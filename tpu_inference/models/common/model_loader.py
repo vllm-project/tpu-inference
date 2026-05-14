@@ -352,6 +352,13 @@ def get_flax_model(
     # https://flax.readthedocs.io/en/latest/guides/performance.html
     graphdef, state = nnx.split(jit_model)
 
+    # Capture the nnx.State treedef once. `run_model` accepts a flat tuple
+    # of array leaves at dispatch time and reconstructs the state via this
+    # treedef. The runner does the flatten of `state` once at init, which
+    # avoids the per-call `nnx.Variable` pytree traversal that otherwise
+    # costs ~17 ms/step on Gemma-4-31B decode at TP=2.
+    _state_treedef = jax.tree_util.tree_structure(state)
+
     @jax.jit(
         out_shardings=(
             kv_cache_sharding,
@@ -359,12 +366,13 @@ def get_flax_model(
             hidden_states_sharding,  # aux hidden states
             None,  # expert ids
         ),
-        donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
+        donate_argnums=1,  # 0 is state_leaves, 1 is kv_cache
         static_argnums=(
-            7, 10, 11
-        ),  #7 is layer_name_to_kvcache_index, 10 is is_first_rank, 11 is is_last_rank
+            6, 9, 10
+        ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
     )
-    def run_model(graphdef, state, *args):
+    def run_model(state_leaves, *args):
+        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
         return model(*args)
 
@@ -433,9 +441,12 @@ def get_flax_model(
     model = nnx.merge(graphdef, state)
     precompile_vision_encoder_fn = getattr(model, "precompile_vision_encoder",
                                            None)
-    model_fn = functools.partial(
-        run_draft_model, graphdef) if is_draft_model else functools.partial(
-            run_model, graphdef)
+    # For the draft path, graphdef is still passed positionally (signature
+    # unchanged). For the main path, graphdef and the state treedef are both
+    # captured in the run_model closure; the runner passes pre-flattened
+    # `state_leaves` as the first positional arg.
+    model_fn = functools.partial(run_draft_model,
+                                 graphdef) if is_draft_model else run_model
     compute_logits_fn = functools.partial(run_compute_logits, graphdef)
     embed_multimodal_fn = functools.partial(run_embed_multimodal, graphdef)
     embed_input_ids_fn = functools.partial(run_embed_input_ids, graphdef)

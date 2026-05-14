@@ -65,7 +65,13 @@ if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
 fi
 
 IMAGE_NAME='vllm-tpu'
-FULL_IMAGE_TAG="${IMAGE_NAME}:${BUILDKITE_COMMIT}"
+declare -a DEV_MOUNT=()
+if [[ "${DEV_MODE:-false}" == "true" ]]; then
+    FULL_IMAGE_TAG="${IMAGE_NAME}:dev"
+    DEV_MOUNT+=("-v" "$(pwd):/workspace/tpu_inference")
+else
+    FULL_IMAGE_TAG="${IMAGE_NAME}:${BUILDKITE_COMMIT}"
+fi
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Source the environment setup script
 # shellcheck disable=SC1091
@@ -103,12 +109,14 @@ mkdir -p "$KERNEL_TUNING_TMP_DIR"
 # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
 
 exec docker run \
+  --name "$IMAGE_NAME" \
   --privileged \
   --net host \
   --shm-size=16G \
   --rm \
   -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
   -v "$KERNEL_TUNING_TMP_DIR":"$KERNEL_TUNING_TMP_DIR" \
+  "${DEV_MOUNT[@]}" \
   "${ENV_VARS[@]}" \
   "${TEST_SUITE_VARS[@]}" \
   -e HF_HOME="$DOCKER_HF_HOME" \

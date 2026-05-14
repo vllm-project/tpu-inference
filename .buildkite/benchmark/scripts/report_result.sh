@@ -124,12 +124,13 @@ safe_numeric_or_null() {
     fi
 }
 
-if [ $# -ne 1 ]; then
-  echo "Usage: $0 <RECORD_ID>"
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <RECORD_ID> [EXIT_CODE]"
   exit 1
 fi
 
 RECORD_ID=$1
+EXIT_CODE=${2:-0} # Default to 0 if not provided
 RUN_TYPE="${RUN_TYPE:-DAILY}"
 
 # Define Result_file name
@@ -253,6 +254,10 @@ fi
 
 # Database Reporting Logic (ON CONFLICT (RecordId) DO UPDATE SET)
 if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANCE_ID:-}" ]]; then
+  if [ "$EXIT_CODE" -ne 0 ]; then
+    echo "--- run_bm.sh failed with exit code $EXIT_CODE. Skipping DB reporting."
+    exit 0
+  fi
   BUILDKITE_AGENT_NAME="${BUILDKITE_AGENT_NAME:-local-test}"
 
   # Parse metric assignments for dynamic columns

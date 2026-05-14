@@ -513,7 +513,7 @@ def main(args: argparse.Namespace):
     if args.dataset_name == "sonnet":
         dataset = SonnetDataset(dataset_path=args.dataset_path)
         # For the "sonnet" dataset, formatting depends on the backend.
-        if args.backend == "openai-chat":
+        if args.backend == "vllm-chat":
             input_requests = dataset.sample(
                 num_requests=args.num_prompts,
                 input_len=args.sonnet_input_len,

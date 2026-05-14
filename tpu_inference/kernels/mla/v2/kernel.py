@@ -1768,7 +1768,6 @@ def mla_ragged_paged_attention(
         p_same_dtype_as_v=p_same_dtype_as_v,
         case=MlaCase.BATCHED_DECODE,
     )
-
     # Decode-only
     ql_nope, updated_kv = run_mla_kernel(
         ql_nope,
@@ -1789,9 +1788,30 @@ def mla_ragged_paged_attention(
         p_same_dtype_as_v=p_same_dtype_as_v,
         case=MlaCase.DECODE,
     )
-    # TODO: evaluate if chunk-prefill-only branch is needed
 
-    # Mixed
+    if chunk_prefill_size is not None:
+        # Handle prefill where the query length is fixed per sequence.
+        ql_nope, updated_kv = run_mla_kernel(
+            ql_nope,
+            q_pe,
+            new_kv_c,
+            new_k_pe,
+            updated_kv,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            num_kv_pages_per_block=num_kv_pages_per_blocks[1],
+            num_queries_per_block=num_queries_per_blocks[1],
+            start_seq_idx=distribution[0],
+            end_seq_idx=distribution[1],
+            static_q_len=chunk_prefill_size,
+            batch_size=1,
+            s_dtype=s_dtype,
+            p_same_dtype_as_v=p_same_dtype_as_v,
+            case=MlaCase.PREFILL,
+        )
+
+    # Handle mixed case where the query length per sequence is variable.
     ql_nope, updated_kv = run_mla_kernel(
         ql_nope,
         q_pe,

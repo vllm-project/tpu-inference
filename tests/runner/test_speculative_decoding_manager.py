@@ -89,11 +89,17 @@ class TestSpeculativeDecodingManager:
         # Mock the eagle-specific proposal method
         with patch.object(self.runner.speculative_decoding_manager,
                           'propose_eagle3_draft_token_ids',
-                          return_value=[[10, 11]]) as mock_propose_eagle:
+                          return_value=[[10, 11]]) as mock_propose_eagle, \
+             patch(
+                 'tpu_inference.runner.speculative_decoding_manager'
+                 '.extract_last_sampled_tokens',
+                 return_value=(MagicMock(), MagicMock())):
 
             # 2. ===== Act =====
             self.runner.speculative_decoding_manager.propose_draft_token_ids(
-                sampled_token_ids=[[1]],
+                sampled_output=MagicMock(),
+                logits_indices_selector=MagicMock(),
+                discard_sampled_tokens_req_indices=[],
                 aux_hidden_states=None,
                 attn_metadata=MagicMock(),
                 spec_decode_metadata=None,
@@ -112,7 +118,7 @@ class TestSpeculativeDecodingManager:
         self.runner.speculative_config.method = "ngram"
         with pytest.raises(AssertionError):
             self.runner.speculative_decoding_manager.propose_draft_token_ids(
-                [[1]], None, MagicMock(), None)
+                MagicMock(), MagicMock(), [], None, MagicMock(), None)
 
     def test_take_draft_token_ids(self):
         """Tests the take_draft_token_ids method for speculative decoding."""
@@ -336,7 +342,6 @@ class TestSpeculativeDecodingManager:
         )
 
         # Inputs
-        sampled_token_ids = [[1], [2]]
         aux_hidden_states = MagicMock()
         attn_metadata = MagicMock()
         attn_metadata.seq_lens.shape = [2]
@@ -345,6 +350,9 @@ class TestSpeculativeDecodingManager:
         else:
             spec_decode_metadata = MagicMock(spec=SpecDecodeMetadata)
             spec_decode_metadata.draft_lengths_cpu = np.array([2, 3])
+        last_sampled_token_id = MagicMock()
+        num_rejected_tokens = MagicMock()
+        discard_sampled_tokens_req_indices = []
         scheduler_output = MagicMock()
         input_ids = MagicMock()
 
@@ -353,10 +361,12 @@ class TestSpeculativeDecodingManager:
                 "tpu_inference.runner.speculative_decoding_manager.device_array",
                 side_effect=lambda mesh, x: x):
             result = self.runner.speculative_decoding_manager.propose_eagle3_draft_token_ids(
-                sampled_token_ids,
+                spec_decode_metadata,
+                last_sampled_token_id,
+                num_rejected_tokens,
+                discard_sampled_tokens_req_indices,
                 aux_hidden_states,
                 attn_metadata,
-                spec_decode_metadata,
                 scheduler_output,
                 input_ids,
             )
