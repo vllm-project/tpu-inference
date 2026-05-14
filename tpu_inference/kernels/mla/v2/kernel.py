@@ -1445,8 +1445,7 @@ def mla_ragged_paged_attention(
     q_pe: jax.Array,  # [max_num_tokens, actual_num_q_heads, actual_r_dim]
     new_kv_c: jax.Array,  # [max_num_tokens, actual_lkv_dim]
     new_k_pe: jax.Array,  # [max_num_tokens, actual_r_dim]
-    cache_kv: jax.
-    Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim, 128)]
+    cache_kv: jax.Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim, 128)]
     kv_lens: jax.Array,  # i32[max_num_seqs]
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
