@@ -156,9 +156,11 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         if self._logprobs_tensors is not None:
             # Separate prompt logprobs and sampling logprobs
+            materialized_logprobs = _jax_logprobs_materialize(
+                self._logprobs_tensors,
+                self.logits_metadata.logits_indices_selector)
             self._model_runner_output.logprobs, self._model_runner_output.prompt_logprobs_dict = _separate_logprobs(
-                self._logprobs_tensors, self.logits_metadata.logits_indices_selector,
-                self.logits_metadata.num_logits_per_req,
+                materialized_logprobs, self.logits_metadata.num_logits_per_req,
                 self._model_runner_output.req_ids)
 
         if self._expert_indices is not None:
@@ -273,28 +275,21 @@ def _jax_logprobs_materialize(
 
 
 def _separate_logprobs(
-    logprobs_tensors: LogprobsTensors,
-    logits_indices_selector: Optional[List[int]],
+    materialized_logprobs: LogprobsTensors,
     num_logits_per_req: Optional[List[int]],
     req_ids: List[str],
 ) -> Tuple[LogprobsTensors, Dict[str, LogprobsTensors]]:
-    """Materializes logprobs from TPU and separates them into sampling and prompt logprobs.
+    """Separates materialized logprobs into sampling and prompt logprobs.
 
-    This function handles the entire pipeline:
-    1. Calculating cumulative offsets.
-    2. Materializing (JAX to Torch) the logprobs.
-    3. Splitting into next-token logprobs and prompt logprobs.
+    Args:
+        materialized_logprobs: Torch-backed LogprobsTensors on CPU.
+        num_logits_per_req: List of token counts for each request.
+        req_ids: List of request IDs.
     """
-    cu_num_logits = None
-    if num_logits_per_req is not None:
-        cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
-
-    materialized_logprobs = _jax_logprobs_materialize(logprobs_tensors,
-                                                      logits_indices_selector,
-                                                      cu_num_logits)
-
     if num_logits_per_req is None:
         return materialized_logprobs, {}
+
+    cu_num_logits = [0] + np.cumsum(num_logits_per_req).tolist()
 
     sampling_logprob_token_ids = []
     sampling_logprobs = []
@@ -329,7 +324,7 @@ def _separate_logprobs(
         logprob_token_ids=torch.stack(sampling_logprob_token_ids),
         logprobs=torch.stack(sampling_logprobs),
         selected_token_ranks=torch.stack(sampling_token_ranks),
-        cu_num_generated_tokens=None,
+        cu_num_generated_tokens=materialized_logprobs.cu_num_generated_tokens,
     )
     return sampling_result, prompt_logprobs_dict
 
@@ -347,59 +342,6 @@ def _get_num_draft_tokens(
             req_idx = req_id_to_index[req_id]
             num_draft_tokens[req_idx] = len(draft_token_ids)
     return num_draft_tokens
-
-
-def _get_total_sampled_tokens(
-    scheduler_output: VllmSchedulerOutput,
-    input_batch: InputBatch,
-    num_reqs: int,
-    use_spec_decode: bool,
-    any_prompt_logprobs: bool,
-    padded_num_reqs: int,
-    dp_size: int = 1,
-) -> int:
-    """Calculates the total number of logits (sampled tokens) to be returned.
-
-    In DP mode, we must ensure each rank has an identical-sized shard to 
-    maintain SPMD alignment and avoid memory overwrites between ranks.
-    """
-    if not (use_spec_decode or any_prompt_logprobs):
-        return -1
-
-    if dp_size <= 1:
-        if use_spec_decode:
-            num_draft_tokens = _get_num_draft_tokens(
-                scheduler_output, input_batch.req_id_to_index, num_reqs)
-            return np.sum(num_draft_tokens + 1)
-
-        total_extra_tokens = 0
-        for req_id in input_batch.req_ids[:num_reqs]:
-            if req_id in input_batch.num_prompt_logprobs:
-                total_extra_tokens += scheduler_output.num_scheduled_tokens[
-                    req_id] - 1
-        return padded_num_reqs + total_extra_tokens
-
-    # DP Case: Find the maximum tokens required by any single rank
-    padded_num_reqs_per_rank = padded_num_reqs // dp_size
-    tokens_per_rank = np.zeros(dp_size, dtype=np.int32)
-
-    # Base slots for generation
-    tokens_per_rank += padded_num_reqs_per_rank
-
-    # Add extra slots for prompt logprobs or spec-decode
-    for req_id in input_batch.req_ids[:num_reqs]:
-        dp_rank = scheduler_output.assigned_dp_rank.get(req_id, 0)
-        extra = 0
-        if use_spec_decode:
-            extra = len(
-                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
-        elif req_id in input_batch.num_prompt_logprobs:
-            extra = scheduler_output.num_scheduled_tokens[req_id] - 1
-
-        tokens_per_rank[dp_rank] += extra
-
-    max_tokens_per_rank = np.max(tokens_per_rank)
-    return max_tokens_per_rank * dp_size
 
 
 def _populate_logits_metadata(
@@ -1476,9 +1418,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if logprobs is not None:
             # Separate prompt logprobs and sampling logprobs
+            materialized_logprobs = _jax_logprobs_materialize(
+                logprobs, logits_metadata.logits_indices_selector
+                if logits_metadata else None)
             logprobs_lists, prompt_logprobs_dict_updates = _separate_logprobs(
-                logprobs, logits_metadata.logits_indices_selector if logits_metadata else None,
-                logits_metadata.num_logits_per_req if logits_metadata else None, req_ids)
+                materialized_logprobs, logits_metadata.num_logits_per_req
+                if logits_metadata else None, req_ids)
             prompt_logprobs_dict.update(prompt_logprobs_dict_updates)
         else:
             logprobs_lists = None
