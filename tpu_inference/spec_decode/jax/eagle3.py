@@ -80,6 +80,7 @@ class Eagle3Proposer:
         self.pooler_fn = model.pooler_fn
         self.combine_hidden_states_fn = model.combine_hidden_states_fn
         self.state = model.state
+        self.state_leaves = model.state_leaves
         self.model = model.model
 
         draft_model_impl = envs.DRAFT_MODEL_IMPL_TYPE
@@ -134,6 +135,13 @@ class Eagle3Proposer:
                 self.state[EMBED_TOKENS_KEY] = target_embed_tokens
             else:
                 logger.info("Draft model has its own embed_tokens.")
+
+        # The embed_tokens assignment above may have mutated `self.state`;
+        # re-derive `state_leaves` so the dispatch-side view matches.
+        if isinstance(self.state, nnx.State):
+            self.state_leaves = tuple(jax.tree_util.tree_leaves(self.state))
+        else:
+            self.state_leaves = self.state
 
     def _prepare_input_ids(
             self, query_start_loc: jax.Array, target_token_ids: jax.Array,
@@ -209,7 +217,7 @@ class Eagle3Proposer:
 
     def _prepare_hidden_states_and_input_ids(
         self,
-        state: nnx.State,
+        state_leaves: Any,
         aux_hidden_states: tuple[jax.Array, ...],
         query_start_loc: jax.Array,
         target_token_ids: jax.Array,
@@ -218,7 +226,7 @@ class Eagle3Proposer:
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         target_hidden_states = jnp.concatenate(aux_hidden_states, axis=-1)
         target_hidden_states = self.combine_hidden_states_fn(
-            state, target_hidden_states)
+            state_leaves, target_hidden_states)
 
         input_ids, last_token_indices = self._prepare_input_ids(
             query_start_loc, target_token_ids, next_token_ids, num_reqs)
@@ -261,7 +269,7 @@ class Eagle3Proposer:
         num_reqs, block_tables = device_array(
             self.mesh, (np.asarray([num_reqs], dtype=jnp.int32), block_tables))
         return self._prepare_inputs(
-            state=self.state,
+            state_leaves=self.state_leaves,
             num_reqs=num_reqs,
             block_tables=block_tables,
             attn_metadata=attn_metadata,
@@ -275,7 +283,7 @@ class Eagle3Proposer:
     @jax.jit(static_argnums=(0, ))
     def _prepare_inputs(
         self,
-        state: nnx.State,
+        state_leaves: Any,
         num_reqs: jax.Array,
         block_tables: jax.Array,
         attn_metadata: AttentionMetadata,
@@ -348,12 +356,13 @@ class Eagle3Proposer:
 
         attn_metadata = replace(attn_metadata, block_tables=block_tables)
         return self._filter_token_and_prepare_initial_inputs(
-            state, token_indices, new_query_start_loc, new_seq_lens, input_ids,
-            aux_hidden_states, attn_metadata, next_token_ids, num_reqs)
+            state_leaves, token_indices, new_query_start_loc, new_seq_lens,
+            input_ids, aux_hidden_states, attn_metadata, next_token_ids,
+            num_reqs)
 
     def _filter_token_and_prepare_initial_inputs(
         self,
-        state: nnx.State,
+        state_leaves: Any,
         token_indices: jax.Array,
         query_start_loc: jax.Array,
         seq_lens: jax.Array,
@@ -383,14 +392,14 @@ class Eagle3Proposer:
         )
 
         target_hidden_states, input_ids, last_token_indices = self._prepare_hidden_states_and_input_ids(
-            state, [h[token_indices] for h in aux_hidden_states],
+            state_leaves, [h[token_indices] for h in aux_hidden_states],
             query_start_loc, target_token_ids, next_token_ids, num_reqs)
 
         return target_hidden_states, input_ids, last_token_indices, attn_metadata
 
     def _select_draft_token_ids(
         self,
-        state: nnx.State,
+        state_leaves: Any,
         hidden_states: jax.Array,
         last_token_indices: jax.Array,
     ) -> jax.Array:
@@ -398,23 +407,25 @@ class Eagle3Proposer:
         sample_hidden_states = lax.with_sharding_constraint(
             sample_hidden_states,
             NamedSharding(self.mesh, PartitionSpec(None, None)))
-        return self._get_draft_token_ids(state, sample_hidden_states)
+        return self._get_draft_token_ids(state_leaves, sample_hidden_states)
 
-    def _get_draft_token_ids(self, state: nnx.State,
+    def _get_draft_token_ids(self, state_leaves: Any,
                              hidden_states: jax.Array) -> jax.Array:
         lora_metadata = None
-        logits = self.compute_logits_fn(state, hidden_states, lora_metadata)
+        logits = self.compute_logits_fn(state_leaves, hidden_states,
+                                        lora_metadata)
         draft_token_ids = jnp.argmax(logits, axis=-1)
         return lax.with_sharding_constraint(
             draft_token_ids, NamedSharding(self.mesh, PartitionSpec()))
 
     def _select_inputs_for_loop_speculation(
-            self, state: nnx.State, positions: jax.Array, residual: jax.Array,
+            self, state_leaves: Any, positions: jax.Array, residual: jax.Array,
             hidden_states: jax.Array,
             last_token_indices: jax.Array) -> tuple[jax.Array, jax.Array]:
         positions = positions[last_token_indices]
         residual = residual[last_token_indices]
-        draft_token_ids = self._select_draft_token_ids(state, hidden_states,
+        draft_token_ids = self._select_draft_token_ids(state_leaves,
+                                                       hidden_states,
                                                        last_token_indices)
 
         positions = lax.with_sharding_constraint(
@@ -435,7 +446,7 @@ class Eagle3Proposer:
         target_hidden_states,
     ) -> tuple[list[jax.Array], jnp.ndarray]:
         return self._propose(
-            state=self.state,
+            state_leaves=self.state_leaves,
             kv_caches=kv_caches,
             input_ids=input_ids,
             attn_metadata=attn_metadata,
@@ -466,7 +477,7 @@ class Eagle3Proposer:
     )
     def _propose(
         self,
-        state: nnx.State,
+        state_leaves: Any,
         kv_caches: list[jax.Array],
         input_ids: jax.Array,
         attn_metadata: AttentionMetadata,
@@ -483,7 +494,7 @@ class Eagle3Proposer:
 
         # input_ids and target_hidden_states for the first speculation have been prepared in prepare_inputs() to improve performance.
         kv_caches, hidden_states, residual, _ = self.model_fn(
-            state,
+            state_leaves,
             kv_caches,
             input_ids,
             target_hidden_states,
@@ -493,11 +504,11 @@ class Eagle3Proposer:
 
         if num_speculative_tokens == 1:
             return kv_caches, self._select_draft_token_ids(
-                state, hidden_states, last_token_indices)
+                state_leaves, hidden_states, last_token_indices)
 
         positions, hidden_states, draft_token_ids = self._select_inputs_for_loop_speculation(
-            state, attn_metadata.input_positions, residual[0], hidden_states,
-            last_token_indices)
+            state_leaves, attn_metadata.input_positions, residual[0],
+            hidden_states, last_token_indices)
 
         draft_token_ids_list = [draft_token_ids]
 
@@ -515,7 +526,7 @@ class Eagle3Proposer:
                 block_tables=new_block_tables,
             )
             kv_caches, new_hidden_states, residual, _ = self.model_fn(
-                state,
+                state_leaves,
                 kv_caches,
                 input_ids_loop,
                 hidden_states,  # This should be the hidden_states from previous step
@@ -524,7 +535,7 @@ class Eagle3Proposer:
             )
             hidden_states = residual[0]
             draft_token_ids = self._get_draft_token_ids(
-                state, new_hidden_states)
+                state_leaves, new_hidden_states)
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
