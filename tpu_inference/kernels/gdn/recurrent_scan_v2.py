@@ -940,7 +940,11 @@ def fused_kernel(
     b_raw_ref,
     a_log_ref,
     dt_bias_ref,
-    schedule_table_ref,
+    query_start_loc_ref,
+    num_valid_seqs_ref,
+    total_num_seqs_ref,
+    chunk_size_ref,
+    BT_ref,
     decode_tokens_ref,
     total_blocks_ref,
     recurrent_state_ref,
@@ -963,26 +967,37 @@ def fused_kernel(
     pad_size = max(C, BT)
     sink_offset = mixed_qkv_ref.shape[0] - pad_size
 
-    in_specs, out_specs = create_block_specs(
-        schedule_table_ref,
-        C,
-        BT,
-        d,
-        n_v,
-        d_v,
-        alignment=sublanesize,
-        sink_offset=sink_offset,
-    )
-
     def _run_with_scratch(
         scratch_ref,
         decode_state_scratch_ref,
         state_commit_scratch_ref,
         decode_output_scratch_ref,
+        schedule_table_ref,
         decode_read_sems,
         decode_write_sem,
         prefill_sem,
     ):
+        compute_schedule_table_v3.kernel(
+            query_metadata_ref=query_start_loc_ref,
+            num_seqs_ref=num_valid_seqs_ref,
+            decode_tokens_ref=decode_tokens_ref,
+            chunk_size_ref=chunk_size_ref,
+            BT_ref=BT_ref,
+            total_num_seqs_ref=total_num_seqs_ref,
+            table_ref=schedule_table_ref,
+            alignment=sublanesize,
+        )
+
+        in_specs, out_specs = create_block_specs(
+            schedule_table_ref,
+            C,
+            BT,
+            d,
+            n_v,
+            d_v,
+            alignment=sublanesize,
+            sink_offset=sink_offset,
+        )
 
         pipeline_func = pltpu.emit_pipeline(
             body=functools.partial(
@@ -1023,7 +1038,9 @@ def fused_kernel(
             output_ref,
             output_ref,
             scratches=[
-                schedule_table_ref, state_indices_ref, has_initial_state_ref
+                schedule_table_ref,
+                state_indices_ref,
+                has_initial_state_ref,
             ],
         )
 
@@ -1037,6 +1054,7 @@ def fused_kernel(
                    recurrent_state_ref.dtype),  # state_commit_scratch
         pltpu.VMEM((BT, n_v * d_v),
                    mixed_qkv_ref.dtype),  # decode_output_scratch
+        pltpu.VMEM((1160, 11 + 3 * sublanesize), jnp.int32),  # schedule_table
         pltpu.SemaphoreType.DMA((1, )),  # decode_read_semaphores
         pltpu.SemaphoreType.DMA((1, )),  # decode_write_semaphore
         pltpu.SemaphoreType.DMA((2, )),  # prefill_semaphore
@@ -1129,35 +1147,75 @@ def recurrent_scan(
     # Assuming length 1 per decode request, this is also the number of decode
     # requests.
     decode_tokens = distribution[0]
-    schedule_table, total_blocks = (
-        compute_schedule_table_v3.compute_schedule_table_v3(
-            query_start_loc,
-            decode_tokens,
-            distribution[2],
-            num_tokens,
-            chunk_size,
-            BT,
-            alignment=sublanesize,
-        ))
+    num_decode_batches = (decode_tokens + BT - 1) // BT
+    # Host side computation for total_blocks
+    seq_end = query_start_loc[1:]
+    prev_seq_end = jnp.pad(seq_end[:-1], (1, 0), constant_values=0)
+    effective_start = jnp.where(
+        prev_seq_end % sublanesize != 0,
+        (prev_seq_end // sublanesize) * sublanesize + sublanesize,
+        prev_seq_end,
+    )
+    is_decode_boundary = prev_seq_end == decode_tokens
+    is_swallowed = (effective_start >= seq_end) & (~is_decode_boundary)
+    next_aligned_start = (seq_end // sublanesize) * sublanesize
+
+    # Replicate v2 bug for last_seq_id
+    num_seqs = query_start_loc.shape[0] - 1
+    is_last_seq = jnp.arange(num_seqs) == num_seqs - 1
+
+    needs_transition = ((seq_end % sublanesize != 0) & (~is_last_seq) &
+                        (~is_swallowed))
+    needs_start_transition = ((prev_seq_end % sublanesize != 0) &
+                              (~is_swallowed) & is_decode_boundary)
+    effective_end = jnp.where(needs_transition, next_aligned_start, seq_end)
+    effective_end = jnp.maximum(effective_start, effective_end)
+    num_regular_blocks = (effective_end - effective_start + chunk_size -
+                          1) // chunk_size
+    total_blocks_per_seq = (num_regular_blocks +
+                            needs_transition.astype(jnp.int32) +
+                            needs_start_transition.astype(jnp.int32))
+    total_blocks_per_seq = jnp.where(is_swallowed, 0, total_blocks_per_seq)
+    is_pure_decode = seq_end <= decode_tokens
+    total_blocks_per_seq = jnp.where(is_pure_decode, 0, total_blocks_per_seq)
+    total_prefill_blocks = jnp.sum(total_blocks_per_seq)
+
+    total_blocks = jnp.maximum(total_prefill_blocks, num_decode_batches)
 
     # sublane,128
     decode_tokens_arr = jnp.expand_dims(decode_tokens, 0)
     total_blocks_arr = jnp.expand_dims(total_blocks, 0)
 
+    num_valid_seqs = distribution[2]
+    num_seqs = query_start_loc.shape[0] - 1
+    num_valid_seqs_arr = jnp.expand_dims(num_valid_seqs, 0)
+    total_num_seqs_arr = jnp.expand_dims(num_seqs, 0)
+    chunk_size_arr = jnp.expand_dims(chunk_size, 0)
+    BT_arr = jnp.expand_dims(BT, 0)
+
     grid_spec = pl.GridSpec(
         grid=(1, ),
         in_specs=[
-            pl.BlockSpec(memory_space=pltpu.HBM),
-            pl.BlockSpec(memory_space=pltpu.HBM),
-            pl.BlockSpec(memory_space=pltpu.SMEM),
-            pl.BlockSpec(memory_space=pltpu.SMEM),
-            pl.BlockSpec(memory_space=pltpu.HBM),
-            pl.BlockSpec(memory_space=pltpu.HBM),
-            pl.BlockSpec(memory_space=pltpu.HBM),
-            pl.BlockSpec(memory_space=pltpu.HBM),
-            pl.BlockSpec(memory_space=pltpu.SMEM),
-            pl.BlockSpec(block_shape=(1, ), index_map=lambda _: (0, )),
-            pl.BlockSpec(block_shape=(1, ), index_map=lambda _: (0, )),
+            pl.BlockSpec(memory_space=pltpu.HBM),  # mixed_qkv
+            pl.BlockSpec(memory_space=pltpu.HBM),  # recurrent_state
+            pl.BlockSpec(memory_space=pltpu.SMEM),  # state_indices
+            pl.BlockSpec(memory_space=pltpu.SMEM),  # has_initial_state
+            pl.BlockSpec(memory_space=pltpu.HBM),  # a_raw
+            pl.BlockSpec(memory_space=pltpu.HBM),  # b_raw
+            pl.BlockSpec(memory_space=pltpu.HBM),  # a_log
+            pl.BlockSpec(memory_space=pltpu.HBM),  # dt_bias
+            pl.BlockSpec(memory_space=pltpu.SMEM),  # query_start_loc
+            pl.BlockSpec(block_shape=(1, ), index_map=lambda _:
+                         (0, )),  # num_valid_seqs
+            pl.BlockSpec(block_shape=(1, ), index_map=lambda _:
+                         (0, )),  # total_num_seqs
+            pl.BlockSpec(block_shape=(1, ), index_map=lambda _:
+                         (0, )),  # chunk_size
+            pl.BlockSpec(block_shape=(1, ), index_map=lambda _: (0, )),  # BT
+            pl.BlockSpec(block_shape=(1, ), index_map=lambda _:
+                         (0, )),  # decode_tokens
+            pl.BlockSpec(block_shape=(1, ), index_map=lambda _:
+                         (0, )),  # total_blocks
         ],
         out_specs=[
             pl.BlockSpec(memory_space=pltpu.HBM),
@@ -1194,7 +1252,11 @@ def recurrent_scan(
         b_padded,
         A_log,
         dt_bias,
-        schedule_table,
+        query_start_loc,
+        num_valid_seqs_arr,
+        total_num_seqs_arr,
+        chunk_size_arr,
+        BT_arr,
         decode_tokens_arr,
         total_blocks_arr,
     )

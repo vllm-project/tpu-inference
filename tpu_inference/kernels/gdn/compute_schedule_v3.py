@@ -26,25 +26,28 @@ def kernel(
     num_seqs_ref: jax.Array,
     decode_tokens_ref: jax.Array,
     chunk_size_ref: jax.Array,
-    alignment_ref: jax.Array,
     BT_ref: jax.Array,
+    total_num_seqs_ref: jax.Array,
     table_ref: jax.Array,
+    *,
+    alignment: int,
 ):
 
     # Read scalars from the first element of the padded vectors
     num_seqs = num_seqs_ref[0]
     decode_tokens = decode_tokens_ref[0]
     chunk_size = chunk_size_ref[0]
-    alignment = alignment_ref[0]
     BT = BT_ref[0]
+    total_num_seqs = total_num_seqs_ref[0]
 
-    total_tokens = query_metadata_ref[num_seqs]
-    last_seq_id = num_seqs - 1
+    max_metadata_idx = query_metadata_ref.shape[0] - 1
+    total_tokens = query_metadata_ref[jnp.minimum(num_seqs, max_metadata_idx)]
+    last_seq_id = total_num_seqs - 1
 
     # 1. Prefill loop over requests
     def process_request(r, running_sum):
-        seq_start = query_metadata_ref[r]
-        seq_end = query_metadata_ref[r + 1]
+        seq_start = query_metadata_ref[jnp.minimum(r, max_metadata_idx)]
+        seq_end = query_metadata_ref[jnp.minimum(r + 1, max_metadata_idx)]
 
         effective_start = jnp.where(
             seq_start % alignment != 0,
@@ -80,10 +83,12 @@ def kernel(
 
         # Inner loop over blocks for current request
         def block_loop(b, _):
+            # index of block within blocks for a sequence
             local_b = b
             start_trans_offset = (seq_start // alignment) * alignment
 
             is_start_trans = needs_start_transition & (local_b == 0)
+            # Adjust local_b for regular blocks if there was a start transition
             adj_local_b = jnp.where(needs_start_transition, local_b - 1,
                                     local_b)
             is_end_trans = needs_transition & (adj_local_b
@@ -94,6 +99,7 @@ def kernel(
 
             trans_offset = next_aligned_start
 
+            # Apply predication
             block_offset = jnp.where(
                 is_start_trans,
                 start_trans_offset,
@@ -108,38 +114,39 @@ def kernel(
 
             is_trans_block = is_start_trans | is_end_trans
 
-            # Use v2 logic for block_is_first and block_is_last
             is_first_block = block_offset <= seq_start
             is_last_block = (block_offset + block_count) >= seq_end
 
+            # Metadata for shared sublane tiles
             glob_idxs = block_offset + lax.broadcasted_iota(
-                jnp.int32, (8, ), 0)
+                jnp.int32, (alignment, ), 0)
             valid_mask = glob_idxs < total_tokens
 
-            # Search to find request ID for each token, matching v2 exactly
             def body_func(i, current_sum):
-                return current_sum + (
-                    glob_idxs >= query_metadata_ref[i]).astype(jnp.int32)
+                return current_sum + (glob_idxs >= query_metadata_ref[
+                    jnp.minimum(i, max_metadata_idx)]).astype(jnp.int32)
 
             sum_ge = lax.fori_loop(0, num_seqs, body_func,
-                                   jnp.zeros((8, ), dtype=jnp.int32))
+                                   jnp.zeros((alignment, ), dtype=jnp.int32))
             t_reqs = sum_ge - 1
 
-            t_reqs = jnp.where(valid_mask, t_reqs, last_seq_id)
+            t_reqs = jnp.where(valid_mask, t_reqs, num_seqs - 1)
             t_reqs = jnp.minimum(jnp.maximum(t_reqs, 0), num_seqs - 1)
 
-            start_locs = jnp.zeros((8, ), dtype=jnp.int32)
-            end_locs = jnp.zeros((8, ), dtype=jnp.int32)
-            iota_8 = lax.broadcasted_iota(jnp.int32, (8, ), 0)
+            start_locs = jnp.zeros((alignment, ), dtype=jnp.int32)
+            end_locs = jnp.zeros((alignment, ), dtype=jnp.int32)
+            iota_alignment = lax.broadcasted_iota(jnp.int32, (alignment, ), 0)
 
             carry = (start_locs, end_locs)
-            for k in range(8):
+            for k in range(alignment):
                 s_locs, e_locs = carry
                 req_idx = t_reqs[k]
-                val_start = query_metadata_ref[req_idx]
-                val_end = query_metadata_ref[req_idx + 1]
+                val_start = query_metadata_ref[jnp.minimum(
+                    req_idx, max_metadata_idx)]
+                val_end = query_metadata_ref[jnp.minimum(
+                    req_idx + 1, max_metadata_idx)]
 
-                mask = iota_8 == k
+                mask = iota_alignment == k
                 s_locs = jnp.where(mask, val_start, s_locs)
                 e_locs = jnp.where(mask, val_end, e_locs)
                 carry = (s_locs, e_locs)
@@ -150,31 +157,42 @@ def kernel(
 
             row_idx = running_sum + b
 
-            # Construct full row vector
-            row_parts = [
-                jnp.ones((1, ), dtype=jnp.int32),  # 0: prefill_valid
-                jnp.expand_dims(block_offset,
-                                0).astype(jnp.int32),  # 1: block_offset
-                jnp.expand_dims(r, 0).astype(jnp.int32),  # 2: r_for_block
-                jnp.expand_dims(block_count,
-                                0).astype(jnp.int32),  # 3: block_count
-                jnp.zeros((1, ), dtype=jnp.int32),  # 4: decode_valid
-                jnp.zeros((1, ), dtype=jnp.int32),  # 5: decode_offsets
-                jnp.zeros((1, ), dtype=jnp.int32),  # 6: decode_req_ids
-                jnp.zeros((1, ), dtype=jnp.int32),  # 7: decode_counts
-                jnp.expand_dims(is_last_block,
-                                0).astype(jnp.int32),  # 8: block_is_last
-                jnp.expand_dims(is_first_block,
-                                0).astype(jnp.int32),  # 9: block_is_first
-                jnp.expand_dims(is_trans_block,
-                                0).astype(jnp.int32),  # 10: is_trans_block
-                t_reqs.astype(jnp.int32),  # 11-18: t_reqs
-                is_first_tok.astype(jnp.int32),  # 19-26: is_first_tok
-                is_last_tok.astype(jnp.int32),  # 27-34: is_last_tok
+            # Construct full row
+            prefill_parts = [
+                # 0: prefill_valid
+                jnp.ones((1, ), dtype=jnp.int32),
+                # 1: block_offset
+                jnp.expand_dims(block_offset, 0).astype(jnp.int32),
+                # 2: r_for_block
+                jnp.expand_dims(r, 0).astype(jnp.int32),
+                # 3: block_count
+                jnp.expand_dims(block_count, 0).astype(jnp.int32),
+                # 4: decode_valid
+                jnp.zeros((1, ), dtype=jnp.int32),
+                # 5: decode_offsets
+                jnp.zeros((1, ), dtype=jnp.int32),
+                # 6: decode_req_ids
+                jnp.zeros((1, ), dtype=jnp.int32),
+                # 7: decode_counts
+                jnp.zeros((1, ), dtype=jnp.int32),
+                ## Conditions
+                # 8: block_is_last
+                jnp.expand_dims(is_last_block, 0).astype(jnp.int32),
+                # 9: block_is_first
+                jnp.expand_dims(is_first_block, 0).astype(jnp.int32),
+                # 10: is_trans_block
+                jnp.expand_dims(is_trans_block, 0).astype(jnp.int32),
+                ## Sublane info
+                # 11 to 11 + alignment - 1: t_reqs
+                t_reqs.astype(jnp.int32),
+                # 11 + alignment to 11 + 2 * alignment - 1: is_first_tok
+                is_first_tok.astype(jnp.int32),
+                # 11 + 2 * alignment to 11 + 3 * alignment - 1: is_last_tok
+                is_last_tok.astype(jnp.int32),
             ]
 
-            row_vec = jnp.concatenate(row_parts)
-            table_ref[row_idx, :] = row_vec
+            prefill_metadata = jnp.concatenate(prefill_parts)
+            table_ref[row_idx, :] = prefill_metadata
 
             return None
 
@@ -182,7 +200,7 @@ def kernel(
 
         return running_sum + total_blocks_per_seq
 
-    lax.fori_loop(0, num_seqs, process_request, 0)
+    running_sum = lax.fori_loop(0, num_seqs, process_request, 0)
 
     # 2. Decode loop
     num_decode_batches = (decode_tokens + BT - 1) // BT
@@ -195,61 +213,65 @@ def kernel(
         decode_counts = jnp.minimum(BT, decode_tokens - decode_offsets)
 
         # For decode, each token belongs to a separate request (length 1)
-        # glob_idxs = decode_offsets + lax.broadcasted_iota(jnp.int32, (8, ), 0)
-        # valid_mask = glob_idxs < decode_tokens
 
-        # Read-Modify-Write to avoid overwriting prefill data in shared rows
         existing_row = table_ref[b, :]
 
-        # Only overwrite columns 11-34 for tokens that are actually valid decode tokens.
-        # For the rest of the tokens in the block, preserve what the prefill loop wrote.
-        is_prefill_valid = existing_row[0] == 1
+        is_real_prefill = b < running_sum
 
         decode_parts = [
-            jnp.ones((1, ), dtype=jnp.int32),  # 4: decode_valid
-            jnp.expand_dims(decode_offsets,
-                            0).astype(jnp.int32),  # 5: decode_offsets
-            jnp.expand_dims(decode_req_ids,
-                            0).astype(jnp.int32),  # 6: decode_req_ids
-            jnp.expand_dims(decode_counts,
-                            0).astype(jnp.int32),  # 7: decode_counts
-            # Preserve columns 8-34 from existing_row if prefill is valid, else zeros
+            # 4: decode_valid
+            jnp.ones((1, ), dtype=jnp.int32),
+            # 5: decode_offsets
+            jnp.expand_dims(decode_offsets, 0).astype(jnp.int32),
+            # 6: decode_req_ids
+            jnp.expand_dims(decode_req_ids, 0).astype(jnp.int32),
+            # 7: decode_counts
+            jnp.expand_dims(decode_counts, 0).astype(jnp.int32),
+            ## Conditions
+            # 8: block_is_last
             jnp.where(
-                is_prefill_valid,
+                is_real_prefill,
                 existing_row[8:9],
                 jnp.zeros((1, ), dtype=jnp.int32),
-            ),  # 8: block_is_last
+            ),
+            # 9: block_is_first
             jnp.where(
-                is_prefill_valid,
+                is_real_prefill,
                 existing_row[9:10],
                 jnp.zeros((1, ), dtype=jnp.int32),
-            ),  # 9: block_is_first
+            ),
+            # 10: is_trans_block
             jnp.where(
-                is_prefill_valid,
+                is_real_prefill,
                 existing_row[10:11],
                 jnp.zeros((1, ), dtype=jnp.int32),
-            ),  # 10: is_trans_block
+            ),
+            ## Sublane info
+            # 11 to 11 + alignment - 1: t_reqs
             jnp.where(
-                is_prefill_valid,
-                existing_row[11:19],
-                jnp.zeros((8, ), dtype=jnp.int32),
-            ),  # 11-18: t_reqs
+                is_real_prefill,
+                existing_row[11:11 + alignment],
+                jnp.zeros((alignment, ), dtype=jnp.int32),
+            ),
+            # 11 + alignment to 11 + 2 * alignment - 1: is_first_tok
             jnp.where(
-                is_prefill_valid,
-                existing_row[19:27],
-                jnp.zeros((8, ), dtype=jnp.int32),
-            ),  # 19-26: is_first_tok
+                is_real_prefill,
+                existing_row[11 + alignment:11 + 2 * alignment],
+                jnp.zeros((alignment, ), dtype=jnp.int32),
+            ),
+            # 11 + 2 * alignment to 11 + 3 * alignment - 1: is_last_tok
             jnp.where(
-                is_prefill_valid,
-                existing_row[27:35],
-                jnp.zeros((8, ), dtype=jnp.int32),
-            ),  # 27-34: is_last_tok
+                is_real_prefill,
+                existing_row[11 + 2 * alignment:11 + 3 * alignment],
+                jnp.zeros((alignment, ), dtype=jnp.int32),
+            ),
         ]
-        decode_vec = jnp.concatenate(decode_parts)
+        decode_metadata = jnp.concatenate(decode_parts)
 
         new_row = jnp.concatenate([
-            existing_row[:4],  # Preserve prefill cols 0-3
-            decode_vec,  # Overwrite cols 4-34
+            jnp.where(is_real_prefill, existing_row[:4],
+                      jnp.zeros((4, ), dtype=jnp.int32)),
+            decode_metadata,
         ])
 
         table_ref[b, :] = new_row
@@ -270,7 +292,26 @@ def compute_schedule_table_v3(
     BT: int | None = None,
     alignment: int = 8,
 ) -> tuple[jax.Array, jnp.ndarray]:
-    """Wrapper for Pallas schedule computation kernel."""
+    """Compute number of iterations in grid and work each iteration will do.
+
+  This is a Pallas kernel implementation of schedule table generation.
+  At high level
+    - each iteration of grid is either prefill and or decode
+    - grid moves in size of bt decode tokens (sequence) backwards starting from
+    boundary
+    - and prefill moves in chunk sized tokens forward from boundary to end
+  Input characteristics
+    - each sequence start and end may not be sublane aligned,
+    boundary between decode and prefill maybe in shared sublane
+    - sequence may not divide chunk size
+
+  hardware req
+    - offset for each block has to be sublane aligned
+
+  So for this we have transition blocks at boundaries between prefill sequences,
+  including first one with decode, token by token math is done here instead of
+  chunk wise.
+  """
     if BT is None:
         BT = chunk_size
 
@@ -281,26 +322,30 @@ def compute_schedule_table_v3(
     safe_max_blocks = int(max_blocks + num_seqs * 2)
     padded_safe_max_blocks = max(((safe_max_blocks + 7) // 8) * 8, 128)
 
+    table_width = 11 + 3 * alignment
+
     query_metadata_spec = pl.BlockSpec(block_shape=query_start_loc.shape,
                                        memory_space=pltpu.SMEM)
 
     # BlockSpecs for the padded scalar inputs (vectors of size 8)
     scalar_spec = pl.BlockSpec(block_shape=(8, ), memory_space=pltpu.SMEM)
 
-    table_spec = pl.BlockSpec(block_shape=(padded_safe_max_blocks, 35))
+    table_spec = pl.BlockSpec(block_shape=(padded_safe_max_blocks,
+                                           table_width))
 
-    # Create padded arrays for scalars to avoid "Scalar windows not implemented"
-    num_seqs_arr = jnp.zeros((8, ), dtype=jnp.int32).at[0].set(num_seqs)
+    # Create padded arrays for scalars to avoid
+    num_seqs_arr = jnp.zeros((8, ), dtype=jnp.int32).at[0].set(num_valid_seqs)
     decode_tokens_arr = jnp.zeros((8, ),
                                   dtype=jnp.int32).at[0].set(decode_tokens)
     chunk_size_arr = jnp.zeros((8, ), dtype=jnp.int32).at[0].set(chunk_size)
-    alignment_arr = jnp.zeros((8, ), dtype=jnp.int32).at[0].set(alignment)
-    BT_arr = jnp.zeros((8, ), dtype=jnp.int32).at[0].set(BT)
+    bt_arr = jnp.zeros((8, ), dtype=jnp.int32).at[0].set(BT)
+    total_num_seqs_arr = jnp.zeros((8, ), dtype=jnp.int32).at[0].set(num_seqs)
 
     table = pl.pallas_call(
-        kernel=kernel,
+        kernel=functools.partial(kernel, alignment=alignment),
         out_shape=[
-            jax.ShapeDtypeStruct((padded_safe_max_blocks, 35), jnp.int32)
+            jax.ShapeDtypeStruct((padded_safe_max_blocks, table_width),
+                                 jnp.int32)
         ],
         in_specs=[
             query_metadata_spec,
@@ -317,11 +362,10 @@ def compute_schedule_table_v3(
         num_seqs_arr,
         decode_tokens_arr,
         chunk_size_arr,
-        alignment_arr,
-        BT_arr,
+        bt_arr,
+        total_num_seqs_arr,
     )[0]
 
-    # Host side computation for total_prefill_blocks to return it correctly
     seq_end = query_start_loc[1:]
     prev_seq_end = jnp.pad(seq_end[:-1], (1, 0), constant_values=0)
     effective_start = jnp.where(
@@ -351,4 +395,4 @@ def compute_schedule_table_v3(
 
     total_blocks = jnp.maximum(total_prefill_blocks, num_decode_batches)
 
-    return table, total_blocks
+    return table[:safe_max_blocks, :], total_blocks
