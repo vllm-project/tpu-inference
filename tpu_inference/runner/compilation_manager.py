@@ -491,10 +491,15 @@ class CompilationManager:
         logger.info("Compiling select_from_array with different input shapes.")
         hsize = self.runner.model_config.get_hidden_size()
 
+        # index_paddings should cover all possible shapes of logits_indices.
+        # When any_prompt_logprobs is True, it matches num_tokens_paddings.
+        # When False, it matches num_reqs_paddings (or num_logits_paddings for spec decode).
+        index_paddings = set(self.runner.num_reqs_paddings)
+        index_paddings.update(self.runner.num_tokens_paddings)
         if self.runner.speculative_config:
-            index_paddings = self.runner.num_logits_paddings
-        else:
-            index_paddings = self.runner.num_reqs_paddings
+            index_paddings.update(self.runner.num_logits_paddings)
+        index_paddings = sorted(list(index_paddings))
+
         dp_sharding = NamedSharding(self.runner.mesh,
                                     PartitionSpec(ShardingAxisName.ATTN_DATA))
         hidden_states_sharding = NamedSharding(
@@ -537,7 +542,13 @@ class CompilationManager:
     def _precompile_compute_logits(self) -> None:
         logger.info("Compiling compute_logits with different input shapes.")
         hsize = self.runner.model_config.get_hidden_size()
-        leading_shape = self.runner.num_reqs_paddings if not self.runner.speculative_config else self.runner.num_logits_paddings
+
+        leading_shape = set(self.runner.num_reqs_paddings)
+        leading_shape.update(self.runner.num_tokens_paddings)
+        if self.runner.speculative_config:
+            leading_shape.update(self.runner.num_logits_paddings)
+        leading_shape = sorted(list(leading_shape))
+
         # Use PartitionSpec(ATTN_DATA, None) (2D explicit) to match the sharding
         # that _select_from_array_fn produces at inference time. shard_map with
         # out_specs=P('data') returns arrays with spec P('data', None); since
@@ -662,7 +673,12 @@ class CompilationManager:
     def _precompile_gather_logprobs(self) -> None:
         logger.info("Compiling gather_logprobs with different input shapes.")
         hsize = self.runner.vocab_size
-        for num_reqs in self.runner.num_reqs_paddings:
+        
+        # gather_logprobs must be compiled for both num_reqs (sampling) and num_tokens (prompt_logprobs)
+        paddings = set(self.runner.num_reqs_paddings)
+        paddings.update(self.runner.num_tokens_paddings)
+        
+        for num_reqs in sorted(list(paddings)):
             logits_sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.MLP_DATA,
