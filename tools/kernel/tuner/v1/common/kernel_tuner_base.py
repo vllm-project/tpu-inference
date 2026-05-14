@@ -18,7 +18,6 @@ import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from enum import Enum
 
 import yaml
@@ -130,8 +129,8 @@ class KernelTunerBase(ABC):
         assert tuner_config.tuning_key_class is not None, "tuning_key_class must be specified"
         assert tuner_config.tunable_params_class is not None, "tunable_params_class must be specified"
         assert tuner_config.kernel_tuner_name is not None, "kernel_tuner_name must be specified, which will be used as the identifier for this kernel tuner in the Buildkite pipeline generation and execution. It should match the key in the KERNEL_TUNER_REGISTRY in kernel_tuner_runner.py to ensure the correct kernel tuner is called during execution."
-        self.storage_manager = LocalDbManager if run_config.run_locally else SpannerStorageManager(
-        )
+        self.storage_manager = LocalDbManager(
+        ) if run_config.run_locally else SpannerStorageManager()
         self._KERNEL_INPUTS_CACHE = {}
         self._TUNING_KEY = None
         self.tuner_config = tuner_config
@@ -144,9 +143,6 @@ class KernelTunerBase(ABC):
             True if tuning cases were initialized so in _generate_tuning_jobs we don't need to regenerate them, False otherwise.
 
         """
-        if self.run_config.case_set_id is None:
-            self.run_config.case_set_id = datetime.now().strftime(
-                "%Y-%m-%d_%H-%M")
         # check case_set_id exists in storage manager, if not exist, create a new case set with the given case_set_id and desc.
         # if exist, check whether the desc is the same as the existing one, if not, raise an error.
         if self.storage_manager.case_set_id_exists(

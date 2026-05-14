@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import datetime
 import logging
 import os
 
@@ -36,7 +35,7 @@ _KERNEL_TUNER_NAME = flags.DEFINE_string('kernel_tuner_name',
 _CASE_SET_ID = flags.DEFINE_string('case_set_id', '',
                                    'The case set ID to use for this run.')
 _RUN_ID = flags.DEFINE_string(
-    'run_id', '0',
+    'run_id', '',
     'The run ID to use for this run. If not specified, a timestamp-based ID will be generated.'
 )
 _CASE_SET_DESC = flags.DEFINE_string('case_set_desc', '',
@@ -135,10 +134,8 @@ def main(argv):
     case_set_id = _CASE_SET_ID.value
     run_id = _RUN_ID.value
     case_set_desc = _CASE_SET_DESC.value
-    if not case_set_id:
-        # If case_set_id is not provided, generate one using the current timestamp but in the format of YYYYMMDDHHMMSS to ensure it is sortable and easily readable.
-        case_set_id = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        run_id = '0'
+    assert case_set_id, 'case_set_id is required. Please specify it through --case_set_id flag.'
+    assert run_id, 'run_id is required. Please specify it through --run_id flag.'
     logger.info(
         f'Using case_set_id: {case_set_id}, run_id: {run_id}, case_set_desc: {case_set_desc} for this tuning run.'
     )
