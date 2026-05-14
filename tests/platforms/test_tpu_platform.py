@@ -268,8 +268,43 @@ class TestTpuPlatform:
         # Current implementation explicitly performs 'pass'. Ensure it returns safely.
         TpuPlatform.update_block_size_for_backend(vllm_config)
 
+
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch("tpu_inference.platforms.tpu_platform.logger")
+    def test_check_and_update_config_power_of_2_block_size(self, mock_logger, mock_update,
+                                                mock_sharding, vllm_config):
+        mock_pallas = MagicMock()
+        mock_pallas.get_page_size.return_value = 1000
+        mock_pallas.get_min_page_size.return_value = 1000
+
+        vllm_config.cache_config = MagicMock()
+        vllm_config.cache_config.user_specified_block_size = False
+
+        vllm_config.model_config.architecture = "Qwen3_5ForConditionalGeneration"
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.model_config.use_mla = False
+
+        with patch.dict(
+                'sys.modules', {
+                    'tpu_inference.layers.vllm.backends.flash_attn':
+                    MagicMock(PallasAttentionBackend=mock_pallas)
+                }), \
+            patch("tpu_inference.envs.USE_BATCHED_RPA_KERNEL", True):
+            TpuPlatform.check_and_update_config(vllm_config)
+            assert vllm_config.cache_config.block_size == 1024
+
+
+    @pytest.mark.parametrize("enable_batch_rpa,expected_block_size", [
+        (True, 2048),
+        (False, 2048),
+    ])
     def test_update_block_size_for_backend_align_hybrid_block_size(
-            self, vllm_config):
+            self, vllm_config, enable_batch_rpa, expected_block_size):
         vllm_config.model_config.architecture = "Qwen3_5ForConditionalGeneration"
         vllm_config.model_config.is_hybrid = True
         vllm_config.model_config.use_mla = True
@@ -289,10 +324,11 @@ class TestTpuPlatform:
         mock_backend.get_supported_kernel_block_sizes.return_value = [256]
 
         with patch.object(TpuPlatform, '_find_non_ssm_backend', return_value=mock_backend), \
-             patch('vllm.model_executor.models.ModelRegistry.resolve_model_cls', return_value=(mock_backend, MagicMock())):
+             patch('vllm.model_executor.models.ModelRegistry.resolve_model_cls', return_value=(mock_backend, MagicMock())), \
+             patch("tpu_inference.envs.USE_BATCHED_RPA_KERNEL", enable_batch_rpa):
             TpuPlatform.update_block_size_for_backend(vllm_config)
 
-        assert vllm_config.cache_config.block_size == 1280
+        assert vllm_config.cache_config.block_size == expected_block_size
 
     def test_update_block_size_for_backend_tp_override(self, vllm_config):
         vllm_config.model_config.is_hybrid = True
