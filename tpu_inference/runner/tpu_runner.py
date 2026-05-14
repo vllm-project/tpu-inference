@@ -1211,28 +1211,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Expose request dimension as axis 0 after transpose: shape (batch_size, max_decode_steps)
         generated_tokens_cpu = generated_tokens_cpu.T
+        if logits_indices_selector is not None:
+            # Realign physical rows back to logical input batch order upfront
+            generated_tokens_cpu = generated_tokens_cpu[
+                logits_indices_selector]
 
         # 1. Pull raw expert indices to CPU once if present
         all_expert_indices_cpu = None
         if all_expert_indices is not None:
             all_expert_indices_cpu = np.asarray(
                 jax.device_get(all_expert_indices))
+            if logits_indices_selector is not None:
+                # Shape: (steps, layers, batch, top_k) -> realign batch dimension
+                all_expert_indices_cpu = all_expert_indices_cpu[:, :,
+                                                                logits_indices_selector, :]
 
+        num_reqs = self.input_batch.num_reqs
         sampled_token_ids = []
-        safe_req_id_to_index = {}
         expert_indices_list = []
 
-        for i, req_id in enumerate(
-                scheduler_output.num_scheduled_tokens.keys()):
-            req_idx = self.input_batch.req_id_to_index.get(req_id, i)
-            safe_req_id_to_index[req_id] = i
-
-            # Map the request index to its correct DP-bucket output row position
-            out_idx = (logits_indices_selector[req_idx]
-                       if logits_indices_selector is not None else req_idx)
-
+        for req_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             req_state = self.requests.get(req_id)
-            tokens = generated_tokens_cpu[out_idx]
+            tokens = generated_tokens_cpu[req_idx]
 
             eos_indices = np.where(tokens == self.eos_token_id)[0]
             if len(eos_indices) > 0:
@@ -1249,9 +1249,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # 3. Extract exact valid expert indices for this request
             if all_expert_indices_cpu is not None:
-                # Raw shape: (steps, layers, reqs, top_k) -> Slice to (actual_len, layers, top_k)
+                # Slice to (actual_len, layers, top_k)
                 req_experts = all_expert_indices_cpu[:actual_len, :,
-                                                     out_idx, :]
+                                                     req_idx, :]
                 # Transpose to (layers, actual_len, top_k) and collect
                 expert_indices_list.append(req_experts.transpose(1, 0, 2))
 
@@ -1276,9 +1276,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             expert_indices_cpu = np.concatenate(expert_indices_list, axis=1)
 
         output = ModelRunnerOutput(
-            req_ids=cast(list[str],
-                         list(scheduler_output.num_scheduled_tokens.keys())),
-            req_id_to_index=safe_req_id_to_index,
+            req_ids=self.input_batch.req_ids[:num_reqs],
+            req_id_to_index=self.input_batch.req_id_to_index.copy(),
             sampled_token_ids=sampled_token_ids,
             logprobs=None,
             prompt_logprobs_dict={},

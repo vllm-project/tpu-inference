@@ -123,14 +123,16 @@ def continue_decode(
     current_tokens = init_state.current_tokens
     active_mask = init_state.active_mask
     attn_metadata = init_state.attn_metadata
-    current_rng = rng
+    # Split RNG upfront for all steps plus one to return as the final state
+    all_rngs = jax.random.split(rng, max_decode_steps + 1)
+    step_rngs = all_rngs[:-1]
+    current_rng = all_rngs[-1]
 
     token_list = []
     expert_indices_list = []
 
     for step_idx in range(max_decode_steps):
-        # Split RNG for current step
-        current_rng, step_rng = jax.random.split(current_rng)
+        step_rng = step_rngs[step_idx]
 
         # 1. Forward pass
         kv_caches, hidden_states, _, expert_indices_step = model_fn(
