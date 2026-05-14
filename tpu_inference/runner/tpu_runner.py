@@ -1141,8 +1141,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         ) = self._prepare_inputs(scheduler_output)
 
         init_tokens = input_ids
-        # Map active rows correctly across DP buckets by checking valid query locations
-        active_mask = logits_indices >= 0
+        # Map active rows correctly across DP buckets by checking valid query locations.
+        # Pad active_mask to match the full padded_total_num_scheduled_tokens length of init_tokens.
+        tokens_per_dp = init_tokens.shape[0] // self.dp_size
+        reqs_per_dp = logits_indices.shape[0] // self.dp_size
+        active_reqs_mask = (logits_indices
+                            >= 0).reshape(self.dp_size, reqs_per_dp)
+
+        if tokens_per_dp == reqs_per_dp:
+            active_mask = logits_indices >= 0
+        else:
+            num_active_per_dp = active_reqs_mask.sum(axis=1, keepdims=True)
+            active_mask = (jnp.arange(tokens_per_dp)
+                           < num_active_per_dp).ravel()
 
         init_state = TpuSamplingState(
             current_tokens=init_tokens,
