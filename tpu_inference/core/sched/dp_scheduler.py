@@ -241,7 +241,7 @@ def _scheduler_worker_process(
                     _send_result(total_tokens)
 
                 case SchedulerCommand.GET_PENDING_PREFILL_TOKENS:
-                    # Number of tokens to be prefilled 
+                    # Number of tokens to be prefilled
                     pending = 0
                     for req in scheduler.running:
                         remaining = req.num_prompt_tokens - req.num_computed_tokens
