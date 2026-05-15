@@ -56,7 +56,7 @@ def _update_loop_state(
     padding_token_id: int,
     dp_size: int,
     pad_len: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     is_eos = next_tokens == eos_token_id
     new_active_mask = jnp.logical_and(active_mask, jnp.logical_not(is_eos))
     next_input_ids = jnp.where(new_active_mask, next_tokens, padding_token_id)
@@ -75,7 +75,9 @@ def _update_loop_state(
     # Compute the token to record in generated_tokens
     step_record_tokens = jnp.where(active_mask, next_tokens, padding_token_id)
 
-    return new_active_mask, next_input_ids, new_positions, new_seq_lens, step_record_tokens
+    any_hit_eos = jnp.any(jnp.logical_and(active_mask, is_eos))
+
+    return new_active_mask, next_input_ids, new_positions, new_seq_lens, step_record_tokens, any_hit_eos
 
 
 def continue_decode(
@@ -162,7 +164,7 @@ def continue_decode(
         next_tokens, _ = sample_fn(step_rng, logits)
 
         # 3. Update loop state via fused JIT helper
-        new_active_mask, next_input_ids, new_positions, new_seq_lens, step_record_tokens = _update_loop_state(
+        new_active_mask, next_input_ids, new_positions, new_seq_lens, step_record_tokens, any_hit_eos = _update_loop_state(
             next_tokens,
             active_mask,
             attn_metadata.input_positions,
@@ -190,6 +192,12 @@ def continue_decode(
         active_mask = new_active_mask
         attn_metadata = new_attn_metadata
 
+        if terminate_on_any_eos and bool(any_hit_eos):
+            actual_steps = step_idx + 1
+            break
+    else:
+        actual_steps = max_decode_steps
+
     generated_tokens = jnp.stack(token_list)
     all_expert_indices = jnp.stack(
         expert_indices_list) if expert_indices_list else None
@@ -198,7 +206,7 @@ def continue_decode(
         current_tokens=current_tokens,
         active_mask=active_mask,
         attn_metadata=attn_metadata,
-        step_counter=jnp.array(max_decode_steps, dtype=jnp.int32),
+        step_counter=jnp.array(actual_steps, dtype=jnp.int32),
     )
 
     return generated_tokens, kv_caches, final_state, current_rng, all_expert_indices
