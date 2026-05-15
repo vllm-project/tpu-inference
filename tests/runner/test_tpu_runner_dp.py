@@ -182,7 +182,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         result = self.runner._prepare_inputs(scheduler_output)
 
-        assert len(result) == 8
+        assert len(result) == 10
 
     @patch('jax.device_put', side_effect=lambda x, y: x)
     @patch('tpu_inference.runner.tpu_runner.NamedSharding')
@@ -209,8 +209,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         result = self.runner._prepare_inputs(scheduler_output)
 
         # Basic assertions
-        assert len(result) == 8
-        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
+        assert len(result) == 10
+        (input_ids, positions, attention_metadata, sampling_metadata,
+         logits_indices, spec_decode_metadata, logits_indices_selector,
+         padded_num_reqs, req_ids_dp,
+         padded_num_scheduled_tokens_per_dp_rank) = result
 
         # Verify utility functions were called
         mock_runner_utils.get_padded_token_len.assert_called()
@@ -271,8 +274,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         result = self.runner._prepare_inputs(scheduler_output)
 
         # Basic assertions
-        assert len(result) == 8
-        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
+        assert len(result) == 10
+        (input_ids, positions, attention_metadata, sampling_metadata,
+         logits_indices, spec_decode_metadata, logits_indices_selector,
+         padded_num_reqs, req_ids_dp,
+         padded_num_scheduled_tokens_per_dp_rank) = result
 
         # Verify utility functions were called
         mock_runner_utils.get_padded_token_len.assert_called()
@@ -543,7 +549,10 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Execute the method
         result = self.runner._prepare_inputs(scheduler_output)
-        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
+        (input_ids, positions, attention_metadata, sampling_metadata,
+         logits_indices, spec_decode_metadata, logits_indices_selector,
+         padded_num_reqs, req_ids_dp,
+         padded_num_scheduled_tokens_per_dp_rank) = result
         # 1. Verify input_ids content
         expected_input_ids = np.zeros(16, dtype=np.int32)
         expected_input_ids[:2] = [1006, 1007]
@@ -650,7 +659,10 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Execute the method
         result = self.runner._prepare_inputs(scheduler_output)
-        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
+        (input_ids, positions, attention_metadata, sampling_metadata,
+         logits_indices, spec_decode_metadata, logits_indices_selector,
+         padded_num_reqs, req_ids_dp,
+         padded_num_scheduled_tokens_per_dp_rank) = result
 
         # 1. Verify input_ids
         expected_input_ids = np.zeros(16, dtype=np.int32)
@@ -755,7 +767,10 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Execute the method
         result = self.runner._prepare_inputs(scheduler_output)
-        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
+        (input_ids, positions, attention_metadata, sampling_metadata,
+         logits_indices, spec_decode_metadata, logits_indices_selector,
+         padded_num_reqs, req_ids_dp,
+         padded_num_scheduled_tokens_per_dp_rank) = result
 
         # Verify request_distribution
         # DP rank 0: req1 (decode), req2 (decode) -> [2, 2, 2]
@@ -815,7 +830,10 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Execute the method
         result = self.runner._prepare_inputs(scheduler_output)
-        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = result
+        (input_ids, positions, attention_metadata, sampling_metadata,
+         logits_indices, spec_decode_metadata, logits_indices_selector,
+         padded_num_reqs, req_ids_dp,
+         padded_num_scheduled_tokens_per_dp_rank) = result
 
         # Verify request_distribution
         # Both ranks have only decode requests
