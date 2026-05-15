@@ -385,19 +385,13 @@ def sharded_ragged_paged_attention(
         in_specs += (P(ShardingAxisName.ATTN_HEAD), )
         args += (attention_sink, )
 
-    # update_kv_cache=False (KV-share) is only supported by the v3 default
-    # RPA kernel. Fail loud if a caller tries to use it on a path that
-    # silently ignores the flag — that would let shared layers corrupt the
-    # parent layer's cache slot.
-    if not update_kv_cache:
-        if use_hd64:
-            raise NotImplementedError(
-                "update_kv_cache=False (KV-share) is not supported on the "
-                "head_dim==64 RPA kernel.")
-        if envs.USE_BATCHED_RPA_KERNEL:
-            raise NotImplementedError(
-                "update_kv_cache=False (KV-share) is not supported on the "
-                "experimental batched RPA kernel.")
+    # update_kv_cache=False (KV-share) is supported by the v3 default RPA
+    # kernel and by the experimental batched RPA kernel. The hd64 path
+    # doesn't accept it; fail loud rather than silently ignoring.
+    if use_hd64 and not update_kv_cache:
+        raise NotImplementedError(
+            "update_kv_cache=False (KV-share) is not supported on the "
+            "head_dim==64 RPA kernel.")
 
     def _ragged_paged_attention(*args):
         kwargs = dict(
@@ -407,14 +401,10 @@ def sharded_ragged_paged_attention(
             k_scale=k_scale,
             v_scale=v_scale,
         )
-        # Only forward update_kv_cache to the v3 default kernel. The hd64
-        # and experimental batched RPA kernels don't accept it as a kwarg;
-        # the guard above rejected update_kv_cache=False on those paths
-        # already, and the True default is a no-op so we don't need to
-        # forward it either. (Without this gate, the batched RPA path
-        # crashed with `TypeError: ragged_paged_attention() got an
-        # unexpected keyword argument 'update_kv_cache'`.)
-        if not use_hd64 and not envs.USE_BATCHED_RPA_KERNEL:
+        # update_kv_cache is supported by both the v3 default and batched
+        # RPA kernels; only the hd64 path doesn't accept it. Default True
+        # is a no-op so we don't forward it to the hd64 signature.
+        if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
         return func(*args, **kwargs)
 

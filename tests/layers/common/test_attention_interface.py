@@ -374,38 +374,58 @@ def test_sharded_rpa_forwards_update_kv_cache_to_v3_kernel(
         f"v3 path must forward update_kv_cache=False; got {captured!r}")
 
 
-def test_sharded_rpa_does_not_forward_update_kv_cache_to_batched_rpa(
+def test_sharded_rpa_forwards_update_kv_cache_to_batched_rpa(
         monkeypatch, gqa_mesh):
-    """Regression: when USE_BATCHED_RPA_KERNEL=1, the wrapper must NOT
-    forward `update_kv_cache` to the batched kernel (whose signature has
-    no such parameter). Forwarding it crashed the server at trace time
-    with `TypeError: ragged_paged_attention() got an unexpected keyword
-    argument 'update_kv_cache'` — observed empirically as a Gemma4-31B
-    benchmark regression."""
+    """On the experimental batched RPA path (USE_BATCHED_RPA_KERNEL=1)
+    the wrapper must forward `update_kv_cache` so the batched kernel's
+    schedule-builder picks the KV-share branch (read full kv_len from
+    cache, skip writeback). The original #2601 wrapper-only patch
+    crashed here with TypeError because the batched kernel didn't accept
+    the kwarg; the kernel now does."""
     from tpu_inference import envs
     monkeypatch.setattr(envs, "USE_BATCHED_RPA_KERNEL", True)
 
     captured = _run_sharded_rpa_capturing_kwargs(monkeypatch,
                                                  gqa_mesh,
-                                                 update_kv_cache=True)
+                                                 update_kv_cache=False)
 
-    assert "update_kv_cache" not in captured, (
-        "batched RPA path must NOT receive update_kv_cache; "
-        f"got kwargs={list(captured.keys())}")
+    assert captured.get("update_kv_cache") is False, (
+        f"batched RPA path must forward update_kv_cache=False; got {captured!r}"
+    )
 
 
-def test_sharded_rpa_rejects_update_kv_cache_false_on_batched(
-        monkeypatch, gqa_mesh):
-    """When USE_BATCHED_RPA_KERNEL=1, passing update_kv_cache=False must
-    raise — silently swallowing it would let shared layers overwrite the
-    parent layer's cache slot. Fail loud."""
-    from tpu_inference import envs
-    monkeypatch.setattr(envs, "USE_BATCHED_RPA_KERNEL", True)
+def test_sharded_rpa_rejects_update_kv_cache_false_on_hd64(gqa_mesh):
+    """The hd64 RPA kernel doesn't support KV-share; passing
+    update_kv_cache=False must raise rather than silently writing to
+    cache. (Currently no model uses head_dim=64 + KV-share, but the
+    guard is cheap insurance.)"""
+    head_dim = 64
+    num_kv_heads = 4
+    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim))
+    k = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
+    v = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
+    kv_cache = jnp.zeros((num_kv_heads, NUM_BLOCKS, BLOCK_SIZE, head_dim))
+    kv_lens = jnp.zeros((MAX_NUM_SEQS, ), dtype=jnp.int32)
+    page_indices = jnp.zeros((MAX_NUM_SEQS, MAX_BLOCKS_PER_SEQ),
+                             dtype=jnp.int32)
+    cu_q_lens = jnp.zeros((MAX_NUM_SEQS + 1, ), dtype=jnp.int32)
+    distribution = jnp.zeros((3, ), dtype=jnp.int32)
 
-    with pytest.raises(NotImplementedError, match="batched RPA kernel"):
-        _run_sharded_rpa_capturing_kwargs(monkeypatch,
-                                          gqa_mesh,
-                                          update_kv_cache=False)
+    with pytest.raises(NotImplementedError, match="head_dim==64"):
+        sharded_ragged_paged_attention(
+            mesh=gqa_mesh,
+            q=q,
+            k=k,
+            v=v,
+            kv_cache=kv_cache,
+            kv_lens=kv_lens,
+            page_indices=page_indices,
+            cu_q_lens=cu_q_lens,
+            distribution=distribution,
+            attention_sink=None,
+            sm_scale=1.0,
+            update_kv_cache=False,
+        )
 
 
 def test_mla_attention(monkeypatch, mesh):
