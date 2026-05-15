@@ -25,8 +25,11 @@ VLLM_LOG=/tmp/vllm_server.log
 BM_LOG=/tmp/bm_client.log
 
 echo "[probe] starting vllm serve in background"
-VLLM_USE_V1=1 \
-MODEL_IMPL_TYPE=flax_nnx \
+# Use `export` instead of inline VAR=val prefix for consistency with the
+# batched probe (see comment there); also avoids any chance of the env
+# var not propagating into the vllm subprocess.
+export VLLM_USE_V1=1
+export MODEL_IMPL_TYPE=flax_nnx
 vllm serve \
   --model google/gemma-4-31B-it \
   --max-num-seqs 256 \

@@ -24,9 +24,12 @@ VLLM_LOG=/tmp/vllm_server.log
 BM_LOG=/tmp/bm_client.log
 
 echo "[probe] starting vllm serve in background (USE_BATCHED_RPA_KERNEL=1)"
-USE_BATCHED_RPA_KERNEL=1 \
-VLLM_USE_V1=1 \
-MODEL_IMPL_TYPE=flax_nnx \
+# Use `export` instead of inline VAR=val prefix: the prefix form was observed
+# NOT to propagate into the vllm subprocess when combined with backgrounding
+# (&) + stdout redirection. `export` makes the env visible to all children.
+export USE_BATCHED_RPA_KERNEL=1
+export VLLM_USE_V1=1
+export MODEL_IMPL_TYPE=flax_nnx
 vllm serve \
   --model google/gemma-4-31B-it \
   --max-num-seqs 256 \
