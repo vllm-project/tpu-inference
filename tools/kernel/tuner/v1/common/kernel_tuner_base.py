@@ -95,7 +95,8 @@ class KernelTunerBase(ABC):
                  tunable_params_class=None,
                  storage_manager: StorageManager = None,
                  job_bucket_size: int = 100,
-                 kernel_tuner_name: str = None):
+                 kernel_tuner_name: str = None,
+                 tpu_queue_multi: str = None):
         assert tuning_key_class is not None, "tuning_key_class must be specified"
         assert tunable_params_class is not None, "tunable_params_class must be specified"
         assert storage_manager is not None, "storage_manager must be specified"
@@ -107,6 +108,7 @@ class KernelTunerBase(ABC):
         self._TUNING_KEY = None
         self.job_bucket_size = job_bucket_size
         self.kernel_tuner_name = kernel_tuner_name
+        self.tpu_queue_multi = tpu_queue_multi
 
     def _init_case_set(self, case_set_id: str, desc: str) -> bool:
         """Initialize the case set with the given case_set_id and description. This will be called when the caseset_id is new or the caseset_id is not specified.
@@ -185,7 +187,10 @@ class KernelTunerBase(ABC):
                 total_cases = len(cases)
                 for case_id, case_str in enumerate(map(str, cases)):
                     self.storage_manager.add_tuner_case(
-                        case_set_id, case_id, case_str)
+                        case_set_id,
+                        case_id,
+                        case_str,
+                        tpu=self.tpu_queue_multi)
                 self.storage_manager.flush()
                 duration_sec = int(time.perf_counter() - start_time)
                 self.storage_manager.finish_case_set(
@@ -207,9 +212,14 @@ class KernelTunerBase(ABC):
             logger.error(f"Error initializing case set {case_set_id}: {e}")
             raise e
 
-    def generate_buildkite_pipeline(self, case_set_id: str, run_id: str,
-                                    desc: str, tpu_version: str,
-                                    tpu_queue_multi: str) -> str:
+    def generate_buildkite_pipeline(
+        self,
+        case_set_id: str,
+        run_id: str,
+        desc: str,
+        tpu_version: str,
+        tpu_cores: int,
+    ) -> str:
         """Generate the Buildkite pipeline for the given tuning jobs. Each tuning job will be represented as a Buildkite step that calls the measure_latency function with the corresponding case_id range.
 
         Args:
@@ -218,6 +228,9 @@ class KernelTunerBase(ABC):
             run_id: Identifies a run of the tuning pipeline. Can be used to distinguish different
                 runs of the tuning pipeline with the same caseset_id — useful when the caseset has
                 not changed but the KernelTunerRunner class has changed.
+            desc: A description for this case set, which will be persisted in local file or database using storage_management module.
+            tpu_version: The version of TPU to run the tuning jobs on, which will determine the TPU queue to use for the tuning jobs.
+            tpu_cores: The number of TPU cores to run the tuning jobs on, which will determine the TPU queue to use for the tuning jobs
 
         Returns:
             A string representing the Buildkite pipeline configuration in YAML format.
@@ -240,21 +253,24 @@ class KernelTunerBase(ABC):
                 "depends_on":
                 f"{tpu_version}_build_docker",
                 "agents": {
-                    "queue": tpu_queue_multi
+                    "queue": self.tpu_queue_multi
                 },
                 "env": {
                     "USE_PREBUILT_IMAGE": "1",
                     "TPU_VERSION": tpu_version
                 },
                 "commands": [
-                    f".buildkite/scripts/run_in_docker.sh bash -c \"pip install --upgrade google-cloud-spanner && pip install --upgrade google-api-core && pip install --upgrade google-auth && pip install --upgrade absl-py && python -m tools.kernel.tuner.v1.kernel_tuner_runner --kernel_tuner_name={self.kernel_tuner_name} --case_set_id={case_set_id} --run_id={run_id} --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
+                    f".buildkite/scripts/run_in_docker.sh bash -c \"pip install --upgrade google-cloud-spanner && pip install --upgrade google-api-core && pip install --upgrade google-auth && pip install --upgrade absl-py && python -m tools.kernel.tuner.v1.kernel_tuner_runner --kernel_tuner_name={self.kernel_tuner_name} --case_set_id={case_set_id} --run_id={run_id} --tpu_version={tpu_version} --tpu_cores={tpu_cores} --tpu_queue_multi={self.tpu_queue_multi} --begin_case_id={case_id_start} --end_case_id={case_id_end}\""
                 ]
             }
             pipeline["steps"].append(step)
-            self.storage_manager.create_bucket_for_run(case_set_id, run_id,
-                                                       bucket_id,
-                                                       case_id_start,
-                                                       case_id_end)
+            self.storage_manager.create_bucket_for_run(
+                case_set_id,
+                run_id,
+                bucket_id,
+                case_id_start,
+                case_id_end,
+                tpu=self.tpu_queue_multi)
 
         pipeline['steps'] = [{
             'group': 'Kernel Sweeping Group',
@@ -385,7 +401,8 @@ class KernelTunerBase(ABC):
             if status != TuningStatus.SUCCESS:
                 results_buffer.append(
                     (caseset_id, run_id, cid, status.value, FLAGS.worker_id, 0,
-                     0, 0, self.storage_manager.get_timestamp_sec()))
+                     0, 0, self.storage_manager.get_timestamp_sec(),
+                     self.tpu_queue_multi))
                 logger.warning(
                     f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
                 )
@@ -399,9 +416,9 @@ class KernelTunerBase(ABC):
             total_time = end_time - begin_case_id_time
             if status != TuningStatus.SUCCESS:
                 results_buffer.append(
-                    (caseset_id, run_id, cid, status.value,
-                     FLAGS.worker_id, warmup_us, 0, 0,
-                     self.storage_manager.get_timestamp_sec()))
+                    (caseset_id, run_id, cid, status.value, FLAGS.worker_id,
+                     warmup_us, 0, 0, self.storage_manager.get_timestamp_sec(),
+                     self.tpu_queue_multi))
                 logger.warning(
                     f"Case {cid} failed during main run with status: {status}. Total time spent: {total_time/1e9:.2f}s."
                 )
@@ -412,7 +429,8 @@ class KernelTunerBase(ABC):
             results_buffer.append(
                 (caseset_id, run_id, cid, status.value, FLAGS.worker_id,
                  average_latency_us, warmup_us, total_time_us,
-                 self.storage_manager.get_timestamp_sec()))
+                 self.storage_manager.get_timestamp_sec(),
+                 self.tpu_queue_multi))
 
             if FLAGS.debug:
                 logger.info(

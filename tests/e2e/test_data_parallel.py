@@ -66,12 +66,12 @@ def generate_test_prompts(num_prompts: int = 256) -> list[str]:
     ]
 
 
-@pytest.fixture
-def sampling_params():
+def get_sampling_params(check_performance: bool = False) -> SamplingParams:
     return SamplingParams(
         temperature=0.0,
         max_tokens=32,
         ignore_eos=True,
+        detokenize=not check_performance,
         logprobs=1,
     )
 
@@ -214,17 +214,19 @@ def _check_correctness(test_name: str, baseline_outputs: list,
 
 
 def _test_attention_data_parallelism(
-    sampling_params: SamplingParams,
-    check_correctness: bool = True,
-    check_performance: bool = True,
+    check_correctness: bool = False,
+    check_performance: bool = False,
 ):
     """Correctness and performance test for attention DP."""
+    assert check_correctness != check_performance, (
+        "Exactly one of check_correctness or check_performance must be True")
     os.environ['MODEL_IMPL_TYPE'] = "vllm"
     model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 
     cfg = TestConfig.for_performance(
     ) if check_performance else TestConfig.for_correctness()
     test_prompts = generate_test_prompts(cfg.num_prompts)
+    sampling_params = get_sampling_params(check_performance)
 
     # Run with attn_dp=2 tp=2
     dp_config = InferenceConfig(
@@ -232,8 +234,8 @@ def _test_attention_data_parallelism(
         tensor_parallel_size=4,
         async_scheduling=False,
         max_model_len=cfg.max_model_len,
-        max_num_batched_tokens=cfg.max_num_batched_tokens // 2,
-        max_num_seqs=cfg.max_num_seqs // 2,
+        max_num_batched_tokens=cfg.max_num_batched_tokens,
+        max_num_seqs=cfg.max_num_seqs,
         additional_config={
             "sharding": {
                 "sharding_strategy": {
@@ -274,17 +276,19 @@ def _test_attention_data_parallelism(
 
 
 def _test_data_parallelism(
-    sampling_params: SamplingParams,
-    check_correctness: bool = True,
-    check_performance: bool = True,
+    check_correctness: bool = False,
+    check_performance: bool = False,
 ):
     """Correctness and performance test for model DP."""
+    assert check_correctness != check_performance, (
+        "Exactly one of check_correctness or check_performance must be True")
     os.environ['MODEL_IMPL_TYPE'] = "flax_nnx"
     model_name = "meta-llama/Meta-Llama-3-8B"
 
     cfg = TestConfig.for_performance(
     ) if check_performance else TestConfig.for_correctness()
     test_prompts = generate_test_prompts(cfg.num_prompts)
+    sampling_params = get_sampling_params(check_performance)
 
     # Run with data parallelism (dp=2, tp=1)
     dp_config = InferenceConfig(
@@ -293,8 +297,8 @@ def _test_data_parallelism(
         data_parallel_size=2,
         async_scheduling=True,
         max_model_len=cfg.max_model_len,
-        max_num_batched_tokens=cfg.max_num_batched_tokens // 2,
-        max_num_seqs=cfg.max_num_seqs // 2,
+        max_num_batched_tokens=cfg.max_num_batched_tokens,
+        max_num_seqs=cfg.max_num_seqs,
     )
     dp_outputs, dp_time = _run_inference(dp_config, test_prompts,
                                          sampling_params)
@@ -326,27 +330,21 @@ def _test_data_parallelism(
         )
 
 
-def test_dp_correctness(sampling_params: SamplingParams):
+def test_dp_correctness():
     """Test data parallelism correctness without compilation."""
     os.environ['SKIP_JAX_PRECOMPILE'] = '1'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
 
-    _test_data_parallelism(sampling_params,
-                           check_correctness=True,
-                           check_performance=False)
-    _test_attention_data_parallelism(sampling_params,
-                                     check_correctness=True,
+    _test_data_parallelism(check_correctness=True, check_performance=False)
+    _test_attention_data_parallelism(check_correctness=True,
                                      check_performance=False)
 
 
-def test_dp_performance(sampling_params: SamplingParams):
+def test_dp_performance():
     """Test data parallelism performance with compilation."""
     os.environ['SKIP_JAX_PRECOMPILE'] = '0'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
 
-    _test_data_parallelism(sampling_params,
-                           check_correctness=False,
-                           check_performance=True)
-    _test_attention_data_parallelism(sampling_params,
-                                     check_correctness=False,
+    _test_data_parallelism(check_correctness=False, check_performance=True)
+    _test_attention_data_parallelism(check_correctness=False,
                                      check_performance=True)

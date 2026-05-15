@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import jax.numpy as jnp
@@ -24,24 +23,15 @@ from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 from tpu_inference.runner import utils as runner_utils
+from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
+from tpu_inference.spec_decode.jax.utils import extract_last_sampled_tokens
 from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
     from tpu_inference.layers.common.attention_metadata import \
         AttentionMetadata
     from tpu_inference.runner.tpu_runner import TPUModelRunner
-
-
-@dataclass
-class SpecDecodeMetadata:
-    """Metadata for speculative decoding on JAX/TPU, containing all necessary indices."""
-    draft_token_ids: jnp.ndarray
-    draft_lengths: jnp.ndarray
-    draft_lengths_cpu: np.ndarray
-    target_logits_indices: jnp.ndarray
-    bonus_logits_indices: jnp.ndarray
-    final_logits_indices: jnp.ndarray
 
 
 class SpeculativeDecodingManager:
@@ -61,7 +51,9 @@ class SpeculativeDecodingManager:
 
     def propose_draft_token_ids(
         self,
-        sampled_token_ids: list[list[int]],
+        sampled_output: jnp.ndarray,
+        logits_indices_selector: np.ndarray,
+        discard_sampled_tokens_req_indices: list,
         aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
         attn_metadata: AttentionMetadata,
         spec_decode_metadata: Optional[SpecDecodeMetadata],
@@ -70,16 +62,28 @@ class SpeculativeDecodingManager:
     ) -> None:
         if self.runner.speculative_config.method == "ngram":
             assert isinstance(self.runner.drafter, NgramProposer)
+            # For n-gram based proposer, the drafter run on host
+            # cpu, therefore, we need to first copy the sampled
+            # token ids from device to host, then run the ngram proposer.
+            valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
+                self.runner, spec_decode_metadata, sampled_output,
+                logits_indices_selector, discard_sampled_tokens_req_indices)
             self._draft_token_ids = self.runner.drafter.propose(
-                sampled_token_ids[:self.runner.input_batch.num_reqs],
+                valid_sampled_token_ids[:self.runner.input_batch.num_reqs],
                 self.runner.input_batch.num_tokens_no_spec,
                 self.runner.input_batch.token_ids_cpu)
         elif self.runner.speculative_config.method == "eagle3":
+            last_sampled_token_id, num_rejected_tokens = extract_last_sampled_tokens(
+                spec_decode_metadata, sampled_output,
+                self.runner.speculative_config.num_speculative_tokens,
+                self.runner.input_batch.vocab_size, self.runner.max_num_reqs)
             self._draft_token_ids = self.propose_eagle3_draft_token_ids(
-                sampled_token_ids,
+                spec_decode_metadata,
+                last_sampled_token_id,
+                num_rejected_tokens,
+                discard_sampled_tokens_req_indices,
                 aux_hidden_states,
                 attn_metadata,
-                spec_decode_metadata,
                 scheduler_output,
                 input_ids,
             )
@@ -90,60 +94,41 @@ class SpeculativeDecodingManager:
 
     def propose_eagle3_draft_token_ids(
         self,
-        sampled_token_ids: list[list[int]],
+        spec_decode_metadata: Optional[SpecDecodeMetadata],
+        last_sampled_token_id: jnp.ndarray,
+        num_rejected_tokens: jnp.ndarray,
+        discard_sampled_tokens_req_indices: list[int],
         aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
         attn_metadata: AttentionMetadata,
-        spec_decode_metadata: Optional[SpecDecodeMetadata],
         scheduler_output: VllmSchedulerOutput,
         input_ids: jnp.ndarray,
     ) -> list[list[int]]:
         assert isinstance(self.runner.drafter, Eagle3Proposer)
-
-        # TODO(woosuk): Refactor the loop.
         req_ids = self.runner.input_batch.req_ids
-        next_token_ids: list[int] = []
-        for i, token_ids in enumerate(sampled_token_ids):
-            if token_ids:
-                # Common case.
-                next_token_id = token_ids[-1]
-            else:
-                # Partial prefill (rare case).
-                # Get the next token id from the request state.
-                req_id = req_ids[i]
-                req_state = self.runner.requests[req_id]
-                seq_len = (req_state.num_computed_tokens +
-                           scheduler_output.num_scheduled_tokens[req_id])
-                next_token_id = req_state.get_token_id(seq_len)
-            next_token_ids.append(next_token_id)
+        max_num_seqs = attn_metadata.seq_lens.shape[0]
+        next_prompt_token_id = np.zeros(max_num_seqs, dtype=np.int32)
+        is_in_prefill = np.zeros(max_num_seqs, dtype=np.int32)
+        for i in discard_sampled_tokens_req_indices:
+            # Partial prefill
+            # Get the next token id from the request state.
+            req_id = req_ids[i]
+            req_state = self.runner.requests[req_id]
+            seq_len = (req_state.num_computed_tokens +
+                       scheduler_output.num_scheduled_tokens[req_id])
+            next_token_id = req_state.get_token_id(seq_len)
+            next_prompt_token_id[i] = next_token_id
+            is_in_prefill[i] = 1
 
-        # Pad the batch size to match with existing padding for target model
-        pad_len = attn_metadata.seq_lens.shape[0] - len(next_token_ids)
-        assert pad_len >= 0
-        next_token_ids += [0] * pad_len
-
-        next_token_ids = device_array(
-            self.runner.mesh, np.array(next_token_ids, dtype=jnp.int32))
-
-        if spec_decode_metadata is None:
-            num_rejected_tokens = None
-        else:
-            num_draft_tokens = spec_decode_metadata.draft_lengths_cpu
-            num_rejected_tokens = [
-                int(n) + 1 - len(sampled_token_ids[i]) if n > 0 else 0
-                for i, n in enumerate(num_draft_tokens)
-            ]
-
-            pad_len = self.runner.max_num_reqs - len(num_rejected_tokens)
-            num_rejected_tokens += [0] * pad_len
-            num_rejected_tokens = device_array(
-                self.runner.mesh, np.array(num_rejected_tokens,
-                                           dtype=jnp.int32))
+        next_prompt_token_id, is_in_prefill = device_array(
+            self.runner.mesh, (next_prompt_token_id, is_in_prefill))
 
         target_hidden_states, input_ids, last_token_indices, attn_metadata = self.runner.drafter.prepare_inputs(
             attn_metadata,
             input_ids,
             aux_hidden_states,
-            next_token_ids,
+            last_sampled_token_id,
+            next_prompt_token_id,
+            is_in_prefill,
             num_rejected_tokens,
         )
 
@@ -253,9 +238,9 @@ class SpeculativeDecodingManager:
         metadata = SpecDecodeMetadata(
             draft_token_ids=padded_draft_token_ids,
             draft_lengths=padded_num_draft_tokens,
-            draft_lengths_cpu=padded_num_draft_tokens_cpu,
             target_logits_indices=padded_target_logits_indices,
             bonus_logits_indices=padded_bonus_logits_indices,
             final_logits_indices=padded_logits_indices,
         )
+        metadata.draft_lengths_cpu = padded_num_draft_tokens_cpu
         return metadata

@@ -23,7 +23,8 @@ from jax.sharding import PartitionSpec as P
 
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, UnfusedMoEWeights, shard_moe_weights)
+    FusedMoEWeights, UnfusedMoEWeights, process_unquantized_moe_weights,
+    shard_moe_weights)
 from tpu_inference.layers.common.quantization import unquantized as jax_common
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.jax import JaxModule
@@ -31,7 +32,10 @@ from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
+from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import shard_put
+
+logger = init_logger(__name__)
 
 
 class UnquantizedLinearMethod(QuantizeMethodBase,
@@ -129,8 +133,9 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             w13_val = jnp.concatenate([w_gate, w_up], axis=1)
             del w_gate, w_up
 
-            weights = jax_common.process_unquantized_moe_weights(
-                mesh=jax.sharding.get_mesh(),
+            mesh = jax.sharding.get_mesh()
+            weights = process_unquantized_moe_weights(
+                mesh=mesh,
                 moe_backend=layer.moe_backend,
                 activation=layer.activation,
                 w13_weight=w13_val,
@@ -141,11 +146,22 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
             sharded_weights = shard_moe_weights(weights,
                                                 moe_backend=layer.moe_backend,
-                                                mesh=jax.sharding.get_mesh())
+                                                mesh=mesh)
 
             layer.kernel_gating_upproj_EDF = nnx.Param(
                 sharded_weights.w13_weight)
             layer.kernel_down_proj_EFD = nnx.Param(sharded_weights.w2_weight)
+
+            # When MOE_REQUANTIZE_WEIGHT_DTYPE quantizes the bf16 weights at
+            # load time, scales are produced by process_unquantized_moe_weights
+            # and need to be stored alongside the weights so apply_jax can pass
+            # them to the MoE kernel.
+            if sharded_weights.w13_weight_scale is not None:
+                layer.kernel_gating_upproj_EDF_weight_scale = nnx.Param(
+                    sharded_weights.w13_weight_scale)
+            if sharded_weights.w2_weight_scale is not None:
+                layer.kernel_down_proj_EFD_weight_scale = nnx.Param(
+                    sharded_weights.w2_weight_scale)
 
             del weights
             del w13_val
@@ -176,13 +192,19 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
             w13_weight = layer.kernel_gating_upproj_E2DF.value if layer.moe_backend == MoEBackend.FUSED_MOE else layer.kernel_gating_upproj_EDF.value
             w2_weight = layer.kernel_down_proj_EFD.value
+            # Although this is UnquantizedMethod, when MOE_REQUANTIZE_WEIGHT_DTYPE
+            # is set, the weights are quantized on the fly and scales are produced
+            w13_scale = getattr(layer, "kernel_gating_upproj_EDF_weight_scale",
+                                None)
+            w2_scale = getattr(layer, "kernel_down_proj_EFD_weight_scale",
+                               None)
             # TODO (jacobplatin/bzgoogle): we should support bias
             weights = FusedMoEWeights(
                 w13_weight=w13_weight,
-                w13_weight_scale=None,
+                w13_weight_scale=getattr(w13_scale, "value", None),
                 w13_bias=None,
                 w2_weight=w2_weight,
-                w2_weight_scale=None,
+                w2_weight_scale=getattr(w2_scale, "value", None),
                 w2_bias=None,
             )
         elif layer.moe_backend in [

@@ -637,7 +637,7 @@ class TestDeepseekV3Attention(unittest.TestCase):
                 None,
                 ShardingAxisName.MLP_TENSOR,
             )
-            attn_o_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
+            attn_o_nth_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
                                             None)
 
             # NOTE: DeepseekV3Attention = MHA
@@ -669,7 +669,7 @@ class TestDeepseekV3Attention(unittest.TestCase):
                 kv_cache_dtype=kv_cache_str,
                 query_tnh=query_tnh_spec,
                 keyvalue_skh=keyvalue_skh_spec,
-                attn_o_tnh=attn_o_tnh_spec,
+                attn_o_nth=attn_o_nth_spec,
                 q_da_sharding=PartitionSpec(None, ShardingAxisName.VOCAB),
                 ap_sharding=PartitionSpec(None, ShardingAxisName.MLP_TENSOR),
                 kv_da_sharding=PartitionSpec(None, ShardingAxisName.VOCAB),
@@ -721,11 +721,12 @@ class TestDeepseekV3Attention(unittest.TestCase):
         kv_lora_rank = 512
 
         with jax.set_mesh(self.mesh):
-            query_tnh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR, None,
+            query_nth_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
                                            None)
-            keyvalue_skh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR,
-                                              None)
-            attn_o_tnh_spec = PartitionSpec(ShardingAxisName.MLP_TENSOR, None,
+            query_tnh_spec = PartitionSpec(ShardingAxisName.ATTN_DATA, None,
+                                           None)
+            keyvalue_skh_spec = PartitionSpec(ShardingAxisName.ATTN_DATA, None)
+            attn_o_nth_spec = PartitionSpec(None, ShardingAxisName.ATTN_DATA,
                                             None)
 
             model = DeepseekV3MLA(
@@ -754,9 +755,10 @@ class TestDeepseekV3Attention(unittest.TestCase):
                 mesh=self.mesh,
                 random_init=True,
                 kv_cache_dtype=kv_cache_str,
+                query_nth=query_nth_spec,
                 query_tnh=query_tnh_spec,
                 keyvalue_skh=keyvalue_skh_spec,
-                attn_o_tnh=attn_o_tnh_spec,
+                attn_o_nth=attn_o_nth_spec,
                 q_da_sharding=(None, ShardingAxisName.VOCAB),
                 # anh_sharding is specific to DeepseekV3MLA
                 anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),

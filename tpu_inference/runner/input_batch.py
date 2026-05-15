@@ -56,6 +56,7 @@ class InputBatch:
         vocab_size: int,
         block_sizes: list[int],
         is_spec_decode: bool = False,
+        num_speculative_tokens: int = 0,
     ):
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
@@ -90,6 +91,7 @@ class InputBatch:
             max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             block_sizes=block_sizes,
+            num_speculative_tokens=num_speculative_tokens,
         )
 
         # Sampling-related.

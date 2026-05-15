@@ -144,17 +144,37 @@ if [ -z "$dataset_path" ]; then
         echo "Dataset name must be mlperf if dataset_path is not specified.  We only support downloading the MLPerf dataset at this time."
         exit 1
     fi
-    # Only download the dataset if it doesn't already exist
-    dataset_path="$root_dir"/open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl
+
+    dataset_path="$root_dir/open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+    EXPECTED_SHA256="b64e66e54b6267f79eb4f9ccec52d466bab3ac94747ed258c3b0f337ed166fab"
+
     if [ ! -f "$dataset_path" ]; then
-        echo "Downloading the MLPerf dataset"
-        curl https://rclone.org/install.sh | bash
-        rclone config create mlc-inference s3 provider=Cloudflare access_key_id=f65ba5eef400db161ea49967de89f47b secret_access_key=fbea333914c292b854f14d3fe232bad6c5407bf0ab1bebf78833c2b359bdfd2b endpoint=https://c2686074cb2caf5cbaf6d134bdba8b47.r2.cloudflarestorage.com
+        echo "Downloading and verifying the MLPerf dataset..."
+        
+        # Check if rclone is installed; if not, install it via package manager for security
+        if ! command -v rclone &> /dev/null; then
+            echo "rclone not found. Installing..."
+            sudo apt-get update && sudo apt-get install -y rclone
+        fi
+
+        rclone config create mlc-inference s3 provider=Cloudflare \
+            access_key_id=f65ba5eef400db161ea49967de89f47b \
+            secret_access_key=fbea333914c292b854f14d3fe232bad6c5407bf0ab1bebf78833c2b359bdfd2b \
+            endpoint=https://c2686074cb2caf5cbaf6d134bdba8b47.r2.cloudflarestorage.com
         rclone copy mlc-inference:mlcommons-inference-wg-public/open_orca ./open_orca -P
         gzip -d open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl.gz
     else
         echo "Not downloading the MLPerf dataset because it already exists"
     fi
+
+    echo "Verifying file integrity..."
+    if ! echo "$EXPECTED_SHA256  $dataset_path" | sha256sum -c -; then
+        echo "CRITICAL SECURITY ERROR: SHA256 hash mismatch for $dataset_path!"
+        echo "The file may be corrupted or tampered with. Deleting file and exiting."
+        rm -f "$dataset_path"
+        exit 1
+    fi
+    echo "Verification successful."
 fi
 
 if [ "$use_dummy_weights" = true ]; then

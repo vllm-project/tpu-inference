@@ -24,12 +24,9 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.kernels.gdn.fused_gdn_kernel_wrapper import \
-    ragged_gated_delta_rule as ragged_gated_delta_rule_fused
+import tpu_inference.layers.common.ragged_gated_delta_rule_wrapper as ragged_gated_delta_rule_wrapper
 from tpu_inference.layers.common.ragged_conv1d_jax import \
     ragged_conv1d as ragged_conv1d_jax
-from tpu_inference.layers.common.ragged_gated_delta_rule_chunked import \
-    ragged_gated_delta_rule as ragged_gated_delta_rule_chunked
 from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
     ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -40,10 +37,7 @@ class RaggedConv1dImpl(enum.Enum):
     JAX = "ragged_conv1d_jax"
 
 
-class RaggedGatedDeltaRuleImpl(enum.Enum):
-    REF = "ragged_gated_delta_rule_ref"
-    CHUNKED = "ragged_gated_delta_rule_chunked"
-    FUSED = "fused_gdn_kernel"
+RaggedGatedDeltaRuleImpl = ragged_gated_delta_rule_wrapper.RaggedGatedDeltaRuleImpl
 
 
 @jax.tree_util.register_dataclass
@@ -51,7 +45,7 @@ class RaggedGatedDeltaRuleImpl(enum.Enum):
 class GdnAttentionConfig:
     ragged_conv1d_impl: RaggedConv1dImpl = RaggedConv1dImpl.JAX
     ragged_gated_delta_rule_impl: RaggedGatedDeltaRuleImpl = (
-        RaggedGatedDeltaRuleImpl.REF)
+        RaggedGatedDeltaRuleImpl.CHUNKED_KERNEL_PD)
 
 
 def run_jax_gdn_attention_local(
@@ -141,46 +135,46 @@ def run_jax_gdn_attention_local(
         kernel_size=kernel_size,
     )
 
-    out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
-
-    if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.FUSED:
-        ragged_gdn_impl = functools.partial(
-            ragged_gated_delta_rule_fused,
-            n_kq=n_kq,
-            n_v=n_v,
-            d_k=d_k,
-            d_v=d_v,
-        )
-    elif config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
+    if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
         ragged_gdn_impl = functools.partial(
             ragged_gated_delta_rule_ref,
+            has_initial_state=has_initial_state,
             n_kq=n_kq,
             n_v=n_v,
             d_k=d_k,
             d_v=d_v,
+        )
+        new_recurrent_state, output = ragged_gdn_impl(
+            out_mixed_qkv,
+            b,
+            a,
+            recurrent_state,
+            A_log,
+            dt_bias,
+            query_start_loc,
+            state_indices,
+            distribution,
         )
     else:
-        ragged_gdn_impl = functools.partial(
-            ragged_gated_delta_rule_chunked,
+        wrapper_config = config.ragged_gated_delta_rule_impl.to_config()
+        new_recurrent_state, output = ragged_gated_delta_rule_wrapper.ragged_gated_delta_rule_wrapper(
+            mixed_qkv=out_mixed_qkv,
+            b=b,
+            a=a,
+            recurrent_state=recurrent_state,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            query_start_loc=query_start_loc,
+            state_indices=state_indices,
+            distribution=distribution,
             n_kq=n_kq,
             n_v=n_v,
             d_k=d_k,
             d_v=d_v,
-            use_qk_norm_in_gdn=True,
+            config=wrapper_config,
+            chunk_size=64,
+            has_initial_state=has_initial_state,
         )
-
-    new_recurrent_state, output = ragged_gdn_impl(
-        out_mixed_qkv,
-        b,
-        a,
-        recurrent_state,
-        A_log,
-        dt_bias,
-        query_start_loc,
-        state_indices,
-        distribution,
-        has_initial_state,
-    )
 
     return (new_conv_state, new_recurrent_state), output
 

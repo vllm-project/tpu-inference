@@ -27,19 +27,41 @@ source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 
 # Handles the environment state for different TPU generations.
 set_jax_envs() {
-    case $1 in
-        v6)
+    local tpu_version=$1
+    local tpu_cores=$2
+
+    echo "Setting JAX environment variables for TPU version: ${tpu_version}, TPU cores: ${tpu_cores}"
+    
+    # keep in sync with the logic in kernel_tuner_runner.py:get_tpu_queue_by_version_and_cores
+    case $tpu_version in
+        tpu6e)
             export TPU_VERSION="tpu6e"
             export TPU_QUEUE_SINGLE="tpu_v6e_queue"
-            export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
+            case $tpu_cores in
+                1) export TPU_QUEUE_MULTI="tpu_v6e_queue" ;;
+                8) export TPU_QUEUE_MULTI="tpu_v6e_8_queue" ;;
+                *) echo "ERROR: unsupported tpu_cores=$tpu_cores for tpu6e"; exit 1 ;;
+            esac
+            echo "Set TPU_VERSION=${TPU_VERSION}, TPU_QUEUE_SINGLE=${TPU_QUEUE_SINGLE}, TPU_QUEUE_MULTI=${TPU_QUEUE_MULTI}"
             ;;
-        v7)
+        tpu7x)
             export TPU_VERSION="tpu7x"
             export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
-            export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
+            case $tpu_cores in
+                2) export TPU_QUEUE_MULTI="tpu_v7x_2_queue" ;;
+                8) export TPU_QUEUE_MULTI="tpu_v7x_8_queue" ;;
+                16) export TPU_QUEUE_MULTI="tpu_v7x_16_queue" ;;
+                *) echo "ERROR: unsupported tpu_cores=$tpu_cores for tpu7x"; exit 1 ;;
+            esac
+            echo "Set TPU_VERSION=${TPU_VERSION}, TPU_QUEUE_SINGLE=${TPU_QUEUE_SINGLE}, TPU_QUEUE_MULTI=${TPU_QUEUE_MULTI}"
             ;;
         unset)
             unset TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI
+            echo "Unset TPU_VERSION, TPU_QUEUE_SINGLE, TPU_QUEUE_MULTI"
+            ;;
+        *)
+            echo "ERROR: unsupported tpu_version=${tpu_version}"
+            exit 1
             ;;
     esac
 }
@@ -74,8 +96,15 @@ echo "  KERNEL_TUNING_RUN_ID=${KERNEL_TUNING_RUN_ID:-}"
 echo "  KERNEL_TUNING_KERNEL_NAME=${KERNEL_TUNING_KERNEL_NAME:-}"
 echo "  KERNEL_TUNING_CASE_SET_DESC=${KERNEL_TUNING_CASE_SET_DESC:-}"
 echo "  KERNEL_TUNING_TPU_VERSION=${KERNEL_TUNING_TPU_VERSION:-}"
+echo "  KERNEL_TUNING_TPU_CORES=${KERNEL_TUNING_TPU_CORES:-}"
 echo "  HOST_NAME=${HOST_NAME:-}"
-set_jax_envs "${KERNEL_TUNING_TPU_VERSION:-v6}"
+
+# Validate KERNEL_TUNING_TPU_CORES based on KERNEL_TUNING_TPU_VERSION
+TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-}"
+TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
+
+set_jax_envs "${TPU_VERSION}" "${TPU_CORES}"
 buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
+set_jax_envs "unset" ""
 
 echo "--- Buildkite Kernel Tuning Bootstrap Finished"

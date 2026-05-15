@@ -61,7 +61,6 @@ from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
-from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -722,6 +721,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         min_num_reqs = max(MIN_NUM_SEQS, next_power_of_2(self.dp_size))
         self.num_reqs_paddings = runner_utils.get_req_paddings(
             min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
+
+        # The num_reqs paddings for attention only, by default it is
+        # the max_reqs. If ATTN_BUCKETIZE_NUM_REQS=true, it is the
+        # power-of-two between min and max reqs.
+        # User can set ATTN_CUSTOM_NUM_REQS_BUCKETS to provide custom buckets.
+        self.attn_num_reqs_paddings = runner_utils.get_attn_req_paddings(
+            min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
         self.num_reqs_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_reqs_paddings
         ]
@@ -778,11 +784,46 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh,
             )
 
+            # Only pre-warm torchax for pooling tasks to prevent JIT during inference
+            # while avoiding unnecessary overhead for standard generative models.
+            if self.is_pooling_model:
+                import torchax
+                from torchax.interop import torch_view
+
+                h_size = self.model_config.get_hidden_size()
+                # Use the actual model mesh and ATTN_DATA axis for sharding alignment
+                pooling_sharding = NamedSharding(
+                    self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+
+                logger.info(
+                    f"Pre-warming StepPooler for shapes: {self.num_tokens_paddings}"
+                )
+                with torchax.default_env():
+                    for max_tokens in self.num_tokens_paddings:
+                        # Create a dummy JAX array with exact shape and sharding metadata
+                        dummy_jax = jnp.zeros((max_tokens, h_size),
+                                              dtype=jnp.bfloat16)
+                        # Shard the array to match real-time hidden_states
+                        dummy_jax = jax.device_put(dummy_jax, pooling_sharding)
+
+                        # Trigger the casting and host-transfer kernels
+                        # Using non_blocking=False to ensure AOT compilation completes during load
+                        _ = torch_view(dummy_jax).to('cpu', non_blocking=False)
+                logger.debug("Universal StepPooler pre-warming successful.")
+
         self.model_fn = model.model_fn
         self.compute_logits_fn = model.compute_logits_fn
         self.pooler_fn = model.pooler_fn
         self.combine_hidden_states_fn = model.combine_hidden_states_fn
         self.state = model.state
+        # For the flax_nnx path, `model_fn` (== `run_model`) accepts a flat
+        # tuple of array leaves and reconstructs the nnx.State inside the
+        # jit. Pre-flatten here so subsequent dispatches skip the per-call
+        # walk of `nnx.Variable` wrappers
+        if isinstance(self.state, nnx.State):
+            self.state_leaves = tuple(jax.tree_util.tree_leaves(self.state))
+        else:
+            self.state_leaves = self.state
         self.lora_manager = model.lora_manager
         self.model = model.model
 
@@ -1110,7 +1151,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # but one of them would be `None`
                 (self.kv_caches, hidden_states, aux_hidden_states,
                  expert_indices) = self.model_fn(
-                     self.state,
+                     self.state_leaves,
                      self.kv_caches,
                      input_ids,
                      attn_metadata,
@@ -1128,43 +1169,47 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 hidden_states.expert_indices = expert_indices
                 return hidden_states
 
-            if self.is_pooling_model:
-                seq_lens_view = self.device_buffer.get_view(
-                    (self.max_num_reqs, ), key="seq_lens")
-                seq_lens = seq_lens_view[:self.input_batch.num_reqs]
-                pooling_metadata = self.input_batch.get_pooling_metadata()
+        if self.is_pooling_model:
+            num_reqs = self.input_batch.num_reqs
 
-                # Extract actual scheduled token counts for the current step
-                num_scheduled_tokens = np.array([
-                    scheduler_output.num_scheduled_tokens[req_id]
-                    for req_id in self.input_batch.req_ids
-                ],
-                                                dtype=np.int32)
+            # Retrieve sequence lengths
+            seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
+                                                        key="seq_lens")
+            seq_lens = seq_lens_view[:num_reqs]
 
-                pooler_fn: PoolerFunc = self.pooler_fn
-                pooler_output = pooler_fn(
-                    hidden_states,
-                    pooling_metadata,
-                    seq_lens,
-                    num_scheduled_tokens,
-                )
+            pooling_metadata = self.input_batch.get_pooling_metadata()
 
-                return ModelRunnerOutput(
-                    req_ids=self.input_batch.req_ids,
-                    req_id_to_index=self.input_batch.req_id_to_index,
-                    sampled_token_ids=[],
-                    logprobs=None,
-                    prompt_logprobs_dict={},
-                    pooler_output=pooler_output,
-                )
+            # Extract scheduled token counts for the current chunk
+            num_scheduled_tokens = np.array([
+                scheduler_output.num_scheduled_tokens[req_id]
+                for req_id in self.input_batch.req_ids[:num_reqs]
+            ],
+                                            dtype=np.int32)
 
-            hidden_states = self._select_from_array_fn(hidden_states,
-                                                       logits_indices)
-            logits = self.compute_logits_fn(
-                self.state,
+            # Call the pooler with the decoupled interface
+            pooler_output = self.pooler_fn(
                 hidden_states,
-                lora_metadata,
+                pooling_metadata,
+                seq_lens,
+                num_scheduled_tokens,
             )
+
+            return ModelRunnerOutput(
+                req_ids=self.input_batch.req_ids,
+                req_id_to_index=self.input_batch.req_id_to_index,
+                sampled_token_ids=[],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=pooler_output,
+            )
+
+        hidden_states = self._select_from_array_fn(hidden_states,
+                                                   logits_indices)
+        logits = self.compute_logits_fn(
+            self.state,
+            hidden_states,
+            lora_metadata,
+        )
 
         self.execute_model_state = ExecuteModelState(
             scheduler_output=scheduler_output,
@@ -1332,6 +1377,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
+        if self.speculative_config:
+            with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
+                self.speculative_decoding_manager.propose_draft_token_ids(
+                    next_tokens,
+                    logits_indices_selector,
+                    discard_sampled_tokens_req_indices,
+                    aux_hidden_states,
+                    attn_metadata,
+                    spec_decode_metadata,
+                    scheduler_output,
+                    input_ids,
+                )
+
         # If async scheduler enabled
         if self.scheduler_config.async_scheduling:
             # Get previous results from TPU and replace the placeholder.
@@ -1394,9 +1452,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 spec_decode_metadata.draft_lengths_cpu, num_reqs,
                 spec_decode_metadata.draft_token_ids.shape[0])
 
-        # Mask out the sampled tokens that should not be sampled.
-        for i in discard_sampled_tokens_req_indices:
-            valid_sampled_token_ids[i].clear()
+        valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
+            self, spec_decode_metadata, next_tokens, logits_indices_selector,
+            discard_sampled_tokens_req_indices)
+
         # Append sampled tokens
         for req_idx, req_state, _ in request_seq_lens:
             sampled_ids = valid_sampled_token_ids[req_idx]
@@ -1428,17 +1487,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             logprobs_lists = None
 
-        if self.speculative_config:
-            with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
-                self.speculative_decoding_manager.propose_draft_token_ids(
-                    valid_sampled_token_ids,
-                    aux_hidden_states,
-                    attn_metadata,
-                    spec_decode_metadata,
-                    scheduler_output,
-                    input_ids,
-                )
-
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1451,10 +1499,31 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if expert_indices is not None:
             expert_indices_cpu = np.asarray(jax.device_get(expert_indices))
-            # Slice to actual scheduled tokens
-            actual_t = scheduler_output.total_num_scheduled_tokens
-            expert_indices_cpu = expert_indices_cpu[:, :actual_t, :]
-            model_runner_output.expert_indices = expert_indices_cpu
+
+            routed_experts_dict = {}
+            current_token_offset = 0
+            for req_id in self.input_batch.req_ids[:num_reqs]:
+                req_state = self.requests[req_id]
+                num_tokens_scheduled = scheduler_output.num_scheduled_tokens[
+                    req_id]
+                start_idx = current_token_offset
+                end_idx = start_idx + num_tokens_scheduled
+                current_token_offset = end_idx
+
+                # Shape: (num_tokens_scheduled, num_layers, top_k)
+                step_experts = expert_indices_cpu[:, start_idx:
+                                                  end_idx, :].transpose(
+                                                      1, 0, 2)
+
+                if not hasattr(req_state, "_accumulated_experts"):
+                    req_state._accumulated_experts = []
+                req_state._accumulated_experts.append(step_experts)
+
+                # Send the FULL accumulated history for every request in the batch
+                routed_experts_dict[req_id] = np.concatenate(
+                    req_state._accumulated_experts, axis=0)
+
+            model_runner_output.routed_experts_dict = routed_experts_dict
 
         return model_runner_output
 
@@ -1480,8 +1549,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logprobs = compute_logprobs(logits)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
-    def _prepare_dp_input_metadata(self,
-                                   scheduler_output: "VllmSchedulerOutput"):
+    def _prepare_input_metadata(self, scheduler_output: "VllmSchedulerOutput"):
 
         dp_size = self.dp_size
         num_reqs = self.input_batch.num_reqs
@@ -1499,7 +1567,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_req_per_dp_rank = {dp_rank: 0 for dp_rank in range(dp_size)}
 
         for req_id in self.input_batch.req_ids[:num_reqs]:
-            dp_rank = scheduler_output.assigned_dp_rank[req_id]
+            dp_rank = (scheduler_output.assigned_dp_rank[req_id]
+                       if dp_size > 1 else 0)
             req_ids_dp[dp_rank].append(req_id)
             req_indices_dp[dp_rank].append(
                 self.input_batch.req_id_to_index[req_id])
@@ -1539,6 +1608,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # Each rank's portion is padded_num_reqs_per_dp_rank wide.
                 sampling_loc = i + padded_num_reqs_per_dp_rank * dp_rank
                 sampling_indices_selector[req_idx] = sampling_loc
+        attn_padded_num_reqs = runner_utils.get_padded_token_len(
+            self.attn_num_reqs_paddings, padded_num_reqs)
+
+        # logits_indices_selector reorders per-rank outputs back to the
+        # original batch ordering; with a single rank the ordering is already
+        # the input-batch ordering, so no selector is needed.
+        if dp_size > 1:
+            all_req_indices = np.concatenate(
+                [req_indices_dp[dp_rank] for dp_rank in range(dp_size)])
+            all_positions = np.concatenate([
+                np.arange(len(req_indices_dp[dp_rank])) +
+                padded_num_reqs_per_dp_rank * dp_rank
+                for dp_rank in range(dp_size)
+            ])
+            sorted_indices = np.argsort(all_req_indices)
+            logits_indices_selector = all_positions[sorted_indices]
+        else:
+            logits_indices_selector = None
 
         return (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
                 scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
@@ -1546,10 +1633,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
                 sampling_indices_selector, max_num_reqs_per_dp_rank)
 
-    def _prepare_async_token_substitution_indices_dp(
+    def _prepare_async_token_substitution_indices(
             self, req_ids_dp, scheduled_tokens_per_dp_rank,
             padded_num_scheduled_tokens_per_dp_rank, dp_size):
-        """Prepare token substitution indices for async scheduling in DP mode."""
+        """Prepare token substitution indices for async scheduling."""
         token_in_tpu_cur_input_indices_dp = {}
         token_in_tpu_pre_next_tokens_indices_dp = {}
 
@@ -1572,29 +1659,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 )
 
         return token_in_tpu_cur_input_indices_dp, token_in_tpu_pre_next_tokens_indices_dp
-
-    def _prepare_async_token_substitution_indices_non_dp(
-            self, num_reqs, num_scheduled_tokens_per_req):
-        """Prepare token substitution indices for async scheduling in non-DP mode."""
-        token_in_tpu_cur_input_indices_list = []
-        token_in_tpu_pre_next_tokens_indices_list = []
-        acc_cur_len = 0
-
-        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            acc_cur_len += num_scheduled_tokens_per_req[i]
-            assert req_id is not None
-            if req_id not in self._pre_async_results.placeholder_req_id_to_index:
-                continue
-
-            token_in_tpu_cur_input_indices_list.append(acc_cur_len - 1)
-            token_in_tpu_pre_next_tokens_indices_list.append(
-                self._pre_async_results.placeholder_req_id_to_index[req_id])
-
-        if len(token_in_tpu_cur_input_indices_list) > 0:
-            return (np.array(token_in_tpu_cur_input_indices_list),
-                    np.array(token_in_tpu_pre_next_tokens_indices_list))
-        else:
-            return np.array([]), np.array([])
 
     def _apply_async_token_substitution(self, input_ids,
                                         token_in_tpu_cur_input_indices,
@@ -1661,9 +1725,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
          padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
-         padded_total_num_scheduled_tokens, padded_num_reqs_per_dp_rank,
-         sampling_indices_selector, max_num_reqs_per_dp_rank
-         ) = self._prepare_dp_input_metadata(scheduler_output)
+         attn_padded_num_reqs, padded_total_num_scheduled_tokens,
+         padded_num_reqs_per_dp_rank, logits_indices_selector,
+         max_num_reqs_per_dp_rank
+         ) = self._prepare_input_metadata(scheduler_output)
         # Multi-modal support
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1678,7 +1743,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # The actual substitution will be performed in tpu during later parts of this function.
             (token_in_tpu_cur_input_indices_dp,
              token_in_tpu_pre_next_tokens_indices_dp
-             ) = self._prepare_async_token_substitution_indices_dp(
+             ) = self._prepare_async_token_substitution_indices(
                  req_ids_dp, scheduled_tokens_per_dp_rank,
                  padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
@@ -1738,9 +1803,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             token_indices = (
                 positions_np +
                 req_indices * self.input_batch.token_ids_cpu.shape[1])
-            # NOTE(woosuk): We use torch.index_select instead of np.take here
-            # because torch.index_select is much faster than np.take for large
-            # tensors.
             np.take(
                 self.input_batch.token_ids_cpu.ravel(),
                 token_indices,
@@ -1945,6 +2007,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                padded_num_reqs=attn_padded_num_reqs,
             )
 
             # This is for making these cpu buffers hidden during tracing
@@ -2386,6 +2449,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mappings=mappings,
             transpose_keys=transpose_keys,
             shard=shard)
+        # Keep the dispatch-side view in sync with the updated state so
+        # subsequent jit dispatches see the new weights.
+        if isinstance(self.state, nnx.State):
+            self.state_leaves = tuple(jax.tree_util.tree_leaves(self.state))
+        else:
+            self.state_leaves = self.state
 
     def _get_padded_total_tokens(
             self, scheduler_output: "VllmSchedulerOutput") -> int:

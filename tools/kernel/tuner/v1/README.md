@@ -193,6 +193,8 @@ The pipeline is defined in `.buildkite/pipeline_kernel_tuning.yml` and bootstrap
 4. Expand **Environment Variables** and set the variables listed below.
 5. Click **Create Build**.
 
+Make sure to include both `KERNEL_TUNING_TPU_VERSION` and `KERNEL_TUNING_TPU_CORES` so the runner can resolve the correct TPU queue.
+
 **Option B — Buildkite REST API:**
 
 ```bash
@@ -209,7 +211,8 @@ curl -s -X POST \
       "KERNEL_TUNING_CASE_SET_ID":    "my_case_set_001",
       "KERNEL_TUNING_RUN_ID":         "001",
       "KERNEL_TUNING_CASE_SET_DESC":  "My tuning run description",
-      "KERNEL_TUNING_TPU_VERSION":    "v7"
+      "KERNEL_TUNING_TPU_VERSION":    "tpu7x",
+      "KERNEL_TUNING_TPU_CORES":      "8"
     }
   }'
 ```
@@ -224,7 +227,8 @@ Set these in the Buildkite **New Build → Environment Variables** section:
 | `KERNEL_TUNING_CASE_SET_ID` | `gmm_v2_tuning_001` | Unique identifier for this case set. Used as the primary key in Spanner. |
 | `KERNEL_TUNING_RUN_ID` | `001` | Run ID within the case set. Increment for re-runs of the same case set. |
 | `KERNEL_TUNING_CASE_SET_DESC` | `"Your description about this case set"` | Human-readable description stored alongside results. |
-| `KERNEL_TUNING_TPU_VERSION` | `v6` or `v7` | TPU generation. Controls which agent queue and `TPU_VERSION` env var are used. |
+| `KERNEL_TUNING_TPU_VERSION` | `tpu6e` or `tpu7x` | TPU generation. Controls which agent queue and `TPU_VERSION` env var are used. |
+| `KERNEL_TUNING_TPU_CORES` | [1, 8] for `tpu6e` or [2, 8, 16] for `tpu7x` | Together with `KERNEL_TUNING_TPU_VERSION`, this controls the TPU config for tuning jobs. For example, `tpu6e` and `8` runs tuning on a tpu6e TPU with 8 cores. |
 
 ---
 

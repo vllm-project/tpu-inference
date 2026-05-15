@@ -200,25 +200,6 @@ def _test_performance_helper(
         # Use a smaller set of prompts for performance testing
         test_prompts = get_test_prompts(speculative_config)
 
-        # Test reference LLM timing
-        ref_llm = LLM(
-            model=model_name,
-            max_model_len=1024,
-            max_num_seqs=1,
-            enable_prefix_caching=False,
-            tensor_parallel_size=_get_tensor_parallel_size(),
-            model_loader_extra_config={"enable_weights_track": False},
-            async_scheduling=0)
-
-        start_time = time.time()
-        _ = ref_llm.generate(test_prompts, sampling_config)
-        ref_time = time.time() - start_time
-
-        del ref_llm
-
-        # Waiting for TPUs to be released
-        time.sleep(30)
-
         # Test speculative LLM timing with max_num_seqs=1
         spec_llm = LLM(
             model=model_name,
@@ -231,9 +212,7 @@ def _test_performance_helper(
             disable_log_stats=False,
             async_scheduling=0)
 
-        start_time = time.time()
         _ = spec_llm.generate(test_prompts, sampling_config)
-        spec_time = time.time() - start_time
 
         metrics = spec_llm.get_metrics()
         num_draft_tokens = num_accepted_tokens = 0
@@ -252,11 +231,6 @@ def _test_performance_helper(
         del spec_llm
         # Waiting for TPUs to be released
         time.sleep(30)
-
-        speedup = ref_time / spec_time
-        print(f"Reference LLM time: {ref_time:.2f}s")
-        print(f"Speculative LLM time: {spec_time:.2f}s")
-        print(f"Speedup: {speedup:.2f}x")
 
         assert acceptance_rate >= min_acceptance_rate, f"Expected at least {min_acceptance_rate:.2%} acceptance rate for {speculative_config['method']}, got {acceptance_rate:.2%}"
 
