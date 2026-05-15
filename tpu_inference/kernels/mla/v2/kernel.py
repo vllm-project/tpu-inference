@@ -1753,7 +1753,7 @@ def mla_ragged_paged_attention(
                           decode_batch_size) * decode_batch_size
     # Batched decode
     decode_tunable_params = lookup_tunable_params(bd_tuning_key)
-    if not decode_tunable_params:
+    if True or not decode_tunable_params:
         decode_tunable_params = {
             'num_kv_pages_per_block': num_kv_pages_per_blocks[0],
             'num_queries_per_block': num_queries_per_blocks[0],
