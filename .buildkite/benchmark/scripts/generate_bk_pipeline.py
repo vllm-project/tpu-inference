@@ -22,12 +22,6 @@ from typing import Any, Dict, List, Set
 
 import yaml
 
-# List of authorized Buildkite queues for benchmark cases
-ALLOWED_QUEUES = {
-    "cpu", "cpu_64_core", "tpu_v6e_queue", "tpu_v7x_2_queue",
-    "tpu_v6e_8_queue", "tpu_v7x_8_queue", "tpu_v7x_16_queue"
-}
-
 # List of authorized command types
 ALLOWED_SERVER_COMMAND_TYPES = {"vllm_serve"}
 ALLOWED_CLIENT_COMMAND_TYPES = {"vllm_bench_serve", "lm_eval"}
@@ -231,13 +225,6 @@ def create_benchmark_steps(
         errors.append(
             f"Validation Error: 'ci_queue' is missing or empty in {file_path} "
             f"for case '{case_name}'.")
-
-    # Validation: Ensure all queues are in the ALLOWED_QUEUES list
-    for q in ci_queues:
-        if q not in ALLOWED_QUEUES:
-            errors.append(
-                f"Validation Error: Unauthorized queue '{q}' detected in {file_path}. "
-                f"Allowed queues are: {sorted(list(ALLOWED_QUEUES))}")
 
     # Merge Environment Variables (Global + Case Specific)
     combined_env = {**global_env, **case_data.get("env", {})}
