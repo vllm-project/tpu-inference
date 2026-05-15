@@ -32,6 +32,21 @@ ALLOWED_QUEUES = {
 ALLOWED_SERVER_COMMAND_TYPES = {"vllm_serve"}
 ALLOWED_CLIENT_COMMAND_TYPES = {"vllm_bench_serve", "lm_eval"}
 
+# Infrastructure validation map: defines mandatory values based on command_type
+COMMAND_SPECIFIC_VALIDATION = {
+    "vllm_serve": {
+        "seed": 42,
+        "async-scheduling": True,
+        "disable-log-requests": True,
+        "no-enable-prefix-caching": True,
+    },
+    "vllm_bench_serve": {
+        "ignore-eos": True,
+        "request-rate": "inf",
+        "percentile-metrics": "ttft,tpot,itl,e2el",
+    }
+}
+
 
 def clean_key_string(key: str) -> str:
     """
@@ -112,33 +127,57 @@ def validate_command_options(case_data: Dict[str, Any], file_path: str,
 def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
                                     errors: List[str]):
     """Validates dependencies required for the benchmark infra (run_bm.sh) to function."""
-    client_options = case_data.get("client_command_options") or {}
-    client_cmd_type = client_options.get("command_type")
-    client_args = client_options.get("args") or {}
+    server_options = case_data.get("server_command_options") or {}
+    server_args = server_options.get("args") or {}
 
-    server_args = (case_data.get("server_command_options")
-                   or {}).get("args") or {}
+    client_options = case_data.get("client_command_options") or {}
+    client_args = client_options.get("args") or {}
+    client_cmd_type = client_options.get("command_type")
+
     server_model = str(server_args.get("model", ""))
 
-    # Rules for vllm_bench_serve to ensure run_bm.sh can parse results
-    if client_cmd_type == "vllm_bench_serve":
-        # 1. Requirement for percentile-metrics (must include e2el for run_bm.sh grep)
-        p_metrics = client_args.get("percentile-metrics")
-        if not p_metrics:
-            errors.append(
-                f"Validation Error: {file_path} is missing 'percentile-metrics' "
-                "in client_command_options. Required for result parsing in run_bm.sh."
-            )
-        else:
-            # Ensure 'e2el' is present as a standalone metric in the comma-separated list
-            p_metrics_list = [m.strip() for m in str(p_metrics).split(",")]
-            if "e2el" not in p_metrics_list:
-                errors.append(
-                    f"Validation Error: 'percentile-metrics' in {file_path} must "
-                    "include 'e2el' so run_bm.sh can extract P99 E2EL metrics."
-                )
+    # Infrastructure Critical Arguments (Command-Type Driven)
+    for opts in [server_options, client_options]:
+        cmd_type = opts.get("command_type")
+        if not cmd_type or cmd_type not in COMMAND_SPECIFIC_VALIDATION:
+            continue
 
-        # 2. Model consistency check to ensure client/server are aligned
+        args = opts.get("args") or {}
+        rules = COMMAND_SPECIFIC_VALIDATION[cmd_type]
+        for arg_name, expected_val in rules.items():
+            actual_val = args.get(arg_name)
+
+            # Case 1: Existence check (expected_val is None)
+            if expected_val is None:
+                if actual_val is None:
+                    errors.append(
+                        f"Validation Error: {file_path} '{arg_name}' must be explicitly set "
+                        f"in options with command_type '{cmd_type}'.")
+            # Case 2: Value check
+            elif actual_val != expected_val:
+                display_val = str(expected_val).lower() if isinstance(
+                    expected_val, bool) else expected_val
+                errors.append(
+                    f"Validation Error: {file_path} '{arg_name}' must be explicitly set to {display_val} "
+                    f"in options with command_type '{cmd_type}'.")
+
+    # Identity and Dataset Path Validation
+    dataset_name = client_args.get("dataset-name")
+    if not dataset_name:
+        errors.append(
+            f"Validation Error: {file_path} is missing 'dataset-name' in client_command_options."
+        )
+    else:
+        # Check for dataset-path (Required if not a random dataset)
+        is_random = dataset_name in ["random", "random-mm"]
+        if not is_random and not client_args.get("dataset-path"):
+            errors.append(
+                f"Validation Error: {file_path} has dataset-name '{dataset_name}' "
+                "but is missing 'dataset-path' in client_command_options.")
+
+    # vllm_bench_serve Specific Rules
+    if client_cmd_type == "vllm_bench_serve":
+        # Model consistency check to ensure client/server are aligned
         client_model = client_args.get("model")
         if not client_model:
             errors.append(
@@ -149,7 +188,7 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
                 f"Validation Error: Model mismatch in {file_path}. Server is '{server_model}' "
                 f"but client is '{client_model}'.")
 
-        # 3. vllm_bench_serve requires a server to be defined
+        # vllm_bench_serve requires a server to be defined
         if not case_data.get("server_command_options"):
             errors.append(
                 f"Validation Error: {file_path} uses 'vllm_bench_serve' but is missing 'server_command_options'. "
