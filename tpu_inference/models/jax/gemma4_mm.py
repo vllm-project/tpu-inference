@@ -748,26 +748,31 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         if pixel_position_ids.ndim == 2:
             pixel_position_ids = jnp.expand_dims(pixel_position_ids, axis=0)
 
-        # Batch all images into one vision-tower call so DP shards process
-        # different images in parallel. Gemma4VisionFlashAttention's
-        # sharded_flash_attention has in_specs=P('data','model',None,None),
-        # which requires B % data_size == 0; pad the batch axis up with
-        # pixel_position_ids=POSITIONS_PAD_VALUE so input_mask masks the
-        # padded entries out of the encoder.
+        # Process images in fixed-size micro-batches of exactly `dp_size` so
+        # every vision-tower call shares the same (B=dp_size, ...) JIT cache
+        # entry regardless of how many images this step has.
+        # Gemma4VisionFlashAttention's sharded_flash_attention has
+        # in_specs=P('data','model',None,None), which requires
+        # B % dp_size == 0; B=dp_size always satisfies that. The last
+        # micro-batch is right-padded with pixel_position_ids=POSITIONS_PAD_VALUE
+        # entries so input_mask masks the padded entries out of the encoder.
         n_images = pixel_values.shape[0]
         dp_size = self.mesh.shape[ShardingAxisName.BATCH]
-        padded_n = ((n_images + dp_size - 1) // dp_size) * dp_size
-        if padded_n > n_images:
-            pad_count = padded_n - n_images
-            pixel_values = jnp.pad(pixel_values,
-                                   ((0, pad_count), (0, 0), (0, 0)))
-            pixel_position_ids = jnp.pad(pixel_position_ids,
-                                         ((0, pad_count), (0, 0), (0, 0)),
-                                         constant_values=POSITIONS_PAD_VALUE)
-
-        vt_output = self.get_single_image_embedding(pixel_values,
-                                                    pixel_position_ids)
-        return [vt_output[i] for i in range(n_images)]
+        per_image_features = []
+        for chunk_start in range(0, n_images, dp_size):
+            chunk_end = min(chunk_start + dp_size, n_images)
+            chunk_size = chunk_end - chunk_start
+            pv_chunk = pixel_values[chunk_start:chunk_end]
+            pp_chunk = pixel_position_ids[chunk_start:chunk_end]
+            if chunk_size < dp_size:
+                pad_count = dp_size - chunk_size
+                pv_chunk = jnp.pad(pv_chunk, ((0, pad_count), (0, 0), (0, 0)))
+                pp_chunk = jnp.pad(pp_chunk, ((0, pad_count), (0, 0), (0, 0)),
+                                   constant_values=POSITIONS_PAD_VALUE)
+            vt_output = self.get_single_image_embedding(pv_chunk, pp_chunk)
+            for i in range(chunk_size):
+                per_image_features.append(vt_output[i])
+        return per_image_features
 
     def embed_multimodal(self, **kwargs) -> List[jax.Array]:
         image_input = self._parse_and_validate_image_input(**kwargs)
