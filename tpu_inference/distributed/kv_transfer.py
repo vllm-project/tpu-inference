@@ -21,6 +21,11 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+try:
+    import raw_transfer as raiden
+except ImportError:
+    raiden = None
+
 Future = Any
 shard_map = jax.shard_map
 P = jax.sharding.PartitionSpec
@@ -423,3 +428,36 @@ def copy_to_host(src, dest, mesh, sharding_spec):
     _copy = _get_copy_to_dest_fn(mesh, sharding_spec, out_sharding, dtype,
                                  memory_kind)
     return _copy(src, dest)
+
+
+def batch_d2h_async(src_arrs: list[jax.Array], dst_arrs: list[jax.Array]):
+    """Starts batch transfer from TPU HBM to pinned host memory.
+
+    Args:
+        src_arrs: Per-layer JAX arrays on TPU HBM.
+        dst_arrs: Per-layer pre-allocated JAX arrays on pinned host memory,
+            updated in-place by the transfer.
+
+    Returns:
+        Futures object; call await_batch_futures() to block until complete.
+    """
+    return raiden.transfer_d2h_batch_async(src_arrs, dst_arrs)
+
+
+def batch_h2d_async(src_arrs: list[jax.Array], dst_arrs: list[jax.Array]):
+    """Starts batch transfer from pinned host memory to TPU HBM.
+
+    Args:
+        src_arrs: Per-layer JAX arrays on pinned host memory.
+        dst_arrs: Per-layer pre-allocated JAX arrays on TPU HBM,
+            updated in-place by the transfer.
+
+    Returns:
+        Futures object; call await_batch_futures() to block until complete.
+    """
+    return raiden.transfer_h2d_batch_async(src_arrs, dst_arrs)
+
+
+def await_batch_futures(futures) -> None:
+    """Blocks until all transfers in a batch futures object complete."""
+    futures.Await()

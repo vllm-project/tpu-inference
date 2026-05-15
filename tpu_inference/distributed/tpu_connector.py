@@ -90,7 +90,8 @@ if TYPE_CHECKING:
 import tpu_inference.distributed.utils as dist_utils
 from tpu_inference import envs
 from tpu_inference.distributed.host_kv_pool import HostKVPool
-from tpu_inference.distributed.kv_transfer import (copy_to_host,
+from tpu_inference.distributed.kv_transfer import (await_batch_futures,
+                                                   batch_d2h_async,
                                                    multi_layer_copy)
 from tpu_inference.distributed.tpu_connector_stats import (
     TpuKVConnectorPromMetrics, TpuKVConnectorStats)
@@ -720,29 +721,16 @@ class TPUConnectorWorker:
         buffer_idx, dest_buffer = self.host_kv_pool.get_buffer()
         logger.debug(
             f"Worker {self.node_id} -->get the buffer id {buffer_idx}")
-        updated_dest_buffer = []
-
         start_time = time.perf_counter()
         sliced_dest_buffer = [
             jax.lax.slice_in_dim(dest, 0, num_valid_blocks)
             for dest in dest_buffer
         ]
         time_1 = time.perf_counter()
-        for src_layer, dest_layer in zip(kv_src, sliced_dest_buffer):
-            updated_dest = copy_to_host(src=src_layer,
-                                        dest=dest_layer,
-                                        mesh=self.mesh,
-                                        sharding_spec=self.sharding.spec)
-            updated_dest_buffer.append(updated_dest)
-
-        # Wait for physical hardware transfer
-        while True:
-            end_time = time.perf_counter()
-            if all(
-                    chunk.is_ready() for chunk in updated_dest_buffer
-            ) or end_time - time_1 > dist_utils.get_p2p_wait_pull_timeout():
-                break
-            time.sleep(0.001)
+        futures = batch_d2h_async(kv_src, sliced_dest_buffer)
+        await_batch_futures(futures)
+        updated_dest_buffer = sliced_dest_buffer
+        end_time = time.perf_counter()
 
         d2h_slice_time = (time_1 - start_time) * 1000
         d2h_transfer_time = (end_time - time_1) * 1000
