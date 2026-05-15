@@ -346,12 +346,15 @@ class AggregatedStatsLogger:
         if target_file.startswith("gs://") and os.path.exists(local_file):
 
             def _upload():
-                from google.cloud import storage  # type: ignore
-                client = storage.Client()
-                # e.g., gs://my-bucket/path/to/file.txt -> ("my-bucket", "path/to/file.txt")
-                bucket_name, blob_name = target_file[5:].split("/", 1)
-                client.bucket(bucket_name).blob(
-                    blob_name).upload_from_filename(local_file)
+                try:
+                    from google.cloud import storage  # type: ignore
+                    client = storage.Client()
+                    # e.g., gs://my-bucket/path/to/file.txt -> ("my-bucket", "path/to/file.txt")
+                    bucket_name, blob_name = target_file[5:].split("/", 1)
+                    client.bucket(bucket_name).blob(
+                        blob_name).upload_from_filename(local_file)
+                except Exception as e:
+                    logger.error(f"Failed to upload {local_file} to {target_file}: {e}", exc_info=True)
 
             if blocking:
                 _upload()
