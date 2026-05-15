@@ -225,10 +225,10 @@ class CompilationManager:
                 if self.runner.scheduler_config.async_scheduling:
                     self._precompile_substitute_placeholder_token()
                     if self.runner.speculative_config:
-                    self._precompile_subtract_num_rejected_tokens()
-                    self._precompile_concat_last_sampled_tokens_and_draft_tokens(
-                    )
-            if not self.runner.is_last_rank:
+                        self._precompile_subtract_num_rejected_tokens()
+                        self._precompile_concat_last_sampled_tokens_and_draft_tokens(
+                        )
+                if not self.runner.is_last_rank:
                     return
                 self._precompile_select_from_array()
                 if not self.runner.is_pooling_model:
