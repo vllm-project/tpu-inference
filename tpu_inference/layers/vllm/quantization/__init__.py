@@ -35,7 +35,6 @@ from tpu_inference.layers.vllm.quantization.unquantized import \
 def get_tpu_quantization_config(vllm_config: VllmConfig,
                                 mesh: Mesh) -> QuantizationConfig:
     model_config = copy.deepcopy(vllm_config.model_config)
-    # TODO(kyuyeunk): Add support for "tpu_int8".
     method_to_config: dict[str | None, Type[QuantizationConfig]] = {
         None: VllmUnquantizedConfig,
         quant_methods.COMPRESSED_TENSORS: VllmCompressedTensorsConfig,
