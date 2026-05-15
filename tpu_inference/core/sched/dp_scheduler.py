@@ -638,6 +638,10 @@ class DPScheduler(SchedulerInterface):
             if len(self._pending_new_requests
                    ) >= self._batch_prefill_threshold:
                 self._flush_pending_new_requests()
+            else:
+                # Still dispatch if there is any idle rank even if
+                # not reaching the flush threshold.
+                self._maybe_dispatch_on_idle_rank()
             return
 
         self._route_and_forward_request(request)
@@ -1128,12 +1132,16 @@ class DPScheduler(SchedulerInterface):
             self._get_result(rank, SchedulerCommand.FINISH_REQUESTS)
 
     def get_num_unfinished_requests(self) -> int:
-        """Get total number of unfinished requests across all DP ranks."""
+        """Get total number of unfinished requests across all DP ranks.
+
+        Also including any pending requests that haven't been dispatched
+        to a per-rank scheduler yet.
+        """
         for rank in range(self.dp_size):
             self._send_command(rank,
                                SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS)
 
-        total = 0
+        total = len(self._pending_new_requests)
         for rank in range(self.dp_size):
             count = self._get_result(
                 rank, SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS)
