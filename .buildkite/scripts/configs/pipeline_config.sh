@@ -49,16 +49,32 @@ get_vllm_commit_hash() {
   echo "$commit_hash"
 }
 
-# Function to upload a light-weight step that intentionally fails to block CI build
+# Function to upload a light-weight step that intentionally fails to block PR merge
 upload_blocking_failure_step() {
   local label="$1"
-  echo "$label"
+  local detailed_message="$2"
+  local artifact_name="benchmark_errors.log"
+
+  echo "🚨 Error: $label"
+  
+  # Write detailed errors to a file and upload as an artifact
+  echo "$detailed_message" > "$artifact_name"
+  buildkite-agent artifact upload "$artifact_name"
+
   cat <<- YAML | buildkite-agent pipeline upload
 steps:
   - label: "$label"
     agents:
       queue: cpu
-    command: exit 1
+    command: |
+      echo "=========================================================="
+      echo "❌ Benchmark Pipeline Generation/Validation Failures"
+      echo "=========================================================="
+      echo "Detailed error log is available in Buildkite Artifacts: $artifact_name"
+      echo ""
+      buildkite-agent artifact download "$artifact_name" .
+      cat "$artifact_name"
+      exit 1
 YAML
 }
 
@@ -68,6 +84,7 @@ process_json_benchmark_cases() {
   local generator="${2:-}"
   local priority="${3:-}"
   local extra_files="${4:-}" # Optional: space-separated list of files
+  local error_msgs=()
 
   echo "--- Generating dynamic pipelines from $case_folder and $extra_files"
 
@@ -99,16 +116,25 @@ process_json_benchmark_cases() {
   for case_file in "${files[@]}"; do
     echo "Processing case file: $case_file"
 
-    # 1. Generate pipeline and capture output/exit code
-    local generated_yaml
-    if ! generated_yaml=$(python3 "$generator" --input "$case_file"); then
-      upload_blocking_failure_step "❌ Pipeline Validation Failure: $case_file"
+    # 1. Generate pipeline and capture output/exit code (including stderr)
+    local py_output
+    if ! py_output=$(python3 "$generator" --input "$case_file" 2>&1); then
+      echo "🚨 Validation failed for $case_file"
+      error_msgs+=("❌ Validation Failure in $case_file:\n$py_output")
       continue
     fi
 
-    # 2. Upload the captured YAML
-    if ! upload_with_priority <(echo "$generated_yaml") "$priority"; then
-      upload_blocking_failure_step "❌ Pipeline Upload Failure: $case_file"
+    # 2. Upload the captured YAML (stdout from python)
+    if ! upload_with_priority <(echo "$py_output") "$priority"; then
+      echo "🚨 Upload failed for $case_file"
+      error_msgs+=("❌ Upload Failure for $case_file")
     fi
   done
+
+  # 3. If any errors occurred, upload ONE aggregate failure step to block CI
+  if [ ${#error_msgs[@]} -gt 0 ]; then
+    local final_report
+    final_report=$(printf "%b\n\n" "${error_msgs[@]}")
+    upload_blocking_failure_step "❌ Benchmark Pipeline Generation Failures" "$final_report"
+  fi
 }
