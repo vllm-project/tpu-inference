@@ -23,10 +23,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-<<<<<<< HEAD
 from tpu_inference.kernels.mla.v2.transpose import xpose_pipeline
-=======
->>>>>>> 9cae579d (add logging)
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
