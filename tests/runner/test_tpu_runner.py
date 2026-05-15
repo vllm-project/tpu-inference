@@ -178,11 +178,10 @@ class TestTPUJaxRunner:
         output = self.runner._prepare_inputs_non_dp(scheduler_output,
                                                     use_spec_decode=False,
                                                     any_prompt_logprobs=False)
-        assert len(output) == 12
+        assert len(output) == 8
         (input_ids, positions, attention_metadata, sampling_metadata,
-         logits_indices, spec_decode_metadata, logits_indices_selector,
-         padded_num_reqs, num_logits_per_req, any_prompt_logprobs,
-         sampling_indices_selector, gi_physical_indices) = output
+         logits_indices, spec_decode_metadata, logits_metadata,
+         padded_num_reqs) = output
         # assert it will create attention metadata for each layer.
         assert isinstance(attention_metadata, dict)
         assert len(attention_metadata) == 20
