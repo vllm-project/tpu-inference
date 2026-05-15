@@ -359,7 +359,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable hierarchical reduce-scatter kernel for MoE
     "ENABLE_RS_KERNEL":
     env_bool("ENABLE_RS_KERNEL", default=False),
-    # Number of worker threads for parallel XLA precompilation. 
+    # Number of worker threads for parallel XLA precompilation.
     "NUM_PRECOMPILE_WORKERS":
     lambda: int(os.getenv("NUM_PRECOMPILE_WORKERS") or "8"),
     # DP scheudler: hold and batch incoming requests (prefills) to
