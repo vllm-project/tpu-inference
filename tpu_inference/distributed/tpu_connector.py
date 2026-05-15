@@ -92,6 +92,7 @@ from tpu_inference import envs
 from tpu_inference.distributed.host_kv_pool import HostKVPool
 from tpu_inference.distributed.kv_transfer import (await_batch_futures,
                                                    batch_d2h_async,
+                                                   batch_h2d_async,
                                                    multi_layer_copy)
 from tpu_inference.distributed.tpu_connector_stats import (
     TpuKVConnectorPromMetrics, TpuKVConnectorStats)
@@ -778,21 +779,21 @@ class TPUConnectorWorker:
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
         )
         start_time = time.perf_counter()
-        kv = conn.pull(req_meta.uuid, kv_spec)
-        kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
+        kv_host = conn.pull(req_meta.uuid, kv_spec)
+        kv_size_mb = sum(k.nbytes for k in kv_host) / (1024 * 1024)
         end_time_0, end_time_1 = time.perf_counter(), None
         prepare_time_ms = (end_time_0 - start_time) * 1000
         if dist_utils.get_enable_block_kv_transfer():
             while True:
                 end_time_1 = time.perf_counter()
                 if all(
-                        chunk.is_ready() for chunk in kv
+                        chunk.is_ready() for chunk in kv_host
                 ) or end_time_1 - end_time_0 > dist_utils.get_p2p_wait_pull_timeout(
                 ):
                     break
                 time.sleep(0.001)
             pull_time_ms = (end_time_1 - end_time_0) * 1000
-            if all(chunk.is_ready() for chunk in kv):
+            if all(chunk.is_ready() for chunk in kv_host):
                 logger.info(
                     f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
                     f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
@@ -813,14 +814,27 @@ class TPUConnectorWorker:
                 f"size={kv_size_mb:.2f}MB")
             self.transfer_stats.record_successful_transfer(
                 prepare_time_ms, pull_time_ms, kv_size_mb)
-        return kv
+
+        h2d_start = time.perf_counter()
+        kv_device = [
+            jax.device_put(jnp.zeros(arr.shape, dtype=arr.dtype),
+                           self.sharding)
+            for arr in kv_host
+        ]
+        futures = batch_h2d_async(kv_host, kv_device)
+        await_batch_futures(futures)
+        h2d_time_ms = (time.perf_counter() - h2d_start) * 1000
+        logger.info(
+            f"Worker {self.node_id} --> kv transfer | H2D req_id={req_id} | time={h2d_time_ms:.2f}ms"
+        )
+        return kv_device
 
     def _get_kv_spec(self, num_blocks: int) -> list[jax.ShapeDtypeStruct]:
         assert num_blocks <= self.shape[0]
         shape = copy.copy(self.shape)
         shape[0] = num_blocks
         return [
-            jax.ShapeDtypeStruct(shape, self.dtype, sharding=self.sharding)
+            jax.ShapeDtypeStruct(shape, self.dtype, sharding=self.host_sharding)
         ] * self.num_layers
 
     def _maybe_build_notif_socket(self, req_meta: LoadMeta) -> zmq.Socket:
