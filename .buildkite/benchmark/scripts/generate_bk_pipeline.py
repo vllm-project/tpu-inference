@@ -265,6 +265,10 @@ def main():
     parent_dir = os.path.basename(os.path.dirname(file_path))
 
     global_env = data.get("global_env", {})
+    # Inject UPLOAD_DB environment variable if present in parent environment
+    if "UPLOAD_DB" in os.environ:
+        global_env["UPLOAD_DB"] = os.environ["UPLOAD_DB"]
+
     all_steps = []
     used_keys = set()  # Track keys for this file
     errors = []
