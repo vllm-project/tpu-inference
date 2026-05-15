@@ -1184,7 +1184,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         lora_metadata = self.lora_utils.extract_lora_metadata()
 
-        # TODO: Implement terminate_on_any_eos
         terminate_on_any_eos = self.vllm_config.additional_config.get(
             "terminate_on_any_eos", False)
 
@@ -1217,7 +1216,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_caches = final_kv_caches
 
         # Copy generated tokens back to CPU. We only need a single jax.device_get
-        # transfer here since step_counter is statically known (max_decode_steps).
+        # transfer here. The shape of generated_tokens is (actual_steps, batch_size).
         generated_tokens_cpu = np.asarray(jax.device_get(generated_tokens))
 
         # Expose request dimension as axis 0 after transpose: shape (batch_size, max_decode_steps)
