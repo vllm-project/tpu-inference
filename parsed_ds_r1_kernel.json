@@ -1,0 +1,1784 @@
+[
+  {
+    "arrays": {
+      "ql_nope": [
+        4,
+        128,
+        512
+      ],
+      "q_pe": [
+        4,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        4,
+        512
+      ],
+      "new_k_pe": [
+        4,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 4,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "batched_decode",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        4,
+        128,
+        512
+      ],
+      "q_pe": [
+        4,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        4,
+        512
+      ],
+      "new_k_pe": [
+        4,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 4,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "batched_decode",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        8,
+        128,
+        512
+      ],
+      "q_pe": [
+        8,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        8,
+        512
+      ],
+      "new_k_pe": [
+        8,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 8,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        8,
+        128,
+        512
+      ],
+      "q_pe": [
+        8,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        8,
+        512
+      ],
+      "new_k_pe": [
+        8,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 8,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        16,
+        128,
+        512
+      ],
+      "q_pe": [
+        16,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        16,
+        512
+      ],
+      "new_k_pe": [
+        16,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 16,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        16,
+        128,
+        512
+      ],
+      "q_pe": [
+        16,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        16,
+        512
+      ],
+      "new_k_pe": [
+        16,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 16,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        32,
+        128,
+        512
+      ],
+      "q_pe": [
+        32,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        32,
+        512
+      ],
+      "new_k_pe": [
+        32,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 32,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        32,
+        128,
+        512
+      ],
+      "q_pe": [
+        32,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        32,
+        512
+      ],
+      "new_k_pe": [
+        32,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 32,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        64,
+        128,
+        512
+      ],
+      "q_pe": [
+        64,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        64,
+        512
+      ],
+      "new_k_pe": [
+        64,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 64,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        64,
+        128,
+        512
+      ],
+      "q_pe": [
+        64,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        64,
+        512
+      ],
+      "new_k_pe": [
+        64,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 64,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        128,
+        128,
+        512
+      ],
+      "q_pe": [
+        128,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        128,
+        512
+      ],
+      "new_k_pe": [
+        128,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 128,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        128,
+        128,
+        512
+      ],
+      "q_pe": [
+        128,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        128,
+        512
+      ],
+      "new_k_pe": [
+        128,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 128,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        160,
+        128,
+        512
+      ],
+      "q_pe": [
+        160,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        160,
+        512
+      ],
+      "new_k_pe": [
+        160,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 160,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        160,
+        128,
+        512
+      ],
+      "q_pe": [
+        160,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        160,
+        512
+      ],
+      "new_k_pe": [
+        160,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 160,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        256,
+        128,
+        512
+      ],
+      "q_pe": [
+        256,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        256,
+        512
+      ],
+      "new_k_pe": [
+        256,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 256,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        256,
+        128,
+        512
+      ],
+      "q_pe": [
+        256,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        256,
+        512
+      ],
+      "new_k_pe": [
+        256,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 256,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        512,
+        128,
+        512
+      ],
+      "q_pe": [
+        512,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        512,
+        512
+      ],
+      "new_k_pe": [
+        512,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 512,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  },
+  {
+    "arrays": {
+      "ql_nope": [
+        512,
+        128,
+        512
+      ],
+      "q_pe": [
+        512,
+        128,
+        64
+      ],
+      "new_kv_c": [
+        512,
+        512
+      ],
+      "new_k_pe": [
+        512,
+        64
+      ],
+      "cache_kv": [
+        1506,
+        256,
+        4,
+        640
+      ],
+      "kv_lens": [
+        160
+      ],
+      "page_indices": [
+        1440
+      ],
+      "cu_q_lens": [
+        161
+      ],
+      "distribution": [
+        3
+      ]
+    },
+    "scalars": {
+      "sm_scale": 0.1352337788608801,
+      "sliding_window": null,
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "q_scale": 1.0,
+      "k_scale": 1.0,
+      "v_scale": 1.0,
+      "chunk_prefill_size": null
+    },
+    "kernel_optimization": {
+      "num_kv_pages_per_blocks": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_blocks": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864,
+      "decode_batch_size": 4
+    },
+    "tuning_key": {
+      "max_num_tokens": 512,
+      "actual_num_q_heads": 128,
+      "actual_lkv_dim": 512,
+      "actual_r_dim": 64,
+      "kv_dtype": "fp8",
+      "q_dtype": "fp8",
+      "total_num_pages": 1506,
+      "page_size_per_kv_packing": 256,
+      "kv_packing": 4,
+      "max_num_seqs": 160,
+      "pages_per_seq": 9,
+      "sm_scale": 0.1352337788608801,
+      "s_dtype": "bf16",
+      "case": "mixed",
+      "soft_cap": null,
+      "mask_value": -3.38953e+38,
+      "chunk_prefill_size": null,
+      "sliding_window": null,
+      "p_same_dtype_as_v": true
+    },
+    "tunable_params": {
+      "decode_batch_size": 4,
+      "num_kv_pages_per_block": [
+        3,
+        1,
+        1
+      ],
+      "num_queries_per_block": [
+        1,
+        16,
+        16
+      ],
+      "vmem_limit_bytes": 67108864
+    }
+  }
+]

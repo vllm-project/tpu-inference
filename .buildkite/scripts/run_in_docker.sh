@@ -94,12 +94,20 @@ TEST_SUITE_VARS=(
 DOCKER_HF_HOME="/tmp/hf_home"
 
 # Try to cache HF models
-persist_cache_dir="/mnt/disks/persist/models"
+# persist_cache_dir="/mnt/disks/persist/models"
 
-if ( mkdir -p "$persist_cache_dir" ); then
-  LOCAL_HF_HOME="$persist_cache_dir"
+# if ( mkdir -p "$persist_cache_dir" ); then
+#   LOCAL_HF_HOME="$persist_cache_dir"
+# else
+#   echo "Error: Failed to create $persist_cache_dir"
+#   exit 1
+# fi
+
+DS_GENERATION_CONFIGS_DIR="/tmp/DeepSeek-R1-Configs"
+if ( mkdir -p "$DS_GENERATION_CONFIGS_DIR" ); then
+  echo "Created $DS_GENERATION_CONFIGS_DIR for DeepSeek R1 generation configs."
 else
-  echo "Error: Failed to create $persist_cache_dir"
+  echo "Error: Failed to create $DS_GENERATION_CONFIGS_DIR"
   exit 1
 fi
 
@@ -110,13 +118,15 @@ mkdir -p "$KERNEL_TUNING_TMP_DIR"
 # Some test scripts set tp=2 on TPU_VERSION=tpu7x to mitigate test failures.
 # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
 
+# -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
+
 exec docker run \
   --name "$IMAGE_NAME" \
   --privileged \
   --net host \
   --shm-size=16G \
   --rm \
-  -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
+  -v "$DS_GENERATION_CONFIGS_DIR":"$DS_GENERATION_CONFIGS_DIR" \
   -v "$KERNEL_TUNING_TMP_DIR":"$KERNEL_TUNING_TMP_DIR" \
   "${DEV_MOUNT[@]}" \
   "${ENV_VARS[@]}" \

@@ -36,113 +36,65 @@
 # 3. Trigger the pipeline — only your branch's file is used.
 
 steps:
-
-  # -----------------------------------------------------------------
-  # Build Step (required by all demo steps below)
-  # -----------------------------------------------------------------
-  - label: ":docker: Build and Push Base Image (tpu7x)"
-    key: tpu7x_build_docker
-    agents:
-      queue: cpu_64_core
-    env:
-      TPU_VERSION: "tpu7x"
-    commands:
-      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
-
-  # -----------------------------------------------------------------
-  # Demo 1: offline_inference.py
-  # Shows the simplest pattern: run a Python script inside Docker.
-  # Use this as a starting point for any offline batch inference test.
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] offline_inference.py"
-    key: tpu7x_demo_offline_inference
-    depends_on: tpu7x_build_docker
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_2_queue
-    commands:
-      - |
-        # Run offline inference with a small model.
-        # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
-        # Customize --model, --max-model-len, --max-tokens as needed.
-        .buildkite/scripts/run_in_docker.sh bash -c '
-          python3 examples/offline_inference.py \
-            --model Qwen/Qwen3-0.6B \
-            --tensor-parallel-size 2 \
-            --max-model-len 1024 \
-            --max-tokens 128'
-
-  # -----------------------------------------------------------------
-  # Demo 2: vllm serve + vllm bench serve
-  # Shows how to start a server and run a benchmark against it.
-  # Uses --dataset-name random so no dataset file is needed.
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] vllm serve + vllm bench serve"
-    key: tpu7x_demo_serve_bench
-    depends_on: tpu7x_build_docker
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_2_queue
-    commands:
-      - |
-        # Customize behaviour via env vars: MODEL, PORT, TENSOR_PARALLEL_SIZE,
-        # MAX_MODEL_LEN, RANDOM_INPUT_LEN, RANDOM_OUTPUT_LEN, NUM_PROMPTS, NUM_WARMUPS.
-        .buildkite/scripts/run_in_docker.sh bash .buildkite/scripts/run_benchmark_demo.sh
-
-  # -----------------------------------------------------------------
-  # Demo 3: DCN-based P/D disaggregation
-  # Mirrors test_25 in pipeline_jax.yml.
-  # Uses run_disagg.sh which delegates to examples/disagg/.
-  # Requires a multi-chip queue (tpu_v7x_8_queue).
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] E2E disaggregation (DCN P/D)"
-    key: tpu7x_demo_disagg
-    depends_on: tpu7x_build_docker
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-      # Customize these to change the disagg benchmark behaviour.
-      MODEL: "Qwen/Qwen3-0.6B"
-      INPUT_LEN: 1024
-      OUTPUT_LEN: 128
-      NUM_PROMPTS: 5
-      RANDOM_SEED: 10
-      MAX_CONCURRENCY: 4
-      TEST_MODE: 1
-    agents:
-      queue: tpu_v7x_8_queue
-    commands:
-      - .buildkite/scripts/run_disagg.sh
-
-  # -----------------------------------------------------------------
-  # Demo 4: Ray-based multi-host inference
-  # Mirrors test_26 in pipeline_jax.yml.
-  # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
-  # Requires a 16-chip queue (tpu_v7x_16_queue).
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] Ray-based multi-host"
-    key: tpu7x_demo_multihost
-    env:
-      TPU_VERSION: "tpu7x"
+  - label: "tpu7x E2E test for Ray-based multi-host"
+    key: "tpu7x_demo_ray_multihost"
+    soft_fail: true
     agents:
       queue: tpu_v7x_16_queue
+    env:
+      TPU_VERSION: "tpu7x"
     commands:
+      # Correctness Test Example:
+      # 1. Start vLLM with specific model and tensor parallel size
+      # 2. Run curl commands against it
       - |
-        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-        .buildkite/scripts/run_multihost.sh \
-          "vllm serve \${MODEL} \
-            --port 8000 \
-            --tensor-parallel-size 16 \
-            --trust-remote-code \
-            --max-model-len 1024 \
-            --no-async-scheduling \
-            --load-format=runai_streamer \
-            --no-enable-prefix-caching" \
-          "curl http://localhost:8000/v1/completions \
-            -X POST \
-            -H 'Content-Type: application/json' \
-            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"
+        if [[ "$$TPU_VERSION" == "tpu7x" ]]; then
+          MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+          .buildkite/scripts/run_multihost.sh \
+            "vllm serve \${MODEL} \
+              --port 8000 \
+              --tensor-parallel-size 16 \
+              --trust-remote-code \
+              --max-model-len 1024 \
+              --no-async-scheduling \
+              --load-format=runai_streamer \
+              --no-enable-prefix-caching" \
+            "curl http://localhost:8000/v1/completions \
+              -X POST \
+              -H 'Content-Type: application/json' \
+              -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
+            "
+        fi
+      # - |
+      #   if [[ "$$TPU_VERSION" == "tpu7x" ]]; then
+      #     MODEL="gs://tpu-commons-ci/deepseek/r1"
+      #     .buildkite/scripts/run_multihost.sh '\
+      #       VLLM_ENGINE_READY_TIMEOUT_S=10800 \
+      #       MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 \
+      #       MOE_REQUANTIZE_WEIGHT_DTYPE=fp4 \
+      #       MOE_REQUANTIZE_BLOCK_SIZE=512 \
+      #       FORCE_MOE_RANDOM_ROUTING=1 \
+      #       NEW_MODEL_DESIGN=1 \
+      #       MODEL_IMPL_TYPE=vllm \
+      #       vllm serve gs://tpu-commons-ci/deepseek/r1 \
+      #         --served-model-name deepseek-ai/DeepSeek-R1 \
+      #         --api-server-count=3 \
+      #         --max-model-len=9216 \
+      #         --max-num-batched-tokens=512 \
+      #         --max-num-seqs=160 \
+      #         --kv-cache-dtype=fp8 \
+      #         --no-enable-prefix-caching \
+      #         --gpu-memory-utilization=0.95 \
+      #         --tensor-parallel-size=16 \
+      #         --load-format=runai_streamer \
+      #         --async-scheduling \
+      #         --enable-expert-parallel \
+      #         --additional_config='\''{"compilation_sizes": [2560], "sharding": {"sharding_strategy": {"enable_dp_attention": true}}}'\'' \
+      #         --trust-remote-code \
+      #         --generation-config "/tmp/DeepSeek-R1-Configs/DeepSeek-R1" && \
+      #        curl http://localhost:8000/v1/completions \
+      #             -X POST \
+      #             -d '\''{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'\'' 
+      #             -H "Content-Type: application/json" \
+      #         '
+      #   fi

@@ -20,6 +20,7 @@ from absl import app, flags
 from tools.kernel.tuner.v1.common.kernel_tuner_base import RunConfig
 from tools.kernel.tuner.v1.example_kernel_tuner import ExampleKernelTuner
 from tools.kernel.tuner.v1.rpa_v3_kernel_tuner import RpaV3KernelTuner
+from tools.kernel.tuner.v1.mla_kernel_tuner import MlaKernelTuner
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -100,6 +101,7 @@ _MAX_EXECUTION_MINUTES = flags.DEFINE_integer(
 KERNEL_TUNER_REGISTRY = {
     'example_kernel_tuner': ExampleKernelTuner,
     'rpa_v3_kernel_tuner': RpaV3KernelTuner,
+    'mla_kernel_tuner': MlaKernelTuner,
 }
 
 

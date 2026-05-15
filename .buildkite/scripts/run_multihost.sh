@@ -127,7 +127,7 @@ wait_for_server() {
   local container_name=$2
   local service_name=$3
   local log_path=$4
-  local timeout=${5:-7200} # Default 2 hours
+  local timeout=${5:-7200} # 2 hours
 
   echo "Waiting for $service_name on port $port to become healthy (Timeout: ${timeout}s)..."
 
@@ -153,10 +153,13 @@ wait_for_server() {
   local end_time=$((SECONDS + timeout))
   while [[ $SECONDS -lt $end_time ]]; do
     # 2. Check health
-    if curl -fs "localhost:${port}/health" > /dev/null; then
-      echo "===== $service_name is healthy on port: $port. ==="
+    local http_code=$(curl -s -o /dev/null -w "%{http_code}" "localhost:${port}/health" || true)
+    if [[ "$http_code" == "200" ]]; then
+      echo "===== $service_name is healthy on port: $port. ====="
+      echo "Health response code: $http_code"
       return 0
     fi
+    echo "Health check returned code: $http_code"
 
     # 3. Check if PID is alive INSIDE the container
     if ! docker exec "$container_name" kill -0 "$pid" 2>/dev/null; then
@@ -270,6 +273,8 @@ VLLM_SERVE_CMD="vllm serve ${MODEL} \
   --load-format=runai_streamer \
   --max-model-len 1024"
 
+mkdir -p /tmp/DeepSeek-R1-Configs
+gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1 /tmp/DeepSeek-R1-Configs
 # Override VLLM_SERVE_CMD if provided as the first argument
 if [ "$#" -ge 1 ]; then
     VLLM_SERVE_CMD="$1"
@@ -285,6 +290,8 @@ docker exec \
   node bash -c "${VLLM_SERVE_CMD} > /root/vllm_serve.log 2>&1"
 
 # 4. Wait for the server to be healthy
+echo "--- To check vllm logs, run: docker exec node tail -f /root/vllm_serve.log"
+echo "--- To enter docker terminal: docker exec -it node bash"
 wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log"
 
 # 5. Run Benchmarks / Validation
@@ -295,6 +302,8 @@ if [ "$#" -gt 0 ]; then
   docker exec \
     -e HF_HOME=/root/.cache/huggingface \
     node bash -c "${COMMAND_ARGS[*]}"
+  echo "Displaying logs from $container_name:$log_path"
+  docker exec "$container_name" cat "$log_path" || true
 else
   # Default: Run the curl test to verify the endpoint
   echo "--- Running default curl test"
@@ -304,6 +313,8 @@ else
     -H 'Content-Type: application/json' \
     -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
   "
+  echo "Displaying logs from $container_name:$log_path"
+  docker exec "$container_name" cat "$log_path" || true
 fi
 
 echo "--- Tests completed successfully"
