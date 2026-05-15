@@ -354,7 +354,9 @@ class AggregatedStatsLogger:
                     client.bucket(bucket_name).blob(
                         blob_name).upload_from_filename(local_file)
                 except Exception as e:
-                    logger.error(f"Failed to upload {local_file} to {target_file}: {e}", exc_info=True)
+                    logger.error(
+                        f"Failed to upload {local_file} to {target_file}: {e}",
+                        exc_info=True)
 
             if blocking:
                 _upload()
