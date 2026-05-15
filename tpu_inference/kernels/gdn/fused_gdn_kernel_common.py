@@ -89,9 +89,10 @@ def validate_gdn_inputs(
                          f"k={k.dtype}, v={v.dtype}")
     if g.dtype != jnp.float32:
         raise ValueError(f"g must be float32, got {g.dtype}")
-    if initial_state.dtype != jnp.float32:
+    if initial_state.dtype not in (jnp.float32, jnp.bfloat16, jnp.float16):
         raise ValueError(
-            f"initial_state must be float32, got {initial_state.dtype}")
+            f"initial_state must be float32, bfloat16, or float16, "
+            f"got {initial_state.dtype}")
     if state_indices.dtype != jnp.int32:
         raise ValueError(
             f"state_indices must be int32, got {state_indices.dtype}")

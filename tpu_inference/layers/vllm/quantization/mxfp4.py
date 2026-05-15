@@ -169,6 +169,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                 ),
                 jnp.float4_e2m1fn,
                 REQUANTIZED_BLOCK_SIZE,
+                w13_interleave=w13_interleave,
             )
             return process_moe_weights(
                 weights,

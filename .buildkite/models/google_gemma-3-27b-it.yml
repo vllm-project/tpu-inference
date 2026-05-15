@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: google/gemma-3-27b-it
-# pipeline-type: text-only
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for google/gemma-3-27b-it"
     key: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_UnitTest"

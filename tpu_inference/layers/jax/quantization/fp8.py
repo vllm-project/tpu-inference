@@ -400,7 +400,8 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         logger.debug(
             f"Loaded {cnt} weight scales for {layer.prefix} MoE layer.")
 
-        loaded_names = original_load_weights_fn(remaining_weights.items())
+        loaded_names = original_load_weights_fn(remaining_weights.items(),
+                                                mesh=cpu_mesh())
         for param_name in {
                 "kernel_gating_EDF_" + self.weight_scale_name,
                 "kernel_up_proj_EDF_" + self.weight_scale_name,

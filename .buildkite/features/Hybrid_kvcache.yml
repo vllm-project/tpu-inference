@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: hybrid kv cache
-# pipeline-type: feature support matrix
 # Hybrid kv cache allows the kv cache mgr to allocate different number of 
 # blocks for different attention types. This is useful for models with more 
 # than 1 attention type (e.g. opt-oss 120b, gemma-27b 

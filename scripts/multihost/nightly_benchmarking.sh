@@ -347,13 +347,21 @@ while IFS='=' read -r key value; do
   fi
 done < "$RESULT_FILE"
 
+sql_escape() {
+  # Replaces each single quote ' with two single quotes ''
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+# Escape the variable that is being added to the SQL string
+ESCAPED_GCP_INSTANCE_NAME=$(sql_escape "$GCP_INSTANCE_NAME")
+
 if [ "$keys" == "RecordId, " ]; then
   echo "Result file was empty or parsing failed. Marking status as FAILED."
   keys+="Status, RunBy, LastUpdate, CreatedTime"
-  vals+="'FAILED', '${GCP_INSTANCE_NAME}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
+  vals+="'FAILED', '${ESCAPED_GCP_INSTANCE_NAME}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
 else
   keys+="Status, RunBy, LastUpdate, CreatedTime"
-  vals+="'COMPLETED', '${GCP_INSTANCE_NAME}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
+  vals+="'COMPLETED', '${ESCAPED_GCP_INSTANCE_NAME}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
 fi
 
 SQL="INSERT INTO RunRecord (${keys}) VALUES (${vals});"

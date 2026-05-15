@@ -96,7 +96,11 @@ class StorageManager:
         """
         raise NotImplementedError("Subclasses must implement flush")
 
-    def add_tuner_case(self, caseset_id: str, case_id: int, case: str):
+    def add_tuner_case(self,
+                       caseset_id: str,
+                       case_id: int,
+                       case: str,
+                       tpu: str = None):
         """Buffers a single tuning case for storage.
 
         Implementations may batch writes internally and flush automatically when
@@ -106,11 +110,17 @@ class StorageManager:
             caseset_id: Unique string identifier for the case set.
             case_id: Integer index of this case within the case set.
             case: String encoding of the case in 'key:value' format.
+            tpu: TPU queue identifier where this case is generated (e.g. tpu_v6e_8_queue).
         """
         raise NotImplementedError("Subclasses must implement add_tuner_case")
 
-    def create_bucket_for_run(self, cs_id: str, r_id: int, bucket_id: int,
-                              start_case_id: int, end_case_id: int):
+    def create_bucket_for_run(self,
+                              cs_id: str,
+                              r_id: int,
+                              bucket_id: int,
+                              start_case_id: int,
+                              end_case_id: int,
+                              tpu: str = None):
         """Creates a new work bucket for a tuning run.
 
         Used by tuner agents to define discrete units of work (buckets) that can
@@ -122,6 +132,7 @@ class StorageManager:
             bucket_id: Unique integer identifier for the bucket within the run.
             start_case_id: Starting case ID (inclusive) for this bucket.
             end_case_id: Ending case ID (inclusive) for this bucket.
+            tpu: TPU queue identifier where this bucket will be executed.
         """
         raise NotImplementedError(
             "Subclasses must implement create_buckets_for_run")
@@ -140,17 +151,31 @@ class StorageManager:
         raise NotImplementedError(
             "Subclasses must implement mark_bucket_in_progress")
 
-    def mark_bucket_completed(self, cs_id, r_id, b_id, tt_us):
-        """Marks a work bucket as COMPLETED and records its total processing time.
+    def mark_bucket_completed(self, cs_id, r_id, b_id):
+        """Marks a work bucket as COMPLETED.
 
         Args:
             cs_id: Case set ID the bucket belongs to.
             r_id: Run ID the bucket belongs to.
             b_id: Bucket ID to mark as completed.
-            tt_us: Total processing time for the bucket in microseconds.
         """
         raise NotImplementedError(
             "Subclasses must implement mark_bucket_completed")
+
+    def add_bucket_processed_time_us(self, cs_id, r_id, b_id,
+                                     processed_time_us):
+        """Add the processed_time_us to the total processed time for the bucket.
+
+        Used by tuner agents to update the total processing time for a bucket as a whole bucket can be broken down into multiple smaller sub-buckets for enabling the TPU Machines to work on other jobs like CICD. Tuning jobs has the lowest priority it should be able to yield the resources when there is a high priority job.
+
+        Args:
+            cs_id: Case set ID the bucket belongs to.
+            r_id: Run ID the bucket belongs to.
+            b_id: Bucket ID to update the processed time for.
+            processed_time_us: Time in microseconds to add to the bucket's total processed time.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement add_bucket_processed_time_us")
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):
         """Returns case IDs that have already been processed within a range.
@@ -178,7 +203,7 @@ class StorageManager:
         Args:
             results: A list of result tuples, each containing fields for
                 CaseResults (ID, RunId, CaseId, ProcessedStatus, WorkerID,
-                Latency, WarmupTime, TotalTime, ProcessedAt).
+                Latency, WarmupTime, TotalTime, ProcessedAt, TPU).
         """
         raise NotImplementedError(
             "Subclasses must implement save_results_batch")

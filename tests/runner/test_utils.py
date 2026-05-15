@@ -569,3 +569,37 @@ def test_phased_profiler_skips_decode_only_steps_based_on_kv_len(
         profiler.step(stats)
     mock_stop.assert_called_once()
     assert profiler.current_phase == ""
+
+
+def test_merge_multihost_profile_directories(tmp_path):
+    """Tests that multi-host profile directories with different timestamps are consolidated correctly."""
+    profiler = PhasedBasedProfiler(profile_dir=str(tmp_path))
+    phase_dir = tmp_path / "prefill_heavy"
+    profiler.profile_dir_with_phase_suffix = str(phase_dir)
+
+    profile_path = phase_dir / "plugins" / "profile"
+    dir_early = profile_path / "2026_05_06_04_47_36"
+    dir_late = profile_path / "2026_05_06_04_47_38"
+
+    # Create the nested timestamped directories
+    dir_early.mkdir(parents=True, exist_ok=True)
+    dir_late.mkdir(parents=True, exist_ok=True)
+
+    # Create dummy host files inside each directory
+    file_early = dir_early / "node-1-0.xplane.pb"
+    file_late = dir_late / "node-0-0.xplane.pb"
+    file_early.write_text("dummy_trace_data_1")
+    file_late.write_text("dummy_trace_data_0")
+
+    # Execute consolidation merge
+    profiler._merge_multihost_profile_directories()
+
+    # Verify that the trailing directory is deleted and all files are merged into the earliest directory
+    assert dir_early.exists()
+    assert not dir_late.exists()
+    assert (dir_early / "node-1-0.xplane.pb").exists()
+    assert (dir_early / "node-0-0.xplane.pb").exists()
+    assert (dir_early /
+            "node-1-0.xplane.pb").read_text() == "dummy_trace_data_1"
+    assert (dir_early /
+            "node-0-0.xplane.pb").read_text() == "dummy_trace_data_0"

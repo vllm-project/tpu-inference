@@ -437,3 +437,34 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
     initialize_layer_weights(linear_layer)
     ref_output, layer_output = return_ref_and_layer_output(linear_layer)
     torch.testing.assert_close(ref_output, layer_output)
+
+
+def test_blockwise_config_construction():
+    from unittest.mock import MagicMock, patch
+
+    from compressed_tensors.quantization import (QuantizationArgs,
+                                                 QuantizationStrategy)
+
+    from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
+        VllmCompressedTensorsW8A8Fp8
+    from tpu_inference.layers.vllm.quantization.configs import \
+        VllmQuantLinearConfig
+
+    weight_quant = QuantizationArgs(num_bits=8,
+                                    type="float",
+                                    strategy=QuantizationStrategy.BLOCK,
+                                    block_structure=(128, 128))
+    mock_linear_config = MagicMock(spec=VllmQuantLinearConfig)
+
+    with patch(
+            'vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8.get_current_vllm_config'
+    ) as mock_get_config:
+        mock_get_config.return_value.model_config.dtype = "float32"
+        scheme = VllmCompressedTensorsW8A8Fp8(weight_quant=weight_quant,
+                                              is_static_input_scheme=False,
+                                              linear_config=mock_linear_config)
+
+    assert scheme.weight_block_size == [128, 128]
+    assert scheme.cutlass_block_fp8_supported is False
+    assert not scheme.use_aiter_and_is_supported
+    assert scheme.act_q_group_shape == (1, 128)

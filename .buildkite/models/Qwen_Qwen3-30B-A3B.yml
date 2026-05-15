@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: Qwen/Qwen3-30B-A3B
-# pipeline-type: text-only
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3-30B-A3B"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_UnitTest"

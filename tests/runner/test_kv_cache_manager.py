@@ -367,6 +367,53 @@ class TestKVCacheManager:
             assert kv_cache_spec[f'layer.{i}'] == expected_full_attn_spec
         assert len(self.runner.kv_cache_manager.shared_kv_cache_layers) == 0
 
+    def test_get_kv_cache_spec_without_compilation_cfg_none_text_config_attrs(
+            self):
+        # Regression: when the HF text_config declares one of the head-shape
+        # attributes (num_global_key_value_heads / global_head_dim /
+        # num_key_value_heads / head_dim) but sets it to None, the
+        # non-compilation-config branch must fall back to the model_config
+        # base values. Without the fix, None propagates into
+        # common_utils.get_padded_num_heads / get_padded_head_dim and raises.
+        #
+        # Real example: Gemma-4 E2B's HF config has
+        # num_global_key_value_heads=None.
+        mock_hf_text_config = MagicMock()
+        mock_hf_text_config.num_global_key_value_heads = None
+        mock_hf_text_config.global_head_dim = None
+        mock_hf_text_config.num_key_value_heads = None
+        mock_hf_text_config.head_dim = None
+        # Mix sliding and full so both branches of the if/else execute.
+        mock_hf_text_config.layer_types = [
+            "full_attention",
+            "sliding_attention",
+            "full_attention",
+            "sliding_attention",
+        ]
+        self.runner.model_config.hf_text_config = mock_hf_text_config
+
+        self.runner.vllm_config.compilation_config.static_forward_context = {}
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        model_config = self.runner.vllm_config.model_config
+        parallel_config = self.runner.vllm_config.parallel_config
+        num_layers = model_config.get_num_layers(parallel_config)
+        expected_num_kv_heads = common_utils.get_padded_num_heads(
+            model_config.get_total_num_kv_heads(),
+            self.runner.mesh.shape["model"])
+        expected_head_size = common_utils.get_padded_head_dim(
+            model_config.get_head_size())
+
+        assert len(kv_cache_spec) == num_layers
+        for i in range(num_layers):
+            spec = kv_cache_spec[f"layer.{i}"]
+            assert spec.num_kv_heads == expected_num_kv_heads, (
+                f"layer.{i}: num_kv_heads={spec.num_kv_heads} "
+                f"(expected base fallback {expected_num_kv_heads})")
+            assert spec.head_size == expected_head_size, (
+                f"layer.{i}: head_size={spec.head_size} "
+                f"(expected base fallback {expected_head_size})")
+
     def test_get_kv_cache_spec_without_compilation_cfg_mla(self):
         self.runner.kv_cache_manager.use_mla = True
         model_config = self.runner.vllm_config.model_config

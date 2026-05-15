@@ -370,12 +370,6 @@ class VllmModelWrapper:
                 None,  # list of aux hidden states
                 None,  # expert ids
             ),
-            compiler_options={
-                "xla_tpu_all_gather_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative"
-            },
             static_argnames=("layer_name_to_kvcache_index", ),
         )
         def draft_step_fun(
@@ -497,8 +491,6 @@ class VllmModelWrapper:
                         torch_mm_embeds = [torch_view(x) for x in mm_embeds]
                     else:
                         torch_mm_embeds = torch_view(mm_embeds)
-                    assert is_multimodal is not None
-                    torch_mm_embeds = torch_mm_embeds[is_multimodal]
                     call_args = (torch_view(input_ids), torch_mm_embeds)
                 else:
                     call_args = (torch_view(input_ids), )
@@ -510,7 +502,9 @@ class VllmModelWrapper:
                         "call_method": "embed_input_ids",
                         "call_args": call_args,
                         "call_kwargs": {
-                            "is_multimodal": torch_view(is_multimodal),
+                            "is_multimodal":
+                            torch_view(is_multimodal)
+                            if is_multimodal is not None else False,
                         },
                     },
                     tie_weights=False,
@@ -583,14 +577,22 @@ class VllmModelWrapper:
             hidden_states: jax.Array,
             pooling_metadata: PoolingMetadata,
             seq_lens: np.ndarray,
+            num_scheduled_tokens: np.ndarray | None = None,
         ) -> PoolerOutput:
             assert self._pooler is not None, "Model does not support pooling"
+
+            # Fallback assignment: for pooling-only models running outside chunked prefill pipelines,
+            # we ensure the pooler receives the complete set of hidden states by using seq_lens.
+            if num_scheduled_tokens is None:
+                num_scheduled_tokens = seq_lens
 
             torch_states: torch.Tensor = torch_view(hidden_states)
             with torchax.default_env():
                 torch_states = torch_states.to('cpu', non_blocking=True)
+
+                # Ensure correct alignment for chunked prefill
                 pooling_metadata.build_pooling_cursor(
-                    seq_lens,
+                    num_scheduled_tokens,
                     torch.tensor(seq_lens),
                     device=torch_states.device,
                 )
@@ -598,6 +600,7 @@ class VllmModelWrapper:
                     torch_states,
                     pooling_metadata,
                 )
+
                 return outputs
 
         return compute_pooler_output

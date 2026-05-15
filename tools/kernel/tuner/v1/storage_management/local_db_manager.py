@@ -142,18 +142,23 @@ class LocalDbManager(StorageManager):
         if not self.buffer or self.dry_run:
             return
         table = self._read_table('KernelTuningCases')
-        for caseset_id, case_id, case_kv in self.buffer:
+        for caseset_id, case_id, case_kv, tpu in self.buffer:
             table.append({
                 'ID': caseset_id,
                 'CaseId': case_id,
-                'CaseKeyValue': case_kv
+                'CaseKeyValue': case_kv,
+                'TPU': tpu
             })
         self._write_table('KernelTuningCases', table)
         logger.info(
             f'Flushed: wrote {len(self.buffer)} cases to KernelTuningCases')
         self.buffer = []
 
-    def add_tuner_case(self, caseset_id: str, case_id: int, case: str):
+    def add_tuner_case(self,
+                       caseset_id: str,
+                       case_id: int,
+                       case: str,
+                       tpu: str = None):
         assert isinstance(
             caseset_id, str
         ), f'param caseset_id should be a string but got {type(caseset_id)}'
@@ -163,13 +168,18 @@ class LocalDbManager(StorageManager):
         assert isinstance(
             case, str
         ), f'param case should be a string representing the key:value but got {type(case)}'
-        self.buffer.append((caseset_id, case_id, case))
+        self.buffer.append((caseset_id, case_id, case, tpu))
         self.current_case_id += 1
         if len(self.buffer) >= BATCH_SIZE:
             self.flush()
 
-    def create_bucket_for_run(self, cs_id: str, r_id: int, bucket_id: int,
-                              start_case_id: int, end_case_id: int):
+    def create_bucket_for_run(self,
+                              cs_id: str,
+                              r_id: int,
+                              bucket_id: int,
+                              start_case_id: int,
+                              end_case_id: int,
+                              tpu: str = None):
         """Creates a new work bucket for a tuning run.
 
         Used by tuner agents to define discrete units of work (buckets) that can
@@ -181,6 +191,7 @@ class LocalDbManager(StorageManager):
             bucket_id: Unique integer identifier for the bucket within the run.
             start_case_id: Starting case ID (inclusive) for this bucket.
             end_case_id: Ending case ID (inclusive) for this bucket.
+            tpu: TPU queue identifier where this bucket will be executed.
         """
         table = self._read_table('WorkBuckets')
         table.append({
@@ -192,11 +203,12 @@ class LocalDbManager(StorageManager):
             'Status': 'PENDING',
             'WorkerID': None,
             'TotalTime': None,
-            'UpdatedAt': datetime.now().isoformat()
+            'UpdatedAt': datetime.now().isoformat(),
+            'TPU': tpu
         })
         self._write_table('WorkBuckets', table)
         logger.info(
-            f'Created bucket: cs_id={cs_id}, r_id={r_id}, bucket_id={bucket_id}, start_case_id={start_case_id}, end_case_id={end_case_id}'
+            f'Created bucket: cs_id={cs_id}, r_id={r_id}, bucket_id={bucket_id}, start_case_id={start_case_id}, end_case_id={end_case_id}, tpu={tpu}'
         )
 
     def mark_bucket_in_progress(self, cs_id, r_id, b_id):
@@ -225,20 +237,35 @@ class LocalDbManager(StorageManager):
             f'Marked bucket as in progress: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, worker={self.worker_id}'
         )
 
-    def mark_bucket_completed(self, cs_id, r_id, b_id, tt_us):
+    def mark_bucket_completed(self, cs_id, r_id, b_id):
         table = self._read_table('WorkBuckets')
         for row in table:
             if row['ID'] == cs_id and row['RunId'] == r_id and row[
                     'BucketId'] == b_id:
-                row.update({
+                update = {
                     'Status': 'COMPLETED',
-                    'TotalTime': tt_us,
                     'UpdatedAt': datetime.now().isoformat()
-                })
+                }
+                row.update(update)
                 break
         self._write_table('WorkBuckets', table)
         logger.info(
-            f'Marked bucket as completed: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, tt_us={tt_us}'
+            f'Marked bucket as completed: cs_id={cs_id}, r_id={r_id}, b_id={b_id}'
+        )
+
+    def add_bucket_processed_time_us(self, cs_id, r_id, b_id,
+                                     processed_time_us):
+        table = self._read_table('WorkBuckets')
+        for row in table:
+            if row['ID'] == cs_id and row['RunId'] == r_id and row[
+                    'BucketId'] == b_id:
+                row['TotalTime'] = (row.get('TotalTime')
+                                    or 0) + processed_time_us
+                row['UpdatedAt'] = datetime.now().isoformat()
+                break
+        self._write_table('WorkBuckets', table)
+        logger.info(
+            f'Added processed time: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, processed_time_us={processed_time_us}'
         )
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):
@@ -253,7 +280,7 @@ class LocalDbManager(StorageManager):
         if not results:
             return
         cols = ('ID', 'RunId', 'CaseId', 'ProcessedStatus', 'WorkerID',
-                'Latency', 'WarmupTime', 'TotalTime', 'ProcessedAt')
+                'Latency', 'WarmupTime', 'TotalTime', 'ProcessedAt', 'TPU')
         table = self._read_table('CaseResults')
         # Build lookup for insert-or-update semantics (mirrors Spanner's insert_or_update).
         index = {

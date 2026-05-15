@@ -21,6 +21,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.request import Request
 
+from tests.offload.utils import EOS_TOKEN_ID, TPURequestRunner
 from tpu_inference.offload.tpu_offload_connector import (
     RequestTracker, TPUOffloadConnectorScheduler)
 
@@ -489,3 +490,59 @@ class TestTPUOffloadConnectorScheduler:
         assert req_id not in scheduler._unfinished_requests
         assert req_id not in scheduler._request_trackers
         assert len(metadata.requests_meta) == 0
+
+
+@pytest.fixture
+def tpu_request_runner():
+    runners = []
+
+    def runner_factory(block_size, num_blocks, async_scheduling):
+        runner = TPURequestRunner(block_size=block_size,
+                                  num_blocks=num_blocks,
+                                  async_scheduling=async_scheduling)
+        runners.append(runner)
+        return runner
+
+    yield runner_factory
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_tpu_offloading_connector_end_to_end(tpu_request_runner,
+                                             async_scheduling: bool):
+    block_size = 4
+    num_blocks = 128
+
+    runner = tpu_request_runner(
+        block_size=block_size,
+        num_blocks=num_blocks,
+        async_scheduling=async_scheduling,
+    )
+
+    # 3 blocks = 12 tokens
+    runner.new_request(token_ids=[0] * (block_size * 3))
+    runner.run(decoded_tokens=[0],
+               expected_stored_blocks=3,
+               expected_loaded_blocks=0)
+
+    # Decode until block boundary is reached (need 4 tokens total to reach 16 computed tokens)
+    runner.run(decoded_tokens=[0] * 2,
+               expected_stored_blocks=0,
+               expected_loaded_blocks=0)
+    runner.run(decoded_tokens=[0],
+               expected_stored_blocks=0,
+               expected_loaded_blocks=0)
+
+    # Hit block boundary (16 tokens = 4 blocks)
+    runner.run(decoded_tokens=[0],
+               expected_stored_blocks=1,
+               expected_loaded_blocks=0)
+    # Finish request
+    runner.run(decoded_tokens=[EOS_TOKEN_ID],
+               expected_stored_blocks=0,
+               expected_loaded_blocks=0)
+
+    # Next request: identical prompt. Should hit full prefix cache.
+    runner.new_request(token_ids=[0] * (block_size * 4))
+    runner.run(decoded_tokens=[EOS_TOKEN_ID],
+               expected_stored_blocks=0,
+               expected_loaded_blocks=1)

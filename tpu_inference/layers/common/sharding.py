@@ -52,6 +52,9 @@ class ShardingAxisNameBase:
     MODEL_1 = 'model'
     MODEL_2 = 'expert'
 
+    # Standard name for the model sharding axis.
+    MODEL = 'model'
+
     # These axes are used in KV caches management.
     BATCH = ('data', 'attn_dp', 'attn_dp_expert')
     CONTEXT = 'dcp'
@@ -77,6 +80,7 @@ class ShardingAxisName2D:
     BATCH = 'data'
     CONTEXT = None
     KV_CACHE_HEAD = 'model'
+    MODEL = 'model'
 
 
 # Lazily initialize the ShardingAxisName so that we can decide which one to use based on the

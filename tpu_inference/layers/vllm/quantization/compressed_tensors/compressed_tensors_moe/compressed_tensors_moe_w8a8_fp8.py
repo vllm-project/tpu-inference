@@ -12,26 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import jax
 import torch
 from compressed_tensors.quantization import QuantizationArgs
 from jax.sharding import Mesh
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import \
     CompressedTensorsW8A8Fp8MoEMethod
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, shard_moe_weights)
-from tpu_inference.layers.common.sharding import ShardingAxisName
+    FusedMoEWeights, process_fp8_moe_weights, shard_moe_weights)
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product, t2j
+from tpu_inference.utils import t2j
 
 logger = init_logger(__name__)
 
@@ -94,40 +91,26 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
         else:
             w13_bias = w2_bias = None
 
-        @jax.jit
-        def process_fp8_moe_weights(
-            w13_weight: jax.Array,
-            w13_weight_scale: jax.Array,
-            w13_bias: jax.Array | None,
-            w2_weight: jax.Array,
-            w2_weight_scale: jax.Array,
-            w2_bias: jax.Array | None,
-        ) -> FusedMoEWeights:
-            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
-            w13_reorder_size = get_mesh_shape_product(
-                self.mesh, ShardingAxisName.MLP_TENSOR)
+        # Support for blockwise quantization (e.g. 128x128 blocks) used by
+        # DeepSeek V3 / Mistral 3 Large models.
+        weight_block_size = None
+        if self.weight_quant.block_structure is not None:
+            weight_block_size = tuple(self.weight_quant.block_structure)
 
-            return process_moe_weights(
-                weights=FusedMoEWeights(
-                    w13_weight=w13_weight,
-                    w13_weight_scale=w13_weight_scale,
-                    w13_bias=w13_bias,
-                    w2_weight=w2_weight,
-                    w2_weight_scale=w2_weight_scale,
-                    w2_bias=w2_bias,
-                ),
-                moe_backend=self.moe_backend,
-                w13_reorder_size=w13_reorder_size,
-                w13_interleave=w13_interleave,
-            )
-
+        input_weights = FusedMoEWeights(
+            w13_weight=w13_weight,
+            w13_weight_scale=w13_weight_scale,
+            w13_bias=w13_bias,
+            w2_weight=w2_weight,
+            w2_weight_scale=w2_weight_scale,
+            w2_bias=w2_bias,
+        )
         weights = process_fp8_moe_weights(
-            w13_weight,
-            w13_weight_scale,
-            w13_bias,
-            w2_weight,
-            w2_weight_scale,
-            w2_bias,
+            input_weights,
+            moe_backend=self.moe_backend,
+            mesh=self.mesh,
+            activation=layer.activation.value,
+            weight_block_size=weight_block_size,
         )
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))

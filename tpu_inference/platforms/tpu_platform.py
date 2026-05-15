@@ -92,7 +92,8 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4"
+        "tpu_int8", "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4",
+        "modelopt_fp4"
     ]
 
     additional_env_vars: list[str] = [
@@ -109,6 +110,7 @@ class TpuPlatform(Platform):
         "MOE_REQUANTIZE_WEIGHT_DTYPE",
         "USE_JAX_PROFILER_SERVER",
         "JAX_PROFILER_SERVER_PORT",
+        "ENABLE_RS_KERNEL",
     ]
 
     @classmethod
@@ -244,8 +246,16 @@ class TpuPlatform(Platform):
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
             if envs.USE_BATCHED_RPA_KERNEL and cache_config.block_size < 256:
                 cache_config.block_size = 256
-            logger.info(
-                f"Using KV cache block size: {cache_config.block_size}")
+
+        if cache_config and envs.TPU_MAMBA_SSM_CACHE_DTYPE:
+            override = envs.TPU_MAMBA_SSM_CACHE_DTYPE
+            current = cache_config.mamba_ssm_cache_dtype
+            if current != override:
+                logger.info(
+                    "TPU_MAMBA_SSM_CACHE_DTYPE=%s overriding "
+                    "cache_config.mamba_ssm_cache_dtype (was %r)", override,
+                    current)
+                cache_config.mamba_ssm_cache_dtype = override
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
@@ -297,32 +307,16 @@ class TpuPlatform(Platform):
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
 
-        from tpu_inference.core.sched.utils import \
-            update_vllm_scheduler_for_exporting_expert_ids
-        update_vllm_scheduler_for_exporting_expert_ids()
-
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: TPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
-
-        # vLLM uses `tensor_parallel_size` to calculate the number of KV heads
-        # per partition. When data parallelism is enabled, the global
-        # `tensor_parallel_size` (total workers) is larger than the actual
-        # `tp_size` used.
-        # https://github.com/vllm-project/tpu-inference/blob/618dea5f5c0ca556a6c76a2e1cc130ff6a30893c/tpu_inference/layers/common/sharding.py#L196
-        # Use the sharding calculated `tp_size` for block size calculations.
-        orig_tp_size = vllm_config.parallel_config.tensor_parallel_size
-        vllm_config.parallel_config.tensor_parallel_size = vllm_config.sharding_config.tp_size
-        try:
-            if vllm_config.model_config.is_hybrid:
-                backend_cls = cls._find_non_ssm_backend(vllm_config)
-                if backend_cls is not None:
-                    # Align block/mamba sizes for hybrid model (may override
-                    # user settings).
-                    cls._align_hybrid_block_size(vllm_config, backend_cls)
-        finally:
-            vllm_config.parallel_config.tensor_parallel_size = orig_tp_size
+        logger.info(f"Using cache_config.block_size: "
+                    f"{vllm_config.cache_config.block_size} "
+                    f"instead of overriding with _align_hybrid_block_size() "
+                    f"since we set mamba_page_size_padded in "
+                    f"kv_cache_manager.py")
+        pass
 
     @classmethod
     def is_pin_memory_available(cls):
