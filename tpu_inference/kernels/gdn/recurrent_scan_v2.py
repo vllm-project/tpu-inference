@@ -424,7 +424,8 @@ def inner_kernel(
             a_raw_processed = a_raw_chunk[:, :n_v].T
             b_raw_processed = b_raw_chunk[:, :n_v].T
 
-            # Compute gates in VMEM in full fp32, not sure if needed.
+            a_raw_processed = a_raw_processed.astype(jnp.float32)
+            b_raw_processed = b_raw_processed.astype(jnp.float32)
             beta = jax.nn.sigmoid(b_raw_processed)
             g = -jnp.exp(a_log_ref[...][:, None].astype(
                 jnp.float32)) * jax.nn.softplus(a_raw_processed + dt_bias_ref[
@@ -600,9 +601,9 @@ def inner_kernel(
             a_raw_processed = a_raw_chunk[:C_trans, :n_v].T
             b_raw_processed = b_raw_chunk[:C_trans, :n_v].T
 
-            # NOTE: b is upcasted to f32 in ref before sigmoid, beta is bf16
+            a_raw_processed = a_raw_processed.astype(jnp.float32)
+            b_raw_processed = b_raw_processed.astype(jnp.float32)
             beta_chunk = jax.nn.sigmoid(b_raw_processed)
-            # NOTE: a is upcasted to f32 before add to dt_bias
             g_chunk = -jnp.exp(a_log_ref[...][:, None].astype(
                 jnp.float32)) * jax.nn.softplus(a_raw_processed + dt_bias_ref[
                     ...][:, None].astype(jnp.float32))

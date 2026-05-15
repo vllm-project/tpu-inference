@@ -71,6 +71,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         mock_kv_cache_config = MagicMock()
         mock_kv_cache_group = MagicMock()
         mock_kv_cache_config.kv_cache_groups = [mock_kv_cache_group]
+        mock_kv_cache_config.has_mamba_layers = False
         self.runner.kv_cache_config = mock_kv_cache_config
         self.runner.use_hybrid_kvcache = False
 
@@ -113,6 +114,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         mock_kv_cache_config.kv_cache_groups = [
             mock_kv_cache_group1, mock_kv_cache_group2
         ]
+        mock_kv_cache_config.has_mamba_layers = False
         self.runner.kv_cache_config = mock_kv_cache_config
         self.runner.use_hybrid_kvcache = True
 
@@ -1271,6 +1273,7 @@ class TestSamplingMetadataPassthrough:
         runner._pre_async_results = None
         mock_kv_cache_config = MagicMock()
         mock_kv_cache_config.kv_cache_groups = [MagicMock()]
+        mock_kv_cache_config.has_mamba_layers = False
         runner.kv_cache_config = mock_kv_cache_config
         runner._prepare_input_metadata = TPUModelRunner._prepare_input_metadata.__get__(
             runner)
