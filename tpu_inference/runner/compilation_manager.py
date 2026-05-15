@@ -389,7 +389,7 @@ class CompilationManager:
 
         def model_fn_warmup(_fn, _args, _call_kwargs):
             out = self.runner.model_fn(
-                self.runner.state,
+                self.runner.state_leaves,
                 self.runner.kv_caches,
                 input_ids,
                 attention_metadata,
