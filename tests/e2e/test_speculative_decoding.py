@@ -93,6 +93,8 @@ def _test_correctness_helper(
     sampling_config: SamplingParams,
     model_name: str,
     speculative_config: dict,
+    max_num_seqs: int = 4,
+    async_scheduling: bool = False,
 ):
     '''
     Helper function to test ngram correctness.
@@ -105,10 +107,10 @@ def _test_correctness_helper(
         ref_llm = LLM(
             model=model_name,
             max_model_len=1024,
-            max_num_seqs=4,
+            max_num_seqs=max_num_seqs,
             tensor_parallel_size=_get_tensor_parallel_size(),
             model_loader_extra_config={"enable_weights_track": False},
-            async_scheduling=0)
+            async_scheduling=async_scheduling)
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
         del ref_llm
@@ -120,10 +122,10 @@ def _test_correctness_helper(
             model=model_name,
             speculative_config=speculative_config,
             max_model_len=1024,
-            max_num_seqs=4,
+            max_num_seqs=max_num_seqs,
             tensor_parallel_size=_get_tensor_parallel_size(),
             model_loader_extra_config={"enable_weights_track": False},
-            async_scheduling=0)
+            async_scheduling=async_scheduling)
         spec_outputs = spec_llm.generate(test_prompts, sampling_config)
 
         matches = 0
@@ -184,12 +186,12 @@ def test_ngram_correctness_random(
         })
 
 
-def _test_performance_helper(
-    monkeypatch: pytest.MonkeyPatch,
-    sampling_config: SamplingParams,
-    speculative_config: dict,
-    min_acceptance_rate: float,
-):
+def _test_performance_helper(monkeypatch: pytest.MonkeyPatch,
+                             sampling_config: SamplingParams,
+                             speculative_config: dict,
+                             min_acceptance_rate: float,
+                             max_num_seqs: int = 1,
+                             async_scheduling: bool = False):
     '''
     Helper function to test speculative decoding performance.
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
@@ -200,19 +202,18 @@ def _test_performance_helper(
         # Use a smaller set of prompts for performance testing
         test_prompts = get_test_prompts(speculative_config)
 
-        # Test speculative LLM timing with max_num_seqs=1
         spec_llm = LLM(
             model=model_name,
             speculative_config=speculative_config,
             max_model_len=1024,
-            max_num_seqs=1,
+            max_num_seqs=max_num_seqs,
             tensor_parallel_size=_get_tensor_parallel_size(),
             enable_prefix_caching=False,
             model_loader_extra_config={"enable_weights_track": False},
             disable_log_stats=False,
-            async_scheduling=0)
+            async_scheduling=async_scheduling)
 
-        _ = spec_llm.generate(test_prompts, sampling_config)
+        spec_llm.generate(test_prompts, sampling_config)
 
         metrics = spec_llm.get_metrics()
         num_draft_tokens = num_accepted_tokens = 0
@@ -227,6 +228,8 @@ def _test_performance_helper(
         if num_draft_tokens > 0:
             acceptance_rate = num_accepted_tokens / num_draft_tokens
             print(f"Acceptance rate: {acceptance_rate:.2%}")
+            print("num_accepted_tokens:" + str(num_accepted_tokens))
+            print("num_draft_tokens:" + str(num_draft_tokens))
 
         del spec_llm
         # Waiting for TPUs to be released
@@ -276,9 +279,11 @@ def test_ngram_performance_random(
                              min_acceptance_rate=0.85)
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
 def test_eagle3_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
+    async_scheduling: bool,
 ):
     '''
     Compare the outputs of a original LLM and a speculative LLM
@@ -290,17 +295,25 @@ def test_eagle3_correctness(
     monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
 
     _test_correctness_helper(
-        monkeypatch, sampling_config, model_name, {
+        monkeypatch,
+        sampling_config,
+        model_name, {
             'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
             "num_speculative_tokens": 3,
             "method": "eagle3",
             "draft_tensor_parallel_size": 1
-        })
+        },
+        max_num_seqs=10,
+        async_scheduling=async_scheduling)
 
 
+@pytest.mark.parametrize("max_num_seqs", [1, 20])
+@pytest.mark.parametrize("async_scheduling", [False, True])
 def test_eagle3_performance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
+    max_num_seqs: int,
+    async_scheduling: bool,
 ):
     '''
     Test that speculative decoding provides significant performance improvement.
@@ -318,4 +331,6 @@ def test_eagle3_performance(
             "num_speculative_tokens": 2,
             "draft_tensor_parallel_size": 1
         },
-        min_acceptance_rate=0.75)
+        min_acceptance_rate=0.75,
+        max_num_seqs=max_num_seqs,
+        async_scheduling=async_scheduling)
