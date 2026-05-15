@@ -213,20 +213,35 @@ class SpannerStorageManager(StorageManager):
                 'wid': spanner.param_types.STRING
             }))
 
-    def mark_bucket_completed(self, cs_id, r_id, b_id, tt_us):
+    def mark_bucket_completed(self, cs_id, r_id, b_id):
         self.database.run_in_transaction(lambda tx: tx.execute_update(
-            "UPDATE WorkBuckets SET Status = 'COMPLETED', TotalTime = @tt, UpdatedAt = PENDING_COMMIT_TIMESTAMP() WHERE ID = @id AND RunId = @rid AND BucketId = @bid",
+            "UPDATE WorkBuckets SET Status = 'COMPLETED', UpdatedAt = PENDING_COMMIT_TIMESTAMP() WHERE ID = @id AND RunId = @rid AND BucketId = @bid",
+            params={
+                'id': cs_id,
+                'rid': r_id,
+                'bid': b_id
+            },
+            param_types={
+                'id': spanner.param_types.STRING,
+                'rid': spanner.param_types.STRING,
+                'bid': spanner.param_types.INT64
+            }))
+
+    def add_bucket_processed_time_us(self, cs_id, r_id, b_id,
+                                     processed_time_us):
+        self.database.run_in_transaction(lambda tx: tx.execute_update(
+            "UPDATE WorkBuckets SET TotalTime = COALESCE(TotalTime, 0) + @pt, UpdatedAt = PENDING_COMMIT_TIMESTAMP() WHERE ID = @id AND RunId = @rid AND BucketId = @bid",
             params={
                 'id': cs_id,
                 'rid': r_id,
                 'bid': b_id,
-                'tt': tt_us
+                'pt': processed_time_us
             },
             param_types={
                 'id': spanner.param_types.STRING,
                 'rid': spanner.param_types.STRING,
                 'bid': spanner.param_types.INT64,
-                'tt': spanner.param_types.INT64
+                'pt': spanner.param_types.INT64
             }))
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):
