@@ -63,6 +63,7 @@ REQUEST_RATE=${REQUEST_RATE:=4}
 
 NUM_PREFILL_INSTANCES=1
 NUM_DECODE_INSTANCES=1
+TPU_VERSION=${TPU_VERSION:=tpu7x}
 if [ "${TPU_VERSION:-}" = "tpu7x" ]; then
     PREFILLER_TP_SIZE=2
     DECODER_TP_SIZE=2
@@ -118,10 +119,10 @@ cleanup_instances() {
   sleep 5
   pkill -9 -f "vllm" || true
   pkill -9 -f "toy_proxy_server" || true
-  sudo fuser -k -9 /dev/vfio/* 2>/dev/null || true
-  sudo fuser -k -9 /dev/accel* 2>/dev/null || true
-  sudo rm -rf /tmp/jax_cache_* || true
-  sudo rm -f /tmp/libtpu_lockfile || true
+  fuser -k -9 /dev/vfio/* || true
+  fuser -k -9 /dev/accel* || true
+  rm -rf /tmp/jax_cache_* || true
+  rm -f /tmp/libtpu_lockfile || true
 }
 
 LOG_DIR=$HOME/logs
