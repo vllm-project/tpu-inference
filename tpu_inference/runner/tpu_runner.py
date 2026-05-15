@@ -1229,13 +1229,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                                   end_idx, :].transpose(
                                                       1, 0, 2)
 
-                if not hasattr(req_state, "_accumulated_experts"):
-                    req_state._accumulated_experts = []
-                req_state._accumulated_experts.append(step_experts)
+                if not hasattr(req_state, "_routed_experts_buf"):
+                    _, layers, top_k = step_experts.shape
+                    req_state._routed_experts_buf = np.zeros(
+                        (self.max_model_len, layers, top_k),
+                        dtype=step_experts.dtype)
+                    req_state._routed_experts_len = 0
 
-                # Send the FULL accumulated history for every request in the batch
-                routed_experts_dict[req_id] = np.concatenate(
-                    req_state._accumulated_experts, axis=0)
+                offset = req_state._routed_experts_len
+                allowed = min(num_tokens_scheduled,
+                              self.max_model_len - offset)
+                if allowed > 0:
+                    req_state._routed_experts_buf[offset:offset + allowed] = (
+                        step_experts[:allowed])
+                    req_state._routed_experts_len += allowed
+
+                routed_experts_dict[
+                    req_id] = req_state._routed_experts_buf[:req_state.
+                                                            _routed_experts_len]
 
             model_runner_output.routed_experts_dict = routed_experts_dict
 
