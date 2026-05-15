@@ -3,22 +3,6 @@ from tpu_inference.logger import init_logger
 logger = init_logger(__name__)
 
 tuned_block_sizes = {
-'''
-    tuning_set_from_log.append([TuningKey(
-        max_num_tokens=512,
-        actual_num_q_heads=128,
-        actual_lkv_dim=512,
-        actual_r_dim=64,
-
-    for each of the above tuningkey, i just want to use their max_num_tokens, actual_num_q_heads, actual_lkv_dim, actual_r_dim to lookup the tunable params for the batched decode case, and ignore the rest of the parameters since they are all the same across different tuning keys in the log (they only differ in max_num_tokens, actual_lkv_dim, actual_r_dim which are already part of the tuning key used for lookup)
-'''
-'''
-    key: (max_num_tokens, actual_num_q_heads, actual_lkv_dim, actual_r_dim, 'batched_decode')
-    value: (num_kv_pages_per_block, num_queries_per_block, decode_batch_size)
-'''
-'''
-    the above tuning keys and tunable params are default values that we got from the log. I want to list them out here as a visual comparision.
-'''
     # Below are existing default tunable params
     # (4, 128, 512, 64, 'batched_decode'): {'num_kv_pages_per_block': 3, 'num_queries_per_block': 1, 'decode_batch_size': 4},
     # (8, 128, 512, 64, 'batched_decode'): {'num_kv_pages_per_block': 3, 'num_queries_per_block': 1, 'decode_batch_size': 4},
