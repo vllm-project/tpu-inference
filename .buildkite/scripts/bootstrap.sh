@@ -301,5 +301,5 @@ source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 
 # echo "--- Buildkite Bootstrap Finished"
 
-# upload_with_priority .buildkite/test-invalid-queue.yml 10
-buildkite-agent pipeline upload .buildkite/test-invalid-queue.yml --dry-run
+upload_with_priority .buildkite/test-invalid-queue.yml 10
+# buildkite-agent pipeline upload .buildkite/test-invalid-queue.yml --dry-run

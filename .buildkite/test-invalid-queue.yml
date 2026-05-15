@@ -15,5 +15,3 @@
 steps:
   - label: "Test Invalid Queue"
     command: "echo hello"
-    agents:
-      queue: "aaa"
