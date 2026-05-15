@@ -49,6 +49,19 @@ get_vllm_commit_hash() {
   echo "$commit_hash"
 }
 
+# Function to upload a light-weight step that intentionally fails to block CI build
+upload_blocking_failure_step() {
+  local label="$1"
+  echo "$label"
+  cat <<- YAML | buildkite-agent pipeline upload
+steps:
+  - label: "$label"
+    agents:
+      queue: cpu
+    command: exit 1
+YAML
+}
+
 # Function to process JSON benchmark cases from a folder and/or a list of specific files
 process_json_benchmark_cases() {
   local case_folder="${1:-}"
@@ -77,24 +90,25 @@ process_json_benchmark_cases() {
   fi
 
   if [ ${#files[@]} -eq 0 ]; then
-    echo "No JSON files found to process."
+    echo "No JSON files found to process (Folder: $case_folder, Extra: $extra_files)."
     return
   fi
 
+  echo "Found ${#files[@]} files to process."
+
   for case_file in "${files[@]}"; do
     echo "Processing case file: $case_file"
-    if upload_with_priority <(python3 "$generator" --input "$case_file") "$priority"; then
-      echo "Successfully uploaded pipeline for $case_file"
-    else
-      echo "🚨 Error: Failed to generate or upload pipeline for $case_file"
-      # Upload a step that will intentionally fail to block the CI build
-      cat <<- YAML | buildkite-agent pipeline upload
-steps:
-  - label: "❌ Pipeline Generation Failure from: $(basename "$case_file")"
-    agents:
-      queue: cpu
-    command: exit 1
-YAML
+
+    # 1. Generate pipeline and capture output/exit code
+    local generated_yaml
+    if ! generated_yaml=$(python3 "$generator" --input "$case_file"); then
+      upload_blocking_failure_step "❌ Pipeline Validation Failure: $case_file"
+      continue
+    fi
+
+    # 2. Upload the captured YAML
+    if ! upload_with_priority <(echo "$generated_yaml") "$priority"; then
+      upload_blocking_failure_step "❌ Pipeline Upload Failure: $case_file"
     fi
   done
 }
