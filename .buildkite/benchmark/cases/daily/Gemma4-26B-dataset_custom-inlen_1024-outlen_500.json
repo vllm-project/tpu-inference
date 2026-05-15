@@ -10,7 +10,6 @@
     {
       "case_name": "Gemma4-26B-A4B-1k/500-GBS256",
       "ci_queue": [
-        "tpu_v6e_8_queue",
         "tpu_v7x_2_queue"
       ],
       "env": {
@@ -25,14 +24,13 @@
           "VLLM_USE_V1": "1",
           "MODEL_IMPL_TYPE": "flax_nnx",
           "USE_BATCHED_RPA_KERNEL": "1",
-          "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp8_e4m3fn"
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "float8_e4m3fn"
         },
         "args": {
           "model": "google/gemma-4-26B-A4B-it",
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
             "v7x-2": 2,
             "default": 1
           },
@@ -53,6 +51,7 @@
           "random-input-len": 1024,
           "random-output-len": 500,
           "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true,
           "temperature": 0
         }
@@ -61,7 +60,6 @@
     {
       "case_name": "Gemma4-26B-A4B-1k/1f512x512/500-GBS256",
       "ci_queue": [
-        "tpu_v6e_8_queue",
         "tpu_v7x_2_queue"
       ],
       "env": {
@@ -76,14 +74,13 @@
           "VLLM_USE_V1": "1",
           "MODEL_IMPL_TYPE": "flax_nnx",
           "USE_BATCHED_RPA_KERNEL": "1",
-          "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp8_e4m3fn"
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "float8_e4m3fn"
         },
         "args": {
           "model": "google/gemma-4-26B-A4B-it",
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
             "v7x-2": 2,
             "default": 1
           },
@@ -107,6 +104,7 @@
           "random-input-len": 1024,
           "random-output-len": 500,
           "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true,
           "temperature": 0
         }

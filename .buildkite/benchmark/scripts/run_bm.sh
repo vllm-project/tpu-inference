@@ -29,6 +29,11 @@ on_crash() {
         return
     fi
 
+    # Ignore explicit 'exit' commands as these are controlled intentional exits
+    if [[ "$command" == exit* ]]; then
+        return
+    fi
+
     echo ""
     echo "================================================================"
     echo "🚨 [FATAL ERROR] Bash Script Crashed Unexpectedly!"
@@ -133,17 +138,10 @@ export VLLM_TORCH_PROFILER_DIR
 report_and_exit() {
   local exit_code=${1:-0}
   local record_id="${RECORD_ID:-local}"
-  local report_exit_code
-
-  echo "--- Calling report_result.sh for RECORD_ID=${record_id}"
-  bash "$SCRIPT_DIR/report_result.sh" "$record_id"
-  report_exit_code=$?
-
-  # Exit with the reporting script's failure code if it did not succeed.
-  if [ "$report_exit_code" -ne 0 ]; then
-    exit "$report_exit_code"
-  fi
-
+  
+  echo "--- Calling report_result.sh for RECORD_ID=${record_id} with exit_code=${exit_code}"
+  bash "$SCRIPT_DIR/report_result.sh" "$record_id" "$exit_code" || exit $?
+  
   # Exit with the originally provided exit code.
   exit "$exit_code"
 }

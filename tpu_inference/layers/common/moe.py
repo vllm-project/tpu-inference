@@ -146,6 +146,7 @@ def moe_apply(
                     activation=activation,
                     scoring_fn=layer.scoring_func,
                     all_gather_fp8=all_gather_fp8,
+                    enable_rs_kernel=envs.ENABLE_RS_KERNEL,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

@@ -83,6 +83,17 @@ setup_environment() {
   local should_push=${2:-"false"}
   local push_to_ci_cache=${3:-"false"}
   IMAGE_NAME="$image_name_param"
+
+  # ==========================================
+  # Skip Build and Cleanup in DEV_MODE if image already exists
+  # ==========================================
+  if [[ "${DEV_MODE:-false}" == "true" ]]; then
+    if docker image inspect "${IMAGE_NAME}:dev" >/dev/null 2>&1; then
+      echo "[DEV_MODE] Base image ${IMAGE_NAME}:dev already exists. Skipping cleanup and build."
+      return 0
+    fi
+  fi
+
   local CI_IMAGE_REPO="us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/${IMAGE_NAME}"
   local LOCAL_TPU_VERSION="${TPU_VERSION:-tpu6e}" 
 
@@ -114,7 +125,11 @@ setup_environment() {
       else
           VLLM_COMMIT_HASH=""
       fi
-      TPU_INFERENCE_HASH=$(git log -n 1 --pretty="%H")
+      if [[ "${DEV_MODE:-false}" == "true" ]]; then
+          TPU_INFERENCE_HASH="dev"
+      else
+          TPU_INFERENCE_HASH=$(git log -n 1 --pretty="%H")
+      fi
   else
       VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
       TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"

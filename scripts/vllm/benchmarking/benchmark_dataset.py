@@ -852,6 +852,7 @@ class SonnetDataset(BenchmarkDataset):
                     SampleRequest(
                         prompt=prompt_formatted
                         if return_prompt_formatted else prompt,
+                        messages=None if return_prompt_formatted else msg,
                         prompt_len=prompt_len,
                         expected_output_len=output_len,
                         request_id=request_id_prefix + str(ind),

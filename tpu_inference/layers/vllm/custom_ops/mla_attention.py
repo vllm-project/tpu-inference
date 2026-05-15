@@ -71,10 +71,22 @@ class VllmMLAAttention(MLAAttention):
     ):
         torch.nn.Module.__init__(self)
         vllm_mla_attn.get_mla_prefill_backend = lambda config: DummyMLAPrefillBackend
-        super().__init__(num_heads, scale, qk_nope_head_dim, qk_rope_head_dim,
-                         v_head_dim, q_lora_rank, kv_lora_rank, kv_b_proj,
-                         cache_config, quant_config, prefix, use_sparse,
-                         indexer, **extra_impl_args)
+        super().__init__(
+            num_heads,
+            scale,
+            qk_nope_head_dim,
+            qk_rope_head_dim,
+            v_head_dim,
+            q_lora_rank,
+            kv_lora_rank,
+            kv_b_proj,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=prefix,
+            use_sparse=use_sparse,
+            indexer=indexer,
+            **extra_impl_args,
+        )
 
         # For compatibility reasons.
         self.kv_sharing_target_layer_name = None
@@ -92,16 +104,31 @@ class VllmMLAAttention(MLAAttention):
 
             # NOTE: vLLM dequantizes kv_b_proj weights which causes more memory
             # usage than expected.
-
             # quantize W_UK_T, W_UV back to cache type and transfer
             # `W_UK_T`, `W_UV` to TPUs
-            mesh = self.kv_b_proj.quant_method.linear_config.mesh
+            # Try to get the mesh from the first possible path.
+            quant_method = getattr(self.kv_b_proj, 'quant_method', None)
+            linear_config = getattr(quant_method, 'linear_config', None)
+            mesh = getattr(linear_config, 'mesh', None)
+            if mesh is None:
+                # If the first path failed, mesh will be None. Try the second path.
+                scheme = getattr(self.kv_b_proj, 'scheme', None)
+                linear_config = getattr(scheme, 'linear_config', None)
+                mesh = getattr(linear_config, 'mesh', None)
+
+            if mesh is None:
+                # If mesh is still None after trying all paths, raise an error.
+                raise ValueError(
+                    "Could not find JAX Mesh. Failed to access "
+                    "'.quant_method.linear_config.mesh' or "
+                    "'.scheme.linear_config.mesh' on the kv_b_proj layer.")
+
             sharding = NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))
             self.W_UK_T, self.W_UK_T_scale = quantize_tensor(
                 self.kv_cache_quantized_dtype, jax_view(self.W_UK_T), axis=1)
             self.W_UK_T = torch_view(general_device_put(self.W_UK_T, sharding))
             self.W_UK_T_scale = torch_view(
-                general_device_put(jnp.expand_dims(self.W_UK_T_scale, 0),
+                general_device_put(jnp.expand_dims(self.W_UK_T_scale, 1),
                                    sharding))
 
             self.W_UV, self.W_UV_scale = quantize_tensor(

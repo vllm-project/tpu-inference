@@ -37,6 +37,9 @@ RUN apt-get update && apt-get install -y \
     bc \
     ca-certificates \
     unzip \
+    build-essential \
+    cmake \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 # Conditionally install google-cloud-cli for benchmarking infrastructure
@@ -59,7 +62,7 @@ RUN git clone $VLLM_REPO . && \
     fi
 
 RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements/tpu.txt --retries 3
-RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install -e .
+RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install --no-build-isolation -e .
 
 # Install test dependencies
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/vllm_test_utils

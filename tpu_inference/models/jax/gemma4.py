@@ -318,6 +318,24 @@ class Gemma4Attention(JaxModule):
 
         self.mesh = mesh
 
+        # Shard k/v projections along the kv-heads dimension when num_kv_heads
+        # is divisible by tp_size — this matches the ragged-paged-attention
+        # kernel's expected sharding (P(ATTN_DATA, ATTN_HEAD, None)) and avoids
+        # XLA inserting all-to-all reshuffles every layer. When num_kv_heads <
+        # tp_size (e.g. global layers with k_eq_v + num_global_key_value_heads
+        # = 4 at TP=8), fall back to sharding the head_dim axis; the kernel
+        # replicates kv-heads internally for that case.
+        _tp_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.MODEL)
+        _shard_kv_on_k = (_tp_size <= 1) or (self.num_kv_heads % _tp_size == 0)
+        if not _shard_kv_on_k:
+            logger.warning_once(
+                f"num_kv_heads={self.num_kv_heads} is not divisible by TP size {_tp_size}, "
+                "sharding k/v projections on head_dim instead of kv-heads. This may cause "
+                "all-to-all communication overhead.")
+        _kv_kernel_spec = (None, "model",
+                           None) if _shard_kv_on_k else (None, None, "model")
+        _kv_bias_spec = ("model", None) if _shard_kv_on_k else (None, "model")
+
         self.q_proj = JaxEinsum(
             "TD,DNH->TNH",
             (self.hidden_size, self.num_heads, self.head_dim),
@@ -347,8 +365,8 @@ class Gemma4Attention(JaxModule):
             bias_shape=(self.num_kv_heads,
                         self.head_dim) if config.attention_bias else None,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, None, "model")),
-            bias_init=nnx.with_partitioning(init_fn, (None, "model"))
+            kernel_init=nnx.with_partitioning(init_fn, _kv_kernel_spec),
+            bias_init=nnx.with_partitioning(init_fn, _kv_bias_spec)
             if config.attention_bias else None,
             rngs=rng,
             quant_config=quant_config,
@@ -364,9 +382,8 @@ class Gemma4Attention(JaxModule):
                 bias_shape=(self.num_kv_heads,
                             self.head_dim) if config.attention_bias else None,
                 param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(init_fn,
-                                                  (None, None, "model")),
-                bias_init=nnx.with_partitioning(init_fn, (None, "model"))
+                kernel_init=nnx.with_partitioning(init_fn, _kv_kernel_spec),
+                bias_init=nnx.with_partitioning(init_fn, _kv_bias_spec)
                 if config.attention_bias else None,
                 rngs=rng,
                 quant_config=quant_config,

@@ -175,7 +175,7 @@ class TestTPUJaxRunner:
         mock_sampling_instance = MagicMock()
         mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
 
-        output = self.runner._prepare_inputs_non_dp(scheduler_output)
+        output = self.runner._prepare_inputs(scheduler_output)
         assert len(output) == 8
         input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = output
         # assert it will create attention metadata for each layer.

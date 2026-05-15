@@ -113,18 +113,15 @@ check_failed_requests() {
 
 cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
+  pkill -f "vllm" || true
+  pkill -f "toy_proxy_server" || true
+  sleep 5
   pkill -9 -f "vllm" || true
   pkill -9 -f "toy_proxy_server" || true
-  pkill -9 -f "multiprocess" || true
-  # Check if any accel devices exist before trying to kill processes on them
-  for dev in /dev/accel*; do
-    if [ -e "$dev" ]; then
-      fuser -k "$dev" || true
-    fi
-  done
-
-  rm -f /dev/shm/vllm_* || true
-  sleep 10
+  sudo fuser -k -9 /dev/vfio/* 2>/dev/null || true
+  sudo fuser -k -9 /dev/accel* 2>/dev/null || true
+  sudo rm -rf /tmp/jax_cache_* || true
+  sudo rm -f /tmp/libtpu_lockfile || true
 }
 
 LOG_DIR=$HOME/logs
@@ -177,9 +174,6 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     PREFILL_HOSTS+=("localhost")
     PREFILL_PORTS+=($PORT)
     PREFILL_PIDS+=($!)
-
-    # Pause between starting each instance to relieve host memory pressure
-    sleep 30
 done
 
 
@@ -220,9 +214,6 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     DECODE_HOSTS+=("localhost")
     DECODE_PORTS+=($PORT)
     DECODE_PIDS+=($!)
-
-    # Pause between starting each instance to relieve host memory pressure
-    sleep 30
 done
 
 # Wait for all instances to start

@@ -29,7 +29,7 @@ import jax
         "request_distribution",
         "mamba_state_indices",
     ],
-    meta_fields=[],
+    meta_fields=["padded_num_reqs"],
     drop_fields=["query_start_loc_cpu", "seq_lens_cpu"],
 )
 @dataclass
@@ -53,6 +53,13 @@ class AttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+
+    # The actual number of requests padded to the compiled buckets. The bucket
+    # contains only max_reqs by default to reduce model precompilation time.
+    # If env var ATTN_BUCKETIZED_NUM_REQS=true, the buckets are the
+    # power of 2 between min and max requests.
+    # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
+    padded_num_reqs: int = -1
 
     query_start_loc_cpu: Any = field(init=False)
     seq_lens_cpu: Any = field(init=False)
