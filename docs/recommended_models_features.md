@@ -24,13 +24,35 @@ These tables show the models currently tested for accuracy and performance.
 
 ### Models
 
---8<-- "docs/includes/model_support.md"
+=== "Release"
+
+    --8<-- "docs/includes/model_support.md"
+
+=== "Nightly"
+
+    --8<-- "docs/includes/nightly_model_support.md"
+
+### Embedding Models
+
+=== "v7x"
+
+    {{ read_csv('support_matrices/release/v7x/default/model_support_matrix.csv') }}
+
+=== "v6e"
+
+    {{ read_csv('support_matrices/release/v6e/default/model_support_matrix.csv') }}
 
 ## Recommended Features
 
 This table shows the features currently tested for accuracy and performance.
 
---8<-- "docs/includes/core_features.md"
+=== "Release"
+
+    --8<-- "docs/includes/core_features.md"
+
+=== "Nightly"
+
+    --8<-- "docs/includes/nightly_core_features.md"
 
 ## Kernel Support
 
@@ -42,16 +64,34 @@ This table tracks high-level correctness and performance validation for distribu
 
 This section outlines the detailed hardware and precision validation for our core microbenchmark kernels.
 
---8<-- "docs/includes/microbenchmarks.md"
+=== "Release"
+
+    --8<-- "docs/includes/microbenchmarks.md"
+
+=== "Nightly"
+
+    --8<-- "docs/includes/nightly_microbenchmarks.md"
 
 ## Parallelism Support
 
 This table shows the current parallelism support status.
 
---8<-- "docs/includes/parallelism.md"
+=== "Release"
+
+    --8<-- "docs/includes/parallelism.md"
+
+=== "Nightly"
+
+    --8<-- "docs/includes/nightly_parallelism.md"
 
 ## Quantization Support
 
 This table shows the current quantization support status.
 
---8<-- "docs/includes/quantization.md"
+=== "Release"
+
+    --8<-- "docs/includes/quantization.md"
+
+=== "Nightly"
+
+    --8<-- "docs/includes/nightly_quantization.md"

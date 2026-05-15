@@ -376,7 +376,6 @@ class TestDPScheduler:
 
         # Verify new per-rank fields
         assert output.req_ids_per_rank == {0: ["req1"], 1: ["req2"]}
-        assert output.scheduled_tokens_per_rank == {0: [10], 1: [20]}
 
     def test_combine_cached_request_data(self, mock_vllm_config,
                                          mock_kv_cache_config,
@@ -753,7 +752,6 @@ class TestDPScheduler:
 
         # Verify new per-rank fields
         assert combined.req_ids_per_rank == {0: ["req1"], 1: ["req2"]}
-        assert combined.scheduled_tokens_per_rank == {0: [10], 1: [20]}
 
     def test_split_model_output_by_rank(self, mock_vllm_config,
                                         mock_kv_cache_config,
@@ -796,10 +794,6 @@ class TestDPScheduler:
             req_ids_per_rank={
                 0: ["req1", "req3"],
                 1: ["req2"]
-            },
-            scheduled_tokens_per_rank={
-                0: [5, 3],
-                1: [10]
             },
         )
 
@@ -873,10 +867,6 @@ class TestDPScheduler:
             req_ids_per_rank={
                 0: ["req1"],
                 1: ["req2"]
-            },
-            scheduled_tokens_per_rank={
-                0: [5],
-                1: [10]
             },
         )
 

@@ -318,16 +318,18 @@ class TestMultiModalManager:
         mock_scheduler_output_1.total_num_scheduled_tokens = 20
         mock_scheduler_output_1.num_scheduled_tokens = {req_id: 20}
 
-        gathered_embeds_1_padded, gathered_is_mm_embed_1 = self.runner.mm_manager.gather_mm_embeddings(
+        gathered_mm_embeds_1, gathered_is_mm_embed_1 = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output_1,
             target_pad_len=mock_scheduler_output_1.total_num_scheduled_tokens)
 
-        assert gathered_embeds_1_padded is not None
+        assert gathered_mm_embeds_1 is not None
+        assert isinstance(gathered_mm_embeds_1, list)
+        assert len(gathered_mm_embeds_1) == 1
         assert gathered_is_mm_embed_1 is not None
+
         expected_embeds_1 = encoder_embedding[0:10]
-        assert gathered_embeds_1_padded.shape[
-            0] == mock_scheduler_output_1.total_num_scheduled_tokens
-        gathered_embeds_1 = gathered_embeds_1_padded[:10]
+        gathered_embeds_1 = gathered_mm_embeds_1[0]
+
         assert gathered_embeds_1.shape == expected_embeds_1.shape
         np.testing.assert_array_equal(np.asarray(gathered_embeds_1),
                                       np.asarray(expected_embeds_1))
@@ -341,16 +343,19 @@ class TestMultiModalManager:
         mock_scheduler_output_2.total_num_scheduled_tokens = 30
         mock_scheduler_output_2.num_scheduled_tokens = {req_id: 30}
 
-        gathered_embeds_2_padded, gathered_is_mm_embed_2 = self.runner.mm_manager.gather_mm_embeddings(
+        gathered_mm_embeds_2, gathered_is_mm_embed_2 = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output_2,
             target_pad_len=mock_scheduler_output_2.total_num_scheduled_tokens)
 
-        assert gathered_embeds_2_padded is not None
+        assert gathered_mm_embeds_2 is not None
+        assert isinstance(gathered_mm_embeds_2, list)
+        assert len(gathered_mm_embeds_2) == 1
         assert gathered_is_mm_embed_2 is not None
+
         expected_embeds_2 = encoder_embedding[10:40]
-        assert gathered_embeds_2_padded.shape[
-            0] == mock_scheduler_output_2.total_num_scheduled_tokens
-        gathered_embeds_2 = gathered_embeds_2_padded[:30]
+        gathered_embeds_2 = gathered_mm_embeds_2[0]
+
+        assert gathered_embeds_2.shape == expected_embeds_2.shape
         np.testing.assert_array_equal(np.asarray(gathered_embeds_2),
                                       np.asarray(expected_embeds_2))
         assert gathered_is_mm_embed_2.shape == (30, )
@@ -363,16 +368,19 @@ class TestMultiModalManager:
         mock_scheduler_output_3.total_num_scheduled_tokens = 30
         mock_scheduler_output_3.num_scheduled_tokens = {req_id: 30}
 
-        gathered_embeds_3_padded, gathered_is_mm_embed_3 = self.runner.mm_manager.gather_mm_embeddings(
+        gathered_mm_embeds_3, gathered_is_mm_embed_3 = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output_3,
             target_pad_len=mock_scheduler_output_3.total_num_scheduled_tokens)
 
-        assert gathered_embeds_3_padded is not None
+        assert gathered_mm_embeds_3 is not None
+        assert isinstance(gathered_mm_embeds_3, list)
+        assert len(gathered_mm_embeds_3) == 1
         assert gathered_is_mm_embed_3 is not None
+
         expected_embeds_3 = encoder_embedding[40:56]
-        assert gathered_embeds_3_padded.shape[
-            0] == mock_scheduler_output_3.total_num_scheduled_tokens
-        gathered_embeds_3 = gathered_embeds_3_padded[:16]
+        gathered_embeds_3 = gathered_mm_embeds_3[0]
+
+        assert gathered_embeds_3.shape == expected_embeds_3.shape
         np.testing.assert_array_equal(np.asarray(gathered_embeds_3),
                                       np.asarray(expected_embeds_3))
         assert gathered_is_mm_embed_3.shape == (30, )

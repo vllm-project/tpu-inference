@@ -19,6 +19,7 @@ ARG VLLM_COMMIT_HASH=""
 FROM $BASE_IMAGE
 
 ARG IS_TEST="false"
+ARG BM_INFRA="false"
 
 # Update pip
 RUN pip install --upgrade pip
@@ -36,7 +37,19 @@ RUN apt-get update && apt-get install -y \
     bc \
     ca-certificates \
     unzip \
+    build-essential \
+    cmake \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
+
+# Conditionally install google-cloud-cli for benchmarking infrastructure
+RUN if [ "$BM_INFRA" = "true" ]; then \
+        apt-get update && apt-get install -y gnupg curl \
+        && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
+        && curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+        && apt-get update && apt-get install -y google-cloud-cli \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # Build vLLM
 WORKDIR /workspace/vllm
@@ -49,7 +62,7 @@ RUN git clone $VLLM_REPO . && \
     fi
 
 RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements/tpu.txt --retries 3
-RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install -e .
+RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install --no-build-isolation -e .
 
 # Install test dependencies
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/vllm_test_utils

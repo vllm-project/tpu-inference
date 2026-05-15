@@ -23,6 +23,7 @@ class PoolerFunc(Protocol):
         hidden_states: jax.Array,
         pooling_metadata: PoolingMetadata,
         seq_lens: np.ndarray,
+        num_scheduled_tokens: np.ndarray | None = None,
     ) -> PoolerOutput:
         ...
 

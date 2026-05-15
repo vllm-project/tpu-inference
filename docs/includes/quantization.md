@@ -10,13 +10,6 @@
   </thead>
   <tbody>
     <tr>
-      <td>AWQ INT4</td>
-      <td></td>
-      <td>v5, v6</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-    <tr>
       <td>FP4 W4A16</td>
       <td>mxfp4</td>
       <td>v7</td>

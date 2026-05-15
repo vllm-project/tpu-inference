@@ -24,6 +24,7 @@ from vllm.v1.attention.backend import (AttentionBackend, AttentionLayer,
 from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
                                                  register_backend)
 
+import tpu_inference.envs as envs
 from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import (
@@ -109,7 +110,7 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         pass
 
     def forward(self,
-                q: torch.Tensor,
+                q: tuple[torch.Tensor, torch.Tensor],
                 kv_c_normed: torch.Tensor,
                 k_pe: torch.Tensor,
                 kv_cache: jnp.ndarray,
@@ -126,7 +127,7 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         below anyways.
 
         Args:
-            q: torch.Tensor
+            q: q_nope, q_pe tuple of torch.Tensor
             kv_c_normed: torch.Tensor
             k_pe: torch.Tensor
             kv_cache: jnp.ndarray
@@ -139,21 +140,21 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             Tuple[jnp.ndarray, jnp.ndarray]: (new_kv_cache, outputs)
         """
 
-        q = jax_view(q)
+        q_nope, q_pe = q
+        q_nope = jax_view(q_nope)
+        q_pe = jax_view(q_pe)
         kv_c_normed = jax_view(kv_c_normed)
         k_pe = jax_view(k_pe)
-        input_dtype = q.dtype
+        input_dtype = q_nope.dtype
 
-        # Prepare inputs
-        q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=2)
-
-        # (B, N, P) x (N, P, L) -> (B, N, L)
-        # torch nn param
-        q_nope = (jnp.einsum("bnp,npl->bnl",
-                             q_nope,
-                             jax_view(layer.W_UK_T),
-                             preferred_element_type=jnp.float32) *
-                  jax_view(layer.W_UK_T_scale)).astype(input_dtype)
+        # Einsum selects 'n' as the batch axis and emits it as the major-most physical dimension.
+        q_nope = jnp.einsum(
+            "bnp,npl->nbl",
+            q_nope,
+            jax_view(layer.W_UK_T),  # torch nn param
+            preferred_element_type=jnp.float32)
+        scale = jax_view(layer.W_UK_T_scale)  # torch nn param
+        q_nope = (q_nope * scale).astype(input_dtype)
 
         q_scale = k_scale = v_scale = None
         if layer.kv_cache_quantized_dtype:
@@ -161,10 +162,14 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             k_scale = layer._k_scale_float
             v_scale = layer._v_scale_float
 
-            q_nope = static_per_tensor_quantize_tensor(
-                layer.kv_cache_quantized_dtype, q_nope, q_scale)
-            q_pe = static_per_tensor_quantize_tensor(
-                layer.kv_cache_quantized_dtype, q_pe, q_scale)
+            if not envs.DISABLE_MLA_Q_ACTIVATION_QUANTIZATION:
+                q_nope = static_per_tensor_quantize_tensor(
+                    layer.kv_cache_quantized_dtype, q_nope, q_scale)
+                q_pe = static_per_tensor_quantize_tensor(
+                    layer.kv_cache_quantized_dtype, q_pe, q_scale)
+            else:
+                # Needed because q_pe comes in as FP32, so we cast down to BF16
+                q_pe = q_pe.astype(input_dtype)
 
             kv_c_normed, _ = quantize_kv(layer.kv_cache_quantized_dtype,
                                          kv_c_normed,
@@ -174,7 +179,6 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
                                   k_pe,
                                   value=None,
                                   k_scale=k_scale)
-
         k_pe = k_pe.squeeze(1)
         new_kv_cache, outputs = mla_attention(
             q_nope,
@@ -186,17 +190,19 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             mesh,
             self.num_heads,
             self.qk_nope_head_dim,
+            query_nth_sharding=None,
             query_tnh_sharding=None,
             keyvalue_skh_sharding=None,
-            attn_o_tnh_sharding=None,
+            attn_o_nth_sharding=None,
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
             sm_scale=self.scale,
         )
 
-        outputs = outputs.reshape(-1, self.num_heads, self.kv_lora_rank)
-        outputs = (jnp.einsum("bnl,nlv->bnv",
+        # einsum selects 'n' as the major-most physical dimension again.
+        outputs = outputs.reshape(self.num_heads, -1, self.kv_lora_rank)
+        outputs = (jnp.einsum("nbl,nlv->bnv",
                               outputs,
                               jax_view(layer.W_UV),
                               preferred_element_type=jnp.float32) *

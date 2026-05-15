@@ -122,7 +122,8 @@ class TestVllmTPUMLAAttention:
                                             env=torchax.default_env())
         attn.W_UV = torchax.tensor.Tensor(jnp.ones((10, 10)),
                                           env=torchax.default_env())
-        attn.kv_b_proj = MagicMock()
+        attn.kv_b_proj = MagicMock(spec=torch.nn.Module)
+        attn.kv_b_proj.quant_method = MagicMock()
         attn.kv_b_proj.quant_method.linear_config.mesh = mesh
         attn.kv_b_proj.named_parameters.return_value = {}
 
@@ -177,7 +178,7 @@ class TestVllmTPUMLAAttention:
         mock_get_attention_context.return_value = (mock_attn_metadata, None,
                                                    None, None)
 
-        q = torch.rand(1, 10)
+        q = (torch.rand(1, 5), torch.rand(1, 5))
         kv_c_normed = torch.rand(1, 10)
         k_pe = torch.rand(1, 10)
 
@@ -238,7 +239,7 @@ class TestVllmTPUMLAAttention:
         mock_get_attention_context.return_value = (MagicMock(), None, None,
                                                    None)
 
-        q = torch.rand(1, 10)
+        q = (torch.rand(1, 5), torch.rand(1, 5))
         kv_c_normed = torch.rand(1, 10)
         k_pe = torch.rand(1, 10)
 

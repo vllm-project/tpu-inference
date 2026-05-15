@@ -85,7 +85,7 @@ class TestTPUJaxRunner:
         """Tests _get_input_ids_embeds for both multimodal and text-only models."""
         # 1. ===== Setup =====
         dummy_input_ids = jnp.array([1, 2, 3])
-        dummy_mm_embeds = jnp.ones((10, 128))
+        dummy_mm_embeds = [jnp.ones((10, 128))]
         dummy_is_mm_embed = jnp.array([False, True, True], dtype=jnp.bool_)
         dummy_final_embeds = jnp.ones((3, 128))
 
@@ -153,10 +153,14 @@ class TestTPUJaxRunner:
         self.runner.input_batch.num_reqs = 1
         self.runner.input_batch.req_ids = ['req1']
         self.runner.input_batch.req_id_to_index = {'req1': 0}
-        self.runner.input_batch.request_distribution = [0, 0, 1]
         self.runner.input_batch.num_computed_tokens_cpu = np.array([10])
         self.runner.input_batch.token_ids_cpu = np.random.randint(
             0, 1000, (8, 64), dtype=np.int32)
+        # Concrete numpy array so `.copy()` returns a real ndarray
+        # (otherwise the surrounding `device_array` introspection on
+        # `MagicMock` recurses on every `dtype` access).
+        self.runner.input_batch.mamba_state_indices_cpu = np.zeros(
+            self.runner.max_num_reqs, dtype=np.int32)
 
         # Mock block tables
         # there will be 2 block tables since there are 2 kv cache groups
@@ -171,7 +175,7 @@ class TestTPUJaxRunner:
         mock_sampling_instance = MagicMock()
         mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
 
-        output = self.runner._prepare_inputs_non_dp(scheduler_output)
+        output = self.runner._prepare_inputs(scheduler_output)
         assert len(output) == 8
         input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = output
         # assert it will create attention metadata for each layer.
@@ -272,7 +276,7 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
 
         self.runner.embed_input_ids_fn = MagicMock()
         dummy_input_ids = jnp.array([1, 2, 3])
-        dummy_mm_embeds = jnp.ones((10, 128))
+        dummy_mm_embeds = [jnp.ones((10, 128))]
         dummy_is_mm_embed = jnp.array([False, True, True], dtype=jnp.bool_)
         _ = self.runner._get_input_ids_embeds(dummy_input_ids, dummy_mm_embeds,
                                               dummy_is_mm_embed)

@@ -339,6 +339,7 @@ def sharded_ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    update_kv_cache: bool = True,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
@@ -384,15 +385,29 @@ def sharded_ragged_paged_attention(
         in_specs += (P(ShardingAxisName.ATTN_HEAD), )
         args += (attention_sink, )
 
+    # KV-share (update_kv_cache=False) is only supported by the non-hd64
+    # kernel. Fail loud if a caller tries to use it on the hd64 path so
+    # the bug surfaces immediately rather than silently writing to cache.
+    if use_hd64 and not update_kv_cache:
+        raise NotImplementedError(
+            "update_kv_cache=False (KV-share) is not supported on the "
+            "head_dim==64 RPA kernel.")
+
     def _ragged_paged_attention(*args):
-        return func(
-            *args,
+        kwargs = dict(
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
         )
+        # update_kv_cache is only supported by the non-hd64 path; the
+        # guard above rejects update_kv_cache=False on hd64. The default
+        # True is a no-op and we don't forward it to the hd64 signature
+        # (which doesn't accept it).
+        if not use_hd64:
+            kwargs["update_kv_cache"] = update_kv_cache
+        return func(*args, **kwargs)
 
     return jax.shard_map(
         _ragged_paged_attention,
@@ -417,6 +432,7 @@ def attention(
     k_scale: float | None = None,
     v_scale: float | None = None,
     sinks: jax.Array | None = None,
+    update_kv_cache: bool = True,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -455,13 +471,14 @@ def attention(
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
+        update_kv_cache=update_kv_cache,
     )
 
     return kv_cache, output
 
 
 def mla_attention(
-        q_TNA: jax.Array,
+        q_NTA: jax.Array,
         q_rope_TNH: jax.Array,
         k_SA: jax.Array,
         k_rope_SH: jax.Array,
@@ -470,9 +487,10 @@ def mla_attention(
         mesh: Mesh,
         num_attention_heads: int,
         qk_nope_head_dim: int,
+        query_nth_sharding: Sharding | None = None,
         query_tnh_sharding: Sharding | None = None,
         keyvalue_skh_sharding: Sharding | None = None,
-        attn_o_tnh_sharding: Sharding | None = None,
+        attn_o_nth_sharding: Sharding | None = None,
         q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
@@ -482,7 +500,7 @@ def mla_attention(
     output and kv cache update.
 
     Args:
-        q_TNA: (tokens_query, num_query_heads, q_lora_rank)
+        q_NTA: (num_query_heads, tokens_query, q_lora_rank) # head-major output from q_nope einsum projection.
         q_rope_TNH: (tokens_query, num_query_heads, head_dim)
         k_SA: (tokens_kv, q_lora_rank)
         k_rope_SH: (tokens_kv, head_dim)
@@ -491,31 +509,33 @@ def mla_attention(
         mesh: Mesh
         num_attention_heads: number of attention heads
         qk_nope_head_dim: head dim for QK without rope
-        query_tnh_sharding: sharding to use for q/q_rope for the shard map (MLA kernel)
+        query_nth_sharding: sharding to use for q_nope for the shard map (MLA kernel)
+        query_tnh_sharding: sharding to use for q_rope for the shard map (MLA kernel)
         keyvalue_skh_sharding: sharding to use for k/k_rope for the shard map (MLA kernel)
-        attn_o_tnh_sharding: sharding to use for the attention output for the shard map (MLA kernel)
+        attn_o_nth_sharding: sharding to use for the attention output for the shard map (MLA kernel)
         q_scale: scale to apply to q (if quantized)
         k_scale: scale to apply to k (if quantized)
         v_scale: scale to apply to v (if quantized)
         sm_scale: softmax scale
     """
     in_specs = (
-        query_tnh_sharding or P(ShardingAxisName.MLP_TENSOR, None, None),  # q
+        query_nth_sharding
+        or P(None, ShardingAxisName.MLP_TENSOR, None),  # q (head-major)
         query_tnh_sharding
-        or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope
+        or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope (token-major)
         keyvalue_skh_sharding or P(ShardingAxisName.MLP_TENSOR, None),  # k
         keyvalue_skh_sharding
         or P(ShardingAxisName.MLP_TENSOR, None),  # k_rope
-        P(ShardingAxisName.MLP_TENSOR),  # kv_cache
+        P(ShardingAxisName.BATCH),  # kv_cache
         P(ShardingAxisName.ATTN_DATA),  # md.seq_lens
         P(ShardingAxisName.ATTN_DATA),  # md.page_indices_flat
         P(ShardingAxisName.ATTN_DATA),  # md.query_start_loc
         P(ShardingAxisName.ATTN_DATA),  # md.distribution
     )
     out_specs = (
-        P(ShardingAxisName.MLP_TENSOR),  # kv cache
-        attn_o_tnh_sharding
-        or P(ShardingAxisName.MLP_TENSOR, None, None)  # attn output
+        P(ShardingAxisName.BATCH),  # kv cache
+        attn_o_nth_sharding
+        or P(None, ShardingAxisName.MLP_TENSOR, None)  # attn output
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
@@ -546,7 +566,7 @@ def mla_attention(
                       mesh=mesh,
                       in_specs=in_specs,
                       out_specs=out_specs,
-                      check_vma=False))(q_TNA, q_rope_TNH, k_SA, k_rope_SH,
+                      check_vma=False))(q_NTA, q_rope_TNH, k_SA, k_rope_SH,
                                         kv_cache, md.seq_lens, md.block_tables,
                                         md.query_start_loc,
                                         md.request_distribution)

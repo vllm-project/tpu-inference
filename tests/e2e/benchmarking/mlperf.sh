@@ -70,9 +70,14 @@ helpFunction()
    echo -e "\t-p The path to the processed MLPerf dataset (default: None, which will download the dataset)"
    echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-0.5B-Instruct, meta-llama/Llama-3.1-8B-Instruct and meta-llama/Llama-4-Scout-17B-16E-Instruct)"
    echo -e "\t-n Number of prompts to use for the benchmark (default: 10)"
+   echo -e "\t-t The timeout in seconds to wait for the vLLM server to start (default: 1800)"
    echo -e "\t--use-dummy-weights Use dummy random weight (default: false)"
    exit 1
 }
+
+# print all sets environment variables
+echo "Environment variables:"
+printenv
 
 # Access shared benchmarking functionality
 # shellcheck disable=SC1091
@@ -105,6 +110,12 @@ while [[ "$#" -gt 0 ]]; do
             shift
             shift
             ;;
+        -t|--timeout)
+            TIMEOUT_SECONDS="$2"
+            export TIMEOUT_SECONDS
+            shift
+            shift
+            ;;
         --use-dummy-weights)
             use_dummy_weights=true
             shift
@@ -122,6 +133,8 @@ done
 
 echo "Using the root directory at $root_dir"
 echo "Using $num_prompts prompts"
+echo "Using server timeout of $TIMEOUT_SECONDS seconds"
+
 
 
 cd "$root_dir" || exit
@@ -131,24 +144,44 @@ if [ -z "$dataset_path" ]; then
         echo "Dataset name must be mlperf if dataset_path is not specified.  We only support downloading the MLPerf dataset at this time."
         exit 1
     fi
-    # Only download the dataset if it doesn't already exist
-    dataset_path="$root_dir"/open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl
+
+    dataset_path="$root_dir/open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+    EXPECTED_SHA256="b64e66e54b6267f79eb4f9ccec52d466bab3ac94747ed258c3b0f337ed166fab"
+
     if [ ! -f "$dataset_path" ]; then
-        echo "Downloading the MLPerf dataset"
-        curl https://rclone.org/install.sh | bash
-        rclone config create mlc-inference s3 provider=Cloudflare access_key_id=f65ba5eef400db161ea49967de89f47b secret_access_key=fbea333914c292b854f14d3fe232bad6c5407bf0ab1bebf78833c2b359bdfd2b endpoint=https://c2686074cb2caf5cbaf6d134bdba8b47.r2.cloudflarestorage.com
+        echo "Downloading and verifying the MLPerf dataset..."
+        
+        # Check if rclone is installed; if not, install it via package manager for security
+        if ! command -v rclone &> /dev/null; then
+            echo "rclone not found. Installing..."
+            sudo apt-get update && sudo apt-get install -y rclone
+        fi
+
+        rclone config create mlc-inference s3 provider=Cloudflare \
+            access_key_id=f65ba5eef400db161ea49967de89f47b \
+            secret_access_key=fbea333914c292b854f14d3fe232bad6c5407bf0ab1bebf78833c2b359bdfd2b \
+            endpoint=https://c2686074cb2caf5cbaf6d134bdba8b47.r2.cloudflarestorage.com
         rclone copy mlc-inference:mlcommons-inference-wg-public/open_orca ./open_orca -P
         gzip -d open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl.gz
     else
         echo "Not downloading the MLPerf dataset because it already exists"
     fi
+
+    echo "Verifying file integrity..."
+    if ! echo "$EXPECTED_SHA256  $dataset_path" | sha256sum -c -; then
+        echo "CRITICAL SECURITY ERROR: SHA256 hash mismatch for $dataset_path!"
+        echo "The file may be corrupted or tampered with. Deleting file and exiting."
+        rm -f "$dataset_path"
+        exit 1
+    fi
+    echo "Verification successful."
 fi
 
 if [ "$use_dummy_weights" = true ]; then
     extra_serve_args+=("--load-format=dummy")
 fi
 
-if [ "$USE_V6E8_QUEUE" == "True" ]; then
+if [ "$USE_V6E8_QUEUE" == "True" ] || [ "$USE_V7X8_QUEUE" == "True" ]; then
     # Set to 8 if job is in 8 chips queue.
     # TODO (Qiliang Cui) Rename USE_V6E8_QUEUE to USE_8_CHIPS_QUEUE
     DEVICE_COUNT=8
@@ -159,6 +192,7 @@ elif [ "$TPU_VERSION" == "tpu7x" ]; then
 else
     DEVICE_COUNT=1
 fi
+echo "device count: $DEVICE_COUNT"
 extra_serve_args+=(--tensor-parallel-size "${DEVICE_COUNT}")
 
 
@@ -286,12 +320,18 @@ for model_name in $model_list; do
             current_serve_args+=(--hf-overrides '{"architectures": ["Llama4ForCausalLM"]}')
         fi
     else
-        if [[ "${model_name,,}" == *"deepseek"* ]]; then
+        if [[ "${model_name,,}" == *"deepseek"* || "${model_name,,}" == *"kimi"* ]]; then
             max_batched_tokens=1024
-            served_name=deepseek-ai/DeepSeek-R1
-            current_serve_args+=(--served-model-name "${served_name}"  --load-format=runai_streamer   --trust-remote-code --kv-cache-dtype=fp8 )
-            current_serve_args+=(--hf_overrides '{"num_hidden_layers": 5}' )
-            current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "expert_parallelism": '"${DEVICE_COUNT}"', "tensor_parallelism": 1}}, "replicate_attn_weights": "True", "sparse_matmul": "True"}')
+            if [[ "${model_name,,}" == *"kimi"* ]]; then
+                served_name=moonshotai/Kimi-K2.6
+                current_serve_args+=(--kv-cache-dtype=fp8 --gpu-memory-utilization 0.977 --limit-mm-per-prompt='{"image": 0, "video": 0, "vision_chunk": 0}' )
+                current_serve_args+=(--served-model-name "${served_name}"  --load-format=runai_streamer   --trust-remote-code --kv-cache-dtype=fp8 --additional-config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "tensor_parallelism": '"${DEVICE_COUNT}"'}}}')
+            else
+                served_name=deepseek-ai/DeepSeek-R1
+                current_serve_args+=(--served-model-name "${served_name}"  --load-format=runai_streamer   --trust-remote-code --kv-cache-dtype=fp8 )
+                current_serve_args+=(--hf_overrides '{"num_hidden_layers": 5}' )
+                current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "expert_parallelism": '"${DEVICE_COUNT}"', "tensor_parallelism": 1}}, "replicate_attn_weights": "True", "sparse_matmul": "True"}')
+            fi
         fi
     fi
 
@@ -312,6 +352,7 @@ for model_name in $model_list; do
     --dataset-name "$dataset_name" \
     --dataset-path "$dataset_path" \
     --num-prompts "$num_prompts" \
+    --trust-remote-code \
     --run-eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
         # TODO (jacobplatin): probably want to add an option to skip this in the future

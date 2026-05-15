@@ -63,8 +63,14 @@ REQUEST_RATE=${REQUEST_RATE:=4}
 
 NUM_PREFILL_INSTANCES=1
 NUM_DECODE_INSTANCES=1
-PREFILLER_TP_SIZE=1
-DECODER_TP_SIZE=1
+if [ "${TPU_VERSION:-}" = "tpu7x" ]; then
+    PREFILLER_TP_SIZE=2
+    DECODER_TP_SIZE=2
+else
+    PREFILLER_TP_SIZE=1
+    DECODER_TP_SIZE=1
+fi
+echo "TPU_VERSION=${TPU_VERSION:-<unset>} | PREFILLER_TP_SIZE=$PREFILLER_TP_SIZE | DECODER_TP_SIZE=$DECODER_TP_SIZE"
 
 PREFILL_HOSTS=()
 PREFILL_PORTS=()
@@ -109,7 +115,13 @@ cleanup_instances() {
   echo "Cleaning up any running vLLM instances..."
   pkill -f "vllm" || true
   pkill -f "toy_proxy_server" || true
-  sleep 1
+  sleep 5
+  pkill -9 -f "vllm" || true
+  pkill -9 -f "toy_proxy_server" || true
+  sudo fuser -k -9 /dev/vfio/* 2>/dev/null || true
+  sudo fuser -k -9 /dev/accel* 2>/dev/null || true
+  sudo rm -rf /tmp/jax_cache_* || true
+  sudo rm -f /tmp/libtpu_lockfile || true
 }
 
 LOG_DIR=$HOME/logs
@@ -130,6 +142,7 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     PORT=$((8400 + i))
     KV_PORT=$((7100 + i))
     SIDE_PORT=$((6100 + i))
+    JAX_PORT=$((1200 + i))
 
     # os.environ[TPU_CHIPS_PER_PROCESS_BOUNDS] = "1,4,1"
     # os.environ[TPU_PROCESS_BOUNDS] = "1,1,1"
@@ -141,9 +154,12 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     \
     TPU_KV_TRANSFER_PORT=$KV_PORT \
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
-    SKIP_JAX_PRECOMPILE=0 \
+    SKIP_JAX_PRECOMPILE=1 \
     VLLM_XLA_CHECK_RECOMPILATION=0 \
     VLLM_XLA_CACHE_PATH="/tmp/jax_cache_$PORT" \
+    JAX_COORDINATOR_ADDRESS="127.0.0.1:$JAX_PORT" \
+    JAX_PROCESS_ID=0 \
+    JAX_NUM_PROCESSES=1 \
     \
     vllm serve $MODEL \
     --port $PORT \
@@ -167,6 +183,7 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     KV_PORT=$((7200 + i))
     # Same as prefill SIDE_PORT
     SIDE_PORT=$((6100 + i))
+    JAX_PORT=$((1210 + i))
 
     # os.environ[TPU_CHIPS_PER_PROCESS_BOUNDS] = "1,4,1"
     # os.environ[TPU_PROCESS_BOUNDS] = "1,1,1"
@@ -178,9 +195,12 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     \
     TPU_KV_TRANSFER_PORT=$KV_PORT \
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
-    SKIP_JAX_PRECOMPILE=0 \
+    SKIP_JAX_PRECOMPILE=1 \
     VLLM_XLA_CHECK_RECOMPILATION=0 \
     VLLM_XLA_CACHE_PATH="/tmp/jax_cache_$PORT" \
+    JAX_COORDINATOR_ADDRESS="127.0.0.1:$JAX_PORT" \
+    JAX_PROCESS_ID=0 \
+    JAX_NUM_PROCESSES=1 \
     \
     vllm serve $MODEL \
     --port $PORT \

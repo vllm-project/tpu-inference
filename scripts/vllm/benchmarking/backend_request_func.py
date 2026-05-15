@@ -189,6 +189,8 @@ async def _openai_fetch(
                             if usage := data.get("usage"):
                                 output.output_tokens = usage.get(
                                     "completion_tokens")
+                                output.prompt_tokens = usage.get(
+                                    "prompt_tokens") or 0
                     if first_chunk_received:
                         output.success = True
                     else:

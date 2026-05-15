@@ -246,6 +246,134 @@ def test_swap_states_only_swaps_active_tokens(input_batch: InputBatch):
     assert input_batch.num_tokens_no_spec[1] == 6
 
 
+def test_mamba_state_indices_unique_per_request(input_batch: InputBatch):
+    """Two concurrent requests must never receive the same mamba slot id —
+    if they did, the GDN op would write both requests' recurrent state
+    into the same physical cache slot and corrupt one of them. Also
+    verifies slot 0 is reserved (vLLM's null block convention)."""
+    for i in range(4):
+        input_batch.add_request(create_dummy_request(f"req-{i}"))
+
+    slots = input_batch.mamba_state_indices_cpu[:input_batch.num_reqs].tolist()
+    assert len(set(slots)) == len(slots), \
+        f"Slots not unique across concurrent requests: {slots}"
+    assert all(s >= 1 for s in slots), \
+        f"Slot 0 is the null block and must not be assigned: {slots}"
+
+
+def test_mamba_state_indices_freed_on_remove(input_batch: InputBatch):
+    """Removing a request must return its slot id to the free pool so the
+    next add reuses it (rather than running the pool dry)."""
+    req = create_dummy_request("req-0")
+    input_batch.add_request(req)
+    slot_first = int(input_batch.mamba_state_indices_cpu[0])
+
+    input_batch.remove_request("req-0")
+    # condense() with empty_indices=[0] would early-return because num_reqs==0,
+    # so we just verify the slot is back in the pool.
+    assert slot_first in input_batch._free_mamba_slots
+
+    new_req = create_dummy_request("req-new")
+    input_batch.add_request(new_req)
+    # The most-recently-freed slot is at the end of the free list — pop()
+    # returns it, so the new request gets the same id back.
+    assert int(input_batch.mamba_state_indices_cpu[0]) == slot_first
+
+
+def test_mamba_state_indices_follow_condense(input_batch: InputBatch):
+    """When condense moves a request to a different persistent-batch slot,
+    its mamba state id must follow it — otherwise the GDN op reads stale
+    state from the recurrent_state cache. This is the bug that broke gsm8k
+    accuracy on Qwen3.5-397B (only triggered when requests finish out of
+    order, which `--ignore-eos` benchmarks suppress)."""
+    reqs = [create_dummy_request(f"req-{i}") for i in range(4)]
+    for req in reqs:
+        input_batch.add_request(req)
+
+    # Snapshot the slot id assigned to each request before any churn.
+    slot_for_req = {
+        rid: int(input_batch.mamba_state_indices_cpu[idx])
+        for rid, idx in input_batch.req_id_to_index.items()
+    }
+
+    # Remove the lower-indexed requests so condense has to move the higher
+    # ones down: [req-0, req-1, req-2, req-3] → [req-3, req-2, _, _].
+    input_batch.remove_request("req-0")
+    input_batch.remove_request("req-1")
+    input_batch.condense(sorted([0, 1], reverse=True))
+
+    # After condense, indexing-by-persistent-slot must yield the same slot
+    # id each request had before the move.
+    assert input_batch.req_id_to_index["req-3"] == 0
+    assert input_batch.req_id_to_index["req-2"] == 1
+    assert int(input_batch.mamba_state_indices_cpu[0]) == slot_for_req["req-3"]
+    assert int(input_batch.mamba_state_indices_cpu[1]) == slot_for_req["req-2"]
+
+
+def test_mamba_state_indices_no_duplicate_in_padded_tail(
+        input_batch: InputBatch):
+    """The padded tail `mamba_state_indices_cpu[num_reqs:]` must not contain
+    any slot id that is also used by an active request.
+
+    If it did, the GDN op's `recurrent_state.at[state_indices].set(...)`
+    scatter would have duplicate destination indices: the active position
+    writes the new state, the padded position writes back the stale
+    pre-update state, and JAX's scatter-with-duplicates is undefined on
+    XLA. The active request's freshly computed state silently loses the
+    race and the request decodes from corrupted recurrent state.
+
+    Reproduces the production symptom: outputs look fine on a fresh batch,
+    then turn to garbage as soon as the persistent batch starts churning
+    (out-of-order completions → `condense` → stale slot ids in the tail).
+    """
+    # Fill, then remove a mix of low and high indices so condense actually
+    # has to move requests downward (the case that left stale ids before
+    # the fix).
+    for i in range(MAX_NUM_REQS):
+        input_batch.add_request(create_dummy_request(f"req-{i}"))
+    for req_id in ("req-0", "req-2", "req-5"):
+        input_batch.remove_request(req_id)
+    input_batch.condense(sorted([0, 2, 5], reverse=True))
+
+    num_reqs = input_batch.num_reqs
+    active = set(input_batch.mamba_state_indices_cpu[:num_reqs].tolist())
+    tail = set(input_batch.mamba_state_indices_cpu[num_reqs:].tolist())
+    assert active.isdisjoint(tail), (
+        "Padded tail still references active slot ids "
+        f"(overlap={active & tail}); the GDN scatter will alias.")
+    # Tail should be the null slot (0) so the scatter folds harmlessly into
+    # the reserved null block.
+    assert tail <= {0}, f"Padded tail contains non-null slot ids: {tail}"
+
+
+def test_mamba_state_indices_remove_clears_position(input_batch: InputBatch):
+    """remove_request must clear the slot id at the vacated position so it
+    does not survive into the padded tail (the source of the scatter-alias
+    bug fixed alongside the trailing-tail invariant)."""
+    input_batch.add_request(create_dummy_request("req-0"))
+    input_batch.add_request(create_dummy_request("req-1"))
+
+    input_batch.remove_request("req-1")
+    # Without condense the position is still in the active range from
+    # `mamba_state_indices_cpu`'s perspective, but `req_id_to_index` no
+    # longer references it; the field at that index must read as null
+    # so the next add doesn't observe a leftover from a prior occupant.
+    assert int(input_batch.mamba_state_indices_cpu[1]) == 0
+
+
+def test_mamba_state_indices_swap(input_batch: InputBatch):
+    """swap_states swaps the request mappings, so the slot ids must swap too."""
+    input_batch.add_request(create_dummy_request("req-0"))
+    input_batch.add_request(create_dummy_request("req-1"))
+    slot0 = int(input_batch.mamba_state_indices_cpu[0])
+    slot1 = int(input_batch.mamba_state_indices_cpu[1])
+
+    input_batch.swap_states(0, 1)
+
+    assert int(input_batch.mamba_state_indices_cpu[0]) == slot1
+    assert int(input_batch.mamba_state_indices_cpu[1]) == slot0
+
+
 def test_all_greedy_property(input_batch: InputBatch):
     """Tests the `all_greedy` property."""
     # Initially true
@@ -279,8 +407,21 @@ def test_get_pooling_metadata(input_batch: InputBatch):
         return all(checks)
 
     def meta_eq(a: PoolingMetadata, b: PoolingMetadata):
-        assert a.prompt_token_ids is None and b.prompt_token_ids is None
+
+        def is_none_or_empty(t):
+            return t is None or (torch.is_tensor(t) and t.numel() == 0)
+
+        if is_none_or_empty(a.prompt_token_ids) and is_none_or_empty(
+                b.prompt_token_ids):
+            token_ids_eq = True
+        elif not is_none_or_empty(a.prompt_token_ids) and not is_none_or_empty(
+                b.prompt_token_ids):
+            token_ids_eq = torch.equal(a.prompt_token_ids, b.prompt_token_ids)
+        else:
+            token_ids_eq = False
+
         checks = [
+            token_ids_eq,
             torch.equal(a.prompt_lens, b.prompt_lens),
             len(a.pooling_params) == len(b.pooling_params),
             len(a.pooling_states) == len(b.pooling_states),
@@ -317,7 +458,8 @@ def test_get_pooling_metadata(input_batch: InputBatch):
         input_batch.get_pooling_metadata(),
         PoolingMetadata(
             prompt_lens=torch.tensor([10], dtype=torch.int32),
-            prompt_token_ids=None,
+            prompt_token_ids=torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]],
+                                          dtype=torch.int32),
             prompt_token_ids_cpu=None,
             pooling_params=[pooling_param],
             pooling_states=[pooling_state],

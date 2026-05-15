@@ -25,6 +25,14 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
+declare -a BENCHMARK_DOCKER_ARGS=()
+
+# Check if the serialized string exists and is not empty.
+if [ -n "${BENCHMARK_DOCKER_ARGS_STR:-}" ]; then
+  mapfile -t BENCHMARK_DOCKER_ARGS <<< "${BENCHMARK_DOCKER_ARGS_STR}"
+fi
+printf "[INFO] %s = %s\n" "BENCHMARK_DOCKER_ARGS" "${BENCHMARK_DOCKER_ARGS[*]}"
+
 # TODO(Qiliang Cui): This is temp solution to mitigate the docker image
 #     not cleaned issue when migrating benchmark to buildkite.
 docker rm -f vllm-tpu || true
@@ -35,19 +43,37 @@ ENV_VARS=(
   -e MINIMUM_ACCURACY_THRESHOLD="${MINIMUM_ACCURACY_THRESHOLD:-}"
   -e MINIMUM_THROUGHPUT_THRESHOLD="${MINIMUM_THROUGHPUT_THRESHOLD:-}"
   -e TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-}"
+  -e TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-}"
   -e INPUT_LEN="${INPUT_LEN:-}"
   -e OUTPUT_LEN="${OUTPUT_LEN:-}"
   -e PREFIX_LEN="${PREFIX_LEN:-}"
   -e MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
   -e MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
   -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+  # For kernel tuning pipeline env vars
+  -e KERNEL_TUNING_CASE_SET_ID="${KERNEL_TUNING_CASE_SET_ID:-}"
+  -e KERNEL_TUNING_RUN_ID="${KERNEL_TUNING_RUN_ID:-}"
+  -e KERNEL_TUNING_KERNEL_NAME="${KERNEL_TUNING_KERNEL_NAME:-}"
+  -e KERNEL_TUNING_CASE_SET_DESC="${KERNEL_TUNING_CASE_SET_DESC:-}"
+  -e KERNEL_TUNING_TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-}"
+  -e KERNEL_TUNING_TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
+  -e KERNEL_TUNING_JOB_PRIORITY="${PRIORITY_KERNEL_TUNING:--10}"
+  -e KERNEL_TUNING_MAX_EXECUTION_MINUTES="${KERNEL_TUNING_MAX_EXECUTION_MINUTES:-20}"
+  -e HOST_NAME="${HOST_NAME:-}"
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
-    MODEL_IMPL_TYPE=flax_nnx
+    MODEL_IMPL_TYPE=auto
 fi
 
 IMAGE_NAME='vllm-tpu'
+declare -a DEV_MOUNT=()
+if [[ "${DEV_MODE:-false}" == "true" ]]; then
+    FULL_IMAGE_TAG="${IMAGE_NAME}:dev"
+    DEV_MOUNT+=("-v" "$(pwd):/workspace/tpu_inference")
+else
+    FULL_IMAGE_TAG="${IMAGE_NAME}:${BUILDKITE_COMMIT}"
+fi
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Source the environment setup script
 # shellcheck disable=SC1091
@@ -77,15 +103,22 @@ else
   exit 1
 fi
 
+# Temporary directory for kernel tuning outputs (not persisted)
+KERNEL_TUNING_TMP_DIR="/tmp/kernel_tuning"
+mkdir -p "$KERNEL_TUNING_TMP_DIR"
+
 # Some test scripts set tp=2 on TPU_VERSION=tpu7x to mitigate test failures.
 # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
 
 exec docker run \
+  --name "$IMAGE_NAME" \
   --privileged \
   --net host \
   --shm-size=16G \
   --rm \
   -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
+  -v "$KERNEL_TUNING_TMP_DIR":"$KERNEL_TUNING_TMP_DIR" \
+  "${DEV_MOUNT[@]}" \
   "${ENV_VARS[@]}" \
   "${TEST_SUITE_VARS[@]}" \
   -e HF_HOME="$DOCKER_HF_HOME" \
@@ -99,5 +132,9 @@ exec docker run \
   ${TPU_VERSION:+-e TPU_VERSION="$TPU_VERSION"} \
   ${SKIP_ACCURACY_TESTS:+-e SKIP_ACCURACY_TESTS="$SKIP_ACCURACY_TESTS"} \
   ${VLLM_MLA_DISABLE:+-e VLLM_MLA_DISABLE="$VLLM_MLA_DISABLE"} \
-  "${IMAGE_NAME}:${BUILDKITE_COMMIT}" \
+  ${USE_V7X8_QUEUE:+-e USE_V7X8_QUEUE="$USE_V7X8_QUEUE"} \
+  ${MOE_REQUANTIZE_BLOCK_SIZE:+-e MOE_REQUANTIZE_BLOCK_SIZE="$MOE_REQUANTIZE_BLOCK_SIZE"} \
+  ${MOE_REQUANTIZE_WEIGHT_DTYPE:+-e MOE_REQUANTIZE_WEIGHT_DTYPE="$MOE_REQUANTIZE_WEIGHT_DTYPE"} \
+   "${BENCHMARK_DOCKER_ARGS[@]}" \
+  "$FULL_IMAGE_TAG" \
   "$@" # Pass all script arguments as the command to run in the container

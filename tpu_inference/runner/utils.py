@@ -7,11 +7,15 @@ import datetime
 import functools
 import json
 import os
+import shutil
 import time
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 import jax
+import jax.numpy as jnp
+import numpy as np
 from jax._src.interpreters import pxla
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
@@ -34,6 +38,9 @@ DECODE_HEAVY_RATIO_THRESHOLD = 0.2
 BALANCED_RATIO_THRESHOLD = (0.4, 0.6)
 PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR = 15
 PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP = 0
+# For decode only batches, start capturing traces after all requests in the
+# batch has KV caches that have reached this length threshold
+PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD = -1
 
 logger = init_logger(__name__)
 
@@ -62,6 +69,26 @@ def get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
         num = get_padded_num_reqs_with_upper_limit(num + 1, max_req_size)
     logger.info(f"Prepared request paddings: {paddings}")
     return paddings
+
+
+def get_attn_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
+    """Get num reqs paddings with custom override to reduce compilation time"""
+    if not envs.ATTN_BUCKETIZED_NUM_REQS:
+        reqs = [max_req_size]
+    elif envs.ATTN_CUSTOM_NUM_REQS_BUCKETS:
+        reqs = envs.ATTN_CUSTOM_NUM_REQS_BUCKETS
+    else:
+        reqs = get_req_paddings(min_req_size, max_req_size)
+
+    if max_req_size not in reqs:
+        logger.info(
+            "max_num_reqs must be supported but is not in ATTN_CUSTOM_NUM_REQS_BUCKETS. Adding max_num_reqs to the num_reqs buckets."
+        )
+        reqs.append(max_req_size)
+
+    logger.info(f"Prepared attn request paddings: {reqs}")
+
+    return reqs
 
 
 def get_token_paddings(min_token_size: int, max_token_size: int,
@@ -186,22 +213,25 @@ class ForbidCompile:
 
 
 def get_batch_composition_stats(
-        input_batch: InputBatch, total_num_scheduled_tokens: int,
-        num_reqs: int, padded_total_num_scheduled_tokens: int,
+        batch_id: int, input_batch: InputBatch,
+        total_num_scheduled_tokens: int, num_reqs: int,
+        padded_total_num_scheduled_tokens: int,
         scheduler_output: "VllmSchedulerOutput") -> dict:
     """
     Logs the total number of tokens scheduled for the batch, the number of
     prefill tokens, the number of decode tokens, and the number of padded
     tokens scheduled for the batch.
     Args:
+        batch_id: The sequential id of the batch.
         input_batch: The input batch.
         total_num_scheduled_tokens: The total number of tokens scheduled for the batch.
         num_reqs: The number of requests in the batch.
         padded_total_num_scheduled_tokens: The padded total number of tokens scheduled for the batch.
         scheduler_output: The scheduler output.
     Returns:
-        A string containing the total number of tokens scheduled for the batch, the number of
-        prefill tokens, the number of decode tokens, and the number of padded tokens scheduled for the batch.
+        A dict containing the batch id, the total number of tokens scheduled for the batch, the number of
+        prefill tokens, the number of decode tokens, the number of padded tokens scheduled for the batch,
+        the number of requests in the batch, and the phase of the inference the batch is in.
     """
     num_prefill_tokens = 0
     num_decode_tokens = 0
@@ -212,6 +242,7 @@ def get_batch_composition_stats(
     num_computed_tokens_per_req = input_batch.num_computed_tokens_cpu[:
                                                                       num_reqs]
 
+    min_kv_len = float('inf') if num_reqs > 0 else 0
     for i, req_id in enumerate(input_batch.req_ids[:num_reqs]):
         assert req_id is not None
 
@@ -220,7 +251,9 @@ def get_batch_composition_stats(
         num_scheduled_tokens_per_req_list.append(num_scheduled_for_req)
 
         # This is the number of tokens already processed for this request (before this step)
-        num_already_computed = num_computed_tokens_per_req[i]
+        num_already_computed = int(
+            num_computed_tokens_per_req[i])  # Cast from np.int32
+        min_kv_len = min(min_kv_len, num_already_computed)
 
         if num_already_computed == 0:
             # Prefill
@@ -233,13 +266,18 @@ def get_batch_composition_stats(
             else:
                 # It's a single token for an ongoing request, so it's decode
                 num_decode_tokens += 1
-    return {
+
+    stats = {
+        "batch_id": batch_id,
         "total_num_scheduled_tokens": total_num_scheduled_tokens,
         "num_prefill_tokens": num_prefill_tokens,
         "num_decode_tokens": num_decode_tokens,
         "padded_total_num_scheduled_tokens": padded_total_num_scheduled_tokens,
-        "num_reqs": num_reqs
+        "num_reqs": num_reqs,
+        "min_kv_len": min_kv_len if min_kv_len != float('inf') else 0
     }
+    stats["phase"] = determine_phase_from_batch_composition_stats(stats).name
+    return stats
 
 
 def determine_phase_from_batch_composition_stats(
@@ -310,6 +348,9 @@ class PhasedBasedProfiler:
             os.getenv("PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP",
                       PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP))
         self.decode_steps_skipped: int = 0
+        self.decode_kv_len_threshold: int = int(
+            os.getenv("PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD",
+                      PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD))
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phase_seen: dict = {
@@ -331,6 +372,9 @@ class PhasedBasedProfiler:
             logger.info(
                 "Will skip %d decode-heavy steps before profiling decode_heavy phase.",
                 self.num_decode_steps_to_skip)
+        if self.decode_kv_len_threshold >= 0:
+            logger.info("Will skip decode-only steps until min KV len >= %d.",
+                        self.decode_kv_len_threshold)
 
     def _write_batch_composition_stats_to_file_helper(
             self, batch_composition_stats: dict) -> None:
@@ -376,6 +420,16 @@ class PhasedBasedProfiler:
                     self.decode_steps_skipped, self.num_decode_steps_to_skip)
                 break
 
+            # Skip decode-only steps until min KV len reaches threshold
+            if phase == InferencePhase.DECODE_ONLY and \
+                    self.decode_kv_len_threshold >= 0:
+                min_kv_len = batch_composition_stats.get("min_kv_len", 0)
+                if min_kv_len < self.decode_kv_len_threshold:
+                    logger.debug(
+                        "Skipping decode-only step as min KV len %d < threshold %d.",
+                        min_kv_len, self.decode_kv_len_threshold)
+                    break
+
             self.inference_phase_seen[phase] = True
             self.profiling_n_steps_left = self.num_steps_to_profile_for
 
@@ -420,9 +474,60 @@ class PhasedBasedProfiler:
             self.profiling_n_steps_left -= 1
             if self.profiling_n_steps_left <= 0:
                 jax.profiler.stop_trace()
+                if envs.TPU_MULTIHOST_BACKEND == "ray":
+                    self._merge_multihost_profile_directories()
                 logger.info(
                     f"Profiling for {self.current_phase} phase finished")
                 self.current_phase = ""
+
+    def _merge_multihost_profile_directories(self) -> None:
+        """
+        Merges multi-host JAX profiler timestamp subdirectories that drift due to asynchronous step trigger times.
+
+        Fixes issues where separate host nodes create disjoint timestamp folders due to 1-2 seconds startup
+        skew, which blocks downstream multi-host profile analysis tools (e.g., c2xprof or TensorBoard profile plugins)
+        from recognizing them as a single concurrent distributed profiling session.
+
+        Example split state before merge:
+          .../plugins/profile/2026_05_06_04_47_36/j-1b8d22de-2250-4697-9dfc-ray-node-1-0.xplane.pb
+          .../plugins/profile/2026_05_06_04_47_38/j-1b8d22de-2250-4697-9dfc-ray-node-0-0.xplane.pb
+
+        After merge:
+          All host trace artifacts are consolidated under the earliest timestamp folder (2026_05_06_04_47_36/).
+        """
+        profile_path = os.path.join(self.profile_dir_with_phase_suffix,
+                                    "plugins", "profile")
+        if not os.path.exists(profile_path):
+            return
+        try:
+            # Get all timestamp subdirectories sorted by time
+            dirs = sorted([
+                d for d in os.listdir(profile_path)
+                if os.path.isdir(os.path.join(profile_path, d))
+            ])
+            if len(dirs) <= 1:
+                return
+
+            # Use the earliest directory as the canonical destination target
+            target_dir = os.path.join(profile_path, dirs[0])
+
+            # Move all files from trailing directories into the canonical target directory
+            for src in dirs[1:]:
+                src_dir = os.path.join(profile_path, src)
+                for f in os.listdir(src_dir):
+                    src_file = os.path.join(src_dir, f)
+                    dst_file = os.path.join(target_dir, f)
+                    shutil.move(src_file, dst_file)
+                try:
+                    os.rmdir(src_dir)
+                except Exception:
+                    pass
+            logger.info(
+                "Successfully merged multi-host profile directories into: %s",
+                dirs[0])
+        except Exception as e:
+            logger.warning(
+                "Failed to merge multi-host profile directories: %s", e)
 
     def step(self, batch_composition_stats: dict) -> None:
         """
@@ -450,3 +555,54 @@ class PhasedBasedProfiler:
             # We are in the middle of profiling a given phase
             else:
                 self._step_or_stop_profiling(batch_composition_stats)
+
+
+@functools.partial(
+    jax.tree_util.register_dataclass,
+    data_fields=[
+        "draft_token_ids",
+        "draft_lengths",
+        "target_logits_indices",
+        "bonus_logits_indices",
+        "final_logits_indices",
+    ],
+    meta_fields=[],
+    drop_fields=["draft_lengths_cpu"],
+)
+@dataclass
+class SpecDecodeMetadata:
+    """Metadata for speculative decoding on JAX/TPU, containing all necessary indices."""
+    draft_token_ids: jnp.ndarray
+    draft_lengths: jnp.ndarray
+    target_logits_indices: jnp.ndarray
+    bonus_logits_indices: jnp.ndarray
+    final_logits_indices: jnp.ndarray
+
+    draft_lengths_cpu: Any = field(init=False)
+
+
+def host_extract_sampled_tokens(
+        runner, spec_decode_metadata: Optional[SpecDecodeMetadata],
+        sampled_output: jnp.ndarray, logits_indices_selector: np.ndarray,
+        discard_sampled_tokens_req_indices: list):
+    """host retrieve the sampled tokens for the current step."""
+
+    num_reqs = runner.input_batch.num_reqs
+    next_tokens = sampled_output
+    if spec_decode_metadata is None:
+        next_tokens = np.asarray(jax.device_get(next_tokens))
+        # Map tokens back to the pre-dp shuffling order
+        if logits_indices_selector is not None:
+            next_tokens = next_tokens[logits_indices_selector]
+        selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
+        valid_sampled_token_ids = selected_token_ids.tolist()
+    else:
+        valid_sampled_token_ids = runner.rejection_sampler.parse_output(
+            next_tokens, runner.input_batch.vocab_size,
+            spec_decode_metadata.draft_lengths_cpu, num_reqs,
+            spec_decode_metadata.draft_token_ids.shape[0])
+    # Mask out the sampled tokens that should not be sampled.
+    for i in discard_sampled_tokens_req_indices:
+        valid_sampled_token_ids[i].clear()
+
+    return valid_sampled_token_ids

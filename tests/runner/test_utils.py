@@ -264,47 +264,51 @@ class MockSchedulerOutput:
 
 
 @pytest.mark.parametrize(
-    "scenario, num_reqs, req_ids, computed, scheduled, expected_prefill, expected_decode",
+    "scenario, num_reqs, req_ids, computed, scheduled, expected_prefill, expected_decode, expected_phase",
     [
         ("prefill_only", 2, [101, 102], [0, 0], {
             101: 50,
             102: 100
-        }, 150, 0),
+        }, 150, 0, "PREFILL_ONLY"),
         ("decode_only", 3, [201, 202, 203], [10, 20, 5], {
             201: 1,
             202: 1,
             203: 1
-        }, 0, 3),
+        }, 0, 3, "DECODE_ONLY"),
         ("mixed_batch", 4, [301, 302, 303, 304], [0, 10, 0, 20], {
             301: 100,
             302: 1,
             303: 50,
             304: 1
-        }, 150, 2),
+        }, 150, 2, "PREFILL_HEAVY"),
         ("chunked_prefill", 2, [401, 402], [50, 10], {
             401: 50,
             402: 1
-        }, 50, 1),
+        }, 50, 1, "PREFILL_HEAVY"),
     ])
 def test_get_batch_composition_stats(scenario, num_reqs, req_ids, computed,
                                      scheduled, expected_prefill,
-                                     expected_decode):
+                                     expected_decode, expected_phase):
     """Tests get_batch_composition_stats for various scenarios."""
     input_batch = MockInputBatch(req_ids, computed)
     scheduler_output = MockSchedulerOutput(scheduled)
     total_tokens = sum(scheduled.values())
+    batch_id = 42
 
     stats = get_batch_composition_stats(
+        batch_id=batch_id,
         input_batch=input_batch,
         total_num_scheduled_tokens=total_tokens,
         num_reqs=num_reqs,
         padded_total_num_scheduled_tokens=total_tokens + 8,
         scheduler_output=scheduler_output)
 
+    assert stats["batch_id"] == batch_id
     assert stats["num_prefill_tokens"] == expected_prefill
     assert stats["num_decode_tokens"] == expected_decode
     assert stats["num_reqs"] == num_reqs
     assert stats["total_num_scheduled_tokens"] == total_tokens
+    assert stats["phase"] == expected_phase
 
 
 @pytest.mark.parametrize("prefill_tokens, total_tokens, expected_phase", [
@@ -526,3 +530,76 @@ def test_phased_profiler_skip_only_affects_decode_heavy(profiler_fixture):
     profiler.step(stats)
     assert mock_start.call_count == 2  # Not started yet
     assert profiler.decode_steps_skipped == 1
+
+
+def test_phased_profiler_skips_decode_only_steps_based_on_kv_len(
+        profiler_fixture):
+    """Tests that the profiler skips DECODE_ONLY steps until min KV len reaches threshold."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_stop = profiler_fixture["mock_stop"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
+
+    kv_len_threshold = 10
+    profiler.decode_kv_len_threshold = kv_len_threshold
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100, "min_kv_len": 5}
+    mock_determine_phase.return_value = InferencePhase.DECODE_ONLY
+
+    # Should be skipped as min_kv_len (5) < threshold (10)
+    profiler.step(stats)
+    mock_start.assert_not_called()
+    assert not profiler.inference_phase_seen[InferencePhase.DECODE_ONLY]
+
+    # Should start profiling as min_kv_len (10) >= threshold (10)
+    stats["min_kv_len"] = 10
+    profiler.step(stats)
+    mock_start.assert_called_once()
+    assert profiler.inference_phase_seen[InferencePhase.DECODE_ONLY]
+    assert profiler.current_phase == "decode_only"
+    assert profiler.profiling_n_steps_left == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
+
+    # Profiling continues
+    stats["min_kv_len"] = 11
+    profiler.step(stats)
+    mock_start.assert_called_once()
+
+    # Complete the profiling cycle (1 more step already done in the step above)
+    for _ in range(PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR - 1):
+        profiler.step(stats)
+    mock_stop.assert_called_once()
+    assert profiler.current_phase == ""
+
+
+def test_merge_multihost_profile_directories(tmp_path):
+    """Tests that multi-host profile directories with different timestamps are consolidated correctly."""
+    profiler = PhasedBasedProfiler(profile_dir=str(tmp_path))
+    phase_dir = tmp_path / "prefill_heavy"
+    profiler.profile_dir_with_phase_suffix = str(phase_dir)
+
+    profile_path = phase_dir / "plugins" / "profile"
+    dir_early = profile_path / "2026_05_06_04_47_36"
+    dir_late = profile_path / "2026_05_06_04_47_38"
+
+    # Create the nested timestamped directories
+    dir_early.mkdir(parents=True, exist_ok=True)
+    dir_late.mkdir(parents=True, exist_ok=True)
+
+    # Create dummy host files inside each directory
+    file_early = dir_early / "node-1-0.xplane.pb"
+    file_late = dir_late / "node-0-0.xplane.pb"
+    file_early.write_text("dummy_trace_data_1")
+    file_late.write_text("dummy_trace_data_0")
+
+    # Execute consolidation merge
+    profiler._merge_multihost_profile_directories()
+
+    # Verify that the trailing directory is deleted and all files are merged into the earliest directory
+    assert dir_early.exists()
+    assert not dir_late.exists()
+    assert (dir_early / "node-1-0.xplane.pb").exists()
+    assert (dir_early / "node-0-0.xplane.pb").exists()
+    assert (dir_early /
+            "node-1-0.xplane.pb").read_text() == "dummy_trace_data_1"
+    assert (dir_early /
+            "node-0-0.xplane.pb").read_text() == "dummy_trace_data_0"
