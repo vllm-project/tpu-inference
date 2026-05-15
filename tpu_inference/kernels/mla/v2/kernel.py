@@ -25,6 +25,7 @@ from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.mla.v2.transpose import xpose_pipeline
 from tpu_inference.logger import init_logger
+from tpu_inference.kernels.mla.v2.tuned_block_sizes import lookup_tunable_params
 
 logger = init_logger(__name__)
 
@@ -1555,7 +1556,9 @@ def mla_ragged_paged_attention(
         decode_batch_size=decode_batch_size,
         debug_mode=debug_mode,
     )
-    actual_num_q_heads, _, actual_lkv_dim = ql_nope.shape
+    actual_num_q_heads, max_num_tokens, actual_lkv_dim = ql_nope.shape
+    _, _, actual_r_dim = q_pe.shape
+    bd_tuning_key = (max_num_tokens, actual_num_q_heads, actual_lkv_dim, actual_r_dim, 'batched_decode')
 
     ql_nope = prepare_q_nope_inputs(
         ql_nope)  # [max_num_tokens, num_q_heads, lkv_dim]
@@ -1749,6 +1752,13 @@ def mla_ragged_paged_attention(
     batch_distribution = (distribution[0] //
                           decode_batch_size) * decode_batch_size
     # Batched decode
+    decode_tunable_params = lookup_tunable_params(bd_tuning_key)
+    if not decode_tunable_params:
+        decode_tunable_params = {
+            'num_kv_pages_per_block': num_kv_pages_per_blocks[0],
+            'num_queries_per_block': num_queries_per_blocks[0],
+            'decode_batch_size': decode_batch_size,
+        }
     ql_nope, updated_kv = run_mla_kernel(
         ql_nope,
         q_pe,
@@ -1758,12 +1768,12 @@ def mla_ragged_paged_attention(
         kv_lens,
         page_indices,
         cu_q_lens,
-        num_kv_pages_per_block=num_kv_pages_per_blocks[0],
-        num_queries_per_block=num_queries_per_blocks[0],
+        num_kv_pages_per_block=decode_tunable_params['num_kv_pages_per_block'],
+        num_queries_per_block=decode_tunable_params['num_queries_per_block'],
         start_seq_idx=jnp.array(0),
         end_seq_idx=batch_distribution,
         static_q_len=1,
-        batch_size=decode_batch_size,
+        batch_size=decode_tunable_params['decode_batch_size'],
         s_dtype=s_dtype,
         p_same_dtype_as_v=p_same_dtype_as_v,
         case=MlaCase.BATCHED_DECODE,
