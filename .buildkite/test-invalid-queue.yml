@@ -16,4 +16,4 @@ steps:
   - label: "Test Invalid Queue"
     command: "echo hello"
     agents:
-      queue: "non-existent-queue-for-testing"
+      queue: "cpu"
