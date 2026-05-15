@@ -165,6 +165,27 @@ def setup_environment():
              test_utils.get_spmd_mesh(2)])
 def test_quant_override(mesh):
     """VllmNvfp4Config.override_quantization_method detects NVFP4."""
+    # 1. New style: quant_library + quant_algo (ModelOpt)
+    result = VllmNvfp4Config.override_quantization_method(
+        {
+            "quant_library": "MODELOPT",
+            "quant_algo": "NVFP4"
+        },
+        user_quant=None,
+    )
+    assert result == NVFP4
+
+    # 2. Case insensitivity check
+    result = VllmNvfp4Config.override_quantization_method(
+        {
+            "quant_library": "modelopt",
+            "quant_algo": "nvfp4"
+        },
+        user_quant=None,
+    )
+    assert result == NVFP4
+
+    # 3. Old style: quant_method (fallback to super)
     result = VllmNvfp4Config.override_quantization_method(
         {
             "quant_method": "modelopt",
@@ -174,12 +195,19 @@ def test_quant_override(mesh):
     )
     assert result == NVFP4
 
-    # Non-NVFP4 should return None.
+    # 4. Non-NVFP4 should return None (or whatever super returns).
     result = VllmNvfp4Config.override_quantization_method(
         {
-            "quant_method": "modelopt",
+            "quant_library": "MODELOPT",
             "quant_algo": "FP8"
         },
+        user_quant=None,
+    )
+    assert result is None
+
+    # 5. hf_quant_cfg=None should return None (fallback to super).
+    result = VllmNvfp4Config.override_quantization_method(
+        None,
         user_quant=None,
     )
     assert result is None
