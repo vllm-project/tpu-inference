@@ -23,5 +23,13 @@ class VllmFusedMoE(FusedMoE):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super().forward(hidden_states, router_logits)
+        # This plugin is needed to pass through Hash MoE layers'
+        # input_ids through the **kwargs argument.
+        # The actual hash routing logicand precomputed topk_ids) lives in three other files:
+        #   1. fused_moe_gmm.py — (TODO) support (optional) precomputed_topk_ids in fused_moe_func
+        #   2. interface/moe.py — (TODO) thread precomputed_topk_ids through vllm_moe_apply
+        #   3. deepseek_v4_fp8.py — detect hash layers in
+        #      apply_monolithic, compute hash_table[input_ids], pass to vllm_moe_apply
+        return super().forward(hidden_states, router_logits, **kwargs)

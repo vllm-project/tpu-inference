@@ -25,6 +25,8 @@ from tpu_inference.layers.vllm.quantization.awq import VllmAWQConfig
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
     VllmCompressedTensorsConfig
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
+from tpu_inference.layers.vllm.quantization.deepseek_v4_fp8 import \
+    VllmDeepseekV4Fp8Config
 from tpu_inference.layers.vllm.quantization.fp8 import VllmFp8Config
 from tpu_inference.layers.vllm.quantization.mxfp4 import VllmMxfp4Config
 from tpu_inference.layers.vllm.quantization.nvfp4 import VllmNvfp4Config
@@ -41,6 +43,7 @@ def get_tpu_quantization_config(vllm_config: VllmConfig,
         quant_methods.COMPRESSED_TENSORS: VllmCompressedTensorsConfig,
         quant_methods.AWQ: VllmAWQConfig,
         quant_methods.FP8: VllmFp8Config,
+        quant_methods.DSV4_FP8: VllmDeepseekV4Fp8Config,
         quant_methods.MXFP4: VllmMxfp4Config,
         quant_methods.NVFP4: VllmNvfp4Config,
     }

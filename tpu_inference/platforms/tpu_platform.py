@@ -92,7 +92,7 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = [
-        "tpu_int8", "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4",
+        "tpu_int8", "compressed-tensors", "awq", "fp8", "deepseek_v4_fp8", "gpt_oss_mxfp4",
         "modelopt_fp4"
     ]
 
@@ -226,10 +226,19 @@ class TpuPlatform(Platform):
         if cache_config and not cache_config.user_specified_block_size:
             if vllm_config.model_config:
                 if vllm_config.model_config.use_mla:
-                    from tpu_inference.layers.vllm.backends.flash_attn_mla import \
-                        PallasMLAttentionBackend
-                    cache_config.block_size = PallasMLAttentionBackend.get_page_size(
-                        vllm_config)  # type: ignore[assignment]
+                    if "DeepseekV4ForCausalLM" in (
+                            vllm_config.model_config.architectures or []):
+                        from tpu_inference.layers.vllm.backends.deepseek_v4_mla import \
+                            PallasDeepseekV4MLABackend
+                        cache_config.block_size = \
+                            PallasDeepseekV4MLABackend.get_page_size(
+                                vllm_config)  # type: ignore[assignment]
+                    else:
+                        from tpu_inference.layers.vllm.backends.flash_attn_mla import \
+                            PallasMLAttentionBackend
+                        cache_config.block_size = \
+                            PallasMLAttentionBackend.get_page_size(
+                                vllm_config)  # type: ignore[assignment]
                 else:
                     from tpu_inference.layers.vllm.backends.flash_attn import \
                         PallasAttentionBackend

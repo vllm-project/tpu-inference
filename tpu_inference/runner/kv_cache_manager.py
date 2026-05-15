@@ -437,10 +437,15 @@ class KVCacheManager:
         text_config = getattr(model_config, "hf_text_config",
                               getattr(model_config, "hf_config", None))
         if self.use_mla:
-            # Individually pad the RopE and latents
+            # Individually pad the RoPE and latents.
+            # V3 config: kv_lora_rank=512 (nope dim), qk_rope_head_dim=64
+            # V4 config: no kv_lora_rank; head_dim = nope + rope, so nope = head_dim - rope
             qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
-            padded_kv_lora_rank = common_utils.align_to(
-                text_config.kv_lora_rank, 128)
+            kv_lora_rank = getattr(
+                text_config, "kv_lora_rank",
+                getattr(text_config, "head_dim", 0) - qk_rope_head_dim,
+            )
+            padded_kv_lora_rank = common_utils.align_to(kv_lora_rank, 128)
             padded_qk_rope_head_dim = common_utils.align_to(
                 qk_rope_head_dim, 128)
             mla_head_size = padded_kv_lora_rank + padded_qk_rope_head_dim
@@ -805,9 +810,14 @@ class KVCacheManager:
                     if j == 0 or duplicate_shared_layers:
                         # NOTE: we'll multiply the num_kv_heads by 2 in the function
                         if self.use_mla:
-
-                            head_size = text_config.kv_lora_rank + \
-                                text_config.qk_rope_head_dim
+                            # V3 config: kv_lora_rank=512 (nope dim), qk_rope_head_dim=64
+                            # V4 config: no kv_lora_rank; head_dim = nope + rope
+                            qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
+                            kv_lora_rank = getattr(
+                                text_config, "kv_lora_rank",
+                                getattr(text_config, "head_dim", 0) - qk_rope_head_dim,
+                            )
+                            head_size = kv_lora_rank + qk_rope_head_dim
                         else:
                             head_size = layer_spec.head_size
                         kv_cache = create_kv_caches(

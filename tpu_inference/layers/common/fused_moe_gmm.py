@@ -456,11 +456,15 @@ def fused_moe_func(
 
     Returns:
         Output of moe operation [num_tokens, hidden_size]
+
+    TODO: Add precomputed_topk_ids: jax.Array | None = None parameter (shape [T, top_k])
+    for DeepSeek-V4 hash-MoE routing. When provided, skip the internal top-k calculation:
     """
     num_tokens, hidden_size = hidden_states.shape
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
 
+    # TODO only call if not using hash MoE layers.
     assert (num_tokens * topk) % 16 == 0, (
         "The kernel requires num_tokens * topk to be a multiple of "
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
