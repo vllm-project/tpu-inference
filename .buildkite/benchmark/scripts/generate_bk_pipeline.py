@@ -37,7 +37,6 @@ COMMAND_SPECIFIC_VALIDATION = {
     "vllm_serve": {
         "seed": 42,
         "async-scheduling": True,
-        "disable-log-requests": True,
         "no-enable-prefix-caching": True,
     },
     "vllm_bench_serve": {
@@ -161,22 +160,23 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
                     f"Validation Error: {file_path} '{arg_name}' must be explicitly set to {display_val} "
                     f"in options with command_type '{cmd_type}'.")
 
-    # Identity and Dataset Path Validation
+    # Verify dataset-name for both `vllm_bench_serve` and `lm_eval`
     dataset_name = client_args.get("dataset-name")
     if not dataset_name:
         errors.append(
             f"Validation Error: {file_path} is missing 'dataset-name' in client_command_options."
         )
-    else:
-        # Check for dataset-path (Required if not a random dataset)
-        is_random = dataset_name in ["random", "random-mm"]
-        if not is_random and not client_args.get("dataset-path"):
-            errors.append(
-                f"Validation Error: {file_path} has dataset-name '{dataset_name}' "
-                "but is missing 'dataset-path' in client_command_options.")
 
-    # vllm_bench_serve Specific Rules
+    # Specific Rules for `vllm_bench_serve`
     if client_cmd_type == "vllm_bench_serve":
+        if dataset_name:
+            # Check for dataset-path (Required if not a random dataset)
+            is_random = dataset_name in ["random", "random-mm"]
+            if not is_random and not client_args.get("dataset-path"):
+                errors.append(
+                    f"Validation Error: {file_path} has dataset-name '{dataset_name}' "
+                    "but is missing 'dataset-path' in client_command_options.")
+
         # Model consistency check to ensure client/server are aligned
         client_model = client_args.get("model")
         if not client_model:
