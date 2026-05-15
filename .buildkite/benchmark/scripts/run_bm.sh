@@ -326,6 +326,10 @@ EXPECTED_ETEL=${EXPECTED_ETEL:-3600000}
 NUM_PROMPTS=${NUM_PROMPTS:-1000}
 PREFIX_LEN=${PREFIX_LEN:-0}
 
+# When modifying run_benchmark(), please note that it is executed in a subshell, 
+# so any unexpected error stack traces cannot be properly caught by the parent process.
+# When adding commands, ensure they do not throw errors, proactively validate expected errors, 
+# and print error logs for easier debugging.
 run_benchmark(){
   echo "running benchmark..." >&2
   echo "logging to $BM_LOG" >&2
@@ -373,7 +377,7 @@ run_benchmark(){
   echo "throughput: $throughput, P99 E2EL: $p99_e2el" >&2
 
   if [ -z "$throughput" ] || [ -z "$p99_e2el" ]; then
-    echo "[ERROR] Unable to extract metrics from the log. Please check if $BM_LOG is correctly formatted or if the test failed." >&2
+    echo "[ERROR] Unable to extract metrics from the log. Please check the format of the statistical results in $BM_LOG, or if the test failed." >&2
     return 1
   fi
 
