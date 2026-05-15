@@ -93,19 +93,8 @@ class TestGroupSamplingPrefixCache:
             "outputs but some were identical")
 
     def test_group_sampling_hits_prefix_cache(self, llm: LLM):
-        """Repeated group sampling on the same prompt should speed up.
+        """Repeated group sampling on the same prompt should speed up."""
 
-        The first call with a prompt populates the prefix cache but does
-        not benefit from it (the prompt must be fully prefilled).  The
-        second call with the *same* prompt should hit the cache and skip
-        prefill, so it should be at least as fast as the first call.
-
-        We cannot compare against a "cache-miss" control prompt because
-        _generate_timed runs multiple iterations and the control prompt
-        itself gets cached after its first iteration, making the two
-        equally fast.  Instead we rely on the cold-vs-warm comparison
-        which reliably shows a ~2-3× speedup.
-        """
         prompt = (
             "Reinforcement learning is a branch of machine learning where "
             "an agent learns to make decisions by interacting with an "
