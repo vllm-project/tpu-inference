@@ -63,7 +63,8 @@ class SpeculativeDecodingManager:
         input_ids: Optional[jnp.ndarray] = None,
     ) -> None:
         if async_scheduling:
-            assert self.runner.speculative_config.method == "eagle3", "async scheduling is only supported with eagle3 spec decoding"
+            assert self.runner.speculative_config.use_eagle(
+            ), "async scheduling is only supported with eagle3 spec decoding"
         if self.runner.speculative_config.method == "ngram":
             assert isinstance(self.runner.drafter, NgramProposer)
             # For n-gram based proposer, the drafter run on host
@@ -77,7 +78,7 @@ class SpeculativeDecodingManager:
                 valid_sampled_token_ids[:self.runner.input_batch.num_reqs],
                 self.runner.input_batch.num_tokens_no_spec,
                 self.runner.input_batch.token_ids_cpu)
-        elif self.runner.speculative_config.method == "eagle3":
+        elif self.runner.speculative_config.use_eagle():
             self._draft_token_ids = self.propose_eagle3_draft_token_ids(
                 spec_decode_metadata,
                 last_sampled_token_id,
@@ -140,15 +141,15 @@ class SpeculativeDecodingManager:
             target_hidden_states=target_hidden_states,
         )
 
-        if not async_scheduling:
+        if async_scheduling:
+            if jnp.ndim(draft_token_ids) == 1:
+                draft_token_ids = jnp.expand_dims(draft_token_ids, 1)
+            return draft_token_ids
+        else:
             draft_token_ids = np.array(draft_token_ids)
             if draft_token_ids.ndim == 1:
                 draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
             return draft_token_ids.tolist()
-        else:
-            if jnp.ndim(draft_token_ids) == 1:
-                draft_token_ids = jnp.expand_dims(draft_token_ids, 1)
-            return draft_token_ids
 
     def get_spec_decode_metadata(
         self,

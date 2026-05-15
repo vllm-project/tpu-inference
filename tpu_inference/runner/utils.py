@@ -564,7 +564,7 @@ class SpecDecodeMetadata:
 def host_extract_sampled_tokens(
         runner, spec_decode_metadata: Optional[SpecDecodeMetadata],
         sampled_output: jnp.ndarray, logits_indices_selector: np.ndarray,
-        discard_sampled_tokens_req_indices: list, num_reqs):
+        discard_sampled_tokens_req_indices: list, num_reqs: int):
     """host retrieve the sampled tokens for the current step."""
     next_tokens = sampled_output
     if spec_decode_metadata is None:

@@ -1175,9 +1175,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_next_tokens = None
             if self.speculative_config:
                 assert spec_decode_last_sampled_token_id is not None
-                spec_decode_next_tokens = concat_last_sampled_tokens_and_draft_tokens(
-                    spec_decode_last_sampled_token_id,
-                    self.speculative_decoding_manager._draft_token_ids)
+                with self.maybe_forbid_compile:
+                    spec_decode_next_tokens = concat_last_sampled_tokens_and_draft_tokens(
+                        spec_decode_last_sampled_token_id,
+                        self.speculative_decoding_manager._draft_token_ids)
 
             # Save the previous results
             next_tokens = jax.copy_to_host_async(next_tokens)

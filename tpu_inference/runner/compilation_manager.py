@@ -32,7 +32,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.runner.utils import SpecDecodeMetadata
-from tpu_inference.spec_decode.jax.utils import extract_last_sampled_tokens
+from tpu_inference.spec_decode.jax.utils import (
+    concat_last_sampled_tokens_and_draft_tokens, extract_last_sampled_tokens)
 from tpu_inference.utils import device_array, to_jax_dtype
 
 if TYPE_CHECKING:
@@ -121,6 +122,8 @@ class CompilationManager:
                 self._precompile_substitute_placeholder_token()
                 if self.runner.speculative_config:
                     self._precompile_subtract_num_rejected_tokens()
+                    self._precompile_concat_last_sampled_tokens_and_draft_tokens(
+                    )
             if not self.runner.is_last_rank:
                 return
             self._precompile_select_from_array()
@@ -388,6 +391,33 @@ class CompilationManager:
                 positions_subtract_indices,
                 num_tokens=num_tokens,
             )
+
+    def _precompile_concat_last_sampled_tokens_and_draft_tokens(self) -> None:
+        logger.info(
+            "Compiling concat_last_sampled_tokens_and_draft_tokens with "
+            "different input shapes.")
+        num_spec_tokens = (
+            self.runner.speculative_config.num_speculative_tokens)
+        max_num_reqs = self.runner.max_num_reqs
+        replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
+
+        last_sampled_tokens = device_array(self.runner.mesh,
+                                           jnp.ones((max_num_reqs, ),
+                                                    dtype=jnp.int32),
+                                           sharding=replicated_sharding)
+        draft_tokens = device_array(self.runner.mesh,
+                                    jnp.ones((max_num_reqs, num_spec_tokens),
+                                             dtype=jnp.int32),
+                                    sharding=replicated_sharding)
+        self._run_compilation(
+            f"worker{self.runner.rank} "
+            "concat_last_sampled_tokens_and_draft_tokens",
+            concat_last_sampled_tokens_and_draft_tokens,
+            last_sampled_tokens,
+            draft_tokens,
+            max_num_reqs=max_num_reqs,
+            num_spec_tokens=num_spec_tokens,
+        )
 
     def _precompile_backbone_text_only(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
