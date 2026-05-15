@@ -252,6 +252,7 @@ class PersistentBatchManager:
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         removed_req_indices = sorted(removed_req_indices, reverse=True)
+        dp_rank_map = getattr(scheduler_output, 'assigned_dp_rank', None)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
             if removed_req_indices:
@@ -260,7 +261,8 @@ class PersistentBatchManager:
             else:
                 # Append to the end.
                 req_index = None
-            self.input_batch.add_request(req_state, req_index)
+            dp_rank = dp_rank_map.get(req_id, 0) if dp_rank_map else 0
+            self.input_batch.add_request(req_state, req_index, dp_rank=dp_rank)
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:

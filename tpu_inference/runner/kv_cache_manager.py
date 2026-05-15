@@ -80,6 +80,7 @@ class KVCacheManager:
         # mamba state with `attn_metadata.mamba_state_indices` (in
         # `[0, max_num_reqs]`) so it stays in-bounds for the smaller arrays.
         self._mamba_num_blocks: int | None = None
+        self.actual_mamba_num_blocks: int | None = None
 
     def _create_attention_spec(
             self,
@@ -629,6 +630,7 @@ class KVCacheManager:
                 vocab_size=self.runner.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
                 num_speculative_tokens=num_speculative_tokens,
+                dp_size=self.runner.dp_size,
             )
             self.runner.input_batch = new_input_batch
             self.runner.persistent_batch_manager.input_batch = new_input_batch
@@ -748,6 +750,8 @@ class KVCacheManager:
             mamba_num_blocks = (self._mamba_num_blocks
                                 if self._mamba_num_blocks is not None else
                                 num_blocks)
+            if self.actual_mamba_num_blocks is None:
+                self.actual_mamba_num_blocks = mamba_num_blocks
 
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
                 layer_spec = layer_name_to_spec[layer_name]
