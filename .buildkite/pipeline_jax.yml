@@ -96,6 +96,6 @@ steps:
                 --trust-remote-code " \
               "vllm bench serve --model deepseek-ai/DeepSeek-R1 \
                 --dataset-name random --random-input-len 1024 \
-                --random-output-len 8192 --num-prompts 5120 \
+                --random-output-len 8192 --num-prompts 2560 \
                 --ignore-eos --skip-chat-template"
             fi
