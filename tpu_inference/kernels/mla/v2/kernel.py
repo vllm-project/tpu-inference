@@ -1752,13 +1752,13 @@ def mla_ragged_paged_attention(
     batch_distribution = (distribution[0] //
                           decode_batch_size) * decode_batch_size
     # Batched decode
-    decode_tunable_params = lookup_tunable_params(bd_tuning_key)
-    if not decode_tunable_params:
-        decode_tunable_params = {
-            'num_kv_pages_per_block': num_kv_pages_per_blocks[0],
-            'num_queries_per_block': num_queries_per_blocks[0],
-            'decode_batch_size': decode_batch_size,
-        }
+    # decode_tunable_params = lookup_tunable_params(bd_tuning_key)
+    # if not decode_tunable_params:
+    #     decode_tunable_params = {
+    #         'num_kv_pages_per_block': num_kv_pages_per_blocks[0],
+    #         'num_queries_per_block': num_queries_per_blocks[0],
+    #         'decode_batch_size': decode_batch_size,
+    #     }
     ql_nope, updated_kv = run_mla_kernel(
         ql_nope,
         q_pe,
@@ -1768,12 +1768,12 @@ def mla_ragged_paged_attention(
         kv_lens,
         page_indices,
         cu_q_lens,
-        num_kv_pages_per_block=decode_tunable_params['num_kv_pages_per_block'],
-        num_queries_per_block=decode_tunable_params['num_queries_per_block'],
+        num_kv_pages_per_block=num_kv_pages_per_blocks[0],
+        num_queries_per_block=num_queries_per_blocks[0],
         start_seq_idx=jnp.array(0),
         end_seq_idx=batch_distribution,
         static_q_len=1,
-        batch_size=decode_tunable_params['decode_batch_size'],
+        batch_size=decode_batch_size,
         s_dtype=s_dtype,
         p_same_dtype_as_v=p_same_dtype_as_v,
         case=MlaCase.BATCHED_DECODE,
