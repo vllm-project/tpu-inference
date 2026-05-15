@@ -553,7 +553,7 @@ def ragged_gather_reduce(
             num_row_partitions=num_row_partitions,
             num_column_partitions=num_column_partitions,
         ),
-        out_type=jax.ShapeDtypeStruct(
+        out_shape=jax.ShapeDtypeStruct(
             (x.shape[0] // reduce_group_size, x.shape[1]),
             jnp.float32,
         ),
@@ -561,18 +561,16 @@ def ragged_gather_reduce(
             use_tc_tiling_on_sc=True,
             disable_bounds_checks=True,
         ),
-        scratch_types=dict(
-            num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes, ),
-                                                           jnp.int32),
-            out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-            prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
-            src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.float32),
-            sorted_by_validity_vmem_ref=pltpu.VMEM((num_simd_lanes, ),
-                                                   jnp.int32),
-            sem_ref=pltpu.SemaphoreType.DMA((2, )),
-        ),
+        scratch_shapes=[
+            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+            pltpu.VMEM((1, col_size), jnp.uint32),
+            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            pltpu.VMEM((num_simd_lanes, ), jnp.float32),
+            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            pltpu.SemaphoreType.DMA((2, )),
+        ],
         mesh=vector_mesh,
         name="sc_ragged_gather_reduce",
     )(
