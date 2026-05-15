@@ -22,6 +22,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
+                                                            RunConfig,
+                                                            TunerConfig,
                                                             TuningCase,
                                                             TuningStatus)
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
@@ -159,15 +161,16 @@ class RpaV3KernelTuner(KernelTunerBase):
     # not based on any real computation, but rather is just a placeholder to
     # demonstrate the tuning pipeline.
 
-    def __init__(self, storage_manager, tpu_queue_multi=None):
-        super().__init__(tuning_key_class=TuningKey,
-                         tunable_params_class=TunableParams,
-                         storage_manager=storage_manager,
-                         job_bucket_size=100,
-                         kernel_tuner_name="rpa_v3_kernel_tuner",
-                         tpu_queue_multi=tpu_queue_multi
-                         )  # Use a small bucket size for testing
-        self.max_num_tokens = 128
+    def __init__(self, run_config: RunConfig):
+        self.tuner_config = TunerConfig(
+            tuning_key_class=TuningKey,
+            tunable_params_class=TunableParams,
+            kernel_tuner_name="rpa_v3_kernel_tuner")
+        self.run_config = run_config
+
+        super().__init__(tuner_config=self.tuner_config,
+                         run_config=self.run_config)
+
         self.max_model_len = 2048
         self.max_num_seqs = 128
         self.bkv_p_lst = [64, 128]
