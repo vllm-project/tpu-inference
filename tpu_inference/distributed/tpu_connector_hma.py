@@ -40,6 +40,7 @@ from tpu_inference.distributed.tpu_connector import (
 # isort: on
 from tpu_inference.distributed.transfer_stats import TransferStats
 from tpu_inference.logger import init_logger
+from tpu_inference.runner.mamba_slot_pool import ReleaseOutcome
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -202,6 +203,12 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
         self.stats = TransferStats(
             log_prefix=f"TPUConnectorHMA Worker {self.node_id} {role}")
 
+        if self.is_producer:
+            # For prefill, the mamba slot must outlive the d2h copy.
+            # Register the release hook so the mamba slot release 
+            # can be deferred until d2h copy completes.
+            self._register_mamba_release_hook(runner.input_batch)
+
         self.num_groups = len(runner.kv_cache_config.kv_cache_groups)
         # Mapping of kv cache group id to whether it is mamba or full attn
         self.group_is_mamba: list[bool] = [
@@ -290,6 +297,14 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                     f"kv_array_to_group_id={self.kv_array_to_group_id} | "
                     f"host_kv_pool_enabled={self.host_kv_pool is not None}")
 
+    def _register_mamba_release_hook(self, input_batch) -> None:
+        """Defer mamba slot release."""
+        def _slot_release_hook(_req_id: str, _slot: int) -> Optional[float]:
+            timeout_s = dist_utils.get_p2p_wait_pull_timeout()
+            return time.perf_counter() + timeout_s
+
+        input_batch.mamba_slot_pool.register_release_hook(_slot_release_hook)
+
     def _compute_max_blocks_per_group(self) -> list[int]:
         """Compute max num of blocks per request per kv cache group."""
         block_size = self.vllm_config.cache_config.block_size
@@ -335,6 +350,15 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                 if req_id in self.reqs_pulling:
                     assert self.reqs_pulling[req_id][1] is not None
                     _, kv, block_ids_per_group = self.reqs_pulling.pop(req_id)
+                    # Rewrite mamba block id to the decode's allocated mamba
+                    # slot id, since tpu runner uses its own slot id for
+                    # mamba state and ignore the vllm's allocated block id.
+                    mamba_slot = self.runner.input_batch.mamba_slot_pool.get_slot(req_id)
+                    assert mamba_slot is not None
+                    block_ids_per_group = [
+                        [mamba_slot] if self.group_is_mamba[g] else list(ids)
+                        for g, ids in enumerate(block_ids_per_group)
+                    ]
                     has_blocks = any(
                         len(ids) > 0 for ids in block_ids_per_group)
                     if has_blocks:
@@ -363,6 +387,14 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
                 f"Expected list[list[int]] (per-kv-cache-group) for "
                 f"local_block_ids in HMA; got {local_block_ids!r}")
 
+        # Rewrite mamba block ids to the runner's slot id before
+        # the HBM gather, since runner maintains its own indexing
+        # from request id to mamba state slot id.
+        slot = self.runner.input_batch.mamba_slot_pool.get_slot(req_id)
+        assert slot is not None, f"req_id={req_id}"
+        local_block_ids = [[slot] if self.group_is_mamba[g] else list(ids)
+                           for g, ids in enumerate(local_block_ids)]
+
         kv = _select_from_kv_caches_per_group(
             self.runner.kv_caches,
             local_block_ids,
@@ -385,6 +417,12 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
             self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
             self.kv_transfer_server.await_pull(req_meta.uuid, kv)
             self.stats.increment_send(sum(k.nbytes for k in kv))
+            outcome = self.runner.input_batch.mamba_slot_pool.release_deferred(
+                req_id)
+            assert outcome == ReleaseOutcome.RELEASED, (
+                f"expected mamba slot for req_id={req_id} to be in "
+                f"_free_deferred, but release_deferred returned "
+                f"{outcome}")
 
     def _async_d2h_and_transfer(self, req_id: str, req_meta: SendMeta,
                                 kv_src: list[jax.Array],
@@ -430,6 +468,15 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
             f"copy_ms={(end_copy_time-end_slice_time)*1000:.2f} | "
             f"bytes={total_bytes}")
         self.stats.increment_send(total_bytes)
+        # d2h transfer is completed. Mamba slot was release 
+        # deferred in order to wait for d2h. Now we can actually 
+        # release the mamba slot.
+        outcome = self.runner.input_batch.mamba_slot_pool.release_deferred(
+            req_id)
+        assert outcome == ReleaseOutcome.RELEASED, (
+            f"expected mamba slot for req_id={req_id} to be in "
+            f"_free_deferred, but release_deferred returned "
+            f"{outcome}")
 
     def _pull_kv(self, req_id: str, conn: Any, req_meta: LoadMeta):
         local_block_ids = req_meta.local_block_ids

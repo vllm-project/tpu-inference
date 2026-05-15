@@ -16,6 +16,7 @@ from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
 from tpu_inference.runner.block_table import MultiGroupBlockTable
+from tpu_inference.runner.mamba_slot_pool import MambaSlotPool
 
 _SAMPLING_EPS = 1e-5
 
@@ -156,16 +157,11 @@ class InputBatch:
         # init_mamba_pools() resizes after KV cache allocation is known.
         self.mamba_state_indices_cpu = np.zeros(max_num_reqs, dtype=np.int32)
         # Mamba slot pool, partitioned by DP rank so each rank's requests
-        # get slots within that rank's shard of the device-side state array.
-        # Matches the sharding in kv_cache_manager: mamba_num_blocks is
-        # rounded up to dp_size, then split evenly across ranks.
+        # get slots within that rank's partition. We rounded up to dp_size, 
+        # then split evenly across ranks.
         mamba_num_blocks = ((max_num_reqs + dp_size) // dp_size) * dp_size
-        self._mamba_local_slots = mamba_num_blocks // dp_size
-        self._free_mamba_slots_per_rank: list[list[int]] = []
-        for k in range(dp_size):
-            base = k * self._mamba_local_slots
-            self._free_mamba_slots_per_rank.append(
-                list(range(base + self._mamba_local_slots - 1, base, -1)))
+        self.mamba_slot_pool: MambaSlotPool = MambaSlotPool(
+            mamba_num_blocks, dp_size=dp_size)
 
         # for pooling models
         self.pooling_params: dict[str, PoolingParams] = {}
@@ -178,12 +174,7 @@ class InputBatch:
         (compact-mamba may have been skipped, giving fewer blocks than the
         default estimate based on max_num_reqs).
         """
-        self._mamba_local_slots = mamba_num_blocks // self.dp_size
-        self._free_mamba_slots_per_rank = []
-        for k in range(self.dp_size):
-            base = k * self._mamba_local_slots
-            self._free_mamba_slots_per_rank.append(
-                list(range(base + self._mamba_local_slots - 1, base, -1)))
+        self.mamba_slot_pool.resize(mamba_num_blocks)
 
     @property
     def req_ids(self) -> list[str]:
@@ -264,7 +255,7 @@ class InputBatch:
         # with the request through the persistent batch's lifetime, even when
         # condense moves the request to a different `req_index`.
         self.mamba_state_indices_cpu[req_index] = (
-            self._free_mamba_slots_per_rank[dp_rank].pop())
+            self.mamba_slot_pool.allocate(req_id, dp_rank))
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
@@ -337,18 +328,14 @@ class InputBatch:
 
     def remove_request(self, req_id: str) -> Optional[int]:
         """This method must always be followed by a call to condense()."""
-
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
-        # Return the mamba state slot back to the free pool. The slot's
-        # contents in the kv cache are stale and will be zeroed by the
-        # has_initial_state guard when the next request takes this slot id.
-        slot = int(self.mamba_state_indices_cpu[req_index])
-        rank = slot // self._mamba_local_slots
-        self._free_mamba_slots_per_rank[rank].append(slot)
+        # Return the mamba state slot back to the pool. The release may
+        # be deferred (e.g. P/D disagg needs to d2h copy)
+        self.mamba_slot_pool.release(req_id)
         # Clear this position to slot 0 (the null block) so the trailing
         # tail of `mamba_state_indices_cpu` (which the GDN op reads over
         # its full length every step) cannot alias an active slot.
