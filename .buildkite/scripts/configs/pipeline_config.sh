@@ -49,19 +49,35 @@ get_vllm_commit_hash() {
   echo "$commit_hash"
 }
 
-# Function to process every JSON file in the cases directory
+# Function to process JSON benchmark cases from a folder and/or a list of specific files
 process_json_benchmark_cases() {
-  local case_folder="$1"
-  local generator="$2"
-  local priority="$3"
+  local case_folder="${1:-}"
+  local generator="${2:-}"
+  local priority="${3:-}"
+  local extra_files="${4:-}" # Optional: space-separated list of files
 
-  echo "--- Generating dynamic pipelines from $case_folder"
+  echo "--- Generating dynamic pipelines from $case_folder and $extra_files"
 
   shopt -s nullglob
-  local files=("$case_folder"/*.json)
+  local files=()
   
+  # Add files from folder if provided
+  if [ -n "$case_folder" ] && [ -d "$case_folder" ]; then
+    files+=("$case_folder"/*.json)
+  fi
+
+  # Add extra files if provided
+  if [ -n "$extra_files" ]; then
+    for f in $extra_files; do
+      # Skip deleted files in PR to avoid generation errors
+      if [ -f "$f" ]; then
+        files+=("$f")
+      fi
+    done
+  fi
+
   if [ ${#files[@]} -eq 0 ]; then
-    echo "No JSON files found in $case_folder."
+    echo "No JSON files found to process."
     return
   fi
 
@@ -71,6 +87,14 @@ process_json_benchmark_cases() {
       echo "Successfully uploaded pipeline for $case_file"
     else
       echo "🚨 Error: Failed to generate or upload pipeline for $case_file"
+      # Upload a step that will intentionally fail to block the CI build
+      cat <<- YAML | buildkite-agent pipeline upload
+steps:
+  - label: "❌ Pipeline Generation Failure from: $(basename "$case_file")"
+    agents:
+      queue: cpu
+    command: exit 1
+YAML
     fi
   done
 }
