@@ -138,9 +138,9 @@ def test_prepare_inputs():
     expected_new_qsl = np.zeros(max_num_seqs + 1, dtype=np.int32)
     num_tokens_per_req = np.zeros(max_num_seqs, dtype=np.int32)
     num_tokens_per_req[:num_reqs] = [3, 4, 3]
-    # The implementation sets padded query lengths to 1, and rejected tokens
+    # The implementation sets padded query lengths to 0, and rejected tokens
     # are 0 for padded requests.
-    num_tokens_per_req[num_reqs:] = 1
+    num_tokens_per_req[num_reqs:] = 0
     expected_new_qsl[1:] = np.cumsum(num_tokens_per_req)
 
     expected_new_seq_lens = np.zeros(max_num_seqs, dtype=np.int32)
