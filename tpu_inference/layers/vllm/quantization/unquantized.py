@@ -161,16 +161,37 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
 
     def maybe_process_weights(self, layer: torch.nn.Module, param_name: str,
                               args, kwargs):
-        """Check if all weights are loaded for the layer. If so, process and shard the weights."""
+        """Check if all weights are loaded for the layer. If so, process and shard the weights.
+
+        Note on Fused Weight Loading (e.g., Qwen3-VL / Qwen3-VL-MoE / Qwen2.5-VL Vision Encoder):
+        Historically, LLMs stored attention Q/K/V weights separately in HuggingFace checkpoints,
+        and vLLM loaded them per shard (passing shard_id in `args`).
+        However, newer multimodal models like Qwen3-VL / Qwen3-VL-MoE store vision attention weights
+        already fused on disk (e.g., `attn.qkv.weight`). In such cases, vLLM's weight loader is invoked
+        without a shard_id (`args` is empty), and vLLM internally slices and copies the fused weight.
+        To support TPU incremental sharding for these fused weights, we detect when `args` is empty
+        and immediately register all underlying shards ('q', 'k', 'v') as loaded to satisfy the sharding trigger.
+        """
         if isinstance(layer, vllm_linear.QKVParallelLinear):
-            assert len(args) == 1, "Expecting shard_id as the only argument"
-            shard_id = args[0]
-            # Keep track of loaded weights for QKVLinear, e.g. (('weight', 'q'), ('bias', 'q'), ('weight', 'k'), ('bias', 'k'), ...)
-            layer._loaded_weights.add((param_name, shard_id))
+            if len(args) == 1:
+                shard_id = args[0]
+                layer._loaded_weights.add((param_name, shard_id))
+            else:
+                # Fused weight loaded in one go (e.g., Qwen3-VL / Qwen3-VL-MoE vision encoder `attn.qkv.weight`).
+                # vLLM's QKVParallelLinear.weight_loader internally slices the weight into q, k, v.
+                # We register all 3 shards to immediately trigger process_weights_after_loading.
+                layer._loaded_weights.add((param_name, 'q'))
+                layer._loaded_weights.add((param_name, 'k'))
+                layer._loaded_weights.add((param_name, 'v'))
         elif isinstance(layer, vllm_linear.MergedColumnParallelLinear):
-            assert len(args) == 1, "Expecting shard_id as the only argument"
-            shard_id = args[0]
-            layer._loaded_weights.add((param_name, shard_id))
+            if len(args) == 1:
+                shard_id = args[0]
+                layer._loaded_weights.add((param_name, shard_id))
+            else:
+                # Fused weight loaded in one go (e.g., MLP gate_up_proj fused on disk).
+                # Register all output partitions to immediately trigger process_weights_after_loading.
+                for i in range(len(layer.output_sizes)):
+                    layer._loaded_weights.add((param_name, i))
         else:
             # Keep track of loaded weights for other linear layers, e.g. ('weight', 'bias')
             layer._loaded_weights.add(param_name)
