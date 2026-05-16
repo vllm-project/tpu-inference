@@ -741,6 +741,11 @@ class KVCacheManager:
             # num_blocks must be a multiple of the sharding divisor
             num_blocks = (num_blocks // divisor) * divisor
 
+            if self.runner.cache_config.num_gpu_blocks_override is not None:
+                num_blocks = min(
+                    num_blocks,
+                    self.runner.cache_config.num_gpu_blocks_override)
+
             # When compact-mamba sizing succeeded (set by
             # `_maybe_set_compact_mamba_num_blocks_override`), mamba layers
             # allocate `_mamba_num_blocks` (= max_num_reqs + 1) slots while
@@ -814,6 +819,7 @@ class KVCacheManager:
                                 text_config.qk_rope_head_dim
                         else:
                             head_size = layer_spec.head_size
+
                         kv_cache = create_kv_caches(
                             num_blocks=num_blocks,
                             block_size=layer_spec.block_size,
