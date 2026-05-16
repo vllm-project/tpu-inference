@@ -61,6 +61,7 @@ class SpeculativeDecodingManager:
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         scheduler_output: Optional[VllmSchedulerOutput] = None,
         input_ids: Optional[jnp.ndarray] = None,
+        hidden_states: Optional[jnp.ndarray] = None,
     ) -> None:
         if async_scheduling:
             assert self.runner.speculative_config.use_eagle(
@@ -89,6 +90,7 @@ class SpeculativeDecodingManager:
                 scheduler_output,
                 input_ids,
                 async_scheduling,
+                hidden_states,
             )
         else:
             raise NotImplementedError(
@@ -96,15 +98,35 @@ class SpeculativeDecodingManager:
                 f"'{self.runner.speculative_config.method}' is not supported.")
 
     def propose_eagle3_draft_token_ids(
-            self, spec_decode_metadata: Optional[SpecDecodeMetadata],
-            last_sampled_token_id: jnp.ndarray,
-            num_rejected_tokens: jnp.ndarray,
-            discard_sampled_tokens_req_indices: list[int],
-            aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
-            attn_metadata: AttentionMetadata,
-            scheduler_output: VllmSchedulerOutput, input_ids: jnp.ndarray,
-            async_scheduling: bool) -> list[list[int]] | jnp.ndarray:
+        self,
+        spec_decode_metadata: Optional[SpecDecodeMetadata],
+        last_sampled_token_id: jnp.ndarray,
+        num_rejected_tokens: jnp.ndarray,
+        discard_sampled_tokens_req_indices: list[int],
+        aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
+        attn_metadata: AttentionMetadata | dict[str, AttentionMetadata],
+        scheduler_output: VllmSchedulerOutput,
+        input_ids: jnp.ndarray,
+        async_scheduling: bool,
+        hidden_states: jnp.ndarray,
+    ) -> list[list[int]] | jnp.ndarray:
         assert isinstance(self.runner.drafter, Eagle3Proposer)
+        if isinstance(attn_metadata, dict):
+            # When multiple KV cache groups are used (e.g., in hybrid models),
+            # attn_metadata becomes a dict mapping layer names to AttentionMetadata.
+            # Since all groups share the same seq_lens and input_positions, any would work for those.
+            # However, we specifically look for an attention layer key to get the correct
+            # block_tables structure, just in case the draft model (which is all attention) needs it.
+            attn_key = None
+            for key in attn_metadata.keys():
+                if ".self_attn." in key:
+                    attn_key = key
+                    break
+            if attn_key is not None:
+                attn_metadata = attn_metadata[attn_key]
+            else:
+                attn_metadata = next(iter(attn_metadata.values()))
+
         req_ids = self.runner.input_batch.req_ids
         max_num_seqs = attn_metadata.seq_lens.shape[0]
         next_prompt_token_id = np.zeros(max_num_seqs, dtype=np.int32)
@@ -123,10 +145,15 @@ class SpeculativeDecodingManager:
         next_prompt_token_id, is_in_prefill = device_array(
             self.runner.mesh, (next_prompt_token_id, is_in_prefill))
 
+        if self.runner.speculative_config.method == "mtp":
+            aux_hidden_states_for_drafter = (hidden_states, )
+        else:
+            aux_hidden_states_for_drafter = aux_hidden_states
+
         target_hidden_states, input_ids, last_token_indices, attn_metadata = self.runner.drafter.prepare_inputs(
             attn_metadata,
             input_ids,
-            aux_hidden_states,
+            aux_hidden_states_for_drafter,
             last_sampled_token_id,
             next_prompt_token_id,
             is_in_prefill,
