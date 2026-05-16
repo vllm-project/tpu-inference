@@ -348,6 +348,7 @@ def calculate_block_sizes(
         "debug_mode",
         "out_dtype",
         "use_causal_mask",
+        "update_kv_cache",
     ),
     donate_argnames=("queries", "keys", "values", "kv_cache"),
 )
@@ -375,6 +376,7 @@ def ragged_paged_attention(
     debug_mode: bool = False,
     out_dtype: jnp.dtype | None = None,
     use_causal_mask: bool = True,
+    update_kv_cache: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
 
@@ -502,6 +504,7 @@ def ragged_paged_attention(
             kv_lens,
             distribution,
             cfgs=cfgs,
+            update_kv_cache=update_kv_cache,
         )
         return kernel.rpa_kernel(
             cu_q_lens,
