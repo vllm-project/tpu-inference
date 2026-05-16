@@ -1,0 +1,124 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# E2B fits on a single v6e chip. Uses --use-chat-template because
+# gemma-4-it is BOS-sensitive — raw prompts produce token-repetition
+# garbage on both GPU vllm-pytorch and JAX (model property, not a
+# correctness bug in our path).
+#
+# JAX path correctness was verified by per-layer hidden-state diff vs
+# vllm-pytorch GPU within BF16 noise across all 35 layers.
+# KV-share kernel behavior regression-guarded by the new
+# test_kv_share_* methods in
+# tests/kernels/ragged_paged_attention_kernel_v3_test.py.
+
+steps:
+  - label: "${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest"
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    soft_fail: true
+    commands:
+      - |
+        if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest" "transformers version too low"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-E2B-it --tensor-parallel-size 1 --max-num-batched-tokens 4096 --max-model-len 4096 --use-chat-template'
+
+  - label: "${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E2B-it"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "multimodal"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest
+
+  - label: "${TPU_VERSION:-tpu6e} Accuracy for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_UnitTest"
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    soft_fail: true
+    env:
+      TEST_MODEL: google/gemma-4-E2B-it
+      TENSOR_PARALLEL_SIZE: 1
+      # First measured GSM8K accuracy on this path: 0.10. lm_eval uses raw
+      # prompts (no chat template), which produces low scores on gemma-4-it
+      # despite the model being functionally correct (chat-templated
+      # offline_inference produces coherent answers). Floor here is a
+      # regression gate, not a quality bar. Bump once test_accuracy.py
+      # routes gemma-4 through apply_chat_template + fewshot_as_multiturn.
+      MINIMUM_ACCURACY_THRESHOLD: 0.05
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
+
+  - label: "${TPU_VERSION:-tpu6e} Record integration test result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E2B-it"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "multimodal"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy
+
+  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Accuracy"
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    soft_fail: true
+    env:
+      TEST_MODEL: google/gemma-4-E2B-it
+      TENSOR_PARALLEL_SIZE: 1
+      # No perf bar to start. Set after first measured run.
+      MINIMUM_THROUGHPUT_THRESHOLD: 0.0
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          # vllm serve's JIT programs need ~384M reservable in addition to
+          # weights+cache; single-chip v6e has only ~380M free at that point
+          # (RESOURCE_EXHAUSTED on jit_structured_decode_fn during warmup).
+          # Same skip as 26B/31B until tpu7x (or v6e_8) is wired in.
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark" "not enough HBM"
+          exit 0
+        fi
+        .buildkite/scripts/run_in_docker.sh bash -c 'TIMEOUT_SECONDS=960 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E2B-it"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "multimodal"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark

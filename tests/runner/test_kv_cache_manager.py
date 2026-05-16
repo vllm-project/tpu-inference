@@ -309,6 +309,11 @@ class TestKVCacheManager:
         mock_hf_text_config = MagicMock()
         mock_hf_text_config.kv_lora_rank = 400
         mock_hf_text_config.qk_rope_head_dim = 40
+        # kv_cache_manager calls compute_kv_share_map(),
+        # which reads these attributes. MagicMock auto-creates them as
+        # Mocks otherwise (truthy, not int) and breaks the `> 0` check.
+        mock_hf_text_config.num_kv_shared_layers = 0
+        mock_hf_text_config.layer_types = []
         self.runner.model_config.hf_text_config = mock_hf_text_config
 
         num_kv_heads = 16
@@ -423,6 +428,11 @@ class TestKVCacheManager:
         mock_hf_text_config = MagicMock()
         mock_hf_text_config.kv_lora_rank = 400
         mock_hf_text_config.qk_rope_head_dim = 40
+        # kv_cache_manager calls compute_kv_share_map(),
+        # which reads these attributes. MagicMock auto-creates them as
+        # Mocks otherwise (truthy, not int) and breaks the `> 0` check.
+        mock_hf_text_config.num_kv_shared_layers = 0
+        mock_hf_text_config.layer_types = []
         self.runner.model_config.hf_text_config = mock_hf_text_config
         expected_head_size = 640  # 640 = align(512, 128) + alignto(40, 128)
 
@@ -538,6 +548,11 @@ class TestKVCacheManager:
         mock_hf_text_config = MagicMock()
         mock_hf_text_config.kv_lora_rank = 400
         mock_hf_text_config.qk_rope_head_dim = 40
+        # kv_cache_manager calls compute_kv_share_map(),
+        # which reads these attributes. MagicMock auto-creates them as
+        # Mocks otherwise (truthy, not int) and breaks the `> 0` check.
+        mock_hf_text_config.num_kv_shared_layers = 0
+        mock_hf_text_config.layer_types = []
         self.runner.model_config.hf_text_config = mock_hf_text_config
         mock_draft_model_config.hf_config = mock_hf_config
         mock_speculative_config.draft_model_config = mock_draft_model_config
