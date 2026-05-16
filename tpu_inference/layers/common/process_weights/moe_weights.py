@@ -700,13 +700,17 @@ def shard_fp8_moe_weights_to_tpu(
     "mesh",
     "activation",
     "weight_block_size",
+    "desired_quant_dtype",
+    "requant_block_size",
 ))
-def process_fp8_moe_weights(
+def process_quantized_moe_weights(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
     mesh: Mesh,
     activation: str,
     weight_block_size: tuple[int, ...] | None = None,
+    desired_quant_dtype: jnp.dtype | None = None,
+    requant_block_size: int | None = None,
 ) -> FusedMoEWeights:
     w13_weight = weights.w13_weight
     w13_weight_scale = weights.w13_weight_scale
@@ -768,18 +772,20 @@ def process_fp8_moe_weights(
                         jax.lax.with_sharding_constraint(weight, sharding))
         return out
 
-    if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
-        desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
-    else:
-        desired_quant_dtype = w13_weight.dtype
-        if w13_weight.dtype != w2_weight.dtype:
-            raise ValueError(
-                f"Expected w13_weight and w2_weight to have the same dtype, but got {w13_weight.dtype} and {w2_weight.dtype}"
-            )
-    requant_block_size = None
-    if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
-        requant_block_size = (int(requant_block_size_from_env)
-                              if requant_block_size_from_env else None)
+    if desired_quant_dtype is None:
+        if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
+            desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
+        else:
+            desired_quant_dtype = w13_weight.dtype
+            if w13_weight.dtype != w2_weight.dtype:
+                raise ValueError(
+                    f"Expected w13_weight and w2_weight to have the same dtype, but got {w13_weight.dtype} and {w2_weight.dtype}"
+                )
+    
+    if requant_block_size is None:
+        if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
+            requant_block_size = (int(requant_block_size_from_env)
+                                  if requant_block_size_from_env else None)
 
     moe_logging_str = (
         f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"

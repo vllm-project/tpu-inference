@@ -28,7 +28,7 @@ from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.linear_weights import \
     shard_linear_weights
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_fp8_moe_weights, shard_fp8_moe_weights_to_tpu)
+    FusedMoEWeights, process_quantized_moe_weights, shard_fp8_moe_weights_to_tpu)
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.utils import cpu_mesh, cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
@@ -540,7 +540,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             input_weights = shard_fp8_moe_weights_to_tpu(
                 input_weights, layer.mesh, source_mesh=cpu_mesh())
 
-            weights = process_fp8_moe_weights(
+            weights = process_quantized_moe_weights(
                 input_weights,
                 moe_backend=layer.moe_backend,
                 mesh=layer.mesh,
