@@ -464,7 +464,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.phase_based_profiler = None
         if self.phased_profiling_dir:
             self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
-                self.phased_profiling_dir)
+                self.phased_profiling_dir, worker_rank=self.rank)
 
     def _init_mm(self) -> None:
         self.is_multimodal_model = None
