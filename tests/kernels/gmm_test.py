@@ -787,7 +787,7 @@ class GmmTest(jtu.JaxTestCase):
         """Profile gmm_v2 and gmm_wxd together and compare wall-clock time."""
         import time
 
-        batch_size, in_size, out_size, num_groups = 128, 1024, 1024, 16
+        batch_size, in_size, out_size, num_groups = 128, 2048, 2048, 128
         lhs, rhs, group_sizes = self._make_wxd_inputs(batch_size, in_size,
                                                       out_size, num_groups)
         group_offset = jnp.array([0], dtype=jnp.int32)
@@ -804,7 +804,7 @@ class GmmTest(jtu.JaxTestCase):
         self.assertEqual(out_v2.shape, out_wxd.shape)
         self.assertArraysAllClose(out_wxd, out_v2, atol=0.5, rtol=5e-2)
 
-        warmup, n = 5, 20
+        warmup, n = 5, 5
         for _ in range(warmup):
             jax.block_until_ready(run_v2())
             jax.block_until_ready(run_wxd())
