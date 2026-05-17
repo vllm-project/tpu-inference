@@ -435,6 +435,12 @@ class TestKVCacheManager:
         num_shared = 2
 
         mock_hf_text_config = MagicMock()
+        # compute_kv_share_map reads text_config.num_hidden_layers directly;
+        # set it to match the runner's num_layers so the helper derives
+        # first_shared = num_layers - num_shared correctly. Without this
+        # MagicMock auto-creates num_hidden_layers as a Mock, which
+        # silently produces an empty redirect map.
+        mock_hf_text_config.num_hidden_layers = num_layers
         mock_hf_text_config.num_kv_shared_layers = num_shared
         # Alternating full/sliding so each shared layer has a same-type
         # predecessor in the non-shared range.
