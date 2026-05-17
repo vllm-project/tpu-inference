@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Gemma-4 E2B integration on rebased #2572 + merged #2632.
-# Runs on both v6e (TP=1) and v7x_2 (TP=2), each with default RPA
-# and USE_BATCHED_RPA_KERNEL=1.
+# Gemma-4 E2B comparison run: full model yml (UnitTest + Accuracy + Benchmark)
+# executed twice on v6e — once with default RPA v3, once with the experimental
+# batched RPA (USE_BATCHED_RPA_KERNEL=1). Output: gsm8k accuracy and text-only
+# vllm bench serve throughput per kernel.
+#
+# Both variants share the same docker image; each variant chains Unit ->
+# Accuracy -> Benchmark so vllm serve doesn't collide on the agent.
 
 steps:
   - label: ":docker: Build and Push Base Image (tpu6e)"
@@ -26,17 +30,10 @@ steps:
     commands:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
-  - label: ":docker: Build and Push Base Image (tpu7x)"
-    key: tpu7x_build_docker
-    agents:
-      queue: cpu_64_core
-    env:
-      TPU_VERSION: "tpu7x"
-    commands:
-      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+  # -------- variant A: default RPA v3 --------
 
-  - label: "tpu6e E2B default RPA"
-    key: tpu6e_e2b_default
+  - label: "[default RPA] Unit test (offline_inference) for google/gemma-4-E2B-it"
+    key: e2b_default_unit
     depends_on: tpu6e_build_docker
     soft_fail: true
     agents:
@@ -45,10 +42,48 @@ steps:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu6e"
     commands:
-      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/e2b_probe.sh
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-E2B-it --tensor-parallel-size 1 --max-num-batched-tokens 4096 --max-model-len 4096 --use-chat-template'
 
-  - label: "tpu6e E2B + USE_BATCHED_RPA_KERNEL=1"
-    key: tpu6e_e2b_batched_rpa
+  - label: "[default RPA] gsm8k accuracy (chat-templated) for google/gemma-4-E2B-it"
+    key: e2b_default_accuracy
+    depends_on: e2b_default_unit
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+      TEST_MODEL: google/gemma-4-E2B-it
+      TENSOR_PARALLEL_SIZE: 1
+      USE_CHAT_TEMPLATE: "1"
+      MINIMUM_ACCURACY_THRESHOLD: 0.05
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
+
+  - label: "[default RPA] text-only bench for google/gemma-4-E2B-it"
+    key: e2b_default_bench
+    depends_on: e2b_default_accuracy
+    soft_fail: true
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+      TEST_MODEL: google/gemma-4-E2B-it
+      TENSOR_PARALLEL_SIZE: 1
+      BENCH_DATASET: "text"
+      INPUT_LEN: "1024"
+      OUTPUT_LEN: "128"
+      MINIMUM_THROUGHPUT_THRESHOLD: 0.0
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash -c 'TIMEOUT_SECONDS=960 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+
+  # -------- variant B: batched RPA (USE_BATCHED_RPA_KERNEL=1) --------
+
+  - label: "[batched RPA] Unit test (offline_inference) for google/gemma-4-E2B-it"
+    key: e2b_batched_unit
     depends_on: tpu6e_build_docker
     soft_fail: true
     agents:
@@ -56,29 +91,44 @@ steps:
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu6e"
+      USE_BATCHED_RPA_KERNEL: "1"
     commands:
-      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/e2b_probe_batched.sh
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-E2B-it --tensor-parallel-size 1 --max-num-batched-tokens 4096 --max-model-len 4096 --use-chat-template'
 
-  - label: "tpu7x E2B default RPA (TP=2)"
-    key: tpu7x_e2b_default
-    depends_on: tpu7x_build_docker
+  - label: "[batched RPA] gsm8k accuracy (chat-templated) for google/gemma-4-E2B-it"
+    key: e2b_batched_accuracy
+    depends_on: e2b_batched_unit
     soft_fail: true
     agents:
-      queue: tpu_v7x_2_queue
+      queue: tpu_v6e_queue
     env:
       USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
+      TPU_VERSION: "tpu6e"
+      TEST_MODEL: google/gemma-4-E2B-it
+      TENSOR_PARALLEL_SIZE: 1
+      USE_CHAT_TEMPLATE: "1"
+      USE_BATCHED_RPA_KERNEL: "1"
+      MINIMUM_ACCURACY_THRESHOLD: 0.05
     commands:
-      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/e2b_probe_tpu7x.sh
+      - .buildkite/scripts/run_in_docker.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
 
-  - label: "tpu7x E2B + USE_BATCHED_RPA_KERNEL=1 (TP=2)"
-    key: tpu7x_e2b_batched_rpa
-    depends_on: tpu7x_build_docker
+  - label: "[batched RPA] text-only bench for google/gemma-4-E2B-it"
+    key: e2b_batched_bench
+    depends_on: e2b_batched_accuracy
     soft_fail: true
     agents:
-      queue: tpu_v7x_2_queue
+      queue: tpu_v6e_queue
     env:
       USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
+      TPU_VERSION: "tpu6e"
+      TEST_MODEL: google/gemma-4-E2B-it
+      TENSOR_PARALLEL_SIZE: 1
+      BENCH_DATASET: "text"
+      INPUT_LEN: "1024"
+      OUTPUT_LEN: "128"
+      USE_BATCHED_RPA_KERNEL: "1"
+      MINIMUM_THROUGHPUT_THRESHOLD: 0.0
     commands:
-      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/e2b_probe_tpu7x_batched.sh
+      - .buildkite/scripts/run_in_docker.sh bash -c 'TIMEOUT_SECONDS=960 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
