@@ -104,7 +104,10 @@ checkThroughput() {
 
 echo "Spinning up the vLLM server..."
 if [ "$bench_dataset" = "text" ]; then
-    vllm_cmd=(vllm serve "$model_name" --tensor-parallel-size "$tp_size" --pipeline-parallel-size 1 --dtype bfloat16 --gpu-memory-utilization 0.98 --max-model-len "$max_model_len")
+    # MM-capable models still compute the MM encoder budget at startup;
+    # on TPU --disable-chunked-mm-input is force-applied, so we must keep
+    # max_num_batched_tokens >= max_tokens_per_mm_item (2496 for gemma-4-E2B).
+    vllm_cmd=(vllm serve "$model_name" --tensor-parallel-size "$tp_size" --pipeline-parallel-size 1 --dtype bfloat16 --gpu-memory-utilization 0.98 --max-model-len "$max_model_len" --max-num-batched-tokens 4096)
 else
     vllm_cmd=(vllm serve "$model_name" --tensor-parallel-size "$tp_size" --pipeline-parallel-size 1 --dtype bfloat16 --gpu-memory-utilization 0.98 --max-model-len "$max_model_len" --limit-mm-per-prompt '{"image": 10, "video": 0}' --mm-processor-kwargs '{"size": {"longest_edge": 1003520, "shortest_edge": 3136}}' --disable-chunked-mm-input)
 fi
