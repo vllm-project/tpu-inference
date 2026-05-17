@@ -35,6 +35,7 @@ from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.kv_share import compute_kv_share_map
 from tpu_inference.offload.utils import get_kv_connector_cache_layout
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
@@ -452,7 +453,23 @@ class KVCacheManager:
             base_num_kv_heads = model_config.get_total_num_kv_heads()
             base_head_size = model_config.get_head_size()
 
+            # KV-share (JAX path): vllm-side models declare KV-share via
+            # per-Attention `kv_sharing_target_layer_name`; the JAX-side
+            # models have no equivalent runtime declaration. Derive the
+            # same mapping from the HF text_config attributes. Returns {}
+            # for models that don't use KV-share, so this is a no-op for
+            # the common case.
+            kv_share_map = compute_kv_share_map(text_config)
+
             for i in range(model_config.get_num_layers(parallel_config)):
+                # If this layer is KV-shared, register the redirect and skip
+                # spec creation (so no slot is allocated). The forward-time
+                # remap at line ~835 picks the source layer's slot.
+                if i in kv_share_map:
+                    self.shared_kv_cache_layers[
+                        f"layer.{i}"] = f"layer.{kv_share_map[i]}"
+                    continue
+
                 if self.use_mla:
                     kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
                         block_size, 1, mla_head_size)
