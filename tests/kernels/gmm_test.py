@@ -21,6 +21,8 @@ from jax._src import test_util as jtu
 
 from tpu_inference.kernels.megablox.gmm_v2 import (TileSizes, apply_act_fn,
                                                    gmm_v2)
+from tpu_inference.kernels.megablox import gmm_wxd as gmm_wxd_mod
+from tpu_inference.kernels.megablox.gmm_wxd import gmm_native
 
 jax.config.parse_flags_with_absl()
 
@@ -737,6 +739,128 @@ class GmmTest(jtu.JaxTestCase):
             atol, rtol = 5e-2, 5e-2  # Unquantized Path (bfloat16 precision diffs)
 
         self.assertArraysAllClose(actual, expected, atol=atol, rtol=rtol)
+
+    def _make_wxd_inputs(self, batch_size, in_size, out_size, num_groups):
+        """Generate test_gmm-style inputs and configure gmm_wxd's globals.
+
+        gmm_wxd's kernel reads b/d/g/h/tile_* from module globals at trace
+        time, so we set them to the requested dims. tile_d/tile_h are set to
+        in_size/out_size (single K/N tile) to satisfy the kernel's exact
+        divisibility requirements.
+        """
+        gmm_wxd_mod.b = batch_size
+        gmm_wxd_mod.d = in_size
+        gmm_wxd_mod.g = num_groups
+        gmm_wxd_mod.h = out_size
+        gmm_wxd_mod.tile_b = min(128, batch_size)
+        gmm_wxd_mod.tile_d = in_size
+        gmm_wxd_mod.tile_h = out_size
+        gmm_wxd_mod.tokens_per_expert = batch_size // num_groups
+
+        key = jax.random.key(0)
+        lhs = jax.random.normal(key, (batch_size, in_size), dtype=jnp.bfloat16)
+        rhs = jax.random.normal(key, (num_groups, in_size, out_size),
+                                dtype=jnp.bfloat16)
+        group_sizes = get_group_sizes(batch_size, num_groups)
+        return lhs, rhs, group_sizes
+
+    @parameterized.product(
+        batch_size=[128],
+        in_size=[512, 1024],
+        out_size=[512, 1024],
+        num_groups=[16, 32],
+    )
+    def test_gmm_wxd_correctness(self, batch_size, in_size, out_size,
+                                 num_groups):
+        """gmm_wxd (gmm_native) must match the reference GMM."""
+        lhs, rhs, group_sizes = self._make_wxd_inputs(batch_size, in_size,
+                                                      out_size, num_groups)
+
+        expected = reference_gmm(lhs, rhs, group_sizes)
+        actual = gmm_native(lhs, rhs, group_sizes)
+
+        self.assertEqual(actual.shape, (batch_size, out_size))
+        # bf16 MXU matmul vs the float32 reference.
+        self.assertArraysAllClose(actual, expected, atol=0.5, rtol=5e-2)
+
+    def test_gmm_wxd_vs_gmm_v2_performance(self):
+        """Profile gmm_v2 and gmm_wxd together and compare wall-clock time."""
+        import time
+
+        batch_size, in_size, out_size, num_groups = 128, 1024, 1024, 16
+        lhs, rhs, group_sizes = self._make_wxd_inputs(batch_size, in_size,
+                                                      out_size, num_groups)
+        group_offset = jnp.array([0], dtype=jnp.int32)
+
+        def run_v2():
+            return gmm_v2(lhs, rhs, group_sizes, group_offset=group_offset)
+
+        def run_wxd():
+            return gmm_native(lhs, rhs, group_sizes)
+
+        # Sanity: both kernels should agree (loose tol; v2 uses its own tiling).
+        out_v2 = jax.block_until_ready(run_v2())
+        out_wxd = jax.block_until_ready(run_wxd())
+        self.assertEqual(out_v2.shape, out_wxd.shape)
+        self.assertArraysAllClose(out_wxd, out_v2, atol=0.5, rtol=5e-2)
+
+        warmup, n = 5, 20
+        for _ in range(warmup):
+            jax.block_until_ready(run_v2())
+            jax.block_until_ready(run_wxd())
+
+        trace_dir = "gs://wenxindong-vm/trace/compare_gmm"
+        timings = {"gmm_v2": [], "gmm_wxd": []}
+        with jax.profiler.trace(trace_dir):
+            for _ in range(n):
+                with jax.profiler.TraceAnnotation("gmm_v2"):
+                    t0 = time.perf_counter()
+                    jax.block_until_ready(run_v2())
+                    timings["gmm_v2"].append(time.perf_counter() - t0)
+                with jax.profiler.TraceAnnotation("gmm_wxd"):
+                    t0 = time.perf_counter()
+                    jax.block_until_ready(run_wxd())
+                    timings["gmm_wxd"].append(time.perf_counter() - t0)
+
+        for name, ts in timings.items():
+            avg_ms = 1000.0 * sum(ts) / len(ts)
+            print(f"[perf] {name}: avg {avg_ms:.3f} ms over {n} runs")
+        print(f"[perf] trace written to {trace_dir}")
+
+        # Pacchetto: per-kernel LLO bundle visualization, saved as local HTML.
+        self._dump_pacchetto(
+            "gmm_v2",
+            lambda l, r, gs: gmm_v2(l, r, gs, group_offset=group_offset),
+            lhs, rhs, group_sizes)
+        self._dump_pacchetto(
+            "gmm_wxd",
+            lambda l, r, gs: gmm_native(l, r, gs),
+            lhs, rhs, group_sizes)
+
+    def _dump_pacchetto(self, name, fn, *args):
+        """Dump a Pacchetto LLO-bundle HTML visualization for `fn`.
+
+        No-op (with a printed notice) when the google3 pacchetto tool is not
+        importable, e.g. outside the google3 environment.
+        """
+        try:
+            from google3.platforms.xla.tools import pacchetto as pc
+        except ImportError as e:
+            print(f"[pacchetto] skipped {name}: pacchetto unavailable ({e})")
+            return
+
+        import os
+        out_dir = "/tmp/pachetto"
+        os.makedirs(out_dir, exist_ok=True)
+
+        scoped = jax.named_scope(name)(fn)
+        bundles = pc.get_bundles(scoped, hlo_pattern=name)(*args)
+        parsed = bundles.get_parsed_bundles(pc.BundleType.POST_RA)
+
+        out_path = os.path.join(out_dir, f"{name}.html")
+        with open(out_path, "w") as fp:
+            fp.write(parsed.as_html())
+        print(f"[pacchetto] wrote {out_path}")
 
 
 if __name__ == "__main__":
