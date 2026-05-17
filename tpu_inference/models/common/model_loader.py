@@ -395,7 +395,8 @@ def get_flax_model(
         PartitionSpec(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR))
 
     @jax.jit(out_shardings=(logits_sharding))
-    def run_compute_logits(graphdef, state, *args):
+    def run_compute_logits(state_leaves, *args):
+        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
         hidden_state, *_ = args
         return model.compute_logits(hidden_state)
@@ -447,7 +448,7 @@ def get_flax_model(
     # `state_leaves` as the first positional arg.
     model_fn = functools.partial(run_draft_model,
                                  graphdef) if is_draft_model else run_model
-    compute_logits_fn = functools.partial(run_compute_logits, graphdef)
+    compute_logits_fn = run_compute_logits
     embed_multimodal_fn = functools.partial(run_embed_multimodal, graphdef)
     embed_input_ids_fn = functools.partial(run_embed_input_ids, graphdef)
     lora_manager, model = None, None

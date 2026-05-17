@@ -91,6 +91,22 @@ INVALID_TOKEN_ID = -1
 MIN_NUM_SEQS = 8
 
 
+@functools.partial(jax.jit, static_argnames=["dp_size", "tokens_per_dp"])
+def _compute_active_mask(
+    logits_indices: jax.Array,
+    dp_size: int,
+    tokens_per_dp: int,
+) -> jax.Array:
+    reqs_per_dp = logits_indices.shape[0] // dp_size
+    active_reqs_mask = (logits_indices >= 0).reshape(dp_size, reqs_per_dp)
+    if tokens_per_dp == reqs_per_dp:
+        active_mask = logits_indices >= 0
+    else:
+        num_active_per_dp = active_reqs_mask.sum(axis=1, keepdims=True)
+        active_mask = (jnp.arange(tokens_per_dp) < num_active_per_dp).ravel()
+    return active_mask
+
+
 class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
     """Holds asynchronous model output specifically from a TPU runner.
 
@@ -323,7 +339,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             and (self.parallel_config is None
                  or self.parallel_config.pipeline_parallel_size == 1)
             and not self.is_pooling_model)
-        self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
+        eos_token_id = runner_utils.get_eos_token_id(self.model_config)
+        if isinstance(eos_token_id, int):
+            self.eos_token_id = (eos_token_id, )
+        elif isinstance(eos_token_id, list):
+            self.eos_token_id = tuple(eos_token_id)
+        elif eos_token_id is None:
+            self.eos_token_id = ()
+        else:
+            self.eos_token_id = tuple(eos_token_id)
         self.pad_token_id = runner_utils.get_pad_token_id(self.model_config)
 
     def _init_random(self):
@@ -585,6 +609,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Initialize to a constant size, and resize later after kv cache size is
         # known.
         self.device_buffer = common_utils.DeviceBuffer(initial_capacity=1024)
+        # Cache a zero scalar JAX array to avoid eager allocation overhead during continue_decode cycles.
+        self.zero_array = jnp.array(0, dtype=jnp.int32)
 
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
@@ -1005,7 +1031,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         hidden_states = self._select_from_array_fn(hidden_states,
                                                    logits_indices)
         logits = self.compute_logits_fn(
-            self.state,
+            self.state_leaves,
             hidden_states,
             lora_metadata,
         )
@@ -1063,22 +1089,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Map active rows correctly across DP buckets by checking valid query locations.
         # Pad active_mask to match the full padded_total_num_scheduled_tokens length of init_tokens.
         tokens_per_dp = init_tokens.shape[0] // self.dp_size
-        reqs_per_dp = logits_indices.shape[0] // self.dp_size
-        active_reqs_mask = (logits_indices
-                            >= 0).reshape(self.dp_size, reqs_per_dp)
-
-        if tokens_per_dp == reqs_per_dp:
-            active_mask = logits_indices >= 0
-        else:
-            num_active_per_dp = active_reqs_mask.sum(axis=1, keepdims=True)
-            active_mask = (jnp.arange(tokens_per_dp)
-                           < num_active_per_dp).ravel()
+        active_mask = _compute_active_mask(logits_indices, self.dp_size,
+                                           tokens_per_dp)
 
         init_state = TpuSamplingState(
             current_tokens=init_tokens,
             active_mask=active_mask,
             attn_metadata=attn_metadata,
-            step_counter=jnp.array(0, dtype=jnp.int32),
+            step_counter=self.zero_array,
         )
 
         from tpu_inference.layers.jax.sample.sampling import sample
@@ -1110,13 +1128,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # This avoids nested JIT compilation overhead and runtime buffer OOM errors
         # on tight HBM constraints, while still launching steps asynchronously (no sync).
         generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices = continue_decode(
-            state=self.state,
+            state=self.state_leaves,
             model_fn=self.model_fn,
             compute_logits_fn=self.compute_logits_fn,
             sample_fn=loop_sample_fn,
             init_state=init_state,
             kv_caches=self.kv_caches,
             max_decode_steps=max_decode_steps,
+            static_max_decode_steps=user_max_decode_steps,
             eos_token_id=self.eos_token_id,
             padding_token_id=self.pad_token_id,
             rng=self.rng_params_for_sampling,
@@ -1134,9 +1153,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.kv_caches = final_kv_caches
 
-        # Copy generated tokens back to CPU. We only need a single jax.device_get
-        # transfer here. The shape of generated_tokens is (actual_steps, batch_size).
-        generated_tokens_cpu = np.asarray(jax.device_get(generated_tokens))
+        if all_expert_indices is not None:
+            generated_tokens_cpu_list, all_expert_indices_cpu_list = jax.device_get(
+                (generated_tokens, all_expert_indices))
+            generated_tokens_cpu = np.stack(generated_tokens_cpu_list)
+            all_expert_indices_cpu = np.stack(all_expert_indices_cpu_list)
+        else:
+            generated_tokens_cpu_list = jax.device_get(generated_tokens)
+            generated_tokens_cpu = np.stack(generated_tokens_cpu_list)
+            all_expert_indices_cpu = None
 
         # Expose request dimension as axis 0 after transpose: shape (batch_size, max_decode_steps)
         generated_tokens_cpu = generated_tokens_cpu.T
@@ -1145,15 +1170,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             generated_tokens_cpu = generated_tokens_cpu[
                 logits_indices_selector]
 
-        # 1. Pull raw expert indices to CPU once if present
-        all_expert_indices_cpu = None
-        if all_expert_indices is not None:
-            all_expert_indices_cpu = np.asarray(
-                jax.device_get(all_expert_indices))
-            if logits_indices_selector is not None:
-                # Shape: (steps, layers, batch, top_k) -> realign batch dimension
-                all_expert_indices_cpu = all_expert_indices_cpu[:, :,
-                                                                logits_indices_selector, :]
+        if all_expert_indices_cpu is not None and logits_indices_selector is not None:
+            # Shape: (steps, layers, batch, top_k) -> realign batch dimension
+            all_expert_indices_cpu = all_expert_indices_cpu[:, :,
+                                                            logits_indices_selector, :]
 
         num_reqs = self.input_batch.num_reqs
         sampled_token_ids = []
@@ -1163,7 +1183,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_state = self.requests.get(req_id)
             tokens = generated_tokens_cpu[req_idx]
 
-            eos_indices = np.where(tokens == self.eos_token_id)[0]
+            eos_arr = np.atleast_1d(self.eos_token_id)
+            is_eos = np.any(tokens[:, None] == eos_arr[None, :], axis=-1)
+            eos_indices = np.where(is_eos)[0]
             if len(eos_indices) > 0:
                 first_eos_idx = eos_indices[0]
                 valid_tokens = tokens[:first_eos_idx + 1].tolist()
