@@ -109,6 +109,11 @@ steps:
       # headroom for the precompile.
       MAX_MODEL_LEN: "4096"
       MAX_NUM_SEQS: "64"
+      # 0.98 leaves only ~380M reservable on a single v6e chip — just under
+      # the 384M jit_structured_decode_fn needs (default RPA fits, batched
+      # RPA's slightly larger compile footprint OOMs). 0.94 frees enough
+      # headroom for both kernels.
+      GPU_MEMORY_UTILIZATION: "0.94"
       # No perf bar to start. Set after first measured run.
       MINIMUM_THROUGHPUT_THRESHOLD: 0.0
     commands:
