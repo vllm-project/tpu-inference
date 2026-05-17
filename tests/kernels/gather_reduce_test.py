@@ -51,7 +51,6 @@ def _maybe_xprof_session(**kwargs):
         yield None
 
 
-@absltest.skipThisClass(reason="Skip until numeric is fixed.")
 class ScatterReduceScTest(parameterized.TestCase):
 
     @parameterized.product(
