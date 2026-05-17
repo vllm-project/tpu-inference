@@ -35,6 +35,7 @@ from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.kv_share import compute_kv_share_map
 from tpu_inference.offload.utils import get_kv_connector_cache_layout
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
@@ -458,8 +459,6 @@ class KVCacheManager:
             # same mapping from the HF text_config attributes. Returns {}
             # for models that don't use KV-share, so this is a no-op for
             # the common case.
-            from tpu_inference.models.common.kv_share import \
-                compute_kv_share_map
             kv_share_map = compute_kv_share_map(text_config)
 
             for i in range(model_config.get_num_layers(parallel_config)):
