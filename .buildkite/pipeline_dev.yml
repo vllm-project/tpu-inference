@@ -76,6 +76,8 @@ steps:
       BENCH_DATASET: "text"
       INPUT_LEN: "1024"
       OUTPUT_LEN: "128"
+      MAX_MODEL_LEN: "4096"
+      MAX_NUM_SEQS: "64"
       MINIMUM_THROUGHPUT_THRESHOLD: 0.0
     commands:
       - .buildkite/scripts/run_in_docker.sh bash -c 'TIMEOUT_SECONDS=960 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
