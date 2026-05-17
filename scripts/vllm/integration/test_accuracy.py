@@ -59,8 +59,15 @@ def run_test(model_name, expected_value, more_args=None):
         fewshot_as_multiturn=apply_chat_template,
     )
 
-    measured_value = results["results"][TASK][FILTER]
+    # gsm8k emits two filters: strict-match (default gate) and flexible-extract.
+    # Print both so CI logs let reviewers compare across runs/kernels.
+    task_results = results["results"][TASK]
+    measured_value = task_results[FILTER]
+    flex_value = task_results.get("exact_match,flexible-extract")
     print(f"measured accuracy: {measured_value}")
+    print(f"measured accuracy (strict-match): {measured_value}")
+    if flex_value is not None:
+        print(f"measured accuracy (flexible-extract): {flex_value}")
     assert measured_value >= expected_value - RTOL, f"Expected: {expected_value} |  Measured: {measured_value}"
 
 
