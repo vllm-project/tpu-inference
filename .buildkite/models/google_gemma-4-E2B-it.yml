@@ -102,6 +102,13 @@ steps:
       BENCH_DATASET: "text"
       INPUT_LEN: "1024"
       OUTPUT_LEN: "128"
+      # v6e is memory-tight: default mm_bench_recipe (max_model_len=16384,
+      # max_num_seqs=256) OOMs during the jit_structured_decode_fn precompile
+      # (needs ~384M reservable, v6e has ~380M free at that point). The 4096
+      # / 64 sizing matches the offline_inference UnitTest and leaves enough
+      # headroom for the precompile.
+      MAX_MODEL_LEN: "4096"
+      MAX_NUM_SEQS: "64"
       # No perf bar to start. Set after first measured run.
       MINIMUM_THROUGHPUT_THRESHOLD: 0.0
     commands:
