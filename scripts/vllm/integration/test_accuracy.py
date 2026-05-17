@@ -11,6 +11,7 @@ sure that the zmq frontend mp RPC message passing and
 AsyncLLMEngine are working correctly.
 """
 
+import os
 import threading
 
 import lm_eval
@@ -43,11 +44,19 @@ def run_test(model_name, expected_value, more_args=None):
     if more_args is not None:
         model_args = "{},{}".format(model_args, more_args)
 
+    apply_chat_template = os.environ.get("USE_CHAT_TEMPLATE", "0") == "1"
+    if apply_chat_template:
+        print("USE_CHAT_TEMPLATE=1: enabling apply_chat_template + "
+              "fewshot_as_multiturn for lm_eval. Required for instruction-"
+              "tuned BOS-sensitive models like gemma-4-it.")
+
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=model_args,
         tasks="gsm8k",
         batch_size="auto",
+        apply_chat_template=apply_chat_template,
+        fewshot_as_multiturn=apply_chat_template,
     )
 
     measured_value = results["results"][TASK][FILTER]
