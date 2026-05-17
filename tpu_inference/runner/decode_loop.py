@@ -52,12 +52,13 @@ def _update_loop_state(
     active_mask: jax.Array,
     input_positions: jax.Array,
     seq_lens: jax.Array,
-    eos_token_id: int,
+    eos_token_id: tuple[int, ...],
     padding_token_id: int,
     dp_size: int,
     pad_len: int,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    is_eos = next_tokens == eos_token_id
+    eos_arr = jnp.atleast_1d(jnp.array(eos_token_id, dtype=jnp.int32))
+    is_eos = jnp.any(next_tokens[:, None] == eos_arr[None, :], axis=-1)
     new_active_mask = jnp.logical_and(active_mask, jnp.logical_not(is_eos))
     next_input_ids = jnp.where(new_active_mask, next_tokens, padding_token_id)
     increment = new_active_mask.astype(jnp.int32)
@@ -80,45 +81,60 @@ def _update_loop_state(
     return new_active_mask, next_input_ids, new_positions, new_seq_lens, step_record_tokens, any_hit_eos
 
 
+@functools.partial(jax.jit, static_argnums=(1, 2))
+def _split_rngs(rng, static_size, dynamic_size):
+    all_rngs = jax.random.split(rng, static_size + 1)
+    return all_rngs[:dynamic_size], all_rngs[dynamic_size]
+
+
 def continue_decode(
-    state: Any,
+    state: dict,
     model_fn: Callable,
     compute_logits_fn: Callable,
     sample_fn: Callable,
     init_state: TpuSamplingState,
     kv_caches: Any,
     max_decode_steps: int,
-    eos_token_id: int,
+    static_max_decode_steps: int,
+    eos_token_id: tuple[int, ...],
     padding_token_id: int,
     rng: jax.Array,
     terminate_on_any_eos: bool = False,
-    inputs_embeds: Any = None,
-    layer_name_to_kvcache_index: Any = (),
-    lora_metadata: Any = None,
-    intermediate_tensors: Any = None,
+    inputs_embeds: jax.Array | None = None,
+    layer_name_to_kvcache_index: tuple[tuple[str, int], ...] = (),
+    lora_metadata: dict | None = None,
+    intermediate_tensors: dict[str, jax.Array] | None = None,
     is_first_rank: bool = True,
     is_last_rank: bool = True,
     dp_size: int = 1,
-) -> tuple[jax.Array, Any, TpuSamplingState, jax.Array]:
-    """Continues decoding on TPU using a Python loop (no host sync during loop).
+) -> tuple[list[jax.Array], Any, TpuSamplingState, jax.Array, list[jax.Array]
+           | None]:
+    """Helper function to run the decode loop on TPU.
 
     Args:
-        state: Model weights and state.
-        model_fn: Function to run the model forward pass.
-        compute_logits_fn: Function to compute logits from hidden states.
-        sample_fn: Function to sample next tokens.
-        init_state: Initial TpuSamplingState.
-        kv_caches: Initial KV caches.
-        max_decode_steps: Maximum steps to decode (Python int).
-        eos_token_id: EOS token ID.
-        padding_token_id: Padding token ID.
-        rng: Initial PRNG key for sampling.
-        terminate_on_any_eos: If True, stops as soon as any request hits EOS (handled on CPU).
-                             If False, continues until all requests hit EOS.
-        dp_size: Data parallel size (needed for correct metadata padding).
+      state: Model state dict.
+      model_fn: Function to run the model forward pass.
+      compute_logits_fn: Function to compute logits from hidden states.
+      sample_fn: Function to sample next tokens.
+      init_state: Initial TpuSamplingState.
+      kv_caches: KV caches.
+      max_decode_steps: Maximum number of steps to run the decode loop.
+      static_max_decode_steps: Static maximum number of steps to split RNG.
+      eos_token_id: EOS token ID.
+      padding_token_id: Padding token ID.
+      rng: RNG key.
+      terminate_on_any_eos: Whether to terminate the loop early if any request
+        hits EOS.
+      inputs_embeds: Optional input embeddings.
+      layer_name_to_kvcache_index: Mapping from layer name to KV cache index.
+      lora_metadata: Optional LoRA metadata.
+      intermediate_tensors: Optional intermediate tensors.
+      is_first_rank: Whether this is the first PP rank.
+      is_last_rank: Whether this is the last PP rank.
+      dp_size: Data parallel size.
 
     Returns:
-    Tuple of (generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices).
+      Tuple of (generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices).
     """
 
     batch_size = init_state.current_tokens.shape[0]
@@ -128,10 +144,8 @@ def continue_decode(
     current_tokens = init_state.current_tokens
     active_mask = init_state.active_mask
     attn_metadata = init_state.attn_metadata
-    # Split RNG upfront for all steps plus one to return as the final state
-    all_rngs = jax.random.split(rng, max_decode_steps + 1)
-    step_rngs = all_rngs[:-1]
-    current_rng = all_rngs[-1]
+    step_rngs, current_rng = _split_rngs(rng, static_max_decode_steps,
+                                         max_decode_steps)
 
     token_list = []
     expert_indices_list = []
@@ -198,9 +212,8 @@ def continue_decode(
     else:
         actual_steps = max_decode_steps
 
-    generated_tokens = jnp.stack(token_list)
-    all_expert_indices = jnp.stack(
-        expert_indices_list) if expert_indices_list else None
+    generated_tokens = token_list
+    all_expert_indices = expert_indices_list if expert_indices_list else None
 
     final_state = TpuSamplingState(
         current_tokens=current_tokens,

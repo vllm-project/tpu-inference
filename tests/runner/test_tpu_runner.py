@@ -226,8 +226,8 @@ class TestTPUJaxRunner:
 
         # Mock continue_decode output
         # Unpacks: generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices
-        mock_generated_tokens = MagicMock()
-        mock_all_expert_indices = MagicMock()
+        mock_generated_tokens = [MagicMock() for _ in range(5)]
+        mock_all_expert_indices = [MagicMock() for _ in range(5)]
         mock_continue_decode.return_value = (
             mock_generated_tokens,
             MagicMock(),  # kv_caches
@@ -237,16 +237,18 @@ class TestTPUJaxRunner:
 
         # Mock jax.device_get to return generated tokens (steps=5, batch_size=8)
         mock_tokens_cpu = np.zeros((5, 8), dtype=np.int32)
+        mock_tokens_cpu_list = [mock_tokens_cpu[i] for i in range(5)]
 
         # Mock jax.device_get for expert indices (steps=5, layers=3, batch_size=8, top_k=2)
         mock_experts_cpu = np.arange(5 * 3 * 8 * 2,
                                      dtype=np.int32).reshape(5, 3, 8, 2)
+        mock_experts_cpu_list = [mock_experts_cpu[i] for i in range(5)]
 
         def device_get_side_effect(arg):
-            if arg is mock_generated_tokens:
-                return mock_tokens_cpu
-            if arg is mock_all_expert_indices:
-                return mock_experts_cpu
+            if isinstance(arg, tuple) and len(arg) == 2:
+                tokens_arg, experts_arg = arg
+                if tokens_arg is mock_generated_tokens and experts_arg is mock_all_expert_indices:
+                    return mock_tokens_cpu_list, mock_experts_cpu_list
             return arg
 
         mock_device_get.side_effect = device_get_side_effect
@@ -268,6 +270,11 @@ class TestTPUJaxRunner:
         # Execute target method
         from tpu_inference.runner.tpu_runner import TPUModelRunner
         TPUModelRunner._execute_continue_decode(runner, scheduler_output)
+
+        mock_continue_decode.assert_called_once()
+        assert mock_continue_decode.call_args.kwargs["max_decode_steps"] == 5
+        assert mock_continue_decode.call_args.kwargs[
+            "static_max_decode_steps"] == 5
 
         # Verify expert indices are formatted correctly: (num_layers, num_reqs * actual_steps, top_k)
         # actual_steps = 5, num_reqs = 2, layers = 3, top_k = 2
@@ -323,7 +330,7 @@ class TestTPUJaxRunner:
         runner.layer_name_to_kvcache_index = {}
 
         # Mock continue_decode output
-        mock_generated_tokens = MagicMock()
+        mock_generated_tokens = [MagicMock() for _ in range(5)]
         mock_continue_decode.return_value = (
             mock_generated_tokens,
             MagicMock(),  # kv_caches
@@ -342,8 +349,14 @@ class TestTPUJaxRunner:
         mock_tokens_cpu[:, 0] = [101, 102, 999, 0, 0]
         mock_tokens_cpu[:, 1] = [201, 202, 203, 204, 999]
         mock_tokens_cpu[:, 2] = [301, 302, 303, 304, 305]
+        mock_tokens_cpu_list = [mock_tokens_cpu[i] for i in range(5)]
 
-        mock_device_get.return_value = mock_tokens_cpu
+        def device_get_side_effect(arg):
+            if arg is mock_generated_tokens:
+                return mock_tokens_cpu_list
+            return arg
+
+        mock_device_get.side_effect = device_get_side_effect
 
         # Setup scheduler output
         scheduler_output = MagicMock()
@@ -377,6 +390,13 @@ class TestTPUJaxRunner:
         # 1. Verify step capping logic: max_decode_steps = min(10, 5) = 5.
         mock_continue_decode.assert_called_once()
         assert mock_continue_decode.call_args.kwargs["max_decode_steps"] == 5
+        assert mock_continue_decode.call_args.kwargs[
+            "static_max_decode_steps"] == 10
+        called_init_state = mock_continue_decode.call_args.kwargs["init_state"]
+        expected_active_mask = np.array(
+            [True, True, True, False, False, False, False, False])
+        np.testing.assert_array_equal(called_init_state.active_mask,
+                                      expected_active_mask)
 
         # 2. Verify generated tokens are trimmed at EOS and placed in output
         output = runner._continue_decode_output
@@ -414,6 +434,138 @@ class TestTPUJaxRunner:
         assert attn_metadata.seq_lens_cpu[1] == 25
         # req3: 30 -> 35
         assert attn_metadata.seq_lens_cpu[2] == 35
+
+    @patch('tpu_inference.runner.tpu_runner.continue_decode')
+    @patch('jax.device_get')
+    def test_execute_continue_decode_sharded(self, mock_device_get,
+                                             mock_continue_decode):
+        """_execute_continue_decode() should realign generated tokens correctly when dp_size > 1."""
+        runner = MagicMock()
+        runner.max_num_reqs = 8
+        runner.max_model_len = 512
+        runner.dp_size = 2
+        runner.input_batch.num_reqs = 3
+        runner.input_batch.req_ids = ["req1", "req2", "req3"]
+        # req1 and req2 are in Rank 0 (slots 0, 1)
+        # req3 is in Rank 1 (slot 0)
+        runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1, "req3": 2}
+
+        # Initialize token_ids_cpu buffer
+        runner.input_batch.token_ids_cpu = np.zeros((8, 512), dtype=np.int32)
+
+        req_mock1 = MagicMock(output_token_ids=[1, 2, 3])
+        req_mock2 = MagicMock(output_token_ids=[4])
+        req_mock3 = MagicMock(output_token_ids=[5, 6])
+        runner.requests = {
+            "req1": req_mock1,
+            "req2": req_mock2,
+            "req3": req_mock3
+        }
+
+        runner._get_min_remaining_slots.return_value = 5
+        runner.vllm_config.additional_config = {
+            "max_decode_steps": 10,
+            "terminate_on_any_eos": True
+        }
+
+        runner.model_config.get_vocab_size.return_value = 1000
+        runner.model_config.hf_config = MagicMock(eos_token_id=999,
+                                                  pad_token_id=0)
+        runner.eos_token_id = 999
+        runner.pad_token_id = 0
+        runner.layer_name_to_kvcache_index = {}
+
+        # Mock continue_decode output
+        mock_generated_tokens = [MagicMock() for _ in range(5)]
+        mock_continue_decode.return_value = (
+            mock_generated_tokens,
+            MagicMock(),  # kv_caches
+            MagicMock(),  # final_state
+            MagicMock(),  # final_rng
+            None  # all_expert_indices
+        )
+
+        # Mock jax.device_get output for generated tokens
+        # Shape (max_decode_steps, padded_total_num_scheduled_tokens) -> (5, 8)
+        mock_tokens_cpu = np.zeros((5, 8), dtype=np.int32)
+        # Rank 0 (slots 0, 1, 2, 3)
+        mock_tokens_cpu[:, 0] = [101, 102, 999, 0, 0]  # req1
+        mock_tokens_cpu[:, 1] = [201, 202, 203, 204, 999]  # req2
+        # Rank 1 (slots 0, 1, 2, 3)
+        mock_tokens_cpu[:, 4] = [301, 302, 303, 304, 305]  # req3
+
+        mock_tokens_cpu_list = [mock_tokens_cpu[i] for i in range(5)]
+
+        def device_get_side_effect(arg):
+            if arg is mock_generated_tokens:
+                return mock_tokens_cpu_list
+            return arg
+
+        mock_device_get.side_effect = device_get_side_effect
+
+        # Setup scheduler output
+        scheduler_output = MagicMock()
+        scheduler_output.num_scheduled_tokens = {
+            "req1": 1,
+            "req2": 1,
+            "req3": 1
+        }
+
+        # Mock attn_metadata.seq_lens_cpu
+        mock_seq_lens_cpu = np.array([10, 20, 30, 0, 0, 0, 0, 0])
+        runner.input_batch.num_tokens = mock_seq_lens_cpu.copy()
+        runner.input_batch.num_tokens_no_spec = mock_seq_lens_cpu.copy()
+
+        attn_metadata = MagicMock()
+        attn_metadata.seq_lens_cpu = mock_seq_lens_cpu
+
+        # logits_indices: Rank 0 has 2 active, Rank 1 has 1 active.
+        # padded_num_reqs_per_dp_rank = 4
+        # logits_indices = [0, 1, -1, -1,  0, -1, -1, -1]
+        # logits_indices_selector = [0, 1, 4]
+        runner._prepare_inputs.return_value = (
+            np.zeros(8, dtype=np.int32),  # input_ids
+            None,
+            attn_metadata,
+            None,
+            np.array([0, 1, -1, -1, 0, -1, -1, -1],
+                     dtype=np.int32),  # logits_indices
+            None,
+            [0, 1, 4],  # logits_indices_selector
+            None)
+
+        # Execute target method
+        from tpu_inference.runner.tpu_runner import TPUModelRunner
+        TPUModelRunner._execute_continue_decode(runner, scheduler_output)
+
+        # Verify generated tokens are trimmed at EOS and placed in output
+        output = runner._continue_decode_output
+        assert output is not None
+
+        # req1: [101, 102, 999] (length 3)
+        assert output.sampled_token_ids[0] == [101, 102, 999]
+        # req2: [201, 202, 203, 204, 999] (length 5)
+        assert output.sampled_token_ids[1] == [201, 202, 203, 204, 999]
+        # req3: [301, 302, 303, 304, 305] (length 5)
+        assert output.sampled_token_ids[2] == [301, 302, 303, 304, 305]
+
+        # Verify CPU token_ids_cpu buffer is updated correctly
+        # req1 starts at 10. next 3 tokens written.
+        np.testing.assert_array_equal(
+            runner.input_batch.token_ids_cpu[0, 10:13], [101, 102, 999])
+        # req2 starts at 20. next 5 tokens written.
+        np.testing.assert_array_equal(
+            runner.input_batch.token_ids_cpu[1, 20:25],
+            [201, 202, 203, 204, 999])
+        # req3 starts at 30. next 5 tokens written.
+        np.testing.assert_array_equal(
+            runner.input_batch.token_ids_cpu[2, 30:35],
+            [301, 302, 303, 304, 305])
+
+        # Verify request output_token_ids are extended
+        assert req_mock1.output_token_ids == [1, 2, 3, 101, 102, 999]
+        assert req_mock2.output_token_ids == [4, 201, 202, 203, 204, 999]
+        assert req_mock3.output_token_ids == [5, 6, 301, 302, 303, 304, 305]
 
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
