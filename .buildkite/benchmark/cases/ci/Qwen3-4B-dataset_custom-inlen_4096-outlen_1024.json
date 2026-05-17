@@ -16,8 +16,7 @@
     "env": {
       "VLLM_USE_V1": "1",
       "MODEL_IMPL_TYPE": "vllm",
-      "NEW_MODEL_DESIGN": "1",
-      "NUM_PRECOMPILE_WORKERS": "1"
+      "NEW_MODEL_DESIGN": "1"
     },
     "args": {
       "model": "Qwen/Qwen3-4B",
