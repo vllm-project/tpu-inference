@@ -29,6 +29,13 @@ steps:
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     soft_fail: true
+    # Default RPA v3 is the production attention path for E2B (fully
+    # deterministic gsm8k across runs). To exercise the experimental batched
+    # RPA kernel locally or on a dev pipeline, set:
+    #   env:
+    #     USE_BATCHED_RPA_KERNEL: "1"
+    # in this step's env block (and in the Accuracy/Benchmark steps below).
+    # Both kernels are verified equivalent in BK #459-#462.
     commands:
       - |
         if pip install "transformers>=5.5.0" --dry-run | grep -q "Would install transformers-"; then
@@ -64,10 +71,10 @@ steps:
       # USE_CHAT_TEMPLATE=1 routes lm_eval through apply_chat_template +
       # fewshot_as_multiturn. Required for gemma-4-it because the model is
       # BOS/chat-template-sensitive — raw prompts produce token-repetition
-      # garbage. Floor below is set from first measured value with chat
-      # template on, not the raw-prompt baseline.
+      # garbage. Floor below is set from the minimum chat-templated measurement
+      # × 0.7 across 4 dev-pipeline runs (min batched = 0.523).
       USE_CHAT_TEMPLATE: "1"
-      MINIMUM_ACCURACY_THRESHOLD: 0.05
+      MINIMUM_ACCURACY_THRESHOLD: 0.35
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
