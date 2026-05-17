@@ -16,12 +16,6 @@
 # gemma-4-it is BOS-sensitive — raw prompts produce token-repetition
 # garbage on both GPU vllm-pytorch and JAX (model property, not a
 # correctness bug in our path).
-#
-# JAX path correctness was verified by per-layer hidden-state diff vs
-# vllm-pytorch GPU within BF16 noise across all 35 layers.
-# KV-share kernel behavior regression-guarded by the new
-# test_kv_share_* methods in
-# tests/kernels/ragged_paged_attention_kernel_v3_test.py.
 
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-E2B-it"
