@@ -372,10 +372,14 @@ class DPScheduler(SchedulerInterface):
         self._schedule_step_count = 0
         self._prev_schedule_start = 0.0
 
-        # Hold incoming requests here until `dp_size` of them accumulate,
-        # then dispatch all together.
+        # Hold incoming requests until `dp_size` of them accumulate,
+        # then dispatch all together, or when elapsed time since the
+        # last flush exceeds the threshold.
         self._batch_prefills: bool = envs.DP_SCHED_BATCH_PREFILL
         self._batch_prefill_threshold: int = max(1, self.dp_size)
+        self._batch_prefill_flush_timeout_ms: int = (
+            envs.DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS)
+        self._batch_prefill_last_flush: float = time()
         self._pending_new_requests: List[Request] = []
 
         # Initialize NONE_HASH global before forking worker processes
@@ -635,13 +639,7 @@ class DPScheduler(SchedulerInterface):
 
         if self._batch_prefills:
             self._pending_new_requests.append(request)
-            if len(self._pending_new_requests
-                   ) >= self._batch_prefill_threshold:
-                self._flush_pending_new_requests()
-            else:
-                # Still dispatch if there is any idle rank even if
-                # not reaching the flush threshold.
-                self._maybe_dispatch_on_idle_rank()
+            self._try_flush_pending()
             return
 
         self._route_and_forward_request(request)
@@ -654,28 +652,46 @@ class DPScheduler(SchedulerInterface):
         self._send_command(rank, SchedulerCommand.ADD_REQUEST, request)
         self._get_result(rank, SchedulerCommand.ADD_REQUEST)
 
-    def _flush_pending_new_requests(self) -> None:
-        """Drain the pending queue using the default load balancer."""
-        if not self._pending_new_requests:
-            return
+    def _flush_pending(self) -> None:
+        """Drain the pending reqs."""
         pending = self._pending_new_requests
         self._pending_new_requests = []
+        self._batch_prefill_last_flush = time()
         for req in pending:
             self._route_and_forward_request(req)
 
-    def _maybe_dispatch_on_idle_rank(self) -> None:
-        """Dispatch pending requests if free ranks can absorb pending count."""
-        num_pending = len(self._pending_new_requests)
-        for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
-        num_free_ranks = 0
-        for rank in range(self.dp_size):
-            running, waiting = self._get_result(
-                rank, SchedulerCommand.GET_REQUEST_COUNTS)
-            if running == 0 and waiting == 0:
-                num_free_ranks += 1
-        if num_free_ranks >= num_pending:
-            self._flush_pending_new_requests()
+    def _count_idle_ranks(self) -> int:
+        """Number of idle ranks reported in most recent schedule"""
+        if not self.cached_schedulers_output:
+            return self.dp_size
+        return sum(1 for out in self.cached_schedulers_output[-1]
+                   if out.total_num_scheduled_tokens == 0)
+
+    def _try_flush_pending(self) -> None:
+        """Flush the pending buffer if a trigger applies.
+
+        Triggers (any one of the following):
+          - Threshold: pending count reached threshold (= dp_size).
+          - Timeout: time since the last flush exceeds
+            ``DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS``.
+          - Idle ranks: at least as many ranks reported idle in the
+            previous step as we have pending requests, so the
+            admissions can land without piling up.
+        """
+        if not self._pending_new_requests:
+            return
+
+        n = len(self._pending_new_requests)
+        if n >= self._batch_prefill_threshold:
+            self._flush_pending()
+            return
+        elapsed_ms = (time() - self._batch_prefill_last_flush) * 1000.0
+        if elapsed_ms >= self._batch_prefill_flush_timeout_ms:
+            self._flush_pending()
+            return
+        if self._count_idle_ranks() >= n:
+            self._flush_pending()
+            return
 
     @time_function
     def schedule(self) -> DPSchedulerOutput:
@@ -696,10 +712,8 @@ class DPScheduler(SchedulerInterface):
                          self._schedule_step_count - 1, e2e_step_time)
         self._prev_schedule_start = now
 
-        # When requests are held in _pending_new_requests below the threshold,
-        # dispatch if we have any idle ranks.
-        if self._batch_prefills and self._pending_new_requests:
-            self._maybe_dispatch_on_idle_rank()
+        if self._batch_prefills:
+            self._try_flush_pending()
 
         # Run each scheduler independently
         for rank in range(self.dp_size):

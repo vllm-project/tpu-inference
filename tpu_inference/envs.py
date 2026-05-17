@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
     ENABLE_RS_KERNEL: bool = False
     DP_SCHED_BATCH_PREFILL: bool = False
+    DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
 
 
 def env_with_choices(
@@ -357,10 +358,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable hierarchical reduce-scatter kernel for MoE
     "ENABLE_RS_KERNEL":
     env_bool("ENABLE_RS_KERNEL", default=False),
-    # DP-scheduler: hold incoming requests (prefills) at the DP layer until
-    # `dp_size` of them have accumulated. The goal is to cluster new prefills.
+    # DP scheudler: hold and batch incoming requests (prefills) to
+    # cluster and dispatch prefills together.
     "DP_SCHED_BATCH_PREFILL":
     env_bool("DP_SCHED_BATCH_PREFILL", default=True),
+    # DP scheduler: timeout (ms) to force flush pending requests.
+    "DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS":
+    lambda: int(os.getenv("DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS", "30000")),
 }
 
 
