@@ -99,10 +99,9 @@ def main_kernel(
     # Inputs.
     num_rows_per_row_partition_ref: jax.Ref,
     in_hbm_ref: jax.Ref,
-    indices_hbm_ref: jax.Ref,
+    src_indices_hbm_ref: jax.Ref,
     dst_indices_hbm_ref: jax.Ref,
     topk_weights_hbm_ref: jax.Ref,
-    sorted_by_validity_hbm_ref: jax.Ref,
     # Outputs.
     out_hbm_ref: jax.Ref,
     # Scratch.
@@ -112,7 +111,6 @@ def main_kernel(
     src_indices_vmem_ref: jax.Ref,
     dst_indices_vmem_ref: jax.Ref,
     topk_weights_vmem_ref: jax.Ref,
-    sorted_by_validity_vmem_ref: jax.Ref,
     sem_ref: jax.Ref,
     *,
     core_axis_name: str,
@@ -178,9 +176,9 @@ def main_kernel(
             dma_list = []
             dma_list.append(
                 pltpu.make_async_copy(
-                    sorted_by_validity_hbm_ref.at[pl.ds(
-                        row_tile_start, num_simd_lanes)],
-                    sorted_by_validity_vmem_ref,
+                    src_indices_hbm_ref.at[pl.ds(row_tile_start,
+                                                 num_simd_lanes)],
+                    src_indices_vmem_ref,
                     recv_sem,
                 ))
             dma_list.append(
@@ -190,20 +188,11 @@ def main_kernel(
                     dst_indices_vmem_ref,
                     recv_sem,
                 ))
-            jax.tree.map(lambda x: x.start(), dma_list)
-            jax.tree.map(lambda x: x.wait(), dma_list)
-
-            dma_list = []
             dma_list.append(
                 pltpu.make_async_copy(
-                    topk_weights_hbm_ref.at[sorted_by_validity_vmem_ref],
+                    topk_weights_hbm_ref.at[pl.ds(row_tile_start,
+                                                  num_simd_lanes)],
                     topk_weights_vmem_ref,
-                    recv_sem,
-                ))
-            dma_list.append(
-                pltpu.make_async_copy(
-                    indices_hbm_ref.at[sorted_by_validity_vmem_ref],
-                    src_indices_vmem_ref,
                     recv_sem,
                 ))
             jax.tree.map(lambda x: x.start(), dma_list)
@@ -238,12 +227,9 @@ def main_kernel(
 
             # VMEM to HBM transfer.
             # Use dynamic loop to minimize register spills.
-            @pl.loop(0,
-                     col_size,
-                     step=num_lanes,
-                     init_carry=(prev_dst_row_hbm, ))
             @jax.named_scope("dma_write_loop")
-            def dma_write_loop(col_vmem_start, carry):
+            def dma_write_loop(i, carry):
+                col_vmem_start = i * num_lanes
                 col_hbm_start = col_start + col_vmem_start
 
                 for _ in range(num_simd_lanes):
@@ -373,6 +359,12 @@ def main_kernel(
 
                 return carry
 
+            jax.lax.fori_loop(
+                0,
+                pl.cdiv(col_size, num_lanes),
+                dma_write_loop,
+                init_val=(prev_dst_row_hbm, ),
+            )
             # Wait for dma write to finish.
             for _ in range(0, col_size, num_lanes):
                 for _ in range(num_simd_lanes):
@@ -388,11 +380,12 @@ def main_kernel(
 # TODO(gxd): investigate if we can make the preprocessing more efficient.
 def _preprocess(
     indices: jax.Array,
+    topk_weights: jax.Array,
     valid_rows_mask: jax.Array,
     reduce_group_size: int,
     num_row_partitions: int,
     num_simd_lanes: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Preprocesses indices for ragged gather reduce."""
     assert indices.ndim == 1, "Ragged scatter only supports 1d indices."
 
@@ -410,10 +403,12 @@ def _preprocess(
     ) * row_partition_size)
     sorted_by_validity = sorted_by_validity.reshape(-1)
 
+    src_indices = indices[sorted_by_validity]
     # `reduce_group_size` source rows are mapped (and reduced) to the same output
     # row.
     dst_indices = sorted_by_validity // reduce_group_size
-    sorted_by_validity = sorted_by_validity.astype(jnp.int32)
+    topk_weights = topk_weights[sorted_by_validity]
+    topk_weights = topk_weights.astype(jnp.float32)
 
     num_src_rows_per_row_partition = jnp.sum(valid_rows_mask, axis=-1)
     assert num_row_partitions <= num_simd_lanes
@@ -426,8 +421,9 @@ def _preprocess(
     mask = jnp.any(valid_rows_mask.reshape(-1, reduce_group_size), axis=-1)
 
     return (
+        src_indices,
         dst_indices,
-        sorted_by_validity,
+        topk_weights,
         num_src_rows_per_row_partition,
         mask,
     )
@@ -525,12 +521,14 @@ def ragged_gather_reduce(
     col_size = x.shape[-1] // num_column_partitions
 
     (
+        src_indices,
         dst_indices,
-        sorted_by_validity,
+        topk_weights,
         num_src_rows_per_row_partition,
         mask,
     ) = _preprocess(
         indices,
+        topk_weights,
         valid_rows_mask,
         reduce_group_size,
         num_row_partitions,
@@ -568,19 +566,12 @@ def ragged_gather_reduce(
             pltpu.VMEM((num_simd_lanes, ), jnp.int32),
             pltpu.VMEM((num_simd_lanes, ), jnp.int32),
             pltpu.VMEM((num_simd_lanes, ), jnp.float32),
-            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
             pltpu.SemaphoreType.DMA((2, )),
         ],
         mesh=vector_mesh,
         name="sc_ragged_gather_reduce",
-    )(
-        num_src_rows_per_row_partition,
-        x,
-        indices,
-        dst_indices,
-        topk_weights.astype(jnp.float32),
-        sorted_by_validity,
-    )
+    )(num_src_rows_per_row_partition, x, src_indices, dst_indices,
+      topk_weights)
 
     # If there is no valid source row in a reduce group, set that group's output
     # to zero.
