@@ -150,28 +150,13 @@ done
 if $did_find_ready_message; then
     echo "Starting the benchmark for $model_name..."
     echo "Current working directory: $(pwd)"
+    bench_cmd=(vllm bench serve --model "$model_name" --dataset-name "$dataset_name" --num-prompts "$num_prompts" --backend "$backend" --endpoint "/v1/chat/completions")
     if [ "$bench_dataset" = "text" ]; then
-        vllm bench serve \
-        --model "$model_name" \
-        --dataset-name "$dataset_name" \
-        --num-prompts "$num_prompts" \
-        --backend "$backend" \
-        --endpoint "/v1/chat/completions" \
-        --random-input-len "${INPUT_LEN:-1024}" \
-        --random-output-len "${OUTPUT_LEN:-128}" \
-        --random-range-ratio 0.0 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+        bench_cmd+=(--random-input-len "${INPUT_LEN:-1024}" --random-output-len "${OUTPUT_LEN:-128}" --random-range-ratio 0.0)
     else
-        vllm bench serve \
-        --model "$model_name" \
-        --dataset-name "$dataset_name" \
-        --num-prompts "$num_prompts" \
-        --backend "$backend" \
-        --endpoint "/v1/chat/completions" \
-        --random-mm-bucket-config '{(736, 736, 1): 1.0}' \
-        --random-mm-base-items-per-request 6 \
-        --random-mm-num-mm-items-range-ratio 0.67 \
-        --random-mm-limit-mm-per-prompt '{"image": 10, "video": 0}' 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+        bench_cmd+=(--random-mm-bucket-config '{(736, 736, 1): 1.0}' --random-mm-base-items-per-request 6 --random-mm-num-mm-items-range-ratio 0.67 --random-mm-limit-mm-per-prompt '{"image": 10, "video": 0}')
     fi
+    "${bench_cmd[@]}" 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
 
     checkThroughput
