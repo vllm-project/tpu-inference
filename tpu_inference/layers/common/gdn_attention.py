@@ -25,8 +25,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.layers.common.ragged_gated_delta_rule_wrapper as ragged_gated_delta_rule_wrapper
-from tpu_inference.layers.common.ragged_conv1d_jax import \
-    ragged_conv1d as ragged_conv1d_jax
+from tpu_inference.kernels.gdn import conv1d
 from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
     ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -121,9 +120,9 @@ def run_jax_gdn_attention_local(
     has_initial_state = (seq_lens - query_lens) > 0
 
     # TODO: Switch conv implementaion based on config once we have more than 1 impl
-    conv_impl = ragged_conv1d_jax
+    # conv_impl = ragged_conv1d_jax
 
-    out_mixed_qkv, new_conv_state = conv_impl(
+    out_mixed_qkv, new_conv_state = conv1d.ragged_causal_conv1d(
         mixed_qkv,
         conv_state,
         conv_weight,
