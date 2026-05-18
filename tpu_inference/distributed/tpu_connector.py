@@ -96,6 +96,7 @@ from tpu_inference.distributed.tpu_connector_stats import (
     TpuKVConnectorPromMetrics, TpuKVConnectorStats)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
+from tpu_inference.runner.utils import trim_request_id_suffix
 from tpu_inference.utils import device_array
 
 ReqId = str
@@ -707,7 +708,18 @@ class TPUConnectorWorker:
                 kv, req_meta.expiration_time, buffer_idx
             ]
             self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-            self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+
+            # Dimensions format: (num_layers, num_blocks, block_size, num_heads, 2 (K/V), head_dim)
+            dims_str = str((len(kv), ) + tuple(kv[0].shape))
+            kv_size_bytes = sum(k.nbytes for k in kv)
+
+            with jax.profiler.TraceAnnotation(
+                    "KV_Cache_Await_Pull",
+                    uuid=req_meta.uuid,
+                    request_id=trim_request_id_suffix(req_id),
+                    bytes=kv_size_bytes,
+                    dimensions=dims_str):
+                self.kv_transfer_server.await_pull(req_meta.uuid, kv)
 
     def _async_d2h_and_transfer(self, req_id: str, req_meta: SendMeta,
                                 kv_src: list[jax.Array],
@@ -757,7 +769,20 @@ class TPUConnectorWorker:
             dest_buffer, req_meta.expiration_time, buffer_idx
         ]
         self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-        self.kv_transfer_server.await_pull(req_meta.uuid, updated_dest_buffer)
+
+        # Dimensions format: (num_layers, num_blocks, block_size, num_heads, 2 (K/V), head_dim)
+        dims_str = str((len(updated_dest_buffer), ) +
+                       tuple(updated_dest_buffer[0].shape))
+        kv_size_bytes = sum(k.nbytes for k in updated_dest_buffer)
+
+        with jax.profiler.TraceAnnotation(
+                "KV_Cache_Await_Pull",
+                uuid=req_meta.uuid,
+                request_id=trim_request_id_suffix(req_id),
+                bytes=kv_size_bytes,
+                dimensions=dims_str):
+            self.kv_transfer_server.await_pull(req_meta.uuid,
+                                               updated_dest_buffer)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
@@ -789,8 +814,20 @@ class TPUConnectorWorker:
         logger.info(
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
         )
+        # Dimensions format: (num_layers, num_blocks, block_size, num_heads, 2 (K/V), head_dim)
+        dims_str = str((len(kv_spec), ) + tuple(kv_spec[0].shape))
+        expected_bytes = len(kv_spec) * np.prod(kv_spec[0].shape) * np.dtype(
+            kv_spec[0].dtype).itemsize
+
         start_time = time.perf_counter()
-        kv = conn.pull(req_meta.uuid, kv_spec)
+        with jax.profiler.TraceAnnotation(
+                "KV_Cache_Pull",
+                uuid=req_meta.uuid,
+                request_id=trim_request_id_suffix(req_id),
+                bytes=expected_bytes,
+                dimensions=dims_str,
+                source=f"{req_meta.remote_host}:{req_meta.remote_port}"):
+            kv = conn.pull(req_meta.uuid, kv_spec)
         kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
         end_time_0, end_time_1 = time.perf_counter(), None
         prepare_time_ms = (end_time_0 - start_time) * 1000
