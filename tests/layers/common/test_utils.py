@@ -23,7 +23,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference import envs
-from tpu_inference.layers.common.utils import general_device_put
+from tpu_inference.layers.common.utils import general_device_put, truncate_sharded_tensor
 
 
 class UtilsTest(jtu.JaxTestCase):
@@ -93,6 +93,20 @@ class UtilsTest(jtu.JaxTestCase):
                 self.assertEqual(mock_make_array.call_count, 2)
                 self.assertIsInstance(result, list)
                 self.assertEqual(len(result), 2)
+
+    def test_truncate_sharded_tensor(self):
+        # Shape: (2, 20), n_shards=4, so each shard has size 5 on the last dim
+        t = jnp.arange(40).reshape(2, 20)
+        n_shards = 4
+        truncate_size = 3
+        
+        result = truncate_sharded_tensor(t, truncate_size, n_shards)
+        
+        # Expected: reshape to (2, 4, 5), truncate to (2, 4, 3), reshape to (2, 12)
+        expected = t.reshape(2, 4, 5)[:, :, :truncate_size].reshape(2, 12)
+        
+        self.assertEqual(result.shape, (2, 12))
+        self.assertAllClose(result, expected)
 
 
 if __name__ == "__main__":

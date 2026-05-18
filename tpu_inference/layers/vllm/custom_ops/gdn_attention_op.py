@@ -30,7 +30,7 @@ from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import \
     RaggedGatedDeltaRuleImpl
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
-    reorder_concatenated_tensor_for_sharding
+    reorder_concatenated_tensor_for_sharding, truncate_sharded_tensor
 from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
@@ -129,11 +129,15 @@ def gdn_attention_core_tpu(
 
     # Slice the state indices to the padded_num_reqs, which is the actual number
     # of requests padded to the bucket.
-    state_indices_sliced = state_indices[:padded_num_reqs]
-    query_start_loc_sliced = attn_metadata.query_start_loc[:padded_num_reqs +
-                                                           dp_size]
-    seq_lens_sliced = attn_metadata.seq_lens[:padded_num_reqs]
-
+    state_indices_sliced = truncate_sharded_tensor(
+        state_indices, padded_num_reqs, dp_size)
+    query_start_loc_sliced = truncate_sharded_tensor(attn_metadata.query_start_loc,
+                                                     padded_num_reqs + 1,
+                                                     dp_size)
+    seq_lens_sliced = truncate_sharded_tensor(attn_metadata.seq_lens,
+                                              padded_num_reqs,
+                                              dp_size)
+    
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
          j_mixed_qkv,
