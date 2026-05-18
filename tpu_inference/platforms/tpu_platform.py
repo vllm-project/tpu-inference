@@ -301,10 +301,28 @@ class TpuPlatform(Platform):
                     f"Unsupported kv_connector "
                     f"'{kv_transfer_config.kv_connector}' for the TPU "
                     f"platform. Expected one of {allowed}.")
+
+        enable_continue_decode = vllm_config.additional_config.get(
+            "enable_continue_decode", False)
+        is_pooling_model = vllm_config.model_config.runner_type == "pooling"
+        async_scheduling = vllm_config.scheduler_config.async_scheduling
+
+        # continue_decode is only active for generative (non-pooling) models,
+        # when pipeline parallelism is disabled, and when async scheduling is disabled.
+        should_use_continue_decode = (
+            enable_continue_decode
+            and parallel_config.pipeline_parallel_size == 1
+            and not is_pooling_model and not async_scheduling)
+
         # Late initialization to avoid circular import.
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
+
+        if should_use_continue_decode:
+            from tpu_inference.core.sched.utils import \
+                patch_vllm_scheduler_for_continue_decode
+            patch_vllm_scheduler_for_continue_decode()
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
