@@ -161,6 +161,15 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
             f"Validation Error: {file_path} is missing 'dataset-name' in client_command_options."
         )
 
+    # Specific Rules for `lm_eval`: must be a known dataset
+    if client_cmd_type == "lm_eval":
+        allowed_datasets = {"math500", "mlperf", "mmlu"}
+        if dataset_name not in allowed_datasets:
+            errors.append(
+                f"Validation Error: {file_path} has dataset-name '{dataset_name}' "
+                f"but for 'lm_eval', it must be one of {sorted(list(allowed_datasets))}."
+            )
+
     # Specific Rules for `vllm_bench_serve`
     if client_cmd_type == "vllm_bench_serve":
         if dataset_name:
