@@ -75,7 +75,7 @@ def get_transfer_channel_number() -> str:
 
 def get_enable_d2h_transfer() -> bool:
     """Check if device-to-host transfer is enabled via environment variable."""
-    enable_str = os.getenv("TPU_ENABLE_D2H_TRANSFER", "true").lower()
+    enable_str = os.getenv("TPU_ENABLE_D2H_TRANSFER", "0").lower()
     return enable_str in ("true", "1", "yes")
 
 
@@ -87,7 +87,7 @@ def get_enable_block_kv_transfer() -> bool:
 
 def get_p2p_wait_pull_timeout() -> int:
     """KV-cache transfer timeout in seconds."""
-    timeout_str = os.getenv("TPU_P2P_WAIT_PULL_TIMEOUT", "30")
+    timeout_str = os.getenv("TPU_P2P_WAIT_PULL_TIMEOUT", "180")
     return int(timeout_str)
 
 

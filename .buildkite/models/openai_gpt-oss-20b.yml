@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: openai/gpt-oss-20b
-# pipeline-type: text-only
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for openai/gpt-oss-20b"
     key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-20b_UnitTest"
@@ -45,7 +43,7 @@ steps:
       queue: cpu  # TODO: replace with execution environment
     env:
       TEST_MODEL: openai/gpt-oss-20b
-      TENSOR_PARALLEL_SIZE: 1
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |
@@ -72,7 +70,7 @@ steps:
       queue: cpu  # TODO: replace with execution environment
     env:
       TEST_MODEL: openai/gpt-oss-20b
-      TENSOR_PARALLEL_SIZE: 1
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
       MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
     commands:
       - |

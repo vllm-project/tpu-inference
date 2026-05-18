@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: moonshotai/Kimi-K2-Thinking
-# pipeline-type: text-only
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for moonshotai/Kimi-K2-Thinking"
     key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2-Thinking_UnitTest"

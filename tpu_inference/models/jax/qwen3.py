@@ -20,6 +20,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import Qwen3Config
 from vllm.config import VllmConfig
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -56,10 +57,11 @@ class Qwen3Attention(JaxModule):
                  kv_cache_dtype: str,
                  quant_config: VllmQuantConfig,
                  prefix: str = ""):
+        set_default_rope_theta(config, default_theta=1000000)
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.rope_theta = config.rope_theta
+        self.rope_theta = config.rope_parameters["rope_theta"]
         self.rope_scaling = getattr(config, "rope_scaling", None)
         self.rms_norm_eps = config.rms_norm_eps
 
@@ -271,10 +273,13 @@ class Qwen3Model(Qwen2Model):
         self.is_first_rank = get_pp_group().is_first_rank
         self.is_last_rank = get_pp_group().is_last_rank
 
+        tp_size = vllm_config.parallel_config.tensor_parallel_size if vllm_config.parallel_config is not None else 1
+        padded_vocab_size = utils.align_to(vocab_size, tp_size)
+
         if self.is_first_rank or (hf_config.tie_word_embeddings
                                   and self.is_last_rank):
             self.embed_tokens = JaxEmbed(
-                num_embeddings=vocab_size,
+                num_embeddings=padded_vocab_size,
                 features=hidden_size,
                 dtype=dtype,
                 param_dtype=dtype,
@@ -328,13 +333,16 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
             prefix="model",
         )
         model_config = vllm_config.model_config
-        if not model_config.hf_config.tie_word_embeddings:
+        is_pooling = vllm_config.model_config.runner_type == "pooling"
+        if not model_config.hf_config.tie_word_embeddings and not is_pooling:
             if self.model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
+                tp_size = vllm_config.parallel_config.tensor_parallel_size if vllm_config.parallel_config is not None else 1
+                padded_vocab_size = utils.align_to(vocab_size, tp_size)
                 hidden_size = model_config.hf_config.hidden_size
                 self.lm_head = JaxEinsum(
                     einsum_str="TD,DV->TV",
-                    kernel_shape=(hidden_size, vocab_size),
+                    kernel_shape=(hidden_size, padded_vocab_size),
                     dtype=model_config.dtype,
                     param_dtype=model_config.dtype,
                     rngs=rng,
@@ -343,6 +351,8 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
                 )
             else:
                 self.lm_head = PPMissingLayer()
+        else:
+            self.lm_head = PPMissingLayer()
 
     def __call__(
         self,
@@ -358,7 +368,7 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
         is_last_rank: bool = True,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
-               List[jax.Array]]:
+               List[jax.Array], Optional[jax.Array]]:
         if not is_first_rank:
             assert intermediate_tensors is not None
             inputs_embeds = intermediate_tensors["hidden_states"]
@@ -370,10 +380,12 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
         )
         if not is_last_rank:
             x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
-        return kv_caches, x, []
+        return kv_caches, x, [], None
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        if hasattr(self, 'lm_head'):
+        # Only use lm_head if it's a real projection layer (not a PPMissingLayer placeholder)
+        if hasattr(self,
+                   'lm_head') and not isinstance(self.lm_head, PPMissingLayer):
             return self.lm_head(hidden_states)
 
         assert isinstance(self.model.embed_tokens, JaxEmbed)

@@ -21,6 +21,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import LlamaConfig
 from vllm.config import VllmConfig
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -91,10 +92,11 @@ class LlamaAttention(nnx.Module):
 
     def __init__(self, config: LlamaConfig, dtype: jnp.dtype, rng: nnx.Rngs,
                  mesh: Mesh, kv_cache_dtype: str):
+        set_default_rope_theta(config, default_theta=500000)
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.rope_theta = config.rope_theta
+        self.rope_theta = config.rope_parameters["rope_theta"]
         self.rope_scaling = getattr(config, "rope_scaling", None)
 
         self.head_dim_original = getattr(config, "head_dim",
@@ -320,8 +322,8 @@ class LlamaModel(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         intermediate_tensors: JaxIntermediateTensors | None,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
-            List[jax.Array], JaxIntermediateTensors]:
+    ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
+               List[jax.Array]]:
         if self.is_first_rank:
             x = self.embed(input_ids)
         else:
@@ -382,14 +384,15 @@ class LlamaForCausalLM(nnx.Module):
         _is_first_rank: bool | None = None,
         _is_last_rank: bool | None = None,
         *args,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
-            List[jax.Array], JaxIntermediateTensors]:
-        return self.model(
+    ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
+               List[jax.Array], Optional[jax.Array]]:
+        outputs = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             intermediate_tensors,
         )
+        return outputs[0], outputs[1], outputs[2], None
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.vllm_config.model_config.hf_config.tie_word_embeddings:

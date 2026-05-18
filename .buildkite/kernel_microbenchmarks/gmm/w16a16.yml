@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: gmm-w16a16
-# pipeline-type: kernel support matrix microbenchmarks
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for gmm-w16a16"
     key: "${TPU_VERSION:-tpu6e}_gmm-w16a16_CorrectnessTest"

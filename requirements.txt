@@ -16,7 +16,10 @@ torchvision==0.25.0
 pathwaysutils
 parameterized
 numba==0.62.1
-runai-model-streamer[s3,gcs]==0.15.4
+runai-model-streamer[s3,gcs]==0.15.9
 gcsfs==2026.1.0
 hypothesis==6.151.9
 sortedcontainers==2.4.0
+# Upstream pins to 5.5.3 https://github.com/vllm-project/vllm/blob/de3fe8dc62f3d77eb8dab8125ca90436f606bccb/requirements/test/nightly-torch.txt#L32
+# TODO: unpin once transformers release with the fix https://github.com/huggingface/transformers/pull/45680
+transformers==5.5.3

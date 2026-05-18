@@ -38,8 +38,8 @@ class _BypassRef(pltpu.BufferedRef):
 class KVBufferedRef(_BypassRef):
     """Handles fetching and updating KV cache using precomputed metadata."""
 
-    cfgs: configs.RPAConfig = dataclasses.field(default=None,
-                                                metadata=dict(static=True))
+    cfgs: configs.RpaConfigs = dataclasses.field(default=None,
+                                                 metadata=dict(static=True))
 
     @classmethod
     def create(
@@ -49,7 +49,7 @@ class KVBufferedRef(_BypassRef):
         buffer_type,  # pltpu.BufferType,
         buffer_count: int,
         use_lookahead: bool,
-        cfgs: configs.RPAConfig,
+        cfgs: configs.RpaConfigs,
     ):
         # TODO(kyuyeunk): Uncomment this out after jax version update.
         # assert buffer_type == pltpu.BufferType.INPUT_OUTPUT
@@ -72,7 +72,7 @@ class KVBufferedRef(_BypassRef):
 
     def copy_in(
         self,
-        src_ref: tuple[jax.Ref, jax.Ref, schedule.RPASchedule, jax.Ref],
+        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
         grid_indices: tuple[int | jax.Array, ...],
     ):
         # src_ref: (kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref)
@@ -121,7 +121,7 @@ class KVBufferedRef(_BypassRef):
 
     def copy_out(
         self,
-        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RPASchedule, jax.Ref],
+        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
         grid_indices: tuple[int | jax.Array, ...],
     ):
         kv_out_ref, _, schedule_ref, page_indices_ref = dst_ref
@@ -149,7 +149,7 @@ class KVBufferedRef(_BypassRef):
 
     def wait_in(
         self,
-        src_ref: tuple[jax.Ref, jax.Ref, schedule.RPASchedule, jax.Ref],
+        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
         grid_indices: tuple[int | jax.Array, ...],
     ):
         _, _, schedule_ref, _ = src_ref
@@ -179,7 +179,7 @@ class KVBufferedRef(_BypassRef):
 
     def wait_out(
         self,
-        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RPASchedule, jax.Ref],
+        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
         grid_indices: tuple[int | jax.Array, ...],
     ):
         kv_out_ref, _, schedule_ref, _ = dst_ref
@@ -209,8 +209,8 @@ class KVBufferedRef(_BypassRef):
 class BatchingORef(pltpu.BufferedRef):
     """Handles normalizing and storing the final attention output."""
 
-    cfgs: configs.RPAConfig = dataclasses.field(default=None,
-                                                metadata=dict(static=True))
+    cfgs: configs.RpaConfigs = dataclasses.field(default=None,
+                                                 metadata=dict(static=True))
 
     @classmethod
     def create(
@@ -220,7 +220,7 @@ class BatchingORef(pltpu.BufferedRef):
         buffer_type,  # pltpu.BufferType,
         buffer_count: int,
         use_lookahead: bool,
-        cfgs: configs.RPAConfig,
+        cfgs: configs.RpaConfigs,
     ):
         # TODO(kyuyeunk): Uncomment this out after jax version update.
         # assert buffer_type == pltpu.BufferType.OUTPUT
@@ -243,7 +243,7 @@ class BatchingORef(pltpu.BufferedRef):
 
     def copy_out(
         self,
-        dst_ref: tuple[jax.Ref, schedule.RPASchedule],
+        dst_ref: tuple[jax.Ref, schedule.RpaSchedule],
         grid_indices: tuple[int | jax.Array, ...],
     ):
         # dst_ref: (o_hbm, schedule_ref)
@@ -271,7 +271,7 @@ class BatchingORef(pltpu.BufferedRef):
 
     def wait_out(
         self,
-        dst_ref: tuple[jax.Ref, schedule.RPASchedule],
+        dst_ref: tuple[jax.Ref, schedule.RpaSchedule],
         grid_indices: tuple[int | jax.Array, ...],
     ):
         # dst_ref: (o_hbm, schedule_ref)
@@ -300,8 +300,8 @@ class BatchingORef(pltpu.BufferedRef):
 class BatchingQRef(pltpu.BufferedRef):
     """Handles fetching Q blocks using precomputed metadata."""
 
-    cfgs: configs.RPAConfig = dataclasses.field(default=None,
-                                                metadata=dict(static=True))
+    cfgs: configs.RpaConfigs = dataclasses.field(default=None,
+                                                 metadata=dict(static=True))
 
     @classmethod
     def create(
@@ -311,7 +311,7 @@ class BatchingQRef(pltpu.BufferedRef):
         buffer_type,  # pltpu.BufferType,
         buffer_count: int,
         use_lookahead: bool,
-        cfgs: configs.RPAConfig,
+        cfgs: configs.RpaConfigs,
     ):
         # TODO(kyuyeunk): Uncomment this out after jax version update.
         # assert buffer_type == pltpu.BufferType.INPUT
@@ -334,7 +334,7 @@ class BatchingQRef(pltpu.BufferedRef):
 
     def copy_in(
         self,
-        src_ref: tuple[jax.Ref, schedule.RPASchedule],
+        src_ref: tuple[jax.Ref, schedule.RpaSchedule],
         grid_indices: tuple[int | jax.Array, ...],
     ):
         # src_ref: (q_hbm, schedule_ref)
@@ -359,7 +359,7 @@ class BatchingQRef(pltpu.BufferedRef):
 
     def wait_in(
         self,
-        src_ref: tuple[jax.Ref, schedule.RPASchedule],
+        src_ref: tuple[jax.Ref, schedule.RpaSchedule],
         grid_indices: tuple[int | jax.Array, ...],
     ):
         _, schedule_ref = src_ref

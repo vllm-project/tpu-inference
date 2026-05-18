@@ -36,8 +36,8 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.moe import MoEBackend
-from tpu_inference.layers.common.quantization import (dequantize_tensor,
-                                                      quantize_kv)
+from tpu_inference.layers.common.quantization import (
+    dequantize_tensor, quantize_kv, static_per_tensor_quantize_tensor)
 from tpu_inference.layers.common.sharding import \
     ShardingAxisNameBase as ShardingAxisName
 from tpu_inference.layers.common.utils import cpu_mesh_context
@@ -139,9 +139,10 @@ class DeepseekV3BaseAttention(JaxModule):
     kv_da_sharding: P = P()
     activation_attention_td: P = P()
     activation_q_td: P = P()
+    query_nth: P = P()
     query_tnh: P = P()
     keyvalue_skh: P = P()
-    attn_o_tnh: P = P()
+    attn_o_nth: P = P()
     activation_attention_out_td: P = P()
     # Weight initialization
     random_init: bool = False
@@ -452,14 +453,15 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
-            P(None, None, ShardingAxisName.ATTN_HEAD),  # kv_cache
+            P(ShardingAxisName.BATCH, None,
+              ShardingAxisName.ATTN_HEAD),  # kv_cache
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated
             P(),  # query_start_loc: Replicated
             P(),  # distribution: Replicated
         )
 
-        out_specs = (self.attn_o_tnh, P(None, None,
+        out_specs = (self.attn_o_nth, P(None, None,
                                         ShardingAxisName.ATTN_HEAD))
 
         output_TNH, kv_cache = jax.jit(
@@ -553,7 +555,7 @@ class MLAEinsum(JaxEinsum):
         setattr(
             mla_layer, "k_up_proj",
             JaxEinsum(
-                einsum_str="TNH,ANH->TNA",
+                einsum_str="TNH,ANH->NTA",
                 kernel_shape=(A, N, qk_nope_head_dim),
                 rngs=nnx.Rngs(0),
                 prefix=mla_layer.prefix + ".k_up_proj",
@@ -562,7 +564,7 @@ class MLAEinsum(JaxEinsum):
         setattr(
             mla_layer, "v_up_proj",
             JaxEinsum(
-                einsum_str="TNA,ANH->TNH",
+                einsum_str="NTA,ANH->TNH",
                 kernel_shape=(A, N, v_head_dim),
                 rngs=nnx.Rngs(0),
                 prefix=mla_layer.prefix + ".v_up_proj",
@@ -625,10 +627,10 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
         q_rope_TNH = q_TNH[..., self.qk_nope_head_dim:]
         q_rope_TNH = self.rope.apply_rope(input_positions, q_rope_TNH)
 
-        q_TNA = self.k_up_proj(q_nope_TNH)
+        q_NTA = self.k_up_proj(q_nope_TNH)
 
-        q_TNA = lax.with_sharding_constraint(q_TNA, self.query_tnh)
-        return (q_TNA, q_rope_TNH)
+        q_NTA = lax.with_sharding_constraint(q_NTA, self.query_nth)
+        return (q_NTA, q_rope_TNH)
 
     def compute_kv_projection(
             self, x_SD: jax.Array,
@@ -677,7 +679,7 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
             A tuple of key-value cache and output tensor of shape `(tokens_query, num_query_heads, q_lora_rank)`.
         """
 
-        q_TNA, q_rope_TNH = q_data
+        q_NTA, q_rope_TNH = q_data
         k_SA, k_rope_SH = kv_data
 
         q_scale = k_scale = None
@@ -692,8 +694,12 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
                                        k_rope_SH,
                                        value=None,
                                        k_scale=k_scale)
+            q_NTA = static_per_tensor_quantize_tensor(
+                self.kv_cache_quantized_dtype, q_NTA, self._q_scale)
+            q_rope_TNH = static_per_tensor_quantize_tensor(
+                self.kv_cache_quantized_dtype, q_rope_TNH, self._q_scale)
 
-        return mla_attention(q_TNA,
+        return mla_attention(q_NTA,
                              q_rope_TNH,
                              k_SA,
                              k_rope_SH,
@@ -702,29 +708,30 @@ class DeepseekV3MLA(DeepseekV3BaseAttention):
                              self.mesh,
                              self.num_attention_heads,
                              self.qk_nope_head_dim,
+                             query_nth_sharding=self.query_nth,
                              query_tnh_sharding=self.query_tnh,
                              keyvalue_skh_sharding=self.keyvalue_skh,
-                             attn_o_tnh_sharding=self.attn_o_tnh,
+                             attn_o_nth_sharding=self.attn_o_nth,
                              q_scale=q_scale,
                              k_scale=k_scale,
                              v_scale=k_scale,
                              sm_scale=self.scale)
 
-    def process_output(self, outputs_TNA: jax.Array) -> jax.Array:
+    def process_output(self, outputs_NTA: jax.Array) -> jax.Array:
         """
         Processes output for MLA specifically.
 
         Args:
-            outputs_TNH: The output tensor of shape `(tokens_query, num_query_heads, q_lora_rank)`.
+            outputs_NTA: The output tensor of shape `(num_heads, tokens_query, q_lora_rank)`.
 
         Returns:
             The processed output tensor of shape `(tokens_query, num_query_heads, head_dim)`.
         """
 
         # MLA Specific: Apply V-Up Projection after attention
-        # Outputs from MLA kernel are in latent space (TNA), project to TNH
-        outputs_TNH = self.v_up_proj(outputs_TNA)
-        return outputs_TNH
+        # Outputs from MLA kernel are N-major [N, T, A]; project to T-major [T, N, H]
+        outputs_TNH = self.v_up_proj(outputs_NTA)
+        return outputs_TNH.astype(self.dtype)
 
 
 @dataclass(kw_only=True)
@@ -816,9 +823,10 @@ class SharedFusedMoe(JaxMoE):
 
     routed_scaling_factor: float = 1.0
 
-    def __call__(self, x_TD: jax.Array) -> jax.Array:
+    def __call__(self, x_TD: jax.Array):
         # Compute Routed Experts
-        final_hidden_states = super().__call__(x_TD)
+        final_hidden_states, expert_indices = super().__call__(x_TD)
+
         final_hidden_states *= self.routed_scaling_factor
 
         # (Maybe) Compute Shared Experts
@@ -826,7 +834,7 @@ class SharedFusedMoe(JaxMoE):
             shared_output = self.shared_experts(x_TD)
             final_hidden_states += shared_output
 
-        return final_hidden_states
+        return final_hidden_states, expert_indices
 
 
 class DeepseekV2Moe(JaxModule):
@@ -844,7 +852,8 @@ class DeepseekV2Moe(JaxModule):
                  quant_config,
                  scoring_func,
                  rng,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 enable_return_routed_experts: bool = False):
 
         self.gate = DeepSeekV3Router(
             hidden_size=hidden_size,
@@ -918,6 +927,7 @@ class DeepseekV2Moe(JaxModule):
             router=self.gate,
             shared_experts=self.shared_experts,
             scoring_func=scoring_func,
+            enable_return_routed_experts=enable_return_routed_experts,
             routed_scaling_factor=routed_scaling_factor)
 
     def __call__(self, x_TD: jax.Array):
@@ -946,7 +956,7 @@ class DeepseekV3DecoderLayer(JaxModule):
     def __call__(
         self, x_TD: jax.Array, *, kv_cache: List[jax.Array],
         attention_metadata: AttentionMetadata
-    ) -> Tuple[List[jax.Array], jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array, Optional[jax.Array]]:
 
         # Run Self-Attention
         residual = x_TD
@@ -960,10 +970,14 @@ class DeepseekV3DecoderLayer(JaxModule):
         hidden_states = self.post_attention_layernorm(hidden_states)
         mlp_output = self.mlp(hidden_states)
 
+        expert_indices = None
+        if isinstance(mlp_output, tuple):
+            mlp_output, expert_indices = mlp_output
+
         # Residual
         hidden_states = residual + mlp_output
 
-        return new_cache, hidden_states
+        return new_cache, hidden_states, expert_indices
 
 
 class DeepSeekV3Router(JaxEinsum):
@@ -1115,6 +1129,7 @@ class DeepSeekV3(JaxModule):
                  quant_config,
                  prefix: str = ""):
         self.vllm_config = vllm_config
+        self.enable_return_routed_experts = self.vllm_config.model_config.enable_return_routed_experts
 
         self.use_mla_kernel: bool = self.vllm_config.model_config.use_mla
 
@@ -1173,14 +1188,17 @@ class DeepSeekV3(JaxModule):
         def _create_deepseek_attention(
                 i: int) -> Union[DeepseekV3MLA, DeepseekV3Attention]:
             if self.use_mla_kernel:
+                # q_NTA is [N, T, A].
+                query_nth_spec = P(None, ShardingAxisName.ATTN_DATA, None)
                 query_tnh_spec = P(ShardingAxisName.ATTN_DATA, None, None)
                 keyvalue_skh_spec = P(ShardingAxisName.ATTN_DATA, None)
-                attn_o_tnh_spec = P(ShardingAxisName.ATTN_DATA, None, None)
+                # Kernel output is [N, T, A]
+                attn_o_nth_spec = P(None, ShardingAxisName.ATTN_DATA, None)
                 anh_sharding = (None, ShardingAxisName.ATTN_HEAD, None)
             else:
                 query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
                 keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR)
-                attn_o_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
+                attn_o_nth_spec = P(None, ShardingAxisName.MLP_TENSOR)
             rd_sharding = P(ShardingAxisName.ATTN_HEAD, None)
             ap_sharding = P(None, ShardingAxisName.ATTN_HEAD)
             q_da_sharding = P(None, ShardingAxisName.ATTN_HEAD)
@@ -1215,11 +1233,12 @@ class DeepSeekV3(JaxModule):
                 quant_config=quant_config,
                 activation_attention_td=P(ShardingAxisName.ATTN_DATA, None),
                 activation_q_td=P(ShardingAxisName.ATTN_DATA, None),
+                query_nth=query_nth_spec,
                 query_tnh=query_tnh_spec,
                 keyvalue_skh=keyvalue_skh_spec,
                 activation_attention_out_td=P(ShardingAxisName.ATTN_DATA,
                                               None),
-                attn_o_tnh=attn_o_tnh_spec,
+                attn_o_nth=attn_o_nth_spec,
                 q_da_sharding=q_da_sharding,
                 ap_sharding=ap_sharding,
                 kv_da_sharding=kv_da_sharding,
@@ -1283,7 +1302,9 @@ class DeepSeekV3(JaxModule):
                     quant_config=quant_config,
                     scoring_func=scoring_func,
                     rng=rng,
-                    prefix=f"{prefix}.layers.{layer_index}.mlp")
+                    prefix=f"{prefix}.layers.{layer_index}.mlp",
+                    enable_return_routed_experts=self.
+                    enable_return_routed_experts)
 
             return DeepseekV3DecoderLayer(
                 input_layernorm=input_layernorm,
@@ -1325,23 +1346,29 @@ class DeepSeekV3(JaxModule):
         input_ids: Optional[jax.Array],
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
-    ) -> Tuple[List[jax.Array], jax.Array]:
+    ) -> Tuple[List[jax.Array], jax.Array, Optional[jax.Array]]:
         if inputs_embeds is not None:
             x = inputs_embeds
         else:
             x = self.embed_tokens(input_ids)
 
+        all_expert_ids = []
         for i, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
             kv_cache = kv_caches[i]
-            kv_cache, x = layer(
+            kv_cache, x, expert_ids = layer(
                 x,
                 kv_cache=kv_cache,
                 attention_metadata=attention_metadata,
             )
+            if expert_ids is not None:
+                all_expert_ids.append(expert_ids)
             kv_caches[i] = kv_cache
         x = self.norm(x)
-        return kv_caches, x
+
+        stacked_expert_ids = jnp.stack(all_expert_ids,
+                                       axis=0) if all_expert_ids else None
+        return kv_caches, x, stacked_expert_ids
 
 
 class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
@@ -1394,12 +1421,12 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
         is_last_rank: bool = True,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array | JaxIntermediateTensors,
-               List[jax.Array]]:
+               List[jax.Array], Optional[jax.Array]]:
         if not is_first_rank:
             assert intermediate_tensors is not None
             inputs_embeds = intermediate_tensors["hidden_states"]
 
-        kv_caches, x = self.model(
+        kv_caches, x, expert_indices = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
@@ -1409,7 +1436,7 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
         if not is_last_rank:
             x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
 
-        return kv_caches, x, []
+        return kv_caches, x, [], expert_indices
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head(hidden_states)

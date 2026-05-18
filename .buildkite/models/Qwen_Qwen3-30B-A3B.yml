@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: Qwen/Qwen3-30B-A3B
-# pipeline-type: text-only
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3-30B-A3B"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_UnitTest"
@@ -46,7 +44,7 @@ steps:
     soft_fail: true
     env:
       TEST_MODEL: Qwen/Qwen3-30B-A3B
-      TENSOR_PARALLEL_SIZE: 4
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MINIMUM_ACCURACY_THRESHOLD: 0.89
       MODEL_IMPL_TYPE: vllm
     commands:
@@ -74,7 +72,7 @@ steps:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     env:
       TEST_MODEL: Qwen/Qwen3-30B-A3B
-      TENSOR_PARALLEL_SIZE: 4
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MINIMUM_THROUGHPUT_THRESHOLD: 7.20
       INPUT_LEN: 1800
       OUTPUT_LEN: 128

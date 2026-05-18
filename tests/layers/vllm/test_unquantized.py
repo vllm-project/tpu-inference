@@ -502,7 +502,6 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
             top_k=topk,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
-            reduce_results=False,
             renormalize=False,
             tp_size=1,
             dp_size=1,
@@ -522,7 +521,8 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
                                   vllm_fused_moe.renormalize,
                                   vllm_fused_moe.activation.value)
 
-    with torchax.default_env(), set_forward_context(None, vllm_config):
+    with torchax.default_env(), set_forward_context(
+            None, vllm_config), jax.set_mesh(mesh):
         assert isinstance(vllm_fused_moe.quant_method,
                           VllmUnquantizedFusedMoEMethod)
         if use_ep:
@@ -625,7 +625,6 @@ def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
             top_k=topk,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
-            reduce_results=True,
             renormalize=False,
             tp_size=mesh.devices.size,
             dp_size=1,

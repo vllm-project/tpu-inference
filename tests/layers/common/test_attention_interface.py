@@ -306,6 +306,126 @@ def test_sharded_ragged_paged_attention_gqa_incompatible_raises_error(
         )
 
 
+def _run_sharded_rpa_capturing_kwargs(monkeypatch, gqa_mesh, update_kv_cache):
+    """Helper: run `sharded_ragged_paged_attention` with a stubbed
+    `ragged_paged_attention` (the module-level binding) and a passthrough
+    `jax.shard_map`. Returns the kwargs forwarded by the closure to the
+    underlying kernel.
+    """
+    head_dim = 128  # non-hd64
+    num_kv_heads = 4
+    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim))
+    k = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
+    v = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
+    kv_cache = jnp.zeros((num_kv_heads, NUM_BLOCKS, BLOCK_SIZE, head_dim))
+    kv_lens = jnp.zeros((MAX_NUM_SEQS, ), dtype=jnp.int32)
+    page_indices = jnp.zeros((MAX_NUM_SEQS, MAX_BLOCKS_PER_SEQ),
+                             dtype=jnp.int32)
+    cu_q_lens = jnp.zeros((MAX_NUM_SEQS + 1, ), dtype=jnp.int32)
+    distribution = jnp.zeros((3, ), dtype=jnp.int32)
+
+    captured = {}
+
+    def fake_kernel(*_args, **kwargs):
+        captured.update(kwargs)
+        return jnp.ones_like(q), kv_cache
+
+    monkeypatch.setattr(
+        "tpu_inference.layers.common.attention_interface.ragged_paged_attention",
+        fake_kernel,
+    )
+
+    # Passthrough shard_map so the closure actually executes.
+    def passthrough_shard_map(inner_fn, **_):
+        return inner_fn
+
+    monkeypatch.setattr("jax.shard_map", passthrough_shard_map)
+
+    sharded_ragged_paged_attention(
+        mesh=gqa_mesh,
+        q=q,
+        k=k,
+        v=v,
+        kv_cache=kv_cache,
+        kv_lens=kv_lens,
+        page_indices=page_indices,
+        cu_q_lens=cu_q_lens,
+        distribution=distribution,
+        attention_sink=None,
+        sm_scale=1.0,
+        update_kv_cache=update_kv_cache,
+    )
+    return captured
+
+
+def test_sharded_rpa_forwards_update_kv_cache_when_not_hd64(
+        monkeypatch, gqa_mesh):
+    """`sharded_ragged_paged_attention` must forward `update_kv_cache`
+    to the underlying kernel on the non-hd64 path. Both kernels (v3 and
+    batched) accept the kwarg after this fix; the wrapper forwards it
+    unconditionally for non-hd64 head sizes."""
+    captured = _run_sharded_rpa_capturing_kwargs(monkeypatch,
+                                                 gqa_mesh,
+                                                 update_kv_cache=False)
+
+    assert captured.get("update_kv_cache") is False, (
+        f"non-hd64 path must forward update_kv_cache=False; got {captured!r}")
+
+
+def test_batched_rpa_wrapper_accepts_update_kv_cache():
+    """Direct signature check that catches the original #2601 crash:
+    the batched RPA wrapper's `ragged_paged_attention` must declare an
+    `update_kv_cache` keyword parameter. `sharded_ragged_paged_attention`
+    always forwards the kwarg on the non-hd64 path; without this
+    signature, that forwarding crashed at trace time with
+    `TypeError: ragged_paged_attention() got an unexpected keyword
+    argument 'update_kv_cache'`."""
+    import inspect
+
+    from tpu_inference.kernels.experimental.batched_rpa import wrapper
+    params = inspect.signature(wrapper.ragged_paged_attention).parameters
+    assert "update_kv_cache" in params, (
+        f"batched RPA wrapper must accept update_kv_cache as a kwarg; "
+        f"got params: {list(params.keys())}")
+    assert params["update_kv_cache"].default is True, (
+        f"update_kv_cache should default to True (no-op for non-KV-share "
+        f"callers); got default={params['update_kv_cache'].default!r}")
+
+
+def test_sharded_rpa_rejects_update_kv_cache_false_on_hd64(gqa_mesh):
+    """The hd64 RPA kernel doesn't support KV-share; passing
+    update_kv_cache=False must raise rather than silently writing to
+    cache. (Currently no model uses head_dim=64 + KV-share, but the
+    guard is cheap insurance.)"""
+    head_dim = 64
+    num_kv_heads = 4
+    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim))
+    k = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
+    v = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
+    kv_cache = jnp.zeros((num_kv_heads, NUM_BLOCKS, BLOCK_SIZE, head_dim))
+    kv_lens = jnp.zeros((MAX_NUM_SEQS, ), dtype=jnp.int32)
+    page_indices = jnp.zeros((MAX_NUM_SEQS, MAX_BLOCKS_PER_SEQ),
+                             dtype=jnp.int32)
+    cu_q_lens = jnp.zeros((MAX_NUM_SEQS + 1, ), dtype=jnp.int32)
+    distribution = jnp.zeros((3, ), dtype=jnp.int32)
+
+    with pytest.raises(NotImplementedError, match="head_dim==64"):
+        sharded_ragged_paged_attention(
+            mesh=gqa_mesh,
+            q=q,
+            k=k,
+            v=v,
+            kv_cache=kv_cache,
+            kv_lens=kv_lens,
+            page_indices=page_indices,
+            cu_q_lens=cu_q_lens,
+            distribution=distribution,
+            attention_sink=None,
+            sm_scale=1.0,
+            update_kv_cache=False,
+        )
+
+
 def test_mla_attention(monkeypatch, mesh):
     """
     Tests the `mla_attention` function.
@@ -320,7 +440,7 @@ def test_mla_attention(monkeypatch, mesh):
     q_lora_rank = 64
     kv_lora_rank = 64
 
-    q_TNA = jnp.ones((TOTAL_TOKENS, NUM_HEADS, q_lora_rank))
+    q_NTA = jnp.ones((NUM_HEADS, TOTAL_TOKENS, q_lora_rank))
     q_rope_TNH = jnp.ones((TOTAL_TOKENS, NUM_HEADS, qk_rope_dim))
     k_SA = jnp.ones((TOTAL_TOKENS, kv_lora_rank))
     k_rope_SH = jnp.ones((TOTAL_TOKENS, qk_rope_dim))
@@ -338,7 +458,7 @@ def test_mla_attention(monkeypatch, mesh):
         request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
     )
 
-    expected_output = jnp.full(q_TNA.shape, 0.5)
+    expected_output = jnp.full(q_NTA.shape, 0.5)
     expected_new_cache = jnp.full(kv_cache_shape, 0.1)
 
     mock_mla_kernel = MagicMock(return_value=(expected_output,
@@ -348,7 +468,7 @@ def test_mla_attention(monkeypatch, mesh):
         mock_mla_kernel)
 
     final_kv_cache, output = mla_attention(
-        q_TNA=q_TNA,
+        q_NTA=q_NTA,
         q_rope_TNH=q_rope_TNH,
         k_SA=k_SA,
         k_rope_SH=k_rope_SH,

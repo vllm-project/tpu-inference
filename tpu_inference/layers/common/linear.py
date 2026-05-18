@@ -42,7 +42,8 @@ def sharded_quantized_matmul(x: jax.Array,
                              w_s: jax.Array,
                              weight_sharding: P | NamedSharding,
                              *,
-                             mesh: Mesh | None = None) -> jax.Array:
+                             mesh: Mesh | None = None,
+                             x_q_dtype: jnp.dtype | None = None) -> jax.Array:
     """
     Wrapper around the quantized matmul kernel.
 
@@ -52,6 +53,7 @@ def sharded_quantized_matmul(x: jax.Array,
         w_s: Weight quantization scale. [n_output_features] for xla quantized matmul, [n_blocks, 1, n_output_features] for quantized matmul kernel
         weight_sharding: PartitionSpec or NamedSharding for the weight tensor.
         mesh: (Optional) Mesh to shard on. If None, mesh from current context is used, similar to jax.shard_map().
+        x_q_dtype: (Optional) Quantized dtype for the activation. If None, inferred from w_q dtype (int -> int8, float -> float8).
 
     Returns:
         Output of the quantized matmul.
@@ -77,10 +79,16 @@ def sharded_quantized_matmul(x: jax.Array,
             out_axis,
         )
     else:
-        scale_sharding = P(out_axis, )
+        # 2D-Blockwise case (e.g. from skipped re-quantization)
+        if len(w_s.shape) == 2:
+            scale_sharding = weight_spec
+        else:
+            # 1D (channelwise) case
+            scale_sharding = P(out_axis, )
     out_sharding = P(ShardingAxisName.ATTN_DATA, out_axis)
 
-    x_q_dtype = _get_x_q_dtype(w_q.dtype)
+    if x_q_dtype is None:
+        x_q_dtype = _get_x_q_dtype(w_q.dtype)
     x = jax.lax.with_sharding_constraint(
         x,
         NamedSharding(mesh, x_sharding) if mesh else x_sharding)
@@ -169,7 +177,7 @@ def sharded_quantized_batched_matmul(x: jax.Array,
         x: Activation tensor (e.g. shape ``[T, N, H]``).
         w_q: Quantized weight (e.g. shape ``[A, N, H]``).
         w_s: Weight scale. Shape ``(out,)`` for tensorwise.
-        einsum_str: Full einsum equation (e.g. ``"TNH,ANH->TNA"``).
+        einsum_str: Full einsum equation (e.g. ``"TNH,ANH->NTA"``).
         weight_sharding: PartitionSpec or NamedSharding for ``w_q``.
         mesh: Optional mesh.
 
@@ -201,12 +209,16 @@ def sharded_quantized_batched_matmul(x: jax.Array,
         None for _ in range(len(w_axis) - len(weight_spec)))
     axis_shard = {c: w_spec_padded[i] for i, c in enumerate(w_axis)}
 
-    # Input sharding: match weight sharding for shared axes, None for free.
-    # The first axis of x is ShardingAxisName.ATTN_DATA to handle
-    # DP attention case.
-    x_spec = tuple(
-        ShardingAxisName.ATTN_DATA if i == 0 else axis_shard.get(c, None)
-        for i, c in enumerate(x_axis))
+    # Determine the token axis as the lhs-free axis (in x but not w) for
+    # ATTN_DATA sharding. Falls back to x_axis[0] if all axes are shared.
+    _shared = set(x_axis) & set(w_axis)
+    _lhs_free = [c for c in x_axis if c not in _shared]
+    _dp_axis = _lhs_free[0] if _lhs_free else x_axis[0]
+    act_shard = {_dp_axis: ShardingAxisName.ATTN_DATA}
+
+    # Input sharding: activation takes precedence; fall back to weight sharding
+    # for shared (batch) axes where activation info is absent.
+    x_spec = tuple(act_shard.get(c, axis_shard.get(c, None)) for c in x_axis)
     x_sharding = P(*x_spec)
 
     # Scale sharding: scale is 1D (out_features) for tensorwise.
@@ -216,19 +228,19 @@ def sharded_quantized_batched_matmul(x: jax.Array,
     scale_spec = tuple(axis_shard.get(c, None) for c in rhs_free)
     scale_sharding = P(*scale_spec) if scale_spec else P()
 
-    # Output sharding: dot_general output order is batch, lhs_free, rhs_free.
+    # We first compute dg_out_spec using dot_general's physical output order
+    # (batch, lhs_free, rhs_free) and then permute via output_perm to reach the
+    # einsum logical output order that shard_map actually sees.
     batch_labels = [
         c for c in x_axis
         if c in (set(x_axis) & set(w_axis) & set(einsum_str.split("->")[1]))
     ]
     lhs_free = [c for c in x_axis if c not in shared]
     dg_out_labels = batch_labels + lhs_free + rhs_free
-    dg_out_spec = tuple(axis_shard.get(c, None) for c in dg_out_labels)
-    # Apply the output permutation to match the einsum output.
-    # The first axis of output is ShardingAxisName.ATTN_DATA to handle
-    # DP attention case.
-    out_spec = tuple(ShardingAxisName.ATTN_DATA if idx == 0 else dg_out_spec[i]
-                     for idx, i in enumerate(output_perm))
+    # Output sharding: weight sharding takes precedence; fall back to activation sharding.
+    dg_out_spec = tuple(
+        axis_shard.get(c, act_shard.get(c, None)) for c in dg_out_labels)
+    out_spec = tuple(dg_out_spec[i] for i in output_perm)
     out_sharding = P(*out_spec)
 
     # Determine the contracting axis name for psum (if sharded).
@@ -243,11 +255,13 @@ def sharded_quantized_batched_matmul(x: jax.Array,
         NamedSharding(mesh, x_sharding) if mesh else x_sharding)
 
     def wrapper(x, w_q, w_s):
-        output = xla_quantized_batched_matmul(x,
-                                              w_q,
-                                              w_s,
-                                              dimension_numbers,
-                                              quantize_activation=True)
+        _should_quantize_act = x.dtype.itemsize > 1
+        output = xla_quantized_batched_matmul(
+            x,
+            w_q,
+            w_s,
+            dimension_numbers,
+            quantize_activation=_should_quantize_act)
         for axis_name in contract_axis_names:
             output = jax.lax.psum(output, axis_name=axis_name)
         # Transpose from dot_general output order to einsum output order.

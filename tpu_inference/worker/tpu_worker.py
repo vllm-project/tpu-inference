@@ -30,6 +30,7 @@ from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.offload.metrics import TPUKVCacheStatsLogger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -285,8 +286,6 @@ class TPUWorker(WorkerBase):
             self.devices[0],
             need_pp=self.parallel_config.pipeline_parallel_size > 1)
 
-        ensure_kv_transfer_initialized(self.vllm_config)
-
         is_first_rank = True
         is_last_rank = True
         self.topology_order_id = self.rank
@@ -315,6 +314,23 @@ class TPUWorker(WorkerBase):
                     f"local_devices={jax.local_devices()}")
         vllm_utils.report_usage_stats(self.vllm_config)
 
+        # Initialize the background metrics logger ONLY if KV offloading is enabled
+        self.stats_logger = None
+        if self.vllm_config.kv_transfer_config is not None:
+            kv_transfer_config = self.vllm_config.kv_transfer_config
+            if (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+                    and kv_transfer_config.kv_connector_module_path
+                    == "tpu_inference.offload.tpu_offload_connector"):
+
+                # Start the background thread (logging every TPU_OFFLOAD_METRICS_LOG_INTERVAL seconds)
+                self.stats_logger = TPUKVCacheStatsLogger(
+                    log_interval=envs.TPU_OFFLOAD_METRICS_LOG_INTERVAL,
+                    model_name=self.model_config.model,
+                    device_type=self.device_config.device_type)
+                logger.info(
+                    f"TPUKVCacheStatsLogger initialized on worker rank {self.rank}."
+                )
+
     def initialize_pp_transfer_connect(self):
         if self.rank == 0:
             return
@@ -335,6 +351,30 @@ class TPUWorker(WorkerBase):
         total_hbm_limit_gb = round(total_hbm_limit / utils.GBYTES, 2)
         total_hbm_limit_cap_gb = round(total_hbm_limit_cap / utils.GBYTES, 2)
         total_hbm_used_gb = round(total_hbm_used / utils.GBYTES, 2)
+
+        if self.vllm_config.kv_transfer_config is not None:
+            kv_transfer_config = self.vllm_config.kv_transfer_config
+            if kv_transfer_config.kv_connector == "TPUOffloadConnector" and \
+               kv_transfer_config.kv_connector_module_path == "tpu_inference.offload.tpu_offload_connector":
+                # If kv offloading is enabled, we need to account for the memory used by the KV transfer buffer.
+                staging_buffer_pages = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
+
+                # TODO(jcgu): verify page_size_bytes
+                kv_cache_specs = self.get_kv_cache_spec()
+                num_layers = len(kv_cache_specs)
+                assert len(kv_cache_specs) >= 1
+                # TODO(jcgu): hybrid-kv is not supported yet.
+                _layer_name, _layer_spec = next(iter(kv_cache_specs.items()))
+                vllm_page_size_bytes = _layer_spec.page_size_bytes
+                # rpa_page_size_bytes = get_rpa_page_size_bytes(self.model_runner.mesh,
+                #                                             kv_cache_specs)
+                stage_buffer_size_bytes = staging_buffer_pages * num_layers * vllm_page_size_bytes
+
+                total_hbm_avail = total_hbm_avail - stage_buffer_size_bytes
+                logger.info(
+                    f"  ALERT: KV offloading enabled. Deducting {stage_buffer_size_bytes} Bytes ({staging_buffer_pages} pages) from available HBM for staging buffer."
+                )
+
         total_hbm_avail_gb = round(total_hbm_avail / utils.GBYTES, 2)
 
         logger.info(f"Memory statistics | "
@@ -359,7 +399,6 @@ class TPUWorker(WorkerBase):
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
-
         if self.parallel_config.pipeline_parallel_size == 1 or self.rank == 0:
             intermediate_tensors = None
         else:
@@ -448,6 +487,11 @@ class TPUWorker(WorkerBase):
         # and the vLLM side should be updated to handle the translation.
         return self.model_runner.get_kv_cache_spec()
 
+    def get_kv_connector_handshake_metadata(self) -> dict | None:
+        """Get KV connector metadata from this worker if available."""
+        # NOTE: we are not using it right now.
+        return
+
     def initialize_from_config(
         self,
         kv_cache_config: KVCacheConfig,
@@ -459,6 +503,10 @@ class TPUWorker(WorkerBase):
                  and self.model_runner.model_config.enforce_eager)):
             self.model_runner.compilation_manager._precompile_sampling()
             self.model_runner.compilation_manager._precompile_gather_logprobs()
+
+        # Init kv cache connector here, because it requires `kv_cache_config`.
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+
         self.model_runner.initialize_kv_cache(kv_cache_config,
                                               self.topology_order_id)
 
@@ -486,8 +534,3 @@ class TPUWorker(WorkerBase):
 
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
-
-    # Ray executor do not need handshake metadata
-    # as we pass the kv_parameters through proxy server
-    def get_kv_connector_handshake_metadata(self) -> None:
-        pass

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: generic ragged paged attention v3-w4a4
-# pipeline-type: kernel support matrix microbenchmarks
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for generic ragged paged attention v3-w4a4"
     key: "${TPU_VERSION:-tpu6e}_generic_ragged_paged_attention_v3-w4a4_CorrectnessTest"

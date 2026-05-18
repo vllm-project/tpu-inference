@@ -39,6 +39,9 @@ def scaled_dot_product_attention(
     if enable_gqa is not False:
         raise NotImplementedError("patched_sdpa does not support enable_gqa")
 
+    if scale is None:
+        scale = 1.0
+
     mesh = jax.sharding.get_abstract_mesh()
 
     # Q, K, V shapes: (batch, num_heads, seq_len, head_dim)
@@ -105,6 +108,9 @@ def vllm_vit_sdpa(
     query = jnp.swapaxes(query, 1, 2)
     key = jnp.swapaxes(key, 1, 2)
     value = jnp.swapaxes(value, 1, 2)
+
+    if scale is None:
+        scale = 1.0
 
     mesh = jax.sharding.get_abstract_mesh()
 

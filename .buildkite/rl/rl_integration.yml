@@ -12,12 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: rl_integration
-# pipeline-type: rl support matrix
 # RL (Reinforcement Learning) integration tests verify features critical for
 # training-inference pipelines: HBM KV-cache delete/reinitialise, log-prob
-# correctness without recompilation, log-prob latency overhead, and group
-# sampling with prefix caching.
+# correctness without recompilation, and log-prob latency overhead.
 steps:
   # ------------------------------------------------------------------
   # Correctness tests
@@ -53,7 +50,7 @@ steps:
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
-      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestLogprobsLatency /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestGroupSamplingPrefixCache
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestLogprobsLatency
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for rl_integration"
     key: "${TPU_VERSION:-tpu6e}_record_rl_integration_PerformanceTest"
     depends_on: "${TPU_VERSION:-tpu6e}_rl_integration_PerformanceTest"

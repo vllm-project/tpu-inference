@@ -13,12 +13,22 @@
 # limitations under the License.
 
 import unittest
+from functools import partial
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
 from tpu_inference.distributed import tpu_connector
+from tpu_inference.distributed.tpu_connector_stats import (
+    TpuKVConnectorPromMetrics, TpuKVConnectorStats)
+
+
+def _make_test_kv_cache_config() -> KVCacheConfig:
+    return KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
 
 
 class MockVllmConfig:
@@ -44,7 +54,8 @@ class TestTPUConnector(unittest.TestCase):
         SCHEDULER role.
         """
         connector = tpu_connector.TPUConnector(self.vllm_config,
-                                               KVConnectorRole.SCHEDULER)
+                                               KVConnectorRole.SCHEDULER,
+                                               _make_test_kv_cache_config())
         mock_scheduler_cls.assert_called_once_with(self.vllm_config)
         mock_worker_cls.assert_not_called()
         self.assertIsNotNone(connector.connector_scheduler)
@@ -56,7 +67,8 @@ class TestTPUConnector(unittest.TestCase):
         role.
         """
         connector = tpu_connector.TPUConnector(self.vllm_config,
-                                               KVConnectorRole.WORKER)
+                                               KVConnectorRole.WORKER,
+                                               _make_test_kv_cache_config())
         mock_worker_cls.assert_called_once_with(self.vllm_config)
         mock_scheduler_cls.assert_not_called()
         self.assertIsNone(connector.connector_scheduler)
@@ -67,7 +79,8 @@ class TestTPUConnector(unittest.TestCase):
         """Tests that scheduler-side methods are correctly delegated."""
         mock_scheduler_instance = mock_scheduler_cls.return_value
         connector = tpu_connector.TPUConnector(self.vllm_config,
-                                               KVConnectorRole.SCHEDULER)
+                                               KVConnectorRole.SCHEDULER,
+                                               _make_test_kv_cache_config())
 
         mock_request = MagicMock()
         mock_blocks = MagicMock()
@@ -93,7 +106,8 @@ class TestTPUConnector(unittest.TestCase):
         """Tests that worker-side methods are correctly delegated."""
         mock_worker_instance = mock_worker_cls.return_value
         connector = tpu_connector.TPUConnector(self.vllm_config,
-                                               KVConnectorRole.WORKER)
+                                               KVConnectorRole.WORKER,
+                                               _make_test_kv_cache_config())
         connector._connector_metadata = tpu_connector.TPUConnectorMetadata(
         )  # need to set this for start_load_kv
 
@@ -204,6 +218,7 @@ class TestTPUConnectorScheduler(unittest.TestCase):
             "remote_port": 54321
         }
         mock_blocks = MagicMock()
+        mock_blocks.get_block_ids.return_value = [[1, 2]]
         num_external_tokens = 0
 
         self.scheduler.update_state_after_alloc(mock_request, mock_blocks,
@@ -212,7 +227,7 @@ class TestTPUConnectorScheduler(unittest.TestCase):
         self.assertIn("req1", self.scheduler.reqs_to_load)
         load_meta = self.scheduler.reqs_to_load["req1"]
         self.assertEqual(load_meta.uuid, 123)
-        self.assertIsNone(load_meta.local_block_ids)
+        self.assertEqual(load_meta.local_block_ids, [1, 2])
         self.assertIsNone(load_meta.remote_block_ids)
 
     def test_build_connector_meta(self):
@@ -424,10 +439,11 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker._maybe_build_kv_connection.assert_called_once_with(load_meta)
         self.all_mocks[
             "ThreadPoolExecutor"].return_value.submit.assert_called_once_with(
-                worker._pull_kv, "req1", "conn", load_meta, mock_indices)
+                worker._pull_kv, "req1", "conn", load_meta)
 
     def test_process_send_load_for_consumer_notifying(self):
         """Tests process_send_load for a consumer that needs to notify."""
+        self.all_mocks["time"].perf_counter.side_effect = [0.0, 1.0]
         self.vllm_config.kv_transfer_config.is_kv_producer = False
         worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
         worker._maybe_build_notif_socket = MagicMock(return_value="socket")
@@ -446,7 +462,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker.sharding = MagicMock()
         worker.sharding.spec = "mock_spec"
         worker.mesh = "mock_mesh"
-        worker.reqs_ready_to_insert = {"req1": ("kv_data", "indices", [1])}
+        worker.reqs_pulling = {"req1": [None, "kv_data", [1]]}
         self.all_mocks['insert_kv_chunks'].return_value = "new_kv_caches"
 
         worker.process_send_load(meta)
@@ -454,7 +470,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.all_mocks['insert_kv_chunks'].assert_called_once_with(
             original_kv_caches, "kv_data", [1], "mock_mesh", "mock_spec")
         self.assertEqual(worker.runner.kv_caches, "new_kv_caches")
-        self.assertNotIn("req1", worker.reqs_ready_to_insert)
+        self.assertNotIn("req1", worker.reqs_pulling)
         worker._maybe_build_notif_socket.assert_called_once_with(load_meta)
         worker._notify_pull_done.assert_called_once_with(
             "socket", "req1", uuid)
@@ -468,15 +484,14 @@ class TestTPUConnectorWorker(unittest.TestCase):
         mock_future = MagicMock()
         mock_future.done.return_value = True
         mock_future.result.return_value = ('kv_data', 'indices', [1])
-        worker.reqs_pulling = {'req1': mock_future}
+        worker.reqs_pulling = {'req1': [mock_future, None, [1]]}
 
         done_sending, done_recving = worker.get_finished()
 
         self.assertEqual(done_sending, set())
         self.assertEqual(done_recving, {'req1'})
-        self.assertNotIn('req1', worker.reqs_pulling)
-        self.assertIn('req1', worker.reqs_ready_to_insert)
-        self.assertEqual(worker.reqs_ready_to_insert['req1'],
+        self.assertIn('req1', worker.reqs_pulling)
+        self.assertEqual(worker.reqs_pulling['req1'][1],
                          ('kv_data', 'indices', [1]))
         self.all_mocks['insert_kv_chunks'].assert_not_called()
 
@@ -520,12 +535,173 @@ class TestTPUConnectorUtils(unittest.TestCase):
         mock_multi_layer_copy.assert_called_once()
         _, kwargs = mock_multi_layer_copy.call_args
 
-        import numpy as np
         self.assertEqual(kwargs['dest_offsets'].shape[0], 9)
         np.testing.assert_array_equal(kwargs['dest_offsets'][:3], [5, 10, 17])
         self.assertEqual(kwargs['chunk_sizes'].shape[0], 9)
         np.testing.assert_array_equal(kwargs['chunk_sizes'][:3], [4, 2, 3])
         np.testing.assert_array_equal(kwargs['num_chunks'], [3])
+
+
+class TestTPUConnectorStats(unittest.TestCase):
+
+    def setUp(self):
+        self.registry = CollectorRegistry()
+        metric_types = {
+            Gauge: partial(Gauge, registry=self.registry),
+            Counter: partial(Counter, registry=self.registry),
+            Histogram: partial(Histogram, registry=self.registry),
+        }
+        labelnames = ["model_name", "engine"]
+        per_engine_labelvalues = {0: ["my_model", "0"]}
+        self.metrics = TpuKVConnectorPromMetrics(
+            vllm_config=MagicMock(),
+            metric_types=metric_types,
+            labelnames=labelnames,
+            per_engine_labelvalues=per_engine_labelvalues)
+
+        mock_data = {
+            "d2h_slice_time": [10.0, 20.0, 30.0],
+            "d2h_transfer_time": [100.0, 200.0, 300.0],
+            "prepare_time": [1.1, 2.2, 3.3],
+            "transfer_time": [1200.0, 5400.0, 12000.0],
+            "mb_transferred": [128.0, 256.0, 2048.0],
+            "num_failed_transfers": [0, 1, 2],
+        }
+
+        self.metrics.observe(mock_data, engine_idx=0)
+
+    def validate_prometheus_histogram_buckets(self, hist, num_buckets,
+                                              non_zero_buckets):
+        assert len(
+            hist._buckets
+        ) == num_buckets, f"Incorrect number of buckets returned: expected {num_buckets} actual {len(hist._buckets)}"
+        for i in range(num_buckets):
+            if i in non_zero_buckets:
+                assert hist._buckets[i].get() == non_zero_buckets[
+                    i], f"Incorrect value for bucket {i}: expected {non_zero_buckets[i]} actual: {hist._buckets[i].get()}"
+            else:
+                assert hist._buckets[i].get(
+                ) == 0, f"Incorrect value for bucket {i}: expected 0 actual: {hist._buckets[i].get()}"
+
+    def test_tpu_stats_aggregation_d2h_transfer(self):
+        stats = TpuKVConnectorStats()
+
+        reduced = stats.reduce()
+        assert reduced["Avg D2H slice time (ms)"] == 0.0
+        assert reduced["P90 D2H slice time (ms)"] == 0.0
+        assert reduced["Avg D2H transfer time (ms)"] == 0.0
+        assert reduced["P90 D2H transfer time (ms)"] == 0.0
+        assert stats.is_empty() is True
+
+        for i in range(10):
+            stats.record_d2h_transfer(d2h_slice_time=100.0 + i,
+                                      d2h_transfer_time=200.0 + i)
+        reduced = stats.reduce()
+
+        assert reduced["Avg D2H slice time (ms)"] == 104.5
+        assert reduced["P90 D2H slice time (ms)"] == 108.1
+        assert reduced["Avg D2H transfer time (ms)"] == 204.5
+        assert reduced["P90 D2H transfer time (ms)"] == 208.1
+        assert stats.is_empty() is False
+
+    def test_tpu_stats_aggregation_successful_transfer(self):
+        stats = TpuKVConnectorStats()
+
+        reduced = stats.reduce()
+        assert reduced["Avg KV transfer prepare time (ms)"] == 0.0
+        assert reduced["P90 KV transfer prepare time (ms)"] == 0.0
+        assert reduced["Avg KV transfer time (ms)"] == 0.0
+        assert reduced["P90 KV transfer time (ms)"] == 0.0
+        assert reduced["Avg MB per transfer"] == 0.0
+        assert stats.is_empty() is True
+
+        for i in range(10):
+            stats.record_successful_transfer(prepare_time=100.0 + i,
+                                             transfer_time=200.0 + i,
+                                             mb_transferred=20 + i)
+        reduced = stats.reduce()
+
+        assert reduced["Avg KV transfer prepare time (ms)"] == 104.5
+        assert reduced["P90 KV transfer prepare time (ms)"] == 108.1
+        assert reduced["Avg KV transfer time (ms)"] == 204.5
+        assert reduced["P90 KV transfer time (ms)"] == 208.1
+        assert reduced["Avg MB per transfer"] == 24.5
+        assert stats.is_empty() is False
+
+    def test_tpu_stats_aggregation_failed_transfer(self):
+        stats = TpuKVConnectorStats()
+
+        reduced = stats.reduce()
+        assert sum(reduced["Num failed transfers"]) == 0
+        assert stats.is_empty() is True
+
+        for i in range(10):
+            stats.record_failed_transfer()
+        reduced = stats.reduce()
+
+        assert sum(reduced["Num failed transfers"]) == 10
+        assert stats.is_empty() is False
+
+    def test_prometheus_histogram_d2h_slice_time(self):
+        hist = self.metrics.tpu_histogram_d2h_slice_time[0]
+        assert hist._sum.get() == 60.0
+        num_buckets = 14
+        non_zero_buckets = {
+            1: 1.0,
+            2: 2.0,
+        }
+        self.validate_prometheus_histogram_buckets(hist, num_buckets,
+                                                   non_zero_buckets)
+
+    def test_prometheus_histogram_d2h_transfer_time(self):
+        hist = self.metrics.tpu_histogram_d2h_transfer_time[0]
+        assert hist._sum.get() == 600.0
+        num_buckets = 14
+        non_zero_buckets = {
+            2: 1.0,
+            3: 1.0,
+            4: 1.0,
+        }
+        self.validate_prometheus_histogram_buckets(hist, num_buckets,
+                                                   non_zero_buckets)
+
+    def test_prometheus_histogram_kv_prepare_time(self):
+        hist = self.metrics.tpu_histogram_kv_prepare_time[0]
+        assert hist._sum.get() == 6.6
+        num_buckets = 14
+        non_zero_buckets = {
+            1: 3.0,
+        }
+        self.validate_prometheus_histogram_buckets(hist, num_buckets,
+                                                   non_zero_buckets)
+
+    def test_prometheus_histogram_kv_transfer_time(self):
+        hist = self.metrics.tpu_histogram_kv_transfer_time[0]
+        assert hist._sum.get() == 18600.0
+        num_buckets = 14
+        non_zero_buckets = {
+            7: 1.0,
+            9: 1.0,
+            11: 1.0,
+        }
+        self.validate_prometheus_histogram_buckets(hist, num_buckets,
+                                                   non_zero_buckets)
+
+    def test_prometheus_histogram_kv_megabytes_transferred(self):
+        hist = self.metrics.tpu_histogram_kv_megabytes_transferred[0]
+        assert hist._sum.get() == 2432.0
+        num_buckets = 9
+        non_zero_buckets = {
+            2: 1.0,
+            3: 1.0,
+            6: 1.0,
+        }
+        self.validate_prometheus_histogram_buckets(hist, num_buckets,
+                                                   non_zero_buckets)
+
+    def test_prometheus_counter_num_failed_transfers(self):
+        counter = self.metrics.counter_tpu_num_failed_transfers[0]
+        assert counter._value.get() == 3.0
 
 
 if __name__ == "__main__":

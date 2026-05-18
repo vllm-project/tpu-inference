@@ -90,6 +90,7 @@ class GptOss(nnx.Module):
 
         self.random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
+        self.enable_return_routed_experts = self.vllm_config.model_config.enable_return_routed_experts
         self.mesh = mesh
 
         self.embedder = Embedder(
@@ -154,6 +155,7 @@ class GptOss(nnx.Module):
                 edf_sharding=P('model', None, None),
                 efd_sharding=P('model', None, None),
                 ed_sharding=P('model', None),
+                enable_return_routed_experts=self.enable_return_routed_experts,
             )
 
             block = TransformerBlock(
@@ -175,6 +177,7 @@ class GptOss(nnx.Module):
                 ),
                 attn=attn,
                 custom_module=moe_mlp,
+                enable_return_routed_experts=self.enable_return_routed_experts,
             )
             self.layers.append(block)
         # Note: ALL RMSNorm does not upcast input to float32, while the pytorch does
@@ -523,21 +526,28 @@ class GptOss(nnx.Module):
         input_ids: jax.Array,
         attention_metadata: AttentionMetadata,
         *args,
-    ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array]]:
+    ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array],
+               Optional[jax.Array]]:
         is_prefill = False
         x = self.embedder.encode(input_ids)
 
+        all_expert_ids = []
         for i, block in enumerate(self.layers):
             kv_cache = kv_caches[i]
             current_sliding_window = self.sliding_window if i % 2 == 0 else None
             attention_metadata.sliding_window = current_sliding_window
 
-            new_kv_cache, x = block(x, is_prefill, kv_cache,
-                                    attention_metadata)
+            new_kv_cache, x, expert_ids = block(x, is_prefill, kv_cache,
+                                                attention_metadata)
+            if expert_ids is not None:
+                all_expert_ids.append(expert_ids)
             kv_caches[i] = new_kv_cache
 
         final_activation = self.final_norm(x)
-        return kv_caches, final_activation, []
+
+        stacked_expert_ids = jnp.stack(all_expert_ids,
+                                       axis=0) if all_expert_ids else None
+        return kv_caches, final_activation, [], stacked_expert_ids
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.lm_head.decode(hidden_states)

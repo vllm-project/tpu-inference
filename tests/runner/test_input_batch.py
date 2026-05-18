@@ -246,6 +246,136 @@ def test_swap_states_only_swaps_active_tokens(input_batch: InputBatch):
     assert input_batch.num_tokens_no_spec[1] == 6
 
 
+def test_mamba_state_indices_unique_per_request(input_batch: InputBatch):
+    """Two concurrent requests must never receive the same mamba slot id —
+    if they did, the GDN op would write both requests' recurrent state
+    into the same physical cache slot and corrupt one of them. Also
+    verifies slot 0 is reserved (vLLM's null block convention)."""
+    for i in range(4):
+        input_batch.add_request(create_dummy_request(f"req-{i}"))
+
+    slots = input_batch.mamba_state_indices_cpu[:input_batch.num_reqs].tolist()
+    assert len(set(slots)) == len(slots), \
+        f"Slots not unique across concurrent requests: {slots}"
+    assert all(s >= 1 for s in slots), \
+        f"Slot 0 is the null block and must not be assigned: {slots}"
+
+
+def test_mamba_state_indices_freed_on_remove(input_batch: InputBatch):
+    """Removing a request must return its slot id to the free pool so the
+    next add reuses it (rather than running the pool dry)."""
+    req = create_dummy_request("req-0")
+    input_batch.add_request(req)
+    slot_first = int(input_batch.mamba_state_indices_cpu[0])
+
+    input_batch.remove_request("req-0")
+    # condense() with empty_indices=[0] would early-return because num_reqs==0,
+    # so we just verify the slot is back in *some* per-rank pool. Pools are
+    # sharded under DP attention; the slot lives in exactly one of them.
+    assert any(slot_first in pool
+               for pool in input_batch._free_mamba_slots_per_rank)
+
+    new_req = create_dummy_request("req-new")
+    input_batch.add_request(new_req)
+    # The most-recently-freed slot is at the end of the free list — pop()
+    # returns it, so the new request gets the same id back.
+    assert int(input_batch.mamba_state_indices_cpu[0]) == slot_first
+
+
+def test_mamba_state_indices_follow_condense(input_batch: InputBatch):
+    """When condense moves a request to a different persistent-batch slot,
+    its mamba state id must follow it — otherwise the GDN op reads stale
+    state from the recurrent_state cache. This is the bug that broke gsm8k
+    accuracy on Qwen3.5-397B (only triggered when requests finish out of
+    order, which `--ignore-eos` benchmarks suppress)."""
+    reqs = [create_dummy_request(f"req-{i}") for i in range(4)]
+    for req in reqs:
+        input_batch.add_request(req)
+
+    # Snapshot the slot id assigned to each request before any churn.
+    slot_for_req = {
+        rid: int(input_batch.mamba_state_indices_cpu[idx])
+        for rid, idx in input_batch.req_id_to_index.items()
+    }
+
+    # Remove the lower-indexed requests so condense has to move the higher
+    # ones down: [req-0, req-1, req-2, req-3] → [req-3, req-2, _, _].
+    input_batch.remove_request("req-0")
+    input_batch.remove_request("req-1")
+    input_batch.condense(sorted([0, 1], reverse=True))
+
+    # After condense, indexing-by-persistent-slot must yield the same slot
+    # id each request had before the move.
+    assert input_batch.req_id_to_index["req-3"] == 0
+    assert input_batch.req_id_to_index["req-2"] == 1
+    assert int(input_batch.mamba_state_indices_cpu[0]) == slot_for_req["req-3"]
+    assert int(input_batch.mamba_state_indices_cpu[1]) == slot_for_req["req-2"]
+
+
+def test_mamba_state_indices_no_duplicate_in_padded_tail(
+        input_batch: InputBatch):
+    """The padded tail `mamba_state_indices_cpu[num_reqs:]` must not contain
+    any slot id that is also used by an active request.
+
+    If it did, the GDN op's `recurrent_state.at[state_indices].set(...)`
+    scatter would have duplicate destination indices: the active position
+    writes the new state, the padded position writes back the stale
+    pre-update state, and JAX's scatter-with-duplicates is undefined on
+    XLA. The active request's freshly computed state silently loses the
+    race and the request decodes from corrupted recurrent state.
+
+    Reproduces the production symptom: outputs look fine on a fresh batch,
+    then turn to garbage as soon as the persistent batch starts churning
+    (out-of-order completions → `condense` → stale slot ids in the tail).
+    """
+    # Fill, then remove a mix of low and high indices so condense actually
+    # has to move requests downward (the case that left stale ids before
+    # the fix).
+    for i in range(MAX_NUM_REQS):
+        input_batch.add_request(create_dummy_request(f"req-{i}"))
+    for req_id in ("req-0", "req-2", "req-5"):
+        input_batch.remove_request(req_id)
+    input_batch.condense(sorted([0, 2, 5], reverse=True))
+
+    num_reqs = input_batch.num_reqs
+    active = set(input_batch.mamba_state_indices_cpu[:num_reqs].tolist())
+    tail = set(input_batch.mamba_state_indices_cpu[num_reqs:].tolist())
+    assert active.isdisjoint(tail), (
+        "Padded tail still references active slot ids "
+        f"(overlap={active & tail}); the GDN scatter will alias.")
+    # Tail should be the null slot (0) so the scatter folds harmlessly into
+    # the reserved null block.
+    assert tail <= {0}, f"Padded tail contains non-null slot ids: {tail}"
+
+
+def test_mamba_state_indices_remove_clears_position(input_batch: InputBatch):
+    """remove_request must clear the slot id at the vacated position so it
+    does not survive into the padded tail (the source of the scatter-alias
+    bug fixed alongside the trailing-tail invariant)."""
+    input_batch.add_request(create_dummy_request("req-0"))
+    input_batch.add_request(create_dummy_request("req-1"))
+
+    input_batch.remove_request("req-1")
+    # Without condense the position is still in the active range from
+    # `mamba_state_indices_cpu`'s perspective, but `req_id_to_index` no
+    # longer references it; the field at that index must read as null
+    # so the next add doesn't observe a leftover from a prior occupant.
+    assert int(input_batch.mamba_state_indices_cpu[1]) == 0
+
+
+def test_mamba_state_indices_swap(input_batch: InputBatch):
+    """swap_states swaps the request mappings, so the slot ids must swap too."""
+    input_batch.add_request(create_dummy_request("req-0"))
+    input_batch.add_request(create_dummy_request("req-1"))
+    slot0 = int(input_batch.mamba_state_indices_cpu[0])
+    slot1 = int(input_batch.mamba_state_indices_cpu[1])
+
+    input_batch.swap_states(0, 1)
+
+    assert int(input_batch.mamba_state_indices_cpu[0]) == slot1
+    assert int(input_batch.mamba_state_indices_cpu[1]) == slot0
+
+
 def test_all_greedy_property(input_batch: InputBatch):
     """Tests the `all_greedy` property."""
     # Initially true
@@ -279,8 +409,21 @@ def test_get_pooling_metadata(input_batch: InputBatch):
         return all(checks)
 
     def meta_eq(a: PoolingMetadata, b: PoolingMetadata):
-        assert a.prompt_token_ids is None and b.prompt_token_ids is None
+
+        def is_none_or_empty(t):
+            return t is None or (torch.is_tensor(t) and t.numel() == 0)
+
+        if is_none_or_empty(a.prompt_token_ids) and is_none_or_empty(
+                b.prompt_token_ids):
+            token_ids_eq = True
+        elif not is_none_or_empty(a.prompt_token_ids) and not is_none_or_empty(
+                b.prompt_token_ids):
+            token_ids_eq = torch.equal(a.prompt_token_ids, b.prompt_token_ids)
+        else:
+            token_ids_eq = False
+
         checks = [
+            token_ids_eq,
             torch.equal(a.prompt_lens, b.prompt_lens),
             len(a.pooling_params) == len(b.pooling_params),
             len(a.pooling_states) == len(b.pooling_states),
@@ -317,7 +460,8 @@ def test_get_pooling_metadata(input_batch: InputBatch):
         input_batch.get_pooling_metadata(),
         PoolingMetadata(
             prompt_lens=torch.tensor([10], dtype=torch.int32),
-            prompt_token_ids=None,
+            prompt_token_ids=torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]],
+                                          dtype=torch.int32),
             prompt_token_ids_cpu=None,
             pooling_params=[pooling_param],
             pooling_states=[pooling_state],
@@ -335,3 +479,109 @@ def test_get_pooling_metadata(input_batch: InputBatch):
             pooling_states=[],
         ),
     ), "After remove, back to empty state."
+
+
+# --------------- DP mamba pool tests ---------------
+
+DP_SIZE = 4
+DP_MAX_NUM_REQS = 32  # dp_size * max_num_seqs_per_rank
+
+
+@pytest.fixture
+def dp_input_batch():
+    """InputBatch with dp_size=4 for testing per-rank mamba pools."""
+    return InputBatch(
+        max_num_reqs=DP_MAX_NUM_REQS,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+        pin_memory=False,
+        vocab_size=VOCAB_SIZE,
+        block_sizes=BLOCK_SIZES,
+        dp_size=DP_SIZE,
+    )
+
+
+def test_dp_mamba_pool_partitioned_by_rank(dp_input_batch: InputBatch):
+    """Each DP rank must get slots within its own shard of the mamba state."""
+    local_slots = dp_input_batch._mamba_local_slots
+    for rank in range(DP_SIZE):
+        base = rank * local_slots
+        pool = dp_input_batch._free_mamba_slots_per_rank[rank]
+        for slot in pool:
+            assert base < slot < base + local_slots, (
+                f"Rank {rank} pool contains out-of-range slot {slot} "
+                f"(expected ({base}, {base + local_slots}))")
+
+
+def test_dp_mamba_add_request_uses_correct_rank_pool(
+        dp_input_batch: InputBatch):
+    """Requests added with a specific dp_rank must get slots from that rank's
+    pool, not any other rank."""
+    local_slots = dp_input_batch._mamba_local_slots
+    for rank in range(DP_SIZE):
+        req = create_dummy_request(f"req-rank{rank}")
+        dp_input_batch.add_request(req, dp_rank=rank)
+        idx = dp_input_batch.req_id_to_index[req.req_id]
+        slot = int(dp_input_batch.mamba_state_indices_cpu[idx])
+        base = rank * local_slots
+        assert base < slot < base + local_slots, (
+            f"Request on rank {rank} got slot {slot}, "
+            f"expected in ({base}, {base + local_slots})")
+
+
+def test_dp_mamba_remove_returns_slot_to_correct_rank(
+        dp_input_batch: InputBatch):
+    """Removing a request must return its slot to the rank that owns it."""
+    for rank in range(DP_SIZE):
+        pool_before = len(dp_input_batch._free_mamba_slots_per_rank[rank])
+        req = create_dummy_request(f"req-rm-{rank}")
+        dp_input_batch.add_request(req, dp_rank=rank)
+        assert len(
+            dp_input_batch._free_mamba_slots_per_rank[rank]) == pool_before - 1
+        dp_input_batch.remove_request(req.req_id)
+        assert len(
+            dp_input_batch._free_mamba_slots_per_rank[rank]) == pool_before
+
+
+def test_dp_mamba_slots_unique_across_ranks(dp_input_batch: InputBatch):
+    """Slots allocated to different ranks must never overlap."""
+    all_slots = []
+    for rank in range(DP_SIZE):
+        for i in range(3):
+            req = create_dummy_request(f"req-r{rank}-{i}")
+            dp_input_batch.add_request(req, dp_rank=rank)
+            idx = dp_input_batch.req_id_to_index[req.req_id]
+            all_slots.append(int(dp_input_batch.mamba_state_indices_cpu[idx]))
+    assert len(set(all_slots)) == len(all_slots), \
+        f"Duplicate slots across ranks: {all_slots}"
+
+
+def test_dp_mamba_init_mamba_pools_resizes(dp_input_batch: InputBatch):
+    """init_mamba_pools must resize the pools to the actual device block count,
+    which may be smaller than the initial estimate."""
+    old_local = dp_input_batch._mamba_local_slots
+    # Simulate compact-mamba being skipped: actual blocks = 20 (5 per rank)
+    dp_input_batch.init_mamba_pools(20)
+    assert dp_input_batch._mamba_local_slots == 5
+    assert dp_input_batch._mamba_local_slots < old_local
+
+    for rank in range(DP_SIZE):
+        pool = dp_input_batch._free_mamba_slots_per_rank[rank]
+        base = rank * 5
+        for slot in pool:
+            assert base < slot < base + 5, (
+                f"After resize, rank {rank} has out-of-range slot {slot}")
+
+
+def test_dp_mamba_global_to_local_conversion():
+    """Verify the global_slot % local_slots formula produces correct
+    rank-local indices for the _prepare_inputs_dp path."""
+    local_slots = 298  # e.g., 2384 total / 8 ranks
+    # Rank 0 slot 1 → local 1
+    assert 1 % local_slots == 1
+    # Rank 1 slot 299 → local 1
+    assert 299 % local_slots == 1
+    # Rank 7 slot 2087 → local 1
+    assert (7 * local_slots + 1) % local_slots == 1
+    # Boundary: rank 1 last slot = 595 → local 297
+    assert 595 % local_slots == 297

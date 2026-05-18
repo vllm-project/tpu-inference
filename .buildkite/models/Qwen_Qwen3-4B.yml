@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: Qwen/Qwen3-4B
-# pipeline-type: text-only
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3-4B"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_UnitTest"
@@ -46,7 +44,7 @@ steps:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     env:
       TEST_MODEL: Qwen/Qwen3-4B
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
       MINIMUM_ACCURACY_THRESHOLD: 0.85
     commands:
       - |
@@ -73,7 +71,7 @@ steps:
     soft_fail: true
     env:
       TEST_MODEL: Qwen/Qwen3-4B
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
       MINIMUM_THROUGHPUT_THRESHOLD: 11.00
       INPUT_LEN: 1800
       OUTPUT_LEN: 128

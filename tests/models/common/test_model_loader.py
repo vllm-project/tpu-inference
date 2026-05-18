@@ -284,6 +284,35 @@ def test_get_flax_model(vllm_config, mesh, tie_word_embeddings):
     assert callable(model.model_fn)
     assert callable(model.compute_logits_fn)
 
+    # Verify that JAX model instance possesses the named_modules attribute
+    assert hasattr(model.model, "named_modules")
+
+
+def test_get_flax_model_with_pooling(vllm_config, mesh, rng):
+    """Tests that get_flax_model correctly instantiates a pooler when runner_type is 'pooling'."""
+    vllm_config.model_config.runner_type = "pooling"
+    from vllm.config import PoolerConfig
+    vllm_config.model_config.pooler_config = PoolerConfig(
+        task="embed", tok_pooling_type="STEP", seq_pooling_type="CLS")
+
+    with patch("tpu_inference.models.common.model_loader._get_nnx_model"
+               ) as mock_get_nnx:
+        mock_model = MagicMock()
+        mock_get_nnx.return_value = mock_model
+
+        init_pp_distributed_environment(ip="",
+                                        rank=0,
+                                        world_size=1,
+                                        device=jax.devices()[0],
+                                        need_pp=False)
+
+        with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
+            model_interface = model_loader.get_flax_model(
+                vllm_config, rng, mesh)
+
+        assert model_interface.pooler_fn != model_loader._not_support
+        assert model_interface.pooler_fn.__name__ == "compute_pooler_output"
+
 
 def test_get_vllm_model(mock_get_pp_group, mesh):
     """
@@ -388,7 +417,8 @@ class TestGetModel:
         result = model_loader.get_model(vllm_config, rng, mesh)
 
         mock_get_flax.assert_not_called()
-        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False)
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
+                                              None)
         assert result == "vllm_model_sentinel"
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
@@ -418,7 +448,8 @@ class TestGetModel:
         result = model_loader.get_model(vllm_config, rng, mesh)
 
         mock_get_flax.assert_not_called()
-        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False)
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
+                                              None)
         assert result == "vllm_model_sentinel"
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
@@ -439,7 +470,8 @@ class TestGetModel:
 
         # Check that both were called
         mock_get_flax.assert_called_once_with(vllm_config, rng, mesh, False)
-        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False)
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
+                                              None)
         assert result == "vllm_fallback_sentinel"
 
     @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "flax_nnx"}, clear=True)
@@ -528,5 +560,6 @@ class TestGetModel:
         result = model_loader.get_model(vllm_config, rng, mesh)
 
         mock_get_flax.assert_not_called()
-        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False)
+        mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
+                                              None)
         assert result == "vllm_model_sentinel"

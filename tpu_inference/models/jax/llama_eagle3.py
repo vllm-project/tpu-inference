@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -185,7 +185,8 @@ class Eagle3LlamaModel(nnx.Module):
         input_ids: jax.Array,
         hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
+               Optional[jax.Array]]:
         embeds = self.embed_tokens(input_ids)
         assert hidden_states.shape[-1] == embeds.shape[-1]
 
@@ -203,7 +204,7 @@ class Eagle3LlamaModel(nnx.Module):
         hidden_states = hidden_states + residual
         residual = hidden_states
         hidden_states = self.norm(hidden_states)
-        return kv_caches, hidden_states, [residual]
+        return kv_caches, hidden_states, [residual], None
 
 
 def update_reshape_map_for_eagle3(vllm_config: VllmConfig,
@@ -302,7 +303,8 @@ class EagleLlama3ForCausalLM(nnx.Module):
         hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
         _layer_name_to_kv_cache=None,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
+               Optional[jax.Array]]:
         return self.model(
             kv_caches,
             input_ids,

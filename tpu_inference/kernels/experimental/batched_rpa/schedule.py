@@ -56,7 +56,7 @@ class SmemWrapper:
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
-class RPASchedule:
+class RpaSchedule:
     """Container for metadata arrays with integrated shape/spec logic."""
 
     s_idx: SmemWrapper  # [steps, batch]
@@ -69,10 +69,10 @@ class RPASchedule:
     dma_kv_new: SmemWrapper  # [steps, batch, bkv_p_new, 4]
     actual_steps: Any  # [1]
 
-    cfgs: configs.RPAConfig = dataclasses.field(metadata=dict(static=True))
+    cfgs: configs.RpaConfigs = dataclasses.field(metadata=dict(static=True))
 
     @classmethod
-    def create_shape_dtype(cls, cfgs: configs.RPAConfig):
+    def create_shape_dtype(cls, cfgs: configs.RpaConfigs):
 
         idx_wrapper = SmemWrapper.create_shape_dtype(
             (cfgs.max_steps_ub, cfgs.batch_size))
@@ -162,12 +162,21 @@ def compute_metadata(
     cu_q_lens_ref: jax.Ref,
     kv_lens_ref: jax.Ref,
     distribution_ref: jax.Ref,
-    schedule: RPASchedule,
+    schedule: RpaSchedule,
     lane_lengths_ref: jax.Ref,
     *,
-    cfgs: configs.RPAConfig,
+    cfgs: configs.RpaConfigs,
+    update_kv_cache: bool = True,
 ):
-    """Fill metadata using triple nested loop of seq->q->k loop."""
+    """Fill metadata using triple nested loop of seq->q->k loop.
+
+    When `update_kv_cache=False` (KV-share path): the current step's
+    K/V tokens are NOT pulled from the input k/v tensors, the whole
+    `kv_len` is read from the (redirected) cache slot, and `do_writeback`
+    is forced to 0 so the kernel doesn't overwrite the source layer's
+    cache contents. Mirrors the v3 RPA kernel's `update_kv_cache=False`
+    semantics.
+    """
 
     @jax.named_scope("k_loop")
     def k_loop(
@@ -198,7 +207,14 @@ def compute_metadata(
         kv_len_start = k_idx * cfgs.bkv_sz
         kv_p_start = k_idx * cfgs.bkv_p
         kv_left = k_len - kv_len_start
-        kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
+        if update_kv_cache:
+            kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
+        else:
+            # KV-share: read everything from cache; the source layer's
+            # call ran earlier in this step and already wrote the
+            # current-step K/V into the (redirected) cache slot. The
+            # shared layer's locally-computed k/v is unused.
+            kv_left_frm_cache = kv_left
         p_offset = s_idx * cfgs.serve.pages_per_seq + kv_p_start
 
         for i in range(cfgs.bkv_p_cache):
@@ -332,13 +348,14 @@ def rpa_metadata_schedule_kernel(
     kv_lens_ref: jax.Ref,
     distribution_ref: jax.Ref,
     # Outputs.
-    schedule_hbm_ref: RPASchedule,
+    schedule_hbm_ref: RpaSchedule,
     # Scratch.
-    schedule_ref: RPASchedule,
+    schedule_ref: RpaSchedule,
     lane_lengths_ref: jax.Ref,
     dma_sem: jax.Ref,
     *,
-    cfgs: configs.RPAConfig,
+    cfgs: configs.RpaConfigs,
+    update_kv_cache: bool = True,
 ):
     """Generates the HBM-to-VMEM DMA schedule.
 
@@ -380,6 +397,7 @@ def rpa_metadata_schedule_kernel(
         schedule_ref,
         lane_lengths_ref,
         cfgs=cfgs,
+        update_kv_cache=update_kv_cache,
     )
 
     # Step 2: Compute actual number of steps.
@@ -444,14 +462,17 @@ def generate_rpa_metadata(
     cu_q_lens: jax.Array,
     kv_lens: jax.Array,
     distribution: jax.Array,
-    cfgs: configs.RPAConfig,
+    cfgs: configs.RpaConfigs,
     *,
     interpret=False,
-) -> RPASchedule:
-    schedule_shaped_dtype = RPASchedule.create_shape_dtype(cfgs)
+    update_kv_cache: bool = True,
+) -> RpaSchedule:
+    schedule_shaped_dtype = RpaSchedule.create_shape_dtype(cfgs)
 
     return pl.pallas_call(
-        functools.partial(rpa_metadata_schedule_kernel, cfgs=cfgs),
+        functools.partial(rpa_metadata_schedule_kernel,
+                          cfgs=cfgs,
+                          update_kv_cache=update_kv_cache),
         out_shape=schedule_shaped_dtype,
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=3,

@@ -275,6 +275,7 @@ class MMLUDataset(BenchmarkDataset):
         input_len: Optional[int] = None,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
+        chat_template_system_prompt: Optional[str] = None,
         **kwargs,
     ) -> list:
         samples: list = []
@@ -283,9 +284,12 @@ class MMLUDataset(BenchmarkDataset):
                 break
 
             if self.use_chat_template:
+                system_prompt = (chat_template_system_prompt
+                                 if chat_template_system_prompt is not None
+                                 else "Reasoning effort: high")
                 messages = [{
                     "role": "system",
-                    "content": "Reasoning effort: high"
+                    "content": system_prompt
                 }, {
                     "role": "user",
                     "content": prompt
@@ -341,7 +345,25 @@ class MLPerfDataset(BenchmarkDataset):
         self.load_data()
 
     def load_data(self) -> None:
-        dataset = pd.read_pickle(self.dataset_path)
+        # Handle conversion from Pickle to Parquet if necessary
+        if self.dataset_path and self.dataset_path.endswith(".pkl"):
+            parquet_path = self.dataset_path.rsplit(".", 1)[0] + ".parquet"
+
+            if not os.path.exists(parquet_path):
+                temp_df = pd.read_pickle(self.dataset_path)
+                temp_df.to_parquet(parquet_path)
+
+            self.dataset_path = parquet_path
+
+        # Load the data from the path
+        if self.dataset_path and self.dataset_path.endswith(".parquet"):
+            dataset = pd.read_parquet(self.dataset_path)
+        elif self.dataset_path and self.dataset_path.endswith(".pkl"):
+            dataset = pd.read_pickle(self.dataset_path)
+        else:
+            raise ValueError(
+                f"Unsupported dataset format for path: {self.dataset_path}")
+
         mlperf_data = []
         print(f"Loaded {len(dataset)} data from mlperf dataset")
         # NOTE: an example row (entry in the dataset) looks like:
@@ -472,6 +494,7 @@ Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."""
         num_requests: int,
         input_len: Optional[int] = None,
         output_len: Optional[int] = None,
+        chat_template_system_prompt: Optional[str] = None,
         **kwargs,
     ) -> list:
         samples: list = []
@@ -480,9 +503,12 @@ Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."""
                 break
 
             if self.use_chat_template:
+                system_prompt = (chat_template_system_prompt
+                                 if chat_template_system_prompt is not None
+                                 else "Reasoning effort: high")
                 messages = [{
                     "role": "system",
-                    "content": "Reasoning effort: high"
+                    "content": system_prompt
                 }, {
                     "role": "user",
                     "content": prompt
@@ -826,6 +852,7 @@ class SonnetDataset(BenchmarkDataset):
                     SampleRequest(
                         prompt=prompt_formatted
                         if return_prompt_formatted else prompt,
+                        messages=None if return_prompt_formatted else msg,
                         prompt_len=prompt_len,
                         expected_output_len=output_len,
                         request_id=request_id_prefix + str(ind),

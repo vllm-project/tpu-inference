@@ -116,9 +116,13 @@ def test_prepare_inputs():
     num_rejected_tokens = jnp.array(num_rejected_tokens_cpu)
     # This is only used in the _prepare_input_ids helper
     # It must be padded to max_num_seqs (128) to match the mask in jnp.where
-    next_token_ids_cpu = np.zeros(max_num_seqs, dtype=np.int32)
-    next_token_ids_cpu[:num_reqs] = [1, 2, 3]  # Valid tokens for active reqs
-    next_token_ids = jnp.array(next_token_ids_cpu)
+    last_sampled_token_id_cpu = np.zeros(max_num_seqs, dtype=np.int32)
+    last_sampled_token_id_cpu[:num_reqs] = [1, 2,
+                                            3]  # Valid tokens for active reqs
+    last_sampled_token_id = jnp.array(last_sampled_token_id_cpu)
+    next_prompt_token_id = jnp.zeros(max_num_seqs, dtype=jnp.int32)
+    # All requests are in decode (not prefill), so last_sampled_token_id is used.
+    is_in_prefill = jnp.zeros(max_num_seqs, dtype=jnp.bool_)
 
     attn_metadata = AttentionMetadata(
         seq_lens=jnp.array(sl_cpu),
@@ -134,24 +138,23 @@ def test_prepare_inputs():
     expected_new_qsl = np.zeros(max_num_seqs + 1, dtype=np.int32)
     num_tokens_per_req = np.zeros(max_num_seqs, dtype=np.int32)
     num_tokens_per_req[:num_reqs] = [3, 4, 3]
-    # The implementation sets padded query lengths to 1, and rejected tokens
+    # The implementation sets padded query lengths to 0, and rejected tokens
     # are 0 for padded requests.
-    num_tokens_per_req[num_reqs:] = 1
+    num_tokens_per_req[num_reqs:] = 0
     expected_new_qsl[1:] = np.cumsum(num_tokens_per_req)
 
     expected_new_seq_lens = np.zeros(max_num_seqs, dtype=np.int32)
     expected_new_seq_lens[:num_reqs] = [3, 4, 3]
 
-    expected_total_tokens = int(expected_new_qsl[-1])
-    expected_total_tokens = runner_utils.get_padded_token_len(
-        proposer.runner.num_tokens_paddings, expected_total_tokens)
+    expected_total_tokens = input_ids.shape[0]
 
     expected_last_token_indices = jnp.array(expected_new_qsl[1:] - 1)
 
     # Execute
     target_hidden_states, input_ids, last_token_indices, updated_metadata = (
         proposer.prepare_inputs(attn_metadata, input_ids, aux_hidden_states,
-                                next_token_ids, num_rejected_tokens))
+                                last_sampled_token_id, next_prompt_token_id,
+                                is_in_prefill, num_rejected_tokens))
 
     # Assertions
     assert jnp.array_equal(updated_metadata.query_start_loc,
@@ -170,7 +173,7 @@ def test_prepare_inputs():
                                           hidden_size * 3)
 
 
-@pytest.mark.parametrize("method", ["eagle3"])
+@pytest.mark.parametrize("method", ["eagle3", "mtp"])
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
 def test_propose(method, num_speculative_tokens):
     proposer = _create_proposer(method, num_speculative_tokens)
@@ -185,7 +188,8 @@ def test_propose(method, num_speculative_tokens):
     base_token_ids = [42, 60]
 
     def mock_model_fn(state, kv_caches, input_ids, target_hidden_states,
-                      attn_metadata, layer_name_to_kvcache_index):
+                      attn_metadata, layer_name_to_kvcache_index,
+                      spec_step_idx):
         """
         Mock model_fn.
         Returns: (kv_caches, hidden_states_for_logits, residual_tuple)
@@ -231,8 +235,9 @@ def test_propose(method, num_speculative_tokens):
             residual_hidden_states = residual_hidden_states.at[:, 0].set(
                 next_token_ids_encoded)
 
-        # Return (kv_caches, hidden_states, residual_tuple)
-        return kv_caches, hidden_states_for_logits, (residual_hidden_states, )
+        # Return (kv_caches, hidden_states, residual_tuple, None)
+        return kv_caches, hidden_states_for_logits, (
+            residual_hidden_states, ), None
 
     def mock_compute_logits_fn(state, hidden_states, lora_metadata):
         # Create deterministic logits from hidden_states.
@@ -309,3 +314,54 @@ def test_propose(method, num_speculative_tokens):
             expected_tokens[i, j] = base_token_ids[i] + j
 
     assert jnp.array_equal(draft_token_ids, jnp.array(expected_tokens))
+
+
+def test_update_inputs_for_loop_speculation_mrope():
+    proposer = _create_proposer("mtp", 2)
+
+    # Setup 2D positions (M-RoPE)
+    max_model_len = 10
+    proposer.runner.max_model_len = max_model_len
+
+    # positions shape: (3, num_reqs) -> (3, 2)
+    positions = jnp.array([[1, 5], [2, 6], [3, 7]])
+
+    seq_lens = jnp.array([5, 8])
+
+    # block_tables shape: (num_reqs * max_num_blocks_per_req,)
+    # Let's say max_num_blocks_per_req = 2. So shape (4,)
+    block_tables = jnp.array([1, 2, 3, 4])
+
+    # Execute
+    positions_out, clamped_positions, new_seq_lens, query_start_loc, new_block_tables = proposer._update_inputs_for_loop_speculation(
+        positions, seq_lens, block_tables)
+
+    # Assertions
+    # 1. positions_out should be positions + 1
+    expected_positions_out = positions + 1
+    assert jnp.array_equal(positions_out, expected_positions_out)
+
+    # Let's test a case where it DOES exceed!
+    positions_exceed = jnp.array([[1, 9], [2, 9], [3, 9]])
+
+    positions_out, clamped_positions, new_seq_lens, query_start_loc, new_block_tables = proposer._update_inputs_for_loop_speculation(
+        positions_exceed, seq_lens, block_tables)
+
+    # exceeds_max_model_len_reduced should be [False, True]
+    # So for request 1 (index 1):
+    # new_seq_lens[1] should be set to 1!
+    # clamped_positions[:, 1] should be set to 0!
+    # new_block_tables for request 1 should be set to -1!
+
+    assert new_seq_lens[1] == 1
+    assert jnp.array_equal(clamped_positions[:, 1], jnp.array([0, 0, 0]))
+
+    # block_tables for request 1 are at indices 2, 3. They should be -1.
+    assert new_block_tables[2] == -1
+    assert new_block_tables[3] == -1
+
+    # For request 0 (index 0), it does not exceed.
+    assert jnp.array_equal(clamped_positions[:, 0], jnp.array([2, 3, 4]))
+    assert new_seq_lens[0] == 6
+    assert new_block_tables[0] == 1
+    assert new_block_tables[1] == 2

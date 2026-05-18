@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: FP8 W8A8
-# pipeline-type: quantization support matrix
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for FP8 W8A8"
     key: "${TPU_VERSION:-tpu6e}_FP8_W8A8_CorrectnessTest"

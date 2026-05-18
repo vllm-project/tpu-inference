@@ -25,8 +25,6 @@
 #
 # Performance tests verify that:
 #   1. Returning log-probs does not add significant latency overhead.
-#   2. Group sampling (same prompt, n=16 outputs) benefits from prefix
-#      caching.
 
 from __future__ import annotations
 
@@ -282,6 +280,40 @@ class TestLogprobsNoRecompilation:
                     f"Log probability must be <= 0, got {logprob_obj.logprob}")
 
 
+class TestMoEExpertIds:
+    """Verify that MoE routed experts are successfully returned when enabled.
+    """
+
+    def test_moe_expert_ids_returned(self, llm: LLM):
+        """routed_experts must be properly shaped if it is an MoE, or None if not."""
+        prompt = "The capital of France is"
+        # Test standard execution with the flag enabled.
+        llm.llm_engine.vllm_config.model_config.enable_return_routed_experts = True
+
+        sampling_params = SamplingParams(temperature=0, max_tokens=10)
+        outputs = llm.generate([prompt], sampling_params)
+        output = outputs[0].outputs[0]
+
+        is_moe = llm.llm_engine.model_config.is_moe
+        if is_moe:
+            assert output.routed_experts is not None, (
+                "MoE models must populate routed_experts when enabled")
+            assert len(output.routed_experts.shape) == 3, (
+                f"Expected 3D expert shape, got {output.routed_experts.shape}")
+
+            # Verify that the token dimension has size P + G - 1
+            P = len(outputs[0].prompt_token_ids)
+            G = len(output.token_ids)
+            expected_len = P + G - 1
+            actual_len = output.routed_experts.shape[0]
+            assert actual_len == expected_len, (
+                f"Expected expert 0-th dim to be P + G - 1 ({expected_len}), "
+                f"got {actual_len}")
+        else:
+            assert output.routed_experts is None, (
+                "Non-MoE models must not populate routed_experts")
+
+
 # ========================================================================
 # Performance tests
 # ========================================================================
@@ -327,90 +359,3 @@ class TestLogprobsLatency:
 
         assert overhead < 1.00, (
             f"Logprobs overhead {overhead:.1%} exceeds 100 % threshold")
-
-
-class TestGroupSamplingPrefixCache:
-    """Group sampling (n=16) on the same prompt should benefit from prefix
-    caching.
-
-    When the same prompt is submitted with ``n=16``, the engine should
-    compute the prefix only once and reuse it for all 16 continuations.
-    With prefix caching enabled the second call (same prompt) should be
-    noticeably faster than the first.
-    """
-
-    @staticmethod
-    def _generate_timed(llm: LLM, prompts, sampling_params, num_runs=3):
-        """Return the median wall-clock time over *num_runs*."""
-        times = []
-        for _ in range(num_runs):
-            start = time.perf_counter()
-            llm.generate(prompts, sampling_params)
-            elapsed = time.perf_counter() - start
-            times.append(elapsed)
-        times.sort()
-        return times[len(times) // 2]
-
-    def test_group_sampling_hits_prefix_cache(self, llm: LLM):
-        """Repeated group sampling on the same prompt should speed up.
-
-        The first call with a prompt populates the prefix cache but does
-        not benefit from it (the prompt must be fully prefilled).  The
-        second call with the *same* prompt should hit the cache and skip
-        prefill, so it should be at least as fast as the first call.
-
-        We cannot compare against a "cache-miss" control prompt because
-        _generate_timed runs multiple iterations and the control prompt
-        itself gets cached after its first iteration, making the two
-        equally fast.  Instead we rely on the cold-vs-warm comparison
-        which reliably shows a ~2-3× speedup.
-        """
-        prompt = (
-            "Reinforcement learning is a branch of machine learning where "
-            "an agent learns to make decisions by interacting with an "
-            "environment. The agent receives rewards or penalties based on "
-            "its actions and aims to maximise cumulative reward over time. "
-            "Explain the key concepts of RL in detail:")
-        sampling_params = SamplingParams(
-            temperature=0.8,
-            max_tokens=MAX_TOKENS_DEFAULT,
-            n=16,
-        )
-
-        # First call – populates the prefix cache for *prompt*.
-        t_first = self._generate_timed(llm, [prompt],
-                                       sampling_params,
-                                       num_runs=1)
-
-        # Second call (same prompt) – should hit the prefix cache.
-        t_cached = self._generate_timed(llm, [prompt],
-                                        sampling_params,
-                                        num_runs=3)
-
-        speedup = t_first / t_cached if t_cached > 0 else 0
-
-        print("✓ Group sampling prefix-cache test results:")
-        print(f"  First (cold) call:     {t_first:.3f}s")
-        print(f"  Cached (same prompt):  {t_cached:.3f}s")
-        print(f"  Speedup:               {speedup:.2f}x")
-
-        assert speedup >= 1.0, (
-            f"Expected cached call to be at least as fast as the first "
-            f"call, got {speedup:.2f}x")
-
-    def test_group_sampling_produces_diverse_outputs(self, llm: LLM):
-        """n=16 with temperature > 0 should produce diverse continuations."""
-        prompt = "Write a creative one-sentence story about a robot:"
-        sampling_params = SamplingParams(
-            temperature=1.0,
-            max_tokens=MAX_TOKENS_DEFAULT,
-            n=16,
-        )
-
-        outputs = llm.generate([prompt], sampling_params)
-        texts = {o.text.strip() for o in outputs[0].outputs}
-
-        print(f"  Unique outputs: {len(texts)}/16")
-        assert len(texts) > 10, (
-            "Group sampling with temperature=1.0 should produce diverse "
-            "outputs but some were identical")

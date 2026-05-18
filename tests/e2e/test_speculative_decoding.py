@@ -21,6 +21,7 @@ import time
 
 import pytest
 from vllm import LLM, SamplingParams
+from vllm.v1.metrics.reader import Counter
 
 
 # TODO (Qiliang Cui): remove this when XLA fixes the recursive jit call issue.
@@ -62,7 +63,7 @@ def get_eagle3_test_prompts():
 def get_test_prompts(speculative_config: dict):
     if speculative_config['method'] == 'ngram':
         return get_ngram_test_prompts()
-    elif speculative_config['method'] == 'eagle3':
+    elif speculative_config['method'] in ('eagle3', 'qwen3_next_mtp', 'mtp'):
         return get_eagle3_test_prompts()
     else:
         raise NotImplementedError(
@@ -92,6 +93,9 @@ def _test_correctness_helper(
     sampling_config: SamplingParams,
     model_name: str,
     speculative_config: dict,
+    max_num_seqs: int = 4,
+    async_scheduling: bool = False,
+    extra_kwargs: dict | None = None,
 ):
     '''
     Helper function to test ngram correctness.
@@ -101,11 +105,19 @@ def _test_correctness_helper(
     with monkeypatch.context():
         test_prompts = get_test_prompts(speculative_config)
 
-        ref_llm = LLM(model=model_name,
-                      max_model_len=1024,
-                      max_num_seqs=4,
-                      tensor_parallel_size=_get_tensor_parallel_size(),
-                      async_scheduling=0)
+        kwargs = {
+            "max_model_len": 1024,
+            "max_num_seqs": max_num_seqs,
+            "tensor_parallel_size": _get_tensor_parallel_size(),
+            "model_loader_extra_config": {
+                "enable_weights_track": False
+            },
+            "async_scheduling": async_scheduling,
+        }
+        if extra_kwargs:
+            kwargs.update(extra_kwargs)
+
+        ref_llm = LLM(model=model_name, **kwargs)
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
         del ref_llm
@@ -115,10 +127,7 @@ def _test_correctness_helper(
 
         spec_llm = LLM(model=model_name,
                        speculative_config=speculative_config,
-                       max_model_len=1024,
-                       max_num_seqs=4,
-                       tensor_parallel_size=_get_tensor_parallel_size(),
-                       async_scheduling=0)
+                       **kwargs)
         spec_outputs = spec_llm.generate(test_prompts, sampling_config)
 
         matches = 0
@@ -183,59 +192,61 @@ def _test_performance_helper(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     speculative_config: dict,
-    min_speedup: float,
+    min_acceptance_rate: float,
+    max_num_seqs: int = 1,
+    async_scheduling: bool = False,
+    model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
+    extra_kwargs: dict | None = None,
 ):
     '''
     Helper function to test speculative decoding performance.
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
     '''
-    model_name = "meta-llama/Llama-3.1-8B-Instruct"
-
     with monkeypatch.context():
         # Use a smaller set of prompts for performance testing
         test_prompts = get_test_prompts(speculative_config)
 
-        # Test reference LLM timing
-        ref_llm = LLM(model=model_name,
-                      max_model_len=1024,
-                      max_num_seqs=1,
-                      enable_prefix_caching=False,
-                      tensor_parallel_size=_get_tensor_parallel_size(),
-                      async_scheduling=0)
+        kwargs = {
+            "max_model_len": 1024,
+            "max_num_seqs": max_num_seqs,
+            "tensor_parallel_size": _get_tensor_parallel_size(),
+            "enable_prefix_caching": False,
+            "model_loader_extra_config": {
+                "enable_weights_track": False
+            },
+            "disable_log_stats": False,
+            "async_scheduling": async_scheduling,
+        }
+        if extra_kwargs:
+            kwargs.update(extra_kwargs)
 
-        start_time = time.time()
-        _ = ref_llm.generate(test_prompts, sampling_config)
-        ref_time = time.time() - start_time
-
-        del ref_llm
-
-        # Waiting for TPUs to be released
-        time.sleep(30)
-
-        # Test speculative LLM timing with max_num_seqs=1
         spec_llm = LLM(model=model_name,
                        speculative_config=speculative_config,
-                       max_model_len=1024,
-                       max_num_seqs=1,
-                       tensor_parallel_size=_get_tensor_parallel_size(),
-                       enable_prefix_caching=False,
-                       async_scheduling=0)
+                       **kwargs)
 
-        start_time = time.time()
-        _ = spec_llm.generate(test_prompts, sampling_config)
-        spec_time = time.time() - start_time
+        spec_llm.generate(test_prompts, sampling_config)
+
+        metrics = spec_llm.get_metrics()
+        num_draft_tokens = num_accepted_tokens = 0
+        acceptance_rate = 0.0
+        for metric in metrics:
+            if metric.name == "vllm:spec_decode_num_draft_tokens":
+                assert isinstance(metric, Counter)
+                num_draft_tokens += metric.value
+            elif metric.name == "vllm:spec_decode_num_accepted_tokens":
+                assert isinstance(metric, Counter)
+                num_accepted_tokens += metric.value
+        if num_draft_tokens > 0:
+            acceptance_rate = num_accepted_tokens / num_draft_tokens
+            print(f"Acceptance rate: {acceptance_rate:.2%}")
+            print("num_accepted_tokens:" + str(num_accepted_tokens))
+            print("num_draft_tokens:" + str(num_draft_tokens))
 
         del spec_llm
         # Waiting for TPUs to be released
         time.sleep(30)
 
-        speedup = ref_time / spec_time
-        print(f"Reference LLM time: {ref_time:.2f}s")
-        print(f"Speculative LLM time: {spec_time:.2f}s")
-        print(f"Speedup: {speedup:.2f}x")
-
-        # TODO(pooyam): Make this tighter once we have better performance.
-        assert speedup >= min_speedup, f"Expected at least {min_speedup}x speedup for {speculative_config['method']}, got {speedup:.2f}x"
+        assert acceptance_rate >= min_acceptance_rate, f"Expected at least {min_acceptance_rate:.2%} acceptance rate for {speculative_config['method']}, got {acceptance_rate:.2%}"
 
 
 def test_ngram_performance_greedy(
@@ -245,15 +256,15 @@ def test_ngram_performance_greedy(
     '''
     Test that speculative decoding provides significant performance improvement.
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
-    Expects spec_llm to be at least 3.x faster than ref_llm.
     '''
-    _test_performance_helper(
-        monkeypatch, sampling_config, {
-            "method": "ngram",
-            "prompt_lookup_max": 2,
-            "prompt_lookup_min": 2,
-            "num_speculative_tokens": 4,
-        }, 1.2 if _is_v7x() else 3.0)
+    _test_performance_helper(monkeypatch,
+                             sampling_config, {
+                                 "method": "ngram",
+                                 "prompt_lookup_max": 2,
+                                 "prompt_lookup_min": 2,
+                                 "num_speculative_tokens": 4,
+                             },
+                             min_acceptance_rate=0.85)
 
 
 def test_ngram_performance_random(
@@ -269,18 +280,21 @@ def test_ngram_performance_random(
     sampling_config.top_p = 0.9
     sampling_config.top_k = 5
 
-    _test_performance_helper(
-        monkeypatch, sampling_config, {
-            "method": "ngram",
-            "prompt_lookup_max": 2,
-            "prompt_lookup_min": 2,
-            "num_speculative_tokens": 4,
-        }, 1.2 if _is_v7x() else 2.8)
+    _test_performance_helper(monkeypatch,
+                             sampling_config, {
+                                 "method": "ngram",
+                                 "prompt_lookup_max": 2,
+                                 "prompt_lookup_min": 2,
+                                 "num_speculative_tokens": 4,
+                             },
+                             min_acceptance_rate=0.85)
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
 def test_eagle3_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
+    async_scheduling: bool,
 ):
     '''
     Compare the outputs of a original LLM and a speculative LLM
@@ -288,28 +302,127 @@ def test_eagle3_correctness(
     '''
     model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
 
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
     _test_correctness_helper(
-        monkeypatch, sampling_config, model_name, {
+        monkeypatch,
+        sampling_config,
+        model_name, {
             'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
             "num_speculative_tokens": 3,
             "method": "eagle3",
             "draft_tensor_parallel_size": 1
-        })
+        },
+        max_num_seqs=10,
+        async_scheduling=async_scheduling)
 
 
+@pytest.mark.parametrize("max_num_seqs", [1, 20])
+@pytest.mark.parametrize("async_scheduling", [False, True])
 def test_eagle3_performance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
+    max_num_seqs: int,
+    async_scheduling: bool,
 ):
     '''
     Test that speculative decoding provides significant performance improvement.
     Compares timing between reference LLM and speculative LLM using Llama 3 8B.
     Expects spec_llm to be at least 1.8 faster than ref_llm.
     '''
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
     _test_performance_helper(
-        monkeypatch, sampling_config, {
+        monkeypatch,
+        sampling_config, {
             "method": "eagle3",
             "model": "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
             "num_speculative_tokens": 2,
             "draft_tensor_parallel_size": 1
-        }, 0.6 if _is_v7x() else 1.8)
+        },
+        min_acceptance_rate=0.75,
+        max_num_seqs=max_num_seqs,
+        async_scheduling=async_scheduling,
+        model_name='meta-llama/Llama-3.1-8B-Instruct')
+
+
+@pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
+                    reason="MTP is only supported with vllm model impl.")
+@pytest.mark.parametrize("async_scheduling", [False])
+def test_mtp_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    async_scheduling: bool,
+):
+    '''
+    Compare the outputs of an original LLM and a speculative LLM;
+    they should be the same when using MTP speculative decoding.
+    '''
+    model_name = "Qwen/Qwen3.5-4B"
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
+    extra_kwargs = {
+        "seed": 42,
+        "max_model_len": 2048,
+        "max_num_batched_tokens": 16384,
+        "enable_prefix_caching": False,
+        "kv_cache_dtype": "fp8",
+        "gpu_memory_utilization": 0.70,
+    }
+
+    _test_correctness_helper(
+        monkeypatch,
+        sampling_config,
+        model_name,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 3,
+        },
+        max_num_seqs=10,
+        async_scheduling=async_scheduling,
+        extra_kwargs=extra_kwargs,
+    )
+
+
+@pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
+                    reason="MTP is only supported with vllm model impl.")
+@pytest.mark.parametrize("max_num_seqs", [1, 20])
+@pytest.mark.parametrize("async_scheduling", [False])
+def test_mtp_performance(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    max_num_seqs: int,
+    async_scheduling: bool,
+):
+    '''
+    Test that MTP speculative decoding achieves the expected acceptance rate.
+    '''
+    model_name = "Qwen/Qwen3.5-4B"
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
+    extra_kwargs = {
+        "seed": 42,
+        "max_model_len": 2048,
+        "max_num_batched_tokens": 16384,
+        "enable_prefix_caching": False,
+        "kv_cache_dtype": "fp8",
+        "gpu_memory_utilization": 0.70,
+    }
+
+    _test_performance_helper(
+        monkeypatch,
+        sampling_config,
+        speculative_config={
+            "method": "mtp",
+            "num_speculative_tokens": 3,
+        },
+        min_acceptance_rate=0.99,
+        max_num_seqs=max_num_seqs,
+        async_scheduling=async_scheduling,
+        model_name=model_name,
+        extra_kwargs=extra_kwargs,
+    )

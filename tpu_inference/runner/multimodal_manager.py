@@ -23,9 +23,8 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
-from tpu_inference.models.jax.utils.multi_modal_utils import (
-    flatten_embeddings, normalize_mm_grid_thw,
-    sanity_check_mm_encoder_outputs)
+from tpu_inference.models.jax.utils.multi_modal_utils import \
+    normalize_mm_grid_thw,sanity_check_mm_encoder_outputs, flatten_embeddings
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -195,13 +194,12 @@ class MultiModalManager:
 
         Args:
             scheduler_output: The VllmSchedulerOutput.
-            target_pad_len: The target length to pad the resulting embeddings
-                and mask to.
+            target_pad_len: The target length to pad the resulting boolean mask to.
 
         Returns:
             A tuple containing:
-                - flattened_embeds: A JAX array of flattened multimodal
-                    embeddings, padded to target_pad_len.
+                - mm_embeds: A list of JAX arrays containing the unpadded multimodal
+                    embeddings, or None if there are no multimodal embeddings.
                 - is_mm_embed: A boolean JAX array mask indicating which
                     positions in the input sequence are multimodal embeddings.
                 - deepstack_embeds: Optional list of per-layer DeepStack
@@ -308,7 +306,7 @@ class MultiModalManager:
         is_mm_embed_cpu = np.pad(
             is_mm_embed_cpu, (0, target_pad_len - is_mm_embed_cpu.shape[0]))
         is_mm_embed = jnp.array(is_mm_embed_cpu, dtype=jnp.bool_)
-        assert flattened_embeds.shape[0] == is_mm_embed.shape[0]
+        assert target_pad_len == is_mm_embed.shape[0]
 
         deepstack_embeds = None
         if deepstack_layers is not None:
@@ -325,4 +323,4 @@ class MultiModalManager:
                 deepstack_embeds.append(
                     jnp.concatenate([layer_flat, layer_padding], axis=0))
 
-        return flattened_embeds, is_mm_embed, deepstack_embeds
+        return mm_embeds, is_mm_embed, deepstack_embeds
