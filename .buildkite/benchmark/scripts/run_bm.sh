@@ -330,6 +330,7 @@ PREFIX_LEN=${PREFIX_LEN:-0}
 # so any unexpected error stack traces cannot be properly caught by the parent process.
 # When adding commands, ensure they do not throw errors, proactively validate expected errors, 
 # and print error logs for easier debugging.
+# For example, please refer to how throughput and p99_e2el are parsed in this file
 run_benchmark(){
   echo "running benchmark..." >&2
   echo "logging to $BM_LOG" >&2
@@ -372,6 +373,9 @@ run_benchmark(){
     return $client_exit_code
   fi
 
+  # If these two commands throw an error, they will not be properly caught.
+  # We use `|| true` to ignore the command's error, and then actively check throughput and p99_e2el.
+  # If the values do not meet expectations, it will print an error message and then return an error.
   throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
   p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}' || true)
   echo "throughput: $throughput, P99 E2EL: $p99_e2el" >&2
