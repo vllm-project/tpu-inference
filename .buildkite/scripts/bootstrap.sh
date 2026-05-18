@@ -199,8 +199,8 @@ upload_benchmark_pipeline() {
         if [ -n "$changed_cases" ]; then
             echo "Found changed benchmark cases to include:"
             echo "$changed_cases"
-            # Replace newlines with spaces for process_json_benchmark_cases
-            changed_cases=$(echo "$changed_cases" | tr '\n' ' ')
+            # Note: We keep changed_cases as a newline-separated string
+            # to correctly handle filenames with spaces in process_json_benchmark_cases.
         fi
     fi
 
