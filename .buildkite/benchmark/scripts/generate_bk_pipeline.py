@@ -27,6 +27,7 @@ ALLOWED_SERVER_COMMAND_TYPES = {"vllm_serve"}
 ALLOWED_CLIENT_COMMAND_TYPES = {"vllm_bench_serve", "lm_eval"}
 
 # Infrastructure validation map: defines mandatory values based on command_type
+# If a value is None, it only checks for the existence of the key.
 COMMAND_SPECIFIC_VALIDATION = {
     "vllm_serve": {
         "seed": 42,
@@ -35,7 +36,7 @@ COMMAND_SPECIFIC_VALIDATION = {
     },
     "vllm_bench_serve": {
         "ignore-eos": True,
-        "request-rate": "inf",
+        "request-rate": None,
         "percentile-metrics": "ttft,tpot,itl,e2el",
     }
 }
