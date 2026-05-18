@@ -226,7 +226,7 @@ class Eagle3Proposer:
         else:
             target_hidden_states = jnp.concatenate(aux_hidden_states, axis=-1)
             target_hidden_states = self.combine_hidden_states_fn(
-                state, target_hidden_states)
+                state_leaves, target_hidden_states)
 
         input_ids, last_token_indices = self._prepare_input_ids(
             query_start_loc, target_token_ids, next_token_ids, num_reqs)
@@ -398,8 +398,8 @@ class Eagle3Proposer:
         aux_states_processed = [h[token_indices] for h in aux_hidden_states]
 
         target_hidden_states, input_ids, last_token_indices = self._prepare_hidden_states_and_input_ids(
-            state, aux_states_processed, query_start_loc, target_token_ids,
-            next_token_ids, num_reqs)
+            state_leaves, aux_states_processed, query_start_loc,
+            target_token_ids, next_token_ids, num_reqs)
 
         return target_hidden_states, input_ids, last_token_indices, attn_metadata
 
@@ -428,8 +428,6 @@ class Eagle3Proposer:
             self, state_leaves: Any, positions: jax.Array, residual: jax.Array,
             hidden_states: jax.Array,
             last_token_indices: jax.Array) -> tuple[jax.Array, jax.Array]:
-        positions = positions[last_token_indices]
-        residual = residual[last_token_indices]
         draft_token_ids = self._select_draft_token_ids(state_leaves,
                                                        hidden_states,
                                                        last_token_indices)

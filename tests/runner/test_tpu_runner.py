@@ -93,7 +93,7 @@ class TestTPUJaxRunner:
         self.mock_get_input_embed_fn = MagicMock()
         self.runner.embed_input_ids_fn = self.mock_get_input_embed_fn
         self.mock_get_input_embed_fn.return_value = dummy_final_embeds
-        self.runner.state = MagicMock()
+        self.runner.state_leaves = MagicMock()
 
         # 2. ===== Act & Assert (Multimodal) =====
         self.runner.is_multimodal_model = True
@@ -105,7 +105,7 @@ class TestTPUJaxRunner:
         np.testing.assert_array_equal(np.asarray(inputs_embeds_res),
                                       np.asarray(dummy_final_embeds))
         self.mock_get_input_embed_fn.assert_called_once_with(
-            self.runner.state,
+            self.runner.state_leaves,
             dummy_input_ids,
             dummy_mm_embeds,
             is_multimodal=dummy_is_mm_embed)
