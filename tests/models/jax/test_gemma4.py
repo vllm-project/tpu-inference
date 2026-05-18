@@ -50,8 +50,10 @@ class TestGemma4ForConditionalGeneration:
             rng,
             mesh,
             mock_vllm_config,
+            monkeypatch: pytest.MonkeyPatch,
             assert_weight_loading_memory_bounded):
         """Tests loading weights from HF model"""
+        monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "1")
         kv_cache_type = "auto"
         vllm_config = mock_vllm_config(model_name, kv_cache_type)
         # No need to load full model.
