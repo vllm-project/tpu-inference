@@ -57,6 +57,8 @@ dataset_name=mmlu
 dataset_path=""
 num_prompts=1000
 mmlu_output_len=1
+passthrough_bench_args=()
+passthrough_serve_args=()
 exit_code=0
 
 helpFunction()
@@ -68,6 +70,9 @@ helpFunction()
    echo -e "\t-p The path to the processed MMLU dataset (default: None, which will download the dataset)"
    echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-0.5B-Instruct, meta-llama/Llama-3.1-8B-Instruct and meta-llama/Llama-4-Scout-17B-16E-Instruct)"
    echo -e "\t-n Number of prompts to use for the benchmark (default: 10)"
+   echo -e "\t-l The mmlu output length (default: 1)"
+   echo -e "\t--additional-bench-flag Append one arg to benchmark_serving.py. Repeatable; each invocation contributes one arg verbatim."
+   echo -e "\t--additional-serve-flag Append one arg to vllm serve. Repeatable; each invocation contributes one arg verbatim (use this for JSON / values with spaces — each token is a separate flag)."
    exit 1
 }
 
@@ -105,6 +110,14 @@ while [[ "$#" -gt 0 ]]; do
         -l|--mmlu-output-len)
             mmlu_output_len="$2"
             shift
+            shift
+            ;;
+        --additional-bench-flag=*)
+            passthrough_bench_args+=("${1#--additional-bench-flag=}")
+            shift
+            ;;
+        --additional-serve-flag=*)
+            passthrough_serve_args+=("${1#--additional-serve-flag=}")
             shift
             ;;
         -h|--help)
@@ -271,7 +284,15 @@ for model_name in $model_list; do
             current_device_count=1
         fi
     fi
+    # Honor TENSOR_PARALLEL_SIZE if set explicitly; otherwise fall back to the
+    # auto/DEVICE_COUNT logic above.
+    if [ -n "$TENSOR_PARALLEL_SIZE" ]; then
+        current_device_count="$TENSOR_PARALLEL_SIZE"
+    fi
     current_serve_args+=(--tensor-parallel-size "${current_device_count}")
+    if [ -n "$DATA_PARALLEL_SIZE" ]; then
+        current_serve_args+=(--data-parallel-size "${DATA_PARALLEL_SIZE}")
+    fi
 
     max_batched_tokens=8192
     served_name=$model_name
@@ -295,16 +316,26 @@ for model_name in $model_list; do
                 current_serve_args+=(--enable-expert-parallel)
                 current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}')
             elif [ "$MODEL_IMPL_TYPE" == "flax_nnx" ]; then
-                current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": 
+                current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy":
                     {"enable_dp_attention": true, "expert_parallelism": '"${current_device_count}"', "tensor_parallelism": 1}},
                         "replicate_attn_weights": "True", "sparse_matmul": "True"}')
             fi
         fi
     fi
 
+    # Env-var overrides (set by the caller / buildkite YAML).
+    [ -n "$MAX_MODEL_LEN" ] && max_model_len="$MAX_MODEL_LEN"
+    [ -n "$MAX_NUM_SEQS" ] && max_num_seqs="$MAX_NUM_SEQS"
+    [ -n "$MAX_NUM_BATCHED_TOKENS" ] && max_batched_tokens="$MAX_NUM_BATCHED_TOKENS"
+    [ -n "$KV_CACHE_DTYPE" ] && current_serve_args+=(--kv-cache-dtype "$KV_CACHE_DTYPE")
+    [ -n "$MINIMUM_ACCURACY_THRESHOLD" ] && TARGET_ACCURACY="$MINIMUM_ACCURACY_THRESHOLD"
+    [ -n "$MINIMUM_THROUGHPUT_THRESHOLD" ] && TARGET_THROUGHPUT="$MINIMUM_THROUGHPUT_THRESHOLD"
+
+    current_serve_args+=("${passthrough_serve_args[@]}")
+
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
-    (vllm serve "$model_name" --no-enable-prefix-caching --gpu-memory-utilization=0.95 --max-model-len $max_model_len --max-num-seqs $max_num_seqs --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
+    (vllm serve "$model_name" --no-enable-prefix-caching --gpu-memory-utilization=0.95 --max-model-len "$max_model_len" --max-num-seqs "$max_num_seqs" --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
 
     # Set initial trap to ensure cleanup happens even on immediate exit
     trap 'cleanUp "$model_name"' EXIT
@@ -320,7 +351,7 @@ for model_name in $model_list; do
     --dataset-path "$dataset_path" \
     --num-prompts "$num_prompts" \
     --mmlu-output-len "${mmlu_output_len}" \
-    --run-eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+    --run-eval "${passthrough_bench_args[@]}" 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
     checkThroughputAndAccuracy
     if [ "$exit_code" -ne 0 ]; then
