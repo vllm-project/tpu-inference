@@ -93,6 +93,10 @@ TEST_SUITE_VARS=(
 
 DOCKER_HF_HOME="/tmp/hf_home"
 
+# ==========================================
+# 1. Cache Setup (HF Models & JAX Compilations)
+# ==========================================
+
 # Try to cache HF models
 persist_cache_dir="/mnt/disks/persist/models"
 
@@ -107,16 +111,50 @@ fi
 KERNEL_TUNING_TMP_DIR="/tmp/kernel_tuning"
 mkdir -p "$KERNEL_TUNING_TMP_DIR"
 
+# Try to cache the JAX compilations.
+GCS_CACHE_BASE="gs://ullm-ci-cache/jax_cache"
+echo "[INFO] Probing JAX version from docker image..."
+JAX_VERSION=$(docker run --rm "$FULL_IMAGE_TAG" python3 -c "import jax; print(jax.__version__)")
+echo "[INFO] Detected JAX Version: ${JAX_VERSION}"
+
+# Centralized GCS cache path
+CACHE_NAMESPACE="jax${JAX_VERSION}_tpu${TPU_VERSION:-tpu6e}"
+FINAL_CACHE_PATH="${GCS_CACHE_BASE}/${CACHE_NAMESPACE}"
+
+LOCAL_JAX_CACHE_DIR="/tmp/tpu_jax_cache/${CACHE_NAMESPACE}"
+mkdir -p "$LOCAL_JAX_CACHE_DIR"
+echo "[INFO] Pulling JAX Cache from GCS to local directory..."
+# Parallel CI builds‘ pushes are safe because JAX's compilation cache 
+# entries are content-addressed. Concurrent pushes are thus idempotent;
+gsutil -m rsync -r "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" || echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
+
+# ==========================================
+# 2. Run Docker Container
+# ==========================================
+set +e # Temporarily disable exit on error to capture exit code
+
+# Ensure the docker container is killed if the wrapper script exits, fails, or is cancelled.
+trap 'docker kill "$IMAGE_NAME" 2>/dev/null || true' EXIT INT TERM
+
 # Some test scripts set tp=2 on TPU_VERSION=tpu7x to mitigate test failures.
 # TODO (Qiliang Cui) Investigate why tensor-parallel-size=1 breaks in tpu7x.
 
-exec docker run \
+# -----------------------------------------------------------------------------
+# JAX Cache Env Variables Explanation:
+# - VLLM_XLA_CACHE_PATH: Prevents vLLM's CompilationManager from overriding our 
+#   path with its default.
+# - JAX_COMPILATION_CACHE_DIR: Serves as a global catch-all for unit tests that 
+#   initiate models and bypass vLLM's CompilationManager logic entirely.
+# -----------------------------------------------------------------------------
+
+docker run \
   --name "$IMAGE_NAME" \
   --privileged \
   --net host \
   --shm-size=16G \
   --rm \
   -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
+  -v "$LOCAL_JAX_CACHE_DIR":"$LOCAL_JAX_CACHE_DIR" \
   -v "$KERNEL_TUNING_TMP_DIR":"$KERNEL_TUNING_TMP_DIR" \
   "${DEV_MOUNT[@]}" \
   "${ENV_VARS[@]}" \
@@ -124,7 +162,8 @@ exec docker run \
   -e HF_HOME="$DOCKER_HF_HOME" \
   -e MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
   -e HF_TOKEN="$HF_TOKEN" \
-  -e VLLM_XLA_CACHE_PATH="$DOCKER_HF_HOME/.cache/jax_cache" \
+  -e VLLM_XLA_CACHE_PATH="$LOCAL_JAX_CACHE_DIR" \
+  -e JAX_COMPILATION_CACHE_DIR="$LOCAL_JAX_CACHE_DIR" \
   -e VLLM_XLA_CHECK_RECOMPILATION=1 \
   ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
   ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
@@ -138,3 +177,16 @@ exec docker run \
    "${BENCHMARK_DOCKER_ARGS[@]}" \
   "$FULL_IMAGE_TAG" \
   "$@" # Pass all script arguments as the command to run in the container
+DOCKER_EXIT_CODE=$?
+
+set -e
+
+# ==========================================
+# 3. Post-Docker Actions
+# ==========================================
+echo "[INFO] Docker finished with exit code ${DOCKER_EXIT_CODE}."
+
+echo "[INFO] Syncing local JAX Cache back to GCS..."
+gsutil -m rsync -r "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" || echo "[WARN] Failed to sync JAX Cache back to GCS."
+
+exit $DOCKER_EXIT_CODE
