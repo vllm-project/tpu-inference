@@ -63,7 +63,7 @@ class MetadataRef:
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
-class BufferWrapper(ABC):
+class BufferRefWrapper(ABC):
     hbm_ref: Any
     vmem_ref: Any
     metadata_ref: MetadataRef
@@ -91,7 +91,7 @@ class BufferWrapper(ABC):
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
-class XBuffer(BufferWrapper):
+class XBufferRef(BufferRefWrapper):
 
     def copy_in(self, b_start, slot, sem, is_first=False):
         if is_first:
@@ -137,7 +137,7 @@ class XBuffer(BufferWrapper):
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
-class ConvStateBuffer(BufferWrapper):
+class ConvStateBufferRef(BufferRefWrapper):
 
     def copy_in(self, b_start, slot, sem, is_first=False):
         dma_list = []
@@ -200,16 +200,38 @@ class ConvStateBuffer(BufferWrapper):
         ).wait()
 
 
-def inner_kernel(
-    p_id: jax.Array,
-    *,
-    x_buffer: XBuffer,
-    conv_state_buffer: ConvStateBuffer,
-    sem_ref: jax.Array,
+def main_kernel(
+    # Inputs.
     metadata_ref: MetadataRef,
+    x_ref: jax.Array,
+    conv_state_ref: jax.Array,
     conv_rhs_ref: ConvRhsRef,
+    # Outputs.
+    x_out_ref: jax.Array,
+    conv_state_out_ref: jax.Array,
+    # Scratch
+    x_scratch_ref: jax.Array,
+    conv_state_scratch_ref: jax.Array,
+    sem_ref: jax.Array,
     cfgs: ConvConfigs,
 ):
+    del x_out_ref, conv_state_out_ref
+
+    # Wrap inputs for better readability.
+    x_buffer_ref = XBufferRef(
+        hbm_ref=x_ref,
+        vmem_ref=x_scratch_ref,
+        metadata_ref=metadata_ref,
+        cfgs=cfgs,
+    )
+    conv_state_buffer_ref = ConvStateBufferRef(
+        hbm_ref=conv_state_ref,
+        vmem_ref=conv_state_scratch_ref,
+        metadata_ref=metadata_ref,
+        cfgs=cfgs,
+    )
+
+    p_id = pl.program_id(0)
     b_start = p_id * cfgs.tile_size
     prev_b_start = b_start - cfgs.tile_size
     next_b_start = b_start + cfgs.tile_size
@@ -220,21 +242,21 @@ def inner_kernel(
     slot = p_id % 2
     other_slot = (slot + 1) % 2
 
-    x_slot_ref = x_buffer.get_slot_vmem(slot)
-    conv_state_slot_ref = conv_state_buffer.get_slot_vmem(slot)
+    x_slot_ref = x_buffer_ref.get_slot_vmem(slot)
+    conv_state_slot_ref = conv_state_buffer_ref.get_slot_vmem(slot)
 
     def _conv1d(is_first: bool, is_last: bool):
 
         # Prologue.
         if is_first:
             dma_list = []
-            dma_list += x_buffer.copy_in(
+            dma_list += x_buffer_ref.copy_in(
                 b_start,
                 slot,
                 recv_sem,
                 is_first=True,
             )
-            dma_list += conv_state_buffer.copy_in(
+            dma_list += conv_state_buffer_ref.copy_in(
                 b_start,
                 slot,
                 recv_sem,
@@ -242,16 +264,16 @@ def inner_kernel(
             )
             jax.tree.map(lambda dma: dma.wait(), dma_list)
         else:
-            x_buffer.wait_in(b_start, slot, recv_sem)
-            conv_state_buffer.wait_in(b_start, slot, recv_sem)
+            x_buffer_ref.wait_in(b_start, slot, recv_sem)
+            conv_state_buffer_ref.wait_in(b_start, slot, recv_sem)
 
         if not is_first:
-            x_buffer.wait_out(prev_b_start, other_slot, send_sem)
-            conv_state_buffer.wait_out(prev_b_start, other_slot, send_sem)
+            x_buffer_ref.wait_out(prev_b_start, other_slot, send_sem)
+            conv_state_buffer_ref.wait_out(prev_b_start, other_slot, send_sem)
 
         if not is_last:
-            x_buffer.copy_in(next_b_start, other_slot, recv_sem)
-            conv_state_buffer.copy_in(next_b_start, other_slot, recv_sem)
+            x_buffer_ref.copy_in(next_b_start, other_slot, recv_sem)
+            conv_state_buffer_ref.copy_in(next_b_start, other_slot, recv_sem)
 
         # Body.
         out_list = []
@@ -290,8 +312,8 @@ def inner_kernel(
 
         # Epilogue.
         dma_list = []
-        dma_list += x_buffer.copy_out(b_start, slot, send_sem)
-        dma_list += conv_state_buffer.copy_out(b_start, slot, send_sem)
+        dma_list += x_buffer_ref.copy_out(b_start, slot, send_sem)
+        dma_list += conv_state_buffer_ref.copy_out(b_start, slot, send_sem)
 
         if is_last:
             jax.tree.map(lambda dma: dma.wait(), dma_list)
@@ -320,50 +342,6 @@ def inner_kernel(
         lambda: jax.lax.cond(is_last, conv1d_first_last, conv1d_first),
         lambda: jax.lax.cond(is_last, conv1d_last, conv1d),
     )
-
-
-def main_kernel(
-    # Inputs.
-    metadata_ref: MetadataRef,
-    x_ref: jax.Array,
-    conv_state_ref: jax.Array,
-    conv_rhs_ref: ConvRhsRef,
-    # Outputs.
-    x_out_ref: jax.Array,
-    conv_state_out_ref: jax.Array,
-    # Scratch
-    x_scratch_ref: jax.Array,
-    conv_state_scratch_ref: jax.Array,
-    sem_ref: jax.Array,
-    *,
-    cfgs: ConvConfigs,
-):
-    del x_out_ref, conv_state_out_ref
-
-    x_buffer = XBuffer(
-        hbm_ref=x_ref,
-        vmem_ref=x_scratch_ref,
-        metadata_ref=metadata_ref,
-        cfgs=cfgs,
-    )
-    conv_state_buffer = ConvStateBuffer(
-        hbm_ref=conv_state_ref,
-        vmem_ref=conv_state_scratch_ref,
-        metadata_ref=metadata_ref,
-        cfgs=cfgs,
-    )
-
-    @pl.loop(0, cfgs.num_tiles)
-    def loop_wrapper(p_id):
-        inner_kernel(
-            p_id=p_id,
-            x_buffer=x_buffer,
-            conv_state_buffer=conv_state_buffer,
-            sem_ref=sem_ref,
-            metadata_ref=metadata_ref,
-            conv_rhs_ref=conv_rhs_ref,
-            cfgs=cfgs,
-        )
 
 
 def preprocess_metadata(
@@ -501,6 +479,7 @@ def ragged_causal_conv1d(
                 ),
                 pltpu.SemaphoreType.DMA((2, )),
             ),
+            grid=(cfgs.num_tiles, ),
         ),
         input_output_aliases={
             5: 0,
