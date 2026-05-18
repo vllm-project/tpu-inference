@@ -1858,7 +1858,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Reorder mamba_state_indices per DP rank (like block_tables)
             # and convert global slot ids to rank-local indices so they
             # index correctly into the per-rank shard of the mamba state.
-            local_slots = self.input_batch._mamba_local_slots
+            local_slots = self.input_batch.mamba_slot_pool.local_slots
             mamba_state_indices_cpu = np.zeros(self.max_num_reqs,
                                                dtype=np.int32)
             for dp_rank in range(dp_size):
