@@ -76,6 +76,7 @@ The `args` within `server_command_options.args` or `client_command_options.args`
   "v6e-1": 1,
   "v6e-8": 8,
   "v7x-2": 2,
+  "v7x-8": 8,
   "default": 1
 }
 ```
