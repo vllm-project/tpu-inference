@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
     ENABLE_RS_KERNEL: bool = False
+    NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
 
@@ -358,6 +359,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable hierarchical reduce-scatter kernel for MoE
     "ENABLE_RS_KERNEL":
     env_bool("ENABLE_RS_KERNEL", default=False),
+    # Number of worker threads for parallel XLA precompilation.
+    "NUM_PRECOMPILE_WORKERS":
+    lambda: int(os.getenv("NUM_PRECOMPILE_WORKERS") or "1"),
     # DP scheudler: hold and batch incoming requests (prefills) to
     # cluster and dispatch prefills together.
     "DP_SCHED_BATCH_PREFILL":

@@ -1233,8 +1233,12 @@ class TestTPUJaxRunnerPadding:
 
 class TestSamplingMetadataPassthrough:
 
-    def test_sample_tokens_passes_sampling_metadata_from_state(self):
+    @patch('jax.set_mesh')
+    def test_sample_tokens_passes_sampling_metadata_from_state(
+            self, mock_set_mesh):
         """sample_tokens() should pass execute_model_state.sampling_metadata to _sample_from_logits."""
+        mock_set_mesh.return_value.__enter__ = MagicMock(return_value=None)
+        mock_set_mesh.return_value.__exit__ = MagicMock(return_value=False)
         runner = MagicMock()
         mock_sampling_metadata = MagicMock()
         # Set the specific field we want to trace; other fields are auto-mocked.
