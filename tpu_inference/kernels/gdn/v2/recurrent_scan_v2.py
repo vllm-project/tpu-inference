@@ -214,11 +214,11 @@ def inner_kernel(
             slot = b % 2
             using_slot_0 = (slot == 0)
             cur_slot_inflight = jax.lax.select(using_slot_0, s0_inflight,
-                                                s1_inflight)
+                                               s1_inflight)
 
             @pl.when(is_valid)
             def do_work():
-                # Wait for THIS iter's load (issued by preload or by iter b-2 prefetch).
+                # Wait for this iter's load (issued by preload or by iter b-2 prefetch).
                 wait_load = pltpu.make_async_copy(
                     src_ref=recurrent_state_in.at[pl.ds(0, 1)],
                     dst_ref=decode_load_scratch.at[pl.ds(slot, 1)],
@@ -227,12 +227,11 @@ def inner_kernel(
                 wait_load.wait()
 
                 # Copy loaded state to fp32 compute scratch.
-                decode_state_scratch[pl.ds(
-                    0, 1)] = decode_load_scratch[pl.ds(slot, 1)][...].astype(
-                        jnp.float32)
+                decode_state_scratch[pl.ds(0, 1)] = decode_load_scratch[pl.ds(
+                    slot, 1)][...].astype(jnp.float32)
 
-                # Prefetch load for iter b+2 (same slot, since (b+2) % 2 == b % 2).
-                # This DMA overlaps with the compute below.
+                # Prefetch load for iter b+2 (same slot).
+                # This DMA overlaps with the compute of current iter.
                 next_b = b + 2
 
                 @pl.when(next_b < decode_count)
@@ -402,7 +401,7 @@ def inner_kernel(
                 # No wait — drained after fori_loop.
 
             # Update carry: this iter marked its slot as having an in-flight
-            # store iff is_valid.
+            # store if is_valid.
             next_s0_inflight = jax.lax.select(
                 is_valid & using_slot_0,
                 jnp.int32(1),
@@ -417,7 +416,9 @@ def inner_kernel(
 
         # loop over bt, could be for loop, BT is static anyway, unroll
         final_s0_inflight, final_s1_inflight = jax.lax.fori_loop(
-            0, BT, process_decode,
+            0,
+            BT,
+            process_decode,
             (jnp.int32(0), jnp.int32(0)),
         )
 
@@ -480,7 +481,6 @@ def inner_kernel(
             def _zero_init_state():
                 prefill_scratch[prefill_slot] = jnp.zeros(
                     (n_v, d_k, d_v), dtype=prefill_scratch.dtype)
-
 
             ### Preparataion for chunk wise math,
             ### this kernel design could be optimized lot by not doing this every chunk
@@ -1158,14 +1158,16 @@ def fused_kernel(
         pltpu.VMEM((1, n_v, d_k, d_v), jnp.float32),  # decode_state_scratch
         pltpu.VMEM((1, n_v, d_k, d_v),
                    recurrent_state_ref.dtype),  # state_commit_scratch
-        pltpu.VMEM((2, n_v, d_k, d_v),
-                   recurrent_state_ref.dtype),  # decode_load_scratch (double-buffered)
-        pltpu.VMEM((2, n_v, d_k, d_v),
-                   recurrent_state_ref.dtype),  # decode_store_scratch (double-buffered)
+        pltpu.VMEM((2, n_v, d_k, d_v), recurrent_state_ref.dtype
+                   ),  # decode_load_scratch (double-buffered)
+        pltpu.VMEM((2, n_v, d_k, d_v), recurrent_state_ref.dtype
+                   ),  # decode_store_scratch (double-buffered)
         pltpu.VMEM((BT, n_v * d_v),
                    mixed_qkv_ref.dtype),  # decode_output_scratch
-        pltpu.SemaphoreType.DMA((2, )),  # decode_read_semaphores (one per slot)
-        pltpu.SemaphoreType.DMA((2, )),  # decode_write_semaphore (one per slot)
+        pltpu.SemaphoreType.DMA(
+            (2, )),  # decode_read_semaphores (one per slot)
+        pltpu.SemaphoreType.DMA(
+            (2, )),  # decode_write_semaphore (one per slot)
         pltpu.SemaphoreType.DMA((2, )),  # prefill_semaphore
     )
 
@@ -1326,4 +1328,3 @@ def recurrent_scan(
         total_blocks_arr,
     )
     return updated_recurrent_state, output_padded[:num_tokens]
-  
