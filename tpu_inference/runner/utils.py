@@ -26,6 +26,19 @@ from tpu_inference import envs
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch import InputBatch
 
+
+def trim_request_id_suffix(request_id: str) -> str:
+    """Trims the suffix from a request ID, keeping only the base ID.
+    
+    Example: cmpl-f0d75fed-c25e-4ccf-b369-9bd0226021b3-0-a9cb3cca 
+          -> cmpl-f0d75fed-c25e-4ccf-b369-9bd0226021b3
+    """
+    parts = request_id.split("-")
+    if len(parts) >= 6 and parts[0] == "cmpl":
+        return "-".join(parts[:6])
+    return request_id
+
+
 MIN_NUM_SEQS = 8
 
 # These are used for determining the inference phase for a given batch in
