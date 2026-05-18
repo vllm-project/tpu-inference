@@ -447,7 +447,20 @@ class TPUWorker(WorkerBase):
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
-            options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
+            if envs.HOST_TRACER_LEVEL is not None:
+                options.host_tracer_level = int(
+                    envs.HOST_TRACER_LEVEL
+                )
+            advanced_config = {}
+            if envs.TPU_NUM_CHIPS_TO_PROFILE_PER_TASK is not None:
+                advanced_config["tpu_num_chips_to_profile_per_task"] = int(
+                    envs.TPU_NUM_CHIPS_TO_PROFILE_PER_TASK
+                )
+            if envs.TPU_NUM_SPARSE_CORES_TO_TRACE is not None:
+                advanced_config["tpu_num_sparse_cores_to_trace"] = int(
+                    envs.TPU_NUM_SPARSE_CORES_TO_TRACE
+                )
+            options.advanced_configuration = advanced_config
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
         else:
