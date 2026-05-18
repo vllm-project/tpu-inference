@@ -83,6 +83,9 @@ class ScatterTest(jtu.JaxTestCase):
     @parameterized.parameters(*_test_cases)
     def test_sc_ragged_gather_reduce(self, out_size, hidden_size, start_end,
                                      dtype, reduce_group_size):
+        # The test is slow on v6e, causing timeouts in presubmit. See b/513860288.
+        if not jtu.is_device_tpu_at_least(version=7):
+            self.skipTest("Expect TPUv7+")
         start, end = start_end
         start = min(start, out_size)
         end = min(end, out_size)
