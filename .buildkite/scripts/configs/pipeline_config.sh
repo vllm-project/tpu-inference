@@ -96,14 +96,14 @@ process_json_benchmark_cases() {
     files+=("$case_folder"/*.json)
   fi
 
-  # Add extra files if provided
+  # Add extra files if provided (handles spaces via newline separation)
   if [ -n "$extra_files" ]; then
-    for f in $extra_files; do
-      # Skip deleted files in PR to avoid generation errors
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue # Skip empty lines
       if [ -f "$f" ]; then
         files+=("$f")
       fi
-    done
+    done <<< "$extra_files"
   fi
 
   if [ ${#files[@]} -eq 0 ]; then
