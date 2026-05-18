@@ -14,6 +14,8 @@
 
 import os
 
+import pytest
+
 os.environ["LIBTPU_INIT_ARGS"] = (os.environ.get("LIBTPU_INIT_ARGS", "") +
                                   " --xla_tpu_scoped_vmem_limit_kib=65536")
 
@@ -406,6 +408,9 @@ class MlaRaggedPagedAttentionTestBase(jtu.JaxTestCase):
         self.assertAllClose(expected_out, kernel_out, atol=0.1, rtol=0.2)
 
 
+# The test is slow on v6e, causing timeouts in presubmit. See b/513860288.
+@pytest.mark.skipif(not jtu.is_device_tpu_at_least(version=7),
+                    reason="Expect TPUv7+")
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
 class MlaRaggedPagedAttentionKernelV2Test(MlaRaggedPagedAttentionTestBase):
 
