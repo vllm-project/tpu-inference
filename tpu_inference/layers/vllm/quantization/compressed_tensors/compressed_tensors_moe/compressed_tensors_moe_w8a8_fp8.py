@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_fp8_moe_weights, shard_moe_weights)
+    FusedMoEWeights, process_quantized_moe_weights, shard_moe_weights)
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
@@ -105,7 +105,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             w2_weight_scale=w2_weight_scale,
             w2_bias=w2_bias,
         )
-        weights = process_fp8_moe_weights(
+        weights = process_quantized_moe_weights(
             input_weights,
             moe_backend=self.moe_backend,
             mesh=self.mesh,
