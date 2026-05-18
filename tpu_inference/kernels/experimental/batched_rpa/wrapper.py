@@ -32,7 +32,6 @@ Note: batched_rpa is build on top / derived from RPA3.
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
-from jax.experimental.layout import Layout, with_layout_constraint
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.batched_rpa import (configs, kernel,
