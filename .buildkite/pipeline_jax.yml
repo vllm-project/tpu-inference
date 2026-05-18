@@ -603,7 +603,7 @@ steps:
         key: ${TPU_VERSION:-tpu6e}_test_33
         depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         agents:
-          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}          
+          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         soft_fail: true
         env:
           TEST_MODEL: Qwen/Qwen2.5-VL-7B-Instruct
@@ -672,7 +672,6 @@ steps:
           - ${TPU_VERSION:-tpu6e}_test_31
           - ${TPU_VERSION:-tpu6e}_test_32
           - ${TPU_VERSION:-tpu6e}_test_33
-          - ${TPU_VERSION:-tpu6e}_test_34
         agents:
           queue: cpu
         commands:
