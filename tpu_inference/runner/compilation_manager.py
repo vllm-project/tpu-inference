@@ -333,6 +333,7 @@ class CompilationManager:
                 intermediate_tensors,
                 is_first_rank,
                 is_last_rank,
+                None,
                 num_reqs=num_reqs,
                 num_tokens=num_tokens,
             )
@@ -346,7 +347,7 @@ class CompilationManager:
                 self._run_compilation(
                     f"{name} with deepstack",
                     model_fn_wrapper,
-                    self.runner.state,
+                    self.runner.state_leaves,
                     self.runner.kv_caches,
                     input_ids,
                     attention_metadata,

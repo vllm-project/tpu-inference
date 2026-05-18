@@ -302,6 +302,7 @@ class TestJaxAutoWeightsLoader:
         self,
         mock_shard_put,
     ):
+        import jax as jnp
         param = MagicMock()
         param.sharding = ('model', )
         param.mesh = 'param-mesh'

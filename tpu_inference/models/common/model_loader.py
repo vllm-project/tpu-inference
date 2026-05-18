@@ -382,7 +382,11 @@ def get_flax_model(
     def run_model(state_leaves, *args):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
-        return model(*args)
+        out = model(*args)
+        # FIX: Pad with None for dense models that don't return expert_ids
+        if isinstance(out, tuple) and len(out) == 3:
+            out = out + (None,)
+        return out
 
     @jax.jit(
         out_shardings=(
@@ -396,7 +400,11 @@ def get_flax_model(
     )
     def run_draft_model(graphdef, state, *args):
         model = nnx.merge(graphdef, state)
-        return model(*args)
+        out = model(*args)
+        # FIX: Pad with None for dense models that don't return expert_ids
+        if isinstance(out, tuple) and len(out) == 3:
+            out = out + (None,)
+        return out
 
     logits_sharding = NamedSharding(
         mesh,
