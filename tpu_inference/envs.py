@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     DRAFT_MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
     PHASED_PROFILING_DIR: str = ""
+    AGGREGATED_STATS_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
     USE_UNFUSED_MEGABLOCKS: bool = False
@@ -107,9 +108,7 @@ def env_with_choices(
     return _get_validated_env
 
 
-def env_bool(env_name: str,
-             default: bool = False,
-             requires: list[str] | None = None) -> Callable[[], bool]:
+def env_bool(env_name: str, default: bool = False):
     """
     Accepts both numeric strings ("0", "1") and boolean strings
     ("true", "false", "True", "False").
@@ -117,32 +116,22 @@ def env_bool(env_name: str,
     Args:
         env_name: Name of the environment variable
         default: Default boolean value if not set
-        requires: List of environment variables that must be set if this is True.
     """
 
     def _get_bool_env() -> bool:
         value = os.getenv(env_name)
         if value is None or value == "":
-            parsed_value = default
+            return default
+
+        value_lower = value.lower()
+        if value_lower in ("true", "1"):
+            return True
+        elif value_lower in ("false", "0"):
+            return False
         else:
-            value_lower = value.lower()
-            if value_lower in ("true", "1"):
-                parsed_value = True
-            elif value_lower in ("false", "0"):
-                parsed_value = False
-            else:
-                raise ValueError(
-                    f"Invalid boolean value '{value}' for {env_name}. "
-                    f"Valid options: '0', '1', 'true', 'false', 'True', 'False'."
-                )
-
-        if parsed_value and requires:
-            for req in requires:
-                if not os.getenv(req):
-                    raise ValueError(
-                        f"{env_name} can only be set if {req} is set.")
-
-        return parsed_value
+            raise ValueError(
+                f"Invalid boolean value '{value}' for {env_name}. "
+                f"Valid options: '0', '1', 'true', 'false', 'True', 'False'.")
 
     return _get_bool_env
 
@@ -336,10 +325,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: Whether to use unpinned_host for KV cache tensors on host dram.
     "TPU_OFFLOAD_USE_UNPINNED_HOST":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_USE_UNPINNED_HOST", "0"))),
-    "ENABLE_AGGREGATED_STATS_LOGGER":
-    env_bool("ENABLE_AGGREGATED_STATS_LOGGER",
-             default=False,
-             requires=["PHASED_PROFILING_DIR"]),
+    "AGGREGATED_STATS_DIR":
+    lambda: os.getenv("AGGREGATED_STATS_DIR", ""),
     # MoE: whether to use approximate top-k for expert selection.
     # Enabling this may speedup the expert selection at the risk of accuracy loss.
     "MOE_APPROX_TOPK":

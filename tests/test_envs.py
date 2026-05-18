@@ -64,7 +64,6 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("USE_MOE_EP_KERNEL", "0")
     monkeypatch.setenv("LAYOUT_Q_PROJ_AS_NDH", "0")
     monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "0")
-    monkeypatch.setenv("ENABLE_AGGREGATED_STATS_LOGGER", "0")
     monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "0")
 
     # Test SKIP_JAX_PRECOMPILE (default False)
@@ -112,12 +111,6 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.USE_BATCHED_RPA_KERNEL is False
     monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "1")
     assert envs.USE_BATCHED_RPA_KERNEL is True
-
-    # Test ENABLE_AGGREGATED_STATS_LOGGER
-    assert envs.ENABLE_AGGREGATED_STATS_LOGGER is False
-    monkeypatch.setenv("PHASED_PROFILING_DIR", "/tmp")
-    monkeypatch.setenv("ENABLE_AGGREGATED_STATS_LOGGER", "1")
-    assert envs.ENABLE_AGGREGATED_STATS_LOGGER is True
 
 
 def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):
@@ -242,12 +235,14 @@ def test_string_env_vars_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("PREFILL_SLICES", raising=False)
     monkeypatch.delenv("DECODE_SLICES", raising=False)
     monkeypatch.delenv("REQUANTIZE_WEIGHT_DTYPE", raising=False)
+    monkeypatch.delenv("AGGREGATED_STATS_DIR", raising=False)
     monkeypatch.delenv("MOE_REQUANTIZE_WEIGHT_DTYPE", raising=False)
 
     assert envs.JAX_PLATFORMS == ""
     assert envs.PREFILL_SLICES == ""
     assert envs.DECODE_SLICES == ""
     assert envs.PHASED_PROFILING_DIR == ""
+    assert envs.AGGREGATED_STATS_DIR == ""
     assert envs.REQUANTIZE_WEIGHT_DTYPE == "float8_e4m3fn"
     assert envs.MOE_REQUANTIZE_WEIGHT_DTYPE == ""
 
@@ -327,15 +322,3 @@ def test_cache_preserves_values_across_env_changes(
 
     # Now it should reflect the new value
     assert envs.JAX_PLATFORMS == "cpu"
-
-
-def test_aggregated_stats_logger_validation(monkeypatch: pytest.MonkeyPatch):
-    """Test that ENABLE_AGGREGATED_STATS_LOGGER requires PHASED_PROFILING_DIR"""
-    monkeypatch.setenv("ENABLE_AGGREGATED_STATS_LOGGER", "1")
-    monkeypatch.delenv("PHASED_PROFILING_DIR", raising=False)
-    with pytest.raises(
-            ValueError,
-            match=
-            "ENABLE_AGGREGATED_STATS_LOGGER can only be set if PHASED_PROFILING_DIR is set."
-    ):
-        _ = envs.ENABLE_AGGREGATED_STATS_LOGGER
