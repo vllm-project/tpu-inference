@@ -365,6 +365,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # DP scheduler: timeout (ms) to force flush pending requests.
     "DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS":
     lambda: int(os.getenv("DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS", "30000")),
+    "MLA_XPOSE_N_TILE_SIZE":
+    lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),
 }
 
 
