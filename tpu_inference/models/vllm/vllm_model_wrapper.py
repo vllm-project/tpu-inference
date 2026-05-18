@@ -439,21 +439,47 @@ class VllmModelWrapper:
             params_and_buffers: Any,
             **kwargs,
         ) -> Any:
-            call_kwargs = {
-                k: jax.tree.map(torch_view, v)
-                for k, v in kwargs.items()
-            }
 
-            output_from_torch = torch.func.functional_call(
-                self.model,
-                torch_view(params_and_buffers),
-                kwargs={
-                    "call_method": "embed_multimodal",
-                    "call_args": (),
-                    "call_kwargs": call_kwargs,
-                },
-                tie_weights=False,
-            )
+            with torchax.default_env(), enable_torch_wrap(False):
+
+                def move(v):
+                    if isinstance(v, np.ndarray):
+                        if v.dtype.name == 'bfloat16':
+                            v = torch.from_numpy(
+                                v.view(np.uint16)).view(torch.bfloat16)
+                        else:
+                            v = torch.from_numpy(np.ascontiguousarray(v))
+                    if not isinstance(v, torch.Tensor):
+                        logger.warning(f"Expect torch.Tensor, got {type(v)}")
+                        return v
+                    return v.to(device="jax")
+
+                # Ensure all tensors are moved into accelerator so the
+                # computation with weights can work properly.
+                # Convert grid_thw tuples to tensors expected by vllm models.
+                # Empty tuples are dropped so non-grid_thw vLLM models do not
+                # see a meaningless zero-element tensor in their kwargs.
+                for key in ("image_grid_thw", "video_grid_thw"):
+                    if key in kwargs and isinstance(kwargs[key], (list, tuple)):
+                        if len(kwargs[key]) == 0:
+                            kwargs.pop(key)
+                        else:
+                            kwargs[key] = torch.tensor(kwargs[key],
+                                                       dtype=torch.int32)
+                call_kwargs = {
+                    k: jax.tree.map(move, v)
+                    for k, v in kwargs.items()
+                }
+                output_from_torch = torch.func.functional_call(
+                    self.model,
+                    torch_view(params_and_buffers),
+                    kwargs={
+                        "call_method": "embed_multimodal",
+                        "call_args": (),
+                        "call_kwargs": call_kwargs,
+                    },
+                    tie_weights=False,
+                )
 
             return jax_view(output_from_torch)
 

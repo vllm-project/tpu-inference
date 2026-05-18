@@ -81,6 +81,43 @@ class TestTPUJaxRunner:
         supported_tasks = self.runner.get_supported_tasks()
         assert supported_tasks == ("generate", )
 
+    @patch('tpu_inference.runner.tpu_runner.logger')
+    def test_load_model_logs_new_model_design_hint_for_extended_sharding(
+            self, mock_logger):
+        self.runner.vllm_config.additional_config = {
+            "sharding": {
+                "sharding_strategy": {
+                    "expert_parallelism": 8,
+                    "tensor_parallelism": 2,
+                }
+            }
+        }
+        self.runner.vllm_config.sharding_config = MagicMock(
+            model_dp_size=1,
+            attn_dp_size=1,
+            attn_dp_expert_size=1,
+            expert_size=8,
+            tp_size=2,
+        )
+        self.runner.model_config.model = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+        self.runner.parallel_config.tensor_parallel_size = 16
+
+        with patch('tpu_inference.runner.tpu_runner.envs.NEW_MODEL_DESIGN',
+                   False), \
+             patch('tpu_inference.runner.tpu_runner.get_model',
+                   side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                self.runner.load_model()
+
+        mock_logger.error.assert_called_once()
+        error_call_args = mock_logger.error.call_args[0]
+        assert "NEW_MODEL_DESIGN=1" in error_call_args[0]
+        assert any(
+            isinstance(arg, str)
+            and "NEW_MODEL_DESIGN=1 vllm serve" in arg
+            for arg in error_call_args
+        )
+
     def test_get_input_ids_embeds(self):
         """Tests _get_input_ids_embeds for both multimodal and text-only models."""
         # 1. ===== Setup =====
@@ -101,7 +138,8 @@ class TestTPUJaxRunner:
         input_ids_res, inputs_embeds_res = self.runner._get_input_ids_embeds(
             dummy_input_ids, dummy_mm_embeds, dummy_is_mm_embed)
 
-        assert input_ids_res is None
+        np.testing.assert_array_equal(np.asarray(input_ids_res),
+                                      np.asarray(dummy_input_ids))
         np.testing.assert_array_equal(np.asarray(inputs_embeds_res),
                                       np.asarray(dummy_final_embeds))
         self.mock_get_input_embed_fn.assert_called_once_with(

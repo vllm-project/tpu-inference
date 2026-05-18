@@ -11,6 +11,7 @@ sure that the zmq frontend mp RPC message passing and
 AsyncLLMEngine are working correctly.
 """
 
+import os
 import threading
 
 import lm_eval
@@ -82,6 +83,11 @@ def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch,
             more_args = "max_model_len=2048,max_num_seqs=64"
             tp_size_str = f"tensor_parallel_size={tp_size}"
             more_args += ",{}".format(tp_size_str)
+            # Multimodal models on TPU disable chunked MM input, so the default
+            # max_num_batched_tokens may be smaller than a single mm item.
+            extra = os.environ.get("MAX_NUM_BATCHED_TOKENS")
+            if extra:
+                more_args += f",max_num_batched_tokens={extra}"
 
         print(f"common args: {more_args}")
 
