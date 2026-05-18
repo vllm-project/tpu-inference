@@ -32,7 +32,6 @@ Note: batched_rpa is build on top / derived from RPA3.
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
-from jax.experimental.layout import Layout, with_layout_constraint
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.batched_rpa import (configs, kernel,
@@ -91,30 +90,18 @@ def prepare_inputs(
         f"{num_kv_heads_x2_aligned}")
     num_kv_heads_aligned = num_kv_heads_x2_aligned // 2
 
-    # `jnp.stack` introduces the K/V axis as a fresh axis, keeping
-    # the data 4D `[T, H_kv, 2, D]` through the pad. The final reshape
-    # `[T, H_kv, 2, D] -> [T, A/P, P, D]` becomes a pure factor merge of
-    # axes (h, kv) -> packed_dim with no head_dim involvement, which is a
-    # clean bitcast for the layout assigner.
-    kv_stacked = jnp.stack([k, v], axis=2)  # [T, H_kv, 2, D]
-    # `with_layout_constraint` on `kv_padded` pins the pad output
-    # to major-to-minor (0, 1, 2, 3) — i.e., T majormost, head_dim minor.
-    # Without it XLA's auto-layout placed the pad in SMEM with a
-    # transposed dim order, requiring a layout-changing copy to reach the
-    # kernel's required HBM layout — and the LLO emitter cannot lower
-    # that simultaneous axis-swap + tile-resize + memory-space migration.
-    kv_padded = with_layout_constraint(
-        jnp.pad(
-            kv_stacked,
-            (
-                (0, 0),
-                (0, num_kv_heads_aligned - actual_num_kv_heads),
-                (0, 0),
-                (0, aligned_head_dim - actual_head_dim),
-            ),
-            constant_values=0,
-        ), Layout(major_to_minor=(0, 1, 2, 3)))
-    new_kv_hbm = kv_padded.reshape(
+    # 1. Pad K and V independently BEFORE stacking.
+    pad_config = (
+        (0, 0),
+        (0, num_kv_heads_aligned - actual_num_kv_heads),
+        (0, aligned_head_dim - actual_head_dim),
+    )
+
+    k_padded = jnp.pad(k, pad_config, constant_values=0)
+    v_padded = jnp.pad(v, pad_config, constant_values=0)
+
+    # 2. Stack and reshape.
+    new_kv_hbm = jnp.stack([k_padded, v_padded], axis=2).reshape(
         total_q_tokens,
         num_kv_heads_x2_aligned // kv_packing,
         kv_packing,
