@@ -442,12 +442,9 @@ def get_flax_model(
     model = nnx.merge(graphdef, state)
     precompile_vision_encoder_fn = getattr(model, "precompile_vision_encoder",
                                            None)
-    # For the draft path, graphdef is still passed positionally (signature
-    # unchanged). For the main path, graphdef and the state treedef are both
-    # captured in the run_model closure; the runner passes pre-flattened
-    # `state_leaves` as the first positional arg.
-    jitted_model_fn = functools.partial(
-        run_draft_model, graphdef) if is_draft_model else run_model
+    # `graphdef` and the state treedef are captured in each closure; the
+    # runner passes pre-flattened `state_leaves` as the first positional arg.
+    jitted_model_fn = run_draft_model if is_draft_model else run_model
 
     model_supports_spec_step = supports_kw(model_class.__call__,
                                            "spec_step_idx")
@@ -457,9 +454,9 @@ def get_flax_model(
             kwargs.pop("spec_step_idx", None)
         return jitted_model_fn(*args, **kwargs)
 
-    compute_logits_fn = functools.partial(run_compute_logits, graphdef)
-    embed_multimodal_fn = functools.partial(run_embed_multimodal, graphdef)
-    embed_input_ids_fn = functools.partial(run_embed_input_ids, graphdef)
+    compute_logits_fn = run_compute_logits
+    embed_multimodal_fn = run_embed_multimodal
+    embed_input_ids_fn = run_embed_input_ids
     lora_manager, model = None, None
     combine_hidden_states_fn = combine_hidden_states
 

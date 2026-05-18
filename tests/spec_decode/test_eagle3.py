@@ -87,6 +87,7 @@ def test_prepare_inputs():
     # Mocks required by _prepare_draft_inputs helper
     proposer.combine_hidden_states_fn = lambda state, h: h  # Mock passthrough
     proposer.state = None  # Mock state
+    proposer.state_leaves = None  # Mock state leaves
     proposer.runner.input_batch.block_table = [mock.MagicMock()]
     # Mock the block table return value (2D array)
     (proposer.runner.input_batch.block_table[0].get_cpu_tensor.return_value
@@ -253,6 +254,7 @@ def test_propose(method, num_speculative_tokens):
     proposer.compute_logits_fn = mock_compute_logits_fn
     proposer.combine_hidden_states_fn = mock_combine_hidden_states_fn
     proposer.state = None  # Mock state
+    proposer.state_leaves = None  # Mock state leaves
 
     # Inputs
     kv_caches = [None] * 1  # Mock kv_caches

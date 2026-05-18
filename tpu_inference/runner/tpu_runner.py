@@ -651,12 +651,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.pooler_fn = model.pooler_fn
         self.combine_hidden_states_fn = model.combine_hidden_states_fn
         self.state = model.state
-        # `state_leaves` is the pre-flattened form (a tuple of `jax.Array`s
-        # for the flax_nnx path, the same dict as `state` for vllm-impl).
-        # All dispatch-side fns (`model_fn`, `compute_logits_fn`,
-        # `embed_input_ids_fn`, …) take this as their first positional arg,
-        # which skips the per-call `nnx.Variable` pytree walk that otherwise
-        # costs ~17 ms/step on Gemma-4-31B decode at TP=2.
+        # For the flax_nnx path, `model_fn` (== `run_model`) accepts a flat
+        # tuple of array leaves and reconstructs the nnx.State inside the
+        # jit. Pre-flatten here so subsequent dispatches skip the per-call
+        # walk of `nnx.Variable` wrappers
         self.state_leaves = model.state_leaves
         self.lora_manager = model.lora_manager
         self.model = model.model
