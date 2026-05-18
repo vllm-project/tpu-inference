@@ -345,6 +345,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # `dp_size` of them have accumulated. The goal is to cluster new prefills.
     "DP_SCHED_BATCH_PREFILL":
     env_bool("DP_SCHED_BATCH_PREFILL", default=True),
+    "MLA_XPOSE_N_TILE_SIZE":
+    lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),
 }
 
 

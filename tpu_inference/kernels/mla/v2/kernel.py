@@ -23,10 +23,13 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+import tpu_inference.envs as envs
 from tpu_inference.kernels.mla.v2.transpose import xpose_pipeline
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
+
+_XPOSE_N_TILE_SIZE = envs.MLA_XPOSE_N_TILE_SIZE
 
 
 def cdiv_on_kv_packing(a, kv_packing):
@@ -1402,9 +1405,10 @@ def prepare_outputs(
     try:
         # Tile to maximum of 160 (multi host bsz)
         # or nearest clean divisor of the number of tokens.
+
         out = xpose_pipeline(out,
                              transpose_axes=(1, 0, 2),
-                             n_tile=160,
+                             n_tile=_XPOSE_N_TILE_SIZE,
                              m_tile=64)[0]
     except ValueError as e:
         sublane_multiple = get_dtype_packing(out.dtype) * 8
