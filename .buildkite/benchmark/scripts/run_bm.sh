@@ -326,10 +326,14 @@ EXPECTED_ETEL=${EXPECTED_ETEL:-3600000}
 NUM_PROMPTS=${NUM_PROMPTS:-1000}
 PREFIX_LEN=${PREFIX_LEN:-0}
 
+# When modifying run_benchmark(), please note that it is executed in a subshell, 
+# so any unexpected error stack traces cannot be properly caught by the parent process.
+# When adding commands, ensure they do not throw errors, proactively validate expected errors, 
+# and print error logs for easier debugging.
+# For example, please refer to how throughput and p99_e2el are parsed in this file
 run_benchmark(){
-  echo "running benchmark..."
-  echo "logging to $BM_LOG"
-  echo
+  echo "running benchmark..." >&2
+  echo "logging to $BM_LOG" >&2
 
   local request_rate=${1:-""}
 
@@ -365,12 +369,28 @@ run_benchmark(){
   set -e
 
   if [ $client_exit_code -ne 0 ]; then
-      return $client_exit_code
+    echo "[ERROR] An error occurred while executing client_cmd." >&2
+    return $client_exit_code
   fi
 
-  throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
-  p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}')
-  echo "throughput: $throughput, P99 E2EL:$p99_e2el"
+  # If these two commands throw an error, they will not be properly caught.
+  # We use `|| true` to ignore the command's error, and then actively check throughput and p99_e2el.
+  # If the values do not meet expectations, it will print an error message and then return an error.
+  throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
+  p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}' || true)
+  echo "throughput: $throughput, P99 E2EL: $p99_e2el" >&2
+
+  if [ -z "$throughput" ] || [ -z "$p99_e2el" ]; then
+    echo "[ERROR] Unable to extract metrics from the log. Please check the format of the statistical results in $BM_LOG, or if the test failed." >&2
+    return 1
+  fi
+
+  local num_reg='^[0-9]+([.][0-9]+)?$'
+  if ! [[ $throughput =~ $num_reg ]] || ! [[ $p99_e2el =~ $num_reg ]]; then
+    echo "[ERROR] Extracted values are not valid numbers (Throughput: '$throughput', P99: '$p99_e2el')" >&2
+    return 1
+  fi
+
   echo "$throughput $p99_e2el"
 }
 
