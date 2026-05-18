@@ -23,19 +23,12 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
-
-from tpu_inference.models.jax.jax_intermediate_tensor import \
-    JaxIntermediateTensors
-
-try:
-    from vllm.model_executor.models.gemma4_mm import \
-        Gemma4ForConditionalGeneration as PtGemma4MM
-except ImportError:
-    # TODO(#2308): Remove try-except once we have transformers>=5.5.0
-    PtGemma4MM = None
+from vllm.model_executor.models.gemma4_mm import \
+    Gemma4ForConditionalGeneration as PtGemma4MM
 
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.norm import JaxRmsNorm
@@ -43,6 +36,8 @@ from tpu_inference.layers.jax.pp_utils import make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     merge_multimodal_embeddings
 from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
@@ -722,8 +717,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         return projected_vision_features
 
-    def _parse_and_validate_image_input(self,
-                                        **kwargs: object) -> Optional[dict]:
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[Gemma4ImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         pixel_position_ids = kwargs.pop("pixel_position_ids", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -743,7 +738,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                                       pixel_values=pixel_values,
                                       pixel_position_ids=pixel_position_ids)
 
-    def _process_image_input(self, image_input: dict) -> list[jax.Array]:
+    def _process_image_input(
+            self, image_input: Gemma4ImagePixelInputs) -> list[jax.Array]:
         pixel_values = image_input["pixel_values"]
         pixel_position_ids = image_input["pixel_position_ids"]
 
@@ -752,13 +748,30 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         if pixel_position_ids.ndim == 2:
             pixel_position_ids = jnp.expand_dims(pixel_position_ids, axis=0)
 
+        # Process images in fixed-size micro-batches of exactly `dp_size` so
+        # every vision-tower call shares the same (B=dp_size, ...) JIT cache
+        # entry regardless of how many images this step has.
+        # Gemma4VisionFlashAttention's sharded_flash_attention has
+        # in_specs=P('data','model',None,None), which requires
+        # B % dp_size == 0; B=dp_size always satisfies that. The last
+        # micro-batch is right-padded with pixel_position_ids=POSITIONS_PAD_VALUE
+        # entries so input_mask masks the padded entries out of the encoder.
+        n_images = pixel_values.shape[0]
+        dp_size = self.mesh.shape[ShardingAxisName.BATCH]
         per_image_features = []
-        batch_size = pixel_values.shape[0]
-        for i in range(batch_size):
-            pv = pixel_values[i:i + 1, ...]
-            pp = pixel_position_ids[i:i + 1, ...]
-            vt_output = self.get_single_image_embedding(pv, pp)
-            per_image_features.append(vt_output[0])
+        for chunk_start in range(0, n_images, dp_size):
+            chunk_end = min(chunk_start + dp_size, n_images)
+            chunk_size = chunk_end - chunk_start
+            pv_chunk = pixel_values[chunk_start:chunk_end]
+            pp_chunk = pixel_position_ids[chunk_start:chunk_end]
+            if chunk_size < dp_size:
+                pad_count = dp_size - chunk_size
+                pv_chunk = jnp.pad(pv_chunk, ((0, pad_count), (0, 0), (0, 0)))
+                pp_chunk = jnp.pad(pp_chunk, ((0, pad_count), (0, 0), (0, 0)),
+                                   constant_values=POSITIONS_PAD_VALUE)
+            vt_output = self.get_single_image_embedding(pv_chunk, pp_chunk)
+            for i in range(chunk_size):
+                per_image_features.append(vt_output[i])
         return per_image_features
 
     def embed_multimodal(self, **kwargs) -> List[jax.Array]:

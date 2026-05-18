@@ -30,6 +30,11 @@
           "model": "google/gemma-4-31B-it",
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
+          "data-parallel-size": {
+              "v6e-8": 2,
+              "v7x-2": 4,
+              "default": 1
+          },
           "tensor-parallel-size": {
             "v6e-8": 4,
             "v7x-2": 2,
@@ -81,6 +86,11 @@
           "model": "google/gemma-4-31B-it",
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
+          "data-parallel-size": {
+              "v6e-8": 2,
+              "v7x-2": 4,
+              "default": 1
+          },
           "tensor-parallel-size": {
             "v6e-8": 4,
             "v7x-2": 2,

@@ -17,6 +17,8 @@ from unittest.mock import MagicMock, patch
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
+from jax._src import test_util as jtu
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -320,7 +322,10 @@ class TestMultiModalManager:
 
         gathered_mm_embeds_1, gathered_is_mm_embed_1 = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output_1,
-            target_pad_len=mock_scheduler_output_1.total_num_scheduled_tokens)
+            target_pad_len=mock_scheduler_output_1.total_num_scheduled_tokens,
+            req_ids_dp={0: [req_id]},
+            padded_num_scheduled_tokens_per_dp_rank=mock_scheduler_output_1.
+            total_num_scheduled_tokens)
 
         assert gathered_mm_embeds_1 is not None
         assert isinstance(gathered_mm_embeds_1, list)
@@ -345,7 +350,10 @@ class TestMultiModalManager:
 
         gathered_mm_embeds_2, gathered_is_mm_embed_2 = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output_2,
-            target_pad_len=mock_scheduler_output_2.total_num_scheduled_tokens)
+            target_pad_len=mock_scheduler_output_2.total_num_scheduled_tokens,
+            req_ids_dp={0: [req_id]},
+            padded_num_scheduled_tokens_per_dp_rank=mock_scheduler_output_2.
+            total_num_scheduled_tokens)
 
         assert gathered_mm_embeds_2 is not None
         assert isinstance(gathered_mm_embeds_2, list)
@@ -370,7 +378,10 @@ class TestMultiModalManager:
 
         gathered_mm_embeds_3, gathered_is_mm_embed_3 = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output_3,
-            target_pad_len=mock_scheduler_output_3.total_num_scheduled_tokens)
+            target_pad_len=mock_scheduler_output_3.total_num_scheduled_tokens,
+            req_ids_dp={0: [req_id]},
+            padded_num_scheduled_tokens_per_dp_rank=mock_scheduler_output_3.
+            total_num_scheduled_tokens)
 
         assert gathered_mm_embeds_3 is not None
         assert isinstance(gathered_mm_embeds_3, list)
@@ -440,7 +451,10 @@ class TestMultiModalManager:
         with patch.object(MRotaryEmbedding,
                           "get_next_input_positions_tensor") as mock_get_next:
             # 2. ===== Act =====
-            self.runner.mm_manager.calc_mrope_positions(mock_scheduler_output)
+            self.runner.mm_manager.calc_mrope_positions(
+                mock_scheduler_output,
+                req_ids_dp={0: [req_id]},
+                padded_num_scheduled_tokens_per_dp_rank=num_scheduled)
 
             # 3. ===== Assert =====
             # The first 5 positions should be copied from the pre-computed prompt positions
@@ -458,3 +472,178 @@ class TestMultiModalManager:
             assert call_kwargs["mrope_position_delta"] == mrope_delta
             assert call_kwargs["context_len"] == prompt_len
             assert call_kwargs["num_new_tokens"] == 5
+
+    # The test is slow on v6e, causing timeouts in presubmit. See b/513860288.
+    @pytest.mark.skipif(not jtu.is_device_tpu_at_least(version=7),
+                        reason="Expect TPUv7+")
+    def test_gather_mm_embeddings_dp_aware(self):
+        """Verifies that with dp_size>1, mm tokens for each request land in
+        that request's rank slot of is_mm_embed (offset = rank * padded_per_rank),
+        and that mm_embeds is emitted in (rank, then req-within-rank) order so
+        a downstream cumsum-based gather aligns."""
+        self.runner.is_multimodal_model = True
+
+        # Two requests, one per DP rank, each with its own image embedding.
+        # Image placeholder slot is offset=5, length=10 within each request.
+        req_id_a, req_id_b = "req-a", "req-b"
+        emb_a = jnp.arange(10 * 128, dtype=jnp.bfloat16).reshape((10, 128))
+        emb_b = (jnp.arange(10 * 128, dtype=jnp.bfloat16) + 1000.0).reshape(
+            (10, 128))
+        self.runner.encoder_cache = {req_id_a: emb_a, req_id_b: emb_b}
+
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
+        def _make_req(req_id):
+            return CachedRequestState(
+                req_id=req_id,
+                prompt_token_ids=list(range(20)),
+                output_token_ids=[],
+                sampling_params=mock_sampling_params,
+                block_ids=([], ),
+                num_computed_tokens=0,
+                mm_features=[
+                    MultiModalFeatureSpec(
+                        data=None,
+                        identifier=req_id,
+                        modality="image",
+                        mm_position=PlaceholderRange(offset=5, length=10),
+                    )
+                ],
+                lora_request=None,
+                pooling_params=None,
+                generator=None,
+            )
+
+        req_a, req_b = _make_req(req_id_a), _make_req(req_id_b)
+        self.runner.requests = {req_id_a: req_a, req_id_b: req_b}
+        self.runner.input_batch.add_request(req_a)
+        self.runner.input_batch.add_request(req_b)
+
+        mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output.num_scheduled_tokens = {
+            req_id_a: 20,
+            req_id_b: 20,
+        }
+
+        # padded_per_rank=24 (>20); target_pad_len=48 (= 24 * 2).
+        padded_per_rank = 24
+        target_pad_len = padded_per_rank * 2
+        req_ids_dp = {0: [req_id_a], 1: [req_id_b]}
+
+        mm_embeds, is_mm_embed = self.runner.mm_manager.gather_mm_embeddings(
+            mock_scheduler_output,
+            target_pad_len=target_pad_len,
+            req_ids_dp=req_ids_dp,
+            padded_num_scheduled_tokens_per_dp_rank=padded_per_rank,
+        )
+
+        # Order: rank 0's embed first, rank 1's second.
+        assert mm_embeds is not None and len(mm_embeds) == 2
+        np.testing.assert_array_equal(np.asarray(mm_embeds[0]),
+                                      np.asarray(emb_a))
+        np.testing.assert_array_equal(np.asarray(mm_embeds[1]),
+                                      np.asarray(emb_b))
+
+        # Within each rank's slot, True bits sit at [5, 15). Padding slots
+        # ([20, 24) within each rank) stay False.
+        expected = np.zeros(target_pad_len, dtype=np.bool_)
+        expected[5:15] = True
+        expected[padded_per_rank + 5:padded_per_rank + 15] = True
+        np.testing.assert_array_equal(np.asarray(is_mm_embed), expected)
+        # Sanity: the cumsum-based downstream gather requires the kth True
+        # bit globally to correspond to mm_embeds[k]; this layout satisfies it
+        # because rank 0's True bits precede rank 1's.
+        assert is_mm_embed.shape == (target_pad_len, )
+
+    # The test is slow on v6e, causing timeouts in presubmit. See b/513860288.
+    @pytest.mark.skipif(not jtu.is_device_tpu_at_least(version=7),
+                        reason="Expect TPUv7+")
+    def test_calc_mrope_positions_dp_aware(self):
+        """Verifies that with dp_size>1, each request's mrope_positions are
+        written into its rank's slot of mrope_positions_cpu rather than packed
+        sequentially into rank 0's slot."""
+        self.runner.uses_mrope = True
+
+        req_id_a, req_id_b = "req-a", "req-b"
+        prompt_len = 8
+        num_scheduled = 8
+
+        # Distinguishable mrope_positions for each request.
+        mrope_a = np.arange(3 * prompt_len, dtype=np.int64).reshape(
+            (3, prompt_len))
+        mrope_b = (np.arange(3 * prompt_len, dtype=np.int64) + 1000).reshape(
+            (3, prompt_len))
+
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
+        def _make_req(req_id, mrope):
+            return CachedRequestState(
+                req_id=req_id,
+                prompt_token_ids=list(range(prompt_len)),
+                output_token_ids=[],
+                sampling_params=mock_sampling_params,
+                block_ids=([], ),
+                num_computed_tokens=0,
+                mm_features=[],
+                lora_request=None,
+                pooling_params=None,
+                generator=None,
+                mrope_positions=mrope,
+                mrope_position_delta=0,
+            )
+
+        req_a = _make_req(req_id_a, mrope_a)
+        req_b = _make_req(req_id_b, mrope_b)
+        self.runner.requests = {req_id_a: req_a, req_id_b: req_b}
+        self.runner.input_batch.add_request(req_a)
+        self.runner.input_batch.add_request(req_b)
+        # Zero num_computed_tokens for both so the full prompt is scheduled.
+        self.runner.input_batch.num_computed_tokens_cpu[0] = 0
+        self.runner.input_batch.num_computed_tokens_cpu[1] = 0
+
+        mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output.num_scheduled_tokens = {
+            req_id_a: num_scheduled,
+            req_id_b: num_scheduled,
+        }
+
+        padded_per_rank = 16  # > num_scheduled, leaves trailing padding slots
+        req_ids_dp = {0: [req_id_a], 1: [req_id_b]}
+
+        # Pre-fill mrope_positions_cpu with a sentinel so we can detect that
+        # writes only landed in the intended slots.
+        self.runner.mrope_positions_cpu[:] = -7
+        self.runner.mm_manager.calc_mrope_positions(
+            mock_scheduler_output,
+            req_ids_dp=req_ids_dp,
+            padded_num_scheduled_tokens_per_dp_rank=padded_per_rank,
+        )
+
+        # Rank 0's slot: [0, 8) holds mrope_a; [8, 16) untouched.
+        np.testing.assert_array_equal(self.runner.mrope_positions_cpu[:, 0:8],
+                                      mrope_a)
+        assert np.all(self.runner.mrope_positions_cpu[:, 8:16] == -7)
+        # Rank 1's slot: [16, 24) holds mrope_b; [24, 32) untouched.
+        np.testing.assert_array_equal(
+            self.runner.mrope_positions_cpu[:, 16:24], mrope_b)
+        assert np.all(self.runner.mrope_positions_cpu[:, 24:32] == -7)
