@@ -195,7 +195,7 @@ upload_benchmark_pipeline() {
     if [ "$BUILDKITE_PULL_REQUEST" != "false" ] && [ -n "${FILES_CHANGED:-}" ]; then
         echo "--- Identifying changed benchmark cases in PR"
         export UPLOAD_DB="false"
-        changed_cases=$(echo "$FILES_CHANGED" | grep "^.buildkite/benchmark/cases/.*\.json$" | grep -v "^.buildkite/benchmark/cases/ci/" || true)
+        changed_cases=$(echo "$FILES_CHANGED" | grep "^\.buildkite/benchmark/cases/.*\.json$" | grep -v "^\.buildkite/benchmark/cases/ci/" || true)
         if [ -n "$changed_cases" ]; then
             echo "Found changed benchmark cases to include:"
             echo "$changed_cases"
