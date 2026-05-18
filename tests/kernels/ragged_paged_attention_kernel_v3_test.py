@@ -529,6 +529,213 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                 soft_cap=0.0,
             )
 
+    # ------------------------------------------------------------------
+    # KV-share path (`update_kv_cache=False`) regression tests.
+    #
+    # Used by gemma-4 KV-shared layers: the cache slot is redirected to
+    # a source layer that has already written its normed/roped K,V, and
+    # the shared layer must read attention K,V *only* from the cache.
+    # The kernel must (1) compute attention using cache K,V (2) ignore
+    # the input `keys` / `values` arrays entirely (3) leave the cache
+    # unchanged. The pre-fix kernel split each block into
+    # `(past from cache, current from input k,v)`, producing a corrupt
+    # mix of source-normed-roped-K with shared-raw-K. The fix is in
+    # kernel.py `_fetch_bkv`: when `update_kv_cache=False`, force all of
+    # `kv_left` to come from the cache.
+    #
+    # Note on path coverage: the non-shared (`update_kv_cache=True`)
+    # path's `_fetch_bkv` expression is unchanged from before the fix,
+    # so the existing prefill / decode / mixed tests above continue to
+    # cover it.
+    # ------------------------------------------------------------------
+
+    def _build_kv_share_inputs(
+        self,
+        *,
+        q_len: int,
+        kv_len: int,
+        kv_input_seed: int,
+        num_q_heads: int = 8,
+        num_kv_heads: int = 1,
+        head_dim: int = 128,
+        page_size: int = 16,
+        num_pages: int = 8,
+        max_num_seqs: int = 8,
+        cache_seed: int = 42,
+        q_seed: int = 123,
+        dtype=jnp.bfloat16,
+    ):
+        """Build a single-seq kernel input tuple with a pre-populated cache.
+
+        Cache contents are determined by `cache_seed`; q is determined by
+        `q_seed`. Input k,v are determined by `kv_input_seed` — varying
+        this between calls lets us check the output is invariant to input
+        k,v when `update_kv_cache=False`.
+        """
+        rng_q = np.random.default_rng(q_seed)
+        rng_cache = np.random.default_rng(cache_seed)
+        rng_input = np.random.default_rng(kv_input_seed)
+
+        pages_per_seq = cdiv(kv_len, page_size)
+        max_num_batched_tokens = max(align_to(q_len, 128), 128)
+        kv_packing = get_dtype_packing(dtype)
+        num_kv_heads_x2 = align_to(num_kv_heads * 2, kv_packing)
+        padded_hd = align_to(head_dim, 128)
+
+        q = jnp.array(
+            rng_q.random((max_num_batched_tokens, num_q_heads, head_dim),
+                         dtype=np.float32)).astype(dtype)
+        k = jnp.array(
+            rng_input.random((max_num_batched_tokens, num_kv_heads, head_dim),
+                             dtype=np.float32)).astype(dtype)
+        v = jnp.array(
+            rng_input.random((max_num_batched_tokens, num_kv_heads, head_dim),
+                             dtype=np.float32)).astype(dtype)
+
+        cache_data = jnp.array(
+            rng_cache.random(
+                (pages_per_seq * page_size, num_kv_heads_x2 // kv_packing,
+                 kv_packing, padded_hd),
+                dtype=np.float32)).astype(dtype)
+        cache_pages = cache_data.reshape(pages_per_seq, page_size,
+                                         num_kv_heads_x2 // kv_packing,
+                                         kv_packing, padded_hd)
+        # Padding pages stay nan to surface any out-of-bounds reads.
+        kv_cache = jnp.pad(
+            cache_pages,
+            ((0, num_pages - pages_per_seq), (0, 0), (0, 0), (0, 0), (0, 0)),
+            constant_values=jnp.nan,
+        )
+
+        page_indices = jnp.zeros((max_num_seqs * pages_per_seq, ),
+                                 dtype=jnp.int32)
+        page_indices = page_indices.at[:pages_per_seq].set(
+            jnp.arange(pages_per_seq, dtype=jnp.int32))
+
+        kv_lens_arr = jnp.zeros((max_num_seqs, ),
+                                dtype=jnp.int32).at[0].set(kv_len)
+        cu_q_lens_arr = jnp.zeros((max_num_seqs + 1, ),
+                                  dtype=jnp.int32).at[1].set(q_len)
+        # distribution[3] = (decode_end, prefill_end, mixed_end). One seq:
+        # decode if q_len==1 else prefill.
+        if q_len == 1:
+            distribution = jnp.array([1, 1, 1], dtype=jnp.int32)
+        else:
+            distribution = jnp.array([0, 1, 1], dtype=jnp.int32)
+
+        return (q, k, v, kv_cache, kv_lens_arr, page_indices, cu_q_lens_arr,
+                distribution)
+
+    def _kv_share_kwargs(self, head_dim: int = 128):
+        return dict(
+            sm_scale=1.0 / float(head_dim)**0.5,
+            update_kv_cache=False,
+            m_block_sizes=(64, 256, 32, 128),
+        )
+
+    def test_kv_share_prefill_input_kv_is_ignored(self):
+        """q_len == kv_len. Two calls with different input k,v but the same
+        pre-populated cache and same q produce bit-identical outputs."""
+        if not jtu.is_device_tpu_at_least(version=4):
+            self.skipTest("Expect TPUv4+")
+        args1 = self._build_kv_share_inputs(q_len=16,
+                                            kv_len=16,
+                                            kv_input_seed=11)
+        args2 = self._build_kv_share_inputs(q_len=16,
+                                            kv_len=16,
+                                            kv_input_seed=99)
+        # Sanity (must happen BEFORE the kernel call — kernel donates
+        # queries/keys/values/kv_cache). Skip the kv_cache equality check:
+        # _build_kv_share_inputs zero-pads unused trailing pages with NaN,
+        # and assert_array_equal treats NaN!=NaN. Cache is identical by
+        # construction (same cache_seed).
+        np.testing.assert_array_equal(args1[0], args2[0])
+        self.assertFalse(np.array_equal(args1[1], args2[1]))
+        self.assertFalse(np.array_equal(args1[2], args2[2]))
+        cache_before = np.asarray(args1[3])
+
+        out1, cache_after_1 = ragged_paged_attention(*args1,
+                                                     **self._kv_share_kwargs())
+        out2, cache_after_2 = ragged_paged_attention(*args2,
+                                                     **self._kv_share_kwargs())
+
+        # Output invariant to input k,v.
+        self.assertArraysEqual(out1, out2)
+        # Sanity: outputs are real attention values, not all-zero / NaN
+        # (regression catch for a kernel that silently fails closed).
+        out1_np = np.asarray(out1[:16]).astype(np.float32)
+        assert np.all(np.isfinite(out1_np)), "outputs contain non-finite"
+        assert float(np.abs(out1_np).max()) > 0.0, (
+            "outputs are all zero — kernel likely failed closed")
+        # Cache unchanged in both runs (use the pre-donation snapshot).
+        mask = ~np.isnan(cache_before)
+        np.testing.assert_array_equal(
+            np.asarray(cache_after_1)[mask], cache_before[mask])
+        np.testing.assert_array_equal(
+            np.asarray(cache_after_2)[mask], cache_before[mask])
+
+    def test_kv_share_chunked_prefill_input_kv_is_ignored(self):
+        """q_len < kv_len (chunked / continued prefill). This is the regime
+        the pre-fix kernel got wrong: cache holds source's normed/roped
+        K,V for the past portion, and the kernel must NOT mix in the
+        layer's own raw input k,v for the 'current step' portion."""
+        if not jtu.is_device_tpu_at_least(version=4):
+            self.skipTest("Expect TPUv4+")
+        args1 = self._build_kv_share_inputs(q_len=8,
+                                            kv_len=24,
+                                            kv_input_seed=11)
+        args2 = self._build_kv_share_inputs(q_len=8,
+                                            kv_len=24,
+                                            kv_input_seed=99)
+        cache_before = np.asarray(args1[3])
+
+        out1, cache_after_1 = ragged_paged_attention(*args1,
+                                                     **self._kv_share_kwargs())
+        out2, cache_after_2 = ragged_paged_attention(*args2,
+                                                     **self._kv_share_kwargs())
+
+        # Output invariant to input k,v. The pre-fix kernel would mix
+        # source K,V (past 16 positions from cache) with shared raw K,V
+        # (current 8 positions from input k,v), so different input k,v
+        # would give different outputs.
+        self.assertArraysEqual(out1[:8], out2[:8])
+        # Sanity: outputs are real (not all-zero / NaN).
+        out1_np = np.asarray(out1[:8]).astype(np.float32)
+        assert np.all(np.isfinite(out1_np))
+        assert float(np.abs(out1_np).max()) > 0.0
+        # Cache unchanged.
+        mask = ~np.isnan(cache_before)
+        np.testing.assert_array_equal(
+            np.asarray(cache_after_1)[mask], cache_before[mask])
+
+    def test_kv_share_decode_input_kv_is_ignored(self):
+        """q_len == 1, kv_len > 1 (decode step). Same invariance."""
+        if not jtu.is_device_tpu_at_least(version=4):
+            self.skipTest("Expect TPUv4+")
+        args1 = self._build_kv_share_inputs(q_len=1,
+                                            kv_len=33,
+                                            kv_input_seed=11)
+        args2 = self._build_kv_share_inputs(q_len=1,
+                                            kv_len=33,
+                                            kv_input_seed=99)
+        cache_before = np.asarray(args1[3])
+
+        out1, cache_after_1 = ragged_paged_attention(*args1,
+                                                     **self._kv_share_kwargs())
+        out2, cache_after_2 = ragged_paged_attention(*args2,
+                                                     **self._kv_share_kwargs())
+
+        # Decode emits q_len = 1 token. Compare just that token (the rest of
+        # the max_num_batched_tokens buffer is junk padding).
+        self.assertArraysEqual(out1[:1], out2[:1])
+        # Sanity: output is real.
+        out1_np = np.asarray(out1[:1]).astype(np.float32)
+        assert np.all(np.isfinite(out1_np))
+        assert float(np.abs(out1_np).max()) > 0.0
+        mask = ~np.isnan(cache_before)
+        np.testing.assert_array_equal(
+            np.asarray(cache_after_1)[mask], cache_before[mask])
+
 
 if __name__ == "__main__":
     absltest.main(testLoader=jtu.JaxTestLoader())

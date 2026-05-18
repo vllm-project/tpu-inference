@@ -39,8 +39,8 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.quantization import \
-    register_quantization_config
+from vllm.model_executor.layers.quantization import (
+    QuantizationMethods, register_quantization_config)
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 from vllm.model_executor.layers.quantization.modelopt import (
@@ -78,6 +78,20 @@ class VllmNvfp4Config(ModelOptNvFp4Config, VllmQuantConfig):
     @classmethod
     def get_name(cls):
         return NVFP4
+
+    @classmethod
+    def override_quantization_method(
+            cls,
+            hf_quant_cfg,
+            user_quant,
+            hf_config=None) -> Optional[QuantizationMethods]:
+        if hf_quant_cfg is not None:
+            quant_library = str(hf_quant_cfg.get("quant_library", "")).upper()
+            quant_algo = str(hf_quant_cfg.get("quant_algo", "")).upper()
+            if quant_library == "MODELOPT" and quant_algo == "NVFP4":
+                return NVFP4
+        return super().override_quantization_method(hf_quant_cfg, user_quant,
+                                                    hf_config)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional[Union[QuantizeMethodBase]]:

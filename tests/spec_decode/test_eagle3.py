@@ -138,9 +138,9 @@ def test_prepare_inputs():
     expected_new_qsl = np.zeros(max_num_seqs + 1, dtype=np.int32)
     num_tokens_per_req = np.zeros(max_num_seqs, dtype=np.int32)
     num_tokens_per_req[:num_reqs] = [3, 4, 3]
-    # The implementation sets padded query lengths to 1, and rejected tokens
+    # The implementation sets padded query lengths to 0, and rejected tokens
     # are 0 for padded requests.
-    num_tokens_per_req[num_reqs:] = 1
+    num_tokens_per_req[num_reqs:] = 0
     expected_new_qsl[1:] = np.cumsum(num_tokens_per_req)
 
     expected_new_seq_lens = np.zeros(max_num_seqs, dtype=np.int32)
@@ -173,7 +173,7 @@ def test_prepare_inputs():
                                           hidden_size * 3)
 
 
-@pytest.mark.parametrize("method", ["eagle3"])
+@pytest.mark.parametrize("method", ["eagle3", "mtp"])
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
 def test_propose(method, num_speculative_tokens):
     proposer = _create_proposer(method, num_speculative_tokens)
@@ -188,7 +188,8 @@ def test_propose(method, num_speculative_tokens):
     base_token_ids = [42, 60]
 
     def mock_model_fn(state, kv_caches, input_ids, target_hidden_states,
-                      attn_metadata, layer_name_to_kvcache_index):
+                      attn_metadata, layer_name_to_kvcache_index,
+                      spec_step_idx):
         """
         Mock model_fn.
         Returns: (kv_caches, hidden_states_for_logits, residual_tuple)
@@ -313,3 +314,54 @@ def test_propose(method, num_speculative_tokens):
             expected_tokens[i, j] = base_token_ids[i] + j
 
     assert jnp.array_equal(draft_token_ids, jnp.array(expected_tokens))
+
+
+def test_update_inputs_for_loop_speculation_mrope():
+    proposer = _create_proposer("mtp", 2)
+
+    # Setup 2D positions (M-RoPE)
+    max_model_len = 10
+    proposer.runner.max_model_len = max_model_len
+
+    # positions shape: (3, num_reqs) -> (3, 2)
+    positions = jnp.array([[1, 5], [2, 6], [3, 7]])
+
+    seq_lens = jnp.array([5, 8])
+
+    # block_tables shape: (num_reqs * max_num_blocks_per_req,)
+    # Let's say max_num_blocks_per_req = 2. So shape (4,)
+    block_tables = jnp.array([1, 2, 3, 4])
+
+    # Execute
+    positions_out, clamped_positions, new_seq_lens, query_start_loc, new_block_tables = proposer._update_inputs_for_loop_speculation(
+        positions, seq_lens, block_tables)
+
+    # Assertions
+    # 1. positions_out should be positions + 1
+    expected_positions_out = positions + 1
+    assert jnp.array_equal(positions_out, expected_positions_out)
+
+    # Let's test a case where it DOES exceed!
+    positions_exceed = jnp.array([[1, 9], [2, 9], [3, 9]])
+
+    positions_out, clamped_positions, new_seq_lens, query_start_loc, new_block_tables = proposer._update_inputs_for_loop_speculation(
+        positions_exceed, seq_lens, block_tables)
+
+    # exceeds_max_model_len_reduced should be [False, True]
+    # So for request 1 (index 1):
+    # new_seq_lens[1] should be set to 1!
+    # clamped_positions[:, 1] should be set to 0!
+    # new_block_tables for request 1 should be set to -1!
+
+    assert new_seq_lens[1] == 1
+    assert jnp.array_equal(clamped_positions[:, 1], jnp.array([0, 0, 0]))
+
+    # block_tables for request 1 are at indices 2, 3. They should be -1.
+    assert new_block_tables[2] == -1
+    assert new_block_tables[3] == -1
+
+    # For request 0 (index 0), it does not exceed.
+    assert jnp.array_equal(clamped_positions[:, 0], jnp.array([2, 3, 4]))
+    assert new_seq_lens[0] == 6
+    assert new_block_tables[0] == 1
+    assert new_block_tables[1] == 2

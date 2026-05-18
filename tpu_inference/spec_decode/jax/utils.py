@@ -82,3 +82,10 @@ def extract_last_sampled_tokens(
                                   (0, max_num_seq - batch_size),
                                   constant_values=0)
     return last_sampled_tokens, num_rejected_tokens
+
+
+@jax.jit
+def concat_last_sampled_tokens_and_draft_tokens(last_sampled_tokens,
+                                                draft_tokens):
+    return jnp.concat([last_sampled_tokens[:, None], draft_tokens],
+                      axis=1).reshape(-1)

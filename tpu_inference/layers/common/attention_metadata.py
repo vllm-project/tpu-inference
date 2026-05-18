@@ -62,4 +62,3 @@ class AttentionMetadata(object):
     padded_num_reqs: int = -1
 
     query_start_loc_cpu: Any = field(init=False)
-    seq_lens_cpu: Any = field(init=False)

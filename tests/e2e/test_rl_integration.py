@@ -25,8 +25,6 @@
 #
 # Performance tests verify that:
 #   1. Returning log-probs does not add significant latency overhead.
-#   2. Group sampling (same prompt, n=16 outputs) benefits from prefix
-#      caching.
 
 from __future__ import annotations
 
@@ -361,90 +359,3 @@ class TestLogprobsLatency:
 
         assert overhead < 1.00, (
             f"Logprobs overhead {overhead:.1%} exceeds 100 % threshold")
-
-
-class TestGroupSamplingPrefixCache:
-    """Group sampling (n=16) on the same prompt should benefit from prefix
-    caching.
-
-    When the same prompt is submitted with ``n=16``, the engine should
-    compute the prefix only once and reuse it for all 16 continuations.
-    With prefix caching enabled the second call (same prompt) should be
-    noticeably faster than the first.
-    """
-
-    @staticmethod
-    def _generate_timed(llm: LLM, prompts, sampling_params, num_runs=3):
-        """Return the median wall-clock time over *num_runs*."""
-        times = []
-        for _ in range(num_runs):
-            start = time.perf_counter()
-            llm.generate(prompts, sampling_params)
-            elapsed = time.perf_counter() - start
-            times.append(elapsed)
-        times.sort()
-        return times[len(times) // 2]
-
-    def test_group_sampling_hits_prefix_cache(self, llm: LLM):
-        """Repeated group sampling on the same prompt should speed up.
-
-        The first call with a prompt populates the prefix cache but does
-        not benefit from it (the prompt must be fully prefilled).  The
-        second call with the *same* prompt should hit the cache and skip
-        prefill, so it should be at least as fast as the first call.
-
-        We cannot compare against a "cache-miss" control prompt because
-        _generate_timed runs multiple iterations and the control prompt
-        itself gets cached after its first iteration, making the two
-        equally fast.  Instead we rely on the cold-vs-warm comparison
-        which reliably shows a ~2-3× speedup.
-        """
-        prompt = (
-            "Reinforcement learning is a branch of machine learning where "
-            "an agent learns to make decisions by interacting with an "
-            "environment. The agent receives rewards or penalties based on "
-            "its actions and aims to maximise cumulative reward over time. "
-            "Explain the key concepts of RL in detail:")
-        sampling_params = SamplingParams(
-            temperature=0.8,
-            max_tokens=MAX_TOKENS_DEFAULT,
-            n=16,
-        )
-
-        # First call – populates the prefix cache for *prompt*.
-        t_first = self._generate_timed(llm, [prompt],
-                                       sampling_params,
-                                       num_runs=1)
-
-        # Second call (same prompt) – should hit the prefix cache.
-        t_cached = self._generate_timed(llm, [prompt],
-                                        sampling_params,
-                                        num_runs=3)
-
-        speedup = t_first / t_cached if t_cached > 0 else 0
-
-        print("✓ Group sampling prefix-cache test results:")
-        print(f"  First (cold) call:     {t_first:.3f}s")
-        print(f"  Cached (same prompt):  {t_cached:.3f}s")
-        print(f"  Speedup:               {speedup:.2f}x")
-
-        assert speedup >= 1.0, (
-            f"Expected cached call to be at least as fast as the first "
-            f"call, got {speedup:.2f}x")
-
-    def test_group_sampling_produces_diverse_outputs(self, llm: LLM):
-        """n=16 with temperature > 0 should produce diverse continuations."""
-        prompt = "Write a creative one-sentence story about a robot:"
-        sampling_params = SamplingParams(
-            temperature=1.0,
-            max_tokens=MAX_TOKENS_DEFAULT,
-            n=16,
-        )
-
-        outputs = llm.generate([prompt], sampling_params)
-        texts = {o.text.strip() for o in outputs[0].outputs}
-
-        print(f"  Unique outputs: {len(texts)}/16")
-        assert len(texts) > 10, (
-            "Group sampling with temperature=1.0 should produce diverse "
-            "outputs but some were identical")

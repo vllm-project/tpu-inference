@@ -2,6 +2,7 @@
 import io
 import logging
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, mock_open, patch
 
 import jax
@@ -12,8 +13,8 @@ from jax._src.interpreters import pxla
 from jax._src.pallas.utils import next_power_of_2
 
 from tpu_inference.runner.utils import (
-    PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR, ForbidCompile, InferencePhase,
-    LatencyTracker, PhasedBasedProfiler,
+    PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR, AggregatedStatsLogger,
+    ForbidCompile, InferencePhase, LatencyTracker, PhasedBasedProfiler,
     determine_phase_from_batch_composition_stats, get_batch_composition_stats,
     get_padded_num_reqs_with_upper_limit, get_padded_token_len,
     get_req_paddings, get_token_paddings)
@@ -259,39 +260,59 @@ class MockInputBatch:
 
 class MockSchedulerOutput:
 
-    def __init__(self, num_scheduled_tokens):
+    def __init__(self,
+                 num_scheduled_tokens,
+                 scheduled_spec_decode_tokens=None):
         self.num_scheduled_tokens = num_scheduled_tokens
+        self.scheduled_spec_decode_tokens = scheduled_spec_decode_tokens or {}
 
 
 @pytest.mark.parametrize(
-    "scenario, num_reqs, req_ids, computed, scheduled, expected_prefill, expected_decode, expected_phase",
+    "scenario, num_reqs, req_ids, computed, scheduled, spec_tokens, expected_prefill, expected_decode, expected_phase",
     [
         ("prefill_only", 2, [101, 102], [0, 0], {
             101: 50,
             102: 100
-        }, 150, 0, "PREFILL_ONLY"),
+        }, None, 150, 0, "PREFILL_ONLY"),
         ("decode_only", 3, [201, 202, 203], [10, 20, 5], {
             201: 1,
             202: 1,
             203: 1
-        }, 0, 3, "DECODE_ONLY"),
+        }, None, 0, 3, "DECODE_ONLY"),
         ("mixed_batch", 4, [301, 302, 303, 304], [0, 10, 0, 20], {
             301: 100,
             302: 1,
             303: 50,
             304: 1
-        }, 150, 2, "PREFILL_HEAVY"),
+        }, None, 150, 2, "PREFILL_HEAVY"),
         ("chunked_prefill", 2, [401, 402], [50, 10], {
             401: 50,
             402: 1
-        }, 50, 1, "PREFILL_HEAVY"),
+        }, None, 50, 1, "PREFILL_HEAVY"),
+        # Speculative decoding: 1 target token + 3 draft tokens per request
+        # should all count as decode tokens, not chunked prefill.
+        ("spec_decode_only", 2, [501, 502], [10, 20], {
+            501: 4,
+            502: 4
+        }, {
+            501: [1, 2, 3],
+            502: [4, 5, 6]
+        }, 0, 8, "DECODE_ONLY"),
+        # Mixed: one request is doing chunked prefill, the other is verifying
+        # draft tokens. Spec tokens must not be misclassified as prefill.
+        ("spec_decode_with_chunked_prefill", 2, [601, 602], [0, 10], {
+            601: 50,
+            602: 4
+        }, {
+            602: [1, 2, 3]
+        }, 50, 4, "PREFILL_HEAVY"),
     ])
 def test_get_batch_composition_stats(scenario, num_reqs, req_ids, computed,
-                                     scheduled, expected_prefill,
+                                     scheduled, spec_tokens, expected_prefill,
                                      expected_decode, expected_phase):
     """Tests get_batch_composition_stats for various scenarios."""
     input_batch = MockInputBatch(req_ids, computed)
-    scheduler_output = MockSchedulerOutput(scheduled)
+    scheduler_output = MockSchedulerOutput(scheduled, spec_tokens)
     total_tokens = sum(scheduled.values())
     batch_id = 42
 
@@ -339,6 +360,128 @@ def test_determine_phase_from_batch_composition_stats(prefill_tokens,
 
 
 @pytest.fixture
+def aggregated_stats_logger_fixture(tmp_path):
+    """Fixture to mock dependencies for AggregatedStatsLogger."""
+    target_module = "tpu_inference.runner.utils"
+    mock_storage = MagicMock()
+    cloud_mock = MagicMock()
+    cloud_mock.storage = mock_storage
+    with patch(f"{target_module}.datetime") as mock_datetime, \
+         patch(f"{target_module}.atexit") as mock_atexit, \
+         patch("threading.Thread") as mock_thread, \
+         patch.dict("sys.modules", {"google.cloud": cloud_mock, "google.cloud.storage": mock_storage}), \
+         patch("tempfile.gettempdir", return_value=str(tmp_path)):
+
+        mock_now = MagicMock()
+        mock_now.strftime.return_value = "2025_01_01_12_00_00"
+        mock_datetime.datetime.now.return_value = mock_now
+
+        yield {
+            "mock_datetime": mock_datetime,
+            "mock_atexit": mock_atexit,
+            "mock_thread": mock_thread,
+            "mock_storage": mock_storage,
+            "tmp_path": tmp_path,
+        }
+
+
+def test_aggregated_stats_logger_initialization_local_path(
+        aggregated_stats_logger_fixture):
+    """Test logger initialization with a local directory."""
+    tmp_path = aggregated_stats_logger_fixture["tmp_path"]
+    profile_dir = tmp_path / "profiles"
+    logger = AggregatedStatsLogger(profile_dir=str(profile_dir))
+
+    expected_filename = "all_batches_stats_2025_01_01_12_00_00.jsonl"
+    expected_path = profile_dir / expected_filename
+
+    assert logger.profile_dir == str(profile_dir)
+    assert logger.local_temp_file == str(expected_path)
+    assert logger.target_file == str(expected_path)
+    assert profile_dir.exists()
+    assert expected_path.exists()
+    assert expected_path.read_text() == ""
+
+    aggregated_stats_logger_fixture[
+        "mock_atexit"].register.assert_called_once_with(logger.close)
+
+
+def test_aggregated_stats_logger_initialization_gcs_path(
+        aggregated_stats_logger_fixture):
+    """Test logger initialization with a GCS directory."""
+    tmp_path = aggregated_stats_logger_fixture["tmp_path"]
+    profile_dir = "gs://my-bucket/profiles"
+    logger = AggregatedStatsLogger(profile_dir=profile_dir)
+
+    expected_filename = "all_batches_stats_2025_01_01_12_00_00.jsonl"
+    expected_local_path = tmp_path / expected_filename
+    expected_target_path = f"gs://my-bucket/profiles/{expected_filename}"
+
+    assert logger.profile_dir == profile_dir
+    assert logger.local_temp_file == str(expected_local_path)
+    assert logger.target_file == expected_target_path
+    assert expected_local_path.exists()
+    assert expected_local_path.read_text() == ""
+
+    aggregated_stats_logger_fixture[
+        "mock_atexit"].register.assert_called_once_with(logger.close)
+
+
+def test_aggregated_stats_logger_log_single_entry(
+        aggregated_stats_logger_fixture):
+    """Test logging a single statistics dictionary."""
+    tmp_path = aggregated_stats_logger_fixture["tmp_path"]
+    profile_dir = tmp_path / "logs"
+    logger = AggregatedStatsLogger(profile_dir=str(profile_dir))
+
+    stats = {"batch_id": 1, "tokens": 100}
+    logger.log(stats)
+    logger.flush()
+
+    expected_json = '{"batch_id": 1, "tokens": 100}\n'
+    local_file_path = Path(logger.local_temp_file)
+    assert local_file_path.read_text() == expected_json
+
+
+def test_aggregated_stats_logger_auto_flush(aggregated_stats_logger_fixture):
+    """Test that flush is called automatically after flush_interval."""
+    profile_dir = "gs://my-bucket/logs"
+    flush_interval = 3
+    logger = AggregatedStatsLogger(profile_dir=profile_dir,
+                                   flush_interval=flush_interval)
+    mock_thread = aggregated_stats_logger_fixture["mock_thread"]
+    mock_storage = aggregated_stats_logger_fixture["mock_storage"]
+
+    for i in range(flush_interval - 1):
+        logger.log({"step": i})
+    mock_thread.assert_not_called()
+    mock_storage.Client.assert_not_called()
+
+    logger.log({"step": flush_interval - 1})
+    mock_thread.assert_called_once()
+    mock_thread.return_value.start.assert_called_once()
+    mock_storage.Client.assert_not_called()
+
+
+def test_aggregated_stats_logger_close_flushes_and_cleans_up_gcs(
+        aggregated_stats_logger_fixture):
+    """Test that close() flushes and removes the local temp file for GCS."""
+    profile_dir = "gs://my-bucket/logs"
+    logger = AggregatedStatsLogger(profile_dir=profile_dir)
+    mock_thread = aggregated_stats_logger_fixture["mock_thread"]
+    mock_storage = aggregated_stats_logger_fixture["mock_storage"]
+    logger.log({"step": 1})
+    local_file_path = Path(logger.local_temp_file)
+
+    assert local_file_path.exists()
+
+    logger.close()
+    mock_thread.assert_not_called()
+    mock_storage.Client.assert_called_once()
+    assert not local_file_path.exists()
+
+
+@pytest.fixture
 def profiler_fixture(tmp_path):
     """Fixture to set up a PhasedBasedProfiler with mocked dependencies."""
     target_module = "tpu_inference.runner.utils"
@@ -363,6 +506,42 @@ def profiler_fixture(tmp_path):
             "mock_file": mock_file,
             "mock_determine_phase": mock_determine_phase,
         }
+
+
+def test_phased_profiler_initializes_aggregated_stats_logger(tmp_path):
+    """Tests that PhasedBasedProfiler initializes AggregatedStatsLogger."""
+    with patch("tpu_inference.runner.utils.envs.ENABLE_AGGREGATED_STATS_LOGGER", True), \
+         patch("tpu_inference.runner.utils.AggregatedStatsLogger") as mock_logger_cls:
+        # Test with worker_rank = 0
+        PhasedBasedProfiler(profile_dir=str(tmp_path),
+                            worker_rank=0,
+                            flush_interval=50)
+        mock_logger_cls.assert_called_once_with(str(tmp_path), 50)
+
+        # Test with worker_rank != 0
+        mock_logger_cls.reset_mock()
+        PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=1)
+        mock_logger_cls.assert_not_called()
+
+    with patch("tpu_inference.runner.utils.envs.ENABLE_AGGREGATED_STATS_LOGGER", False), \
+         patch("tpu_inference.runner.utils.AggregatedStatsLogger") as mock_logger_cls:
+        # Test with aggregated logging disabled
+        PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=0)
+        mock_logger_cls.assert_not_called()
+
+
+def test_phased_profiler_step_calls_aggregated_stats_logger(profiler_fixture):
+    """Tests that profiler.step() calls aggregated_stats_logger.log()."""
+    profiler = profiler_fixture["profiler"]
+    profiler.aggregated_stats_logger = MagicMock()
+    stats = {
+        "batch_id": 1,
+        "tokens": 100,
+        "num_reqs": 2,
+        "total_num_scheduled_tokens": 100
+    }
+    profiler.step(stats)
+    profiler.aggregated_stats_logger.log.assert_called_once_with(stats)
 
 
 def test_phased_profiler_full_cycle(profiler_fixture):
@@ -401,7 +580,7 @@ def test_phased_profiler_full_cycle(profiler_fixture):
 
 
 def test_phased_profiler_ignores_initial_request(profiler_fixture):
-    """Tests that profiling is not triggered for initial small requests."""
+    """Tests that profiling is not triggered for initial single-token requests."""
     profiler = profiler_fixture["profiler"]
     mock_start = profiler_fixture["mock_start"]
     mock_determine_phase = profiler_fixture["mock_determine_phase"]
@@ -409,9 +588,6 @@ def test_phased_profiler_ignores_initial_request(profiler_fixture):
     mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
 
     profiler.step({"num_reqs": 1, "total_num_scheduled_tokens": 1})
-    mock_start.assert_not_called()
-
-    profiler.step({"num_reqs": 1, "total_num_scheduled_tokens": 100})
     mock_start.assert_not_called()
 
     profiler.step({"num_reqs": 2, "total_num_scheduled_tokens": 1})

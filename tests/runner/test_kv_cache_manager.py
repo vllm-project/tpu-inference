@@ -496,6 +496,49 @@ class TestKVCacheManager:
             assert self.runner.layer_name_to_kvcache_index[
                 f'layer.{i + 10}'] == i
 
+    def test_initialize_kv_cache_capped_by_override(self):
+        # create a kv cache config with 1 layer full attention.
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = 8
+        head_size = 128
+        num_blocks = 100
+        kv_packing = 2  #bf16
+        full_attn_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+        )
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=['layer.0'],
+                             kv_cache_spec=full_attn_spec),
+        ]
+        page_size_bytes = full_attn_spec.page_size_bytes
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=num_blocks * page_size_bytes,
+                shared_by=['layer.0'],
+            )
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        # Set num_gpu_blocks_override to a smaller value!
+        override_blocks = 50
+        self.runner.cache_config.num_gpu_blocks_override = override_blocks
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        # Assert that the allocated KV cache has size equal to override_blocks, not num_blocks!
+        assert len(self.runner.kv_caches) == 1
+        assert self.runner.kv_caches[0].shape == (override_blocks, block_size,
+                                                  num_kv_heads * 2 //
+                                                  kv_packing, kv_packing,
+                                                  head_size)
+
     def test_get_kv_cache_spec_with_eagle3(self):
         # tests we create kv cache spec for eagle3 draft model
         self.runner.vllm_config.compilation_config.static_forward_context = {}

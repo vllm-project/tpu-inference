@@ -25,7 +25,6 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
-from tpu_inference.spec_decode.jax.utils import extract_last_sampled_tokens
 from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
@@ -53,13 +52,20 @@ class SpeculativeDecodingManager:
         self,
         sampled_output: jnp.ndarray,
         logits_indices_selector: np.ndarray,
+        last_sampled_token_id: jnp.ndarray,
+        num_rejected_tokens: jnp.ndarray,
         discard_sampled_tokens_req_indices: list,
         aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
         attn_metadata: AttentionMetadata,
+        async_scheduling: bool,
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         scheduler_output: Optional[VllmSchedulerOutput] = None,
         input_ids: Optional[jnp.ndarray] = None,
+        hidden_states: Optional[jnp.ndarray] = None,
     ) -> None:
+        if async_scheduling:
+            assert self.runner.speculative_config.use_eagle(
+            ), "async scheduling is only supported with eagle3 spec decoding"
         if self.runner.speculative_config.method == "ngram":
             assert isinstance(self.runner.drafter, NgramProposer)
             # For n-gram based proposer, the drafter run on host
@@ -67,16 +73,13 @@ class SpeculativeDecodingManager:
             # token ids from device to host, then run the ngram proposer.
             valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
                 self.runner, spec_decode_metadata, sampled_output,
-                logits_indices_selector, discard_sampled_tokens_req_indices)
+                logits_indices_selector, discard_sampled_tokens_req_indices,
+                self.runner.input_batch.num_reqs)
             self._draft_token_ids = self.runner.drafter.propose(
                 valid_sampled_token_ids[:self.runner.input_batch.num_reqs],
                 self.runner.input_batch.num_tokens_no_spec,
                 self.runner.input_batch.token_ids_cpu)
-        elif self.runner.speculative_config.method == "eagle3":
-            last_sampled_token_id, num_rejected_tokens = extract_last_sampled_tokens(
-                spec_decode_metadata, sampled_output,
-                self.runner.speculative_config.num_speculative_tokens,
-                self.runner.input_batch.vocab_size, self.runner.max_num_reqs)
+        elif self.runner.speculative_config.use_eagle():
             self._draft_token_ids = self.propose_eagle3_draft_token_ids(
                 spec_decode_metadata,
                 last_sampled_token_id,
@@ -86,6 +89,8 @@ class SpeculativeDecodingManager:
                 attn_metadata,
                 scheduler_output,
                 input_ids,
+                async_scheduling,
+                hidden_states,
             )
         else:
             raise NotImplementedError(
@@ -99,11 +104,29 @@ class SpeculativeDecodingManager:
         num_rejected_tokens: jnp.ndarray,
         discard_sampled_tokens_req_indices: list[int],
         aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
-        attn_metadata: AttentionMetadata,
+        attn_metadata: AttentionMetadata | dict[str, AttentionMetadata],
         scheduler_output: VllmSchedulerOutput,
         input_ids: jnp.ndarray,
-    ) -> list[list[int]]:
+        async_scheduling: bool,
+        hidden_states: jnp.ndarray,
+    ) -> list[list[int]] | jnp.ndarray:
         assert isinstance(self.runner.drafter, Eagle3Proposer)
+        if isinstance(attn_metadata, dict):
+            # When multiple KV cache groups are used (e.g., in hybrid models),
+            # attn_metadata becomes a dict mapping layer names to AttentionMetadata.
+            # Since all groups share the same seq_lens and input_positions, any would work for those.
+            # However, we specifically look for an attention layer key to get the correct
+            # block_tables structure, just in case the draft model (which is all attention) needs it.
+            attn_key = None
+            for key in attn_metadata.keys():
+                if ".self_attn." in key:
+                    attn_key = key
+                    break
+            if attn_key is not None:
+                attn_metadata = attn_metadata[attn_key]
+            else:
+                attn_metadata = next(iter(attn_metadata.values()))
+
         req_ids = self.runner.input_batch.req_ids
         max_num_seqs = attn_metadata.seq_lens.shape[0]
         next_prompt_token_id = np.zeros(max_num_seqs, dtype=np.int32)
@@ -122,10 +145,15 @@ class SpeculativeDecodingManager:
         next_prompt_token_id, is_in_prefill = device_array(
             self.runner.mesh, (next_prompt_token_id, is_in_prefill))
 
+        if self.runner.speculative_config.method == "mtp":
+            aux_hidden_states_for_drafter = (hidden_states, )
+        else:
+            aux_hidden_states_for_drafter = aux_hidden_states
+
         target_hidden_states, input_ids, last_token_indices, attn_metadata = self.runner.drafter.prepare_inputs(
             attn_metadata,
             input_ids,
-            aux_hidden_states,
+            aux_hidden_states_for_drafter,
             last_sampled_token_id,
             next_prompt_token_id,
             is_in_prefill,
@@ -139,10 +167,16 @@ class SpeculativeDecodingManager:
             last_token_indices=last_token_indices,
             target_hidden_states=target_hidden_states,
         )
-        draft_token_ids = np.array(draft_token_ids)
-        if draft_token_ids.ndim == 1:
-            draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
-        return draft_token_ids.tolist()
+
+        if async_scheduling:
+            if jnp.ndim(draft_token_ids) == 1:
+                draft_token_ids = jnp.expand_dims(draft_token_ids, 1)
+            return draft_token_ids
+        else:
+            draft_token_ids = np.array(draft_token_ids)
+            if draft_token_ids.ndim == 1:
+                draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
+            return draft_token_ids.tolist()
 
     def get_spec_decode_metadata(
         self,
