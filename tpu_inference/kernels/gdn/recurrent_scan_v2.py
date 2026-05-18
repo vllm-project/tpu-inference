@@ -447,20 +447,18 @@ def inner_kernel(
             k = k.reshape(C, n_kq, d_k)
             v = v.reshape(C, n_v, d_v)
 
+            q = q.transpose(1, 0, 2)
+            k = k.transpose(1, 0, 2)
+            v = v.transpose(1, 0, 2)
+
             if use_qk_norm_in_gdn:
                 q = l2_normalize(q)
                 k = l2_normalize(k)
 
             repeat_factor = n_v // n_kq
             if repeat_factor > 1:
-                q = jnp.repeat(q, repeat_factor, axis=1)
-                k = jnp.repeat(k, repeat_factor, axis=1)
-
-            # TODO: eliminate these transposes by directly slicing in the right
-            # shape above,
-            q = q.transpose(1, 0, 2)
-            k = k.transpose(1, 0, 2)
-            v = v.transpose(1, 0, 2)
+                q = jnp.repeat(q, repeat_factor, axis=0)
+                k = jnp.repeat(k, repeat_factor, axis=0)
 
             scale = d_k**-0.5
             q = q * scale
@@ -612,19 +610,19 @@ def inner_kernel(
             k = k.reshape(C_trans, n_kq, d_k)
             v = v.reshape(C_trans, n_v, d_v)
 
+            # TODO: eliminate these transposes by directly slicing in the right shape above,
+            q = q.transpose(1, 0, 2)
+            k = k.transpose(1, 0, 2)
+            v = v.transpose(1, 0, 2)
+
             if use_qk_norm_in_gdn:
                 q = l2_normalize(q)
                 k = l2_normalize(k)
 
             repeat_factor = n_v // n_kq
             if repeat_factor > 1:
-                q = jnp.repeat(q, repeat_factor, axis=1)
-                k = jnp.repeat(k, repeat_factor, axis=1)
-
-            # TODO: eliminate these transposes by directly slicing in the right shape above,
-            q = q.transpose(1, 0, 2)
-            k = k.transpose(1, 0, 2)
-            v = v.transpose(1, 0, 2)
+                q = jnp.repeat(q, repeat_factor, axis=0)
+                k = jnp.repeat(k, repeat_factor, axis=0)
 
             scale = d_k**-0.5
             q = q * scale
