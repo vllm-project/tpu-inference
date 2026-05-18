@@ -109,22 +109,48 @@ class Eagle3Proposer:
         # Reuse the target model's embedding if the draft model doesn't have its own or if they are identical, to save memory.
         # TODO(ranlihao): Unify the weight loading process for jax and torchax path.
         if draft_model_impl == "flax_nnx":
-            draft_embed_tokens = getattr(self.state.model, 'embed_tokens',
-                                         None)
-            if draft_embed_tokens is None or ~jnp.any(
-                    draft_embed_tokens.embedding):
-                logger.info(
-                    "Draft model does not have embedding. Setting draft model's embed_tokens to target model's embed"
-                )
-                self.state.model.embed_tokens = target_model.model.embed
-            elif jnp.array_equal(draft_embed_tokens.embedding,
-                                 target_model.model.embed.embedding):
-                logger.info(
-                    "Draft model's embed_tokens is identical to target model's embed. Sharing the embedding."
-                )
-                self.state.model.embed_tokens = target_model.model.embed
+            from tpu_inference.models.jax.utils.weight_utils import get_param
+
+            # 1. Resolve draft embed param in self.state
+            draft_embed_param = None
+            for path in ["model.embed_tokens.weight", "model.embed.embedding"]:
+                try:
+                    draft_embed_param = get_param(self.state, path)
+                    logger.info(f"Resolved draft model embedding path: {path}")
+                    break
+                except ValueError:
+                    continue
+
+            # 2. Resolve target embed param in target_model (which is already the target state)
+            target_embed_param = None
+            for path in ["model.embed_tokens.weight", "model.embed.embedding"]:
+                try:
+                    target_embed_param = get_param(target_model, path)
+                    logger.info(
+                        f"Resolved target model embedding path: {path}")
+                    break
+                except ValueError:
+                    continue
+
+            # 3. Check and share embedding values directly in the State trees
+            if draft_embed_param is not None and target_embed_param is not None:
+                if not jnp.any(draft_embed_param.value):
+                    logger.info(
+                        "Draft model does not have embedding. Setting draft model's embed_tokens to target model's embed"
+                    )
+                    draft_embed_param.value = target_embed_param.value
+                elif jnp.array_equal(draft_embed_param.value,
+                                     target_embed_param.value):
+                    logger.info(
+                        "Draft model's embed_tokens is identical to target model's embed. Sharing the embedding."
+                    )
+                    draft_embed_param.value = target_embed_param.value
+                else:
+                    logger.info("Draft model has its own embed_tokens.")
             else:
-                logger.info("Draft model has its own embed_tokens.")
+                logger.warning(
+                    "Failed to locate draft or target embedding parameter in State objects."
+                )
 
         # The embed_tokens assignment above may have mutated `self.state`;
         # re-derive `state_leaves` so the dispatch-side view matches.
