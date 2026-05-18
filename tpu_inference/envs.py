@@ -107,8 +107,7 @@ def env_with_choices(
     return _get_validated_env
 
 
-def env_bool(env_name: str,
-             default: bool = False):
+def env_bool(env_name: str, default: bool = False):
     """
     Accepts both numeric strings ("0", "1") and boolean strings
     ("true", "false", "True", "False").
