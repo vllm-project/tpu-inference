@@ -73,26 +73,29 @@ def kernel_inner(
 
     is_first_k = d_idx == 0
     is_last_k = d_idx == (d // tile_d - 1)
-
-    gm_start = gm_lhs_start_ref[gm_idx]
-    gm_end = gm_lhs_start_ref[gm_idx + 1]
-    row = (gm_start // tile_b) * tile_b + jnp.arange(tile_b)[:, None]  # [tile_b, 1]
-    mask = (row >= gm_start) & (row < gm_end)  # [tile_b, 1]
     
-    # On the first K tile, zero out the accumulator.
-    @pl.when(is_first_k)
-    def _():
-        acc_ref[...] = jnp.where(mask, jnp.zeros_like(acc_ref[...]), acc_ref[...])
+    def _matmul(is_first_k, is_last_k):
+        res = jnp.matmul(lhs_ref[...], rhs_ref[0, ...], preferred_element_type=jnp.float32)
+        if not is_first_k:
+            res = res + acc_ref[...]
+        if is_last_k:
+            gm_start = gm_lhs_start_ref[gm_idx]
+            gm_end = gm_lhs_start_ref[gm_idx + 1]
+            row = (gm_start // tile_b) * tile_b + jnp.arange(tile_b)[:, None]  # [tile_b, 1]
+            mask = (row >= gm_start) & (row < gm_end)  # [tile_b, 1]
+            res = jnp.where(mask, res, 0)
+            out_ref[...] = jnp.where(mask, res.astype(out_ref.dtype), out_ref[...])
+        else:
+            acc_ref[...] = res
     
-    res = jnp.matmul(lhs_ref[...], rhs_ref[0, ...], preferred_element_type=jnp.float32)
-    res = jnp.where(mask, res, 0)
-    acc_ref[...] = acc_ref[...] + res
-
-    # Only write to output on the last K tile.
-    @pl.when(is_last_k)
-    def _():
-        out_ref[...] = jnp.where(mask, acc_ref[...].astype(out_ref.dtype), out_ref[...])
-
+    jax.lax.cond(
+        is_first_k,
+        lambda: jax.lax.cond(is_last_k, lambda: _matmul(True,  True),
+                                        lambda: _matmul(True,  False)),
+        lambda: jax.lax.cond(is_last_k, lambda: _matmul(False, True),
+                                        lambda: _matmul(False, False)),
+    )
+    
 def compute_metadata(group_sizes):
     lhs_pointer = 0 
     gm_expert_ids, gm_lhs_start, gm_lhs_end = [], [], []
