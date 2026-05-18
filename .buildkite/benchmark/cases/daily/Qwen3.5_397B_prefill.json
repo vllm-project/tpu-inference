@@ -36,6 +36,7 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.8,
           "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
           "async-scheduling": true
         }
       },
@@ -84,6 +85,7 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.8,
           "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
           "async-scheduling": true
         }
       },
@@ -132,6 +134,7 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.6,
           "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
           "async-scheduling": true
         }
       },
@@ -180,6 +183,7 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.6,
           "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
           "async-scheduling": true
         }
       },
@@ -228,6 +232,7 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.6,
           "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
           "async-scheduling": true
         }
       },
@@ -276,6 +281,7 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.6,
           "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
           "async-scheduling": true
         }
       },
