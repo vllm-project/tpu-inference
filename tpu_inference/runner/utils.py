@@ -26,6 +26,53 @@ from tpu_inference import envs
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch import InputBatch
 
+
+def trim_request_id_suffix(request_id: str) -> str:
+    """Trims the suffix from a request ID, keeping only the base ID.
+    
+    Example: cmpl-f0d75fed-c25e-4ccf-b369-9bd0226021b3-0-a9cb3cca 
+          -> cmpl-f0d75fed-c25e-4ccf-b369-9bd0226021b3
+    """
+    parts = request_id.split("-")
+    if len(parts) >= 6 and parts[0] == "cmpl":
+        return "-".join(parts[:6])
+    return request_id
+
+
+def extract_request_ids_for_tracing(
+    input_batch: InputBatch,
+    scheduler_output: Optional[Any] = None,
+) -> dict[str, str]:
+    """Extracts request IDs from an InputBatch and formats them for XProf tracing."""
+    req_id_kwargs = {}
+    try:
+        num_reqs = input_batch.num_reqs
+        raw_req_ids = [
+            str(rid) for rid in input_batch.req_ids[:num_reqs]
+            if rid is not None
+        ]
+
+        active_req_ids = []
+        for rid in raw_req_ids:
+            # Only trace requests that have non-zero scheduled tokens in this step
+            if scheduler_output is not None:
+                num_tokens = scheduler_output.num_scheduled_tokens.get(rid, 0)
+                if num_tokens == 0:
+                    continue
+            active_req_ids.append(rid)
+
+        trimmed_req_ids = [
+            trim_request_id_suffix(rid) for rid in active_req_ids
+        ]
+        for i, rid in enumerate(trimmed_req_ids):
+            req_id_kwargs[f"request_id{i+1}"] = rid
+    except Exception as e:
+        logger.warning(
+            f"Failed to extract request IDs for tracing from input_batch. Error: {e}"
+        )
+    return req_id_kwargs
+
+
 MIN_NUM_SEQS = 8
 
 # These are used for determining the inference phase for a given batch in

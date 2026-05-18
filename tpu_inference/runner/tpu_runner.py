@@ -793,8 +793,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                "after execute_model() returns None.")
         reqs = self.input_batch.num_reqs
         toks = scheduler_output.total_num_scheduled_tokens
+
+        req_id_kwargs = {}
+        if jax.profiler.TraceAnnotation.is_enabled():
+            req_id_kwargs = runner_utils.extract_request_ids_for_tracing(
+                self.input_batch, scheduler_output)
+
         with jax.set_mesh(self.mesh), jax.profiler.TraceAnnotation(
-                f"execute_model: {reqs} reqs, {toks} toks"):
+                f"execute_model: {reqs} reqs, {toks} toks", **req_id_kwargs):
             output = self._execute_model(scheduler_output,
                                          intermediate_tensors)
         return output
@@ -996,7 +1002,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
         with self.maybe_forbid_compile:
-
             with set_forward_context(
                     None,
                     self.vllm_config,
