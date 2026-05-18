@@ -944,6 +944,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
             padded_num_reqs,
+            req_ids_dp,
+            padded_num_scheduled_tokens_per_dp_rank,
         ) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
@@ -952,7 +954,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # We have the modality embeds at this time.
             self.mm_manager.execute_mm_encoder(scheduler_output)
             mm_embeds, is_mm_embed = self.mm_manager.gather_mm_embeddings(
-                scheduler_output, input_ids.shape[0])
+                scheduler_output, input_ids.shape[0], req_ids_dp,
+                padded_num_scheduled_tokens_per_dp_rank)
         else:
             mm_embeds, is_mm_embed = None, None
 
@@ -1603,7 +1606,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
-            self.mm_manager.calc_mrope_positions(scheduler_output)
+            self.mm_manager.calc_mrope_positions(
+                scheduler_output, req_ids_dp,
+                padded_num_scheduled_tokens_per_dp_rank)
 
         # Async scheduling: prepare token substitution indices for DP
         num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
@@ -1991,6 +1996,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
             padded_num_reqs,
+            req_ids_dp,
+            padded_num_scheduled_tokens_per_dp_rank,
         )
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
