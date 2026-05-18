@@ -81,7 +81,8 @@ def kernel_inner(
         if is_last_k:
             gm_start = gm_lhs_start_ref[gm_idx]
             gm_end = gm_lhs_start_ref[gm_idx + 1]
-            row = (gm_start // tile_b) * tile_b + jnp.arange(tile_b)[:, None]  # [tile_b, 1]
+            row = (gm_start // tile_b) * tile_b + jax.lax.broadcasted_iota(
+                jnp.int32, out_ref.shape, 0)
             mask = (row >= gm_start) & (row < gm_end)  # [tile_b, 1]
             res = jnp.where(mask, res, 0)
             out_ref[...] = jnp.where(mask, res.astype(out_ref.dtype), out_ref[...])
