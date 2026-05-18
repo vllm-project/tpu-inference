@@ -287,10 +287,12 @@ class TpuPlatform(Platform):
 
         if scheduler_config.is_multimodal_model and not \
             scheduler_config.disable_chunked_mm_input:
-            logger.warning("TPU does not support running Multimodal models"
-                           " without setting `--disable_chunked_mm_input`. "
-                           "Forcing --disable_chunked_mm_input.")
-            scheduler_config.disable_chunked_mm_input = True
+            logger.warning(
+                "TPU does not support running Multimodal models"
+                " without setting `--disable_chunked_mm_input`. "
+                "If you are serving a multimodal model, please explicitly add the "
+                "`--disable-chunked-mm-input` flag to your server command to avoid execution failures."
+            )
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
