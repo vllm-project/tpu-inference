@@ -288,12 +288,12 @@ class TpuPlatform(Platform):
                 "Using uniproc_executor.")
             parallel_config.distributed_executor_backend = "uni"
 
-        if scheduler_config.is_multimodal_model and not \
-            scheduler_config.disable_chunked_mm_input:
-            logger.warning("TPU does not support running Multimodal models"
-                           " without setting `--disable_chunked_mm_input`. "
-                           "Forcing --disable_chunked_mm_input.")
-            scheduler_config.disable_chunked_mm_input = True
+        # if scheduler_config.is_multimodal_model and not \
+        #     scheduler_config.disable_chunked_mm_input:
+        #     logger.warning("TPU does not support running Multimodal models"
+        #                    " without setting `--disable_chunked_mm_input`. "
+        #                    "Forcing --disable_chunked_mm_input.")
+        #     scheduler_config.disable_chunked_mm_input = True
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
