@@ -1,3 +1,16 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Smoke tests for the modality-agnostic helpers that handle video grids."""
 
 from __future__ import annotations
@@ -7,11 +20,8 @@ import numpy as np
 import pytest
 
 from tpu_inference.models.jax.utils.multi_modal_utils import (
-    merge_multimodal_embeddings,
-    normalize_mm_grid_thw,
-    split_mm_embeddings_by_grid,
-)
-
+    merge_multimodal_embeddings, normalize_mm_grid_thw,
+    split_mm_embeddings_by_grid)
 
 HIDDEN = 8
 SPATIAL_MERGE = 2
@@ -20,19 +30,22 @@ IMAGE_TOKEN_ID = 151655
 TEXT_TOKEN_ID = 1
 
 
-def _video_token_count(t: int, h: int, w: int, merge: int = SPATIAL_MERGE) -> int:
+def _video_token_count(t: int,
+                       h: int,
+                       w: int,
+                       merge: int = SPATIAL_MERGE) -> int:
     return t * (h // merge) * (w // merge)
 
 
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ([4, 8, 8], ((4, 8, 8),)),
-        ((4, 8, 8), ((4, 8, 8),)),
-        ([[4, 8, 8]], ((4, 8, 8),)),
+        ([4, 8, 8], ((4, 8, 8), )),
+        ((4, 8, 8), ((4, 8, 8), )),
+        ([[4, 8, 8]], ((4, 8, 8), )),
         ([[1, 8, 8], [4, 8, 8]], ((1, 8, 8), (4, 8, 8))),
-        (np.array([[4, 8, 8]]), ((4, 8, 8),)),
-        (np.array([[[4, 8, 8]]]), ((4, 8, 8),)),
+        (np.array([[4, 8, 8]]), ((4, 8, 8), )),
+        (np.array([[[4, 8, 8]]]), ((4, 8, 8), )),
         (None, ()),
         ([], ()),
     ],
@@ -42,11 +55,13 @@ def test_normalize_grid_thw_accepts_video_shapes(raw, expected):
 
 
 def test_split_embeddings_round_trip_single_video():
-    grid = ((4, 8, 8),)
+    grid = ((4, 8, 8), )
     n_tokens = _video_token_count(*grid[0])
-    embeds = jnp.arange(n_tokens * HIDDEN, dtype=jnp.float32).reshape(n_tokens, HIDDEN)
+    embeds = jnp.arange(n_tokens * HIDDEN,
+                        dtype=jnp.float32).reshape(n_tokens, HIDDEN)
 
-    splits, deepstack = split_mm_embeddings_by_grid(embeds, grid, SPATIAL_MERGE)
+    splits, deepstack = split_mm_embeddings_by_grid(embeds, grid,
+                                                    SPATIAL_MERGE)
 
     assert deepstack is None
     assert len(splits) == 1
@@ -64,7 +79,8 @@ def test_split_embeddings_mixed_image_and_video():
     total = n_image + n_video
     assert (n_image, n_video) == (16, 64)
 
-    embeds = jnp.arange(total * HIDDEN, dtype=jnp.float32).reshape(total, HIDDEN)
+    embeds = jnp.arange(total * HIDDEN,
+                        dtype=jnp.float32).reshape(total, HIDDEN)
     splits, _ = split_mm_embeddings_by_grid(embeds, grid, SPATIAL_MERGE)
 
     assert len(splits) == 2
@@ -102,9 +118,8 @@ def test_merge_video_embeddings_into_input_ids():
 
     assert jnp.all(merged[:3] == 0)
     assert jnp.all(merged[3 + n_video_tokens:] == 0)
-    np.testing.assert_array_equal(
-        np.asarray(merged[3:3 + n_video_tokens]), np.asarray(video_embeds)
-    )
+    np.testing.assert_array_equal(np.asarray(merged[3:3 + n_video_tokens]),
+                                  np.asarray(video_embeds))
 
 
 def test_merge_handles_image_and_video_token_ids_together():
@@ -114,8 +129,8 @@ def test_merge_handles_image_and_video_token_ids_together():
 
     # Layout: [text, IMG x4, text, VIDEO x8, text]
     input_ids = jnp.array(
-        [TEXT_TOKEN_ID] + [IMAGE_TOKEN_ID] * n_image_tokens + [TEXT_TOKEN_ID]
-        + [VIDEO_TOKEN_ID] * n_video_tokens + [TEXT_TOKEN_ID],
+        [TEXT_TOKEN_ID] + [IMAGE_TOKEN_ID] * n_image_tokens + [TEXT_TOKEN_ID] +
+        [VIDEO_TOKEN_ID] * n_video_tokens + [TEXT_TOKEN_ID],
         dtype=jnp.int32,
     )
     seq_len = input_ids.shape[0]

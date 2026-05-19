@@ -91,8 +91,7 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
 
 
 def normalize_mm_grid_thw(
-    grid_thw: object,
-) -> tuple[tuple[int, int, int], ...]:
+    grid_thw: object, ) -> tuple[tuple[int, int, int], ...]:
     """Normalize grid_thw into a tuple-of-tuples.
 
     Accepts (3,), (N, 3), or (B, N, 3) style list/tuple/numpy/torch/jax inputs.
@@ -108,7 +107,7 @@ def normalize_mm_grid_thw(
             return (tuple(int(v) for v in grid_thw), )
         if all(isinstance(row, (list, tuple)) for row in grid_thw):
             if grid_thw and grid_thw[0] and isinstance(grid_thw[0][0],
-                                                      (list, tuple)):
+                                                       (list, tuple)):
                 flat_rows = [row for batch in grid_thw for row in batch]
                 return tuple(tuple(int(v) for v in row) for row in flat_rows)
             return tuple(tuple(int(v) for v in row) for row in grid_thw)
@@ -181,7 +180,9 @@ def split_mm_embeddings_by_grid(
         item_splits = (embeddings, )
         if not deepstack_embeddings:
             return item_splits, None
-        return item_splits, [[layer_embeds for layer_embeds in deepstack_embeddings]]
+        return item_splits, [[
+            layer_embeds for layer_embeds in deepstack_embeddings
+        ]]
 
     split_indices = np.cumsum(sizes)[:-1]
     item_splits = tuple(jnp.split(embeddings, split_indices))
