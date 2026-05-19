@@ -125,8 +125,9 @@ else
 fi
 
 # --- Step 3: Execute the vLLM TPU build script ---
-echo "Ensuring 'build' package is installed..."
+echo "Ensuring 'build' package and torch is installed..."
 pip install build
+pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
 echo "Executing the vLLM TPU build script..."
 bash tools/vllm-tpu/build.sh "${VLLM_TPU_VERSION}"
 
