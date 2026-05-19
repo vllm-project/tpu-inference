@@ -147,6 +147,8 @@ def moe_apply(
                     scoring_fn=layer.scoring_func,
                     all_gather_fp8=all_gather_fp8,
                     enable_rs_kernel=envs.ENABLE_RS_KERNEL,
+                    onehot_moe_permute_threshold=envs.
+                    ONEHOT_MOE_PERMUTE_THRESHOLD,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
