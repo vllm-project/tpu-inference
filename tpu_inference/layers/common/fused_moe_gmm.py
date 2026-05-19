@@ -147,7 +147,8 @@ def moe_gmm_local(x: jax.Array,
                   activation: str,
                   topk: int,
                   parallelism: Literal["tp", "ep"],
-                  enable_rs_kernel: bool = False) -> jax.Array:
+                  enable_rs_kernel: bool = False,
+                  scatter_results: bool = False) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
@@ -234,6 +235,11 @@ def moe_gmm_local(x: jax.Array,
                 num_micro_batches=num_mb,
                 axis_name=reduction_axis)
             out = rs_out.astype(x.dtype)
+    elif scatter_results:
+        out = jax.lax.psum_scatter(out,
+                                   axis_name=reduction_axis,
+                                   scatter_dimension=0,
+                                   tiled=True).astype(x.dtype)
     else:
         out = jax.lax.psum(out, axis_name=reduction_axis).astype(x.dtype)
     return out
@@ -327,10 +333,12 @@ def expert_parallel_gmm(
     topk: int,
     mesh: Mesh,
     enable_rs_kernel: bool = False,
+    scatter_results: bool = False,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
+    ep_data_p_spec = P(ShardingAxisName.EXPERT_DATA)
     num_experts = w1.shape[0]
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
@@ -347,6 +355,7 @@ def expert_parallel_gmm(
             topk=topk,
             parallelism="ep",
             enable_rs_kernel=enable_rs_kernel,
+            scatter_results=scatter_results,
         ),
         mesh=mesh,
         in_specs=(
@@ -362,12 +371,7 @@ def expert_parallel_gmm(
             data_p_spec,
             data_p_spec,
         ),
-        out_specs=P(
-            (ShardingAxisName.MLP_DATA, ) +
-            (ShardingAxisName.EXPERT
-             if isinstance(ShardingAxisName.EXPERT, tuple) else
-             (ShardingAxisName.EXPERT, )), None) if enable_rs_kernel else
-        (data_p_spec),
+        out_specs=ep_data_p_spec if (enable_rs_kernel or scatter_results) else data_p_spec,
         check_vma=False,
     )(
         x,
@@ -416,6 +420,7 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     "scoring_fn",
     "all_gather_fp8",
     "enable_rs_kernel",
+    "scatter_results",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -434,6 +439,7 @@ def fused_moe_func(
     scoring_fn: str,
     all_gather_fp8: bool = False,
     enable_rs_kernel: bool = False,
+    scatter_results: bool = False,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -578,6 +584,7 @@ def fused_moe_func(
             topk=topk,
             mesh=mesh,
             enable_rs_kernel=actual_enable_rs_kernel,
+            scatter_results=scatter_results,
         )
     else:
         x = tensor_parallel_gmm(

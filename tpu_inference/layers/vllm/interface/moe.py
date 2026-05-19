@@ -98,6 +98,14 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
             except AssertionError:
                 pass
 
+    is_dp = False
+    if vllm_config is not None:
+        sharding_strategy = vllm_config.additional_config.get("sharding", {}).get("sharding_strategy", {})
+        is_dp = sharding_strategy.get("enable_dp_attention", False)
+
+    extra_kwargs = dict(quant_method_instance.extra_backend_kwargs)
+    extra_kwargs["scatter_results"] = is_dp
+
     return torch_view(
         moe_apply(
             layer=layer,
@@ -106,5 +114,5 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
             weights=weights,
             moe_backend=quant_method_instance.moe_backend,
             mesh=quant_method_instance.mesh,
-            extra_backend_kwargs=quant_method_instance.extra_backend_kwargs,
+            extra_backend_kwargs=extra_kwargs,
         ))

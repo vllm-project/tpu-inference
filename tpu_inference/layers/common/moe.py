@@ -147,6 +147,7 @@ def moe_apply(
                     scoring_fn=layer.scoring_func,
                     all_gather_fp8=all_gather_fp8,
                     enable_rs_kernel=envs.ENABLE_RS_KERNEL,
+                    scatter_results=extra_backend_kwargs.get("scatter_results", False),
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
