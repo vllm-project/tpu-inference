@@ -1,3 +1,17 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import ast
 import dataclasses
 import json
@@ -148,7 +162,8 @@ def parse_log_file(log_path: str) -> list[dict[str, Any]]:
                 curr["scalars"] = parse_payload(payload)
                 curr_raw["scalar_line"] = line.rstrip("\n")
             elif "Kernel optimization params:" in line:
-                payload = line.split("Kernel optimization params:", 1)[1].strip()
+                payload = line.split("Kernel optimization params:",
+                                     1)[1].strip()
                 curr["kernel"] = parse_payload(payload)
                 curr_raw["kernel_line"] = line.rstrip("\n")
 
@@ -166,9 +181,7 @@ def parse_log_file(log_path: str) -> list[dict[str, Any]]:
                 print(curr_raw["array_line"])
                 print(curr_raw["scalar_line"])
                 print(curr_raw["kernel_line"])
-                print(
-                    f"TuningKey={tuning_key} TunableParams={tunable_params}"
-                )
+                print(f"TuningKey={tuning_key} TunableParams={tunable_params}")
                 print()
                 curr = {}
                 curr_raw = {}
@@ -178,7 +191,8 @@ def parse_log_file(log_path: str) -> list[dict[str, Any]]:
 
 def main() -> None:
     input_log = sys.argv[1] if len(sys.argv) > 1 else "ds_r1_kernel.log"
-    output_json = sys.argv[2] if len(sys.argv) > 2 else "parsed_ds_r1_kernel.json"
+    output_json = sys.argv[2] if len(
+        sys.argv) > 2 else "parsed_ds_r1_kernel.json"
 
     groups = parse_log_file(input_log)
     with open(output_json, "w", encoding="utf-8") as f:

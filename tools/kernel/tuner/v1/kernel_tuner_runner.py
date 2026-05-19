@@ -19,8 +19,8 @@ from absl import app, flags
 
 from tools.kernel.tuner.v1.common.kernel_tuner_base import RunConfig
 from tools.kernel.tuner.v1.example_kernel_tuner import ExampleKernelTuner
-from tools.kernel.tuner.v1.rpa_v3_kernel_tuner import RpaV3KernelTuner
 from tools.kernel.tuner.v1.mla_kernel_tuner import MlaKernelTuner
+from tools.kernel.tuner.v1.rpa_v3_kernel_tuner import RpaV3KernelTuner
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

@@ -500,7 +500,10 @@ def spanner_query_case_latency(db,
     with db.snapshot() as snap:
         for case_id, lat, warmup, total_time, status, kv_str in snap.execute_sql(
                 query,
-                params={'id': case_set_id, 'rid': run_id},
+                params={
+                    'id': case_set_id,
+                    'rid': run_id
+                },
                 param_types={
                     'id': gspanner.param_types.STRING,
                     'rid': gspanner.param_types.STRING,
@@ -711,28 +714,25 @@ def _build_parser():
         action='append',
         default=None,
         metavar='FIELD',
-        help=(
-            'Only display this column in the output table. '
-            'Repeat to show multiple columns. '
-            'Built-in columns: case_id, latency_us, warmup_us. '
-            'Any tuning_key or tunable_params field name is also valid. '
-            'Example: --show latency_us --show max_num_tokens'
-        ),
+        help=('Only display this column in the output table. '
+              'Repeat to show multiple columns. '
+              'Built-in columns: case_id, latency_us, warmup_us. '
+              'Any tuning_key or tunable_params field name is also valid. '
+              'Example: --show latency_us --show max_num_tokens'),
     )
 
     p = sub.add_parser(
         'query_case_latency',
         help='Query latency for tuning cases, with optional field filters.',
-        description=(
-            'Show latency for all successful tuning cases matching the given filters.\n'
-            'Use --filter-key FIELD=VALUE (repeatable) to filter by any field of\n'
-            'tuning_key or tunable_params in the stored CaseKeyValue.\n\n'
-            'FIELD can be any key present in the tuning_key or tunable_params\n'
-            'sub-dicts of the case — field names vary by case set type.\n\n'
-            'Example:\n'
-            '  query_case_latency --case_set_id X --run_id Y \\\n'
-            '    --filter-key max_num_tokens=4 --filter-key q_dtype=fp8'
-        ),
+        description=
+        ('Show latency for all successful tuning cases matching the given filters.\n'
+         'Use --filter-key FIELD=VALUE (repeatable) to filter by any field of\n'
+         'tuning_key or tunable_params in the stored CaseKeyValue.\n\n'
+         'FIELD can be any key present in the tuning_key or tunable_params\n'
+         'sub-dicts of the case — field names vary by case set type.\n\n'
+         'Example:\n'
+         '  query_case_latency --case_set_id X --run_id Y \\\n'
+         '    --filter-key max_num_tokens=4 --filter-key q_dtype=fp8'),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument('--case_set_id', required=True)
@@ -743,10 +743,10 @@ def _build_parser():
         action='append',
         default=[],
         metavar='FIELD=VALUE',
-        help=(
-            'Filter by a TuningKey or TunableParams field. '
-            'Repeat for multiple filters. Example: --filter-key max_num_tokens=4'
-        ),
+        help=
+        ('Filter by a TuningKey or TunableParams field. '
+         'Repeat for multiple filters. Example: --filter-key max_num_tokens=4'
+         ),
     )
 
     p.add_argument(
@@ -755,22 +755,20 @@ def _build_parser():
         action='append',
         default=None,
         metavar='FIELD',
-        help=(
-            'Only display this column in the output table. '
-            'Repeat to show multiple columns. '
-            'Built-in columns: case_id, processed_status, latency_us, '
-            'warmup_us, total_time_us. '
-            'Any tuning_key or tunable_params field name is also valid. '
-            'Example: --show latency_us --show max_num_tokens --show decode_batch_size'
-        ),
+        help=
+        ('Only display this column in the output table. '
+         'Repeat to show multiple columns. '
+         'Built-in columns: case_id, processed_status, latency_us, '
+         'warmup_us, total_time_us. '
+         'Any tuning_key or tunable_params field name is also valid. '
+         'Example: --show latency_us --show max_num_tokens --show decode_batch_size'
+         ),
     )
     p.add_argument(
         '--show_all',
         action='store_true',
-        help=(
-            'Include unsuccessful case results as well. '
-            'By default, only successful results are shown.'
-        ),
+        help=('Include unsuccessful case results as well. '
+              'By default, only successful results are shown.'),
     )
 
     return parser
@@ -818,7 +816,6 @@ def _resolve_source(args):
                 args.db_path = candidates[-1]
         else:
             args.db_path = input('Enter path to local DB folder: ').strip()
-
 
     return source
 
@@ -869,18 +866,19 @@ def _run_command(args, source, db_path=None, spanner_db=None):
                     print(f'  {k}: {v}')
 
         elif args.command == 'query_min_latency':
-            _print_min_latency(
-                local_query_min_latency(db_path, args.case_set_id,
-                                        args.run_id),
-                show_fields=args.show_fields)
+            _print_min_latency(local_query_min_latency(db_path,
+                                                       args.case_set_id,
+                                                       args.run_id),
+                               show_fields=args.show_fields)
 
         elif args.command == 'query_case_latency':
-            _print_case_latency(
-                local_query_case_latency(db_path, args.case_set_id,
-                                         args.run_id,
-                                         filter_keys=args.filter_keys,
-                                         show_all=args.show_all),
-                show_fields=args.show_fields)
+            _print_case_latency(local_query_case_latency(
+                db_path,
+                args.case_set_id,
+                args.run_id,
+                filter_keys=args.filter_keys,
+                show_all=args.show_all),
+                                show_fields=args.show_fields)
 
     else:  # spanner
         if args.command == 'list_case_sets':
@@ -919,18 +917,18 @@ def _run_command(args, source, db_path=None, spanner_db=None):
                 print(f'  {k}: {v}')
 
         elif args.command == 'query_min_latency':
-            _print_min_latency(
-                spanner_query_min_latency(spanner_db, args.case_set_id,
-                                          args.run_id),
-                show_fields=args.show_fields)
+            _print_min_latency(spanner_query_min_latency(
+                spanner_db, args.case_set_id, args.run_id),
+                               show_fields=args.show_fields)
 
         elif args.command == 'query_case_latency':
-            _print_case_latency(
-                spanner_query_case_latency(spanner_db, args.case_set_id,
-                                           args.run_id,
-                                           filter_keys=args.filter_keys,
-                                           show_all=args.show_all),
-                show_fields=args.show_fields)
+            _print_case_latency(spanner_query_case_latency(
+                spanner_db,
+                args.case_set_id,
+                args.run_id,
+                filter_keys=args.filter_keys,
+                show_all=args.show_all),
+                                show_fields=args.show_fields)
 
 
 # ---------------------------------------------------------------------------

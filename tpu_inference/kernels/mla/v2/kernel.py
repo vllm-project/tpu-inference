@@ -25,7 +25,6 @@ from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.mla.v2.transpose import xpose_pipeline
 from tpu_inference.logger import init_logger
-from tpu_inference.kernels.mla.v2.tuned_block_sizes import lookup_tunable_params
 
 logger = init_logger(__name__)
 
@@ -1558,7 +1557,8 @@ def mla_ragged_paged_attention(
     )
     actual_num_q_heads, max_num_tokens, actual_lkv_dim = ql_nope.shape
     _, _, actual_r_dim = q_pe.shape
-    bd_tuning_key = (max_num_tokens, actual_num_q_heads, actual_lkv_dim, actual_r_dim, 'batched_decode')
+    bd_tuning_key = (max_num_tokens, actual_num_q_heads, actual_lkv_dim,
+                     actual_r_dim, 'batched_decode')
 
     ql_nope = prepare_q_nope_inputs(
         ql_nope)  # [max_num_tokens, num_q_heads, lkv_dim]
