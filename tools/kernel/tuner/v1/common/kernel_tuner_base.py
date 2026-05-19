@@ -23,11 +23,6 @@ from enum import Enum
 import yaml
 from absl import flags
 
-from tools.kernel.tuner.v1.storage_management.local_db_manager import \
-    LocalDbManager
-from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
-    SpannerStorageManager
-
 FLAGS = flags.FLAGS
 
 logger = logging.getLogger(__name__)
@@ -131,8 +126,15 @@ class KernelTunerBase(ABC):
         assert tuner_config.tuning_key_class is not None, "tuning_key_class must be specified"
         assert tuner_config.tunable_params_class is not None, "tunable_params_class must be specified"
         assert tuner_config.kernel_tuner_name is not None, "kernel_tuner_name must be specified, which will be used as the identifier for this kernel tuner in the Buildkite pipeline generation and execution. It should match the key in the KERNEL_TUNER_REGISTRY in kernel_tuner_runner.py to ensure the correct kernel tuner is called during execution."
-        self.storage_manager = LocalDbManager(
-        ) if run_config.run_locally else SpannerStorageManager()
+        # lazy import the storage manager to avoid import spanner when running locally
+        if run_config.run_locally:
+            from tools.kernel.tuner.v1.storage_management.local_db_manager import \
+                LocalDbManager
+            self.storage_manager = LocalDbManager()
+        else:
+            from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
+                SpannerStorageManager
+            self.storage_manager = SpannerStorageManager()
         self._KERNEL_INPUTS_CACHE = {}
         self._TUNING_KEY = None
         self.tuner_config = tuner_config
