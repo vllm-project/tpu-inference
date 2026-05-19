@@ -23,8 +23,9 @@ from jax.experimental.pallas import tpu as pltpu
 
 try:
     import raw_transfer as raiden
-except ImportError:
-    raiden = None
+except ImportError as e:
+    raise ImportError("raw_transfer module not found. Make sure PYTHONPATH includes the bazel-bin/raw_transfer directory.") from e
+    # raiden = None
 
 Future = Any
 shard_map = jax.shard_map
@@ -430,32 +431,40 @@ def copy_to_host(src, dest, mesh, sharding_spec):
     return _copy(src, dest)
 
 
-def batch_d2h_async(src_arrs: list[jax.Array], dst_arrs: list[jax.Array]):
+def batch_d2h_async(src_arrs: list[jax.Array], dst_arrs: list[jax.Array],
+                    **kwargs):
     """Starts batch transfer from TPU HBM to pinned host memory.
 
     Args:
         src_arrs: Per-layer JAX arrays on TPU HBM.
         dst_arrs: Per-layer pre-allocated JAX arrays on pinned host memory,
             updated in-place by the transfer.
+        **kwargs: Optional offset/size kwargs forwarded to the underlying
+            transfer (e.g. src_offsets_major_dim, dst_offsets_major_dim,
+            copy_sizes_major_dim).
 
     Returns:
         Futures object; call await_batch_futures() to block until complete.
     """
-    return raiden.transfer_d2h_batch_async(src_arrs, dst_arrs)
+    return raiden.transfer_d2h_batch_async(src_arrs, dst_arrs, **kwargs)
 
 
-def batch_h2d_async(src_arrs: list[jax.Array], dst_arrs: list[jax.Array]):
+def batch_h2d_async(src_arrs: list[jax.Array], dst_arrs: list[jax.Array],
+                    **kwargs):
     """Starts batch transfer from pinned host memory to TPU HBM.
 
     Args:
         src_arrs: Per-layer JAX arrays on pinned host memory.
         dst_arrs: Per-layer pre-allocated JAX arrays on TPU HBM,
             updated in-place by the transfer.
+        **kwargs: Optional offset/size kwargs forwarded to the underlying
+            transfer (e.g. src_offsets_major_dim, dst_offsets_major_dim,
+            copy_sizes_major_dim).
 
     Returns:
         Futures object; call await_batch_futures() to block until complete.
     """
-    return raiden.transfer_h2d_batch_async(src_arrs, dst_arrs)
+    return raiden.transfer_h2d_batch_async(src_arrs, dst_arrs, **kwargs)
 
 
 def await_batch_futures(futures) -> None:

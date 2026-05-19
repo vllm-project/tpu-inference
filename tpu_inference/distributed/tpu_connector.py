@@ -723,30 +723,28 @@ class TPUConnectorWorker:
         logger.debug(
             f"Worker {self.node_id} -->get the buffer id {buffer_idx}")
         start_time = time.perf_counter()
-        sliced_dest_buffer = [
-            jax.lax.slice_in_dim(dest, 0, num_valid_blocks)
-            for dest in dest_buffer
-        ]
-        time_1 = time.perf_counter()
-        futures = batch_d2h_async(kv_src, sliced_dest_buffer)
+        futures = batch_d2h_async(
+            kv_src,
+            dest_buffer,
+            src_offsets_major_dim=[0],
+            dst_offsets_major_dim=[0],
+            copy_sizes_major_dim=[num_valid_blocks],
+        )
         await_batch_futures(futures)
-        updated_dest_buffer = sliced_dest_buffer
         end_time = time.perf_counter()
 
-        d2h_slice_time = (time_1 - start_time) * 1000
-        d2h_transfer_time = (end_time - time_1) * 1000
+        d2h_transfer_time = (end_time - start_time) * 1000
         logger.info(
-            f"Worker {self.node_id} --> Done D2H kv transfer for req_id={req_id} | slice time={d2h_slice_time:.2f}ms | copy time={d2h_transfer_time:.2f}ms"
+            f"Worker {self.node_id} --> Done D2H kv transfer for req_id={req_id} | copy time={d2h_transfer_time:.2f}ms"
         )
-        self.transfer_stats.record_d2h_transfer(d2h_slice_time,
-                                                d2h_transfer_time)
+        self.transfer_stats.record_d2h_transfer(0.0, d2h_transfer_time)
 
         # 4. Network transfer
         self.reqs_wait_pull[req_id] = [
             dest_buffer, req_meta.expiration_time, buffer_idx
         ]
         self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-        self.kv_transfer_server.await_pull(req_meta.uuid, updated_dest_buffer)
+        self.kv_transfer_server.await_pull(req_meta.uuid, dest_buffer)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
@@ -815,13 +813,20 @@ class TPUConnectorWorker:
             self.transfer_stats.record_successful_transfer(
                 prepare_time_ms, pull_time_ms, kv_size_mb)
 
+        num_valid_blocks = len(remote_block_ids)
         h2d_start = time.perf_counter()
         kv_device = [
             jax.device_put(jnp.zeros(arr.shape, dtype=arr.dtype),
                            self.sharding)
             for arr in kv_host
         ]
-        futures = batch_h2d_async(kv_host, kv_device)
+        futures = batch_h2d_async(
+            kv_host,
+            kv_device,
+            src_offsets_major_dim=[0],
+            dst_offsets_major_dim=[0],
+            copy_sizes_major_dim=[num_valid_blocks],
+        )
         await_batch_futures(futures)
         h2d_time_ms = (time.perf_counter() - h2d_start) * 1000
         logger.info(
