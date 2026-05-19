@@ -34,6 +34,19 @@ from tpu_inference.models.jax.qwen3_vl import (
 )
 from tpu_inference.runner.kv_cache import create_kv_caches
 
+from tpu_inference.distributed.jax_parallel_state import init_pp_distributed_environment
+
+@pytest.fixture(autouse=True, scope="module")
+def initialize_pp():
+    """Sets up the distributed environment before tests run."""
+    init_pp_distributed_environment(
+        ip="",
+        rank=0,
+        world_size=1,
+        device=jax.devices()[0],
+        need_pp=False,
+    )
+
 
 # --- Configuration Mocking ---
 class MockVisionConfig:
@@ -134,6 +147,7 @@ class MockVllmConfig:
             rope_theta=10000.0,
             tie_word_embeddings=tie_word_embeddings,
         )
+        hf_config.rope_theta = 10000.0
         hf_config.head_dim = hf_config.hidden_size // hf_config.num_attention_heads
 
         # Multimodal special tokens must be within vocab_size for embedding lookups.
@@ -192,7 +206,7 @@ def _make_kv_caches(model: Qwen3VLForConditionalGeneration,
     head_dim = model.language_model.layers[0].self_attn.head_dim
     layer_names = ["layer"] * model.config.num_hidden_layers
     return create_kv_caches(
-        num_blocks=4,
+        num_blocks=8,
         block_size=32,
         num_kv_heads=num_kv_heads,
         head_size=head_dim,
@@ -208,8 +222,8 @@ def mesh() -> Mesh:
     """Creates a mesh with all required axes for testing."""
     if not jax.devices():
         pytest.skip("No JAX devices available for mesh creation.")
-    devices = np.array(jax.local_devices())
-    return Mesh(devices.reshape((len(devices), 1, 1)),
+    devices = np.array(jax.local_devices()[0])
+    return Mesh(devices.reshape((1, 1, 1)),
                 axis_names=('data', 'attn_dp', 'model'))
 
 
@@ -658,7 +672,8 @@ class TestVisionPosEmbedInterpolation:
         rect_vllm_config = MockVllmConfig()
         rect_vllm_config.model_config = model_config
 
-        vision = Qwen3VLVisionTransformer(rect_vllm_config, nnx.Rngs(params=rng), mesh)
+        with jax.set_mesh(mesh):
+            vision = Qwen3VLVisionTransformer(rect_vllm_config, nnx.Rngs(params=rng), mesh)
         assert vision.pos_embed_grid_h != vision.pos_embed_grid_w
 
         pos_embeds = vision.fast_pos_embed_interpolate(((1, 2, 4),))
@@ -672,7 +687,7 @@ class TestQwen3VLForConditionalGeneration:
     def model(self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
         """Creates a model with mocked vision and language components."""
         with patch('tpu_inference.models.jax.qwen3_vl.Qwen3VLVisionTransformer', autospec=True) as MockVision, \
-             patch('tpu_inference.models.jax.qwen3_vl.Qwen3VLModel', autospec=True) as MockLM:
+             patch('tpu_inference.models.jax.qwen3_vl.Qwen3VLModel', autospec=True) as MockLM, jax.set_mesh(mesh):
             mock_visual = MockVision.return_value
             mock_visual.dtype = mock_vllm_config.model_config.dtype
             mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
@@ -850,9 +865,10 @@ class TestServingIntegration:
     def test_text_only_forward_is_causal(
         self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
-        input_ids_1 = jnp.array([1, 2, 3, 4, 5, 6], dtype=jnp.int32)
-        input_ids_2 = jnp.array([1, 2, 3, 4, 5, 7], dtype=jnp.int32)
+        with jax.set_mesh(mesh):
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        input_ids_1 = jnp.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=jnp.int32)
+        input_ids_2 = jnp.array([1, 2, 3, 4, 5, 6, 7, 9], dtype=jnp.int32)
 
         attn_meta = _make_attention_metadata(input_ids_1.shape[0])
 
@@ -868,7 +884,8 @@ class TestServingIntegration:
     def test_get_mrope_input_positions_wrapper_signature(
         self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
 
         grid = (1, 4, 4)
         n_img = _num_placeholders_for_grid(grid, model.spatial_merge_size)
@@ -885,7 +902,8 @@ class TestServingIntegration:
     def test_get_mrope_input_positions_with_2d_image_grid_mm_feature(
         self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
 
         grid = (1, 4, 4)
         n_img = _num_placeholders_for_grid(grid, model.spatial_merge_size)
@@ -909,7 +927,8 @@ class TestServingIntegration:
     def test_vision_encoder_and_embedding_merge_end_to_end(
         self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
-        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
 
         img_grid = (1, 4, 4)
         vid_grid = (2, 4, 4)
@@ -993,7 +1012,8 @@ class TestServingIntegration:
         self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         """Text-only input should produce sequential 3D positions."""
-        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
         tokens = [1, 2, 3, 4, 5, 6, 7, 8]
 
         positions, _ = model.get_mrope_input_positions(
@@ -1013,8 +1033,9 @@ class TestServingIntegration:
         self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         """KV cache should be updated after a forward pass."""
-        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
-        input_ids = jnp.array([1, 2, 3, 4], dtype=jnp.int32)
+        with jax.set_mesh(mesh):
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        input_ids = jnp.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=jnp.int32)
         attn_meta = _make_attention_metadata(input_ids.shape[0])
 
         kv_caches = _make_kv_caches(model, mesh)
@@ -1031,11 +1052,12 @@ class TestServingIntegration:
         self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         """DeepStack embeddings should affect outputs at placeholder positions."""
-        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
         grid = (1, 4, 4)
         n_img = _num_placeholders_for_grid(grid, model.spatial_merge_size)
         input_ids = jnp.array(
-            [1, model.vision_start_token_id] + [model.image_token_id] * n_img + [2],
+            [1, model.vision_start_token_id] + [model.image_token_id] * n_img + [2, 3],
             dtype=jnp.int32,
         )
         attn_meta = _make_attention_metadata(input_ids.shape[0])
@@ -1060,7 +1082,7 @@ class TestServingIntegration:
         self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         """DeepStack injection should use global decoder layer indices."""
-        with mesh: 
+        with jax.set_mesh(mesh): 
             model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
         language_model = model.language_model
         hidden_size = model.config.hidden_size
