@@ -138,6 +138,8 @@ def gdn_attention_core_tpu(
                                               padded_num_reqs,
                                               dp_size)
     
+    jax.debug.print("LLLLLLLLLLL: {}", seq_lens_sliced.shape)
+
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
          j_mixed_qkv,

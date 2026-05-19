@@ -565,8 +565,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # the max_reqs. If ATTN_BUCKETIZE_NUM_REQS=true, it is the
         # power-of-two between min and max reqs.
         # User can set ATTN_CUSTOM_NUM_REQS_BUCKETS to provide custom buckets.
-        self.attn_num_reqs_paddings = runner_utils.get_attn_req_paddings(
-            min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
+        self.attn_num_reqs_paddings_per_dp = runner_utils.get_attn_req_paddings(
+            min_req_size=MIN_NUM_SEQS, max_req_size=scheduler_config.max_num_seqs)
+        self.attn_num_reqs_paddings = self.attn_num_reqs_paddings_per_dp * self.dp_size
+
         self.num_reqs_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_reqs_paddings
         ]
