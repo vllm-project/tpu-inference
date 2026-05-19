@@ -7,3 +7,4 @@ rouge-score
 scikit-learn
 pandas
 gdown<6.0.0
+lm-eval[math]==0.4.11
