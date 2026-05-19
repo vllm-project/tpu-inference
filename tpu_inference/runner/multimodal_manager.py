@@ -205,8 +205,7 @@ class MultiModalManager:
                     deepstack_outputs,
             ):
                 self.runner.encoder_cache[mm_hash] = output
-                if deepstack_output is not None:
-                    self.runner.deepstack_cache[mm_hash] = deepstack_output
+                self.runner.deepstack_cache[mm_hash] = deepstack_output
 
     def gather_mm_embeddings(
         self,

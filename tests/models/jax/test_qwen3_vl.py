@@ -94,11 +94,10 @@ class MockModelConfig:
     def __init__(self, hf_config: Qwen3Config, dtype: jnp.dtype):
         self.hf_config = hf_config
         self.dtype = dtype
-        self.multimodal_config = MultiModalConfig(
-            image_input_type="pixel",
-            image_token_id=hf_config.image_token_id,
-            image_input_shape=None,
-        )
+        self.multimodal_config = MagicMock()
+        self.multimodal_config.image_input_type = "pixel"
+        self.multimodal_config.image_token_id = hf_config.image_token_id
+        self.multimodal_config.image_input_shape = None
         self.model = "mock_qwen3_vl"
         self.tokenizer = "mock_tokenizer"
         self.tokenizer_mode = "auto"
@@ -385,7 +384,7 @@ class TestApplyRopeWithMRoPE:
             x,
             positions_3d,
             head_dim=6,
-            rope_scaling={"mrope_section": [3, 3, 0]},
+            rope_scaling={"mrope_section": [2, 1, 0]},
             rope_input_ordering="interleaved",
         )
         assert result.shape == x.shape
@@ -1061,7 +1060,8 @@ class TestServingIntegration:
         self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
     ):
         """DeepStack injection should use global decoder layer indices."""
-        model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        with mesh: 
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
         language_model = model.language_model
         hidden_size = model.config.hidden_size
         seq_len = 4
