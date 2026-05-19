@@ -89,6 +89,7 @@ if TYPE_CHECKING:
 
 import tpu_inference.distributed.utils as dist_utils
 from tpu_inference import envs
+from tpu_inference.distributed.device_kv_pool import DeviceKVPool
 from tpu_inference.distributed.host_kv_pool import HostKVPool
 from tpu_inference.distributed.kv_transfer import (await_batch_futures,
                                                    batch_d2h_async,
@@ -282,6 +283,13 @@ class TPUConnectorScheduler():
             f"TPUConnectorScheduler --> kv_ip={self.kv_ip} | kv_port={self.kv_port}"
         )
 
+        self._use_device_pool = (not self.is_producer
+                                  and envs.TPU_MULTIHOST_BACKEND != "ray")
+        if self._use_device_pool:
+            self._device_pool_capacity = dist_utils.get_max_device_kv_pool_size()
+            self._device_pool_in_flight: int = 0
+            self._active_loading_reqs: set[ReqId] = set()
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -322,6 +330,13 @@ class TPUConnectorScheduler():
         # NOTE(xiang): Although the JAX P2P pulling is a blocking op, we will run it in a
         # separte thread to make it async, so we are safe to return True here.
         if count > 0:
+            if (self._use_device_pool
+                    and self._device_pool_in_flight >= self._device_pool_capacity):
+                logger.debug(
+                    f"TPUConnector Scheduler skip kv transfer for req {request.request_id}: "
+                    f"device pool full ({self._device_pool_in_flight}/{self._device_pool_capacity})"
+                )
+                return 0, False
             return count, True
         return 0, False
 
@@ -363,6 +378,9 @@ class TPUConnectorScheduler():
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
             )
+            if self._use_device_pool:
+                self._active_loading_reqs.add(request.request_id)
+                self._device_pool_in_flight += 1
         else:
             # This branch means two cases:
             # 1. We don't need to load KV-cache from remote because of full local cache.
@@ -375,6 +393,9 @@ class TPUConnectorScheduler():
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
             )
+            if self._use_device_pool and request.request_id in self._active_loading_reqs:
+                self._device_pool_in_flight -= 1
+                self._active_loading_reqs.discard(request.request_id)
 
         # Only trigger 1 KV transfer per request.
         params["do_remote_prefill"] = False
@@ -481,9 +502,12 @@ class TPUConnectorWorker:
         # req_id: (kv, expiration_time, buffer_index)
         self.reqs_wait_pull: dict[ReqId, list[list[jax.Array], float,
                                               int]] = {}
-        # req_id: (pull_thread_future, kv, block_ids)
+        # req_id: (pull_thread_future, kv, block_ids, buf_idx)
+        # buf_idx is the DeviceKVPool index to return after insert_kv_chunks;
+        # -1 sentinel until the future returns.
         self.reqs_pulling: dict[ReqId, list[Future, list[jax.Array],
-                                            list[int]]] = {}
+                                            list[int], int]] = {}
+        self.device_kv_pool: DeviceKVPool | None = None
 
         # req_id: (kv, indices)
         self.reqs_ready_to_insert: dict[ReqId, tuple[list[jax.Array],
@@ -566,6 +590,33 @@ class TPUConnectorWorker:
                 cache_inner_shape=kv_layer.shape[1:],
                 dtype=self.dtype,
                 host_sharding=self.host_sharding)
+
+        if not self.is_producer and not self.multi_host:
+            block_size = self.vllm_config.cache_config.block_size
+            max_blocks = self.vllm_config.model_config.max_model_len // block_size
+            pool_size = dist_utils.get_max_device_kv_pool_size()
+            # raiden's batch_h2d_async partial-copy path rejects destinations
+            # whose sharding.spec[0] is not None. The KV cache uses
+            # P('data', None, 'model') where 'data' has size 1 (physically
+            # replicated on the major axis), but the check is purely syntactic.
+            # Build a pool-specific sharding with None on the major axis —
+            # physically identical to the KV cache layout, syntactically
+            # accepted by the partial-copy fast path.
+            pool_spec = jax.sharding.PartitionSpec(None,
+                                                   *self.sharding.spec[1:])
+            pool_sharding = jax.sharding.NamedSharding(
+                self.sharding.mesh, pool_spec, memory_kind='device')
+            self.device_kv_pool = DeviceKVPool(
+                pool_size=pool_size,
+                num_layers=self.num_layers,
+                max_blocks_per_req=max_blocks,
+                cache_inner_shape=kv_layer.shape[1:],
+                dtype=self.dtype,
+                device_sharding=pool_sharding)
+            logger.info(
+                f"TPUConnector Worker {self.node_id} --> initialized DeviceKVPool "
+                f"pool_size={pool_size}, max_blocks={max_blocks}"
+            )
 
     def _maybe_start_p2p_server(self):
         if self.kv_transfer_server is not None:
@@ -653,8 +704,10 @@ class TPUConnectorWorker:
                 if req_id not in self.reqs_pulling:
                     self.reqs_pulling[req_id] = [
                         self.pull_executor.submit(self._pull_kv, req_id, conn,
-                                                  req_meta), None,
-                        req_meta.local_block_ids
+                                                  req_meta),
+                        None,                    # kv (populated when future done)
+                        req_meta.local_block_ids,
+                        -1,                      # buf_idx (populated when future done)
                     ]
                 else:
                     # Update the local block ids as the pre-allocated blocks may get preempted
@@ -662,7 +715,7 @@ class TPUConnectorWorker:
             else:
                 if req_id in self.reqs_pulling:
                     assert self.reqs_pulling[req_id][1] is not None
-                    _, kv, block_numbers = self.reqs_pulling.pop(req_id)
+                    _, kv, block_numbers, buf_idx = self.reqs_pulling.pop(req_id)
                     if len(block_numbers) > 0:
                         start_time = time.perf_counter()
                         self.runner.kv_caches = insert_kv_chunks(
@@ -672,6 +725,8 @@ class TPUConnectorWorker:
                         logger.info(
                             f"TPUConnector Worker {self.node_id} --> req_id={req_id}, takes {(end_time - start_time)*1000:.2f}ms for insert_kv_chunks"
                         )
+                        if buf_idx != -1 and self.device_kv_pool is not None:
+                            self.device_kv_pool.return_buffer(buf_idx, kv)
                     # The request has finished pulling the KV from remote, or it has full local
                     # prefix cache, need to notify P to let it free blocks.
                     socket = self._maybe_build_notif_socket(req_meta)
@@ -815,24 +870,47 @@ class TPUConnectorWorker:
 
         num_valid_blocks = len(remote_block_ids)
         h2d_start = time.perf_counter()
-        kv_device = [
-            jax.device_put(jnp.zeros(arr.shape, dtype=arr.dtype),
-                           self.sharding)
-            for arr in kv_host
-        ]
-        futures = batch_h2d_async(
-            kv_host,
-            kv_device,
-            src_offsets_major_dim=[0],
-            dst_offsets_major_dim=[0],
-            copy_sizes_major_dim=[num_valid_blocks],
-        )
-        await_batch_futures(futures)
+
+        if self.device_kv_pool is not None:
+            assert num_valid_blocks <= self.device_kv_pool.max_blocks_per_req, (
+                f"num_valid_blocks={num_valid_blocks} exceeds device pool "
+                f"max_blocks_per_req={self.device_kv_pool.max_blocks_per_req}"
+            )
+            buf_idx, kv_device = self.device_kv_pool.get_buffer(timeout=60)
+        else:
+            buf_idx = -1
+            kv_device = [
+                jax.device_put(jnp.zeros(arr.shape, dtype=arr.dtype),
+                               self.sharding)
+                for arr in kv_host
+            ]
+
+        try:
+            futures = batch_h2d_async(
+                kv_host,
+                kv_device,
+                src_offsets_major_dim=[0],
+                dst_offsets_major_dim=[0],
+                copy_sizes_major_dim=[num_valid_blocks],
+            )
+            await_batch_futures(futures)
+        except Exception:
+            # H2D failed after we checked out a pool buffer — return it so the
+            # slot isn't leaked. Re-raise so the future surfaces the error and
+            # get_finished() can clean up reqs_pulling.
+            if buf_idx != -1 and self.device_kv_pool is not None:
+                logger.warning(
+                    f"Worker {self.node_id} --> H2D failed for req_id={req_id}, "
+                    f"returning buf_idx={buf_idx} to pool"
+                )
+                self.device_kv_pool.return_buffer(buf_idx, kv_device)
+            raise
         h2d_time_ms = (time.perf_counter() - h2d_start) * 1000
         logger.info(
-            f"Worker {self.node_id} --> kv transfer | H2D req_id={req_id} | time={h2d_time_ms:.2f}ms"
+            f"Worker {self.node_id} --> kv transfer | H2D req_id={req_id} | "
+            f"time={h2d_time_ms:.2f}ms | buf_idx={buf_idx}"
         )
-        return kv_device
+        return buf_idx, kv_device
 
     def _get_kv_spec(self, num_blocks: int) -> list[jax.ShapeDtypeStruct]:
         assert num_blocks <= self.shape[0]
@@ -881,8 +959,22 @@ class TPUConnectorWorker:
             if self.reqs_pulling[req_id][1] is None:
                 future = self.reqs_pulling[req_id][0]
                 if future.done():
-                    kv = future.result()
+                    try:
+                        buf_idx, kv = future.result()
+                    except Exception as e:
+                        # _pull_kv raised (e.g., pool timeout, H2D failure).
+                        # Drop the entry so the worker doesn't get stuck
+                        # re-polling a failed future. The request will time out
+                        # higher up; we intentionally do NOT add to done_recving
+                        # because the KV transfer never completed.
+                        logger.error(
+                            f"Worker {self.node_id} --> _pull_kv failed for "
+                            f"req_id={req_id}: {e!r}"
+                        )
+                        del self.reqs_pulling[req_id]
+                        continue
                     self.reqs_pulling[req_id][1] = kv
+                    self.reqs_pulling[req_id][3] = buf_idx
                     done_recving.add(req_id)
 
         # Mark a req as done seding when it's expired.

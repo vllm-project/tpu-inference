@@ -25,7 +25,8 @@ from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.distributed.utils import (get_device_topology_order_id,
-                                             get_host_ip, get_kv_transfer_port)
+                                             get_host_ip, get_kv_transfer_port,
+                                             get_max_device_kv_pool_size)
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -374,6 +375,32 @@ class TPUWorker(WorkerBase):
                 logger.info(
                     f"  ALERT: KV offloading enabled. Deducting {stage_buffer_size_bytes} Bytes ({staging_buffer_pages} pages) from available HBM for staging buffer."
                 )
+
+            if kv_transfer_config.kv_connector == "TPUConnector" and \
+               kv_transfer_config.kv_connector_module_path == \
+                   "tpu_inference.distributed.tpu_connector" and \
+               kv_transfer_config.is_kv_consumer and \
+               envs.TPU_MULTIHOST_BACKEND != "ray":
+                pool_size = get_max_device_kv_pool_size()
+                block_size = self.vllm_config.cache_config.block_size
+                max_blocks_per_req = (
+                    self.vllm_config.model_config.max_model_len // block_size)
+
+                kv_cache_specs = self.get_kv_cache_spec()
+                num_layers = len(kv_cache_specs)
+                assert num_layers >= 1
+                _, _layer_spec = next(iter(kv_cache_specs.items()))
+                vllm_page_size_bytes = _layer_spec.page_size_bytes
+
+                device_pool_size_bytes = (pool_size * num_layers *
+                                          max_blocks_per_req *
+                                          vllm_page_size_bytes)
+                total_hbm_avail = total_hbm_avail - device_pool_size_bytes
+                logger.info(
+                    f"  ALERT: TPUConnector D-side DeviceKVPool enabled. "
+                    f"Deducting {device_pool_size_bytes} Bytes "
+                    f"({pool_size=}, {max_blocks_per_req=}, {num_layers=}) "
+                    f"from available HBM for staging buffer.")
 
         total_hbm_avail_gb = round(total_hbm_avail / utils.GBYTES, 2)
 

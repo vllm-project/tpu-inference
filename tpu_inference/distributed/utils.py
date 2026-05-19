@@ -97,6 +97,12 @@ def get_max_host_kv_buffer_size() -> int:
     return int(size_str)
 
 
+def get_max_device_kv_pool_size() -> int:
+    """Maximum number of concurrent in-flight D-side device KV staging buffers."""
+    size_str = os.getenv("TPU_MAX_DEVICE_KV_POOL_SIZE", "30")
+    return int(size_str)
+
+
 def get_device_topology_order_id(local_devices, global_devices) -> int:
     """
     Calculates the topology order ID for the local device set within the global topology.
