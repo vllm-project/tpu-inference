@@ -273,6 +273,13 @@ class VllmModelWrapper:
 
     def jit_step_func(self):
 
+        # NOTE(continue_decode hack): compiler_options were moved off this
+        # nested-jittable step_fun and onto the top-level _decode_core jit in
+        # decode_loop.py (JAX forbids compiler_options on a nested jit). This
+        # regresses the normal decode path, which loses these XLA collective-
+        # matmul flags -- intentionally accepted for now to unblock the
+        # continue_decode path. Revert / split into a separate entry point
+        # before relying on the default path.
         @jax.jit(
             donate_argnames=("kv_caches", ),
             out_shardings=(
@@ -282,12 +289,6 @@ class VllmModelWrapper:
                 None,  # empty list
                 None,  # expert ids
             ),
-            compiler_options={
-                "xla_tpu_all_gather_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative"
-            },
             static_argnames=(
                 "layer_name_to_kvcache_index",
                 "is_first_rank",

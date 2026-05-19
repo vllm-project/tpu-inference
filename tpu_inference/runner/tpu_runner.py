@@ -1111,27 +1111,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if max_decode_steps <= 0:
             max_decode_steps = 1
 
-        def loop_sample_fn(step_rng, logits):
-            return sample(
-                step_rng,
-                self.mesh,
-                logits,
-                sampling_metadata,
-            )
-
         lora_metadata = self.lora_utils.extract_lora_metadata()
 
         terminate_on_any_eos = self.vllm_config.additional_config.get(
             "terminate_on_any_eos", False)
 
-        # Pass max_decode_steps as a Python int to allow loop static bounds.
-        # This avoids nested JIT compilation overhead and runtime buffer OOM errors
-        # on tight HBM constraints, while still launching steps asynchronously (no sync).
+        # max_decode_steps is a Python int (static loop bound). The loop is a
+        # single jax.jit'd, kv-cache-donating fused while_loop: in-place KV
+        # update keeps peak HBM flat, and the data-dependent EOS early-exit
+        # stays on-device (no per-step host sync). `sample` and self.mesh are
+        # stable objects passed straight through so the jit cache persists;
+        # per-call sampling data goes via `sampling_metadata`.
         generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices = continue_decode(
             state=self.state_leaves,
             model_fn=self.model_fn,
             compute_logits_fn=self.compute_logits_fn,
-            sample_fn=loop_sample_fn,
+            sample_fn=sample,
+            mesh=self.mesh,
+            sampling_metadata=sampling_metadata,
             init_state=init_state,
             kv_caches=self.kv_caches,
             max_decode_steps=max_decode_steps,
@@ -1148,22 +1145,29 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             is_first_rank=self.is_first_rank,
             is_last_rank=self.is_last_rank,
             dp_size=self.dp_size,
+            collect_expert_indices=getattr(
+                self.vllm_config.model_config,
+                "enable_return_routed_experts", False),
         )
         self.rng_params_for_sampling = final_rng
 
         self.kv_caches = final_kv_caches
 
-        if all_expert_indices is not None:
-            generated_tokens_cpu_list, all_expert_indices_cpu_list = jax.device_get(
-                (generated_tokens, all_expert_indices))
-            generated_tokens_cpu = np.stack(generated_tokens_cpu_list)
-            all_expert_indices_cpu = np.stack(all_expert_indices_cpu_list)
-        else:
-            generated_tokens_cpu_list = jax.device_get(generated_tokens)
-            generated_tokens_cpu = np.stack(generated_tokens_cpu_list)
-            all_expert_indices_cpu = None
+        # continue_decode now returns fixed-size stacked buffers plus the
+        # number of steps actually executed (early EOS exit can stop before
+        # the cap). This is the single, end-of-run host transfer.
+        generated_tokens_cpu, all_expert_indices_cpu, actual_steps = jax.device_get(
+            (generated_tokens, all_expert_indices, final_state.step_counter))
+        actual_steps = int(actual_steps)
+        logger.info(
+            "continue_decode ran %d/%d steps for %d reqs", actual_steps,
+            max_decode_steps, self.input_batch.num_reqs)
+        generated_tokens_cpu = np.asarray(generated_tokens_cpu)[:actual_steps]
+        if all_expert_indices_cpu is not None:
+            all_expert_indices_cpu = np.asarray(
+                all_expert_indices_cpu)[:actual_steps]
 
-        # Expose request dimension as axis 0 after transpose: shape (batch_size, max_decode_steps)
+        # Expose request dimension as axis 0 after transpose: shape (batch_size, actual_steps)
         generated_tokens_cpu = generated_tokens_cpu.T
         if logits_indices_selector is not None:
             # Realign physical rows back to logical input batch order upfront
