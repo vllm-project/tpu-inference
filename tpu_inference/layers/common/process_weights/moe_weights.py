@@ -322,14 +322,6 @@ def process_moe_weights(
     w13_weight = jnp.swapaxes(w13_weight, 1, 2)
     w2_weight = jnp.swapaxes(w2_weight, 1, 2)
 
-    # `with_layout_constraint` here was a jax-0.9.2 workaround for a "must have
-    # valid byte strides" error. On jax 0.10 (commit 83ac59f16 / d1eb0fb07),
-    # `layout_constraint_p` is now read by `get_out_layouts_via_propagation` and
-    # actually pins the requested layout — which is the WRONG layout for the
-    # MoE kernel's weight reads and silently miscomputes (gemma-4-26B-A4B
-    # accuracy → 0). Removed; the natural C-order layout is what the kernel
-    # expects on jax 0.10.
-
     if w13_weight_scale is not None:
         # For block scales (experts, out_blocks, in_blocks), we need to maintain
         # the block dims
