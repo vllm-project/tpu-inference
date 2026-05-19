@@ -396,6 +396,13 @@ class VllmModelWrapper:
                 "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
                     threshold_bytes)
 
+        # NOTE(continue_decode hack): compiler_options were moved off this
+        # nested-jittable step_fun and onto the top-level _decode_core jit in
+        # decode_loop.py (JAX forbids compiler_options on a nested jit). This
+        # regresses the normal decode path, which loses these XLA collective-
+        # matmul flags -- intentionally accepted for now to unblock the
+        # continue_decode path. Revert / split into a separate entry point
+        # before relying on the default path.
         @jax.jit(
             donate_argnames=("kv_caches", ),
             out_shardings=(

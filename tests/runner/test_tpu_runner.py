@@ -226,29 +226,29 @@ class TestTPUJaxRunner:
 
         # Mock continue_decode output
         # Unpacks: generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices
-        mock_generated_tokens = [MagicMock() for _ in range(5)]
-        mock_all_expert_indices = [MagicMock() for _ in range(5)]
+        mock_generated_tokens = MagicMock()
+        mock_all_expert_indices = MagicMock()
+        mock_final_state = MagicMock()
         mock_continue_decode.return_value = (
             mock_generated_tokens,
             MagicMock(),  # kv_caches
-            MagicMock(),  # final_state
+            mock_final_state,  # final_state
             MagicMock(),  # final_rng
             mock_all_expert_indices)
 
-        # Mock jax.device_get to return generated tokens (steps=5, batch_size=8)
+        # continue_decode now returns fixed-size stacked buffers; the caller
+        # trims them with final_state.step_counter via a single device_get of
+        # (generated_tokens, all_expert_indices, step_counter).
         mock_tokens_cpu = np.zeros((5, 8), dtype=np.int32)
-        mock_tokens_cpu_list = [mock_tokens_cpu[i] for i in range(5)]
-
-        # Mock jax.device_get for expert indices (steps=5, layers=3, batch_size=8, top_k=2)
         mock_experts_cpu = np.arange(5 * 3 * 8 * 2,
                                      dtype=np.int32).reshape(5, 3, 8, 2)
-        mock_experts_cpu_list = [mock_experts_cpu[i] for i in range(5)]
 
         def device_get_side_effect(arg):
-            if isinstance(arg, tuple) and len(arg) == 2:
-                tokens_arg, experts_arg = arg
-                if tokens_arg is mock_generated_tokens and experts_arg is mock_all_expert_indices:
-                    return mock_tokens_cpu_list, mock_experts_cpu_list
+            if isinstance(arg, tuple) and len(arg) == 3:
+                tokens_arg, experts_arg, _ = arg
+                if (tokens_arg is mock_generated_tokens
+                        and experts_arg is mock_all_expert_indices):
+                    return mock_tokens_cpu, mock_experts_cpu, np.int32(5)
             return arg
 
         mock_device_get.side_effect = device_get_side_effect
@@ -330,11 +330,12 @@ class TestTPUJaxRunner:
         runner.layer_name_to_kvcache_index = {}
 
         # Mock continue_decode output
-        mock_generated_tokens = [MagicMock() for _ in range(5)]
+        mock_generated_tokens = MagicMock()
+        mock_final_state = MagicMock()
         mock_continue_decode.return_value = (
             mock_generated_tokens,
             MagicMock(),  # kv_caches
-            MagicMock(),  # final_state
+            mock_final_state,  # final_state
             MagicMock(),  # final_rng
             None  # all_expert_indices
         )
@@ -349,11 +350,15 @@ class TestTPUJaxRunner:
         mock_tokens_cpu[:, 0] = [101, 102, 999, 0, 0]
         mock_tokens_cpu[:, 1] = [201, 202, 203, 204, 999]
         mock_tokens_cpu[:, 2] = [301, 302, 303, 304, 305]
-        mock_tokens_cpu_list = [mock_tokens_cpu[i] for i in range(5)]
 
+        # New contract: caller does a single device_get of
+        # (generated_tokens, all_expert_indices, step_counter) and trims to
+        # step_counter (= 5 here, so all rows are kept).
         def device_get_side_effect(arg):
-            if arg is mock_generated_tokens:
-                return mock_tokens_cpu_list
+            if isinstance(arg, tuple) and len(arg) == 3:
+                tokens_arg, experts_arg, _ = arg
+                if tokens_arg is mock_generated_tokens and experts_arg is None:
+                    return mock_tokens_cpu, None, np.int32(5)
             return arg
 
         mock_device_get.side_effect = device_get_side_effect
@@ -476,11 +481,12 @@ class TestTPUJaxRunner:
         runner.layer_name_to_kvcache_index = {}
 
         # Mock continue_decode output
-        mock_generated_tokens = [MagicMock() for _ in range(5)]
+        mock_generated_tokens = MagicMock()
+        mock_final_state = MagicMock()
         mock_continue_decode.return_value = (
             mock_generated_tokens,
             MagicMock(),  # kv_caches
-            MagicMock(),  # final_state
+            mock_final_state,  # final_state
             MagicMock(),  # final_rng
             None  # all_expert_indices
         )
@@ -494,11 +500,14 @@ class TestTPUJaxRunner:
         # Rank 1 (slots 0, 1, 2, 3)
         mock_tokens_cpu[:, 4] = [301, 302, 303, 304, 305]  # req3
 
-        mock_tokens_cpu_list = [mock_tokens_cpu[i] for i in range(5)]
-
+        # New contract: caller does a single device_get of
+        # (generated_tokens, all_expert_indices, step_counter) and trims to
+        # step_counter (= 5 here, so all rows are kept).
         def device_get_side_effect(arg):
-            if arg is mock_generated_tokens:
-                return mock_tokens_cpu_list
+            if isinstance(arg, tuple) and len(arg) == 3:
+                tokens_arg, experts_arg, _ = arg
+                if tokens_arg is mock_generated_tokens and experts_arg is None:
+                    return mock_tokens_cpu, None, np.int32(5)
             return arg
 
         mock_device_get.side_effect = device_get_side_effect
