@@ -155,9 +155,11 @@ class TestMultiModalManager:
 
         # Verify the pixel values tensor passed to the mock
         passed_pixel_values = kwargs_arg['pixel_values']
-        assert isinstance(passed_pixel_values, torch.Tensor)
         assert passed_pixel_values.shape == (1, 3, 224, 224)
-        assert torch.equal(passed_pixel_values[0], dummy_pixel_values)
+        
+        # Convert dummy_pixel_values the same way the actual code does
+        expected_pixel_values = dummy_pixel_values.to(torch.float32).numpy().astype(jnp.bfloat16)
+        np.testing.assert_array_equal(passed_pixel_values[0], expected_pixel_values)
 
     def test_execute_mm_encoder_multiple_images(self):
         import torch
@@ -259,10 +261,13 @@ class TestMultiModalManager:
         assert "pixel_values" in kwargs_arg
 
         passed_pixel_values = kwargs_arg['pixel_values']
-        assert isinstance(passed_pixel_values, torch.Tensor)
         assert passed_pixel_values.shape == (2, 3, 224, 224)
-        assert torch.equal(passed_pixel_values[0], px_1)
-        assert torch.equal(passed_pixel_values[1], px_2)
+
+        # Convert both dummy tensors the same way the actual code does
+        expected_px_1 = px_1.to(torch.float32).numpy().astype(jnp.bfloat16)
+        expected_px_2 = px_2.to(torch.float32).numpy().astype(jnp.bfloat16)
+        np.testing.assert_array_equal(passed_pixel_values[0], expected_px_1)
+        np.testing.assert_array_equal(passed_pixel_values[1], expected_px_2)
 
     def test_gather_mm_embeddings_chunked_prefill(self):
         """Tests _gather_mm_embeddings with chunked prefill scenarios."""
@@ -463,16 +468,20 @@ class TestMultiModalManager:
 
         mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
         mock_scheduler_output.num_scheduled_tokens = {req_id: 4}
+        mock_scheduler_output.total_num_scheduled_tokens = 4
 
         mm_embeds, is_mm_embed, deepstack_embeds = self.runner.mm_manager.gather_mm_embeddings(
-            mock_scheduler_output, target_pad_len=2)
-
-        np.testing.assert_array_equal(mm_embeds, encoder_embedding)
+            mock_scheduler_output, target_pad_len=4)
+        assert len(mm_embeds) == 1
+        np.testing.assert_array_equal(mm_embeds[0], encoder_embedding)
         np.testing.assert_array_equal(
-            is_mm_embed, np.array([True, True], dtype=np.bool_))
+            is_mm_embed, np.array([True, False, True, False], dtype=np.bool_))  
         assert len(deepstack_embeds) == 1
-        np.testing.assert_array_equal(deepstack_embeds[0],
-                                      deepstack_embedding[0])
+        expected_deepstack = np.concatenate([
+            deepstack_embedding[0], 
+            np.zeros((2, 4), dtype=np.float32)
+        ], axis=0)
+        np.testing.assert_array_equal(deepstack_embeds[0], expected_deepstack)
 
     def test_calc_mrope_positions(self):
         """Tests the calculation of M-RoPE positions for mixed prompt/completion."""

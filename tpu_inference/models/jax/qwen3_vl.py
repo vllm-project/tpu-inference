@@ -287,6 +287,9 @@ def build_mrope_input_positions(
                 ed_video = len(input_tokens) + 1
         else:
             ed_video = len(input_tokens) + 1
+        
+        if ed_image == len(input_tokens) + 1 and ed_video == len(input_tokens) + 1:
+            break
 
         if ed_image < ed_video:
             t, h, w = image_grid_thw[image_index]
@@ -1519,6 +1522,9 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             self, image_input: Qwen3VLImageInputs
     ) -> tuple[tuple[jax.Array, ...],
                Optional[list[list[jax.Array]]]]:
+
+        if not image_input:
+            return (), None
         grid_thw = image_input["image_grid_thw"]
         if not grid_thw:
             return (), None
@@ -1528,6 +1534,8 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             deepstack_embeds = None
         else:
             pixel_values = image_input["pixel_values"]
+            if pixel_values is None:
+                return (), None
             image_embeds, deepstack_embeds = self.visual(pixel_values, grid_thw)
         return split_mm_embeddings_by_grid(image_embeds, grid_thw,
                                            self.spatial_merge_size,
@@ -1568,6 +1576,9 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
                     if deepstack_outputs is None:
                         deepstack_outputs = []
                     deepstack_outputs.extend(deepstack_by_item)
+        
+        if not multimodal_embeddings:
+            return {}
 
         return {"embeds": multimodal_embeddings, "deepstack": deepstack_outputs}
 
