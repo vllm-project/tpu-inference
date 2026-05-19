@@ -645,6 +645,18 @@ def shard_moe_weights(
     return weights
 
 
+def _get_expert_shard_axis(mesh: Mesh) -> str | tuple[str, ...]:
+    expert_axis = ShardingAxisName.EXPERT
+    if isinstance(expert_axis, str):
+        assert expert_axis in mesh.axis_names, f"{expert_axis} not in mesh {mesh}!"
+        return expert_axis
+    else:
+        if all(a in mesh.axis_names for a in expert_axis):
+            return expert_axis
+        else:
+            return mesh.axis_names[0]
+
+
 def shard_moe_weights_to_tpu(
     weights: FusedMoEWeights,
     mesh: Mesh,
@@ -669,28 +681,51 @@ def shard_moe_weights_to_tpu(
     Returns:
         FusedMoEWeights sharded across TPU devices.
     """
-    expert_axis = ShardingAxisName.EXPERT
-    if isinstance(expert_axis, str):
-        assert expert_axis in mesh.axis_names, f"{expert_axis} not in mesh {mesh}!"
-        shard_axis = expert_axis
-    else:
-        if all(a in mesh.axis_names for a in expert_axis):
-            shard_axis = expert_axis
-        else:
-            shard_axis = mesh.axis_names[0]
+    shard_axis = _get_expert_shard_axis(mesh)
     ep_sharding = NamedSharding(mesh, P(shard_axis))
 
-    result_fields = {}
     for field in fields(FusedMoEWeights):
         key = field.name
-        weight = getattr(weights, key)
-        if weight is not None:
-            result_fields[key] = general_device_put(weight,
-                                                    ep_sharding,
-                                                    source_mesh=source_mesh)
+        if (weight := getattr(weights, key, None)) is not None:
+            weight = general_device_put(weight,
+                                        ep_sharding,
+                                        source_mesh=source_mesh)
+            setattr(weights, key, weight)
+    return weights
+
+
+def process_quantized_moe_weights(
+    weights: FusedMoEWeights,
+    moe_backend: MoEBackend,
+    mesh: Mesh,
+    activation: str,
+    weight_block_size: tuple[int, ...] | None = None,
+    desired_quant_dtype: jnp.dtype | None = None,
+    requant_block_size: int | None = None,
+) -> FusedMoEWeights:
+
+    disable_weight_requantization = envs.DISABLE_WEIGHT_REQUANTIZATION
+
+    if desired_quant_dtype is None:
+        if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
+            desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
         else:
-            result_fields[key] = None
-    return FusedMoEWeights(**result_fields)
+            desired_quant_dtype = weights.w13_weight.dtype
+
+    if requant_block_size is None:
+        if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
+            requant_block_size = int(requant_block_size_from_env)
+
+    return _process_quantized_moe_weights_impl(
+        weights=weights,
+        moe_backend=moe_backend,
+        mesh=mesh,
+        activation=activation,
+        weight_block_size=weight_block_size,
+        desired_quant_dtype=desired_quant_dtype,
+        requant_block_size=requant_block_size,
+        disable_weight_requantization=disable_weight_requantization,
+    )
 
 
 @jax.jit(static_argnames=(
@@ -700,8 +735,9 @@ def shard_moe_weights_to_tpu(
     "weight_block_size",
     "desired_quant_dtype",
     "requant_block_size",
+    "disable_weight_requantization",
 ))
-def process_quantized_moe_weights(
+def _process_quantized_moe_weights_impl(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
     mesh: Mesh,
@@ -709,6 +745,7 @@ def process_quantized_moe_weights(
     weight_block_size: tuple[int, ...] | None = None,
     desired_quant_dtype: jnp.dtype | None = None,
     requant_block_size: int | None = None,
+    disable_weight_requantization: bool = False,
 ) -> FusedMoEWeights:
     w13_weight = weights.w13_weight
     w13_weight_scale = weights.w13_weight_scale
@@ -719,7 +756,7 @@ def process_quantized_moe_weights(
     w13_reorder_size = get_mesh_shape_product(mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
-    if envs.DISABLE_WEIGHT_REQUANTIZATION:
+    if disable_weight_requantization:
         logger.info_once("Disabled weight requantization")
         assert not envs.MOE_REQUANTIZE_WEIGHT_DTYPE, (
             "MOE_REQUANTIZE_WEIGHT_DTYPE should not be set when weight "
@@ -757,33 +794,19 @@ def process_quantized_moe_weights(
             moe_backend=moe_backend,
             w13_reorder_size=w13_reorder_size,
             w13_interleave=w13_interleave,
-            disable_weight_requantization=envs.DISABLE_WEIGHT_REQUANTIZATION,
+            disable_weight_requantization=disable_weight_requantization,
         )
 
         target_shardings = _get_moe_weight_shardings(out, moe_backend, mesh)
         for field in fields(FusedMoEWeights):
             key = field.name
-            weight = getattr(out, key)
-            if weight is not None:
+            if (weight := getattr(out, key, None)) is not None:
                 sharding = getattr(target_shardings, key)
                 setattr(out, key,
                         jax.lax.with_sharding_constraint(weight, sharding))
         return out
 
-    if desired_quant_dtype is None:
-        if desired_quant_dtype_from_env := envs.MOE_REQUANTIZE_WEIGHT_DTYPE:
-            desired_quant_dtype = to_jax_dtype(desired_quant_dtype_from_env)
-        else:
-            desired_quant_dtype = w13_weight.dtype
-            if w13_weight.dtype != w2_weight.dtype:
-                raise ValueError(
-                    f"Expected w13_weight and w2_weight to have the same dtype, but got {w13_weight.dtype} and {w2_weight.dtype}"
-                )
-
-    if requant_block_size is None:
-        if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
-            requant_block_size = (int(requant_block_size_from_env)
-                                  if requant_block_size_from_env else None)
+    # desired_quant_dtype and requant_block_size are handled by the wrapper.
 
     moe_logging_str = (
         f"[MoE requantization]: re-quantizing MoE weights to {desired_quant_dtype}"
@@ -809,15 +832,7 @@ def process_quantized_moe_weights(
     hidden_pad = hidden_size - orig_hidden_size
 
     # Determine which mesh axis the expert dim is sharded across.
-    expert_axis = ShardingAxisName.EXPERT
-    if isinstance(expert_axis, str):
-        assert expert_axis in mesh.axis_names, f"{expert_axis} not in mesh {mesh}!"
-        shard_axis = expert_axis
-    else:
-        if all(a in mesh.axis_names for a in expert_axis):
-            shard_axis = expert_axis
-        else:
-            shard_axis = mesh.axis_names[0]
+    shard_axis = _get_expert_shard_axis(mesh)
 
     scan_batch_size = 1
     expert_p = P(shard_axis)
@@ -971,8 +986,7 @@ def process_quantized_moe_weights(
     target_shardings = _get_moe_weight_shardings(out, moe_backend, mesh)
     for field in fields(FusedMoEWeights):
         key = field.name
-        weight = getattr(out, key)
-        if weight is not None:
+        if (weight := getattr(out, key, None)) is not None:
             sharding = getattr(target_shardings, key)
             setattr(out, key,
                     jax.lax.with_sharding_constraint(weight, sharding))
