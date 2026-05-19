@@ -155,6 +155,110 @@
           "random-output-len": 1024
         }
       }
+    },
+    {
+      "case_name": "gpt-oss-120b-dataset_random-inlen_1024-outlen_8192-C2",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "MODELTAG": "NEW",
+        "EXPECTED_ETEL": 43200000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 8192,
+        "PREFIX_LEN": 0,
+        "VLLM_ENGINE_READY_TIMEOUT_S": 1800
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "MODEL_IMPL_TYPE": "vllm",
+          "USE_MOE_EP_KERNEL": "0"
+        },
+        "args": {
+          "model": "openai/gpt-oss-120b",
+          "seed": 42,
+          "max-num-seqs": 1024,
+          "max-num-batched-tokens": 16384,
+          "tensor-parallel-size": {
+            "v7x-8": 2
+          },
+          "data-parallel-size": 4,
+          "max-model-len": 9216,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.97,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "openai/gpt-oss-120b",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "random",
+          "num-prompts": 4096,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true,
+          "random-input-len": 1024,
+          "random-output-len": 8192
+        }
+      }
+    },
+    {
+      "case_name": "gpt-oss-120b-dataset_random-inlen_8192-outlen_1024-C2",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "MODELTAG": "NEW",
+        "EXPECTED_ETEL": 43200000,
+        "INPUT_LEN": 8192,
+        "OUTPUT_LEN": 1024,
+        "PREFIX_LEN": 0,
+        "VLLM_ENGINE_READY_TIMEOUT_S": 1800
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "MODEL_IMPL_TYPE": "vllm",
+          "USE_MOE_EP_KERNEL": "0"
+        },
+        "args": {
+          "model": "openai/gpt-oss-120b",
+          "seed": 42,
+          "max-num-seqs": 1024,
+          "max-num-batched-tokens": 8192,
+          "tensor-parallel-size": {
+            "v7x-8": 2
+          },
+          "data-parallel-size": 4,
+          "max-model-len": 9216,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.95,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "openai/gpt-oss-120b",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "random",
+          "num-prompts": 4096,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true,
+          "random-input-len": 8192,
+          "random-output-len": 1024
+        }
+      }
     }
   ]
 }
