@@ -25,9 +25,8 @@ from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
                                                             TunerConfig,
                                                             TuningCase,
                                                             TuningStatus)
-from tools.kernel.tuner.v1.kernel_tuner_utils import (align_to, cdiv,
-                                                      get_dtype_packing)
 from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
+from tpu_inference.utils import align_to, cdiv, get_dtype_packing
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
