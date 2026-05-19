@@ -17,7 +17,8 @@
         "EXPECTED_ETEL": 43200000,
         "INPUT_LEN": 1024,
         "OUTPUT_LEN": 8192,
-        "PREFIX_LEN": 0
+        "PREFIX_LEN": 0,
+        "VLLM_ENGINE_READY_TIMEOUT_S": 1800
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -69,7 +70,8 @@
         "EXPECTED_ETEL": 43200000,
         "INPUT_LEN": 8192,
         "OUTPUT_LEN": 1024,
-        "PREFIX_LEN": 0
+        "PREFIX_LEN": 0,
+        "VLLM_ENGINE_READY_TIMEOUT_S": 1800
       },
       "server_command_options": {
         "command_type": "vllm_serve",
