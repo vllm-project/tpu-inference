@@ -191,14 +191,11 @@ class CompilationManager:
 
         warmup_start = time.perf_counter()
         for name, fn, args, call_kwargs, warmup_handler in tasks:
-            try:
-                if warmup_handler is not None:
-                    out = warmup_handler(fn, args, call_kwargs)
-                else:
-                    out = fn(*args, **call_kwargs)
-                jax.tree.map(lambda r: r.block_until_ready(), out)
-            except Exception as e:
-                logger.warning("Warm-up call for %s failed: %r", name, e)
+            if warmup_handler is not None:
+                out = warmup_handler(fn, args, call_kwargs)
+            else:
+                out = fn(*args, **call_kwargs)
+            jax.tree.map(lambda r: r.block_until_ready(), out)
         warmup_elapsed = time.perf_counter() - warmup_start
         if tasks:
             logger.info(
