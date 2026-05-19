@@ -73,7 +73,12 @@ steps:
       queue: tpu_v7x_2_queue
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash -c 'python -m pytest tools/kernel/tuner/v1/tests/test_kernel_tuner_runner.py -v'
+        .buildkite/scripts/run_in_docker.sh bash -c "
+          pip install --upgrade google-cloud-spanner && \
+          pip install --upgrade google-api-core && \
+          pip install --upgrade google-auth && \
+          pip install --upgrade absl-py && \        
+        python -m pytest tools/kernel/tuner/v1/tests/test_kernel_tuner_runner.py -v"
 
   # -----------------------------------------------------------------
   # Demo 1: test_kernel_tuner_runner.py
@@ -91,4 +96,9 @@ steps:
       queue: tpu_v6e_queue
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash -c 'python -m pytest tools/kernel/tuner/v1/tests/test_kernel_tuner_runner.py -v'
+        .buildkite/scripts/run_in_docker.sh bash -c "
+          pip install --upgrade google-cloud-spanner && \
+          pip install --upgrade google-api-core && \
+          pip install --upgrade google-auth && \
+          pip install --upgrade absl-py && \        
+        python -m pytest tools/kernel/tuner/v1/tests/test_kernel_tuner_runner.py -v"
