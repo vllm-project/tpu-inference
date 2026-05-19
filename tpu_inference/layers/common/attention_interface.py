@@ -568,58 +568,6 @@ def sharded_ragged_paged_attention_experimental(
     )(*args)
 
 
-def dcp_all2all(
-    context_out: jax.Array,
-    context_lse: jax.Array,
-    dcp_axis: str = 'dcp'
-    ) -> tuple[jax.Array, jax.Array]:
-    """
-    DCP combine via All-to-All communication.
-        Inputs:
-        - context_out = [seq, dcp_size * local_heads, head_dim]
-        - ontext_lse = [seq, dcp_size * local_heads]
-        Outputs:
-        - 
-        - 
-    """
-
-    dcp_size = jax.lax.psum(1, axis_name=dcp_axis)
-
-    # =====================================================================
-    # 1. All-to-All
-    # Split in head axis and concatenates them at front axis (seq),
-    # Before: [seq_len, dcp_size * local_heads, ...]
-    # After:  [dcp_size * seq_len, local_heads, ...]
-    # =====================================================================
-    out_gathered = jax.lax.all_to_all(context_out, axis_name=dcp_axis, split_axis=1, concat_axis=0)
-    lse_gathered = jax.lax.all_to_all(context_lse, axis_name=dcp_axis, split_axis=1, concat_axis=0)
-
-    # =====================================================================
-    # 2. Reshape to isolate the dcp_size dimension for Local Update
-    # =====================================================================
-    out_reshaped = out_gathered.reshape((dcp_size, -1, *out_gathered.shape[1:]))
-    lse_reshaped = lse_gathered.reshape((dcp_size, -1, *lse_gathered.shape[1:]))
-
-    # =====================================================================
-    # 3. Local Update
-    # =====================================================================
-    # Find the maximum LSE locally along dcp_size
-    max_lse = jnp.max(lse_reshaped, axis=0)
-
-    # Calculate exponential weights for each partition
-    weights = jnp.exp(lse_reshaped - max_lse)
-
-    # Weighted sum of the outputs and the weights themselves
-    sum_weighted_out = jnp.sum(out_reshaped * weights[..., None], axis=0)
-    sum_weights = jnp.sum(weights, axis=0)
-
-    # Normalize to get the final combined output and updated LSE
-    combined_out = sum_weighted_out / sum_weights[..., None]
-    combined_lse = max_lse + jnp.log(sum_weights)
-
-    # Returned shapes: [seq_len, local_heads, head_dim] and [seq_len, local_heads]
-    return combined_out, combined_lse
-
 def dcp_alltoall(
     attn_out: jax.Array,  # P('decode-cp', 'model'): (max_num_tokens, heads//model, head_dim)
     lse: jax.Array,       # P('decode-cp', 'model'): (max_num_tokens, heads//model)
@@ -728,7 +676,6 @@ def forward_with_dcp(
     k_scale: float | None = None,
     v_scale: float | None = None,
     ):
-    print('start forward with dcp function')
     """
     Distributed Context Parallelism (DCP) Attention forward pass.
 
@@ -744,32 +691,12 @@ def forward_with_dcp(
 
     md = attention_metadata
 
-    dcp_size = mesh.shape['dcp']
-    # local_block_size = kv_cache.shape[1]
-    # global_block_size = local_block_size * dcp_size
-
-    def _compute_local_kv_lens(kv_lens):
-        # dcp_rank = jax.lax.axis_index('dcp')
-        # Each device only holds a chunk of the context.
-        # This is a simplified version.
-        return kv_lens // dcp_size
-
-    local_kv_lens = jax.shard_map(
-        _compute_local_kv_lens,
-        mesh=mesh,
-        in_specs=(P(ShardingAxisName.ATTN_DATA),),
-        out_specs=P(ShardingAxisName.ATTN_DATA),
-    )(md.seq_lens)
-
     # ==========================================================================
     # Phase 2: Query Attention (Attending to current tokens K, V)
     # Run Phase 2 FIRST so Phase 1 can read from updated_kv_cache instead of
     # the aliased kv_cache arg. This eliminates the kv_cache copy that XLA
     # inserts for each of the 94 layers (38 simultaneous copies = 8.5G HLO
     # temp) when Phase 3 is alive, preventing the compile-time HBM OOM.
-    # Phase 1 attends only to positions 0..local_kv_lens-1; Phase 2 writes
-    # new tokens at position local_kv_lens, so Phase 1's result is identical
-    # whether it reads from kv_cache or updated_kv_cache.
     # ==========================================================================
     q_len_per_seq = md.query_start_loc[1:] - md.query_start_loc[:-1]
     global_kv_cache_lens = md.seq_lens - q_len_per_seq
@@ -806,7 +733,7 @@ def forward_with_dcp(
         k=k,
         v=v,
         kv_cache=updated_kv_cache,
-        kv_lens=local_kv_lens,
+        kv_lens=md.seq_lens,
         paged_indices=md.block_tables,
         cu_q_lens=md.query_start_loc,
         distribution=md.request_distribution,
@@ -816,13 +743,11 @@ def forward_with_dcp(
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
-        kv_cache_lens=local_kv_lens,
+        kv_cache_lens=global_kv_cache_lens,
         kv_write_back=False,
         is_context_phase=True,
         # return_lse=True,
     )
-
-    print("context rpa")
 
     from jax import random
 
@@ -836,8 +761,6 @@ def forward_with_dcp(
     )
 
     context_attn_out_cor, context_lse_cor = dcp_alltoall(context_attn_out, context_lse, mesh=mesh)
-
-    print("all 2 all")
 
     lse_sharding = jax.sharding.NamedSharding(
         mesh,
