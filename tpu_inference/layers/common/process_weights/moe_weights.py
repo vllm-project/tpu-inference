@@ -708,10 +708,27 @@ def process_fp8_moe_weights(
         logger.info_once(moe_logging_str)
 
         # Dequantize fp8 2d block quantized weights into fp32.
-        w13_weight = dequantize_tensor(w13_weight,
-                                       w13_weight_scale, (1, 2),
-                                       jnp.float32,
-                                       block_size=weight_block_size)
+        if weight_block_size is None and w13_weight_scale.ndim == 2:
+            # Models like Mistral Small 4 have fused W1/W3 weights and scales,
+            # but lack a block size (using per-channel quantization). The standard
+            # dequantize_tensor logic expects either a single scale or a matching
+            # block dimension, which fails for fused per-channel scales.
+            # We must manually split W1 and W3, dequantize them with their respective
+            # scales, and then re-concatenate them before passing to the next stage.
+            intermediate_size = w13_weight.shape[1] // 2
+            w1 = w13_weight[:, :intermediate_size, :]
+            w3 = w13_weight[:, intermediate_size:, :]
+            s1 = w13_weight_scale[:, 0]
+            s3 = w13_weight_scale[:, 1]
+            w1 = dequantize_tensor(w1, s1, (1, 2), jnp.float32)
+            w3 = dequantize_tensor(w3, s3, (1, 2), jnp.float32)
+            w13_weight = jnp.concatenate([w1, w3], axis=1)
+        else:
+            w13_weight = dequantize_tensor(w13_weight,
+                                           w13_weight_scale, (1, 2),
+                                           jnp.float32,
+                                           block_size=weight_block_size)
+
         w2_weight = dequantize_tensor(w2_weight,
                                       w2_weight_scale, (1, 2),
                                       jnp.float32,
