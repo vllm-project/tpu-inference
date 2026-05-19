@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass, fields
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -702,7 +703,29 @@ def process_quantized_moe_weights(
     weight_block_size: tuple[int, ...] | None = None,
     desired_quant_dtype: jnp.dtype | None = None,
     requant_block_size: int | None = None,
+    source_mesh: Mesh | None = None,
 ) -> FusedMoEWeights:
+    """Process quantized MoE weights for inference.
+
+    This function handles sharding the weights to TPU, and then either
+    processing them without requantization or re-quantizing them to a desired
+    data type and block size.
+
+    Args:
+        weights: The fused MoE weights.
+        moe_backend: The MoE backend to use.
+        mesh: The TPU device mesh.
+        activation: The activation function name.
+        weight_block_size: Optional block size for weight quantization.
+        desired_quant_dtype: Optional desired data type for requantization.
+        requant_block_size: Optional block size for requantization.
+        source_mesh: Optional mesh where weights currently reside.
+
+    Returns:
+        The processed FusedMoEWeights.
+    """
+
+    weights = shard_moe_weights_to_tpu(weights, mesh, source_mesh)
 
     disable_weight_requantization = envs.DISABLE_WEIGHT_REQUANTIZATION
 
@@ -725,6 +748,284 @@ def process_quantized_moe_weights(
         desired_quant_dtype=desired_quant_dtype,
         requant_block_size=requant_block_size,
         disable_weight_requantization=disable_weight_requantization,
+    )
+
+
+def _process_moe_weights_no_requant(
+    weights: FusedMoEWeights,
+    moe_backend: MoEBackend,
+    mesh: Mesh,
+    w13_reorder_size: int,
+    w13_interleave: bool,
+    disable_weight_requantization: bool,
+    weight_block_size: tuple[int, ...] | None,
+) -> FusedMoEWeights:
+    """Process MoE weights without requantization.
+
+    This is a helper for process_quantized_moe_weights when weight
+    requantization is disabled.
+
+    Args:
+        weights: The fused MoE weights.
+        moe_backend: The MoE backend to use.
+        mesh: The TPU device mesh.
+        w13_reorder_size: Size for reordering w13 weights.
+        w13_interleave: Whether to interleave w13 weights.
+        disable_weight_requantization: Must be True.
+        weight_block_size: Block size for weight quantization.
+
+    Returns:
+        The processed FusedMoEWeights.
+    """
+    w13_weight = weights.w13_weight
+    w13_weight_scale = weights.w13_weight_scale
+    w2_weight = weights.w2_weight
+    w2_weight_scale = weights.w2_weight_scale
+
+    logger.info_once("Disabled weight requantization")
+    assert not envs.MOE_REQUANTIZE_WEIGHT_DTYPE, (
+        "MOE_REQUANTIZE_WEIGHT_DTYPE should not be set when weight "
+        "requantization is disabled.")
+
+    assert weight_block_size is not None
+    in_block_size = weight_block_size[1]
+    if w13_weight_scale is not None and w13_weight_scale.ndim == 3:
+        in_blocks_13 = w13_weight.shape[2] // in_block_size
+        if (w13_weight_scale.shape[1] == in_blocks_13
+                and w13_weight_scale.shape[2] != in_blocks_13):
+            w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
+    if w2_weight_scale is not None and w2_weight_scale.ndim == 3:
+        in_blocks_2 = w2_weight.shape[2] // in_block_size
+        if (w2_weight_scale.shape[1] == in_blocks_2
+                and w2_weight_scale.shape[2] != in_blocks_2):
+            w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
+
+    weights = FusedMoEWeights(
+        w13_weight=w13_weight,
+        w13_weight_scale=w13_weight_scale,
+        w13_bias=weights.w13_bias,
+        w2_weight=w2_weight,
+        w2_weight_scale=w2_weight_scale,
+        w2_bias=weights.w2_bias,
+    )
+
+    out = process_moe_weights(
+        weights,
+        moe_backend=moe_backend,
+        w13_reorder_size=w13_reorder_size,
+        w13_interleave=w13_interleave,
+        disable_weight_requantization=disable_weight_requantization,
+    )
+
+    target_shardings = _get_moe_weight_shardings(out, moe_backend, mesh)
+    for field in fields(FusedMoEWeights):
+        key = field.name
+        if (weight := getattr(out, key, None)) is not None:
+            sharding = getattr(target_shardings, key)
+            setattr(out, key,
+                    jax.lax.with_sharding_constraint(weight, sharding))
+    return out
+
+
+def _requant_expert_batch_fn(
+    carry,
+    batch_inputs,
+    *,
+    has_w13_scale: bool,
+    has_w2_scale: bool,
+    weight_block_size: tuple[int, ...] | None,
+    orig_intermediate_size: int,
+    w13_interleave: bool,
+    inter_pad: int,
+    hidden_pad: int,
+    desired_quant_dtype: jnp.dtype,
+    w13_block_size: int,
+    w2_block_size: int,
+):
+    """Requantize a batch of experts.
+
+    This is a helper for jax.lax.scan inside _requant_and_process_local_fn.
+
+    Args:
+        carry: Unused carry for scan.
+        batch_inputs: Tuple containing the batch of weights and optionally scales.
+        has_w13_scale: Whether w13 has scale.
+        has_w2_scale: Whether w2 has scale.
+        weight_block_size: Block size for weight quantization.
+        orig_intermediate_size: Original intermediate size before padding.
+        w13_interleave: Whether to interleave w13 weights.
+        inter_pad: Padding for intermediate dimension.
+        hidden_pad: Padding for hidden dimension.
+        desired_quant_dtype: Desired data type for requantization.
+        w13_block_size: Block size for w13 requantization.
+        w2_block_size: Block size for w2 requantization.
+
+    Returns:
+        Tuple of (carry, (w13_q_b, w13_s_new_b, w2_q_b, w2_s_new_b)).
+    """
+    idx = 0
+    w13_batch = batch_inputs[idx]
+    idx += 1
+    if has_w13_scale:
+        w13_s_batch = batch_inputs[idx]
+        idx += 1
+    else:
+        w13_s_batch = None
+
+    w2_batch = batch_inputs[idx]
+    idx += 1
+    if has_w2_scale:
+        w2_s_batch = batch_inputs[idx]
+        idx += 1
+    else:
+        w2_s_batch = None
+
+    w13_fp32 = dequantize_tensor(w13_batch,
+                                 w13_s_batch, (1, 2),
+                                 jnp.float32,
+                                 block_size=weight_block_size)
+    w2_fp32 = dequantize_tensor(w2_batch,
+                                w2_s_batch, (1, 2),
+                                jnp.float32,
+                                block_size=weight_block_size)
+
+    if w13_interleave:
+        w13_pad_widths = ((0, 0), (0, 2 * inter_pad), (0, hidden_pad))
+        w13_fp32 = jnp.pad(w13_fp32, w13_pad_widths)
+    else:
+        w1 = w13_fp32[:, :orig_intermediate_size, :]
+        w3 = w13_fp32[:, orig_intermediate_size:, :]
+        w13_pad_widths = ((0, 0), (0, inter_pad), (0, hidden_pad))
+        w1 = jnp.pad(w1, w13_pad_widths)
+        w3 = jnp.pad(w3, w13_pad_widths)
+        w13_fp32 = jnp.concatenate([w1, w3], axis=1)
+
+    w2_pad_widths = ((0, 0), (0, hidden_pad), (0, inter_pad))
+    w2_fp32 = jnp.pad(w2_fp32, w2_pad_widths)
+
+    w13_q_b, w13_s_new_b = quantize_tensor(desired_quant_dtype, w13_fp32, 2,
+                                           w13_block_size)
+    w2_q_b, w2_s_new_b = quantize_tensor(desired_quant_dtype, w2_fp32, 2,
+                                         w2_block_size)
+    return carry, (w13_q_b, w13_s_new_b, w2_q_b, w2_s_new_b)
+
+
+def _requant_and_process_local_fn(
+    w13_w,
+    w13_s,
+    w13_b,
+    w2_w,
+    w2_s,
+    w2_b,
+    *,
+    scan_batch_size: int,
+    has_w13_scale: bool,
+    has_w2_scale: bool,
+    has_w13_bias: bool,
+    has_w2_bias: bool,
+    weight_block_size: tuple[int, ...] | None,
+    orig_intermediate_size: int,
+    w13_interleave: bool,
+    inter_pad: int,
+    hidden_pad: int,
+    desired_quant_dtype: jnp.dtype,
+    w13_block_size: int,
+    w2_block_size: int,
+    moe_backend: MoEBackend,
+    w13_reorder_size: int,
+):
+    """Per-device requantization and processing of MoE weights.
+
+    This is a helper for jax.shard_map inside _process_quantized_moe_weights_impl.
+
+    Args:
+        w13_w, w13_s, w13_b, w2_w, w2_s, w2_b: Local shards of weights, scales, and biases.
+        scan_batch_size: Batch size for scan.
+        has_w13_scale, has_w2_scale, has_w13_bias, has_w2_bias: Boolean flags.
+        weight_block_size: Block size for weight quantization.
+        orig_intermediate_size: Original intermediate size.
+        w13_interleave: Whether to interleave w13 weights.
+        inter_pad, hidden_pad: Padding amounts.
+        desired_quant_dtype: Desired data type for requantization.
+        w13_block_size, w2_block_size: Block sizes for requantization.
+        moe_backend: The MoE backend.
+        w13_reorder_size: Size for reordering w13 weights.
+
+    Returns:
+        Tuple of processed local shards.
+    """
+    n_local = w13_w.shape[0]
+    n_batches = n_local // scan_batch_size
+
+    _requant_expert_batch = partial(
+        _requant_expert_batch_fn,
+        has_w13_scale=has_w13_scale,
+        has_w2_scale=has_w2_scale,
+        weight_block_size=weight_block_size,
+        orig_intermediate_size=orig_intermediate_size,
+        w13_interleave=w13_interleave,
+        inter_pad=inter_pad,
+        hidden_pad=hidden_pad,
+        desired_quant_dtype=desired_quant_dtype,
+        w13_block_size=w13_block_size,
+        w2_block_size=w2_block_size,
+    )
+
+    xs_list = []
+    xs_list.append(w13_w)
+    if has_w13_scale:
+        xs_list.append(w13_s)
+    xs_list.append(w2_w)
+    if has_w2_scale:
+        xs_list.append(w2_s)
+
+    xs = tuple(
+        x.reshape(n_batches, scan_batch_size, *x.shape[1:]) for x in xs_list)
+    _, (w13_q, w13_s_new, w2_q, w2_s_new) = jax.lax.scan(_requant_expert_batch,
+                                                         init=None,
+                                                         xs=xs)
+
+    w13_q = w13_q.reshape(n_local, *w13_q.shape[2:])
+    w13_s_new = w13_s_new.reshape(n_local, *w13_s_new.shape[2:])
+    w2_q = w2_q.reshape(n_local, *w2_q.shape[2:])
+    w2_s_new = w2_s_new.reshape(n_local, *w2_s_new.shape[2:])
+
+    if has_w13_bias:
+        if w13_interleave:
+            w13_b_pad = ((0, 0), (0, 2 * inter_pad))
+            w13_b = jnp.pad(w13_b, w13_b_pad)
+        else:
+            b1 = w13_b[:, :orig_intermediate_size]
+            b3 = w13_b[:, orig_intermediate_size:]
+            b_pad = ((0, 0), (0, inter_pad))
+            b1 = jnp.pad(b1, b_pad)
+            b3 = jnp.pad(b3, b_pad)
+            w13_b = jnp.concatenate([b1, b3], axis=1)
+
+    if has_w2_bias:
+        w2_b_pad = ((0, 0), (0, hidden_pad))
+        w2_b = jnp.pad(w2_b, w2_b_pad)
+
+    out_local = process_moe_weights(
+        FusedMoEWeights(
+            w13_weight=w13_q,
+            w13_weight_scale=w13_s_new,
+            w13_bias=w13_b,
+            w2_weight=w2_q,
+            w2_weight_scale=w2_s_new,
+            w2_bias=w2_b,
+        ),
+        moe_backend=moe_backend,
+        w13_reorder_size=w13_reorder_size,
+        w13_interleave=w13_interleave,
+    )
+    return (
+        out_local.w13_weight,
+        out_local.w13_weight_scale,
+        out_local.w13_bias,
+        out_local.w2_weight,
+        out_local.w2_weight_scale,
+        out_local.w2_bias,
     )
 
 
@@ -751,60 +1052,23 @@ def _process_quantized_moe_weights_impl(
     w13_weight_scale = weights.w13_weight_scale
     w2_weight = weights.w2_weight
     w2_weight_scale = weights.w2_weight_scale
+    w13_bias = weights.w13_bias
+    w2_bias = weights.w2_bias
 
     w13_interleave = activation == "swigluoai"
     w13_reorder_size = get_mesh_shape_product(mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
     if disable_weight_requantization:
-        logger.info_once("Disabled weight requantization")
-        assert not envs.MOE_REQUANTIZE_WEIGHT_DTYPE, (
-            "MOE_REQUANTIZE_WEIGHT_DTYPE should not be set when weight "
-            "requantization is disabled.")
-
-        assert weight_block_size is not None
-        in_block_size = weight_block_size[1]
-        if w13_weight_scale is not None and w13_weight_scale.ndim == 3:
-            # out_dim = 2 * inter, in_dim = hidden
-            # we want (experts, out_blocks, in_blocks)
-            # check if it is (experts, in_blocks, out_blocks)
-            in_blocks_13 = w13_weight.shape[2] // in_block_size
-            if (w13_weight_scale.shape[1] == in_blocks_13
-                    and w13_weight_scale.shape[2] != in_blocks_13):
-                w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
-        if w2_weight_scale is not None and w2_weight_scale.ndim == 3:
-            # out_dim = hidden, in_dim = inter
-            # we want (experts, out_blocks, in_blocks)
-            in_blocks_2 = w2_weight.shape[2] // in_block_size
-            if (w2_weight_scale.shape[1] == in_blocks_2
-                    and w2_weight_scale.shape[2] != in_blocks_2):
-                w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
-
-        weights = FusedMoEWeights(
-            w13_weight=w13_weight,
-            w13_weight_scale=w13_weight_scale,
-            w13_bias=weights.w13_bias,
-            w2_weight=w2_weight,
-            w2_weight_scale=w2_weight_scale,
-            w2_bias=weights.w2_bias,
-        )
-
-        out = process_moe_weights(
+        return _process_moe_weights_no_requant(
             weights,
             moe_backend=moe_backend,
+            mesh=mesh,
             w13_reorder_size=w13_reorder_size,
             w13_interleave=w13_interleave,
             disable_weight_requantization=disable_weight_requantization,
+            weight_block_size=weight_block_size,
         )
-
-        target_shardings = _get_moe_weight_shardings(out, moe_backend, mesh)
-        for field in fields(FusedMoEWeights):
-            key = field.name
-            if (weight := getattr(out, key, None)) is not None:
-                sharding = getattr(target_shardings, key)
-                setattr(out, key,
-                        jax.lax.with_sharding_constraint(weight, sharding))
-        return out
 
     # desired_quant_dtype and requant_block_size are handled by the wrapper.
 
@@ -837,115 +1101,30 @@ def _process_quantized_moe_weights_impl(
     scan_batch_size = 1
     expert_p = P(shard_axis)
 
-    has_w13_scale = weights.w13_weight_scale is not None
-    has_w2_scale = weights.w2_weight_scale is not None
-    has_w13_bias = weights.w13_bias is not None
-    has_w2_bias = weights.w2_bias is not None
+    has_w13_scale = w13_weight_scale is not None
+    has_w2_scale = w2_weight_scale is not None
+    has_w13_bias = w13_bias is not None
+    has_w2_bias = w2_bias is not None
 
-    def _requant_and_process_local(w13_w, w13_s, w13_b, w2_w, w2_s, w2_b):
-        """Per-device requant + process. Shapes are local [local_experts, ...]."""
-        n_local = w13_w.shape[0]
-        n_batches = n_local // scan_batch_size
-
-        def _requant_expert_batch(carry, batch_inputs):
-            idx = 0
-            w13_batch = batch_inputs[idx]
-            idx += 1
-            if has_w13_scale:
-                w13_s_batch = batch_inputs[idx]
-                idx += 1
-            else:
-                w13_s_batch = None
-
-            w2_batch = batch_inputs[idx]
-            idx += 1
-            if has_w2_scale:
-                w2_s_batch = batch_inputs[idx]
-                idx += 1
-            else:
-                w2_s_batch = None
-
-            w13_fp32 = dequantize_tensor(w13_batch,
-                                         w13_s_batch, (1, 2),
-                                         jnp.float32,
-                                         block_size=weight_block_size)
-            w2_fp32 = dequantize_tensor(w2_batch,
-                                        w2_s_batch, (1, 2),
-                                        jnp.float32,
-                                        block_size=weight_block_size)
-
-            if w13_interleave:
-                w13_pad_widths = ((0, 0), (0, 2 * inter_pad), (0, hidden_pad))
-                w13_fp32 = jnp.pad(w13_fp32, w13_pad_widths)
-            else:
-                w1 = w13_fp32[:, :orig_intermediate_size, :]
-                w3 = w13_fp32[:, orig_intermediate_size:, :]
-                w13_pad_widths = ((0, 0), (0, inter_pad), (0, hidden_pad))
-                w1 = jnp.pad(w1, w13_pad_widths)
-                w3 = jnp.pad(w3, w13_pad_widths)
-                w13_fp32 = jnp.concatenate([w1, w3], axis=1)
-
-            w2_pad_widths = ((0, 0), (0, hidden_pad), (0, inter_pad))
-            w2_fp32 = jnp.pad(w2_fp32, w2_pad_widths)
-
-            w13_q_b, w13_s_new_b = quantize_tensor(desired_quant_dtype,
-                                                   w13_fp32, 2, w13_block_size)
-            w2_q_b, w2_s_new_b = quantize_tensor(desired_quant_dtype, w2_fp32,
-                                                 2, w2_block_size)
-            return carry, (w13_q_b, w13_s_new_b, w2_q_b, w2_s_new_b)
-
-        xs_list = []
-        xs_list.append(w13_w)
-        if has_w13_scale:
-            xs_list.append(w13_s)
-        xs_list.append(w2_w)
-        if has_w2_scale:
-            xs_list.append(w2_s)
-
-        xs = tuple(
-            x.reshape(n_batches, scan_batch_size, *x.shape[1:])
-            for x in xs_list)
-        _, (w13_q, w13_s_new, w2_q,
-            w2_s_new) = jax.lax.scan(_requant_expert_batch, init=None, xs=xs)
-
-        w13_q = w13_q.reshape(n_local, *w13_q.shape[2:])
-        w13_s_new = w13_s_new.reshape(n_local, *w13_s_new.shape[2:])
-        w2_q = w2_q.reshape(n_local, *w2_q.shape[2:])
-        w2_s_new = w2_s_new.reshape(n_local, *w2_s_new.shape[2:])
-
-        if has_w13_bias:
-            if w13_interleave:
-                w13_b_pad = ((0, 0), (0, 2 * inter_pad))
-                w13_b = jnp.pad(w13_b, w13_b_pad)
-            else:
-                b1 = w13_b[:, :orig_intermediate_size]
-                b3 = w13_b[:, orig_intermediate_size:]
-                b_pad = ((0, 0), (0, inter_pad))
-                b1 = jnp.pad(b1, b_pad)
-                b3 = jnp.pad(b3, b_pad)
-                w13_b = jnp.concatenate([b1, b3], axis=1)
-
-        if has_w2_bias:
-            w2_b_pad = ((0, 0), (0, hidden_pad))
-            w2_b = jnp.pad(w2_b, w2_b_pad)
-
-        out_local = process_moe_weights(
-            FusedMoEWeights(
-                w13_weight=w13_q,
-                w13_weight_scale=w13_s_new,
-                w13_bias=w13_b,
-                w2_weight=w2_q,
-                w2_weight_scale=w2_s_new,
-                w2_bias=w2_b,
-            ),
-            moe_backend=moe_backend,
-            w13_reorder_size=w13_reorder_size,
-            w13_interleave=w13_interleave,
-        )
-        # Return cleanly unpacked, fully processed arrays to align seamlessly with out_specs tuple.
-        return (out_local.w13_weight, out_local.w13_weight_scale,
-                out_local.w13_bias, out_local.w2_weight,
-                out_local.w2_weight_scale, out_local.w2_bias)
+    # We use the extracted function here.
+    _requant_and_process_local = partial(
+        _requant_and_process_local_fn,
+        scan_batch_size=scan_batch_size,
+        has_w13_scale=has_w13_scale,
+        has_w2_scale=has_w2_scale,
+        has_w13_bias=has_w13_bias,
+        has_w2_bias=has_w2_bias,
+        weight_block_size=weight_block_size,
+        orig_intermediate_size=orig_intermediate_size,
+        w13_interleave=w13_interleave,
+        inter_pad=inter_pad,
+        hidden_pad=hidden_pad,
+        desired_quant_dtype=desired_quant_dtype,
+        w13_block_size=w13_block_size,
+        w2_block_size=w2_block_size,
+        moe_backend=moe_backend,
+        w13_reorder_size=w13_reorder_size,
+    )
 
     in_specs = (
         expert_p,
