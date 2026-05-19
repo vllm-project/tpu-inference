@@ -36,8 +36,7 @@
           "max-num-seqs": 16,
           "max-num-batched-tokens": 1024,
           "tensor-parallel-size": {
-            "v7x-8": 8,
-            "default": 8
+            "v7x-8": 8
           },
           "max-model-len": 5120,
           "kv-cache-dtype": "fp8",
