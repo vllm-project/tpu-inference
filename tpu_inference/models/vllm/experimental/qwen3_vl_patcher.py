@@ -43,10 +43,12 @@ making sure they go through standard function arguments:
 
 import torch
 import torch.nn as nn
+import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
+import vllm.model_executor.models.utils as vllm_utils
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
-from vllm.sequence import IntermediateTensors
 from vllm.multimodal import NestedTensors
+from vllm.sequence import IntermediateTensors
 
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
@@ -274,12 +276,11 @@ def apply_qwen3_vl_patches(vllm_model):
         vllm_model, orig_forward, *args, **kwargs)
 
     # 5. Patch _flatten_embeddings in vllm utils to handle negative indexes correctly in torchax
-    import vllm.model_executor.models.utils as vllm_utils
     vllm_utils._flatten_embeddings = _patched_flatten_embeddings
 
     # 6. Force HAS_TRITON to False to prevent JAX/Triton active driver crash on TPU
-    import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
     qwen3_vl_mod.HAS_TRITON = False
+
 
 def is_qwen3_vl(vllm_model) -> bool:
     """Check if the given vLLM model is of architecture Qwen3VLForConditionalGeneration."""
