@@ -147,7 +147,8 @@ def moe_gmm_local(x: jax.Array,
                   activation: str,
                   topk: int,
                   parallelism: Literal["tp", "ep"],
-                  enable_rs_kernel: bool = False) -> jax.Array:
+                  enable_rs_kernel: bool = False,
+                  onehot_moe_permute_threshold: int = 0) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
@@ -194,9 +195,24 @@ def moe_gmm_local(x: jax.Array,
                       if parallelism == "tp" else ShardingAxisName.EXPERT)
 
     if local_group_size < group_sizes.size:
-        out = ragged_gather_reduce(gmm2_res, topk_argsort_revert_indices,
-                                   topk_weights.reshape(-1), mask.reshape(-1),
-                                   topk)
+        if batch_size <= onehot_moe_permute_threshold:
+            # Use onehot + matmul for unpermutation, which can be faster
+            # for small batch size.
+            assert batch_size % topk == 0, (
+                f"batch_size ({batch_size}) should be a multiple of topk "
+                f"({topk})")
+            num_tokens = batch_size // topk
+            revert_indices = topk_argsort_revert_indices.reshape(
+                num_tokens, topk)
+            onehot = jax.nn.one_hot(revert_indices,
+                                    batch_size,
+                                    dtype=gmm2_res.dtype)
+            combine = (onehot * topk_weights[..., None] * mask).sum(axis=1)
+            out = combine @ gmm2_res
+        else:
+            out = ragged_gather_reduce(gmm2_res, topk_argsort_revert_indices,
+                                       topk_weights.reshape(-1),
+                                       mask.reshape(-1), topk)
     else:
         token_hidden_full = gmm2_res[topk_argsort_revert_indices]
         cur_sorted = token_hidden_full.reshape((-1, topk, gmm2_res.shape[-1]))
@@ -255,6 +271,7 @@ def tensor_parallel_gmm(
     topk: int,
     mesh: Mesh,
     enable_rs_kernel: bool = False,
+    onehot_moe_permute_threshold: int = 0,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     group_offset = jnp.array([0])
@@ -279,6 +296,7 @@ def tensor_parallel_gmm(
             topk=topk,
             parallelism="tp",
             enable_rs_kernel=False,
+            onehot_moe_permute_threshold=onehot_moe_permute_threshold,
         ),
         mesh=mesh,
         in_specs=(
@@ -327,6 +345,7 @@ def expert_parallel_gmm(
     topk: int,
     mesh: Mesh,
     enable_rs_kernel: bool = False,
+    onehot_moe_permute_threshold: int = 0,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
@@ -346,6 +365,7 @@ def expert_parallel_gmm(
             activation=activation,
             topk=topk,
             parallelism="ep",
+            onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             enable_rs_kernel=enable_rs_kernel,
         ),
         mesh=mesh,
@@ -416,6 +436,7 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     "scoring_fn",
     "all_gather_fp8",
     "enable_rs_kernel",
+    "onehot_moe_permute_threshold",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -434,6 +455,7 @@ def fused_moe_func(
     scoring_fn: str,
     all_gather_fp8: bool = False,
     enable_rs_kernel: bool = False,
+    onehot_moe_permute_threshold: int = 0,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -526,12 +548,21 @@ def fused_moe_func(
                                                include_initial=True)
             shard_output_start = group_offsets[experts_start]
             shard_output_end = group_offsets[experts_end]
-            x = ragged_gather(
-                hidden_states_local,
-                token_indices_sorted,
-                shard_output_start,
-                shard_output_end,
-            )
+            num_tokens = token_indices_sorted.shape[0]
+            if num_tokens <= onehot_moe_permute_threshold:
+                # Use one-hot matmul for permutation, which can be faster
+                # for small batch size
+                onehot = jax.nn.one_hot(token_indices_sorted,
+                                        hidden_states_local.shape[0],
+                                        dtype=hidden_states_local.dtype)
+                x = onehot @ hidden_states_local
+            else:
+                x = ragged_gather(
+                    hidden_states_local,
+                    token_indices_sorted,
+                    shard_output_start,
+                    shard_output_end,
+                )
         else:
             x = hidden_states_local[token_indices_sorted]
 
@@ -578,6 +609,7 @@ def fused_moe_func(
             topk=topk,
             mesh=mesh,
             enable_rs_kernel=actual_enable_rs_kernel,
+            onehot_moe_permute_threshold=onehot_moe_permute_threshold,
         )
     else:
         x = tensor_parallel_gmm(
@@ -595,6 +627,7 @@ def fused_moe_func(
             topk=topk,
             mesh=mesh,
             enable_rs_kernel=actual_enable_rs_kernel,
+            onehot_moe_permute_threshold=onehot_moe_permute_threshold,
         )
 
     return x[:num_tokens, :hidden_size]

@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     ENABLE_RS_KERNEL: bool = False
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
+    ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
 
 
 def env_with_choices(
@@ -359,6 +360,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS", "30000")),
     "MLA_XPOSE_N_TILE_SIZE":
     lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),
+    # Use Onehot+Matmul for permute and unpermute before and after moe
+    # when the batch size <= this threshold. When set to 0, this feature
+    # is effectively disabled.
+    "ONEHOT_MOE_PERMUTE_THRESHOLD":
+    lambda: int(os.getenv("ONEHOT_MOE_PERMUTE_THRESHOLD", "0")),
 }
 
 
