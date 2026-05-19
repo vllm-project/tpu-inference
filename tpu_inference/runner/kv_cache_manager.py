@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
-from vllm.config import get_layers_from_vllm_config
+from vllm.config import get_layers_from_vllm_config, set_current_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -80,6 +80,7 @@ class KVCacheManager:
         # mamba state with `attn_metadata.mamba_state_indices` (in
         # `[0, max_num_reqs]`) so it stays in-bounds for the smaller arrays.
         self._mamba_num_blocks: int | None = None
+        self.actual_mamba_num_blocks: int | None = None
 
     def _create_attention_spec(
             self,
@@ -423,6 +424,7 @@ class KVCacheManager:
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully
         block_size = self.runner.cache_config.block_size
+        block_size *= self.runner.vllm_config.parallel_config.decode_context_parallel_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
 
         tp_axis_name = ShardingAxisName.ATTN_HEAD
@@ -462,18 +464,24 @@ class KVCacheManager:
                         layer_type = text_config.layer_types[i]
 
                     is_sliding = layer_type == "sliding_attention"
+                    # Use `or` instead of getattr default so we also handle
+                    # the case where the attribute is present but None
+                    # (e.g. Gemma-4 E2B has num_global_key_value_heads=None).
+                    # `or` also coerces 0 → fallback, which is fine because
+                    # 0 num_kv_heads / head_dim is never a valid config and
+                    # would crash get_padded_num_heads downstream anyway.
                     if not is_sliding:
-                        num_kv_heads = getattr(text_config,
-                                               "num_global_key_value_heads",
-                                               base_num_kv_heads)
-                        head_size = getattr(text_config, "global_head_dim",
-                                            base_head_size)
+                        num_kv_heads = (getattr(
+                            text_config, "num_global_key_value_heads", None)
+                                        or base_num_kv_heads)
+                        head_size = (getattr(text_config, "global_head_dim",
+                                             None) or base_head_size)
                     else:
-                        num_kv_heads = getattr(text_config,
-                                               "num_key_value_heads",
-                                               base_num_kv_heads)
-                        head_size = getattr(text_config, "head_dim",
-                                            base_head_size)
+                        num_kv_heads = (getattr(text_config,
+                                                "num_key_value_heads", None)
+                                        or base_num_kv_heads)
+                        head_size = (getattr(text_config, "head_dim", None)
+                                     or base_head_size)
                     # Pad num_kv_heads to multiple of TP size.
                     num_kv_heads = common_utils.get_padded_num_heads(
                         num_kv_heads, model_cnt)
@@ -611,6 +619,9 @@ class KVCacheManager:
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details.")
+            num_speculative_tokens = 0
+            if self.runner.vllm_config.speculative_config:
+                num_speculative_tokens = self.runner.vllm_config.speculative_config.num_speculative_tokens
             new_input_batch = InputBatch(
                 max_num_reqs=self.runner.max_num_reqs,
                 max_model_len=self.runner.max_model_len,
@@ -618,6 +629,8 @@ class KVCacheManager:
                 pin_memory=False,
                 vocab_size=self.runner.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
+                num_speculative_tokens=num_speculative_tokens,
+                dp_size=self.runner.dp_size,
             )
             self.runner.input_batch = new_input_batch
             self.runner.persistent_batch_manager.input_batch = new_input_batch
@@ -676,14 +689,18 @@ class KVCacheManager:
                         "MambaSpec does not support shared layers for now, defaulting to single KV cache per layer..."
                     )
                     duplicate_shared_layers = True
-                    # assert that each kv_cache_tensor in kv_cache_config.kv_cache_tensors has the same number of shared layers
-                    # This is needed for models like Qwen3.5 where every 4 layers share the same KV cache (3 linear attn and 1 full attn)
-                    num_shared_layers = len(
-                        kv_cache_config.kv_cache_tensors[0].shared_by)
-                    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                        assert len(
-                            kv_cache_tensor.shared_by
-                        ) == num_shared_layers, f"Expected all kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
+                    non_mtp_tensors = [
+                        t for t in kv_cache_config.kv_cache_tensors
+                        if not any("mtp" in name for name in t.shared_by)
+                    ]
+                    if non_mtp_tensors:
+                        # assert that each kv_cache_tensor in kv_cache_config.kv_cache_tensors has the same number of shared layers
+                        # This is needed for models like Qwen3.5 where every 4 layers share the same KV cache (3 linear attn and 1 full attn)
+                        num_shared_layers = len(non_mtp_tensors[0].shared_by)
+                        for kv_cache_tensor in non_mtp_tensors:
+                            assert len(
+                                kv_cache_tensor.shared_by
+                            ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
                     break
 
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
@@ -717,19 +734,17 @@ class KVCacheManager:
                 assert kv_cache_tensor.size % page_size_bytes == 0
                 num_blocks = kv_cache_tensor.size // page_size_bytes
 
-            if self.use_mla and not self.runner.vllm_config.additional_config.get(
-                    "sharding", {}).get("sharding_strategy", {}).get(
-                        "enable_dp_attention", False):
-                # MLA KV cache is sharded over MLP_TENSOR
-                divisor = common_utils.get_mesh_shape_product(
-                    self.runner.mesh, ShardingAxisName.MLP_TENSOR)
-            else:
-                # Default KV cache is sharded over ATTN_DATA
-                divisor = common_utils.get_mesh_shape_product(
-                    self.runner.mesh, ShardingAxisName.ATTN_DATA)
+            # Default KV cache is sharded over (BATCH=(dp, attn_dp))
+            divisor = common_utils.get_mesh_shape_product(
+                self.runner.mesh, ShardingAxisName.BATCH)
 
             # num_blocks must be a multiple of the sharding divisor
             num_blocks = (num_blocks // divisor) * divisor
+
+            if self.runner.cache_config.num_gpu_blocks_override is not None:
+                num_blocks = min(
+                    num_blocks,
+                    self.runner.cache_config.num_gpu_blocks_override)
 
             # When compact-mamba sizing succeeded (set by
             # `_maybe_set_compact_mamba_num_blocks_override`), mamba layers
@@ -740,6 +755,8 @@ class KVCacheManager:
             mamba_num_blocks = (self._mamba_num_blocks
                                 if self._mamba_num_blocks is not None else
                                 num_blocks)
+            if self.actual_mamba_num_blocks is None:
+                self.actual_mamba_num_blocks = mamba_num_blocks
 
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
                 layer_spec = layer_name_to_spec[layer_name]
@@ -802,6 +819,7 @@ class KVCacheManager:
                                 text_config.qk_rope_head_dim
                         else:
                             head_size = layer_spec.head_size
+
                         kv_cache = create_kv_caches(
                             num_blocks=num_blocks,
                             block_size=layer_spec.block_size,
@@ -926,7 +944,8 @@ class KVCacheManager:
             f"hbm_before="
             f"{utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
 
-        self.initialize_kv_cache(kv_cache_config)
+        with set_current_vllm_config(self.runner.vllm_config):
+            self.initialize_kv_cache(kv_cache_config)
 
     @staticmethod
     @jax.jit

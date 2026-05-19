@@ -13,10 +13,17 @@
 # limitations under the License.
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from flax import nnx
+from jax.sharding import Mesh
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.process_weights.moe_weights import \
+    process_unquantized_moe_weights
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
@@ -111,3 +118,60 @@ class TestUnquantizedJaxLinear:
                                    y_from_method,
                                    rtol=1e-5,
                                    atol=1e-5)
+
+
+class TestUnquantizedJaxMoe:
+
+    @pytest.fixture
+    def mesh(self):
+        devices = jax.devices()
+        return Mesh(
+            np.array([devices[0]]).reshape(1), (ShardingAxisName.MLP_TENSOR, ))
+
+    @staticmethod
+    def _make_inputs(num_experts: int = 4,
+                     hidden_size: int = 128,
+                     intermediate_size: int = 256):
+        key = jax.random.PRNGKey(0)
+        k1, k2 = jax.random.split(key)
+        w13 = jax.random.normal(
+            k1, (num_experts, 2 * intermediate_size, hidden_size),
+            dtype=jnp.bfloat16)
+        w2 = jax.random.normal(k2,
+                               (num_experts, hidden_size, intermediate_size),
+                               dtype=jnp.bfloat16)
+        return w13, w2
+
+    @pytest.mark.parametrize("requantize_dtype,expect_w_dtype,expect_scale", [
+        ("", jnp.bfloat16, None),
+        ("fp8_e4m3", jnp.float8_e4m3fn, jnp.float32),
+    ])
+    def test_no_requantize_when_env_unset(self, mesh, monkeypatch,
+                                          requantize_dtype, expect_w_dtype,
+                                          expect_scale):
+        """No moe weights requantization -> weights stay bf16 and scales stay None."""
+        monkeypatch.setenv("MOE_REQUANTIZE_WEIGHT_DTYPE", requantize_dtype)
+        monkeypatch.delenv("MOE_REQUANTIZE_BLOCK_SIZE", raising=False)
+        # The function is jax.jit'ed and reads the env at trace time, so a
+        # cached trace from a prior test would otherwise mask the env change.
+        jax.clear_caches()
+
+        w13, w2 = self._make_inputs()
+        weights = process_unquantized_moe_weights(
+            mesh=mesh,
+            moe_backend=MoEBackend.GMM_EP,
+            activation=MoEActivation.SILU,
+            w13_weight=w13,
+            w13_bias=None,
+            w2_weight=w2,
+            w2_bias=None,
+        )
+
+        assert weights.w13_weight.dtype == expect_w_dtype
+        assert weights.w2_weight.dtype == expect_w_dtype
+        if expect_scale is None:
+            assert weights.w13_weight_scale is None
+            assert weights.w2_weight_scale is None
+        else:
+            assert weights.w13_weight_scale.dtype == expect_scale
+            assert weights.w2_weight_scale.dtype == expect_scale

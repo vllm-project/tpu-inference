@@ -91,6 +91,9 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     else
       echo "Code files changed. Proceeding with pipeline upload."
     fi
+
+    # Count files not matching the benchmark prefix
+    NON_BENCHMARK_COUNT=$(printf "%s\n" "$NON_SKIPPABLE_FILES" | grep -c -v "^\.buildkite/benchmark" || true)
     
     # Validate custom pipeline metadata (Uniqueness & Completeness)
     if .buildkite/scripts/validate_pipeline_metadata.sh "$NON_SKIPPABLE_FILES"; then
@@ -167,10 +170,27 @@ upload_pipeline() {
 
       # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
       upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
+      upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
     fi
 
     upload_with_priority .buildkite/nightly_verify.yml "$JOB_PRIORITY"
-    upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
+}
+
+upload_benchmark_pipeline() {
+    VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH")
+    TPU_COMMIT_HASH=$(git rev-parse HEAD)
+    CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_COMMIT_HASH}-"
+    buildkite-agent meta-data set "CODE_HASH" "${CODE_HASH}"
+    TIMEZONE="America/Los_Angeles"
+    JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
+    buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
+    echo "[BM-DEBUG] Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
+    echo "[BM-DEBUG] Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
+
+    # Upload benchmark pipelines
+    local case_folder=".buildkite/benchmark/cases/ci"
+    local generator_script="${SCRIPT_DIR}/../benchmark/scripts/generate_bk_pipeline.py"
+    process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY"
 }
 
 echo "--- Starting Buildkite Bootstrap"
@@ -260,7 +280,11 @@ else
     # If it's a PR, check for the specific label
     if [[ $PR_LABELS == *"ready"* ]]; then
       echo "Found 'ready' label on PR. Uploading main pipeline..."
-      upload_pipeline
+      # Upload main pipeline if file list is empty or contains non-benchmark files
+      if [ -z "${NON_SKIPPABLE_FILES:-}" ] || [ "${NON_BENCHMARK_COUNT:--1}" -ne 0 ]; then
+        upload_pipeline
+      fi
+      upload_benchmark_pipeline
     else
       # Explicitly fail the build because the required 'ready' label is missing.
       echo "Missing 'ready' label on PR. Failing build."
@@ -270,6 +294,7 @@ else
     # If it's NOT a Pull Request (e.g., branch push, tag, manual build)
     echo "This is not a Pull Request build. Uploading main pipeline."
     upload_pipeline
+    upload_benchmark_pipeline
   fi
 fi
 

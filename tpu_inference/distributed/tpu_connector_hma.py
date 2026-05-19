@@ -506,6 +506,22 @@ class TPUConnectorHMAWorker(TPUConnectorWorker):
         return specs
 
 
+@jax.jit
+def _select_kv_caches_jit(
+        kv_caches: list,
+        indices_per_layer: list[jax.Array]) -> list[jax.Array]:
+    """Select KV caches based on indices."""
+    selected: list[jax.Array] = []
+    for layer, cache in enumerate(kv_caches):
+        indices = indices_per_layer[layer]
+        if isinstance(cache, tuple):
+            for state in cache:
+                selected.append(state.at[indices].get())
+        else:
+            selected.append(cache.at[indices].get())
+    return selected
+
+
 def _select_from_kv_caches_per_group(
     kv_caches: list,
     block_ids_per_group: list[list[int]],
@@ -519,16 +535,13 @@ def _select_from_kv_caches_per_group(
     indices_per_group = [
         jnp.asarray(ids, dtype=jnp.int32) for ids in block_ids_per_group
     ]
-    selected: list[jax.Array] = []
-    for layer, cache in enumerate(kv_caches):
-        group_id = layer_to_group_id[layer]
-        indices = indices_per_group[group_id]
-        if isinstance(cache, tuple):
-            for state in cache:
-                selected.append(state.at[indices].get())
-        else:
-            selected.append(cache.at[indices].get())
-    return selected
+
+    indices_per_layer = [
+        indices_per_group[layer_to_group_id[layer]]
+        for layer in range(len(kv_caches))
+    ]
+
+    return _select_kv_caches_jit(kv_caches, indices_per_layer)
 
 
 # TODO(wyzhang): Evaluate how to leverage `insert_kv_chunks`

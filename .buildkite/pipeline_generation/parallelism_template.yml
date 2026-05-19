@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: {FEATURE_NAME}
-# pipeline-type: {CATEGORY}
 steps:
   # --- Single-Host Tests ---
   - label: "${{TPU_VERSION:-tpu6e}} Correctness tests for {FEATURE_NAME} (single-host)"

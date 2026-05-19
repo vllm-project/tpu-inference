@@ -13,7 +13,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -euo pipefail
+set -Eeuo pipefail
+
+# ==============================================================================
+# 0. Global Panic Handler (Crash Interceptor)
+# ==============================================================================
+# shellcheck disable=SC2317
+on_crash() {
+    local exit_code=$?
+    local line_no=$1
+    local command="$2"
+    
+    # Ignore normal exits (Fixed SC2086 by adding double quotes)
+    if [ "$exit_code" -eq 0 ]; then
+        return
+    fi
+
+    # Ignore explicit 'exit' commands as these are controlled intentional exits
+    if [[ "$command" == exit* ]]; then
+        return
+    fi
+
+    echo ""
+    echo "================================================================"
+    echo "🚨 [FATAL ERROR] Bash Script Crashed Unexpectedly!"
+    echo "================================================================"
+    echo "File:     $(basename "$0")"
+    echo "Line:     $line_no"
+    echo "Command:  $command"
+    echo "ExitCode: $exit_code"
+    echo "================================================================"
+    echo ""
+}
+
+# Bind the ERR signal: Triggers on_crash immediately if any command fails 
+# and is not explicitly caught by an 'if' statement or '||' operator.
+trap 'on_crash ${LINENO} "$BASH_COMMAND"' ERR
 
 CASE_FILE="$1"
 TARGET_CASE_NAME=${2:-""}
@@ -103,17 +138,10 @@ export VLLM_TORCH_PROFILER_DIR
 report_and_exit() {
   local exit_code=${1:-0}
   local record_id="${RECORD_ID:-local}"
-  local report_exit_code
-
-  echo "--- Calling report_result.sh for RECORD_ID=${record_id}"
-  bash "$SCRIPT_DIR/report_result.sh" "$record_id"
-  report_exit_code=$?
-
-  # Exit with the reporting script's failure code if it did not succeed.
-  if [ "$report_exit_code" -ne 0 ]; then
-    exit "$report_exit_code"
-  fi
-
+  
+  echo "--- Calling report_result.sh for RECORD_ID=${record_id} with exit_code=${exit_code}"
+  bash "$SCRIPT_DIR/report_result.sh" "$record_id" "$exit_code" || exit $?
+  
   # Exit with the originally provided exit code.
   exit "$exit_code"
 }
@@ -143,6 +171,100 @@ contains_element () {
   for e; do [[ "$e" == "$match" ]] && return 0; done
   return 1
 }
+
+# ---------------------------------------------------------
+# DECODE_ONLY Mode Configuration Validation & Dataset Injection
+# ---------------------------------------------------------
+if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
+    echo "====================================================================="
+    echo "[INFO] DECODE_ONLY mode activated. Validating configuration..."
+    
+    # Extract configurations from SERVER_CMD
+    MAX_NUM_SEQS=""
+    PREFIX_CACHING_ENABLED="false"
+    for i in "${!SERVER_CMD[@]}"; do
+        arg="${SERVER_CMD[$i]}"
+        if [[ "$arg" == "--max-num-seqs" ]]; then
+            MAX_NUM_SEQS="${SERVER_CMD[i+1]}"
+        elif [[ "$arg" == --max-num-seqs=* ]]; then
+            MAX_NUM_SEQS="${arg#*=}"
+        elif [[ "$arg" == "--enable-prefix-caching" ]]; then
+            PREFIX_CACHING_ENABLED="true"
+        fi
+    done
+
+    # Read DECODE_INPUT_LEN directly from the environment variable
+    DECODE_INPUT_LEN="${INPUT_LEN:-}"
+
+    # Extract configurations from CLIENT_CMD for dataset validations
+    DATASET_NAME_VALID="false"
+    HAS_DATASET_PATH="false"
+    for i in "${!CLIENT_CMD[@]}"; do
+        arg="${CLIENT_CMD[$i]}"
+        if [[ "$arg" == "--dataset-name" && "${CLIENT_CMD[i+1]}" == "custom" ]]; then
+            DATASET_NAME_VALID="true"
+        elif [[ "$arg" == "--dataset-name=custom" ]]; then
+            DATASET_NAME_VALID="true"
+        elif [[ "$arg" == "--dataset-path" || "$arg" == --dataset-path=* ]]; then
+            HAS_DATASET_PATH="true"
+        fi
+    done
+
+    # Assertions
+    if [[ -z "$MAX_NUM_SEQS" ]]; then
+        echo "[ERROR] DECODE_ONLY validation failed: Missing '--max-num-seqs' in SERVER_CMD."
+        echo "Reason: The exact cache boundary must be defined to prevent Cache Eviction during generation."
+        exit 1
+    fi
+
+    if [[ "$PREFIX_CACHING_ENABLED" == "false" ]]; then
+        echo "[ERROR] DECODE_ONLY validation failed: Missing '--enable-prefix-caching' in SERVER_CMD."
+        echo "Reason: Without prefix caching, the KV Cache seeded during warmup will be ignored, and vLLM will recompute the prefill for every request. This defeats the purpose of Decode-Only testing."
+        echo "Fix: Add '\"enable-prefix-caching\": true' to server_command_options.args in your JSON."
+        exit 1
+    fi
+
+    if [[ -z "$DECODE_INPUT_LEN" ]]; then
+        echo "[ERROR] DECODE_ONLY validation failed: Missing 'INPUT_LEN' in the environment variables."
+        echo "Reason: The dataset generator needs to know the exact token length to construct the prompt_token_ids array."
+        echo "Fix: Add 'INPUT_LEN' to the 'env' section of your case JSON."
+        exit 1
+    fi
+
+    if [[ "$DATASET_NAME_VALID" == "false" ]]; then
+        echo "[ERROR] DECODE_ONLY validation failed: Missing '--dataset-name custom' in CLIENT_CMD."
+        echo "Reason: vLLM can only read the generated JSONL with prompt_token_ids if the custom parser is enforced."
+        exit 1
+    fi
+
+    if [[ "$HAS_DATASET_PATH" == "true" ]]; then
+        echo "[ERROR] DECODE_ONLY validation failed: Found '--dataset-path' in CLIENT_CMD."
+        echo "Reason: DECODE_ONLY dynamically generates and injects its own dataset file. Providing one will cause a conflict."
+        exit 1
+    fi
+
+    # Generate decode-only mode dataset and Inject
+    echo "[INFO] Validation passed. Generating dataset..."
+
+    DECODE_DATASET_PATH="/tmp/decode_only_dataset.jsonl"
+    
+    python3 "$SCRIPT_DIR/generate_decode_only_bm_dataset.py" \
+        --input-len "$DECODE_INPUT_LEN" \
+        --num-distinct "$MAX_NUM_SEQS" \
+        --output-file "$DECODE_DATASET_PATH"
+        
+    CLIENT_CMD+=( "--dataset-path" "$DECODE_DATASET_PATH" )
+    
+    # Disable shuffle here to strictly preserve the round-robin order to guarantee that every request
+    # in a concurrent batch is completely distinct.
+    if ! contains_element "--disable-shuffle" "${CLIENT_CMD[@]}"; then
+        CLIENT_CMD+=( "--disable-shuffle" )
+    fi
+    
+    DATASET="decode_only_override"
+    echo "[INFO] Interception complete. Dataset path and shuffle disabled."
+    echo "====================================================================="
+fi
 
 # Download Datasets
 DATASET_DIR="$ARTIFACT_FOLDER/dataset"
@@ -257,8 +379,8 @@ while (( ELAPSED <= MAX_WAIT_SECONDS )); do
     # 1. [Fail-Fast Check] Ask the OS if the process is still alive
     if ! kill -0 "$VLLM_PID" 2>/dev/null; then
         echo "[ERROR] vLLM process (PID=$VLLM_PID) has exited unexpectedly!"
-        echo "--- Last 20 lines of VLLM_LOG for debugging ---"
-        tail -n 20 "$VLLM_LOG"
+        echo "--- Dumping VLLM_LOG for debugging ---"
+        cat "$VLLM_LOG"
         exit 1
     fi
 
@@ -293,15 +415,68 @@ if [[ "$SERVER_STARTED" == "false" ]]; then
     exit 1
 fi
 
+# ---------------------------------------------------------
+# DECODE_ONLY Warmup Execution (Cache Seeding)
+# ---------------------------------------------------------
+if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
+    echo "====================================================================="
+    echo "[INFO] DECODE_ONLY: Executing Warmup Phase"
+    echo "====================================================================="
+    echo "Warming up HBM Cache with exactly $MAX_NUM_SEQS distinct requests to prevent Cache Eviction..."
+    
+    # Copy the array for safe modification
+    WARMUP_CMD=("${CLIENT_CMD[@]}")
+    
+    found_prompts=false
+    
+    # In-place modification of existing flags
+    for i in "${!WARMUP_CMD[@]}"; do
+        arg="${WARMUP_CMD[$i]}"
+        if [[ "$arg" == "--num-prompts" ]]; then
+            WARMUP_CMD[i+1]="$MAX_NUM_SEQS"
+            found_prompts=true
+        elif [[ "$arg" == --num-prompts=* ]]; then
+            WARMUP_CMD[i]="--num-prompts=$MAX_NUM_SEQS"
+            found_prompts=true
+        fi
+    done
+    
+    # Append the flags if they were not found in the original command
+    if [[ "$found_prompts" == false ]]; then
+        WARMUP_CMD+=( "--num-prompts" "$MAX_NUM_SEQS" )
+    fi
+    
+    echo "[DEBUG] WARMUP_CMD: ${CLIENT_CMD_ENVS[*]} ${WARMUP_CMD[*]}"
+    set +e
+    env "${CLIENT_CMD_ENVS[@]}" "${WARMUP_CMD[@]}" > "$LOG_FOLDER/warmup_log.txt" 2>&1
+    warmup_exit_code=$?
+    set -e
+    
+    if [[ "$warmup_exit_code" -ne 0 ]]; then
+        echo "[ERROR] Warmup phase failed with exit code $warmup_exit_code!"
+        echo "--- Dumping Warmup Log ---"
+        cat "$LOG_FOLDER/warmup_log.txt"
+        exit 1
+    fi
+    
+    echo "[INFO] Warmup Phase Completed Successfully. Cache is strictly seeded."
+    echo "[INFO] Proceeding to Decode-Only concurrency stress testing."
+    echo "====================================================================="
+fi
+
 # Set Default
 EXPECTED_ETEL=${EXPECTED_ETEL:-3600000}
 NUM_PROMPTS=${NUM_PROMPTS:-1000}
 PREFIX_LEN=${PREFIX_LEN:-0}
 
+# When modifying run_benchmark(), please note that it is executed in a subshell, 
+# so any unexpected error stack traces cannot be properly caught by the parent process.
+# When adding commands, ensure they do not throw errors, proactively validate expected errors, 
+# and print error logs for easier debugging.
+# For example, please refer to how throughput and p99_e2el are parsed in this file
 run_benchmark(){
-  echo "running benchmark..."
-  echo "logging to $BM_LOG"
-  echo
+  echo "running benchmark..." >&2
+  echo "logging to $BM_LOG" >&2
 
   local request_rate=${1:-""}
 
@@ -330,12 +505,35 @@ run_benchmark(){
   fi
 
   echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD_ENVS[*]} ${CLIENT_CMD[*]} > $BM_LOG" >&2
+  set +e
   # Execute the array directly, preserving strict argument boundaries
   env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
+  local client_exit_code=$?
+  set -e
 
-  throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
-  p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}')
-  echo "throughput: $throughput, P99 E2EL:$p99_e2el"
+  if [ $client_exit_code -ne 0 ]; then
+    echo "[ERROR] An error occurred while executing client_cmd." >&2
+    return $client_exit_code
+  fi
+
+  # If these two commands throw an error, they will not be properly caught.
+  # We use `|| true` to ignore the command's error, and then actively check throughput and p99_e2el.
+  # If the values do not meet expectations, it will print an error message and then return an error.
+  throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
+  p99_e2el=$(grep "P99 E2EL (ms):" "$BM_LOG" | awk '{print $NF}' || true)
+  echo "throughput: $throughput, P99 E2EL: $p99_e2el" >&2
+
+  if [ -z "$throughput" ] || [ -z "$p99_e2el" ]; then
+    echo "[ERROR] Unable to extract metrics from the log. Please check the format of the statistical results in $BM_LOG, or if the test failed." >&2
+    return 1
+  fi
+
+  local num_reg='^[0-9]+([.][0-9]+)?$'
+  if ! [[ $throughput =~ $num_reg ]] || ! [[ $p99_e2el =~ $num_reg ]]; then
+    echo "[ERROR] Extracted values are not valid numbers (Throughput: '$throughput', P99: '$p99_e2el')" >&2
+    return 1
+  fi
+
   echo "$throughput $p99_e2el"
 }
 
@@ -348,13 +546,61 @@ printf "[DEBUG] Checking folder structure (Environment: %s)...\n" "$ENV_CONTEXT"
 printf "[DEBUG] pwd=%s\n\nls $ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls "$ARTIFACT_FOLDER")" || true
 printf "[DEBUG] ls $ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls "$ARTIFACT_FOLDER"/temp_logs)" || true
 
-# request_rate use default value (inf)
-read -r throughput p99_e2el < <(run_benchmark | tail -n 1)
+# ---------------------------------------------------------
+# Helper Function: Safely execute benchmark and validate metrics
+# ---------------------------------------------------------
+# Define global variables for the main workflow to read
+VALID_THROUGHPUT=""
+VALID_P99_E2EL=""
+
+execute_benchmark_safely() {
+    local rate_arg="${1:-}" # Accept the request_rate argument; default to empty string if not provided
+    local output
+    local bm_exit_code
+
+    # 1. Execute the benchmark and intercept the exit code from the subshell pipeline
+    set +e  
+    output=$(run_benchmark "$rate_arg" | tail -n 1)
+    bm_exit_code=$?
+    set -e
+    if [[ "$bm_exit_code" -ne 0 ]]; then
+        echo "[ERROR] Benchmark client crashed with exit code $bm_exit_code (rate=${rate_arg:-initial})!"
+        echo "--- Dumping BM_LOG for debugging ---"
+        cat "$BM_LOG"
+        report_and_exit 1
+    fi
+
+    # 2. Parse the extracted string into respective variables safely
+    local temp_throughput
+    local temp_p99
+    read -r temp_throughput temp_p99 <<< "$output"
+
+    # 3. Validate that the extracted variables are strictly numerical (float or int)
+    if ! [[ "$temp_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! [[ "$temp_p99" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "[ERROR] Failed to parse valid metrics (rate=${rate_arg:-initial})! Output was: '$output'"
+        report_and_exit 1
+    fi
+
+    # 4. Validation passed, assign to global variables
+    VALID_THROUGHPUT="$temp_throughput"
+    VALID_P99_E2EL="$temp_p99"
+}
+
+
+# =========================================================
+# Main Flow: Benchmark Starts
+# =========================================================
+
+# Step 1: Initial run
+echo "Starting initial run..."
+execute_benchmark_safely  # Call the helper without arguments
+throughput="$VALID_THROUGHPUT"
+p99_e2el="$VALID_P99_E2EL"
 
 echo "throughput:$throughput"
 echo "p99_e2el:$p99_e2el"
 
-# Step 1: check if initial run meets the E2EL requirement
+# Step 1.5: check if initial run meets the E2EL requirement
 p99_int=$(printf "%.0f" "$p99_e2el")
 goal_int=$(printf "%.0f" "$EXPECTED_ETEL")
 
@@ -366,7 +612,7 @@ fi
 echo "Initial run failed: P99 E2EL ($p99_e2el ms) > EXPECTED_ETEL ($EXPECTED_ETEL ms)"
 echo "Starting binary search to lower request rate..."
 
-# Step 2: Begin binary search
+# Step 2: Binary search
 low=0
 high=$(printf "%.0f" "$throughput")
 goal=$EXPECTED_ETEL
@@ -382,7 +628,10 @@ while (( high - low > 0 )); do
   mid=$(( (low + high + 1) / 2 ))
   echo "Trying request_rate=$mid"
 
-  read -r throughput p99_e2el < <(run_benchmark "$mid" | tail -n 1)
+  # Single function call with double-layer defense (exit code interception + regex validation)
+  execute_benchmark_safely "$mid"
+  throughput="$VALID_THROUGHPUT"
+  p99_e2el="$VALID_P99_E2EL"
 
   # Convert p99_e2el to integer
   p99_int=$(printf "%.0f" "$p99_e2el")

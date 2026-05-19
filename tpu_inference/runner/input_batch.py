@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Datastructures defining an input batch
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional, cast
 
 import jax
@@ -29,6 +29,7 @@ class CachedRequestState(NewRequestData):
     generator: Optional[Any] = None
     mrope_positions: Optional[jax.Array] = None
     mrope_position_delta: Optional[int] = None
+    pooling_states: PoolingStates = field(default_factory=PoolingStates)
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -55,9 +56,12 @@ class InputBatch:
         vocab_size: int,
         block_sizes: list[int],
         is_spec_decode: bool = False,
+        num_speculative_tokens: int = 0,
+        dp_size: int = 1,
     ):
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
+        self.dp_size = dp_size
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
@@ -89,6 +93,7 @@ class InputBatch:
             max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             block_sizes=block_sizes,
+            num_speculative_tokens=num_speculative_tokens,
         )
 
         # Sampling-related.
@@ -137,8 +142,9 @@ class InputBatch:
         # Per-request physical slot id in the mamba kv-cache. Each request
         # gets a unique slot at `add_request` and keeps it for its lifetime
         # (slot ids follow the request through `condense` and `swap_states`,
-        # see those methods below). Real slots are [1, max_num_reqs]; slot 0
-        # is reserved as the null block. Why we track slot ids separately
+        # see those methods below). Within each DP rank k, slot 0 (or
+        # k * local_slots for dp_size > 1) is the null block; usable slots
+        # start at base + 1. Why we track slot ids separately
         # from the persistent-batch position `req_idx`: `condense`
         # (https://github.com/vllm-project/vllm/blob/de3da0b/vllm/v1/worker/gpu_input_batch.py#L662)
         # moves requests into lower `req_idx` slots when earlier requests
@@ -146,15 +152,38 @@ class InputBatch:
         # physical slot. Indexing the cache by the moving `req_idx` would
         # read stale state; indexing by `mamba_state_indices_cpu[req_idx]`
         # reads the slot that actually holds this request's state.
-        # Pool size matches `_maybe_set_compact_mamba_num_blocks_override`'s
-        # cap of `max_num_reqs + 1`.
+        # Initial pool size is based on max_num_reqs rounded up to dp_size;
+        # init_mamba_pools() resizes after KV cache allocation is known.
         self.mamba_state_indices_cpu = np.zeros(max_num_reqs, dtype=np.int32)
-        self._free_mamba_slots: list[int] = list(range(
-            max_num_reqs, 0, -1))  # pop from end → low slots first
+        # Mamba slot pool, partitioned by DP rank so each rank's requests
+        # get slots within that rank's shard of the device-side state array.
+        # Matches the sharding in kv_cache_manager: mamba_num_blocks is
+        # rounded up to dp_size, then split evenly across ranks.
+        mamba_num_blocks = ((max_num_reqs + dp_size) // dp_size) * dp_size
+        self._mamba_local_slots = mamba_num_blocks // dp_size
+        self._free_mamba_slots_per_rank: list[list[int]] = []
+        for k in range(dp_size):
+            base = k * self._mamba_local_slots
+            self._free_mamba_slots_per_rank.append(
+                list(range(base + self._mamba_local_slots - 1, base, -1)))
 
         # for pooling models
         self.pooling_params: dict[str, PoolingParams] = {}
         self.pooling_states: dict[str, PoolingStates] = {}
+
+    def init_mamba_pools(self, mamba_num_blocks: int) -> None:
+        """Reinitialize mamba slot pools with the actual device block count.
+
+        Called after KV cache init, when the true mamba_num_blocks is known
+        (compact-mamba may have been skipped, giving fewer blocks than the
+        default estimate based on max_num_reqs).
+        """
+        self._mamba_local_slots = mamba_num_blocks // self.dp_size
+        self._free_mamba_slots_per_rank = []
+        for k in range(self.dp_size):
+            base = k * self._mamba_local_slots
+            self._free_mamba_slots_per_rank.append(
+                list(range(base + self._mamba_local_slots - 1, base, -1)))
 
     @property
     def req_ids(self) -> list[str]:
@@ -174,14 +203,22 @@ class InputBatch:
         pooling_params = self.get_pooling_params()
         pooling_states = self.get_pooling_states()
 
-        # Prompt token ID is used by StepPooler.
-        # As embedding task for converted model is not implemented yet,
-        # so it's ok to set prompt token ID list to None here.
+        # Extract prompt token IDs from token_ids_cpu
+        # Shape of token_ids_cpu is (max_num_reqs, max_model_len)
+        max_prompt_len = int(self.num_prompt_tokens[:self.num_reqs].max()
+                             ) if self.num_reqs > 0 else 0
+        prompt_token_ids_tensor = torch.zeros((self.num_reqs, max_prompt_len),
+                                              dtype=torch.int32)
+        for i in range(self.num_reqs):
+            num_prompt = self.num_prompt_tokens[i]
+            prompt_token_ids_tensor[i, :num_prompt] = torch.from_numpy(
+                self.token_ids_cpu[i, :num_prompt]).to(torch.int32)
+
         return PoolingMetadata(
             prompt_lens=torch.from_numpy(
                 self.num_prompt_tokens[:self.num_reqs]),
-            prompt_token_ids=None,
-            prompt_token_ids_cpu=None,
+            prompt_token_ids=prompt_token_ids_tensor,
+            prompt_token_ids_cpu=prompt_token_ids_tensor,
             pooling_params=pooling_params,
             pooling_states=pooling_states,
         )
@@ -190,6 +227,7 @@ class InputBatch:
         self,
         request: "CachedRequestState",
         req_index: Optional[int] = None,
+        dp_rank: int = 0,
     ) -> None:
         if req_index is None:
             req_index = self.num_reqs
@@ -225,7 +263,8 @@ class InputBatch:
         # Allocate a fresh mamba state slot for this request. The slot stays
         # with the request through the persistent batch's lifetime, even when
         # condense moves the request to a different `req_index`.
-        self.mamba_state_indices_cpu[req_index] = self._free_mamba_slots.pop()
+        self.mamba_state_indices_cpu[req_index] = (
+            self._free_mamba_slots_per_rank[dp_rank].pop())
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
@@ -280,9 +319,8 @@ class InputBatch:
         if sampling_params := request.sampling_params:
             collect_sampling(sampling_params)
 
-        if pooling_params := request.pooling_params:
-            self.pooling_params[req_id] = pooling_params
-            self.pooling_states[req_id] = PoolingStates()
+        self.pooling_params[req_id] = request.pooling_params
+        self.pooling_states[req_id] = request.pooling_states
 
         # Add request lora ID
         if request.lora_request:
@@ -308,8 +346,24 @@ class InputBatch:
         # Return the mamba state slot back to the free pool. The slot's
         # contents in the kv cache are stale and will be zeroed by the
         # has_initial_state guard when the next request takes this slot id.
-        self._free_mamba_slots.append(
-            int(self.mamba_state_indices_cpu[req_index]))
+        slot = int(self.mamba_state_indices_cpu[req_index])
+        rank = slot // self._mamba_local_slots
+        self._free_mamba_slots_per_rank[rank].append(slot)
+        # Clear this position to slot 0 (the null block) so the trailing
+        # tail of `mamba_state_indices_cpu` (which the GDN op reads over
+        # its full length every step) cannot alias an active slot.
+        # Concrete trace with max_num_reqs=4:
+        #
+        #   start (4 active):           [1, 2, 3, 4]  num_reqs=4
+        #   remove pos 0,1 (stale):     [1, 2, 3, 4]  num_reqs=2
+        #   condense w/o source clear:  [3, 4, 3, 4]  ← tail aliases active
+        #   condense w/  source clear:  [3, 4, 0, 0]  ← tail is null
+        #
+        # In the aliased case `recurrent_state.at[slots].set(...)` writes
+        # twice to slot 3 in the same scatter — undefined on XLA, silent
+        # state corruption. See
+        # `test_mamba_state_indices_no_duplicate_in_padded_tail`.
+        self.mamba_state_indices_cpu[req_index] = 0
 
         self.greedy_reqs.discard(req_id)
         self.random_reqs.discard(req_id)
@@ -438,6 +492,10 @@ class InputBatch:
             # the right physical slot in the mamba kv cache.
             self.mamba_state_indices_cpu[
                 empty_index] = self.mamba_state_indices_cpu[last_req_index]
+            # Clear the source: the slot id now lives at `empty_index`, so
+            # leaving it here too would put a duplicate in the padded tail
+            # (see the trace in `remove_request`).
+            self.mamba_state_indices_cpu[last_req_index] = 0
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]

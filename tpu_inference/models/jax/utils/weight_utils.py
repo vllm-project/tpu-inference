@@ -27,6 +27,7 @@ from typing import Any, Iterable, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 import torchax
 from flax import nnx
@@ -34,7 +35,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.sharding import SingleDeviceSharding, get_mesh
 from safetensors import safe_open
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.models.utils import AutoWeightsLoader
@@ -821,6 +822,45 @@ def load_nnx_param_from_reshaped_torch(
             f"Failed to convert torch weight for '{param_name}' ({torch_weight.shape}) to JAX array, with reshape_dims={reshape_dims} and permute_dims={permute_dims}"
         ) from e
 
+    if jax_weight.shape != jax_param.value.shape:
+        # Retrieve current config to determine if the model task is embedding/pooling
+        is_embedding_task = False
+        try:
+            is_embedding_task = (get_current_vllm_config().model_config.
+                                 runner_type == "pooling")
+        except Exception as e:
+            logger.debug(
+                "Failed to retrieve vllm_config to check for embedding task status. Defaulting is_embedding_task to False: %s",
+                e)
+            is_embedding_task = False
+
+        is_vocab_layer = param_name.endswith(
+            (".embed_tokens.weight", ".lm_head.weight", ".wte.weight",
+             ".pooler.weight", "embed_tokens.weight", "lm_head.weight",
+             "wte.weight", "pooler.weight"))
+
+        if is_vocab_layer or is_embedding_task:
+            if all(
+                    w <= p
+                    for w, p in zip(jax_weight.shape, jax_param.value.shape)
+            ) and any(
+                    w < p
+                    for w, p in zip(jax_weight.shape, jax_param.value.shape)):
+                pad_width = tuple(
+                    (0, p - w)
+                    for w, p in zip(jax_weight.shape, jax_param.value.shape))
+                logger.info(
+                    f"Padding weight '{param_name}' from {jax_weight.shape} to {jax_param.value.shape}"
+                )
+                # Use NumPy to keep it on Host
+                jax_weight_np = np.pad(np.asarray(jax_weight), pad_width)
+                with cpu_mesh_context():
+                    jax_weight = jnp.array(jax_weight_np)
+        else:
+            raise ValueError(
+                f"Shape mismatch in non-vocab layer '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
+            )
+
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
 
@@ -830,8 +870,13 @@ def load_nnx_param_from_reshaped_torch(
 class JaxAutoWeightsLoader(AutoWeightsLoader):
     """A weights loader for JAX models."""
 
-    def __init__(self, model, **kwargs):
+    def __init__(self,
+                 model,
+                 pytorch_pooler: Optional[torch.nn.Module] = None,
+                 **kwargs):
         assert isinstance(model, JaxModule)
+        self.pytorch_pooler = pytorch_pooler
+        self.pooler_weights = {}
 
         for name, param in model.named_parameters():
             if not hasattr(param, "weight_loader"):
@@ -889,7 +934,53 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
 
     def _load_module(self, base_prefix: str, module: JaxModule,
                      weights: Iterable) -> Iterable:
-        yield from super()._load_module(base_prefix, module, weights)
+        """Load weights into the JAX module, performing prefix adjustments and interception.
+
+        Args:
+            base_prefix: The prefix string of the current base module.
+            module: The JAX module into which the weights are loaded.
+            weights: The iterable collection of torch weights to load.
+
+        Returns:
+            Iterable: The iterable collection after performing custom mappings and intercepts.
+        """
+
+        def _map_weights(w_iter):
+            if base_prefix == "":
+                root_children = {name for name, _ in module.named_children()}
+                has_model_child = "model" in root_children
+            else:
+                root_children = set()
+                has_model_child = False
+
+            for name, weight in w_iter:
+                if self.pytorch_pooler is not None:
+                    match = re.match(r"^(?:model\.)?pooler\.(.*)$", name)
+                    if match:
+                        pooler_key = match.group(1)
+                        self.pooler_weights[pooler_key] = weight
+                        continue
+
+                if base_prefix == "":
+                    top_level = name.split('.')[0]
+                    if top_level in root_children:
+                        # Path A: Root child, load as-is
+                        pass
+                    elif has_model_child and not name.startswith("model."):
+                        # Path B: Not root child, but root has 'model', prepend 'model.'
+                        name = "model." + name
+                    # Path C: Fallback to as-is
+
+                yield name, weight
+
+        yield from super()._load_module(base_prefix, module,
+                                        _map_weights(weights))
+
+        if base_prefix == "" and self.pytorch_pooler is not None and self.pooler_weights:
+            logger.info(
+                f"Loading {len(self.pooler_weights)} weights into CPU Pooler")
+            self.pytorch_pooler.load_state_dict(self.pooler_weights,
+                                                strict=False)
         # Post-process module after loading weights. Unlike vLLM post-process
         # weights after loading all weights, we do it per-module here to
         # avoid OOM.
@@ -916,8 +1007,11 @@ class LoadableWithIterator:
             # Use next parent class in MRO.
             return super().load_weights(weights)
 
+        pytorch_pooler = getattr(getattr(self, "vllm_config", None),
+                                 "pytorch_pooler", None)
         loader = JaxAutoWeightsLoader(
             self,
+            pytorch_pooler=pytorch_pooler,
             skip_prefixes=(["lm_head"]
                            if not hasattr(self, 'lm_head') else None))
         return loader.load_weights(weights)

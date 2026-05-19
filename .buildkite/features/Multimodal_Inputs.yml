@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: Multimodal Inputs
-# pipeline-type: feature support matrix
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for Multimodal Inputs"
     key: "${TPU_VERSION:-tpu6e}_Multimodal_Inputs_CorrectnessTest"
     soft_fail: true
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:

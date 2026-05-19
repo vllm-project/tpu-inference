@@ -87,7 +87,7 @@ For debugging or development purposes, you can install `tpu-inference` from sour
     ```shell
     cd vllm
     uv pip install -r requirements/tpu.txt --torch-backend=cpu
-    VLLM_TARGET_DEVICE="tpu" uv pip install -e .
+    VLLM_TARGET_DEVICE="tpu" uv pip install -e . --no-build-isolation
     cd ..
     ```
 

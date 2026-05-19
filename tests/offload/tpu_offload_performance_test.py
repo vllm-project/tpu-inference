@@ -42,7 +42,7 @@ def test_kv_cache_cpu_offloading_performance(
             batched_save,
             "10",  # TPU_OFFLOAD_NUM_CPU_CHUNKS
             prompts,
-            max_output_len=1,
+            max_output_len=10,
         )
 
         print("\nPerformance Results:")

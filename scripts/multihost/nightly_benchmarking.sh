@@ -68,6 +68,7 @@ export MOE_ALL_GATHER_ACTIVATION_DTYPE=""
 export MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV=""
 export PHASED_PROFILING_DIR=""
 export PHASED_PROFILING_DIR_ENV=""
+export PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_ENV=""
 export SKIP_DB_UPLOAD="false"
 export RUN_ACCURACY=""
 export MMLU_OUTPUT_LEN=""
@@ -108,6 +109,7 @@ while [[ $# -gt 0 ]]; do
     --moe-requantize-weight-dtype) export MOE_REQUANTIZE_WEIGHT_DTYPE="$2"; MOE_REQUANTIZE_WEIGHT_DTYPE_ENV="MOE_REQUANTIZE_WEIGHT_DTYPE=$2"; shift 2 ;;
     --moe-all-gather-activation-dtype) export MOE_ALL_GATHER_ACTIVATION_DTYPE="$2"; MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV="MOE_ALL_GATHER_ACTIVATION_DTYPE=$2"; shift 2 ;;
     --phased-profiling-dir) export PHASED_PROFILING_DIR="$2"; PHASED_PROFILING_DIR_ENV="PHASED_PROFILING_DIR=$2"; shift 2 ;;
+    --phased-profiler-decode-only-kv-len-threshold) export PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_ENV="PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=$2"; shift 2 ;;
     --skip-db-upload) export SKIP_DB_UPLOAD="true"; shift 1 ;;
     --run-accuracy) export RUN_ACCURACY="$2"; shift 2 ;;
     --mmlu-output-len) export MMLU_OUTPUT_LEN="$2"; shift 2 ;;
@@ -155,6 +157,7 @@ ${MOE_REQUANTIZE_BLOCK_SIZE_ENV} \
 ${MOE_REQUANTIZE_WEIGHT_DTYPE_ENV} \
 ${MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV} \
 ${PHASED_PROFILING_DIR_ENV} \
+${PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_ENV} \
 ${USE_UNFUSED_MEGABLOCKS_ENV} \
 VLLM_ENGINE_READY_TIMEOUT_S=10800 \
 ${FORCE_MOE_RANDOM_ROUTING_ENV} \
@@ -344,13 +347,21 @@ while IFS='=' read -r key value; do
   fi
 done < "$RESULT_FILE"
 
+sql_escape() {
+  # Replaces each single quote ' with two single quotes ''
+  printf '%s' "$1" | sed "s/'/''/g"
+}
+
+# Escape the variable that is being added to the SQL string
+ESCAPED_GCP_INSTANCE_NAME=$(sql_escape "$GCP_INSTANCE_NAME")
+
 if [ "$keys" == "RecordId, " ]; then
   echo "Result file was empty or parsing failed. Marking status as FAILED."
   keys+="Status, RunBy, LastUpdate, CreatedTime"
-  vals+="'FAILED', '${GCP_INSTANCE_NAME}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
+  vals+="'FAILED', '${ESCAPED_GCP_INSTANCE_NAME}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
 else
   keys+="Status, RunBy, LastUpdate, CreatedTime"
-  vals+="'COMPLETED', '${GCP_INSTANCE_NAME}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
+  vals+="'COMPLETED', '${ESCAPED_GCP_INSTANCE_NAME}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()"
 fi
 
 SQL="INSERT INTO RunRecord (${keys}) VALUES (${vals});"

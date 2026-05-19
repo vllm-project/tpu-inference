@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import argparse
 import sys
 from enum import Enum
@@ -42,19 +44,19 @@ class FeatureCategory(str, Enum):
 
 
 class HostScale(str, Enum):
-    SINGLE = "single"
-    MULTI = "multi"
+    SMALL = "small"
+    LARGE = "large"
 
 
 # Maps host scale to Buildkite settings with shell defaults
 HOST_SCALE_TO_SETTINGS = {
-    HostScale.SINGLE.value: {
-        "queue": "${{TPU_QUEUE_SINGLE:-tpu_v6e_queue}}",
-        "tp_size": "${{TENSOR_PARALLEL_SIZE_SINGLE:-1}}",
+    HostScale.SMALL.value: {
+        "queue": "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}",
+        "tp_size": "${TENSOR_PARALLEL_SIZE_SINGLE:-1}",
     },
-    HostScale.MULTI.value: {
-        "queue": "${{TPU_QUEUE_MULTI:-tpu_v6e_8_queue}}",
-        "tp_size": "${{TENSOR_PARALLEL_SIZE_MULTI:-8}}",
+    HostScale.LARGE.value: {
+        "queue": "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}",
+        "tp_size": "${TENSOR_PARALLEL_SIZE_MULTI:-8}",
     },
 }
 
@@ -189,20 +191,20 @@ def get_interactive_input():
         f"   {YELLOW}Hint: Choose the hardware scale based on your feature's requirements{RESET}\n"
     )
     print(
-        f"   [1] {BOLD}single{RESET} : Runs tests on a single TPU host. (v6e: tpu_v6e_queue, v7x: tpu_v7x_2_queue)"
+        f"   [1] {BOLD}Small scale{RESET} : Runs tests on small scale queue. (v6e: tpu_v6e_queue, v7x: tpu_v7x_2_queue)"
     )
     print(
-        f"   [2] {BOLD}multi{RESET}  : Runs tests on multiple TPU hosts. (v6e: tpu_v6e_8_queue, v7x: tpu_v7x_8_queue)\n"
+        f"   [2] {BOLD}Large scale{RESET}  : Runs tests on large scale queue. (v6e: tpu_v6e_8_queue, v7x: tpu_v7x_8_queue)\n"
     )
     while True:
         choice = input(f"{BOLD}Select (1-2): {RESET}").strip()
         if choice == '1':
-            m_scale = HostScale.SINGLE.value
-            print(f"{GREEN}✓ Scale: {BOLD}single host{RESET}")
+            m_scale = HostScale.SMALL.value
+            print(f"{GREEN}✓ Scale: {BOLD}small scale{RESET}")
             break
         elif choice == '2':
-            m_scale = HostScale.MULTI.value
-            print(f"{GREEN}✓ Scale: {BOLD}multi host{RESET}")
+            m_scale = HostScale.LARGE.value
+            print(f"{GREEN}✓ Scale: {BOLD}large scale{RESET}")
             break
         print(f"{RED}❌ Invalid entry. Please enter 1 or 2.{RESET}\n")
 
@@ -306,7 +308,7 @@ def main():
         feature_name = args.feature_name
         category = args.category or FeatureCategory.FEATURE.value
         group = args.group
-        host_scale = args.host_scale or HostScale.SINGLE.value
+        host_scale = args.host_scale or HostScale.SMALL.value
 
     # Validation: Groups are mandatory for microbenchmarks
     if category == FeatureCategory.KERNEL_MICROBENCHMARKS.value and not group:

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: Speculative Decoding: Ngram
-# pipeline-type: feature support matrix
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for Speculative Decoding: Ngram"
     key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_CorrectnessTest"
