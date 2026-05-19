@@ -185,7 +185,7 @@ class CompilationManager:
                 self.runner.embed_input_ids_fn,
                 self.runner.state,
                 dummy_input_ids,
-                # Make _compute_deepstack_embeds happy. 
+                # Make _compute_deepstack_embeds happy.
                 [dummy_multimodal_embeddings],
                 call_kwargs={"is_multimodal": dummy_is_multimodal},
                 num_tokens=num_tokens,
