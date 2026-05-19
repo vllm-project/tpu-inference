@@ -28,7 +28,7 @@
         "v7x-2": 2,
         "default": 1
       },
-      "no-enable-prefix-caching": false,
+      "no-enable-prefix-caching": true,
       "max-model-len": 5120,
       "kv-cache-dtype": "fp8",
       "gpu-memory-utilization": 0.90,
