@@ -24,7 +24,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from absl.testing import parameterized
-from jax._src import compilation_cache as cc
 from jax._src import test_util as jtu
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
@@ -113,7 +112,6 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             del self.connector
 
         # Force JAX to release memory
-        cc.reset_cache()
         jax.clear_caches()
 
         # Force Python GC

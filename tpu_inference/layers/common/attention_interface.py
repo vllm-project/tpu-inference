@@ -72,7 +72,7 @@ def sharded_flash_attention(
             P("data", "model", None, None),  # k
             P("data", "model", None, None),  # v
             P("data", "model", None, None),  # attention_bias
-            P(),  # segment_ids
+            P("data", None),  # segment_ids (B matches q's B, so shard 'data')
         )
         out_specs = P("data", "model", None, None)
 
@@ -92,7 +92,7 @@ def sharded_flash_attention(
             P("data", "model", None, None),  # q
             P("data", "model", None, None),  # k
             P("data", "model", None, None),  # v
-            P(),  # segment_ids
+            P("data", None),  # segment_ids (B matches q's B, so shard 'data')
         )
         out_specs = P("data", "model", None, None)
 
