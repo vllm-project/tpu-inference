@@ -125,7 +125,6 @@ def test_merge_video_embeddings_into_input_ids():
 def test_merge_handles_image_and_video_token_ids_together():
     n_image_tokens = 4
     n_video_tokens = 8
-    total = n_image_tokens + n_video_tokens
 
     # Layout: [text, IMG x4, text, VIDEO x8, text]
     input_ids = jnp.array(
