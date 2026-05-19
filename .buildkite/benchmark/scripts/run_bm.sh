@@ -1,18 +1,3 @@
-#!/bin/bash
-# Copyright 2026 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 set -Eeuo pipefail
 
 # ==============================================================================
@@ -172,6 +157,16 @@ contains_element () {
   return 1
 }
 
+## Helper function to extract metrics from log files
+extract_value() {
+  local log_file="$1"
+  local section="$2"
+  local label="$3"  # Mean, Median, or P99
+  
+  grep "$section (ms):" "$log_file" | \
+  awk -v label="$label" '$0 ~ label { print $NF }' || true
+}
+
 # ---------------------------------------------------------
 # DECODE_ONLY Mode Configuration Validation & Dataset Injection
 # ---------------------------------------------------------
@@ -180,15 +175,10 @@ if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
     echo "[INFO] DECODE_ONLY mode activated. Validating configuration..."
     
     # Extract configurations from SERVER_CMD
-    MAX_NUM_SEQS=""
     PREFIX_CACHING_ENABLED="false"
     for i in "${!SERVER_CMD[@]}"; do
         arg="${SERVER_CMD[$i]}"
-        if [[ "$arg" == "--max-num-seqs" ]]; then
-            MAX_NUM_SEQS="${SERVER_CMD[i+1]}"
-        elif [[ "$arg" == --max-num-seqs=* ]]; then
-            MAX_NUM_SEQS="${arg#*=}"
-        elif [[ "$arg" == "--enable-prefix-caching" ]]; then
+        if [[ "$arg" == "--enable-prefix-caching" ]]; then
             PREFIX_CACHING_ENABLED="true"
         fi
     done
@@ -196,9 +186,13 @@ if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
     # Read DECODE_INPUT_LEN directly from the environment variable
     DECODE_INPUT_LEN="${INPUT_LEN:-}"
 
+    # Use MAX_DISTINCT_PROMPTS to generate dataset
+    MAX_DISTINCT_PROMPTS="${MAX_DISTINCT_PROMPTS:-}"
+
     # Extract configurations from CLIENT_CMD for dataset validations
     DATASET_NAME_VALID="false"
     HAS_DATASET_PATH="false"
+    PERCENTILE_METRICS=""
     for i in "${!CLIENT_CMD[@]}"; do
         arg="${CLIENT_CMD[$i]}"
         if [[ "$arg" == "--dataset-name" && "${CLIENT_CMD[i+1]}" == "custom" ]]; then
@@ -207,13 +201,18 @@ if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
             DATASET_NAME_VALID="true"
         elif [[ "$arg" == "--dataset-path" || "$arg" == --dataset-path=* ]]; then
             HAS_DATASET_PATH="true"
+        elif [[ "$arg" == "--percentile-metrics" ]]; then
+            PERCENTILE_METRICS="${CLIENT_CMD[i+1]}"
+        elif [[ "$arg" == --percentile-metrics=* ]]; then
+            PERCENTILE_METRICS="${arg#*=}"
         fi
     done
 
     # Assertions
-    if [[ -z "$MAX_NUM_SEQS" ]]; then
-        echo "[ERROR] DECODE_ONLY validation failed: Missing '--max-num-seqs' in SERVER_CMD."
-        echo "Reason: The exact cache boundary must be defined to prevent Cache Eviction during generation."
+    if [[ -z "$MAX_DISTINCT_PROMPTS" ]]; then
+        echo "[ERROR] DECODE_ONLY validation failed: Missing 'MAX_DISTINCT_PROMPTS' in the environment variables."
+        echo "Reason: You must define how many distinct prompts to inject into the KV Cache to prevent Eviction."
+        echo "Fix: Add 'MAX_DISTINCT_PROMPTS' to the 'env' section of your case JSON."
         exit 1
     fi
 
@@ -243,6 +242,12 @@ if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
         exit 1
     fi
 
+    if [[ "$PERCENTILE_METRICS" != *"ttft"* ]]; then
+        echo "[ERROR] DECODE_ONLY validation failed: 'ttft' is missing from '--percentile-metrics' in CLIENT_CMD."
+        echo "Reason: TTFT tracking is required to mathematically verify that Prefix Caching successfully bypassed the prefill phase."
+        exit 1
+    fi
+
     # Generate decode-only mode dataset and Inject
     echo "[INFO] Validation passed. Generating dataset..."
 
@@ -250,8 +255,9 @@ if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
     
     python3 "$SCRIPT_DIR/generate_decode_only_bm_dataset.py" \
         --input-len "$DECODE_INPUT_LEN" \
-        --num-distinct "$MAX_NUM_SEQS" \
-        --output-file "$DECODE_DATASET_PATH"
+        --num-distinct "$MAX_DISTINCT_PROMPTS" \
+        --output-file "$DECODE_DATASET_PATH" \
+        --model "$MODEL"
         
     CLIENT_CMD+=( "--dataset-path" "$DECODE_DATASET_PATH" )
     
@@ -422,44 +428,111 @@ if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
     echo "====================================================================="
     echo "[INFO] DECODE_ONLY: Executing Warmup Phase"
     echo "====================================================================="
-    echo "Warming up HBM Cache with exactly $MAX_NUM_SEQS distinct requests to prevent Cache Eviction..."
     
-    # Copy the array for safe modification
-    WARMUP_CMD=("${CLIENT_CMD[@]}")
-    
-    found_prompts=false
-    
-    # In-place modification of existing flags
-    for i in "${!WARMUP_CMD[@]}"; do
-        arg="${WARMUP_CMD[$i]}"
-        if [[ "$arg" == "--num-prompts" ]]; then
-            WARMUP_CMD[i+1]="$MAX_NUM_SEQS"
-            found_prompts=true
-        elif [[ "$arg" == --num-prompts=* ]]; then
-            WARMUP_CMD[i]="--num-prompts=$MAX_NUM_SEQS"
-            found_prompts=true
+    # 1. Dynamically extract max-concurrency from the benchmark command
+    TARGET_CONCURRENCY="$MAX_DISTINCT_PROMPTS" # fallback
+    for i in "${!CLIENT_CMD[@]}"; do
+        arg="${CLIENT_CMD[$i]}"
+        if [[ "$arg" == "--max-concurrency" ]]; then
+            TARGET_CONCURRENCY="${CLIENT_CMD[i+1]}"
+            break
+        elif [[ "$arg" == --max-concurrency=* ]]; then
+            TARGET_CONCURRENCY="${arg#*=}"
+            break
         fi
     done
+
+    echo "[INFO] Target concurrency extracted: ${TARGET_CONCURRENCY}"
+    echo "[INFO] Shaping Warmup Output: Setting custom-output-len=1 to bypass lengthy generation."
+
+    # =======================================================================
+    # Warmup Run 1: Establish a pure baseline TTFT & safely seed the HBM Cache
+    # =======================================================================
+    echo "-> [Run 1] Warming up HBM Cache with exactly $MAX_DISTINCT_PROMPTS distinct requests..."
+    WARMUP_CMD_1=("${CLIENT_CMD[@]}")
     
-    # Append the flags if they were not found in the original command
-    if [[ "$found_prompts" == false ]]; then
-        WARMUP_CMD+=( "--num-prompts" "$MAX_NUM_SEQS" )
-    fi
-    
-    echo "[DEBUG] WARMUP_CMD: ${CLIENT_CMD_ENVS[*]} ${WARMUP_CMD[*]}"
+    found_prompts=false
+    found_output_len=false
+    for i in "${!WARMUP_CMD_1[@]}"; do
+        arg="${WARMUP_CMD_1[$i]}"
+        if [[ "$arg" == "--num-prompts" ]]; then
+            WARMUP_CMD_1[i+1]="$MAX_DISTINCT_PROMPTS"
+            found_prompts=true
+        elif [[ "$arg" == --num-prompts=* ]]; then
+            WARMUP_CMD_1[i]="--num-prompts=$MAX_DISTINCT_PROMPTS"
+            found_prompts=true
+        fi
+        if [[ "$arg" == "--custom-output-len" ]]; then
+            WARMUP_CMD_1[i+1]="1"
+            found_output_len=true
+        elif [[ "$arg" == --custom-output-len=* ]]; then
+            WARMUP_CMD_1[i]="--custom-output-len=1"
+            found_output_len=true
+        fi
+    done
+    if [[ "$found_prompts" == false ]]; then WARMUP_CMD_1+=( "--num-prompts" "$MAX_DISTINCT_PROMPTS" ); fi
+    if [[ "$found_output_len" == false ]]; then WARMUP_CMD_1+=( "--custom-output-len" "1" ); fi
+
     set +e
-    env "${CLIENT_CMD_ENVS[@]}" "${WARMUP_CMD[@]}" > "$LOG_FOLDER/warmup_log.txt" 2>&1
+    env "${CLIENT_CMD_ENVS[@]}" "${WARMUP_CMD_1[@]}" > "$LOG_FOLDER/warmup_log.txt" 2>&1
     warmup_exit_code=$?
     set -e
     
     if [[ "$warmup_exit_code" -ne 0 ]]; then
-        echo "[ERROR] Warmup phase failed with exit code $warmup_exit_code!"
-        echo "--- Dumping Warmup Log ---"
+        echo "[ERROR] Warmup phase Run 1 failed with exit code $warmup_exit_code!"
         cat "$LOG_FOLDER/warmup_log.txt"
         exit 1
     fi
+
+    # Extract the true full-length Prefill TTFT + large XLA graph compilation time
+    export WARMUP_TTFT=$(extract_value "$LOG_FOLDER/warmup_log.txt" "TTFT" "Median")
+    if [[ -z "$WARMUP_TTFT" ]]; then
+        echo "[ERROR] Failed to extract Median TTFT from warmup log 1!"
+        exit 1
+    else
+        echo "[INFO] Warmup Run 1 Median TTFT recorded: ${WARMUP_TTFT} ms"
+    fi
+
+    # =======================================================================
+    # Warmup Run 2: Hit Cache and pre-compile XLA graph for concurrent ragged block prefill
+    # =======================================================================
+    echo "-> [Run 2] Pre-compiling Ragged Block XLA graphs for target concurrency: $TARGET_CONCURRENCY..."
+    WARMUP_CMD_2=("${CLIENT_CMD[@]}")
     
-    echo "[INFO] Warmup Phase Completed Successfully. Cache is strictly seeded."
+    found_prompts=false
+    found_output_len=false
+    for i in "${!WARMUP_CMD_2[@]}"; do
+        arg="${WARMUP_CMD_2[$i]}"
+        if [[ "$arg" == "--num-prompts" ]]; then
+            WARMUP_CMD_2[i+1]="$TARGET_CONCURRENCY"
+            found_prompts=true
+        elif [[ "$arg" == --num-prompts=* ]]; then
+            WARMUP_CMD_2[i]="--num-prompts=$TARGET_CONCURRENCY"
+            found_prompts=true
+        fi
+        if [[ "$arg" == "--custom-output-len" ]]; then
+            WARMUP_CMD_2[i+1]="1"
+            found_output_len=true
+        elif [[ "$arg" == --custom-output-len=* ]]; then
+            WARMUP_CMD_2[i]="--custom-output-len=1"
+            found_output_len=true
+        fi
+    done
+    if [[ "$found_prompts" == false ]]; then WARMUP_CMD_2+=( "--num-prompts" "$TARGET_CONCURRENCY" ); fi
+    if [[ "$found_output_len" == false ]]; then WARMUP_CMD_2+=( "--custom-output-len" "1" ); fi
+
+    set +e
+    env "${CLIENT_CMD_ENVS[@]}" "${WARMUP_CMD_2[@]}" > "$LOG_FOLDER/warmup_log_2.txt" 2>&1
+    warmup_exit_code_2=$?
+    set -e
+    
+    if [[ "$warmup_exit_code_2" -ne 0 ]]; then
+        echo "[ERROR] Warmup phase Run 2 failed with exit code $warmup_exit_code_2!"
+        cat "$LOG_FOLDER/warmup_log_2.txt"
+        exit 1
+    fi
+
+    echo "[INFO] Warmup Phase Completed Successfully. Cache is safely seeded and dynamic XLA graphs are fully pre-compiled."
     echo "[INFO] Proceeding to Decode-Only concurrency stress testing."
     echo "====================================================================="
 fi
@@ -599,6 +672,31 @@ p99_e2el="$VALID_P99_E2EL"
 
 echo "throughput:$throughput"
 echo "p99_e2el:$p99_e2el"
+
+# Verify if successfully hit the Prefix Cache in Decode-Only mode
+if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
+    BM_TTFT=$(extract_value "$BM_LOG" "TTFT" "Median")
+
+    if [[ -z "$BM_TTFT" ]]; then
+         echo "[ERROR] Failed to extract Benchmark Median TTFT from BM_LOG!"
+         echo "Reason: Benchmark TTFT is strictly required to verify Prefix Cache hits."
+         echo "--- Dumping BM_LOG ---"
+         cat "$BM_LOG"
+         report_and_exit 1
+    fi
+
+    # Check whether hit the cache by comparing the 2 TTFT
+    CACHE_MISS=$(awk -v w="$WARMUP_TTFT" -v b="$BM_TTFT" 'BEGIN { if (b >= w * 0.15) print 1; else print 0 }')
+    
+    if [[ "$CACHE_MISS" -eq 1 ]]; then
+        echo "[ERROR] CACHE MISS DETECTED in DECODE_ONLY mode!"
+        echo "Warmup TTFT: ${WARMUP_TTFT} ms | Benchmark TTFT: ${BM_TTFT} ms"
+        echo "Reason: The benchmark phase is re-computing prefill. Prefix Cache was likely evicted."
+        report_and_exit 1
+    else
+        echo "[INFO] Prefix Cache Hit Verified! (Warmup TTFT: ${WARMUP_TTFT} ms -> Benchmark TTFT: ${BM_TTFT} ms)"
+    fi
+fi
 
 # Step 1.5: check if initial run meets the E2EL requirement
 p99_int=$(printf "%.0f" "$p99_e2el")

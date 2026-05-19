@@ -1,0 +1,110 @@
+{
+  "global_env": {
+    "GCP_PROJECT_ID": "cloud-tpu-inference-test",
+    "GCS_BUCKET": "vllm-cb-storage2",
+    "GCP_INSTANCE_ID": "vllm-bm-inst",
+    "GCP_DATABASE_ID": "vllm-bm-bk-runs",
+    "SERVER_WAIT_MINS": 180,
+    "DECODE_ONLY": "true"
+  },
+  "benchmark_cases": [
+    {
+      "case_name": "Qwen3_5-397B-Decode-GBS128",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "MODELTAG": "NEW",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 8192,
+        "OUTPUT_LEN": 1024,
+        "MAX_DISTINCT_PROMPTS": 16
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "MODEL_IMPL_TYPE": "vllm",
+          "NEW_MODEL_DESIGN": "1"
+        },
+        "args": {
+          "model": "Qwen/Qwen3.5-397B-A17B-FP8",
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 16384,
+          "tensor-parallel-size": {
+            "v7x-8": 8
+          },
+          "max-model-len": 10240,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.8,
+          "enable-expert-parallel": true,
+          "async-scheduling": true,
+          "enable-prefix-caching": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3.5-397B-A17B-FP8",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "custom",
+          "custom-output-len": 1024,
+          "num-prompts": 512,
+          "percentile-metrics": "ttft,tpot,e2el",
+          "ignore-eos": true,
+          "max-concurrency": 128
+        }
+      }
+    },
+    {
+      "case_name": "Qwen3_5-397B-Decode-GBS256",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "MODELTAG": "NEW",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 8192,
+        "OUTPUT_LEN": 1024,
+        "MAX_DISTINCT_PROMPTS": 16
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "MODEL_IMPL_TYPE": "vllm",
+          "NEW_MODEL_DESIGN": "1"
+        },
+        "args": {
+          "model": "Qwen/Qwen3.5-397B-A17B-FP8",
+          "max-num-seqs": 256,
+          "max-num-batched-tokens": 16384,
+          "tensor-parallel-size": {
+            "v7x-8": 8
+          },
+          "max-model-len": 10240,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.8,
+          "enable-expert-parallel": true,
+          "async-scheduling": true,
+          "enable-prefix-caching": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3.5-397B-A17B-FP8",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "custom",
+          "custom-output-len": 1024,
+          "num-prompts": 512,
+          "percentile-metrics": "ttft,tpot,e2el",
+          "ignore-eos": true,
+          "max-concurrency": 256
+        }
+      }
+    }
+  ]
+}

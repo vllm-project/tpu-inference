@@ -16,7 +16,7 @@ import argparse
 import json
 
 import numpy as np
-
+from transformers import AutoTokenizer
 
 def main():
     parser = argparse.ArgumentParser(
@@ -36,48 +36,66 @@ def main():
         "--num-distinct",
         required=True,
         type=int,
-        help=
-        "Suggested to be equal to --max-num-seqs to maximize the randomness while ensuring all requests can be safely cached without eviction.",
+        help="Suggested to be equal to --max-num-seqs to avoid eviction."
     )
     parser.add_argument(
         "--output-file",
         type=str,
         default="/tmp/decode_only_dataset.jsonl",
-        help="Path to save the JSONL",
+        help="Path to save the JSONL"
+    )
+    parser.add_argument(
+        "--model", 
+        type=str, 
+        required=True, 
+        help="HuggingFace model ID or path for Tokenizer"
+    )
+    parser.add_argument(
+        "--shrink-ratio", 
+        type=float, 
+        default=0.95, 
+        help="Ratio to shrink initial random array to prevent BPE fragmentation overflow"
     )
     args = parser.parse_args()
 
-    print(
-        f"[Data Prep] Generating {args.num_distinct} distinct random prompts (Len: {args.input_len})..."
-    )
+    print(f"[Data Prep] Loading Tokenizer for {args.model}...")
+    # Load the tokenizer to perform the decoding
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
-    # Generate `num_distinct` completely different random token arrays to force realistic hardware utilization
-    # We avoid 0-100 because they are often reserved for special tokens (BOS, EOS, PAD).
+    # Calculate the safe initial length to account for BPE expansion
+    safe_initial_len = int(args.input_len * args.shrink_ratio)
+    print(f"[Data Prep] Target Limit: {args.input_len} tokens. Generating arrays of {safe_initial_len} (Ratio: {args.shrink_ratio})...")
+
+    # Generate `num_distinct` completely different random token arrays
     random_matrix = np.random.randint(low=100,
                                       high=50000,
-                                      size=(args.num_distinct, args.input_len))
-    distinct_prompts = [row.tolist() for row in random_matrix]
+                                      size=(args.num_distinct, safe_initial_len))
+    
+    distinct_prompts_text = []
+    print("[Data Prep] Decoding random token arrays into strings...")
+    for i, row in enumerate(random_matrix):
+        prompt_ids = row.tolist()
+        # Decode the random integers directly into a raw string
+        decoded_text = tokenizer.decode(prompt_ids, skip_special_tokens=True)
+        distinct_prompts_text.append(decoded_text)
+        # Log the actual re-tokenized length
+        actual_len = len(tokenizer(decoded_text).input_ids)
+        length_diff = args.input_len - actual_len
+        print(f"  -> Prompt {i+1}: Original IDs={args.input_len} | Re-tokenized Length={actual_len} | Diff=-{length_diff} tokens")
 
-    # vLLM 'custom' dataset expects JSONL format and natively supports "prompt_token_ids".
-    # We cycle through the distinct prompts sequentially (e.g., A, B, C, D, A, B, C, D...).
+    # We cycle through the distinct prompts sequentially.
     with open(args.output_file, "w") as f:
         for i in range(args.num_prompts):
-            prompt_ids = distinct_prompts[i % args.num_distinct]
-            # vLLM's dataset parser strictly requires a 'prompt' key to pass schema validation
-            # 'prompt_token_ids' will override it.
+            prompt_text = distinct_prompts_text[i % args.num_distinct]
+            
+            # vLLM's dataset parser natively reads standard strings from the 'prompt' key
             json_record = {
-                "prompt":
-                f"decode_only_dummy_bypass_seq_{i % args.num_distinct}",
-                "prompt_token_ids": prompt_ids
+                "prompt": prompt_text
             }
             f.write(json.dumps(json_record) + "\n")
 
-    print(
-        "[Data Prep] Successfully generated Custom JSONL dataset using raw Token IDs."
-    )
-    print(
-        f"[Data Prep] Total Lines: {args.num_prompts} | Distinct Request Types: {args.num_distinct}"
-    )
+    print("[Data Prep] Successfully generated Custom JSONL dataset using decoded random text.")
+    print(f"[Data Prep] Total Lines: {args.num_prompts} | Distinct Request Types: {args.num_distinct}")
     print(f"[Data Prep] Saved to {args.output_file}")
 
 
