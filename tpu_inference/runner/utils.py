@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
@@ -44,6 +45,7 @@ PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP = 0
 # For decode only batches, start capturing traces after all requests in the
 # batch has KV caches that have reached this length threshold
 PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD = -1
+PHASED_PROFILER_MAX_WORKERS = 1
 
 logger = init_logger(__name__)
 
@@ -280,13 +282,14 @@ def get_batch_composition_stats(
                 num_decode_tokens += 1
 
     stats = {
-        "batch_id": batch_id,
-        "total_num_scheduled_tokens": total_num_scheduled_tokens,
-        "num_prefill_tokens": num_prefill_tokens,
-        "num_decode_tokens": num_decode_tokens,
-        "padded_total_num_scheduled_tokens": padded_total_num_scheduled_tokens,
-        "num_reqs": num_reqs,
-        "min_kv_len": min_kv_len if min_kv_len != float('inf') else 0
+        "batch_id": int(batch_id),
+        "total_num_scheduled_tokens": int(total_num_scheduled_tokens),
+        "num_prefill_tokens": int(num_prefill_tokens),
+        "num_decode_tokens": int(num_decode_tokens),
+        "padded_total_num_scheduled_tokens":
+        int(padded_total_num_scheduled_tokens),
+        "num_reqs": int(num_reqs),
+        "min_kv_len": int(min_kv_len) if min_kv_len != float("inf") else 0,
     }
     stats["phase"] = determine_phase_from_batch_composition_stats(stats).name
     return stats
@@ -517,6 +520,8 @@ class PhasedBasedProfiler:
         if self.decode_kv_len_threshold >= 0:
             logger.info("Will skip decode-only steps until min KV len >= %d.",
                         self.decode_kv_len_threshold)
+        self._executor = ThreadPoolExecutor(
+            max_workers=PHASED_PROFILER_MAX_WORKERS)
 
     def _write_batch_composition_stats_to_file_helper(
             self, batch_composition_stats: dict) -> None:
@@ -526,13 +531,24 @@ class PhasedBasedProfiler:
         """
         now = datetime.datetime.now()
         date_string_in_profiler_format = now.strftime("%Y_%m_%d_%H_%M_%S_%f")
+        target_dir = self.profile_dir_with_phase_suffix
+        stats_copy = dict(batch_composition_stats)
 
-        with open(
-                os.path.join(
-                    self.profile_dir_with_phase_suffix,
-                    f"batch_composition_stats_{date_string_in_profiler_format}.json"
-                ), "w") as f:
-            f.write(json.dumps(batch_composition_stats) + "\n")
+        def _write():
+            try:
+                logger.info("Writing batch composition stats to %s",
+                            target_dir)
+                with open(
+                        os.path.join(
+                            target_dir,
+                            f"batch_composition_stats_{date_string_in_profiler_format}.json"
+                        ), "w") as f:
+                    f.write(json.dumps(stats_copy) + "\n")
+            except Exception as e:
+                logger.warning("Failed to write batch composition stats: %s",
+                               e)
+
+        self._executor.submit(_write)
 
     def _start_profiling(self, batch_composition_stats: dict) -> None:
         """
