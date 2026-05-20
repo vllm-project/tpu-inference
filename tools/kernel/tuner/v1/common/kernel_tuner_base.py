@@ -503,7 +503,6 @@ class KernelTunerBase(ABC):
 
             average_latency_us = int(average_latency_ns // 1000)
             total_time_us = int(total_time // 1000)
-            status = TuningStatus.UNKNOWN_ERROR # testing 
             results_buffer.append(
                 (self.run_config.case_set_id, self.run_config.run_id, cid,
                  status.value, FLAGS.worker_id, average_latency_us, warmup_us,
