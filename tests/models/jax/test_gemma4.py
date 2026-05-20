@@ -32,33 +32,33 @@ from tpu_inference.models.jax.gemma4_mm import Gemma4ForConditionalGeneration
 
 class TestGemma4ForConditionalGeneration:
 
-    @pytest.mark.parametrize("model_name", [
-        "google/gemma-4-31B-it",
-        "google/gemma-4-26B-A4B-it",
-    ])
-    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
-                                                       (3, 4)])
-    @pytest.mark.parametrize(
-        "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
-    def test_model_loading(
-            self,
-            model_name,
-            pp_rank,
-            pp_world_size,
-            load_format,
-            # following are defined in conftest.py
-            rng,
-            mesh,
-            mock_vllm_config,
-            assert_weight_loading_memory_bounded):
-        """Tests loading weights from HF model"""
+    def _run_model_loading_test(self, model_name, pp_rank, pp_world_size,
+                                load_format, truncate_layers, rng, mesh,
+                                mock_vllm_config):
+        """Construct Gemma4ForConditionalGeneration, load weights, run a
+        single decoder-layer forward pass, and assert the output exists.
+
+        Args:
+          truncate_layers: int or None. When set, the test rewrites
+            text_config.num_hidden_layers and vision_config.num_hidden_layers
+            to this value so the per-test fixture can iterate quickly
+            (used by the 31B / 26B-A4B cases). E-family configs (E2B/E4B)
+            must pass None — their PLE weights are aggregated over L
+            (`embed_tokens_per_layer.weight` shape `[V_ple, L*P]`), so
+            truncating L breaks weight load with a shape mismatch.
+        """
         kv_cache_type = "auto"
         vllm_config = mock_vllm_config(model_name, kv_cache_type)
-        # No need to load full model.
-        vllm_config.model_config.hf_config.text_config.num_hidden_layers = 4
-        vllm_config.model_config.hf_config.vision_config.num_hidden_layers = 4
+        if truncate_layers is not None:
+            # No need to load full model — 31B / 26B-A4B don't have PLE,
+            # so truncating L is safe and keeps the per-test cost low.
+            vllm_config.model_config.hf_config.text_config.num_hidden_layers = (
+                truncate_layers)
+            vllm_config.model_config.hf_config.vision_config.num_hidden_layers = (
+                truncate_layers)
+            vllm_config.load_config.num_layers_to_load_for_test = (
+                truncate_layers)
         vllm_config.load_config.load_format = load_format
-        vllm_config.load_config.num_layers_to_load_for_test = 4
         vllm_config.parallel_config = MagicMock()
         vllm_config.parallel_config.enable_expert_parallel = False
 
@@ -126,3 +126,67 @@ class TestGemma4ForConditionalGeneration:
                 ),
             )
         assert jax_output is not None
+
+    @pytest.mark.parametrize("model_name", [
+        "google/gemma-4-31B-it",
+        "google/gemma-4-26B-A4B-it",
+    ])
+    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
+                                                       (3, 4)])
+    @pytest.mark.parametrize(
+        "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
+    def test_model_loading(
+            self,
+            model_name,
+            pp_rank,
+            pp_world_size,
+            load_format,
+            # following are defined in conftest.py
+            rng,
+            mesh,
+            mock_vllm_config,
+            assert_weight_loading_memory_bounded):
+        """Tests loading weights from HF model (31B, 26B-A4B). Truncates
+        to 4 layers for fast iteration; E-family lives in
+        `test_e_family_model_loading` instead."""
+        self._run_model_loading_test(
+            model_name=model_name,
+            pp_rank=pp_rank,
+            pp_world_size=pp_world_size,
+            load_format=load_format,
+            truncate_layers=4,
+            rng=rng,
+            mesh=mesh,
+            mock_vllm_config=mock_vllm_config,
+        )
+
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "google/gemma-4-E2B-it",
+            # "google/gemma-4-E4B-it",  # add when E4B bringup lands
+        ])
+    def test_e_family_model_loading(
+        self,
+        model_name,
+        # following are defined in conftest.py
+        rng,
+        mesh,
+        mock_vllm_config,
+    ):
+        """E-family (E2B, E4B): PLE makes `embed_tokens_per_layer.weight`
+        aggregate over L as shape `[V_ple, L*P]`, so the
+        `num_hidden_layers=4` truncation used by `test_model_loading`
+        shape-mismatches on weight load. Run at world_size=1 with the
+        real L; `jax_dummy` skips real-weight download but still exercises
+        the construct + load_weights path."""
+        self._run_model_loading_test(
+            model_name=model_name,
+            pp_rank=0,
+            pp_world_size=1,
+            load_format="jax_dummy",
+            truncate_layers=None,
+            rng=rng,
+            mesh=mesh,
+            mock_vllm_config=mock_vllm_config,
+        )
