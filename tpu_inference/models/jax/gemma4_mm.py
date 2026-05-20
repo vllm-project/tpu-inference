@@ -593,15 +593,14 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             if self.model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
                 hidden_size = model_config.hf_config.text_config.hidden_size
-                from tpu_inference.layers.jax.linear import JaxEinsum
-                self.lm_head = JaxEinsum(
-                    "TD,DV->TV",
-                    (hidden_size, vocab_size),
+                from tpu_inference.layers.jax.linear import JaxLmHead
+                self.lm_head = JaxLmHead(
+                    hidden_size=hidden_size,
+                    vocab_size=vocab_size,
                     param_dtype=model_config.dtype,
                     kernel_init=nnx.with_partitioning(init_fn,
                                                       ("model", None)),
                     rngs=rng,
-                    quant_config=vllm_config.quant_config,
                     prefix="lm_head",
                 )
             else:

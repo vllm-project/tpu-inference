@@ -40,7 +40,7 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
-from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
+from tpu_inference.layers.jax.linear import JaxLinear, JaxLmHead
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
                                                 select_moe_backend)
@@ -332,13 +332,12 @@ class Qwen3MoeForCausalLM(JaxModule, LoadableWithIterator):
             if self.model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
                 hidden_size = model_config.hf_config.hidden_size
-                self.lm_head = JaxEinsum(
-                    einsum_str="TD,DV->TV",
-                    kernel_shape=(hidden_size, vocab_size),
+                self.lm_head = JaxLmHead(
+                    hidden_size=hidden_size,
+                    vocab_size=vocab_size,
                     dtype=model_config.dtype,
                     param_dtype=model_config.dtype,
                     rngs=rng,
-                    quant_config=vllm_config.quant_config,
                     prefix="lm_head",
                 )
             else:
