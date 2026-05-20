@@ -21,6 +21,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn import Parameter
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
@@ -68,6 +69,33 @@ def _load_weight_for_layer(
     """Load a layer's weight parameter onto the TPU mesh.
     """
     tensor = getattr(layer, param_name)
+
+    if tensor.device == torch.device("meta"):
+        vllm_config = get_current_vllm_config()
+
+        # Hardening for Multimodal Embedding models (e.g., Qwen3-VL-Embedding-8B):
+        # vLLM V1 uses lazy loading which may leave some tensors on the 'meta' device.
+        # Since the TPU/JAX backend requires concrete data to perform t2j (Torch-to-JAX)
+        # sharding, we must force materialization to CPU memory for pooling tasks.
+        # Note: we cannot use `is_pooling_model` here because a model instance is not available
+        # in this layer-level loading function.
+        if vllm_config.model_config.runner_type == "pooling":
+            logger.warning(
+                f"Materializing meta tensor '{param_name}' for layer "
+                f"{layer.__class__.__name__} to CPU RAM for StepPooler compatibility."
+            )
+            # Allocate real memory on CPU
+            real_data = torch.empty_like(tensor, device='cpu')
+            new_param = torch.nn.Parameter(real_data, requires_grad=False)
+
+            # Bypass setters to satisfy PyTorch registration rules.
+            # pop from __dict__ avoids shadowing KeyError;
+            # inject into _parameters establishes Parameter identity.
+            layer.__dict__.pop(param_name, None)
+            layer._parameters[param_name] = new_param
+
+            # Synchronize local handle for the subsequent t2j call
+            tensor = new_param
 
     if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return t2j(tensor, use_dlpack=False)
@@ -141,7 +169,15 @@ class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
         weight = _load_weight_for_layer(layer, "weight", weight_sharding)
         delattr(layer, 'weight')
         weight = general_device_put(weight, weight_sharding)
-        layer.weight = Parameter(torch_view(weight), requires_grad=False)
+        is_pooling = get_current_vllm_config(
+        ).model_config.runner_type == "pooling"
+
+        if is_pooling:
+            layer.__dict__.pop("weight", None)
+            layer._parameters["weight"] = Parameter(torch_view(weight),
+                                                    requires_grad=False)
+        else:
+            layer.weight = Parameter(torch_view(weight), requires_grad=False)
 
         if isinstance(layer, ParallelLMHead) and layer.bias is not None:
             bias_sharding = NamedSharding(self.mesh,
@@ -149,7 +185,13 @@ class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
             bias = _load_weight_for_layer(layer, "bias", bias_sharding)
             delattr(layer, 'bias')
             bias = general_device_put(bias, bias_sharding)
-            layer.bias = Parameter(torch_view(bias), requires_grad=False)
+
+            if is_pooling:
+                layer.__dict__.pop("bias", None)
+                layer._parameters["bias"] = Parameter(torch_view(bias),
+                                                      requires_grad=False)
+            else:
+                layer.bias = Parameter(torch_view(bias), requires_grad=False)
 
 
 class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
