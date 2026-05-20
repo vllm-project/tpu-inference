@@ -149,17 +149,32 @@ class CompilationManager:
         for num_tokens in self.runner.num_tokens_paddings:
             hidden_size = self.runner.vllm_config.model_config.get_hidden_size(
             )
+            hf_conf = self.runner.vllm_config.model_config.hf_config
+
+            # Identify multimodal embedding size
+            mm_hidden_size = hidden_size
+            vision_config = getattr(hf_conf, "vision_config", None)
+
+            if vision_config:
+                visual_dim = getattr(vision_config, "out_hidden_size", None)
+                deepstack_indexes = getattr(vision_config,
+                                            "deepstack_visual_indexes", None)
+
+                # If both exist, we apply the deepstack concat logic
+                if visual_dim is not None and deepstack_indexes is not None:
+                    deepstack_levels = len(deepstack_indexes)
+                    mm_hidden_size = visual_dim * (1 + deepstack_levels)
+
             sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.ATTN_DATA, None))
             input_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
-            dummy_mm_embeds = self._create_dummy_tensor(
-                (num_tokens, hidden_size),
+            dummy_multimodal_embeddings = self._create_dummy_tensor(
+                (num_tokens, mm_hidden_size),
                 self.runner.vllm_config.model_config.dtype,
                 sharding=sharding)
-            dummy_multimodal_embeddings = [dummy_mm_embeds]
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
             dummy_is_multimodal = self._create_dummy_tensor(
@@ -170,7 +185,8 @@ class CompilationManager:
                 self.runner.embed_input_ids_fn,
                 self.runner.state_leaves,
                 dummy_input_ids,
-                dummy_multimodal_embeddings,
+                # Make _compute_deepstack_embeds happy.
+                [dummy_multimodal_embeddings],
                 call_kwargs={"is_multimodal": dummy_is_multimodal},
                 num_tokens=num_tokens,
             )
@@ -475,17 +491,39 @@ class CompilationManager:
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
         dtype = self.runner.model_config.dtype
-        for num_tokens in self.runner.num_tokens_paddings:
-            for num_reqs in self.runner.attn_num_reqs_paddings:
-                sharding = NamedSharding(
-                    self.runner.mesh,
-                    PartitionSpec(ShardingAxisName.ATTN_DATA, None))
-                input_sharding = NamedSharding(
-                    self.runner.mesh,
-                    PartitionSpec(ShardingAxisName.ATTN_DATA))
 
-                inputs_embeds = self._create_dummy_tensor(
-                    (num_tokens, hidden_size), dtype, sharding=sharding)
+        # Identify multimodal embedding size including Deepstack
+        hf_conf = self.runner.vllm_config.model_config.hf_config
+        vision_config = getattr(hf_conf, "vision_config", None)
+        embeds_hidden_size = hidden_size
+
+        if vision_config:
+            visual_dim = getattr(vision_config, "out_hidden_size", None)
+            deepstack_indexes = getattr(vision_config,
+                                        "deepstack_visual_indexes", None)
+
+            # If both exist, we apply the deepstack concat logic
+            if visual_dim is not None and deepstack_indexes is not None:
+                deepstack_levels = len(deepstack_indexes)
+                embeds_hidden_size = visual_dim * (1 + deepstack_levels)
+
+        # Compile for both standard (4k) and Deepstack (16k) dimensions if they differ
+        hidden_sizes_to_compile = [hidden_size]
+        if embeds_hidden_size != hidden_size:
+            hidden_sizes_to_compile.append(embeds_hidden_size)
+
+        for h_size in hidden_sizes_to_compile:
+            for num_tokens in self.runner.num_tokens_paddings:
+                for num_reqs in self.runner.attn_num_reqs_paddings:
+                    sharding = NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+                    input_sharding = NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(ShardingAxisName.ATTN_DATA))
+
+                    inputs_embeds = self._create_dummy_tensor(
+                        (num_tokens, h_size), dtype, sharding=sharding)
                 if self.runner.uses_mrope:
                     mrope_sharding = NamedSharding(
                         self.runner.mesh,
