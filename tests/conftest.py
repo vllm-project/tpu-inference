@@ -52,6 +52,33 @@ def pytest_configure(config):
     )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _prewarm_jax_compilation_cache():
+    """
+    Pre-warms the JAX compilation cache singleton before any tests run.
+
+    JaxTestCase wraps every test in `assert_global_configs_unchanged`, which
+    asserts that `jax._src.compilation_cache._cache` is the same object before
+    and after the test. With `JAX_COMPILATION_CACHE_DIR` set, the cache is
+    lazily initialized on the first JIT call, so the first test to JIT would
+    transition `_cache` from None to LRUCache and trip the assertion. Force
+    that initialization at session setup so `_cache` has a stable identity
+    for every test that follows. Tests that need to opt out can still use
+    the `@pytest.mark.disable_jax_cache` marker.
+
+    Use `compilation_cache._initialize_cache()` (JAX's own lazy-init helper)
+    instead of a dummy `jax.jit(...)` because a JIT would also initialize the
+    backend (libtpu on TPU) in the pytest parent process, which conflicts with
+    tests that fork worker processes (e.g. Ray's RayDistributedExecutor, vLLM
+    MultiProcExecutor) and produces `Internal error when accessing libtpu
+    multi-process lockfile`. `_initialize_cache` only constructs the LRUCache
+    object from the configured cache dir — no backend touched.
+    """
+    if jax.config.jax_compilation_cache_dir:
+        from jax._src import compilation_cache
+        compilation_cache._initialize_cache()
+
+
 @pytest.fixture(autouse=True)
 def _handle_disable_jax_cache_marker(request):
     """
