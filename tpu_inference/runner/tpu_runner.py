@@ -28,6 +28,7 @@ from flax import nnx
 from jax._src import mesh as mesh_lib
 from jax._src.pallas.utils import next_power_of_2
 from jax.experimental import mesh_utils
+from jax.experimental.layout import Format, Layout
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -89,6 +90,86 @@ logging.getLogger("torchax.tensor").setLevel(logging.ERROR)
 INVALID_TOKEN_ID = -1
 # Smallest output size
 MIN_NUM_SEQS = 8
+
+
+# Match keys for the attention input/output projections we want to relayout.
+# Substring match against `jax.tree_util.keystr(path)` for each state leaf.
+_ATTN_PROJ_KEY_SUBSTRS = (
+    "qkv_proj",
+    "o_proj",
+    "q_proj",
+    "k_proj",
+    "v_proj",
+)
+
+# Tile the decode while_loop body wants for these weights. T(16,128) is
+# the major tile; the inner sub-tile depends on dtype packing on TPU:
+#   - 16-bit (bf16, fp16): sub-tile (2, 1)  (two values packed per 32-bit lane)
+#   - 32-bit (fp32):       no sub-tile
+# Storing weights already in this tile at load time avoids the per-call
+# ENTRY relayout copy XLA otherwise inserts in front of the while_loop.
+# See repro_while_relayout.py and XLA_BUG_REPORT.md for details.
+_TILE_FOR_16BIT = ((16, 128), (2, 1))
+_TILE_FOR_32BIT = ((16, 128), )
+
+
+def _attn_proj_tile_for_dtype(dtype):
+    bits = jnp.dtype(dtype).itemsize * 8
+    if bits == 16:
+        return _TILE_FOR_16BIT
+    if bits == 32:
+        return _TILE_FOR_32BIT
+    return None  # unsupported; skip pinning
+
+
+def _pin_attn_proj_layouts(state: Any) -> tuple[Any, int]:
+    """Place attention qkv/o projection weights in T(16,128) on device.
+
+    Walks the state pytree, finds 2D float weights whose flattened path
+    contains an attention-projection name, and `device_put`s each into a
+    Format that pins the on-device tile to T(16,128). Returns
+    (new_state, n_pinned).
+
+    Path matching is intentionally permissive (just the projection name as
+    a substring) so it works across both nnx-style state paths
+    (`...['qkv_proj']['kernel'].value`) and vllm/torch-style paths
+    (`...['qkv_proj']['weight']`).
+
+    Gated by the caller (only do this when `enable_continue_decode` is on)
+    because the non-loop matmul fusion prefers T(8,128) directly and would
+    instead require a relayout if we pre-tiled to T(16,128).
+    """
+    leaves_with_paths, treedef = jax.tree_util.tree_flatten_with_path(state)
+    new_leaves: list[Any] = []
+    n_pinned = 0
+    for path, leaf in leaves_with_paths:
+        path_str = jax.tree_util.keystr(path)
+        try:
+            is_attn_proj = any(s in path_str
+                               for s in _ATTN_PROJ_KEY_SUBSTRS)
+            is_2d_float = (hasattr(leaf, "ndim") and leaf.ndim == 2
+                           and hasattr(leaf, "dtype")
+                           and jnp.issubdtype(leaf.dtype, jnp.floating))
+            shape_ok = is_2d_float and (leaf.shape[0] % 16 == 0
+                                        and leaf.shape[1] % 128 == 0)
+            if (is_attn_proj and is_2d_float and shape_ok
+                    and hasattr(leaf, "sharding")):
+                tile = _attn_proj_tile_for_dtype(leaf.dtype)
+                if tile is not None:
+                    fmt = Format(
+                        Layout(major_to_minor=(0, 1), tiling=tile),
+                        leaf.sharding)
+                    leaf = jax.device_put(leaf, fmt)
+                    n_pinned += 1
+                    logger.debug("pinned T(16,128) on %s shape=%s dtype=%s",
+                                 path_str, leaf.shape, leaf.dtype)
+        except Exception as e:
+            # Don't fail load on layout-pin issues; just log and continue.
+            logger.warning(
+                "Skipping layout pin for %s (%s): %s", path_str,
+                getattr(leaf, "shape", "?"), e)
+        new_leaves.append(leaf)
+    return jax.tree_util.tree_unflatten(treedef, new_leaves), n_pinned
 
 
 @functools.partial(jax.jit, static_argnames=["dp_size", "tokens_per_dp"])
@@ -652,6 +733,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.pooler_fn = model.pooler_fn
         self.combine_hidden_states_fn = model.combine_hidden_states_fn
         self.state = model.state
+        # When continue_decode is on, pre-relayout the attention input/output
+        # projection weights to T(16,128) so the decode while_loop doesn't
+        # emit a per-call ENTRY relayout `copy` in front of `%while` (each
+        # such copy is ~56k cycles per weight, ~96 of them on a typical
+        # 48-layer model). The non-continue path prefers T(8,128) and would
+        # regress, so this is gated.
+        if self.enable_continue_decode:
+            self.state, n_pinned = _pin_attn_proj_layouts(self.state)
+            logger.info(
+                "continue_decode: pinned T(16,128) layout on %d attention "
+                "projection weights", n_pinned)
         # For the flax_nnx path, `model_fn` (== `run_model`) accepts a flat
         # tuple of array leaves and reconstructs the nnx.State inside the
         # jit. Pre-flatten here so subsequent dispatches skip the per-call
@@ -1122,33 +1214,43 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # stays on-device (no per-step host sync). `sample` and self.mesh are
         # stable objects passed straight through so the jit cache persists;
         # per-call sampling data goes via `sampling_metadata`.
-        generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices = continue_decode(
-            state=self.state_leaves,
-            model_fn=self.model_fn,
-            compute_logits_fn=self.compute_logits_fn,
-            sample_fn=sample,
-            mesh=self.mesh,
-            sampling_metadata=sampling_metadata,
-            init_state=init_state,
-            kv_caches=self.kv_caches,
-            max_decode_steps=max_decode_steps,
-            static_max_decode_steps=user_max_decode_steps,
-            eos_token_id=self.eos_token_id,
-            padding_token_id=self.pad_token_id,
-            rng=self.rng_params_for_sampling,
-            terminate_on_any_eos=terminate_on_any_eos,
-            inputs_embeds=None,
-            layer_name_to_kvcache_index=tuple(
-                self.layer_name_to_kvcache_index.items()),
-            lora_metadata=lora_metadata,
-            intermediate_tensors=None,
-            is_first_rank=self.is_first_rank,
-            is_last_rank=self.is_last_rank,
-            dp_size=self.dp_size,
-            collect_expert_indices=getattr(
-                self.vllm_config.model_config,
-                "enable_return_routed_experts", False),
-        )
+        #
+        # Mirror the non-continue path's wrappers so anything inside model_fn
+        # / sampling that reads vllm.forward_context.get_forward_context()
+        # during tracing (attention layers, MoE config, etc.) sees the right
+        # state, and so any registered KV connector still gets its publish
+        # hook around the model run.
+        with self.maybe_forbid_compile, \
+             set_forward_context(None, self.vllm_config), \
+             self.maybe_get_kv_connector_output(
+                 scheduler_output) as kv_connector_output:
+            generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices = continue_decode(
+                state=self.state_leaves,
+                model_fn=self.model_fn,
+                compute_logits_fn=self.compute_logits_fn,
+                sample_fn=sample,
+                mesh=self.mesh,
+                sampling_metadata=sampling_metadata,
+                init_state=init_state,
+                kv_caches=self.kv_caches,
+                max_decode_steps=max_decode_steps,
+                static_max_decode_steps=user_max_decode_steps,
+                eos_token_id=self.eos_token_id,
+                padding_token_id=self.pad_token_id,
+                rng=self.rng_params_for_sampling,
+                terminate_on_any_eos=terminate_on_any_eos,
+                inputs_embeds=None,
+                layer_name_to_kvcache_index=tuple(
+                    self.layer_name_to_kvcache_index.items()),
+                lora_metadata=lora_metadata,
+                intermediate_tensors=None,
+                is_first_rank=self.is_first_rank,
+                is_last_rank=self.is_last_rank,
+                dp_size=self.dp_size,
+                collect_expert_indices=getattr(
+                    self.vllm_config.model_config,
+                    "enable_return_routed_experts", False),
+            )
         self.rng_params_for_sampling = final_rng
 
         self.kv_caches = final_kv_caches
@@ -1237,6 +1339,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
+            kv_connector_output=kv_connector_output,
         )
 
         if expert_indices_cpu is not None:
@@ -2084,6 +2187,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mappings=mappings,
             transpose_keys=transpose_keys,
             shard=shard)
+        # Re-pin attention-proj layouts after weight transfer so the
+        # continue_decode path stays free of per-call ENTRY relayout copies.
+        if self.enable_continue_decode:
+            self.state, _ = _pin_attn_proj_layouts(self.state)
         # Keep the dispatch-side view in sync with the updated state so
         # subsequent jit dispatches see the new weights.
         if isinstance(self.state, nnx.State):
