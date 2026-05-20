@@ -509,13 +509,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.is_pooling_model: bool = self.model_config.runner_type == "pooling"
         """Generative model or pooling model select different computations."""
-        self.enable_continue_decode = (
-            self.vllm_config.additional_config.get("enable_continue_decode",
-                                                   False)
-            and not self.scheduler_config.async_scheduling
-            and (self.parallel_config is None
-                 or self.parallel_config.pipeline_parallel_size == 1)
-            and not self.is_pooling_model)
+        self.enable_continue_decode = self.vllm_config.additional_config.get(
+            "enable_continue_decode", False)
         eos_token_id = runner_utils.get_eos_token_id(self.model_config)
         if isinstance(eos_token_id, int):
             self.eos_token_id = (eos_token_id, )
@@ -1436,9 +1431,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         generated_tokens_cpu, all_expert_indices_cpu, actual_steps = jax.device_get(
             (generated_tokens, all_expert_indices, final_state.step_counter))
         actual_steps = int(actual_steps)
-        logger.info(
-            "continue_decode ran %d/%d steps for %d reqs", actual_steps,
-            max_decode_steps, self.input_batch.num_reqs)
         generated_tokens_cpu = np.asarray(generated_tokens_cpu)[:actual_steps]
         if all_expert_indices_cpu is not None:
             all_expert_indices_cpu = np.asarray(
@@ -1459,6 +1451,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         sampled_token_ids = []
         expert_indices_list = []
+        num_eos_hits = 0
 
         for req_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             req_state = self.requests.get(req_id)
@@ -1468,6 +1461,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             is_eos = np.any(tokens[:, None] == eos_arr[None, :], axis=-1)
             eos_indices = np.where(is_eos)[0]
             if len(eos_indices) > 0:
+                num_eos_hits += 1
                 first_eos_idx = eos_indices[0]
                 valid_tokens = tokens[:first_eos_idx + 1].tolist()
             else:
@@ -1506,6 +1500,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         expert_indices_cpu = None
         if expert_indices_list:
             expert_indices_cpu = np.concatenate(expert_indices_list, axis=1)
+
+        termination_reason = "unknown"
+        if terminate_on_any_eos and actual_steps < max_decode_steps:
+            termination_reason = "eos_hit"
+        elif actual_steps == max_decode_steps:
+            reasons = []
+            if max_decode_steps == user_max_decode_steps:
+                reasons.append("max_decode_steps_limit")
+            if max_decode_steps == min_remaining or min_remaining <= 0:
+                reasons.append("kv_cache_limit")
+            termination_reason = "_".join(reasons) if reasons else "max_steps"
+
+        logger.info(
+            "continue_decode finished: actual steps: %d, reason: %s, initial_active_reqs: %d (max_steps: %d, EOS hits: %d)",
+            actual_steps, termination_reason, num_reqs, max_decode_steps,
+            num_eos_hits)
 
         output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],

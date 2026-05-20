@@ -159,6 +159,17 @@ def _scheduler_worker_process(
     if "hash_block_size" in sig.parameters:
         scheduler_kwargs["hash_block_size"] = hash_block_size
 
+    import os
+
+    enable_continue_decode = False
+    if hasattr(vllm_config, "additional_config"):
+        enable_continue_decode = vllm_config.additional_config.get(
+            "enable_continue_decode", False)
+
+    if enable_continue_decode:
+        from tpu_inference.core.sched.utils import \
+            patch_vllm_scheduler_for_continue_decode
+        patch_vllm_scheduler_for_continue_decode()
     scheduler = original_scheduler_cls(**scheduler_kwargs)
 
     _cached_scheduler_outputs: deque[SchedulerOutput] = deque()
