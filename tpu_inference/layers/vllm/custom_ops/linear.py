@@ -24,7 +24,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 
-from tpu_inference.layers.common.sharding import ShardingAxisName2D
+from tpu_inference.layers.common.sharding import (ShardingAxisName2D,
+                                                  ShardingConfigManager)
 from tpu_inference.layers.common.utils import (
     reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation)
@@ -90,8 +91,10 @@ class VllmQKVParallelLinear(QKVParallelLinear):
                  **kwargs):
         if total_num_kv_heads is None:
             total_num_kv_heads = total_num_heads
-
-        tp = get_current_vllm_config().parallel_config.tensor_parallel_size
+        vllm_config = get_current_vllm_config()
+        sharding_config = (getattr(vllm_config, "sharding_config", None) or
+                           ShardingConfigManager.from_vllm_config(vllm_config))
+        tp = sharding_config.tp_size
         if tp > total_num_kv_heads:
             assert tp % total_num_kv_heads == 0, (
                 f"tp_size ({tp}) must be divisible by total_num_kv_heads "
