@@ -34,4 +34,17 @@ def patch_vllm_scheduler_for_continue_decode():
             return res_token_ids, stopped
 
         Scheduler._update_request_with_output = patched_update_base
+
+        original_init = Scheduler.__init__
+
+        def patched_init(scheduler_self, vllm_config, *args, **kwargs):
+            original_init(scheduler_self, vllm_config, *args, **kwargs)
+            additional_config = getattr(vllm_config, "additional_config", {})
+            if additional_config.get("enable_continue_decode", False):
+                max_decode_steps = additional_config.get("max_decode_steps", 1)
+                # We need max_decode_steps - 1 lookahead tokens to ensure we have enough blocks.
+                scheduler_self.num_lookahead_tokens = max(
+                    scheduler_self.num_lookahead_tokens, max_decode_steps - 1)
+
+        Scheduler.__init__ = patched_init
         Scheduler._continue_decode_patched = True
