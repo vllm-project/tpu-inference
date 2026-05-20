@@ -97,7 +97,7 @@ process_json_benchmark_cases() {
     if [ ! -f "$f" ]; then
       # If the file does not exist (e.g., deleted in the current PR), skip it gracefully.
       echo "--- Skipping non-existent file (might be deleted): $f"
-      return 0
+      return
     fi
 
     echo "--- Processing case file: $f (no-verify: $no_verify)"
@@ -107,14 +107,14 @@ process_json_benchmark_cases() {
     if ! py_output=$(python3 "$generator" --input "$f" --no-verify "$no_verify" 2>&1); then
       echo "🚨 Generator failed for $f"
       error_msgs+=("❌ Generation Failure in $f:\n$py_output")
-      return 1
+      return
     fi
 
     # 2. Upload the captured YAML (stdout from python)
     if ! upload_with_priority <(echo "$py_output") "$priority"; then
       echo "🚨 Upload failed for $f"
       error_msgs+=("❌ Upload Failure for $f")
-      return 1
+      return
     fi
   }
 
