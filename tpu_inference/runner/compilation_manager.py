@@ -106,7 +106,9 @@ class CompilationManager:
     def capture_model(self) -> None:
         if envs.SKIP_JAX_PRECOMPILE or self.runner.model_config.enforce_eager:
             return
-        logger.info("Precompile all the subgraphs with possible input shapes.")
+        logger.info(
+            f"Precompile all the subgraphs with possible input shapes. num_tokens_paddings={self.runner.num_tokens_paddings} attn_num_reqs_paddings={self.runner.attn_num_reqs_paddings}"
+        )
         compilation_start_time = time.perf_counter()
 
         with self.runner.maybe_setup_dummy_loras(
@@ -149,32 +151,17 @@ class CompilationManager:
         for num_tokens in self.runner.num_tokens_paddings:
             hidden_size = self.runner.vllm_config.model_config.get_hidden_size(
             )
-            hf_conf = self.runner.vllm_config.model_config.hf_config
-
-            # Identify multimodal embedding size
-            mm_hidden_size = hidden_size
-            vision_config = getattr(hf_conf, "vision_config", None)
-
-            if vision_config:
-                visual_dim = getattr(vision_config, "out_hidden_size", None)
-                deepstack_indexes = getattr(vision_config,
-                                            "deepstack_visual_indexes", None)
-
-                # If both exist, we apply the deepstack concat logic
-                if visual_dim is not None and deepstack_indexes is not None:
-                    deepstack_levels = len(deepstack_indexes)
-                    mm_hidden_size = visual_dim * (1 + deepstack_levels)
-
             sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.ATTN_DATA, None))
             input_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
-            dummy_multimodal_embeddings = self._create_dummy_tensor(
-                (num_tokens, mm_hidden_size),
+            dummy_mm_embeds = self._create_dummy_tensor(
+                (num_tokens, hidden_size),
                 self.runner.vllm_config.model_config.dtype,
                 sharding=sharding)
+            dummy_multimodal_embeddings = [dummy_mm_embeds]
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
             dummy_is_multimodal = self._create_dummy_tensor(
@@ -183,10 +170,9 @@ class CompilationManager:
             self._run_compilation(
                 "input_embeddings_merger",
                 self.runner.embed_input_ids_fn,
-                self.runner.state_leaves,
+                self.runner.state,
                 dummy_input_ids,
-                # Make _compute_deepstack_embeds happy.
-                [dummy_multimodal_embeddings],
+                dummy_multimodal_embeddings,
                 call_kwargs={"is_multimodal": dummy_is_multimodal},
                 num_tokens=num_tokens,
             )
@@ -194,7 +180,7 @@ class CompilationManager:
             self._run_compilation(
                 "input_embeddings_merger_text_only",
                 self.runner.embed_input_ids_fn,
-                self.runner.state_leaves,
+                self.runner.state,
                 dummy_input_ids,
                 None,
                 call_kwargs={"is_multimodal": None},
@@ -284,7 +270,7 @@ class CompilationManager:
             }
 
         def model_fn_wrapper(
-            state_leaves,
+            state,
             kv_caches,
             input_ids,
             attention_metadata,
@@ -297,10 +283,9 @@ class CompilationManager:
             is_last_rank,
         ):
             kv_caches, hidden_states, *_ = self.runner.model_fn(
-                state_leaves, kv_caches, input_ids, attention_metadata,
-                inputs_embeds, positions, layer_name_to_kvcache_index,
-                lora_metadata, intermediate_tensors, is_first_rank,
-                is_last_rank)
+                state, kv_caches, input_ids, attention_metadata, inputs_embeds,
+                positions, layer_name_to_kvcache_index, lora_metadata,
+                intermediate_tensors, is_first_rank, is_last_rank)
             self.runner.kv_caches = kv_caches
             return hidden_states
 
@@ -491,39 +476,17 @@ class CompilationManager:
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
         dtype = self.runner.model_config.dtype
+        for num_tokens in self.runner.num_tokens_paddings:
+            for num_reqs in self.runner.attn_num_reqs_paddings:
+                sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+                input_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.ATTN_DATA))
 
-        # Identify multimodal embedding size including Deepstack
-        hf_conf = self.runner.vllm_config.model_config.hf_config
-        vision_config = getattr(hf_conf, "vision_config", None)
-        embeds_hidden_size = hidden_size
-
-        if vision_config:
-            visual_dim = getattr(vision_config, "out_hidden_size", None)
-            deepstack_indexes = getattr(vision_config,
-                                        "deepstack_visual_indexes", None)
-
-            # If both exist, we apply the deepstack concat logic
-            if visual_dim is not None and deepstack_indexes is not None:
-                deepstack_levels = len(deepstack_indexes)
-                embeds_hidden_size = visual_dim * (1 + deepstack_levels)
-
-        # Compile for both standard (4k) and Deepstack (16k) dimensions if they differ
-        hidden_sizes_to_compile = [hidden_size]
-        if embeds_hidden_size != hidden_size:
-            hidden_sizes_to_compile.append(embeds_hidden_size)
-
-        for h_size in hidden_sizes_to_compile:
-            for num_tokens in self.runner.num_tokens_paddings:
-                for num_reqs in self.runner.attn_num_reqs_paddings:
-                    sharding = NamedSharding(
-                        self.runner.mesh,
-                        PartitionSpec(ShardingAxisName.ATTN_DATA, None))
-                    input_sharding = NamedSharding(
-                        self.runner.mesh,
-                        PartitionSpec(ShardingAxisName.ATTN_DATA))
-
-                    inputs_embeds = self._create_dummy_tensor(
-                        (num_tokens, h_size), dtype, sharding=sharding)
+                inputs_embeds = self._create_dummy_tensor(
+                    (num_tokens, hidden_size), dtype, sharding=sharding)
                 if self.runner.uses_mrope:
                     mrope_sharding = NamedSharding(
                         self.runner.mesh,
@@ -617,10 +580,15 @@ class CompilationManager:
         logger.info("Compiling select_from_array with different input shapes.")
         hsize = self.runner.model_config.get_hidden_size()
 
+        # index_paddings should cover all possible shapes of logits_indices.
+        # When any_prompt_logprobs is True, it matches num_tokens_paddings.
+        # When False, it matches num_reqs_paddings (or num_logits_paddings for spec decode).
+        index_paddings = set(self.runner.num_reqs_paddings)
+        index_paddings.update(self.runner.num_tokens_paddings)
         if self.runner.speculative_config:
-            index_paddings = self.runner.num_logits_paddings
-        else:
-            index_paddings = self.runner.num_reqs_paddings
+            index_paddings.update(self.runner.num_logits_paddings)
+        index_paddings = sorted(list(index_paddings))
+
         dp_sharding = NamedSharding(self.runner.mesh,
                                     PartitionSpec(ShardingAxisName.ATTN_DATA))
         hidden_states_sharding = NamedSharding(
@@ -663,7 +631,13 @@ class CompilationManager:
     def _precompile_compute_logits(self) -> None:
         logger.info("Compiling compute_logits with different input shapes.")
         hsize = self.runner.model_config.get_hidden_size()
-        leading_shape = self.runner.num_reqs_paddings if not self.runner.speculative_config else self.runner.num_logits_paddings
+
+        leading_shape = set(self.runner.num_reqs_paddings)
+        leading_shape.update(self.runner.num_tokens_paddings)
+        if self.runner.speculative_config:
+            leading_shape.update(self.runner.num_logits_paddings)
+        leading_shape = sorted(list(leading_shape))
+
         # Use PartitionSpec(ATTN_DATA, None) (2D explicit) to match the sharding
         # that _select_from_array_fn produces at inference time. shard_map with
         # out_specs=P('data') returns arrays with spec P('data', None); since
@@ -682,7 +656,7 @@ class CompilationManager:
                 self._run_compilation(
                     f"worker{self.runner.rank} compute_logits",
                     self.runner.compute_logits_fn,
-                    self.runner.state_leaves,
+                    self.runner.state,
                     hidden_states,
                     lora_metadata,
                     num_reqs=num_reqs,
@@ -788,7 +762,12 @@ class CompilationManager:
     def _precompile_gather_logprobs(self) -> None:
         logger.info("Compiling gather_logprobs with different input shapes.")
         hsize = self.runner.vocab_size
-        for num_reqs in self.runner.num_reqs_paddings:
+
+        # gather_logprobs must be compiled for both num_reqs (sampling) and num_tokens (prompt_logprobs)
+        paddings = set(self.runner.num_reqs_paddings)
+        paddings.update(self.runner.num_tokens_paddings)
+
+        for num_reqs in sorted(list(paddings)):
             logits_sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.MLP_DATA,
