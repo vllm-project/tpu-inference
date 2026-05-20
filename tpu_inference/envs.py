@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     DRAFT_MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
     PHASED_PROFILING_DIR: str = ""
+    AGGREGATED_STATS_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
     USE_UNFUSED_MEGABLOCKS: bool = False
@@ -329,10 +330,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: Whether to use unpinned_host for KV cache tensors on host dram.
     "TPU_OFFLOAD_USE_UNPINNED_HOST":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_USE_UNPINNED_HOST", "0"))),
-    "ENABLE_AGGREGATED_STATS_LOGGER":
-    env_bool("ENABLE_AGGREGATED_STATS_LOGGER",
-             default=False,
-             requires=["PHASED_PROFILING_DIR"]),
+    "AGGREGATED_STATS_DIR":
+    lambda: os.getenv("AGGREGATED_STATS_DIR", ""),
     # MoE: whether to use approximate top-k for expert selection.
     # Enabling this may speedup the expert selection at the risk of accuracy loss.
     "MOE_APPROX_TOPK":
