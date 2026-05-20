@@ -402,7 +402,7 @@ def get_flax_model(
         return model.compute_logits(hidden_state)
 
     # Multi-modal support only
-    # This function calculates the image token's embeddings by VIT
+    # This function calculates the image/video token's embeddings by VIT
     def run_embed_multimodal(state_leaves, **kwargs):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
