@@ -42,6 +42,17 @@ COMMAND_SPECIFIC_VALIDATION = {
 }
 
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 def clean_key_string(key: str) -> str:
     """
     Sanitizes the string and ensures the length does not exceed 100 characters.
@@ -208,13 +219,15 @@ def create_benchmark_steps(
         parent_dir: str,
         used_keys: Set[str],
         errors: List[str],
+        no_verify: bool = False,
         is_single_case: bool = False) -> List[Dict[str, Any]]:
     """
     Generates a list of Buildkite steps for a case.
     """
-    # Basic structural validation
-    validate_command_options(case_data, file_path, errors)
-    validate_parameter_dependencies(case_data, file_path, errors)
+    # Skip all non-essential validation if no_verify is set
+    if not no_verify:
+        validate_command_options(case_data, file_path, errors)
+        validate_parameter_dependencies(case_data, file_path, errors)
 
     # Identify Case Name
     try:
@@ -222,7 +235,8 @@ def create_benchmark_steps(
     except ValueError as e:
         # Collect the error and continue with a placeholder to allow reporting
         # multiple issues across the entire file in a single run.
-        errors.append(str(e))
+        if not no_verify:
+            errors.append(str(e))
         model_name = "unknown_model"
 
     case_name = case_data.get("case_name", model_name)
@@ -231,7 +245,7 @@ def create_benchmark_steps(
     ci_queues = case_data.get("ci_queue", [])
 
     # Validation: Ensure ci_queue is not empty
-    if not ci_queues:
+    if not no_verify and not ci_queues:
         errors.append(
             f"Validation Error: 'ci_queue' is missing or empty in {file_path} "
             f"for case '{case_name}'.")
@@ -257,7 +271,7 @@ def create_benchmark_steps(
 
         # Define step key and check for internal collisions
         step_safe_key = clean_key_string(step_label)
-        if step_safe_key in used_keys:
+        if not no_verify and step_safe_key in used_keys:
             errors.append(
                 f"Collision Error: Duplicate key '{step_safe_key}' detected "
                 f"within {file_path}. Ensure all of case_name are unique.")
@@ -285,6 +299,10 @@ def main():
     parser.add_argument("--input",
                         required=True,
                         help="Path to the benchmark JSON configuration file")
+    parser.add_argument("--no-verify",
+                        type=str2bool,
+                        default=False,
+                        help="Skip validation rules")
     args = parser.parse_args()
 
     # Verify input file existence
@@ -321,6 +339,7 @@ def main():
                                        parent_dir,
                                        used_keys,
                                        errors,
+                                       no_verify=args.no_verify,
                                        is_single_case=False))
     else:
         # Single-case
@@ -332,6 +351,7 @@ def main():
                                    parent_dir,
                                    used_keys,
                                    errors,
+                                   no_verify=args.no_verify,
                                    is_single_case=True))
 
     # Final check: Ensure we actually produced steps and no errors occurred

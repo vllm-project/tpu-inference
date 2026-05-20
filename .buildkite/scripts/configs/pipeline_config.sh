@@ -83,55 +83,65 @@ process_json_benchmark_cases() {
   local case_folder="${1:-}"
   local generator="${2:-}"
   local priority="${3:-}"
-  local extra_files="${4:-}" # Optional: space-separated list of files
+  local extra_files="${4:-}" # Optional: newline-separated list of files
   local error_msgs=()
 
   echo "--- Generating dynamic pipelines from $case_folder and $extra_files"
 
-  shopt -s nullglob
-  local files=()
-  
-  # Add files from folder if provided
-  if [ -n "$case_folder" ] && [ -d "$case_folder" ]; then
-    files+=("$case_folder"/*.json)
-  fi
+  # Helper function to process a single benchmark file. 
+  # Any failure (generation or upload) is captured in error_msgs.
+  _process_benchmark_file() {
+    local f="$1"
+    local no_verify="${2:-false}"
 
-  # Add extra files if provided (handles spaces via newline separation)
-  if [ -n "$extra_files" ]; then
-    while IFS= read -r f; do
-      [ -z "$f" ] && continue # Skip empty lines
-      if [ -f "$f" ]; then
-        files+=("$f")
-      fi
-    done <<< "$extra_files"
-  fi
+    if [ ! -f "$f" ]; then
+      # If the file does not exist (e.g., deleted in the current PR), skip it gracefully.
+      echo "--- Skipping non-existent file (might be deleted): $f"
+      return 0
+    fi
 
-  if [ ${#files[@]} -eq 0 ]; then
-    echo "No JSON files found to process (Folder: $case_folder, Extra: $extra_files)."
-    return
-  fi
-
-  echo "Found ${#files[@]} files to process."
-
-  for case_file in "${files[@]}"; do
-    echo "Processing case file: $case_file"
-
-    # 1. Generate pipeline and capture output/exit code (including stderr)
+    echo "--- Processing case file: $f (no-verify: $no_verify)"
+    
     local py_output
-    if ! py_output=$(python3 "$generator" --input "$case_file" 2>&1); then
-      echo "🚨 Validation failed for $case_file"
-      error_msgs+=("❌ Validation Failure in $case_file:\n$py_output")
-      continue
+    # 1. Generate pipeline and capture output/exit code (including stderr)
+    if ! py_output=$(python3 "$generator" --input "$f" --no-verify "$no_verify" 2>&1); then
+      echo "🚨 Generator failed for $f"
+      error_msgs+=("❌ Generation Failure in $f:\n$py_output")
+      return 1
     fi
 
     # 2. Upload the captured YAML (stdout from python)
     if ! upload_with_priority <(echo "$py_output") "$priority"; then
-      echo "🚨 Upload failed for $case_file"
-      error_msgs+=("❌ Upload Failure for $case_file")
+      echo "🚨 Upload failed for $f"
+      error_msgs+=("❌ Upload Failure for $f")
+      return 1
     fi
-  done
+  }
 
-  # 3. If any errors occurred, upload ONE aggregate failure step to block CI
+  # 1. Process files from case_folder (Baseline: non-blocking business validation)
+  if [ -n "$case_folder" ] && [ -d "$case_folder" ]; then
+    shopt -s nullglob
+    local folder_files=("$case_folder"/*.json)
+    for f in "${folder_files[@]}"; do
+      # Skip files that are explicitly listed in extra_files to avoid duplicate uploads
+      # and ensure they are processed with mandatory verification.
+      if [[ "$extra_files" == *"$f"* ]]; then
+        echo "--- Skipping $f in folder pass (will be verified in extra_files pass)"
+        continue
+      fi
+      _process_benchmark_file "$f" "true"
+    done
+  fi
+
+  # 2. Process extra_files (Target: with full mandatory validation)
+  if [ -n "$extra_files" ]; then
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      _process_benchmark_file "$f" "false"
+    done <<< "$extra_files"
+  fi
+
+  # 3. If any errors occurred (in either pass), upload ONE aggregate failure step to block CI
   if [ ${#error_msgs[@]} -gt 0 ]; then
     local final_report
     final_report=$(printf "%b\n\n" "${error_msgs[@]}")
