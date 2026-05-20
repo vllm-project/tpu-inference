@@ -157,14 +157,18 @@ class CompilationManager:
             vision_config = getattr(hf_conf, "vision_config", None)
 
             if vision_config:
-                visual_dim = getattr(vision_config, "out_hidden_size", None)
-                deepstack_indexes = getattr(vision_config,
-                                            "deepstack_visual_indexes", None)
-
-                # If both exist, we apply the deepstack concat logic
-                if visual_dim is not None and deepstack_indexes is not None:
-                    deepstack_levels = len(deepstack_indexes)
-                    mm_hidden_size = visual_dim * (1 + deepstack_levels)
+                  visual_dim = getattr(vision_config, "out_hidden_size", None)
+                  if visual_dim is not None:
+                      deepstack_indexes = getattr(vision_config,
+                                                  "deepstack_visual_indexes", None)
+                      # Concatenation logic is only used in patched PyTorch (TorchAX) path.
+                      # Native JAX model passes DeepStack features statelessly.
+                      model_module = self.runner.model.__class__.__module__ if self.runner.model is not None else ""
+                      if deepstack_indexes is not None and "vllm" in model_module:
+                          deepstack_levels = len(deepstack_indexes)
+                          mm_hidden_size = visual_dim * (1 + deepstack_levels)
+                      else:
+                          mm_hidden_size = visual_dim
 
             sharding = NamedSharding(
                 self.runner.mesh,
@@ -564,14 +568,18 @@ class CompilationManager:
         embeds_hidden_size = hidden_size
 
         if vision_config:
-            visual_dim = getattr(vision_config, "out_hidden_size", None)
-            deepstack_indexes = getattr(vision_config,
-                                        "deepstack_visual_indexes", None)
-
-            # If both exist, we apply the deepstack concat logic
-            if visual_dim is not None and deepstack_indexes is not None:
-                deepstack_levels = len(deepstack_indexes)
-                embeds_hidden_size = visual_dim * (1 + deepstack_levels)
+              visual_dim = getattr(vision_config, "out_hidden_size", None)
+              if visual_dim is not None:
+                  deepstack_indexes = getattr(vision_config,
+                                              "deepstack_visual_indexes", None)
+                  # Concatenation logic is only used in patched PyTorch (TorchAX) path.
+                  # Native JAX model passes DeepStack features statelessly.
+                  model_module = self.runner.model.__class__.__module__ if self.runner.model is not None else ""
+                  if deepstack_indexes is not None and "vllm" in model_module:
+                      deepstack_levels = len(deepstack_indexes)
+                      embeds_hidden_size = visual_dim * (1 + deepstack_levels)
+                  else:
+                      embeds_hidden_size = visual_dim
 
         # Compile for both standard (4k) and Deepstack (16k) dimensions if they differ
         hidden_sizes_to_compile = [hidden_size]
