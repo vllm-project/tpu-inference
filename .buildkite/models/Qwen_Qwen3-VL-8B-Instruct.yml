@@ -17,9 +17,11 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-VL-8B-Instruct_UnitTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
-      - echo "placeholder"  # TODO: replace with your unit test command
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_qwen3_vl.py'
   - label: "${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3-VL-8B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-VL-8B-Instruct_UnitTest"
     depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-VL-8B-Instruct_UnitTest"
@@ -39,16 +41,16 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-VL-8B-Instruct_UnitTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     env:
       TEST_MODEL: Qwen/Qwen3-VL-8B-Instruct
       # The default values are for tpu6e. For tpu7x, the CI procedure will export TENSOR_PARALLEL_SIZE_SINGLE=2, TENSOR_PARALLEL_SIZE_MULTI=8 automatically
-      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
       MAX_NUM_BATCHED_TOKENS: "16384"
       MINIMUM_ACCURACY_THRESHOLD: 0.80
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh
   - label: "${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen3-VL-8B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-VL-8B-Instruct_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-VL-8B-Instruct_Accuracy"
@@ -74,7 +76,7 @@ steps:
       # The default values are for tpu6e. For tpu7x, the CI procedure will export TENSOR_PARALLEL_SIZE_SINGLE=2, TENSOR_PARALLEL_SIZE_MULTI=8 automatically
       TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MAX_NUM_BATCHED_TOKENS: "16384"
-      MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
+      MINIMUM_THROUGHPUT_THRESHOLD: 0.7  # TODO : replace 0 with your performance threshold
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh

@@ -876,7 +876,7 @@ class TestServingIntegration:
         kv_caches_2 = _make_kv_caches(model, mesh)
 
         _, out_1, _, _ = model(kv_caches_1, input_ids_1, attn_meta)
-        _, out_2, _, _ = make_attention_metadata = model(kv_caches_2, input_ids_2, attn_meta)
+        _, out_2, _, _ = model(kv_caches_2, input_ids_2, attn_meta)
         np.testing.assert_allclose(
             np.array(out_1)[:-1, :], np.array(out_2)[:-1, :], rtol=0, atol=0
         )
