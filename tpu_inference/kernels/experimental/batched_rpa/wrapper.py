@@ -89,10 +89,9 @@ def prepare_inputs(
     assert num_kv_heads_x2_aligned % 2 == 0, (
         f"kv_packing={kv_packing} produces an odd aligned head count "
         f"{num_kv_heads_x2_aligned}")
-    if actual_num_kv_heads > 2:
+    if actual_num_kv_heads >= 4:
         # XLA generates {2, 1, 0} minor-to-major layout for K, V with
-        # subtiling (4, 128) in some cases with heads>=4,
-        # needing the layout constraint below.
+        # num_kv_heads=4 ex: gemma4, needing the layout constraint below.
         num_kv_heads_aligned = num_kv_heads_x2_aligned // 2
 
         # `jnp.stack` introduces the K/V axis as a fresh axis, keeping
