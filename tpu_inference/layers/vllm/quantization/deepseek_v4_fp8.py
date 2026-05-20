@@ -29,11 +29,12 @@ The naming distinction matters:
 from typing import Optional, Union
 
 import jax
+import jax.numpy as jnp
 import torch
 import torch.nn as nn
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from torch.nn.parameter import Parameter
-from torchax.interop import torch_view
+from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
@@ -44,8 +45,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_s
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.models.deepseek_v4 import DeepseekV4FP8Config
 
+from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.process_weights.moe_weights import FusedMoEWeights
+from tpu_inference.layers.common.quantization import e8m0_to_fp32, u8_unpack_e2m1
 from tpu_inference.layers.common.quant_methods import DSV4_FP8
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.vllm.interface.moe import (
+    select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.fp8 import (
@@ -72,8 +78,10 @@ class VllmDeepseekV4Fp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe_config, mesh: Mesh) -> None:
         super().__init__(moe_config)
         self.mesh = mesh
-        # TODO (3d): add self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
-        # to use by `shard_moe_weights` in `process_weights_after_loading`.
+        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
+        self.extra_backend_kwargs = {}
+        if self.moe_backend == MoEBackend.FUSED_MOE:
+            self.extra_backend_kwargs = dict(ep_axis_name="model")
 
     @property
     def is_monolithic(self) -> bool:
@@ -164,23 +172,32 @@ class VllmDeepseekV4Fp4MoEMethod(FusedMoEMethodBase):
         return None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # TODO  replace this skeleton with the full pipeline:
-        #   1. Dequantize: uint8 packed + ue8m0 scales → bfloat16
-        #   2. quantize_moe_weights(bfloat16_weights, desired_dtype, block_size)
-        #      requantizes to kernel dtype (e.g. fp8 e4m3) and pads to alignment.
-        #   3. shard_moe_weights(weights, self.moe_backend, self.mesh)
-        #      applies TP or EP sharding based on self.moe_backend
-        #      This replaces the hardcoded EP temporary workaround.
-        #
-        # The skeleton bypasses shard_moe_weights because its Layout objects
-        # assume FP8 4D weight shapes incompatible with our 3D MXFP4 tensors.
-        # Direct jax.device_put with EP sharding prevents HBM OOM for now.
         ep_sharding = NamedSharding(self.mesh, P(ShardingAxisName.EXPERT))
-        for attr in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"):
-            tensor = getattr(layer, attr)
-            jax_array = t2j(tensor, use_dlpack=False)
-            jax_array = jax.device_put(jax_array, ep_sharding)
-            setattr(layer, attr, Parameter(torch_view(jax_array), requires_grad=False))
+        w13_weight = jax.device_put(
+            t2j(layer.w13_weight, use_dlpack=False), ep_sharding)
+        w2_weight = jax.device_put(
+            t2j(layer.w2_weight, use_dlpack=False), ep_sharding)
+        w13_scale = jax.device_put(
+            t2j(layer.w13_weight_scale, use_dlpack=False), ep_sharding)
+        w2_scale = jax.device_put(
+            t2j(layer.w2_weight_scale, use_dlpack=False), ep_sharding)
+
+        # The GMM kernel expects weights as (E, K, N) and scales as (E, K_blocks, 1, N).
+        # Our checkpoint layout is (E, N, K) for weights and (E, N, K_blocks) for scales
+        # so we need to transpose explicitly.
+        # We also need to unpack the weights from uint8 to FP4_e2m1 and cast the scales
+        # into fp32.
+        w13_weight = jnp.swapaxes(u8_unpack_e2m1(w13_weight), 1, 2)
+        w2_weight = jnp.swapaxes(u8_unpack_e2m1(w2_weight), 1, 2)
+        w13_scale = jnp.expand_dims(
+            jnp.swapaxes(e8m0_to_fp32(w13_scale), 1, 2), axis=2)
+        w2_scale = jnp.expand_dims(
+            jnp.swapaxes(e8m0_to_fp32(w2_scale), 1, 2), axis=2)
+
+        layer.w13_weight = Parameter(torch_view(w13_weight), requires_grad=False)
+        layer.w2_weight = Parameter(torch_view(w2_weight), requires_grad=False)
+        layer.w13_weight_scale = Parameter(torch_view(w13_scale), requires_grad=False)
+        layer.w2_weight_scale = Parameter(torch_view(w2_scale), requires_grad=False)
 
     def apply_monolithic(
         self,
@@ -189,17 +206,29 @@ class VllmDeepseekV4Fp4MoEMethod(FusedMoEMethodBase):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # TODO: implement real MXFP4 MoE forward for TPU (currently a stub):
-        #   1. Dequantize w13/w2 from MXFP4 using ue8m0 scales
-        #   2. Run MoE routing and expert matmuls (using existing fused_moe_gmm.py)
-        #
-        # For step 2 above, pre-compute topk_ids from the lookup table
-        # instead of softmax routing if hash-MoE layers are detected:
+        # TODO (1d): Detect hash-MoE layers and pre-compute topk_ids before routing:
         #   hash_table = getattr(layer, 'hash_indices_table', None)
         #   precomputed_topk_ids = jax_view(hash_table[input_ids]) if (
         #       hash_table is not None and input_ids is not None) else None
-        # Then pass precomputed_topk_ids to vllm_moe_apply.
-        return torch.zeros(x.shape[0], x.shape[-1], dtype=x.dtype, device=x.device)
+        # Then pass precomputed_topk_ids to vllm_moe_apply (after TODO 1d step 2 is done).
+        #
+        # Note: weights are float4_e2m1fn (unpacked FP4) with float32 scales after
+        # process_weights_after_loading. The numerics match the MXFP4 checkpoint exactly.
+        weights = FusedMoEWeights(
+            w13_weight=jax_view(layer.w13_weight),
+            w13_weight_scale=jax_view(layer.w13_weight_scale),  # no _inv: FP4 scales not pre-inverted
+            w13_bias=None,
+            w2_weight=jax_view(layer.w2_weight),
+            w2_weight_scale=jax_view(layer.w2_weight_scale),  # no _inv
+            w2_bias=None,
+        )
+        return vllm_moe_apply(
+            layer=layer,
+            weights=weights,
+            quant_method_instance=self,
+            x=x,
+            router_logits=router_logits,
+        )
 
 
 @register_quantization_config(DSV4_FP8)
@@ -245,6 +274,7 @@ class VllmDeepseekV4Fp8Config(DeepseekV4FP8Config, VllmQuantConfig):
                     logger.info_once(
                         "Using VllmDeepseekV4Fp4MoEMethod (MXFP4 stub) "
                         "for expert_dtype='fp4' MoE layer at %s", prefix)
+                    layer.moe_config = self.get_moe_config(layer)
                     return VllmDeepseekV4Fp4MoEMethod(layer.moe_config, self.mesh)
                 else:
                     # expert_dtype == "fp8": use standard FP8 block-quant MoE

@@ -21,9 +21,9 @@ from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
 from vllm.config import get_layers_from_vllm_config, set_current_vllm_config
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mla import MLAAttention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.utils import (get_kv_cache_layout,
                                               set_kv_cache_layout)

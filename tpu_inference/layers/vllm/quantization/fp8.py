@@ -151,10 +151,6 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
 
         weight_scale_inv = layer.weight_scale_inv
         # Float8_e8m0fnu (ue8m0) scales cannot be converted via numpy in t2j.
-        # Cast to float32 first — PyTorch decodes each byte E as 2^(E - 127).
-        # This occurs for DeepSeek-V4-Flash (expert_dtype="fp4") where FP8 linear
-        # scales are stored as e8m0fnu. The float32 value is then used for
-        # dequantization only; re-quantization produces a fresh float32 scale.
         if weight_scale_inv.dtype == torch.float8_e8m0fnu:
             weight_scale_inv = weight_scale_inv.to(torch.float32)
         weight_scale = t2j(weight_scale_inv, use_dlpack=False)
@@ -314,7 +310,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # TODO (1d): Detect hash-MoE layers and pre-compute topk_ids before routing:
+        # TODO: Detect hash-MoE layers and pre-compute topk_ids before routing:
         #   hash_table = getattr(layer, 'hash_indices_table', None)
         #   precomputed_topk_ids = jax_view(hash_table[input_ids]) if (
         #       hash_table is not None and input_ids is not None) else None

@@ -125,7 +125,9 @@ class TpuDeepseekV4SWACache(MLAAttention):
     """Implements DeepseekV4SWACache for torchax.
     (vllm/vllm/v1/attention/backends/mla/sparse_swa.py).
 
-    Inherits from MLAAttention so that we can register a KV cache for this layer.
+    Inherits from MLAAttention so that kv_cache_manager (which filters by
+    isinstance(x, (Attention, MLAAttention, MambaBase))) picks it up and
+    allocates sliding-window KV cache pages for it.
 
     Shapes:
       kv_cache  [num_blocks, block_size=64, 1, head_dim]  uint8
@@ -182,27 +184,29 @@ class TpuDeepseekV4SWACache(MLAAttention):
         # Filler that is eeded to satisfy the AttentionLayerBase interface but is not used in practice
         return PallasMLAttentionBackend
 
-    def process_weights_after_loading(self, _act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self, act_order: bool = False) -> None:
         # Doesn't hold weights of its own so
         # process_weights_after_loading should be a no-op.
         pass
 
     def forward(self) -> None:
-        # This class only sets up the cache specs for the SWA cache.
-        # SWA KV insertion and SWA attention are the
-        # responsibility of TpuDeepseekV4MultiHeadLatentAttentionWrapper.forward.
+        # This class only registers KV cache specs for the SWA cache.
+        # SWA KV insertion and SWA attention are driven by
+        # TpuDeepseekV4MultiHeadLatentAttentionWrapper.forward.
         pass
 
 
 class TpuDeepseekV4MLAAttention(MLAAttention):
     """
-    Analagous to VllmMLAAttention in tpu_inference/layers/vllm/custom_ops/mla_attention.py.
-    Responsibilities: 
+    Analogous to VllmMLAAttention in tpu_inference/layers/vllm/custom_ops/mla_attention.py.
+    Inherits from MLAAttention so kv_cache_manager picks it up.
+
+    Responsibilities:
         - Registers the KV cache for the DSv4 attention.
         - Receives the q/kv inputs from TpuDeepseekV4MultiHeadLatentAttentionWrapper and 
           calls the kernel implementation.
 
-    (GPU reference: 
+    (GPU reference:
     vllm/vllm/model_executor/layers/deepseek_v4_attention.py::DeepseekV4MLAAttention).
 
     Responsibilities (all TODO):
@@ -273,13 +277,13 @@ class TpuDeepseekV4MLAAttention(MLAAttention):
             model_version="deepseek_v4",
         )
 
+    def process_weights_after_loading(self, act_order: bool = False) -> None:
+        # No-op since this is just an orchestrator class that doesn't own any weights.
+        pass
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         # Filler that is eeded to satisfy the AttentionLayerBase interface but is not used in practice
         return PallasMLAttentionBackend
-
-    def process_weights_after_loading(self, _act_dtype: torch.dtype) -> None:
-        # No-op since this is just an orchestrator class that doesn't own any weights.
-        pass
 
     def forward(
         self,

@@ -73,7 +73,7 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
     Returns:
         The output tensor from the MoE fowrard pass.
 
-    TODO (1d): Add precomputed_topk_ids: jax.Array | None = None parameter for
+    TODO: Add precomputed_topk_ids: jax.Array | None = None parameter for
     hash-MoE routing. When provided (shape [T, top_k]), thread it through to moe_apply
     and ultimately to fused_moe_func in fused_moe_gmm.py so the routing calculation is
     skipped.

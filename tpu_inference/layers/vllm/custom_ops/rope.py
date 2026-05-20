@@ -35,9 +35,6 @@ class VllmDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
     TPU-friendly modifications for efficient RoPE usage.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
     def forward_native(
         self,
         positions: torch.Tensor,
