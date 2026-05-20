@@ -36,6 +36,9 @@ from tpu_inference.models.jax.utils.multi_modal_utils import (
     reshape_mm_tensor,
     split_mm_embeddings_by_grid,
 )
+from tpu_inference.models.jax.jax_intermediate_tensor import (
+    JaxIntermediateTensors,
+)
 from tpu_inference.models.jax.utils.weight_utils import (
     get_default_maps,
     load_hf_weights,
@@ -1595,7 +1598,7 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
         _is_first_rank: bool = True,
         _is_last_rank: bool = True,
         deepstack_embeds: Optional[Union[List[jax.Array], Tuple[jax.Array, ...]]] = None,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array], Optional[jax.Array]]:
         visual_pos_mask = None
 
         if deepstack_embeds is not None and input_ids is not None:
@@ -1612,7 +1615,10 @@ class Qwen3VLForConditionalGeneration(nnx.Module):
             deepstack_visual_embeds=deepstack_embeds,
         )
 
-        return kv_caches, hidden_states, []
+        if not _is_last_rank:
+            hidden_states = JaxIntermediateTensors(tensors={"hidden_states": hidden_states})
+
+        return kv_caches, hidden_states, [], None
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if hasattr(self, 'lm_head'):
