@@ -31,6 +31,8 @@ import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import envs
 from tpu_inference.kernels.flash_attention.kernel import flash_attention
 from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
+from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
+                                                       get_tuned_params)
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
@@ -538,10 +540,20 @@ def mla_attention(
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
-        # TODO: use auto tuner to find the best block sizes.
-        num_kv_pages_per_block = (3, 1, 1)
-        num_queries_per_block = (1, 16, 16)
-        decode_batch_size = 4
+        batched_decode_tuning_key = TuningKey(
+            case="batched_decode",
+            max_num_tokens=q.shape[1],
+            actual_num_q_heads=q.shape[0],
+            actual_lkv_dim=q.shape[2],
+            actual_r_dim=q_rope.shape[2],
+        )
+        batched_decode_tuned_params = get_tuned_params(
+            batched_decode_tuning_key)
+        num_kv_pages_per_block = (
+            batched_decode_tuned_params.num_kv_pages_per_block, 1, 1)
+        num_queries_per_block = (
+            batched_decode_tuned_params.num_queries_per_block, 16, 16)
+        decode_batch_size = batched_decode_tuned_params.decode_batch_size
 
         out, new_cache = mla_ragged_paged_attention(
             q,
