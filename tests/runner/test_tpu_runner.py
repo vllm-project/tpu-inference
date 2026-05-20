@@ -94,6 +94,7 @@ class TestTPUJaxRunner:
         self.runner.embed_input_ids_fn = self.mock_get_input_embed_fn
         self.mock_get_input_embed_fn.return_value = dummy_final_embeds
         self.runner.state = MagicMock()
+        self.runner.state_leaves = self.runner.state
 
         # 2. ===== Act & Assert (Multimodal) =====
         self.runner.is_multimodal_model = True
@@ -105,7 +106,7 @@ class TestTPUJaxRunner:
         np.testing.assert_array_equal(np.asarray(inputs_embeds_res),
                                       np.asarray(dummy_final_embeds))
         self.mock_get_input_embed_fn.assert_called_once_with(
-            self.runner.state,
+            self.runner.state_leaves,
             dummy_input_ids,
             dummy_mm_embeds,
             is_multimodal=dummy_is_mm_embed)
@@ -261,15 +262,17 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             embed_multimodal_fn=None,
             embed_input_ids_fn=None,
             get_mrope_input_positions_fn=None)
+        state = MagicMock()
         return ModelInterface(
-            MagicMock(),  # TPUModelRunner.model_fn
-            MagicMock(),  # TPUModelRunner.compute_logits_fn
-            MagicMock(),  # TPUModelRunner.pooler_fn
-            MagicMock(),  # TPUModelRunner.combine_hidden_states_fn
-            mock_multimodal_fns,  # TPUModelRunner.multimodal_fns
-            MagicMock(),  # TPUModelRunner.state (model params)
-            None,  # TPUModelRunner.lora_manager
-            None,  # TPUModelRunner.model
+            model_fn=MagicMock(),
+            compute_logits_fn=MagicMock(),
+            pooler_fn=MagicMock(),
+            combine_hidden_states_fn=MagicMock(),
+            multimodal_fns=mock_multimodal_fns,
+            state=state,
+            state_leaves=state,
+            lora_manager=MagicMock(),
+            model=MagicMock(),
         )
 
     def test_is_multimodal_model(self):
@@ -306,15 +309,17 @@ class TestTPUJaxRunnerDisableMM:
             embed_multimodal_fn=MagicMock(),
             embed_input_ids_fn=MagicMock(),
             get_mrope_input_positions_fn=None)
+        state = MagicMock()
         return ModelInterface(
-            MagicMock(),  # TPUModelRunner.model_fn
-            MagicMock(),  # TPUModelRunner.compute_logits_fn
-            MagicMock(),  # TPUModelRunner.pooler_fn
-            MagicMock(),  # TPUModelRunner.combine_hidden_states_fn
-            mock_multimodal_fns,  # TPUModelRunner.multimodal_fns
-            MagicMock(),  # TPUModelRunner.state (model params)
-            None,  # TPUModelRunner.lora_manager
-            None,  # TPUModelRunner.model
+            model_fn=MagicMock(),
+            compute_logits_fn=MagicMock(),
+            pooler_fn=MagicMock(),
+            combine_hidden_states_fn=MagicMock(),
+            multimodal_fns=mock_multimodal_fns,
+            state=state,
+            state_leaves=state,
+            lora_manager=MagicMock(),
+            model=MagicMock(),
         )
 
     @pytest.mark.parametrize(

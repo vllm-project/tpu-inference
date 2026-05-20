@@ -170,7 +170,7 @@ class CompilationManager:
             self._run_compilation(
                 "input_embeddings_merger",
                 self.runner.embed_input_ids_fn,
-                self.runner.state,
+                self.runner.state_leaves,
                 dummy_input_ids,
                 dummy_multimodal_embeddings,
                 call_kwargs={"is_multimodal": dummy_is_multimodal},
@@ -180,7 +180,7 @@ class CompilationManager:
             self._run_compilation(
                 "input_embeddings_merger_text_only",
                 self.runner.embed_input_ids_fn,
-                self.runner.state,
+                self.runner.state_leaves,
                 dummy_input_ids,
                 None,
                 call_kwargs={"is_multimodal": None},
@@ -656,7 +656,7 @@ class CompilationManager:
                 self._run_compilation(
                     f"worker{self.runner.rank} compute_logits",
                     self.runner.compute_logits_fn,
-                    self.runner.state,
+                    self.runner.state_leaves,
                     hidden_states,
                     lora_metadata,
                     num_reqs=num_reqs,

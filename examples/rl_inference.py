@@ -47,6 +47,7 @@ def main(args: dict):
     mixed_logprobs = args.pop("mixed_logprobs")
 
     # Create an LLM
+    args["enable_return_routed_experts"] = True
     llm = LLM(**args)
 
     # Create a sampling params object
