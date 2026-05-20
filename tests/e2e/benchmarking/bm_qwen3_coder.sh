@@ -140,6 +140,8 @@ start_time=$(date +%s)
 # If needed, replace "--async-scheduling" with "--no-async-scheduling"
 export USE_MOE_EP_KERNEL=${use_moe_ep_kernel}
 export MODEL_IMPL_TYPE=vllm
+# TODO: Remove this once batched rpa is the default
+export USE_BATCHED_RPA_KERNEL=1
 
 echo "bench_serving commit: $(git -C bench_serving rev-parse HEAD)"
 
