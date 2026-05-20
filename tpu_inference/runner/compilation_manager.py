@@ -183,7 +183,7 @@ class CompilationManager:
             self._run_compilation(
                 "input_embeddings_merger",
                 self.runner.embed_input_ids_fn,
-                self.runner.state,
+                self.runner.state_leaves,
                 dummy_input_ids,
                 # Make _compute_deepstack_embeds happy.
                 [dummy_multimodal_embeddings],
@@ -194,7 +194,7 @@ class CompilationManager:
             self._run_compilation(
                 "input_embeddings_merger_text_only",
                 self.runner.embed_input_ids_fn,
-                self.runner.state,
+                self.runner.state_leaves,
                 dummy_input_ids,
                 None,
                 call_kwargs={"is_multimodal": None},
@@ -284,7 +284,7 @@ class CompilationManager:
             }
 
         def model_fn_wrapper(
-            state,
+            state_leaves,
             kv_caches,
             input_ids,
             attention_metadata,
@@ -297,9 +297,10 @@ class CompilationManager:
             is_last_rank,
         ):
             kv_caches, hidden_states, *_ = self.runner.model_fn(
-                state, kv_caches, input_ids, attention_metadata, inputs_embeds,
-                positions, layer_name_to_kvcache_index, lora_metadata,
-                intermediate_tensors, is_first_rank, is_last_rank)
+                state_leaves, kv_caches, input_ids, attention_metadata,
+                inputs_embeds, positions, layer_name_to_kvcache_index,
+                lora_metadata, intermediate_tensors, is_first_rank,
+                is_last_rank)
             self.runner.kv_caches = kv_caches
             return hidden_states
 
@@ -681,7 +682,7 @@ class CompilationManager:
                 self._run_compilation(
                     f"worker{self.runner.rank} compute_logits",
                     self.runner.compute_logits_fn,
-                    self.runner.state,
+                    self.runner.state_leaves,
                     hidden_states,
                     lora_metadata,
                     num_reqs=num_reqs,
