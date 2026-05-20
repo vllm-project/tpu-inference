@@ -24,11 +24,11 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 
-from tpu_inference.layers.common.sharding import (ShardingAxisName2D,
-                                                  ShardingConfigManager)
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
     reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation)
+from tpu_inference.utils import get_mesh_shape_product
 
 
 @RowParallelLinear.register_oot
@@ -92,9 +92,8 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         if total_num_kv_heads is None:
             total_num_kv_heads = total_num_heads
         vllm_config = get_current_vllm_config()
-        sharding_config = (getattr(vllm_config, "sharding_config", None) or
-                           ShardingConfigManager.from_vllm_config(vllm_config))
-        tp = sharding_config.tp_size
+        tp = get_mesh_shape_product(vllm_config.quant_config.mesh,
+                                    ShardingAxisName.ATTN_HEAD)
         if tp > total_num_kv_heads:
             assert tp % total_num_kv_heads == 0, (
                 f"tp_size ({tp}) must be divisible by total_num_kv_heads "
@@ -167,8 +166,8 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         )
 
         mesh = jax.sharding.get_abstract_mesh()
-        kv_head_axis = ShardingAxisName2D.ATTN_HEAD
-        data_axis = ShardingAxisName2D.ATTN_DATA
+        kv_head_axis = ShardingAxisName.ATTN_HEAD
+        data_axis = ShardingAxisName.ATTN_DATA
         replica_axis = 'replica'
 
         # Split the `kv_head` mesh axis (size kv_size) into a pair
