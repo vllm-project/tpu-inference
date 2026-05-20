@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import functools
 from typing import Any, Optional
 
 import jax
@@ -383,10 +382,11 @@ def get_flax_model(
             hidden_states_sharding,  # residual
             None,  # expert ids
         ),
-        donate_argnums=2,  # 0 is graphdef, 1 is state, 2 is kv_cache
-        static_argnums=(6, ),  # 6 is layer_name_to_kvcache_index
+        donate_argnums=1,  # 0 is state_leaves, 1 is kv_cache
+        static_argnums=(5, ),  # 5 is layer_name_to_kvcache_index
     )
-    def run_draft_model(graphdef, state, *args):
+    def run_draft_model(state_leaves, *args):
+        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
         return model(*args)
 
@@ -395,58 +395,56 @@ def get_flax_model(
         PartitionSpec(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR))
 
     @jax.jit(out_shardings=(logits_sharding))
-    def run_compute_logits(graphdef, state, *args):
+    def run_compute_logits(state_leaves, *args):
+        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
         hidden_state, *_ = args
         return model.compute_logits(hidden_state)
 
     # Multi-modal support only
-    # This function calculates the image token's embeddings by VIT
-    def run_embed_multimodal(graphdef, state, **kwargs):
+    # This function calculates the image/video token's embeddings by VIT
+    def run_embed_multimodal(state_leaves, **kwargs):
+        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
         return model.embed_multimodal(**kwargs)
 
     embed_sharding = NamedSharding(mesh, PartitionSpec(None))
 
     @jax.jit(out_shardings=(embed_sharding))
-    def jitted_embed_input_ids(graphdef,
-                               state,
+    def jitted_embed_input_ids(state_leaves,
                                input_ids,
                                mm_embeds,
                                is_multimodal=None):
+        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
         return model.embed_input_ids(input_ids,
                                      mm_embeds,
                                      is_multimodal=is_multimodal)
 
-    def run_embed_input_ids(graphdef,
-                            state,
+    def run_embed_input_ids(state_leaves,
                             input_ids,
                             mm_embeds=None,
                             is_multimodal=None):
         mm_embeds = flatten_pad_mm_embeds(mm_embeds,
                                           target_pad_len=input_ids.shape[0])
-        return jitted_embed_input_ids(graphdef,
-                                      state,
+        return jitted_embed_input_ids(state_leaves,
                                       input_ids,
                                       mm_embeds,
                                       is_multimodal=is_multimodal)
 
     # For models that want to work with EAGLE-3 speculative decoding
     @jax.jit(out_shardings=(logits_sharding))
-    def combine_hidden_states(graphdef, state, hidden_states):
+    def combine_hidden_states(state_leaves, hidden_states):
+        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
         return model.combine_hidden_states(hidden_states)
 
     model = nnx.merge(graphdef, state)
     precompile_vision_encoder_fn = getattr(model, "precompile_vision_encoder",
                                            None)
-    # For the draft path, graphdef is still passed positionally (signature
-    # unchanged). For the main path, graphdef and the state treedef are both
-    # captured in the run_model closure; the runner passes pre-flattened
-    # `state_leaves` as the first positional arg.
-    jitted_model_fn = functools.partial(
-        run_draft_model, graphdef) if is_draft_model else run_model
+    # `graphdef` and the state treedef are captured in each closure; the
+    # runner passes pre-flattened `state_leaves` as the first positional arg.
+    jitted_model_fn = run_draft_model if is_draft_model else run_model
 
     model_supports_spec_step = supports_kw(model_class.__call__,
                                            "spec_step_idx")
@@ -456,12 +454,11 @@ def get_flax_model(
             kwargs.pop("spec_step_idx", None)
         return jitted_model_fn(*args, **kwargs)
 
-    compute_logits_fn = functools.partial(run_compute_logits, graphdef)
-    embed_multimodal_fn = functools.partial(run_embed_multimodal, graphdef)
-    embed_input_ids_fn = functools.partial(run_embed_input_ids, graphdef)
+    compute_logits_fn = run_compute_logits
+    embed_multimodal_fn = run_embed_multimodal
+    embed_input_ids_fn = run_embed_input_ids
     lora_manager, model = None, None
-    combine_hidden_states_fn = functools.partial(combine_hidden_states,
-                                                 graphdef)
+    combine_hidden_states_fn = combine_hidden_states
 
     get_mrope_input_positions_fn = None if not hasattr(
         jit_model,
@@ -508,6 +505,8 @@ def get_flax_model(
     else:
         pooler_fn = _not_support
 
+    state_leaves = tuple(jax.tree_util.tree_leaves(state))
+
     return ModelInterface(
         model_fn=wrapped_model_fn,
         compute_logits_fn=compute_logits_fn,
@@ -515,6 +514,7 @@ def get_flax_model(
         combine_hidden_states_fn=combine_hidden_states_fn,
         multimodal_fns=multimodal_fns,
         state=state,
+        state_leaves=state_leaves,
         lora_manager=lora_manager,
         model=jit_model,
     )
@@ -560,6 +560,8 @@ def get_vllm_model(
     )
 
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
+    # For the vllm-impl path the dispatch-side fns accept the params dict
+    # directly, so `state_leaves` is just the dict.
     return ModelInterface(
         model_fn=jit_model,
         compute_logits_fn=compute_logits_fn,
@@ -567,6 +569,7 @@ def get_vllm_model(
         combine_hidden_states_fn=combine_hidden_states_fn,
         multimodal_fns=multimodal_fns,
         state=params,
+        state_leaves=params,
         lora_manager=lora_manager,
         model=model,
     )

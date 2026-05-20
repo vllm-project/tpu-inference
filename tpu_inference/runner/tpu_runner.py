@@ -565,8 +565,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # the max_reqs. If ATTN_BUCKETIZE_NUM_REQS=true, it is the
         # power-of-two between min and max reqs.
         # User can set ATTN_CUSTOM_NUM_REQS_BUCKETS to provide custom buckets.
-        self.attn_num_reqs_paddings = runner_utils.get_attn_req_paddings(
-            min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
+        self.attn_num_reqs_paddings_per_dp = runner_utils.get_attn_req_paddings(
+            min_req_size=MIN_NUM_SEQS,
+            max_req_size=scheduler_config.max_num_seqs)
+        self.attn_num_reqs_paddings = [
+            padding * self.dp_size
+            for padding in self.attn_num_reqs_paddings_per_dp
+        ]
+
         self.num_reqs_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_reqs_paddings
         ]
@@ -655,10 +661,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # tuple of array leaves and reconstructs the nnx.State inside the
         # jit. Pre-flatten here so subsequent dispatches skip the per-call
         # walk of `nnx.Variable` wrappers
-        if isinstance(self.state, nnx.State):
-            self.state_leaves = tuple(jax.tree_util.tree_leaves(self.state))
-        else:
-            self.state_leaves = self.state
+        self.state_leaves = model.state_leaves
         self.lora_manager = model.lora_manager
         self.model = model.model
 
@@ -1038,7 +1041,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         hidden_states = self._select_from_array_fn(hidden_states,
                                                    logits_indices)
         logits = self.compute_logits_fn(
-            self.state,
+            self.state_leaves,
             hidden_states,
             lora_metadata,
         )
@@ -1406,7 +1409,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
         attn_padded_num_reqs = runner_utils.get_padded_token_len(
-            self.attn_num_reqs_paddings, padded_num_reqs)
+            self.attn_num_reqs_paddings_per_dp,
+            max_num_reqs_across_dp) * dp_size
 
         # logits_indices_selector reorders per-rank outputs back to the
         # original batch ordering; with a single rank the ordering is already
@@ -2007,7 +2011,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.is_multimodal_model and mm_embeds is not None:
             assert self.embed_input_ids_fn is not None
             inputs_embeds = self.embed_input_ids_fn(
-                self.state,
+                self.state_leaves,
                 input_ids,
                 mm_embeds,
                 is_multimodal=is_mm_embed,
