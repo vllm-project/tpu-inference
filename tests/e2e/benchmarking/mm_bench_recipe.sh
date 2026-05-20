@@ -17,9 +17,22 @@
 # Spin up the vLLM server
 model_name="${TEST_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}"
 tp_size="${TENSOR_PARALLEL_SIZE:-1}"
-max_model_len=16384
+# MAX_MODEL_LEN / MAX_NUM_SEQS are env-overridable so smaller models can fit
+# on memory-tight v6e. Defaults match the previous tpu7x_2 sizing.
+max_model_len="${MAX_MODEL_LEN:-16384}"
+max_num_seqs="${MAX_NUM_SEQS:-}"
+gpu_mem_util="${GPU_MEMORY_UTILIZATION:-0.98}"
 block_size="${BLOCK_SIZE:-}"
-dataset_name="random-mm"
+# BENCH_DATASET=text routes through the plain-text "random" dataset and skips
+# the vision tower entirely. Use for text-only mm-capable models like
+# gemma-4-E2B-it where we want kernel/attention perf without vision overhead.
+# Default "mm" preserves the existing Qwen-VL etc. multimodal recipe.
+bench_dataset="${BENCH_DATASET:-mm}"
+if [ "$bench_dataset" = "text" ]; then
+  dataset_name="random"
+else
+  dataset_name="random-mm"
+fi
 backend="openai-chat"
 num_prompts=128
 
@@ -94,7 +107,18 @@ checkThroughput() {
 }
 
 echo "Spinning up the vLLM server..."
-vllm_cmd=(vllm serve "$model_name" --tensor-parallel-size "$tp_size" --pipeline-parallel-size 1 --dtype bfloat16 --gpu-memory-utilization 0.98 --max-model-len "$max_model_len" --limit-mm-per-prompt '{"image": 10, "video": 0}' --mm-processor-kwargs '{"size": {"longest_edge": 1003520, "shortest_edge": 3136}}' --disable-chunked-mm-input)
+vllm_cmd=(vllm serve "$model_name" --tensor-parallel-size "$tp_size" --pipeline-parallel-size 1 --dtype bfloat16 --gpu-memory-utilization "$gpu_mem_util" --max-model-len "$max_model_len")
+if [ "$bench_dataset" = "text" ]; then
+    # MM-capable models still compute the MM encoder budget at startup;
+    # on TPU --disable-chunked-mm-input is force-applied, so we must keep
+    # max_num_batched_tokens >= max_tokens_per_mm_item (2496 for gemma-4-E2B).
+    vllm_cmd+=(--max-num-batched-tokens 4096)
+else
+    vllm_cmd+=(--limit-mm-per-prompt '{"image": 10, "video": 0}' --mm-processor-kwargs '{"size": {"longest_edge": 1003520, "shortest_edge": 3136}}' --disable-chunked-mm-input)
+fi
+if [ -n "$max_num_seqs" ]; then
+    vllm_cmd+=(--max-num-seqs "$max_num_seqs")
+fi
 if [ -n "$block_size" ]; then
     vllm_cmd+=(--block-size "$block_size")
 fi
@@ -126,16 +150,13 @@ done
 if $did_find_ready_message; then
     echo "Starting the benchmark for $model_name..."
     echo "Current working directory: $(pwd)"
-    vllm bench serve \
-    --model "$model_name" \
-    --dataset-name "$dataset_name" \
-    --num-prompts "$num_prompts" \
-    --backend "$backend" \
-    --endpoint "/v1/chat/completions" \
-    --random-mm-bucket-config '{(736, 736, 1): 1.0}' \
-    --random-mm-base-items-per-request 6 \
-    --random-mm-num-mm-items-range-ratio 0.67 \
-    --random-mm-limit-mm-per-prompt '{"image": 10, "video": 0}' 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
+    bench_cmd=(vllm bench serve --model "$model_name" --dataset-name "$dataset_name" --num-prompts "$num_prompts" --backend "$backend" --endpoint "/v1/chat/completions")
+    if [ "$bench_dataset" = "text" ]; then
+        bench_cmd+=(--random-input-len "${INPUT_LEN:-1024}" --random-output-len "${OUTPUT_LEN:-128}" --random-range-ratio 0.0)
+    else
+        bench_cmd+=(--random-mm-bucket-config '{(736, 736, 1): 1.0}' --random-mm-base-items-per-request 6 --random-mm-num-mm-items-range-ratio 0.67 --random-mm-limit-mm-per-prompt '{"image": 10, "video": 0}')
+    fi
+    "${bench_cmd[@]}" 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
 
     checkThroughput

@@ -52,6 +52,9 @@ from vllm.sequence import IntermediateTensors
 
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def _patched_set_deepstack(vllm_model, deepstack_input_embeds):
@@ -292,3 +295,17 @@ def is_qwen3_vl(vllm_model) -> bool:
 def maybe_apply_qwen3_vl_patches(vllm_model: nn.Module) -> None:
     if is_qwen3_vl(vllm_model):
         apply_qwen3_vl_patches(vllm_model)
+
+        if hasattr(vllm_model, "deepstack_input_embeds"):
+            # Force the deepstack placeholder buffers to the correct TPU device
+            # (via Torchax/JAX) to resolve device mismatch during the forward pass.
+            # This is required because the ModelForEmbedding adapter can cause
+            # the standard weight loader to skip these non-parameter buffers.
+            target_device = next(vllm_model.parameters()).device
+            logger.info(
+                f"Patching Qwen3-VL deepstack buffers to device: {target_device}"
+            )
+            vllm_model.deepstack_input_embeds = [
+                t.to(device=target_device)
+                for t in vllm_model.deepstack_input_embeds
+            ]
