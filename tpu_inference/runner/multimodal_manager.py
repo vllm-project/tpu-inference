@@ -308,33 +308,33 @@ class MultiModalManager:
                     mm_embeds.append(mm_embeds_item)
                     deepstack_output = self.runner.deepstack_cache.get(mm_hash)
                     if deepstack_output is not None:
-                        if deepstack_layers is None:
-                            deepstack_dim = deepstack_output[0].shape[1]
-                            deepstack_dtype = deepstack_output[0].dtype
-                            deepstack_layers = [[] for _ in range(len(deepstack_output))]
-                        for layer_idx, layer_embeds in enumerate(deepstack_output):
-                            if is_embed is not None:
-                                layer_item = layer_embeds[
-                                    curr_embeds_start:curr_embeds_end]
-                            else:
-                                layer_item = layer_embeds[start_idx:end_idx]
-                            deepstack_layers[layer_idx].append(layer_item)
-
-                        req_start_pos = (rank_token_offset + req_start_idx +
-                                        start_pos - num_computed_tokens)
-
-                        # use cpu numpy array for inplace modification
-                        if is_embed is None:
-                            is_mm_embed_cpu[req_start_pos +
-                                            start_idx:req_start_pos +
-                                            end_idx] = True
-                        else:
-                            embed_mask = is_embed.numpy() if hasattr(
-                            is_embed, "numpy") else np.asarray(is_embed,
-                                                            dtype=np.bool_)
-                            is_mm_embed_cpu[req_start_pos +
-                                            start_idx:req_start_pos +
-                                            end_idx] |= embed_mask
+                          if deepstack_layers is None:
+                              deepstack_dim = deepstack_output[0].shape[1]
+                              deepstack_dtype = deepstack_output[0].dtype
+                              deepstack_layers = [[] for _ in range(len(deepstack_output))]
+                          for layer_idx, layer_embeds in enumerate(deepstack_output):
+                              if is_embed is not None:
+                                  layer_item = layer_embeds[
+                                      curr_embeds_start:curr_embeds_end]
+                              else:
+                                  layer_item = layer_embeds[start_idx:end_idx]
+                              deepstack_layers[layer_idx].append(layer_item)
+  
+                    req_start_pos = (rank_token_offset + req_start_idx +
+                                       start_pos - num_computed_tokens)
+  
+                    # use cpu numpy array for inplace modification
+                    if is_embed is None:
+                          is_mm_embed_cpu[req_start_pos +
+                                          start_idx:req_start_pos +
+                                          end_idx] = True
+                    else:
+                          embed_mask = is_embed.numpy() if hasattr(
+                          is_embed, "numpy") else np.asarray(is_embed,
+                                                             dtype=np.bool_)
+                          is_mm_embed_cpu[req_start_pos +
+                                          start_idx:req_start_pos +
+                                          end_idx] |= embed_mask
 
                 req_start_idx += num_scheduled_tokens
 
