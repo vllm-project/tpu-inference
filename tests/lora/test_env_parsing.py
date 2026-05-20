@@ -14,7 +14,7 @@
 
 import os
 import pytest
-from tpu_inference.models.vllm.vllm_model_wrapper import _parse_lora_module_path_env
+from tpu_inference.lora.lora_manager import parse_lora_module_path_env as _parse_lora_module_path_env
 
 def test_parse_lora_module_path_env(monkeypatch):
     # Test case 1: Missing env var

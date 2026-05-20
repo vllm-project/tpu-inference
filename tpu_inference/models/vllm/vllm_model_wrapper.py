@@ -13,8 +13,6 @@
 # limitations under the License.
 
 import copy
-import os
-import re
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -66,6 +64,8 @@ from tpu_inference.models.vllm.experimental.vision_tower_jit import (
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
+from tpu_inference.lora.lora_manager import (TPULRUCacheWorkerLoRAManager,
+                                             parse_lora_module_path_env)
 
 logger = init_logger(__name__)
 
@@ -619,17 +619,6 @@ class VllmModelWrapper:
         return compute_pooler_output
 
 
-class TPULRUCacheWorkerLoRAManager(LRUCacheWorkerLoRAManager):
-    """
-    TPU-specific wrapper to ensure dummy LoRA creation happens 
-    within the torchax environment.
-    """
-
-    def add_dummy_lora(self, lora_request, rank: int) -> bool:
-        with torchax.default_env():
-            return super().add_dummy_lora(lora_request, rank)
-
-
 def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
                     device: str) -> torch.nn.Module:
     if not supports_lora(model):
@@ -643,7 +632,7 @@ def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
     # The target_modules list is used by vLLM's LoRA manager to identify
     # which modules in the base model should have LoRA adapters attached.
     # Overriding it here allows targeting custom module paths specified via env var on TPU.
-    env_modules = _parse_lora_module_path_env()
+    env_modules = parse_lora_module_path_env()
     if env_modules is not None and vllm_config.lora_config:
         vllm_config.lora_config.target_modules = env_modules
         logger.info(
@@ -683,45 +672,3 @@ def replace_set_lora(model):
             module.set_lora = _tpu_set_lora.__get__(module, module.__class__)
             module.reset_lora = _tpu_reset_lora.__get__(
                 module, module.__class__)
-
-
-def _parse_lora_module_path_env():
-    """Parses LORA_MODULE_PATH env var into vLLM canonical target_modules list."""
-    env_val = os.environ.get("LORA_MODULE_PATH")
-    if not env_val:
-        return None
-    # Map Google/MaxText Pax-style names to canonical HF/vLLM names
-    name_mapping = {
-        "query": "q_proj",
-        "key": "k_proj",
-        "value": "v_proj",
-        "out": "o_proj",
-        "wi_0": "gate_proj",
-        "wi_1": "up_proj",
-        "wo": "down_proj",
-        "embed": "embed_tokens",
-        "lm_head": "lm_head"
-    }
-    target_modules = set()
-
-    # Extract regex groups like (query|key|value|out)
-    if '(' in env_val or ')' in env_val:
-        matches = re.findall(r'\(([^)]+)\)', env_val)
-        for group in matches:
-            for module in group.split('|'):
-                if module in name_mapping:
-                    target_modules.add(name_mapping[module])
-                else:
-                    target_modules.add(module)
-    else:
-        # No parentheses found, assume standard list
-        # Split by comma or pipe
-        parts = re.split(r'[,|]', env_val)
-        for part in parts:
-            part = part.strip()
-            if part:
-                if part in name_mapping:
-                    target_modules.add(name_mapping[part])
-                else:
-                    target_modules.add(part)
-    return list(target_modules) if target_modules else None
