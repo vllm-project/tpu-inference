@@ -52,6 +52,30 @@ def pytest_configure(config):
     )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _prewarm_jax_compilation_cache():
+    """Initialize the JAX compilation cache once at session start.
+
+    On JAX 0.10, JaxTestCase wraps each test in ``assert_global_configs_unchanged``,
+    which checks that ``jax._src.compilation_cache._cache`` is the same object
+    before and after the test. When ``JAX_COMPILATION_CACHE_DIR`` is set, the
+    cache is lazily initialized on the first JIT call — so the first test to
+    JIT transitions ``_cache`` from ``None`` to an ``LRUCache`` and the helper
+    raises ``AssertionError: Test changed the compilation cache object``.
+
+    Forcing one JIT here ensures ``_cache`` has a stable identity before any
+    test body runs, so the assertion holds across the whole session. No-op if
+    the env var is unset (cache stays ``None`` everywhere) or if JAX/devices
+    are unavailable.
+    """
+    if not os.environ.get("JAX_COMPILATION_CACHE_DIR"):
+        return
+    try:
+        jax.jit(lambda x: x + jax.numpy.float32(1.0))(jax.numpy.float32(0.0))
+    except Exception:
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _handle_disable_jax_cache_marker(request):
     """
