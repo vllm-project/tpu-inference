@@ -90,7 +90,7 @@ class TestMultiModalManager:
         self.mock_get_mm_embed_fn = MagicMock()
         self.runner.embed_multimodal_fn = self.mock_get_mm_embed_fn
 
-        self.runner.state = MagicMock()
+        self.runner.state_leaves = MagicMock()
         # Mock scheduler output
         mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
         mock_scheduler_output.scheduled_encoder_inputs = {"req-1": [0]}
@@ -143,12 +143,12 @@ class TestMultiModalManager:
         self.mock_get_mm_embed_fn.assert_called_once()
         call_args = self.mock_get_mm_embed_fn.call_args
 
-        # Positional args: (state, image_grid_thw)
+        # Positional args: (state_leaves,)
         state_arg, = call_args.args
         # Keyword args: **batched_mm_inputs
         kwargs_arg = call_args.kwargs
 
-        assert state_arg == self.runner.state
+        assert state_arg == self.runner.state_leaves
         assert "image_grid_thw" in kwargs_arg
         assert "pixel_values" in kwargs_arg
 
@@ -166,7 +166,7 @@ class TestMultiModalManager:
         self.mock_get_mm_embed_fn = MagicMock()
         self.runner.embed_multimodal_fn = self.mock_get_mm_embed_fn
 
-        self.runner.state = MagicMock()
+        self.runner.state_leaves = MagicMock()
         # Mock scheduler output for two requests
         mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
         mock_scheduler_output.scheduled_encoder_inputs = {
@@ -253,7 +253,7 @@ class TestMultiModalManager:
         state_arg, = call_args.args
         kwargs_arg = call_args.kwargs
 
-        assert state_arg == self.runner.state
+        assert state_arg == self.runner.state_leaves
         assert "image_grid_thw" in kwargs_arg
         assert "pixel_values" in kwargs_arg
 
