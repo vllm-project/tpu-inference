@@ -99,7 +99,7 @@ def test_patched_get_deepstack_with_cache():
 
     res = _patched_get_deepstack(model, orig_get_deepstack, 10)
     assert res is not None
-    assert "deepstack_input_embeds_0" in res
+    assert "deepstack_input_embeds_0" in res.tensors
 
 
 def test_patched_get_deepstack_fallback():
@@ -119,4 +119,4 @@ def test_patched_get_deepstack_fallback():
 
     res = _patched_get_deepstack(model, orig_get_deepstack, 10)
     assert res is not None
-    assert "layer_0" in res
+    assert "layer_0" in res.tensors

@@ -232,6 +232,8 @@ def _patched_flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
     preventing the JAX compiler from crashing at startup.
     """
     if isinstance(embeddings, torch.Tensor):
+        if embeddings.ndim < 2:
+            return embeddings
         if embeddings.numel() == 0 or 0 in embeddings.shape:
             return embeddings.view(0, embeddings.shape[-1])
         ndim = embeddings.ndim
