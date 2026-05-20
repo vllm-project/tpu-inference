@@ -23,19 +23,12 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
-
-from tpu_inference.models.jax.jax_intermediate_tensor import \
-    JaxIntermediateTensors
-
-try:
-    from vllm.model_executor.models.gemma4_mm import \
-        Gemma4ForConditionalGeneration as PtGemma4MM
-except ImportError:
-    # TODO(#2308): Remove try-except once we have transformers>=5.5.0
-    PtGemma4MM = None
+from vllm.model_executor.models.gemma4_mm import \
+    Gemma4ForConditionalGeneration as PtGemma4MM
 
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.norm import JaxRmsNorm
@@ -43,6 +36,8 @@ from tpu_inference.layers.jax.pp_utils import make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     merge_multimodal_embeddings
 from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
@@ -643,7 +638,29 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             for name, weight in weights_iterator:
                 mapped_name = map_name(name)
 
-                # Handle packed QKV weights for the text tower
+                # Skip audio tower weights — audio path is deferred for
+                # E-family. Audio re-introduction is a separate follow-up.
+                if "audio_tower" in mapped_name or "embed_audio" in mapped_name:
+                    continue
+
+                # Skip activation-calibration metadata that ships in E2B/E4B
+                # HF checkpoints (vision tower) but isn't a JAX parameter.
+                # The JAX vision module doesn't track these min/max scalars.
+                if any(
+                        mapped_name.endswith(suffix) for suffix in (
+                            ".input_max",
+                            ".input_min",
+                            ".output_max",
+                            ".output_min",
+                        )):
+                    continue
+
+                # Handle packed QKV weights for the text tower.
+                # Note: KV-shared layers DO have full Q/K/V weights in the
+                # checkpoint — vllm-pytorch's Gemma4Attention constructs
+                # qkv_proj unconditionally. K/V are still computed and used
+                # for the current step's attention; the kernel skips writing
+                # them to the cache via update_kv_cache=False.
                 if "qkv_proj" in mapped_name:
                     m = re.search(r"layers\.(\d+)\.", mapped_name)
                     if m:
@@ -722,8 +739,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         return projected_vision_features
 
-    def _parse_and_validate_image_input(self,
-                                        **kwargs: object) -> Optional[dict]:
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[Gemma4ImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         pixel_position_ids = kwargs.pop("pixel_position_ids", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -743,7 +760,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                                       pixel_values=pixel_values,
                                       pixel_position_ids=pixel_position_ids)
 
-    def _process_image_input(self, image_input: dict) -> list[jax.Array]:
+    def _process_image_input(
+            self, image_input: Gemma4ImagePixelInputs) -> list[jax.Array]:
         pixel_values = image_input["pixel_values"]
         pixel_position_ids = image_input["pixel_position_ids"]
 
@@ -752,13 +770,30 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         if pixel_position_ids.ndim == 2:
             pixel_position_ids = jnp.expand_dims(pixel_position_ids, axis=0)
 
+        # Process images in fixed-size micro-batches of exactly `dp_size` so
+        # every vision-tower call shares the same (B=dp_size, ...) JIT cache
+        # entry regardless of how many images this step has.
+        # Gemma4VisionFlashAttention's sharded_flash_attention has
+        # in_specs=P('data','model',None,None), which requires
+        # B % dp_size == 0; B=dp_size always satisfies that. The last
+        # micro-batch is right-padded with pixel_position_ids=POSITIONS_PAD_VALUE
+        # entries so input_mask masks the padded entries out of the encoder.
+        n_images = pixel_values.shape[0]
+        dp_size = self.mesh.shape[ShardingAxisName.BATCH]
         per_image_features = []
-        batch_size = pixel_values.shape[0]
-        for i in range(batch_size):
-            pv = pixel_values[i:i + 1, ...]
-            pp = pixel_position_ids[i:i + 1, ...]
-            vt_output = self.get_single_image_embedding(pv, pp)
-            per_image_features.append(vt_output[0])
+        for chunk_start in range(0, n_images, dp_size):
+            chunk_end = min(chunk_start + dp_size, n_images)
+            chunk_size = chunk_end - chunk_start
+            pv_chunk = pixel_values[chunk_start:chunk_end]
+            pp_chunk = pixel_position_ids[chunk_start:chunk_end]
+            if chunk_size < dp_size:
+                pad_count = dp_size - chunk_size
+                pv_chunk = jnp.pad(pv_chunk, ((0, pad_count), (0, 0), (0, 0)))
+                pp_chunk = jnp.pad(pp_chunk, ((0, pad_count), (0, 0), (0, 0)),
+                                   constant_values=POSITIONS_PAD_VALUE)
+            vt_output = self.get_single_image_embedding(pv_chunk, pp_chunk)
+            for i in range(chunk_size):
+                per_image_features.append(vt_output[i])
         return per_image_features
 
     def embed_multimodal(self, **kwargs) -> List[jax.Array]:
@@ -797,12 +832,20 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         layer_name_to_kv_cache = dict(
             _layer_name_to_kv_cache) if _layer_name_to_kv_cache else None
 
+        # PLE multimodal mask: mark image-token positions
+        # so embed_tokens_per_layer redirects them to slot 0. None when not
+        # PLE-active or first rank where input_ids isn't reliable. Cheap to
+        # always compute; the PLE compute path is the only consumer.
+        is_multimodal = (input_ids == self.image_token_id
+                         ) if input_ids is not None else None
+
         kv_caches, x, expert_indices = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
             inputs_embeds,
             layer_name_to_kv_cache=layer_name_to_kv_cache,
+            is_multimodal=is_multimodal,
         )
 
         if not is_last_rank:

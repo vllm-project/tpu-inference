@@ -87,6 +87,7 @@ def test_prepare_inputs():
     # Mocks required by _prepare_draft_inputs helper
     proposer.combine_hidden_states_fn = lambda state, h: h  # Mock passthrough
     proposer.state = None  # Mock state
+    proposer.state_leaves = None  # Mock state leaves
     proposer.runner.input_batch.block_table = [mock.MagicMock()]
     # Mock the block table return value (2D array)
     (proposer.runner.input_batch.block_table[0].get_cpu_tensor.return_value
@@ -138,9 +139,9 @@ def test_prepare_inputs():
     expected_new_qsl = np.zeros(max_num_seqs + 1, dtype=np.int32)
     num_tokens_per_req = np.zeros(max_num_seqs, dtype=np.int32)
     num_tokens_per_req[:num_reqs] = [3, 4, 3]
-    # The implementation sets padded query lengths to 1, and rejected tokens
+    # The implementation sets padded query lengths to 0, and rejected tokens
     # are 0 for padded requests.
-    num_tokens_per_req[num_reqs:] = 1
+    num_tokens_per_req[num_reqs:] = 0
     expected_new_qsl[1:] = np.cumsum(num_tokens_per_req)
 
     expected_new_seq_lens = np.zeros(max_num_seqs, dtype=np.int32)
@@ -253,6 +254,7 @@ def test_propose(method, num_speculative_tokens):
     proposer.compute_logits_fn = mock_compute_logits_fn
     proposer.combine_hidden_states_fn = mock_combine_hidden_states_fn
     proposer.state = None  # Mock state
+    proposer.state_leaves = None  # Mock state leaves
 
     # Inputs
     kv_caches = [None] * 1  # Mock kv_caches

@@ -574,8 +574,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # the max_reqs. If ATTN_BUCKETIZE_NUM_REQS=true, it is the
         # power-of-two between min and max reqs.
         # User can set ATTN_CUSTOM_NUM_REQS_BUCKETS to provide custom buckets.
-        self.attn_num_reqs_paddings = runner_utils.get_attn_req_paddings(
-            min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
+        self.attn_num_reqs_paddings_per_dp = runner_utils.get_attn_req_paddings(
+            min_req_size=MIN_NUM_SEQS,
+            max_req_size=scheduler_config.max_num_seqs)
+        self.attn_num_reqs_paddings = [
+            padding * self.dp_size
+            for padding in self.attn_num_reqs_paddings_per_dp
+        ]
+
         self.num_reqs_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_reqs_paddings
         ]
@@ -664,10 +670,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # tuple of array leaves and reconstructs the nnx.State inside the
         # jit. Pre-flatten here so subsequent dispatches skip the per-call
         # walk of `nnx.Variable` wrappers
-        if isinstance(self.state, nnx.State):
-            self.state_leaves = tuple(jax.tree_util.tree_leaves(self.state))
-        else:
-            self.state_leaves = self.state
+        self.state_leaves = model.state_leaves
         self.lora_manager = model.lora_manager
         self.model = model.model
 
@@ -708,6 +711,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                     and hasattr(self.model_config.hf_config,
                                                 "architectures")
                                     and not disable_mm_from_limits)
+
+        # Clear JIT compilation caches from weight loading to free XLA
+        # program reservations (bytes_reserved) on TPU HBM.
+        jax.clear_caches()
+        logger.info("Cleared JIT caches after weight loading")
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
@@ -953,6 +961,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
             padded_num_reqs,
+            req_ids_dp,
+            padded_num_scheduled_tokens_per_dp_rank,
         ) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
@@ -961,7 +971,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # We have the modality embeds at this time.
             self.mm_manager.execute_mm_encoder(scheduler_output)
             mm_embeds, is_mm_embed = self.mm_manager.gather_mm_embeddings(
-                scheduler_output, input_ids.shape[0])
+                scheduler_output, input_ids.shape[0], req_ids_dp,
+                padded_num_scheduled_tokens_per_dp_rank)
         else:
             mm_embeds, is_mm_embed = None, None
 
@@ -1044,7 +1055,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         hidden_states = self._select_from_array_fn(hidden_states,
                                                    logits_indices)
         logits = self.compute_logits_fn(
-            self.state,
+            self.state_leaves,
             hidden_states,
             lora_metadata,
         )
@@ -1412,7 +1423,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
         attn_padded_num_reqs = runner_utils.get_padded_token_len(
-            self.attn_num_reqs_paddings, padded_num_reqs)
+            self.attn_num_reqs_paddings_per_dp,
+            max_num_reqs_across_dp) * dp_size
 
         # logits_indices_selector reorders per-rank outputs back to the
         # original batch ordering; with a single rank the ordering is already
@@ -1612,7 +1624,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
-            self.mm_manager.calc_mrope_positions(scheduler_output)
+            self.mm_manager.calc_mrope_positions(
+                scheduler_output, req_ids_dp,
+                padded_num_scheduled_tokens_per_dp_rank)
 
         # Async scheduling: prepare token substitution indices for DP
         num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
@@ -2004,6 +2018,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
             padded_num_reqs,
+            req_ids_dp,
+            padded_num_scheduled_tokens_per_dp_rank,
         )
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
@@ -2013,7 +2029,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.is_multimodal_model and mm_embeds is not None:
             assert self.embed_input_ids_fn is not None
             inputs_embeds = self.embed_input_ids_fn(
-                self.state,
+                self.state_leaves,
                 input_ids,
                 mm_embeds,
                 is_multimodal=is_mm_embed,

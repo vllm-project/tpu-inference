@@ -93,7 +93,7 @@ class TestTPUJaxRunner:
         self.mock_get_input_embed_fn = MagicMock()
         self.runner.embed_input_ids_fn = self.mock_get_input_embed_fn
         self.mock_get_input_embed_fn.return_value = dummy_final_embeds
-        self.runner.state = MagicMock()
+        self.runner.state_leaves = MagicMock()
 
         # 2. ===== Act & Assert (Multimodal) =====
         self.runner.is_multimodal_model = True
@@ -105,7 +105,7 @@ class TestTPUJaxRunner:
         np.testing.assert_array_equal(np.asarray(inputs_embeds_res),
                                       np.asarray(dummy_final_embeds))
         self.mock_get_input_embed_fn.assert_called_once_with(
-            self.runner.state,
+            self.runner.state_leaves,
             dummy_input_ids,
             dummy_mm_embeds,
             is_multimodal=dummy_is_mm_embed)
@@ -176,8 +176,8 @@ class TestTPUJaxRunner:
         mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
 
         output = self.runner._prepare_inputs(scheduler_output)
-        assert len(output) == 8
-        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs = output
+        assert len(output) == 10
+        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank = output
         # assert it will create attention metadata for each layer.
         assert isinstance(attention_metadata, dict)
         assert len(attention_metadata) == 20
@@ -256,14 +256,15 @@ class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
             embed_input_ids_fn=None,
             get_mrope_input_positions_fn=None)
         return ModelInterface(
-            MagicMock(),  # TPUModelRunner.model_fn
-            MagicMock(),  # TPUModelRunner.compute_logits_fn
-            MagicMock(),  # TPUModelRunner.pooler_fn
-            MagicMock(),  # TPUModelRunner.combine_hidden_states_fn
-            mock_multimodal_fns,  # TPUModelRunner.multimodal_fns
-            MagicMock(),  # TPUModelRunner.state (model params)
-            None,  # TPUModelRunner.lora_manager
-            None,  # TPUModelRunner.model
+            model_fn=MagicMock(),
+            compute_logits_fn=MagicMock(),
+            pooler_fn=MagicMock(),
+            combine_hidden_states_fn=MagicMock(),
+            multimodal_fns=mock_multimodal_fns,
+            state=MagicMock(),
+            state_leaves=MagicMock(),
+            lora_manager=None,
+            model=None,
         )
 
     def test_is_multimodal_model(self):
@@ -301,14 +302,15 @@ class TestTPUJaxRunnerDisableMM:
             embed_input_ids_fn=MagicMock(),
             get_mrope_input_positions_fn=None)
         return ModelInterface(
-            MagicMock(),  # TPUModelRunner.model_fn
-            MagicMock(),  # TPUModelRunner.compute_logits_fn
-            MagicMock(),  # TPUModelRunner.pooler_fn
-            MagicMock(),  # TPUModelRunner.combine_hidden_states_fn
-            mock_multimodal_fns,  # TPUModelRunner.multimodal_fns
-            MagicMock(),  # TPUModelRunner.state (model params)
-            None,  # TPUModelRunner.lora_manager
-            None,  # TPUModelRunner.model
+            model_fn=MagicMock(),
+            compute_logits_fn=MagicMock(),
+            pooler_fn=MagicMock(),
+            combine_hidden_states_fn=MagicMock(),
+            multimodal_fns=mock_multimodal_fns,
+            state=MagicMock(),
+            state_leaves=MagicMock(),
+            lora_manager=None,
+            model=None,
         )
 
     @pytest.mark.parametrize(
