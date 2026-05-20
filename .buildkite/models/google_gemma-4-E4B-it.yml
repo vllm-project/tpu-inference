@@ -38,7 +38,7 @@ steps:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "google/gemma-4-E4B-it"
       CI_STAGE: "UnitTest"
-      CI_CATEGORY: "multimodal"
+      CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
@@ -74,7 +74,7 @@ steps:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "google/gemma-4-E4B-it"
       CI_STAGE: "Accuracy/Correctness"
-      CI_CATEGORY: "multimodal"
+      CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
@@ -119,7 +119,7 @@ steps:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "google/gemma-4-E4B-it"
       CI_STAGE: "Benchmark"
-      CI_CATEGORY: "multimodal"
+      CI_CATEGORY: "text-only"
     agents:
       queue: cpu
     commands:
