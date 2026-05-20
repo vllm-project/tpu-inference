@@ -471,7 +471,11 @@ class TestMultiModalManager:
         mock_scheduler_output.total_num_scheduled_tokens = 4
 
         mm_embeds, is_mm_embed, deepstack_embeds = self.runner.mm_manager.gather_mm_embeddings(
-            mock_scheduler_output, target_pad_len=4)
+              mock_scheduler_output,
+              target_pad_len=4,
+              req_ids_dp={0: [req_id]},
+              padded_num_scheduled_tokens_per_dp_rank=4,
+          )
         assert len(mm_embeds) == 1
         np.testing.assert_array_equal(mm_embeds[0], encoder_embedding)
         np.testing.assert_array_equal(
