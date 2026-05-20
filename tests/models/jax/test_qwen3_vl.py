@@ -826,7 +826,7 @@ class TestQwen3VLForConditionalGeneration:
         mock_lm_output = ([MagicMock()], jnp.ones((10, model.config.hidden_size)))
         model.language_model.return_value = mock_lm_output
 
-        new_kvs, x, aux_hidden_states = model(kv_caches, input_ids, attn_meta)
+        new_kvs, x, aux_hidden_states, _ = model(kv_caches, input_ids, attn_meta)
         model.language_model.assert_called_once()
         assert len(new_kvs) == 1
         assert x.shape == (10, model.config.hidden_size)
@@ -875,8 +875,8 @@ class TestServingIntegration:
         kv_caches_1 = _make_kv_caches(model, mesh)
         kv_caches_2 = _make_kv_caches(model, mesh)
 
-        _, out_1, _ = model(kv_caches_1, input_ids_1, attn_meta)
-        _, out_2, _ = model(kv_caches_2, input_ids_2, attn_meta)
+        _, out_1, _, _ = model(kv_caches_1, input_ids_1, attn_meta)
+        _, out_2, _, _ = make_attention_metadata = model(kv_caches_2, input_ids_2, attn_meta)
         np.testing.assert_allclose(
             np.array(out_1)[:-1, :], np.array(out_2)[:-1, :], rtol=0, atol=0
         )
@@ -1042,7 +1042,7 @@ class TestServingIntegration:
         kv_caches = [cache * 0 for cache in kv_caches]
         before_norm = np.array(jnp.linalg.norm(kv_caches[0]))
 
-        kv_caches, _, _ = model(kv_caches, input_ids, attn_meta)
+        kv_caches, _, _, _ = model(kv_caches, input_ids, attn_meta)
         after_norm = np.array(jnp.linalg.norm(kv_caches[0]))
 
         assert before_norm == 0
@@ -1070,8 +1070,8 @@ class TestServingIntegration:
 
         kv_caches_base = _make_kv_caches(model, mesh)
         kv_caches_deep = _make_kv_caches(model, mesh)
-        _, out_base, _ = model(kv_caches_base, input_ids, attn_meta, inputs_embeds)
-        _, out_deep, _ = model(kv_caches_deep, input_ids, attn_meta,
+        _, out_base, _, _ = model(kv_caches_base, input_ids, attn_meta, inputs_embeds)
+        _, out_deep, _, _ = model(kv_caches_deep, input_ids, attn_meta,
                                inputs_embeds, deepstack_embeds=deepstack)
 
         diff = np.abs(np.array(out_deep - out_base))
