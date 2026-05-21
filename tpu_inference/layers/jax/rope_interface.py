@@ -76,28 +76,27 @@ def apply_rope(
             mrope_section = rope_scaling.get("mrope_section", None)
 
         if mrope_section is None:
-            rope_scaling_keys = list(rope_scaling.keys()) if rope_scaling else []
+            rope_scaling_keys = list(
+                rope_scaling.keys()) if rope_scaling else []
             raise ValueError(
                 "apply_rope received 3D M-RoPE positions (shape=(3, seq_len)) "
                 "but rope_scaling is missing 'mrope_section'. "
                 f"Got rope_scaling keys={rope_scaling_keys}. "
                 "Fix: ensure the HF config includes e.g. "
                 "`rope_scaling={'mrope_section': [t, h, w], ...}` or disable "
-                "M-RoPE/uses_mrope for this model."
-            )
+                "M-RoPE/uses_mrope for this model.")
 
-        if not isinstance(mrope_section, (list, tuple)) or len(mrope_section) != 3:
+        if not isinstance(mrope_section,
+                          (list, tuple)) or len(mrope_section) != 3:
             raise ValueError(
                 "Invalid rope_scaling['mrope_section']; expected a list/tuple "
-                f"of length 3, but got {mrope_section!r}."
-            )
+                f"of length 3, but got {mrope_section!r}.")
 
         mrope_section = tuple(int(x) for x in mrope_section)
         if any(x < 0 for x in mrope_section):
             raise ValueError(
                 "Invalid rope_scaling['mrope_section']; expected non-negative "
-                f"values, but got {mrope_section}."
-            )
+                f"values, but got {mrope_section}.")
 
         half_dim = head_dim // 2
         if sum(mrope_section) > half_dim:
@@ -107,10 +106,10 @@ def apply_rope(
                 f"({half_dim}), but got {mrope_section} for head_dim={head_dim}."
             )
 
-        inv_freq = 1.0 / (
-            rope_theta**(jnp.arange(0, half_dim, dtype=jnp.float32) * 2.0 /
-                         head_dim))
-        freqs = positions.astype(jnp.float32)[..., None] * inv_freq[None, None, :]
+        inv_freq = 1.0 / (rope_theta**(
+            jnp.arange(0, half_dim, dtype=jnp.float32) * 2.0 / head_dim))
+        freqs = positions.astype(jnp.float32)[..., None] * inv_freq[None,
+                                                                    None, :]
         if rope_input_ordering == "interleaved":
             freqs = apply_interleaved_mrope(freqs, mrope_section)
         else:

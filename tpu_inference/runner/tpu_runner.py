@@ -1012,7 +1012,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             mm_embeds, is_mm_embed, deepstack_embeds = (
                 self.mm_manager.gather_mm_embeddings(
                     scheduler_output, input_ids.shape[0], req_ids_dp,
-                padded_num_scheduled_tokens_per_dp_rank))
+                    padded_num_scheduled_tokens_per_dp_rank))
         else:
             mm_embeds, is_mm_embed, deepstack_embeds = None, None, None
 

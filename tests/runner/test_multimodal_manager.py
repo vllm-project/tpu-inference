@@ -156,10 +156,12 @@ class TestMultiModalManager:
         # Verify the pixel values tensor passed to the mock
         passed_pixel_values = kwargs_arg['pixel_values']
         assert passed_pixel_values.shape == (1, 3, 224, 224)
-        
+
         # Convert dummy_pixel_values the same way the actual code does
-        expected_pixel_values = dummy_pixel_values.to(torch.float32).numpy().astype(jnp.bfloat16)
-        np.testing.assert_array_equal(passed_pixel_values[0], expected_pixel_values)
+        expected_pixel_values = dummy_pixel_values.to(
+            torch.float32).numpy().astype(jnp.bfloat16)
+        np.testing.assert_array_equal(passed_pixel_values[0],
+                                      expected_pixel_values)
 
     def test_execute_mm_encoder_multiple_images(self):
         import torch
@@ -409,8 +411,8 @@ class TestMultiModalManager:
 
     def test_gather_mm_embeddings_deepstack_uses_embed_indices(self):
         req_id = "req-1"
-        encoder_embedding = jnp.arange(2 * 4, dtype=jnp.float32).reshape((2,
-                                                                          4))
+        encoder_embedding = jnp.arange(2 * 4, dtype=jnp.float32).reshape(
+            (2, 4))
         deepstack_embedding = [encoder_embedding + 100]
         self.runner.encoder_cache = {req_id: encoder_embedding}
         self.runner.deepstack_cache = {req_id: deepstack_embedding}
@@ -471,20 +473,20 @@ class TestMultiModalManager:
         mock_scheduler_output.total_num_scheduled_tokens = 4
 
         mm_embeds, is_mm_embed, deepstack_embeds = self.runner.mm_manager.gather_mm_embeddings(
-              mock_scheduler_output,
-              target_pad_len=4,
-              req_ids_dp={0: [req_id]},
-              padded_num_scheduled_tokens_per_dp_rank=4,
-          )
+            mock_scheduler_output,
+            target_pad_len=4,
+            req_ids_dp={0: [req_id]},
+            padded_num_scheduled_tokens_per_dp_rank=4,
+        )
         assert len(mm_embeds) == 1
         np.testing.assert_array_equal(mm_embeds[0], encoder_embedding)
         np.testing.assert_array_equal(
-            is_mm_embed, np.array([True, False, True, False], dtype=np.bool_))  
+            is_mm_embed, np.array([True, False, True, False], dtype=np.bool_))
         assert len(deepstack_embeds) == 1
-        expected_deepstack = np.concatenate([
-            deepstack_embedding[0], 
-            np.zeros((2, 4), dtype=np.float32)
-        ], axis=0)
+        expected_deepstack = np.concatenate(
+            [deepstack_embedding[0],
+             np.zeros((2, 4), dtype=np.float32)],
+            axis=0)
         np.testing.assert_array_equal(deepstack_embeds[0], expected_deepstack)
 
     def test_calc_mrope_positions(self):
