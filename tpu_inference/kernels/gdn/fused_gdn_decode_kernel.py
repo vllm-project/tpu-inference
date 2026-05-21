@@ -45,7 +45,7 @@ def get_default_block_sizes(
 ) -> int:
     """Choose bt to balance pipelining and VMEM utilization to minimize latency
 
-    Accounts for state scratch ``(bt, H_v, K, V)`` float32, optional
+    Accounts for state scratch ``(bt, H_v, K, V)`` of ``state_dtype``, optional
     a_log / dt_bias, and bt-proportional tiles that ``emit_pipeline``
     double-buffers (q, k, v, g, b, o).
     """
@@ -60,7 +60,7 @@ def get_default_block_sizes(
         fixed_bits += 2 * H_v * num_lanes * 32  # dt_bias: (H_v, num_lanes) f32
 
     # bt-proportional (in bits):
-    #   state scratch: (2*bt, H_v, K, V) float32 (double buffer)
+    #   state scratch: (2*bt, H_v, K, V) state_dtype (double buffer)
     #   pipeline tiles (×2 for emit_pipeline double buffering):
     #     q(bt,H_qk,K) + k(bt,H_qk,K)           -> 2·H_qk·K·ibits
     #     g(bt,H_v,K) float32                     -> H_v·K·32
@@ -401,7 +401,7 @@ def fused_decoding_gdn(
     k: jax.Array,  # [T, H_qk, K]
     v: jax.Array,  # [T, H_v, V]
     g: jax.Array,  # [T, H_v, K] float32
-    initial_state: jax.Array,  # [num_states, H_v, K, V] float32
+    initial_state: jax.Array,  # [num_states, H_v, K, V]
     state_indices: jax.Array,  # [max_num_req] int32
     distribution: jax.Array,  # [2] int32
     b: jax.Array | None,  # [T, H_v, num_lanes] or None
@@ -421,7 +421,7 @@ def fused_decoding_gdn(
         k: Keys ``[T, H_qk, K]``.
         v: Values ``[T, H_v, V]``.
         g: Per-key gating ``[T, H_v, K]``, float32.
-        initial_state: State cache ``[num_states, H_v, K, V]`` float32.
+        initial_state: State cache ``[num_states, H_v, K, V]``
         state_indices: ``i32[max_num_req]`` — indices into the state cache.
         distribution: ``i32[2]`` — ``(decode_end, total)``.
         b: Raw betas ``[T, H_v, num_lanes]`` (sigmoid applied inside kernel).
