@@ -90,13 +90,10 @@ steps:
     env:
       TEST_MODEL: google/gemma-4-E4B-it
       TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
-      # BENCH_DATASET=text routes mm_bench_recipe through the plain-text
-      # "random" dataset, skipping the vision tower entirely. E4B's
-      # generation path is what we want to measure here; the vision tower
-      # is exercised separately by other gemma-4 nightlies.
-      BENCH_DATASET: "text"
-      INPUT_LEN: "1024"
-      OUTPUT_LEN: "128"
+      # BENCH_DATASET unset -> mm_bench_recipe.sh defaults to the random-mm
+      # dataset (6 images @ 736x736 per prompt, 128 prompts), exercising
+      # the vision tower end-to-end. Validated on both v6e (TP=1) and v7x_2
+      # (TP=2) in tpu-inference-dev #475.
       MAX_MODEL_LEN: "4096"
       MAX_NUM_SEQS: "64"
       # 0.85 was the most permissive value at which both v6e TP=1 and
@@ -107,6 +104,7 @@ steps:
       # measured workload needs longer context.
       GPU_MEMORY_UTILIZATION: "0.85"
       # No perf bar to start. Set after first measured run.
+      # Dev #475 measurements: req/s = 2.40 (v6e), 2.88 (v7x_2).
       MINIMUM_THROUGHPUT_THRESHOLD: 0.0
     commands:
       - |
