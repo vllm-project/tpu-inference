@@ -64,7 +64,12 @@ class KernelTunerRunnerSmokeTest(absltest.TestCase):
             self.skipTest(
                 "TPU_VERSION and TPU_CORES environment variables must be set "
                 "to run these tests (e.g. TPU_VERSION=tpu6e TPU_CORES=1).")
-        return tpu_version, int(tpu_cores_str)
+        try:
+            tpu_cores = int(tpu_cores_str)
+        except ValueError:
+            self.skipTest(
+                f"TPU_CORES must be an integer, got {tpu_cores_str!r}.")
+        return tpu_version, tpu_cores
 
     def _make_run_config(self, kernel_tuner_name: str) -> RunConfig:
         """Builds a RunConfig with run_locally=True from TPU env vars."""
