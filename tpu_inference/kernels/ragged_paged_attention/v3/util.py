@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,12 +25,8 @@ def align_to(x, a):
     return cdiv(x, a) * a
 
 
-def get_dtype_bitwidth(dtype):
-    return dtypes.itemsize_bits(dtype)
-
-
 def get_dtype_packing(dtype):
-    bits = get_dtype_bitwidth(dtype)
+    bits = dtypes.bit_width(dtype)
     return 32 // bits
 
 
@@ -56,9 +52,24 @@ def get_tpu_version() -> int:
         return -1
     if kind.endswith(' lite'):
         kind = kind[:-len(' lite')]
-    if kind.endswith('p') or kind.endswith('e'):
-        kind = kind[:-1]
     if kind == 'TPU7x':
         return 7
     assert kind[:-1] == 'TPU v', kind
     return int(kind[-1])
+
+
+def get_device_name(num_devices: int | None = None):
+    kind = jax.devices()[0].device_kind
+    if 'TPU' not in kind:
+        raise RuntimeError('Expected TPU devices')
+    suffix = ''
+    if kind.endswith(' lite'):
+        kind = kind[:-len(' lite')]
+        suffix = 'e'
+    if kind == 'TPU7x':
+        kind = 'TPU v7'
+    assert kind[:-1] == 'TPU v', kind
+    kind += suffix
+    if num_devices is not None:
+        kind += f'-{num_devices}'
+    return kind
