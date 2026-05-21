@@ -14,9 +14,10 @@
 """Smoke tests for kernel_tuner_runner.
 
 Each test instantiates a registered kernel tuner (identified by its name in
-KERNEL_TUNER_REGISTRY), generates tuning buckets, and runs the first case of
-every bucket via measure_latency.  A test is considered passing when every
-recorded result has a status of SUCCESS or FAILED_OOM.
+KERNEL_TUNER_REGISTRY), generates tuning buckets, and runs only the first case
+of the first bucket via measure_latency (to keep test time manageable).  A test
+is considered passing when every recorded result has a status of SUCCESS or
+FAILED_OOM.
 
 Environment variables (required):
     TPU_VERSION   -- e.g. "tpu6e" or "tpu7x"
