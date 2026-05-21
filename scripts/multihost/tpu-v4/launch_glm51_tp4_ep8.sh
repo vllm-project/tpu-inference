@@ -58,6 +58,14 @@ export KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
 # ── MoE direct FP8 path (skip dequant/requant roundtrip, ~30x faster PWAL) ────
 export VLLM_MOE_SKIP_REQUANTIZATION="${VLLM_MOE_SKIP_REQUANTIZATION:-1}"
 
+# ── DSA indexer ──────────────────────────────────────────────────────────────
+# The official zai-org/GLM-5.1-FP8 config.json ships index_topk=2048, which
+# makes vLLM deepseek_v2.py set is_v32=True and try to run the DSA indexer
+# in the forward pass. The indexer is not yet ported to torchax/TPU
+# (k_norm(...).type_as(x) hits 'View' object has no attribute '_elem'),
+# so disable the forward call and fall back to dense MLA.
+export TPU_DISABLE_DSA_INDEXER="${TPU_DISABLE_DSA_INDEXER:-1}"
+
 # ── I/O path for weights on a gcsfuse mount ──────────────────────────────────
 # 0 = read through the gcsfuse mount (safetensors.safe_open).
 # 1 = bypass gcsfuse with direct GCS HTTP Range GETs.

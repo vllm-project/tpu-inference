@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
     MOE_REQUANTIZE_EXPERT_CHUNK_SIZE: int | None = 8
     MOE_SKIP_REQUANTIZATION: bool = False
+    DISABLE_DSA_INDEXER: bool = False
     LAYOUT_Q_PROJ_AS_NDH: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
@@ -242,6 +243,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Skip FP8→FP32→FP8 dequant/requant cycle, do shape transforms directly
     "MOE_SKIP_REQUANTIZATION":
     env_bool("VLLM_MOE_SKIP_REQUANTIZATION", default=False),
+    # Skip the DSA indexer forward call (not yet ported to torchax/TPU);
+    # falls back to dense MLA. Required for the official GLM-5.1-FP8 checkpoint
+    # whose config.json sets index_topk and triggers vLLM's is_v32 path.
+    "DISABLE_DSA_INDEXER":
+    env_bool("TPU_DISABLE_DSA_INDEXER", default=False),
     # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)
     # or DNH (model dim, q-heads, head dim), which is the default (False)
     "LAYOUT_Q_PROJ_AS_NDH":
