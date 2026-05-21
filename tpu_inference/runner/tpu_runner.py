@@ -1241,6 +1241,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
 
+        prompt_logprobs_dict = {}
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            prompt_logprobs_dict[req_id] = None
 
         spec_decode_last_sampled_token_id = None
         spec_decode_num_rejected_tokens = None
@@ -1308,7 +1311,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_id_to_index=self.input_batch.req_id_to_index.copy(),
                 sampled_token_ids=[],  # Fill in async get
                 logprobs=None,
-                prompt_logprobs_dict=None,
+                prompt_logprobs_dict=prompt_logprobs_dict,
                 pooler_output=[],
                 kv_connector_output=kv_connector_output,
             )
