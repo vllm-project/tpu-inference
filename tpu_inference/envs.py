@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     NEW_MODEL_DESIGN: bool = False
     PHASED_PROFILING_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
+    RAIDEN_PROFILE_START_STEP: int = -1
+    RAIDEN_PROFILE_END_STEP: int = -1
     USE_MOE_EP_KERNEL: bool = False
     USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
@@ -199,6 +201,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Python tracer level for profiling
     "PYTHON_TRACER_LEVEL":
     lambda: int(os.getenv("PYTHON_TRACER_LEVEL") or "1"),
+    # Step at which the worker starts profiling. -1 (default) disables profiling.
+    "RAIDEN_PROFILE_START_STEP":
+    lambda: int(os.getenv("RAIDEN_PROFILE_START_STEP") or "-1"),
+    # Step at which the worker stops profiling. -1 (default) disables profiling.
+    "RAIDEN_PROFILE_END_STEP":
+    lambda: int(os.getenv("RAIDEN_PROFILE_END_STEP") or "-1"),
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
     env_bool("USE_MOE_EP_KERNEL", default=False),
