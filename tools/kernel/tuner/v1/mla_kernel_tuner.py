@@ -289,14 +289,15 @@ class MlaKernelTuner(KernelTunerBase):
         input_cache = self.generate_inputs(tuning_key)
         start_ns = time.perf_counter_ns()
         try:
+            cache_kv = input_cache['cache_kv']
             for _ in range(iters):
-                jax.block_until_ready(
+                _, cache_kv = jax.block_until_ready(
                     mla_ragged_paged_attention(
                         ql_nope=input_cache['ql_nope'],
                         q_pe=input_cache['q_pe'],
                         new_kv_c=input_cache['new_kv_c'],
                         new_k_pe=input_cache['new_k_pe'],
-                        cache_kv=input_cache['cache_kv'].copy(),  # donated 
+                        cache_kv=cache_kv,
                         kv_lens=input_cache['kv_lens'],
                         page_indices=input_cache['page_indices'],
                         cu_q_lens=input_cache['cu_q_lens'],
