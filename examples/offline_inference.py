@@ -135,6 +135,24 @@ def main(args: dict):
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+
+        # output.prompt_logprobs is a list with one entry per prompt token.
+        # The first entry is None (no logprob for the first token); each other
+        # entry is a dict mapping token_id -> Logprob(logprob, rank,
+        # decoded_token).
+        prompt_logprobs = output.prompt_logprobs
+        if prompt_logprobs is not None:
+            print("Prompt logprobs (top-k per position):")
+            for pos, lp_dict in enumerate(prompt_logprobs):
+                if lp_dict is None:
+                    print(f"  [{pos}] <no logprob for first token>")
+                    continue
+                ranked = sorted(lp_dict.items(),
+                                key=lambda kv: kv[1].rank)
+                entries = ", ".join(
+                    f"{lp.decoded_token!r}({tok_id}): {lp.logprob:.4f}"
+                    for tok_id, lp in ranked)
+                print(f"  [{pos}] {entries}")
         print("-" * 50)
 
 

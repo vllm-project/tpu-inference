@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+import torch
 import vllm.envs as vllm_envs
 from flax import nnx
 from jax._src import mesh as mesh_lib
@@ -1538,13 +1539,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 if req_state.in_progress_prompt_logprobs_cpu is not None:
                     ids_buf, lp_buf, ranks_buf = (
                         req_state.in_progress_prompt_logprobs_cpu)
-                    # LogprobsTensors fields are typed as torch.Tensor downstream
-                    # but the engine only calls numpy-compatible methods
-                    # (.shape, .flatten(), .tolist()), so numpy arrays work.
+                    # LogprobsTensors fields must be torch.Tensors: EngineCoreOutputs
+                    # is msgpack-serialized between the EngineCore and client
+                    # processes, and the type-driven decoder reconstructs these
+                    # fields as torch.Tensor. numpy arrays serialize with a numpy
+                    # dtype string (e.g. '<i4') that the tensor decoder rejects.
                     prompt_logprobs_dict[snap.req_id] = LogprobsTensors(
-                        logprob_token_ids=ids_buf.copy(),
-                        logprobs=lp_buf.copy(),
-                        selected_token_ranks=ranks_buf.copy(),
+                        logprob_token_ids=torch.from_numpy(ids_buf.copy()),
+                        logprobs=torch.from_numpy(lp_buf.copy()),
+                        selected_token_ranks=torch.from_numpy(ranks_buf.copy()),
                     )
                 completed_snaps.append(snap)
 
