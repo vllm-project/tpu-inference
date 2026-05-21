@@ -467,11 +467,15 @@ class VllmModelWrapper:
 
                 kwargs = maybe_prepare_for_jit(kwargs, self.model.vllm_model)
 
-                def move(v: torch.Tensor) -> torch.Tensor:
-                    if not isinstance(v, torch.Tensor):
-                        logger.warning(f"Expect torch.Tensor, got {type(v)}")
-                        return v
-                    return t2j(v, use_dlpack=False)
+                def move(v: Any) -> Any:
+                    if isinstance(v, torch.Tensor):
+                        return t2j(v, use_dlpack=False)
+                    if isinstance(v, np.ndarray):
+                        return jax.numpy.asarray(v)
+                    logger.warning(
+                        f"Expect torch.Tensor or JAX-compatible array, got {type(v)}"
+                    )
+                    return v
 
                 # Ensure all tensors are moved into accelerator so the
                 # computation with weights can work properly.

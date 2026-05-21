@@ -182,5 +182,8 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
 
     for k, v in kwargs.items():
         if k in ("image_grid_thw", "video_grid_thw", "grid_thw"):
-            kwargs[k] = GridTHW(v.tolist())
+            if hasattr(v, "tolist"):
+                kwargs[k] = GridTHW(v.tolist())
+            else:
+                kwargs[k] = GridTHW(v)
     return kwargs
