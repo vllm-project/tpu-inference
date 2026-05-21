@@ -1,0 +1,26 @@
+# Bare Pathways Resource Manager + workers for the Shared Pathways Service
+# (multi-tenancy). Unlike scripts/pathways/pathways_job_v7x_16.yaml, this runs
+# NO workload -- it just keeps the RM alive so isc_pathways clients can attach
+# and be handed (sub)slices. See examples/mpmd_dp_shared_pathways.py.
+#
+# Deploy:   kubectl apply -f scripts/pathways/pathways_rm_shared.yaml
+# Teardown: kubectl delete pathwaysjob pathways-cluster
+#
+# RM address (pass as --pathways_service): derived from the head pod, expected
+#   pathways-cluster-pathways-head-0-0.pathways-cluster:29001
+# Verify after deploy with:
+#   kubectl get pods | grep pathways-cluster
+#   kubectl logs <worker-pod> -c pathways-worker | grep -o '\-\-resource_manager_address=[^ ]*'
+apiVersion: pathways-job.pathways.domain/v1
+kind: PathwaysJob
+metadata:
+  name: pathways-cluster
+spec:
+  maxRestarts: 1
+  workers:
+  - type: tpu7x-standard-4t   # GKE machine type of the TPU nodes in this cluster
+    topology: 2x2x2           # one 8-chip tpu7x slice (2 nodes x 4 chips)
+    numSlices: 1
+  pathwaysDir: "gs://wenxindong-multipod-dev/pathways"  # scratch space; bucket must exist
+  controller:
+    deploymentMode: default
