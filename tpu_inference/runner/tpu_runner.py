@@ -111,6 +111,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                  discard_sampled_tokens_req_indices: list[int],
                  logits_indices_selector: Optional[List[int]] = None,
                  logprobs_tensors: Optional[LogprobsTensors] = None,
+                 prompt_logprobs_async_data: Optional["PromptLogprobsAsyncData"] = None,
                  expert_indices: Optional[jax.Array] = None,
                  total_num_scheduled_tokens: int = 0,
                  spec_decode_metadata: Optional[SpecDecodeMetadata] = None,
@@ -121,6 +122,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._discard_sampled_tokens_req_indices = discard_sampled_tokens_req_indices
         self.logits_indices_selector: list[int] = logits_indices_selector
         self._logprobs_tensors = logprobs_tensors
+        self._prompt_logprobs_async_data = prompt_logprobs_async_data
         self._expert_indices = expert_indices
         self._total_num_scheduled_tokens = total_num_scheduled_tokens
         self._spec_decode_metadata = spec_decode_metadata
@@ -138,6 +140,11 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
             # Use materialize to ensure logprobs are ready on host when we return async results
             self._model_runner_output.logprobs = _jax_logprobs_materialize(
                 self._logprobs_tensors, self.logits_indices_selector)
+
+        if self._prompt_logprobs_async_data is not None:
+            self._model_runner_output.prompt_logprobs_dict = (
+                self._runner._get_prompt_logprobs_dict(
+                    self._prompt_logprobs_async_data))
 
         if self._expert_indices is not None:
             expert_indices_cpu = np.asarray(
@@ -168,6 +175,25 @@ class AsyncPreResults:
 
 
 @dataclass
+class PromptLogprobsReqSnap:
+    """Per-request state snapshotted at step N for use in get_output()."""
+    req_id: str
+    req_state: CachedRequestState  # stable ref; in_progress_prompt_logprobs_cpu pre-allocated
+    req_offset: int    # absolute row index into the full-batch logprobs tensor
+    start_idx: int     # where to write in the accumulator (= num_computed_tokens at step N)
+    num_logits: int    # rows to copy from the tensor into the accumulator
+    is_last_chunk: bool
+    num_k: int         # num_prompt_logprobs for this request
+
+
+@dataclass
+class PromptLogprobsAsyncData:
+    """Holds async-copied prompt logprob tensors + per-request snapshots for get_output()."""
+    tensors: LogprobsTensors  # result of _jax_logprobs_copy_to_host_async (pending transfer)
+    req_snaps: List[PromptLogprobsReqSnap]
+
+
+@dataclass
 class ExecuteModelState:
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -185,6 +211,9 @@ class ExecuteModelState:
     padded_num_reqs: Optional[int] = None
     expert_indices: Optional[jax.Array] = None
     full_hidden_states: Optional[jax.Array] = None
+    # Prompt logprobs fields: populated only when any request has prompt_logprobs set.
+    full_logits: Optional[jax.Array] = None
+    req_ids_dp: Optional[Dict] = None
 
 
 @jax.jit(donate_argnums=(0, 1, 2))
@@ -803,7 +832,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         (scheduler_output, attn_metadata, sampling_metadata, input_ids,
          hidden_states, logits, aux_hidden_states, spec_decode_metadata,
          kv_connector_output, logits_indices_selector, padded_num_reqs,
-         expert_indices, full_hidden_states) = (
+         expert_indices, full_hidden_states, full_logits,
+         req_ids_dp) = (
              self.execute_model_state.scheduler_output,
              self.execute_model_state.attn_metadata,
              self.execute_model_state.sampling_metadata,
@@ -816,7 +846,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              self.execute_model_state.logits_indices_selector,
              self.execute_model_state.padded_num_reqs,
              self.execute_model_state.expert_indices,
-             self.execute_model_state.full_hidden_states)
+             self.execute_model_state.full_hidden_states,
+             self.execute_model_state.full_logits,
+             self.execute_model_state.req_ids_dp,
+         )
         self.execute_model_state = None
 
         if grammar_output is not None:
@@ -834,7 +867,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             scheduler_output, attn_metadata, sampling_metadata, input_ids,
             hidden_states, logits, aux_hidden_states, spec_decode_metadata,
             kv_connector_output, logits_indices_selector, padded_num_reqs,
-            expert_indices, full_hidden_states)
+            expert_indices, full_hidden_states, full_logits, req_ids_dp)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -976,6 +1009,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             mm_embeds, is_mm_embed = None, None
 
+        if self.is_multimodal_model and self.input_batch.num_prompt_logprobs:
+            raise ValueError(
+                "prompt_logprobs is not supported for multimodal models.")
+
         # NOTE(Wenlong): For multi-modal model,
         # it will embed the text tokens and merge with the existing modality embeds
         # Later, the multi-modality model will take the embedding as the input.
@@ -1052,13 +1089,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             )
 
         full_hidden_states = hidden_states
-        hidden_states = self._select_from_array_fn(hidden_states,
-                                                   logits_indices)
-        logits = self.compute_logits_fn(
-            self.state_leaves,
-            hidden_states,
-            lora_metadata,
-        )
+
+        if self.input_batch.num_prompt_logprobs:
+            # Compute logits for ALL token positions once, then select decode
+            # rows — avoids a second compute_logits_fn call (which would require
+            # another large matmul + all-gather across TP devices).
+            full_logits = self.compute_logits_fn(
+                self.state_leaves,
+                full_hidden_states,
+                lora_metadata,
+            )
+            logits = self._select_from_array_fn(full_logits, logits_indices)
+        else:
+            full_logits = None
+            hidden_states = self._select_from_array_fn(hidden_states,
+                                                       logits_indices)
+            logits = self.compute_logits_fn(
+                self.state_leaves,
+                hidden_states,
+                lora_metadata,
+            )
 
         self.execute_model_state = ExecuteModelState(
             scheduler_output=scheduler_output,
@@ -1073,7 +1123,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_selector=logits_indices_selector,
             padded_num_reqs=padded_num_reqs,
             expert_indices=expert_indices,
-            full_hidden_states=full_hidden_states)
+            full_hidden_states=full_hidden_states,
+            full_logits=full_logits,
+            req_ids_dp=req_ids_dp,
+        )
         return None
 
     def _sample_from_logits(
@@ -1091,6 +1144,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         padded_num_reqs: Optional[int] = None,
         expert_indices: Optional[jax.Array] = None,
         full_hidden_states: Optional[jax.Array] = None,
+        full_logits: Optional[jax.Array] = None,
+        req_ids_dp: Optional[Dict] = None,
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
         if padded_num_reqs is None:
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
@@ -1152,6 +1207,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             else:
                 logprobs = None
 
+            prompt_logprobs_async = self._compute_prompt_logprobs(
+                full_logits, input_ids, scheduler_output, req_ids_dp)
+
+
         num_reqs = self.input_batch.num_reqs
 
         # Update the cache state concurrently. Code above will not block until
@@ -1182,9 +1241,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
         req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
 
-        prompt_logprobs_dict = {}
-        for req_id in self.input_batch.req_ids[:num_reqs]:
-            prompt_logprobs_dict[req_id] = None
 
         spec_decode_last_sampled_token_id = None
         spec_decode_num_rejected_tokens = None
@@ -1252,7 +1308,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_id_to_index=self.input_batch.req_id_to_index.copy(),
                 sampled_token_ids=[],  # Fill in async get
                 logprobs=None,
-                prompt_logprobs_dict=prompt_logprobs_dict,
+                prompt_logprobs_dict=None,
                 pooler_output=[],
                 kv_connector_output=kv_connector_output,
             )
@@ -1264,6 +1320,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 discard_sampled_tokens_req_indices,
                 logits_indices_selector,
                 logprobs_tensors=logprobs,
+                prompt_logprobs_async_data=prompt_logprobs_async,
                 expert_indices=expert_indices,
                 total_num_scheduled_tokens=scheduler_output.
                 total_num_scheduled_tokens,
@@ -1306,7 +1363,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
-            prompt_logprobs_dict=prompt_logprobs_dict,
+            prompt_logprobs_dict=(self._get_prompt_logprobs_dict(
+                prompt_logprobs_async) if prompt_logprobs_async else {}),
             pooler_output=[],
             kv_connector_output=kv_connector_output,
         )
@@ -1373,6 +1431,125 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
         logprobs = compute_logprobs(logits)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
+
+    def _compute_prompt_logprobs(
+        self,
+        full_logits: Optional[jax.Array],
+        input_ids: Optional[jax.Array],
+        scheduler_output: "VllmSchedulerOutput",
+        req_ids_dp: Optional[Dict],
+    ) -> Optional["PromptLogprobsAsyncData"]:
+        """Dispatch prompt logprob computation and snapshot per-request state.
+
+        Returns a PromptLogprobsAsyncData holding the async-copied tensors and
+        all per-request state needed to slice them in get_output() — by which
+        time req_state.num_computed_tokens will have been updated for the next
+        step, so we must snapshot it now.
+        """
+        if (not self.input_batch.num_prompt_logprobs or full_logits is None
+                or input_ids is None):
+            return None
+
+        max_k = max(self.input_batch.num_prompt_logprobs.values())
+
+        # Shift input_ids by one position to build gather targets:
+        # target[i] = input_ids[i+1], the token whose logprob we want at pos i.
+        # The rolled-off last element and any cross-request boundary positions
+        # are never used (we only access num_logits positions per request).
+        prompt_target_ids = jnp.roll(input_ids, -1, axis=0)
+
+        # Gather compact [total_padded_tokens, max_k+1] tensors on TPU and
+        # start async transfer to host (overlaps with next step's execute_model).
+        prompt_lp_tensors = self._compute_and_gather_logprobs(
+            full_logits.astype(jnp.float32), prompt_target_ids, max_k)
+        prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
+
+        # Snapshot all mutable per-request state before update_states(N+1) runs.
+        padded_tokens_per_dp = full_logits.shape[0] // self.dp_size
+        req_snaps: List[PromptLogprobsReqSnap] = []
+        for dp_rank, req_id_list in req_ids_dp.items():
+            dp_token_offset = dp_rank * padded_tokens_per_dp
+            local_token_offset = 0
+            for req_id in req_id_list:
+                num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
+                if req_id in self.input_batch.num_prompt_logprobs:
+                    num_k = self.input_batch.num_prompt_logprobs[req_id]
+                    req_state = self.requests[req_id]
+                    start_idx = req_state.num_computed_tokens
+                    num_remaining = req_state.num_prompt_tokens - (start_idx + 1)
+                    if num_scheduled <= num_remaining:
+                        num_logits = num_scheduled
+                        is_last_chunk = False
+                    else:
+                        num_logits = num_remaining
+                        is_last_chunk = True
+                    req_snaps.append(
+                        PromptLogprobsReqSnap(
+                            req_id=req_id,
+                            req_state=req_state,
+                            req_offset=dp_token_offset + local_token_offset,
+                            start_idx=start_idx,
+                            num_logits=num_logits,
+                            is_last_chunk=is_last_chunk,
+                            num_k=num_k,
+                        ))
+                local_token_offset += num_scheduled
+
+        return PromptLogprobsAsyncData(tensors=prompt_lp_tensors,
+                                       req_snaps=req_snaps)
+
+    def _get_prompt_logprobs_dict(
+        self,
+        data: "PromptLogprobsAsyncData",
+    ) -> Dict[str, Any]:
+        """CPU-side: materialize async tensors and slice per-request prompt logprobs.
+
+        In the async scheduling path this is called from get_output(), so the
+        TPU→host transfer overlaps with the next step's execute_model(). Mutable
+        per-request state (num_computed_tokens, num_k) was snapshotted in
+        _compute_prompt_logprobs before update_states(N+1) could overwrite it.
+        The in_progress_prompt_logprobs_cpu buffer is pre-allocated at request
+        creation time so its reference remains valid regardless of call order.
+        """
+        token_ids_np = np.asarray(
+            jax.device_get(data.tensors.logprob_token_ids))
+        logprobs_np = np.asarray(jax.device_get(data.tensors.logprobs))
+        ranks_np = np.asarray(
+            jax.device_get(data.tensors.selected_token_ranks))
+
+        prompt_logprobs_dict: Dict[str, Any] = {}
+        completed_reqs: List[str] = []
+
+        for snap in data.req_snaps:
+            req_state = snap.req_state
+            if snap.num_logits > 0:
+                ids_buf, lp_buf, ranks_buf = (
+                    req_state.in_progress_prompt_logprobs_cpu)
+                s, n, k = snap.start_idx, snap.num_logits, snap.num_k
+                o = snap.req_offset
+                ids_buf[s:s + n] = token_ids_np[o:o + n, :k + 1]
+                lp_buf[s:s + n] = logprobs_np[o:o + n, :k + 1]
+                ranks_buf[s:s + n] = ranks_np[o:o + n]
+
+            if snap.is_last_chunk:
+                if req_state.in_progress_prompt_logprobs_cpu is not None:
+                    ids_buf, lp_buf, ranks_buf = (
+                        req_state.in_progress_prompt_logprobs_cpu)
+                    # LogprobsTensors fields are typed as torch.Tensor downstream
+                    # but the engine only calls numpy-compatible methods
+                    # (.shape, .flatten(), .tolist()), so numpy arrays work.
+                    prompt_logprobs_dict[snap.req_id] = LogprobsTensors(
+                        logprob_token_ids=ids_buf.copy(),
+                        logprobs=lp_buf.copy(),
+                        selected_token_ranks=ranks_buf.copy(),
+                    )
+                completed_reqs.append(snap.req_id)
+
+        for req_id in completed_reqs:
+            self.input_batch.num_prompt_logprobs.pop(req_id, None)
+            self.requests[req_id].in_progress_prompt_logprobs_cpu = None
+
+        return prompt_logprobs_dict
 
     def _prepare_input_metadata(self, scheduler_output: "VllmSchedulerOutput"):
 
