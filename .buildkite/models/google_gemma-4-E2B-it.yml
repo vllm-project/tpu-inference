@@ -16,6 +16,12 @@
 # gemma-4-it is BOS-sensitive — raw prompts produce token-repetition
 # garbage on both GPU vllm-pytorch and JAX (model property, not a
 # correctness bug in our path).
+#
+# The UnitTest step exercises the vision tower end-to-end via
+# examples/multi_modal_inference_gemma.py (chat-with-image smoke test).
+# Audio is not wired on the JAX path (the gemma4_mm loader skips
+# audio_tower / embed_audio weights and there is no audio_token_id branch
+# in __call__), so we don't test it.
 
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-E2B-it"
@@ -33,7 +39,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          bash -c 'JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-E2B-it --tensor-parallel-size 1 --max-num-batched-tokens 4096 --max-model-len 4096 --use-chat-template'
+          bash -c 'JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/multi_modal_inference_gemma.py --model google/gemma-4-E2B-it --tensor-parallel-size 1 --max-model-len 4096 --max-num-batched-tokens 4096'
 
   - label: "${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-4-E2B-it"
     key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_UnitTest"
@@ -42,7 +48,7 @@ steps:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "google/gemma-4-E2B-it"
       CI_STAGE: "UnitTest"
-      CI_CATEGORY: "text-only"
+      CI_CATEGORY: "multimodal"
     agents:
       queue: cpu
     commands:
@@ -76,7 +82,7 @@ steps:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "google/gemma-4-E2B-it"
       CI_STAGE: "Accuracy/Correctness"
-      CI_CATEGORY: "text-only"
+      CI_CATEGORY: "multimodal"
     agents:
       queue: cpu
     commands:
@@ -124,7 +130,7 @@ steps:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "google/gemma-4-E2B-it"
       CI_STAGE: "Benchmark"
-      CI_CATEGORY: "text-only"
+      CI_CATEGORY: "multimodal"
     agents:
       queue: cpu
     commands:
