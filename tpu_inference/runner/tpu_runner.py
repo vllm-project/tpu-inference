@@ -1521,7 +1521,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             jax.device_get(data.tensors.selected_token_ranks))
 
         prompt_logprobs_dict: Dict[str, Any] = {}
-        completed_reqs: List[str] = []
+        completed_snaps: List[PromptLogprobsReqSnap] = []
 
         for snap in data.req_snaps:
             req_state = snap.req_state
@@ -1546,11 +1546,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         logprobs=lp_buf.copy(),
                         selected_token_ranks=ranks_buf.copy(),
                     )
-                completed_reqs.append(snap.req_id)
+                completed_snaps.append(snap)
 
-        for req_id in completed_reqs:
-            self.input_batch.num_prompt_logprobs.pop(req_id, None)
-            self.requests[req_id].in_progress_prompt_logprobs_cpu = None
+        for snap in completed_snaps:
+            self.input_batch.num_prompt_logprobs.pop(snap.req_id, None)
+            snap.req_state.in_progress_prompt_logprobs_cpu = None
 
         return prompt_logprobs_dict
 
