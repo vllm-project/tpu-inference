@@ -75,8 +75,15 @@ class KernelTunerRunnerSmokeTest(absltest.TestCase):
     def _make_run_config(self, kernel_tuner_name: str) -> RunConfig:
         """Builds a RunConfig with run_locally=True from TPU env vars."""
         tpu_version, tpu_cores = self._get_tpu_env()
-        tpu_queue_multi = get_tpu_queue_by_version_and_cores(
-            tpu_version, tpu_cores, "")
+        try:
+            tpu_queue_multi = get_tpu_queue_by_version_and_cores(
+                tpu_version, tpu_cores, "")
+        except AssertionError as e:
+            self.skipTest(
+                f"Unsupported TPU_VERSION/TPU_CORES combination "
+                f"({tpu_version!r}, {tpu_cores}): {e}. Supported combinations: "
+                f"(tpu6e, 1), (tpu6e, 8), (tpu7x, 2), (tpu7x, 8), (tpu7x, 16)."
+            )
         return RunConfig(
             case_set_id=f"test_{kernel_tuner_name}_{uuid.uuid4().hex[:8]}",
             run_id=f"run_{uuid.uuid4().hex[:8]}",
