@@ -100,6 +100,30 @@ class GDNAttentionTest(parameterized.TestCase):
             ref_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF),
         ),
+        dict(
+            testcase_name="prefill_fused",
+            max_reqs=1,
+            lengths=[8192],
+            q_loc=[0, 8192],
+            distribution=[0, 0, 3],
+            test_config=GdnAttentionConfig(
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                CHUNKED_KERNEL_P_RECURRENT_KERNEL_D),
+            ref_config=GdnAttentionConfig(
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF),
+        ),
+        dict(
+            testcase_name="mixed_fused",
+            max_reqs=3,
+            lengths=[256, 128, 128],
+            q_loc=[0, 256, 384, 512],
+            distribution=[0, 3, 3],
+            test_config=GdnAttentionConfig(
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                CHUNKED_KERNEL_P_RECURRENT_KERNEL_D),
+            ref_config=GdnAttentionConfig(
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF),
+        ),
     )
     def test_run_jax_gdn_attention_local(self, max_reqs, lengths, q_loc,
                                          distribution, test_config,
@@ -218,7 +242,7 @@ class GDNAttentionTest(parameterized.TestCase):
 
     @parameterized.named_parameters(
         dict(
-            testcase_name="chunked",
+            testcase_name="jax",
             test_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
                 CHUNKED_JAX_PD),
@@ -229,14 +253,21 @@ class GDNAttentionTest(parameterized.TestCase):
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.REF),
         ),
         dict(
-            testcase_name="fused",
+            testcase_name="chunked_kernel_pd",
             test_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
                 CHUNKED_KERNEL_PD),
         ),
+        dict(
+            testcase_name="chunked_kernel_p_recurrent_kernel_d",
+            test_config=GdnAttentionConfig(
+                ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
+                CHUNKED_KERNEL_P_RECURRENT_KERNEL_D),
+        ),
     )
     def test_has_initial_state_zeros_stale_slot(self, test_config):
         """A new prefill landing on a slot whose previous tenant left
+
         non-zero state must produce the same output and final state as it
         would on a fresh-zero slot. This exercises the production bug fixed
         by the `has_initial_state` plumbing: vLLM's mamba pool reuses
@@ -344,14 +375,18 @@ class GDNAttentionTest(parameterized.TestCase):
                                    atol=1e-5)
         # Compare the active slots (1..max_reqs+1); slot 0 (null) is
         # untouched in both runs and inactive slots are unused.
-        np.testing.assert_allclose(new_conv_fresh[1:max_reqs + 1],
-                                   new_conv_stale[1:max_reqs + 1],
-                                   rtol=1e-5,
-                                   atol=1e-5)
-        np.testing.assert_allclose(new_rec_fresh[1:max_reqs + 1],
-                                   new_rec_stale[1:max_reqs + 1],
-                                   rtol=1e-5,
-                                   atol=1e-5)
+        np.testing.assert_allclose(
+            new_conv_fresh[1:max_reqs + 1],
+            new_conv_stale[1:max_reqs + 1],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            new_rec_fresh[1:max_reqs + 1],
+            new_rec_stale[1:max_reqs + 1],
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
     @parameterized.named_parameters(
         dict(
@@ -369,11 +404,12 @@ class GDNAttentionTest(parameterized.TestCase):
             testcase_name="fused",
             test_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
-                RECURRENT_KERNEL_PD),
+                CHUNKED_KERNEL_PD),
         ),
     )
     def test_has_initial_state_preserves_continuation(self, test_config):
         """When ``has_initial_state[i]`` is True, the kernel must use the
+
         slot's existing state as the prefill's initial state. This is the
         chunked-prefill / prefix-cache continuation path: a prior step
         wrote a recurrent/conv state to the slot, and the next prefill
@@ -496,6 +532,7 @@ class GDNAttentionTest(parameterized.TestCase):
     )
     def test_l2norm_fp32_internal_more_precise_than_bf16(self, l2norm_fn):
         """The l2norm helper must do its sum-of-squares in fp32 even when
+
         the input is bf16. This is what GPU FLA's ``l2norm_fwd`` does.
 
         Regression test for the full-GPQA-Diamond drop we observed when
@@ -528,10 +565,9 @@ class GDNAttentionTest(parameterized.TestCase):
             test_out = l2norm_fn(x_bf16, eps=1e-6)
         # A deliberately-bf16-only baseline that mimics the pre-fix
         # behavior: rsqrt + reduction stay in bf16.
-        bf16_only = (
-            x_bf16 *
-            jax.lax.rsqrt((x_bf16 * x_bf16).sum(axis=-1, keepdims=True) +
-                          jnp.array(1e-6, dtype=jnp.bfloat16)))
+        bf16_only = x_bf16 * jax.lax.rsqrt(
+            (x_bf16 * x_bf16).sum(axis=-1, keepdims=True) +
+            jnp.array(1e-6, dtype=jnp.bfloat16))
 
         test_err = float(jnp.max(jnp.abs(test_out.astype(jnp.float32) - ref)))
         bf16_err = float(jnp.max(jnp.abs(bf16_only.astype(jnp.float32) - ref)))
@@ -541,9 +577,11 @@ class GDNAttentionTest(parameterized.TestCase):
         # assert a strict factor-of-2 improvement to catch silent
         # regressions to bf16.
         self.assertLess(
-            test_err, bf16_err / 2.0,
+            test_err,
+            bf16_err / 2.0,
             f"fp32 l2norm err {test_err:.4g} is not at "
-            f"least 2× tighter than bf16 err {bf16_err:.4g}")
+            f"least 2× tighter than bf16 err {bf16_err:.4g}",
+        )
 
     @parameterized.named_parameters(
         dict(testcase_name="chunked", l2norm_fn=l2norm_chunked),
@@ -551,6 +589,7 @@ class GDNAttentionTest(parameterized.TestCase):
     )
     def test_l2norm_returns_input_dtype(self, l2norm_fn):
         """The l2norm helpers compute in fp32 internally but must return
+
         the input dtype unchanged so callers' downstream layout
         assumptions (e.g. ``compute_dtype`` casts in
         `pack_inputs_single_stream`) keep working.

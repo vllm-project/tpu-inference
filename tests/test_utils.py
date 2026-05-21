@@ -2,10 +2,13 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from jax.experimental import pallas as pl
+from jax.experimental.pallas import tpu as pltpu
 from torchax.ops.mappings import t2j as ref_t2j
 
 # Import the functions to be tested
@@ -29,7 +32,7 @@ def test_hbm_usage_bytes_ray_backend():
     mock_device1 = MagicMock()
     mock_device1.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
-        "bytes_limit": 128 * GBYTES
+        "bytes_limit": 128 * GBYTES,
     }
     mock_device2 = MagicMock()
     mock_device2.memory_stats.side_effect = Exception("Memory stats failed")
@@ -48,12 +51,12 @@ def test_hbm_usage_bytes_pathways_disabled():
     mock_device1 = MagicMock()
     mock_device1.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
-        "bytes_limit": 128 * GBYTES
+        "bytes_limit": 128 * GBYTES,
     }
     mock_device2 = MagicMock()
     mock_device2.memory_stats.return_value = {
         "bytes_in_use": 50 * GBYTES,
-        "bytes_limit": 128 * GBYTES
+        "bytes_limit": 128 * GBYTES,
     }
 
     devices = [mock_device1, mock_device2]
@@ -128,12 +131,12 @@ def test_hbm_usage_gb_pathways_disabled():
     mock_device1 = MagicMock()
     mock_device1.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
-        "bytes_limit": 128 * GBYTES
+        "bytes_limit": 128 * GBYTES,
     }
     mock_device2 = MagicMock()
     mock_device2.memory_stats.return_value = {
         "bytes_in_use": 50.5 * GBYTES,
-        "bytes_limit": 128.0 * GBYTES
+        "bytes_limit": 128.0 * GBYTES,
     }
 
     devices = [mock_device1, mock_device2]
@@ -202,13 +205,16 @@ def test_get_jax_dtype_from_str_dtype():
 
 # Special dtypes: our t2j uses a bit-cast via uint8 view instead of going
 # through float32, so we compare byte representations to the torchax reference.
-@pytest.mark.parametrize("torch_dtype,jax_dtype", [
-    (torch.bfloat16, jnp.bfloat16),
-    (torch.float8_e4m3fn, jnp.float8_e4m3fn),
-    (torch.float8_e4m3fnuz, jnp.float8_e4m3fnuz),
-    (torch.float8_e5m2, jnp.float8_e5m2),
-    (torch.float8_e5m2fnuz, jnp.float8_e5m2fnuz),
-])
+@pytest.mark.parametrize(
+    "torch_dtype,jax_dtype",
+    [
+        (torch.bfloat16, jnp.bfloat16),
+        (torch.float8_e4m3fn, jnp.float8_e4m3fn),
+        (torch.float8_e4m3fnuz, jnp.float8_e4m3fnuz),
+        (torch.float8_e5m2, jnp.float8_e5m2),
+        (torch.float8_e5m2fnuz, jnp.float8_e5m2fnuz),
+    ],
+)
 def test_t2j_numpy_unsupported_dtypes(torch_dtype, jax_dtype):
     # Generate random values via float32, then cast to the target dtype.
     t = torch.randn(50000, dtype=torch.float32)
@@ -232,3 +238,30 @@ def test_t2j_falls_back_on_exception(caplog):
 
     reference = ref_t2j(t)
     np.testing.assert_array_equal(result, reference)
+
+
+def poison_tpu_memory():
+    """Fills TPU VMEM and SMEM with NaNs to simulate garbage state."""
+    if jax.devices()[0].platform != "tpu":
+        return
+    tpu_info = pltpu.get_tpu_info()
+    # Security: Use a large but safe portion of VMEM/SMEM to avoid OOM.
+    vmem_size = (4 * 1024 * 1024) // 4  # 4MB
+    smem_size = (tpu_info.smem_capacity_bytes // 4) - 8192
+
+    def poison_kernel(in_ref, out_ref, v_scratch, s_scratch):
+        del in_ref, out_ref
+        v_scratch[...] = jnp.full_like(v_scratch, jnp.nan)
+        for i in range(s_scratch.shape[0]):
+            s_scratch[i] = 0x7FC00000  # IEEE 754 NaN bit pattern
+
+    pl.pallas_call(
+        poison_kernel,
+        out_shape=jax.ShapeDtypeStruct((1, ), jnp.float32),
+        grid=(1, ),
+        scratch_shapes=[
+            pltpu.VMEM((vmem_size // 128, 128), jnp.float32),
+            pltpu.SMEM((smem_size, ), jnp.int32),
+        ],
+        compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
+    )(jnp.zeros((1, ), dtype=jnp.float32))
