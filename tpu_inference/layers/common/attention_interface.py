@@ -401,11 +401,6 @@ def sharded_ragged_paged_attention(
             k_scale=k_scale,
             v_scale=v_scale,
         )
-        # update_kv_cache is supported by both the v3 default and batched
-        # RPA kernels; only the hd64 path doesn't accept it. Default True
-        # is a no-op so we don't forward it to the hd64 signature.
-        if not use_hd64:
-            kwargs["update_kv_cache"] = update_kv_cache
         return func(*args, **kwargs)
 
     return jax.shard_map(
