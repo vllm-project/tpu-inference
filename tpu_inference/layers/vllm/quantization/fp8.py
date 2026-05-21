@@ -35,7 +35,7 @@ from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_fp8_moe_weights, shard_moe_weights)
+    FusedMoEWeights, process_quantized_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import FP8
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.vllm.interface.moe import (
@@ -280,7 +280,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         if self.weight_block_size is not None:
             weight_block_size = tuple(self.weight_block_size)
 
-        weights = process_fp8_moe_weights(
+        weights = process_quantized_moe_weights(
             input_weights,
             moe_backend=self.moe_backend,
             mesh=self.mesh,

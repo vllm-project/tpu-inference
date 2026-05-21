@@ -313,6 +313,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._init_random()
         self._init_mesh()
         self._init_phased_profiling()
+        self._init_aggregated_stats_logging()
         self._init_mm()
         self._init_inputs()
         self._init_speculative_decoding()
@@ -465,7 +466,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.phase_based_profiler = None
         if self.phased_profiling_dir:
             self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
-                self.phased_profiling_dir, worker_rank=self.rank)
+                self.phased_profiling_dir)
+
+    def _init_aggregated_stats_logging(self) -> None:
+        self.aggregated_stats_dir = envs.AGGREGATED_STATS_DIR
+        self.aggregated_stats_logger = None
+        # Only enable stats aggregation on one worker to avoid duplicate records
+        if self.aggregated_stats_dir and self.rank == 0:
+            self.aggregated_stats_logger = runner_utils.AggregatedStatsLogger(
+                self.aggregated_stats_dir)
 
     def _init_mm(self) -> None:
         self.is_multimodal_model = None
@@ -702,6 +711,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                     and hasattr(self.model_config.hf_config,
                                                 "architectures")
                                     and not disable_mm_from_limits)
+
+        # Clear JIT compilation caches from weight loading to free XLA
+        # program reservations (bytes_reserved) on TPU HBM.
+        jax.clear_caches()
+        logger.info("Cleared JIT caches after weight loading")
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
@@ -1761,15 +1775,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 1)
             logits_indices_cpu[_num_reqs:] = -1
 
-        # Please see runner_utils.PhasedBasedProfiler for details
-        if self.phase_based_profiler:
+            # Calculate batch composition statistics for active hardware profilers
+            # and/or continuous batch logging.
+        if self.phase_based_profiler or self.aggregated_stats_logger:
             self.batch_counter += 1
             batch_composition_stats = runner_utils.get_batch_composition_stats(
                 self.batch_counter, self.input_batch,
                 total_num_scheduled_tokens, num_reqs,
                 padded_total_num_scheduled_tokens, scheduler_output)
 
-            self.phase_based_profiler.step(batch_composition_stats)
+            if self.phase_based_profiler:
+                self.phase_based_profiler.step(batch_composition_stats)
+            if self.aggregated_stats_logger:
+                self.aggregated_stats_logger.log(batch_composition_stats)
 
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :

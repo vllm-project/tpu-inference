@@ -508,42 +508,6 @@ def profiler_fixture(tmp_path):
         }
 
 
-def test_phased_profiler_initializes_aggregated_stats_logger(tmp_path):
-    """Tests that PhasedBasedProfiler initializes AggregatedStatsLogger."""
-    with patch("tpu_inference.runner.utils.envs.ENABLE_AGGREGATED_STATS_LOGGER", True), \
-         patch("tpu_inference.runner.utils.AggregatedStatsLogger") as mock_logger_cls:
-        # Test with worker_rank = 0
-        PhasedBasedProfiler(profile_dir=str(tmp_path),
-                            worker_rank=0,
-                            flush_interval=50)
-        mock_logger_cls.assert_called_once_with(str(tmp_path), 50)
-
-        # Test with worker_rank != 0
-        mock_logger_cls.reset_mock()
-        PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=1)
-        mock_logger_cls.assert_not_called()
-
-    with patch("tpu_inference.runner.utils.envs.ENABLE_AGGREGATED_STATS_LOGGER", False), \
-         patch("tpu_inference.runner.utils.AggregatedStatsLogger") as mock_logger_cls:
-        # Test with aggregated logging disabled
-        PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=0)
-        mock_logger_cls.assert_not_called()
-
-
-def test_phased_profiler_step_calls_aggregated_stats_logger(profiler_fixture):
-    """Tests that profiler.step() calls aggregated_stats_logger.log()."""
-    profiler = profiler_fixture["profiler"]
-    profiler.aggregated_stats_logger = MagicMock()
-    stats = {
-        "batch_id": 1,
-        "tokens": 100,
-        "num_reqs": 2,
-        "total_num_scheduled_tokens": 100
-    }
-    profiler.step(stats)
-    profiler.aggregated_stats_logger.log.assert_called_once_with(stats)
-
-
 def test_phased_profiler_full_cycle(profiler_fixture):
     """Tests a full start-step-stop profiling cycle for one phase."""
     profiler = profiler_fixture["profiler"]

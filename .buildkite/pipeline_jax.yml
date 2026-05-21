@@ -169,7 +169,7 @@ steps:
             FILES_CHANGED=$$(buildkite-agent meta-data get "changed_files" --default "" | tr ',' '\n')
             echo "$${FILES_CHANGED}"
 
-            if [[ "$$NIGHTLY" == "1" ]] || echo "$$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels|tests/kernels|requirements.txt)'; then
+            if [[ "$$NIGHTLY" == "1" ]] || echo "$$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels|tests/kernels|tests/conftest.py|requirements.txt)'; then
               .buildkite/scripts/run_in_docker.sh \
                 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
                 --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
@@ -177,7 +177,7 @@ steps:
                 --ignore=/workspace/tpu_inference/tests/kernels/collectives \
                 --ignore=/workspace/tpu_inference/tests/kernels/spmm_v1_test.py
             else
-              echo "Skipping: Step requires either a NIGHTLY build or changes in kernels, kernel tests, or requirements.txt."
+              echo "Skipping: Step requires either a NIGHTLY build or changes in kernels, kernel tests, shared conftest, or requirements.txt."
               exit 0
             fi
 
@@ -196,11 +196,11 @@ steps:
             FILES_CHANGED=$$(buildkite-agent meta-data get "changed_files" --default "" | tr ',' '\n')
             echo "$${FILES_CHANGED}"
 
-            if [[ "$$NIGHTLY" == "1" ]] || echo "$$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|requirements.txt)'; then
+            if [[ "$$NIGHTLY" == "1" ]] || echo "$$FILES_CHANGED" | grep -qE '^(tpu_inference/kernels/collectives|tests/kernels/collectives|tests/conftest.py|requirements.txt)'; then
               .buildkite/scripts/run_in_docker.sh \
                 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
             else
-              echo "Skipping: Step requires either a NIGHTLY build or changes in kernels/collectives, tests, or requirements.txt."
+              echo "Skipping: Step requires either a NIGHTLY build or changes in kernels/collectives, tests, shared conftest, or requirements.txt."
               exit 0
             fi
 
