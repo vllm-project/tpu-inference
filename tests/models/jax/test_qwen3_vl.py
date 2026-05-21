@@ -1,9 +1,23 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
+import copy
 from typing import Tuple
 from unittest.mock import MagicMock, patch
 
-import copy
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -16,25 +30,20 @@ from jax.sharding import Mesh
 pytest.importorskip("vllm")
 pytest.importorskip("transformers")
 from transformers import Qwen3Config
-from vllm.config import CacheConfig, DeviceConfig, MultiModalConfig, ParallelConfig, SchedulerConfig
+from vllm.config import (CacheConfig, DeviceConfig, ParallelConfig,
+                         SchedulerConfig)
 
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.models.jax.qwen3_vl import (
-    Qwen3VLForConditionalGeneration,
-    Qwen3VLVisionTransformer,
-    SegmentIds,
-    _infer_pos_embed_grid_hw,
-    _inject_visual_features,
-    apply_rotary_pos_emb_vision,
-    build_mrope_input_positions,
-    compute_vision_counts_per_sequence,
-    generate_segment_ids_from_grid_thw,
-    pad_segment_ids_for_attention,
-)
+    Qwen3VLForConditionalGeneration, Qwen3VLVisionTransformer, SegmentIds,
+    _infer_pos_embed_grid_hw, apply_rotary_pos_emb_vision,
+    build_mrope_input_positions, compute_vision_counts_per_sequence,
+    generate_segment_ids_from_grid_thw, pad_segment_ids_for_attention)
 from tpu_inference.runner.kv_cache import create_kv_caches
 
-from tpu_inference.distributed.jax_parallel_state import init_pp_distributed_environment
 
 @pytest.fixture(autouse=True, scope="module")
 def initialize_pp():
@@ -65,7 +74,7 @@ class MockVisionConfig:
         depth: int = 1,
         num_heads: int = 4,
         num_position_embeddings: int = 16,
-        deepstack_visual_indexes: Tuple[int, ...] = (0,),
+        deepstack_visual_indexes: Tuple[int, ...] = (0, ),
         tokens_per_second: float = 1.0,
     ):
         self.hidden_size = hidden_size
@@ -124,7 +133,8 @@ class MockModelConfig:
         return int(self.hf_config.hidden_size)
 
     def get_head_size(self) -> int:
-        return int(self.hf_config.hidden_size // self.hf_config.num_attention_heads)
+        return int(self.hf_config.hidden_size //
+                   self.hf_config.num_attention_heads)
 
     def get_vocab_size(self) -> int:
         return int(self.hf_config.vocab_size)
@@ -173,9 +183,8 @@ class MockVllmConfig:
         self.quant_config = None
 
 
-def _num_placeholders_for_grid(
-    grid_thw: Tuple[int, int, int], spatial_merge_size: int
-) -> int:
+def _num_placeholders_for_grid(grid_thw: Tuple[int, int, int],
+                               spatial_merge_size: int) -> int:
     t, h, w = grid_thw
     return int(t * (h // spatial_merge_size) * (w // spatial_merge_size))
 
@@ -184,8 +193,7 @@ def _make_attention_metadata(seq_len: int) -> AttentionMetadata:
     num_reqs = 1
     max_num_blocks_per_req = 4
     positions = jnp.broadcast_to(
-        jnp.arange(seq_len, dtype=jnp.int32)[None, :], (3, seq_len)
-    )
+        jnp.arange(seq_len, dtype=jnp.int32)[None, :], (3, seq_len))
     block_tables = jnp.zeros((num_reqs, max_num_blocks_per_req),
                              dtype=jnp.int32).reshape(-1)
     seq_lens = jnp.array([seq_len], dtype=jnp.int32)
@@ -252,6 +260,7 @@ def hf_config(mock_vllm_config: MockVllmConfig) -> Qwen3Config:
 
 
 class TestUtils:
+
     def test_apply_rotary_pos_emb_vision_shapes(self, rng: PRNGKey):
         b, t, n, h = 1, 6, 4, 16
         x = jax.random.normal(rng, (b, t, n, h))
@@ -264,10 +273,16 @@ class TestUtils:
         segment_ids = generate_segment_ids_from_grid_thw(grid_thw)
         # (1,4,4) -> 16 tokens (1 frame), (2,4,4) -> 32 tokens (2 frames).
         # Each frame gets a unique segment ID to prevent cross-frame attention.
-        assert segment_ids.shape == (48,)
-        np.testing.assert_array_equal(segment_ids[:16], np.ones(16, dtype=np.int32))      # image frame
-        np.testing.assert_array_equal(segment_ids[16:32], np.full(16, 2, dtype=np.int32)) # video frame 1
-        np.testing.assert_array_equal(segment_ids[32:], np.full(16, 3, dtype=np.int32))   # video frame 2
+        assert segment_ids.shape == (48, )
+        np.testing.assert_array_equal(segment_ids[:16],
+                                      np.ones(16,
+                                              dtype=np.int32))  # image frame
+        np.testing.assert_array_equal(segment_ids[16:32],
+                                      np.full(16, 2,
+                                              dtype=np.int32))  # video frame 1
+        np.testing.assert_array_equal(segment_ids[32:],
+                                      np.full(16, 3,
+                                              dtype=np.int32))  # video frame 2
 
     def test_pad_segment_ids_for_attention(self):
         segment_ids = jnp.array([1, 1, 2, 2], dtype=jnp.int32)
@@ -276,23 +291,26 @@ class TestUtils:
         assert padded.q.shape == (1, 8)
         assert padded.kv.shape == (1, 8)
         np.testing.assert_array_equal(
-            np.array(padded.q), np.array([[1, 1, 2, 2, 0, 0, 0, 0]], dtype=np.int32)
-        )
+            np.array(padded.q),
+            np.array([[1, 1, 2, 2, 0, 0, 0, 0]], dtype=np.int32))
 
     def test_pad_segment_ids_exact_length_no_padding(self):
         segment_ids = jnp.array([1, 1, 2, 2], dtype=jnp.int32)
         padded = pad_segment_ids_for_attention(segment_ids, padded_seq_len=4)
-        np.testing.assert_array_equal(np.array(padded.q), np.array([[1, 1, 2, 2]], dtype=np.int32))
+        np.testing.assert_array_equal(np.array(padded.q),
+                                      np.array([[1, 1, 2, 2]], dtype=np.int32))
 
     def test_pad_segment_ids_empty_input(self):
         segment_ids = jnp.array([], dtype=jnp.int32)
         padded = pad_segment_ids_for_attention(segment_ids, padded_seq_len=4)
-        np.testing.assert_array_equal(np.array(padded.q), np.array([[0, 0, 0, 0]], dtype=np.int32))
+        np.testing.assert_array_equal(np.array(padded.q),
+                                      np.array([[0, 0, 0, 0]], dtype=np.int32))
 
     def test_generate_segment_ids_single_grid(self):
-        segment_ids = generate_segment_ids_from_grid_thw(((1, 2, 2),))
-        assert segment_ids.shape == (4,)
-        np.testing.assert_array_equal(np.array(segment_ids), np.array([1, 1, 1, 1], dtype=np.int32))
+        segment_ids = generate_segment_ids_from_grid_thw(((1, 2, 2), ))
+        assert segment_ids.shape == (4, )
+        np.testing.assert_array_equal(np.array(segment_ids),
+                                      np.array([1, 1, 1, 1], dtype=np.int32))
 
 
 class TestInferPosEmbedGridHw:
@@ -340,7 +358,8 @@ class TestInferPosEmbedGridHw:
 class TestApplyRopeWithMRoPE:
     """Tests for apply_rope's shared MRoPE path."""
 
-    def test_apply_rope_handles_qwen3vl_positions(self, hf_config: Qwen3Config):
+    def test_apply_rope_handles_qwen3vl_positions(self,
+                                                  hf_config: Qwen3Config):
         seq_len = 8
         num_heads = 2
         head_dim = 16
@@ -374,8 +393,8 @@ class TestApplyRopeWithMRoPE:
             rope_input_ordering="interleaved",
         )
 
-        inv_freq = 1.0 / (rope_theta**((2 * np.arange(head_dim // 2)) /
-                                        head_dim))
+        inv_freq = 1.0 / (rope_theta**(
+            (2 * np.arange(head_dim // 2)) / head_dim))
         expected_angles = np.array(
             [1.0 * inv_freq[0], 2.0 * inv_freq[1], 3.0 * inv_freq[2]],
             dtype=np.float32,
@@ -392,8 +411,7 @@ class TestApplyRopeWithMRoPE:
 
     def test_zero_section_allowed(self):
         x = jnp.ones((4, 1, 6), dtype=jnp.float32)
-        positions_3d = jnp.stack([jnp.arange(4), jnp.arange(4),
-                                  jnp.arange(4)])
+        positions_3d = jnp.stack([jnp.arange(4), jnp.arange(4), jnp.arange(4)])
         result = apply_rope(
             x,
             positions_3d,
@@ -411,8 +429,7 @@ class TestComputeVisionCountsPerSequence:
         input_ids = jnp.array([[1, 100, 2, 100, 3]])  # 2 image tokens
         attention_mask = jnp.ones_like(input_ids)
         num_images, num_videos = compute_vision_counts_per_sequence(
-            input_ids, attention_mask, image_token_id=100, video_token_id=101
-        )
+            input_ids, attention_mask, image_token_id=100, video_token_id=101)
         assert int(num_images[0]) == 2
         assert int(num_videos[0]) == 0
 
@@ -420,8 +437,7 @@ class TestComputeVisionCountsPerSequence:
         input_ids = jnp.array([[1, 101, 2, 101, 101, 3]])  # 3 video tokens
         attention_mask = jnp.ones_like(input_ids)
         num_images, num_videos = compute_vision_counts_per_sequence(
-            input_ids, attention_mask, image_token_id=100, video_token_id=101
-        )
+            input_ids, attention_mask, image_token_id=100, video_token_id=101)
         assert int(num_images[0]) == 0
         assert int(num_videos[0]) == 3
 
@@ -429,8 +445,7 @@ class TestComputeVisionCountsPerSequence:
         input_ids = jnp.array([[100, 1, 101, 2, 100]])  # 2 images, 1 video
         attention_mask = jnp.ones_like(input_ids)
         num_images, num_videos = compute_vision_counts_per_sequence(
-            input_ids, attention_mask, image_token_id=100, video_token_id=101
-        )
+            input_ids, attention_mask, image_token_id=100, video_token_id=101)
         assert int(num_images[0]) == 2
         assert int(num_videos[0]) == 1
 
@@ -438,16 +453,14 @@ class TestComputeVisionCountsPerSequence:
         input_ids = jnp.array([[100, 100, 100]])  # 3 image tokens
         attention_mask = jnp.array([[1, 0, 1]])  # middle one masked
         num_images, num_videos = compute_vision_counts_per_sequence(
-            input_ids, attention_mask, image_token_id=100, video_token_id=101
-        )
+            input_ids, attention_mask, image_token_id=100, video_token_id=101)
         assert int(num_images[0]) == 2  # only counts unmasked
 
     def test_all_masked_returns_zero(self):
         input_ids = jnp.array([[100, 100, 100]])
         attention_mask = jnp.zeros_like(input_ids)
         num_images, num_videos = compute_vision_counts_per_sequence(
-            input_ids, attention_mask, image_token_id=100, video_token_id=101
-        )
+            input_ids, attention_mask, image_token_id=100, video_token_id=101)
         assert int(num_images[0]) == 0
         assert int(num_videos[0]) == 0
 
@@ -455,8 +468,7 @@ class TestComputeVisionCountsPerSequence:
         input_ids = jnp.array([[100, 1, 2], [1, 101, 101]])
         attention_mask = jnp.ones_like(input_ids)
         num_images, num_videos = compute_vision_counts_per_sequence(
-            input_ids, attention_mask, image_token_id=100, video_token_id=101
-        )
+            input_ids, attention_mask, image_token_id=100, video_token_id=101)
         np.testing.assert_array_equal(np.array(num_images), [1, 0])
         np.testing.assert_array_equal(np.array(num_videos), [0, 2])
 
@@ -464,8 +476,7 @@ class TestComputeVisionCountsPerSequence:
         input_ids = jnp.array([[1, 2, 3, 4, 5]])
         attention_mask = jnp.ones_like(input_ids)
         num_images, num_videos = compute_vision_counts_per_sequence(
-            input_ids, attention_mask, image_token_id=100, video_token_id=101
-        )
+            input_ids, attention_mask, image_token_id=100, video_token_id=101)
         assert int(num_images[0]) == 0
         assert int(num_videos[0]) == 0
 
@@ -473,13 +484,13 @@ class TestComputeVisionCountsPerSequence:
         input_ids = jnp.array([[]], dtype=jnp.int32).reshape(1, 0)
         attention_mask = jnp.array([[]], dtype=jnp.int32).reshape(1, 0)
         num_images, num_videos = compute_vision_counts_per_sequence(
-            input_ids, attention_mask, image_token_id=100, video_token_id=101
-        )
+            input_ids, attention_mask, image_token_id=100, video_token_id=101)
         assert int(num_images[0]) == 0
         assert int(num_videos[0]) == 0
 
 
 class TestMRoPEPositions:
+
     def test_mrope_text_only_positions(self, hf_config: Qwen3Config):
         tokens = [1, 2, 3, 4]
         positions, delta = build_mrope_input_positions(
@@ -496,7 +507,8 @@ class TestMRoPEPositions:
         np.testing.assert_array_equal(positions[0], positions[1])
         np.testing.assert_array_equal(positions[1], positions[2])
 
-    def test_mrope_vision_start_at_end_does_not_crash(self, hf_config: Qwen3Config):
+    def test_mrope_vision_start_at_end_does_not_crash(self,
+                                                      hf_config: Qwen3Config):
         tokens = [1, 2, hf_config.vision_start_token_id]
         positions, delta = build_mrope_input_positions(
             input_tokens=tokens,
@@ -512,9 +524,11 @@ class TestMRoPEPositions:
 
     def test_mrope_single_image_3d_structure(self, hf_config: Qwen3Config):
         grid = (1, 4, 4)
-        n_img = _num_placeholders_for_grid(grid, hf_config.vision_config.spatial_merge_size)
+        n_img = _num_placeholders_for_grid(
+            grid, hf_config.vision_config.spatial_merge_size)
 
-        tokens = [11, hf_config.vision_start_token_id] + [hf_config.image_token_id] * n_img + [12]
+        tokens = [11, hf_config.vision_start_token_id
+                  ] + [hf_config.image_token_id] * n_img + [12]
         positions, _ = build_mrope_input_positions(
             input_tokens=tokens,
             image_grid_thw=[grid],
@@ -531,9 +545,9 @@ class TestMRoPEPositions:
         np.testing.assert_array_equal(positions[1, :2], positions[2, :2])
 
         # Image placeholders should have constant T but varying H/W.
-        t_slice = np.array(positions[0, 2 : 2 + n_img])
-        h_slice = np.array(positions[1, 2 : 2 + n_img])
-        w_slice = np.array(positions[2, 2 : 2 + n_img])
+        t_slice = np.array(positions[0, 2:2 + n_img])
+        h_slice = np.array(positions[1, 2:2 + n_img])
+        w_slice = np.array(positions[2, 2:2 + n_img])
         assert len(set(t_slice.tolist())) == 1
         assert len(set(h_slice.tolist())) > 1
         assert len(set(w_slice.tolist())) > 1
@@ -541,15 +555,15 @@ class TestMRoPEPositions:
     def test_mrope_consecutive_image_then_video(self, hf_config: Qwen3Config):
         img_grid = (1, 4, 4)
         vid_grid = (2, 4, 4)
-        n_img = _num_placeholders_for_grid(img_grid, hf_config.vision_config.spatial_merge_size)
-        n_vid = _num_placeholders_for_grid(vid_grid, hf_config.vision_config.spatial_merge_size)
+        n_img = _num_placeholders_for_grid(
+            img_grid, hf_config.vision_config.spatial_merge_size)
+        n_vid = _num_placeholders_for_grid(
+            vid_grid, hf_config.vision_config.spatial_merge_size)
 
-        tokens = (
-            [hf_config.vision_start_token_id]
-            + [hf_config.image_token_id] * n_img
-            + [hf_config.vision_start_token_id]
-            + [hf_config.video_token_id] * n_vid
-        )
+        tokens = ([hf_config.vision_start_token_id] +
+                  [hf_config.image_token_id] * n_img +
+                  [hf_config.vision_start_token_id] +
+                  [hf_config.video_token_id] * n_vid)
         positions, _ = build_mrope_input_positions(
             input_tokens=tokens,
             image_grid_thw=[img_grid],
@@ -563,19 +577,18 @@ class TestMRoPEPositions:
 
         # Video temporal positions should not be constant when t>1.
         video_start = 1 + n_img + 1
-        t_vid = np.array(positions[0, video_start : video_start + n_vid])
+        t_vid = np.array(positions[0, video_start:video_start + n_vid])
         assert len(set(t_vid.tolist())) > 1
 
     def test_mrope_multiple_images_consecutive(self, hf_config: Qwen3Config):
         """Two images back-to-back without text between."""
         grid = (1, 4, 4)
-        n_img = _num_placeholders_for_grid(grid, hf_config.vision_config.spatial_merge_size)
-        tokens = (
-            [hf_config.vision_start_token_id]
-            + [hf_config.image_token_id] * n_img
-            + [hf_config.vision_start_token_id]
-            + [hf_config.image_token_id] * n_img
-        )
+        n_img = _num_placeholders_for_grid(
+            grid, hf_config.vision_config.spatial_merge_size)
+        tokens = ([hf_config.vision_start_token_id] +
+                  [hf_config.image_token_id] * n_img +
+                  [hf_config.vision_start_token_id] +
+                  [hf_config.image_token_id] * n_img)
         positions, _ = build_mrope_input_positions(
             input_tokens=tokens,
             image_grid_thw=[grid, grid],
@@ -591,14 +604,14 @@ class TestMRoPEPositions:
         """Video tokens appear before image tokens in the sequence."""
         img_grid = (1, 4, 4)
         vid_grid = (2, 4, 4)
-        n_img = _num_placeholders_for_grid(img_grid, hf_config.vision_config.spatial_merge_size)
-        n_vid = _num_placeholders_for_grid(vid_grid, hf_config.vision_config.spatial_merge_size)
-        tokens = (
-            [hf_config.vision_start_token_id]
-            + [hf_config.video_token_id] * n_vid
-            + [hf_config.vision_start_token_id]
-            + [hf_config.image_token_id] * n_img
-        )
+        n_img = _num_placeholders_for_grid(
+            img_grid, hf_config.vision_config.spatial_merge_size)
+        n_vid = _num_placeholders_for_grid(
+            vid_grid, hf_config.vision_config.spatial_merge_size)
+        tokens = ([hf_config.vision_start_token_id] +
+                  [hf_config.video_token_id] * n_vid +
+                  [hf_config.vision_start_token_id] +
+                  [hf_config.image_token_id] * n_img)
         positions, _ = build_mrope_input_positions(
             input_tokens=tokens,
             image_grid_thw=[img_grid],
@@ -613,8 +626,10 @@ class TestMRoPEPositions:
     def test_mrope_extra_grids_allowed(self, hf_config: Qwen3Config):
         """Extra grids beyond what's needed should not raise."""
         grid = (1, 4, 4)
-        n_img = _num_placeholders_for_grid(grid, hf_config.vision_config.spatial_merge_size)
-        tokens = [hf_config.vision_start_token_id] + [hf_config.image_token_id] * n_img
+        n_img = _num_placeholders_for_grid(
+            grid, hf_config.vision_config.spatial_merge_size)
+        tokens = [hf_config.vision_start_token_id
+                  ] + [hf_config.image_token_id] * n_img
         # Provide 3 grids but only 1 image
         positions, _ = build_mrope_input_positions(
             input_tokens=tokens,
@@ -629,7 +644,9 @@ class TestMRoPEPositions:
 
 
 class TestRopeInterface:
-    def test_apply_rope_accepts_mrope_positions_when_configured(self, hf_config: Qwen3Config):
+
+    def test_apply_rope_accepts_mrope_positions_when_configured(
+            self, hf_config: Qwen3Config):
         seq_len = 8
         num_heads = 2
         head_dim = 16
@@ -650,9 +667,9 @@ class TestRopeInterface:
 
 
 class TestVisionPosEmbedInterpolation:
+
     def test_fast_pos_embed_interpolate_supports_rectangular_base_grid(
-        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
+            self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
         cfg = copy.deepcopy(mock_vllm_config.model_config.hf_config)
         cfg.vision_config = MockVisionConfig(
             hidden_size=32,
@@ -668,15 +685,17 @@ class TestVisionPosEmbedInterpolation:
             num_position_embeddings=12,  # 3x4 grid (non-square)
             deepstack_visual_indexes=(),
         )
-        model_config = MockModelConfig(hf_config=cfg, dtype=mock_vllm_config.model_config.dtype)
+        model_config = MockModelConfig(
+            hf_config=cfg, dtype=mock_vllm_config.model_config.dtype)
         rect_vllm_config = MockVllmConfig()
         rect_vllm_config.model_config = model_config
 
         with jax.set_mesh(mesh):
-            vision = Qwen3VLVisionTransformer(rect_vllm_config, nnx.Rngs(params=rng), mesh)
+            vision = Qwen3VLVisionTransformer(rect_vllm_config,
+                                              nnx.Rngs(params=rng), mesh)
         assert vision.pos_embed_grid_h != vision.pos_embed_grid_w
 
-        pos_embeds = vision.fast_pos_embed_interpolate(((1, 2, 4),))
+        pos_embeds = vision.fast_pos_embed_interpolate(((1, 2, 4), ))
         assert pos_embeds.shape == (8, cfg.vision_config.hidden_size)
 
 
@@ -684,7 +703,8 @@ class TestQwen3VLForConditionalGeneration:
     """Tests for the Qwen3VL model with proper mocking."""
 
     @pytest.fixture
-    def model(self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
+    def model(self, mock_vllm_config: MockVllmConfig, rng: PRNGKey,
+              mesh: Mesh):
         """Creates a model with mocked vision and language components."""
         with patch('tpu_inference.models.jax.qwen3_vl.Qwen3VLVisionTransformer', autospec=True) as MockVision, \
              patch('tpu_inference.models.jax.qwen3_vl.Qwen3VLModel', autospec=True) as MockLM, jax.set_mesh(mesh):
@@ -693,44 +713,47 @@ class TestQwen3VLForConditionalGeneration:
             mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
             mock_visual.spatial_merge_size = mock_vllm_config.model_config.hf_config.vision_config.spatial_merge_size
 
-            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng,
+                                                    mesh)
             model.visual = mock_visual
             model.language_model = MockLM.return_value
             yield model
 
     def test_embed_multimodal_none_pixel_values_returns_empty(
-        self, model: Qwen3VLForConditionalGeneration
-    ):
+            self, model: Qwen3VLForConditionalGeneration):
         """embed_multimodal with None pixel_values should return empty dict."""
-        result = model.embed_multimodal(((1, 4, 4),), pixel_values=None)
+        result = model.embed_multimodal(((1, 4, 4), ), pixel_values=None)
         assert result == {}
 
     def test_embed_multimodal_empty_grid_returns_empty(
-        self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
-    ):
+            self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
         """embed_multimodal with empty grid should return empty dict."""
         vc = model.config.vision_config
-        patch_dim = int(vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size)
-        pixel_values = jax.random.normal(rng, (16, patch_dim)).astype(model.vllm_config.model_config.dtype)
+        patch_dim = int(vc.in_channels * vc.temporal_patch_size *
+                        vc.patch_size * vc.patch_size)
+        pixel_values = jax.random.normal(rng, (16, patch_dim)).astype(
+            model.vllm_config.model_config.dtype)
         result = model.embed_multimodal((), pixel_values=pixel_values)
         assert result == {}
 
     def test_embed_multimodal_single_image(
-        self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
-    ):
+            self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
         """Single image grid should call visual encoder and return embeddings."""
         grid = (1, 4, 4)
         vc = model.config.vision_config
-        patch_dim = int(vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size)
+        patch_dim = int(vc.in_channels * vc.temporal_patch_size *
+                        vc.patch_size * vc.patch_size)
         num_patches = grid[0] * grid[1] * grid[2]
-        n_output_tokens = _num_placeholders_for_grid(grid, vc.spatial_merge_size)
-        pixel_values = jax.random.normal(rng, (num_patches, patch_dim)).astype(model.vllm_config.model_config.dtype)
+        n_output_tokens = _num_placeholders_for_grid(grid,
+                                                     vc.spatial_merge_size)
+        pixel_values = jax.random.normal(rng, (num_patches, patch_dim)).astype(
+            model.vllm_config.model_config.dtype)
 
         mock_vision_output = jnp.ones((n_output_tokens, vc.out_hidden_size))
         mock_deepstack = [jnp.ones((n_output_tokens, vc.out_hidden_size))]
         model.visual.return_value = (mock_vision_output, mock_deepstack)
 
-        result = model.embed_multimodal((grid,), pixel_values=pixel_values)
+        result = model.embed_multimodal((grid, ), pixel_values=pixel_values)
         assert isinstance(result, dict)
         embeds = result.get("embeds", ())
         deepstack = result.get("deepstack")
@@ -742,8 +765,8 @@ class TestQwen3VLForConditionalGeneration:
 
     @patch('tpu_inference.models.jax.qwen3_vl.merge_multimodal_embeddings')
     def test_get_input_embeddings_without_multimodal(
-        self, mock_merge: MagicMock, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
-    ):
+            self, mock_merge: MagicMock,
+            model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
         """get_input_embeddings with None/empty multimodal should return text embeddings."""
         input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
         mock_text_embeds = jnp.ones((5, model.config.hidden_size))
@@ -752,19 +775,22 @@ class TestQwen3VLForConditionalGeneration:
 
         # Test with None
         result = model.get_input_embeddings(input_ids, None)
-        np.testing.assert_array_equal(np.array(result), np.array(mock_text_embeds))
+        np.testing.assert_array_equal(np.array(result),
+                                      np.array(mock_text_embeds))
         mock_merge.assert_not_called()
 
         # Test with empty array
-        empty_mm = jnp.empty((0, model.config.hidden_size), dtype=model.vllm_config.model_config.dtype)
+        empty_mm = jnp.empty((0, model.config.hidden_size),
+                             dtype=model.vllm_config.model_config.dtype)
         result = model.get_input_embeddings(input_ids, empty_mm)
-        np.testing.assert_array_equal(np.array(result), np.array(mock_text_embeds))
+        np.testing.assert_array_equal(np.array(result),
+                                      np.array(mock_text_embeds))
         mock_merge.assert_not_called()
 
     @patch('tpu_inference.models.jax.qwen3_vl.merge_multimodal_embeddings')
     def test_get_input_embeddings_with_multimodal(
-        self, mock_merge: MagicMock, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
-    ):
+            self, mock_merge: MagicMock,
+            model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
         """get_input_embeddings with multimodal should call merge function."""
         input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
         mock_text_embeds = jnp.ones((5, model.config.hidden_size))
@@ -782,24 +808,27 @@ class TestQwen3VLForConditionalGeneration:
             [model.config.image_token_id, model.config.video_token_id])
 
     def test_embed_input_ids_delegates_to_get_input_embeddings(
-        self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
-    ):
+            self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
         """embed_input_ids should delegate to get_input_embeddings."""
         input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
         is_multimodal = jnp.array([False, True, False, True, False])
         mock_embeds = jnp.ones((5, model.config.hidden_size))
 
-        with patch.object(model, 'get_input_embeddings', return_value=mock_embeds) as mock_get:
-            result = model.embed_input_ids(
-                input_ids, is_multimodal=is_multimodal)
-            np.testing.assert_array_equal(np.array(result), np.array(mock_embeds))
-            mock_get.assert_called_once_with(
-                input_ids, None, is_multimodal=is_multimodal)
+        with patch.object(model,
+                          'get_input_embeddings',
+                          return_value=mock_embeds) as mock_get:
+            result = model.embed_input_ids(input_ids,
+                                           is_multimodal=is_multimodal)
+            np.testing.assert_array_equal(np.array(result),
+                                          np.array(mock_embeds))
+            mock_get.assert_called_once_with(input_ids,
+                                             None,
+                                             is_multimodal=is_multimodal)
 
     @patch('tpu_inference.models.jax.qwen3_vl._merge_multimodal_embeddings')
     def test_get_input_embeddings_with_mask_uses_mask_merge(
-        self, mock_merge: MagicMock, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
-    ):
+            self, mock_merge: MagicMock,
+            model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
         input_ids = jnp.array([1, 2, 3, 4, 5], dtype=jnp.int32)
         is_multimodal = jnp.array([False, True, True, False, False])
         mock_text_embeds = jnp.ones((5, model.config.hidden_size))
@@ -810,30 +839,31 @@ class TestQwen3VLForConditionalGeneration:
         mock_merged = jnp.ones((5, model.config.hidden_size))
         mock_merge.return_value = mock_merged
 
-        result = model.get_input_embeddings(
-            input_ids, mm_embeds, is_multimodal=is_multimodal)
+        result = model.get_input_embeddings(input_ids,
+                                            mm_embeds,
+                                            is_multimodal=is_multimodal)
         np.testing.assert_array_equal(np.array(result), np.array(mock_merged))
-        mock_merge.assert_called_once_with(
-            mock_text_embeds, is_multimodal, mm_embeds)
+        mock_merge.assert_called_once_with(mock_text_embeds, is_multimodal,
+                                           mm_embeds)
 
     def test_call_delegates_to_language_model(
-        self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey
-    ):
+            self, model: Qwen3VLForConditionalGeneration, rng: PRNGKey):
         """Model call should delegate to language model."""
         kv_caches = [MagicMock()]
-        input_ids = jax.random.randint(rng, (10,), 0, model.config.vocab_size)
+        input_ids = jax.random.randint(rng, (10, ), 0, model.config.vocab_size)
         attn_meta = MagicMock(spec=AttentionMetadata)
-        mock_lm_output = ([MagicMock()], jnp.ones((10, model.config.hidden_size)))
+        mock_lm_output = ([MagicMock()],
+                          jnp.ones((10, model.config.hidden_size)))
         model.language_model.return_value = mock_lm_output
 
-        new_kvs, x, aux_hidden_states, _ = model(kv_caches, input_ids, attn_meta)
+        new_kvs, x, aux_hidden_states, _ = model(kv_caches, input_ids,
+                                                 attn_meta)
         model.language_model.assert_called_once()
         assert len(new_kvs) == 1
         assert x.shape == (10, model.config.hidden_size)
 
     def test_compute_logits_uses_lm_head_when_present(
-        self, model: Qwen3VLForConditionalGeneration
-    ):
+            self, model: Qwen3VLForConditionalGeneration):
         """compute_logits should use the wrapper lm_head when untied."""
         hidden_states = jnp.ones((10, model.config.hidden_size))
         mock_logits = jnp.ones((10, model.config.vocab_size))
@@ -844,33 +874,31 @@ class TestQwen3VLForConditionalGeneration:
         model.lm_head.assert_called_once_with(hidden_states)
 
     @patch('tpu_inference.models.jax.utils.weight_utils.JaxAutoWeightsLoader')
-    def test_load_weights(
-        self, mock_loader_cls: MagicMock,
-        model: Qwen3VLForConditionalGeneration,
-        mock_vllm_config: MockVllmConfig, mesh: Mesh
-    ):
+    def test_load_weights(self, mock_loader_cls: MagicMock,
+                          model: Qwen3VLForConditionalGeneration,
+                          mock_vllm_config: MockVllmConfig, mesh: Mesh):
         """load_weights should call JaxAutoWeightsLoader with proper args."""
-        mock_weights = [("model.language_model.embed_tokens.weight", torch.zeros((10, 10)))]
+        mock_weights = [("model.language_model.embed_tokens.weight",
+                         torch.zeros((10, 10)))]
         mock_loader = mock_loader_cls.return_value
-        
+
         model.load_weights(mock_weights)
-        
-        mock_loader_cls.assert_called_once_with(
-            model,
-            pytorch_pooler=None,
-            skip_prefixes=None
-        )
+
+        mock_loader_cls.assert_called_once_with(model,
+                                                pytorch_pooler=None,
+                                                skip_prefixes=None)
         mock_loader.load_weights.assert_called_once()
 
 
 class TestServingIntegration:
     """Integration tests that create actual model instances."""
 
-    def test_text_only_forward_is_causal(
-        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
+    def test_text_only_forward_is_causal(self,
+                                         mock_vllm_config: MockVllmConfig,
+                                         rng: PRNGKey, mesh: Mesh):
         with jax.set_mesh(mesh):
-            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng,
+                                                    mesh)
         input_ids_1 = jnp.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=jnp.int32)
         input_ids_2 = jnp.array([1, 2, 3, 4, 5, 6, 7, 9], dtype=jnp.int32)
 
@@ -881,19 +909,21 @@ class TestServingIntegration:
 
         _, out_1, _, _ = model(kv_caches_1, input_ids_1, attn_meta)
         _, out_2, _, _ = model(kv_caches_2, input_ids_2, attn_meta)
-        np.testing.assert_allclose(
-            np.array(out_1)[:-1, :], np.array(out_2)[:-1, :], rtol=0, atol=0
-        )
+        np.testing.assert_allclose(np.array(out_1)[:-1, :],
+                                   np.array(out_2)[:-1, :],
+                                   rtol=0,
+                                   atol=0)
 
     def test_get_mrope_input_positions_wrapper_signature(
-        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
+            self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
         with jax.set_mesh(mesh):
-            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng,
+                                                    mesh)
 
         grid = (1, 4, 4)
         n_img = _num_placeholders_for_grid(grid, model.spatial_merge_size)
-        tokens = [1, model.vision_start_token_id] + [model.image_token_id] * n_img + [2, 3]
+        tokens = [1, model.vision_start_token_id
+                  ] + [model.image_token_id] * n_img + [2, 3]
 
         # Test with no mm_features (text-only)
         positions, delta = model.get_mrope_input_positions(
@@ -904,14 +934,15 @@ class TestServingIntegration:
         assert isinstance(delta, int)
 
     def test_get_mrope_input_positions_with_2d_image_grid_mm_feature(
-        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
+            self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
         with jax.set_mesh(mesh):
-            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng,
+                                                    mesh)
 
         grid = (1, 4, 4)
         n_img = _num_placeholders_for_grid(grid, model.spatial_merge_size)
-        tokens = [1, model.vision_start_token_id] + [model.image_token_id] * n_img + [2]
+        tokens = [1, model.vision_start_token_id
+                  ] + [model.image_token_id] * n_img + [2]
 
         mock_item = MagicMock()
         mock_item.get_data.return_value = {
@@ -929,10 +960,10 @@ class TestServingIntegration:
         assert isinstance(delta, int)
 
     def test_vision_encoder_and_embedding_merge_end_to_end(
-        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
+            self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
         with jax.set_mesh(mesh):
-            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng,
+                                                    mesh)
 
         img_grid = (1, 4, 4)
         vid_grid = (2, 4, 4)
@@ -941,12 +972,16 @@ class TestServingIntegration:
 
         # Vision encoder inputs: patchified pixels with shape (sum(t*h*w), patch_dim).
         vc = model.config.vision_config
-        patch_dim = int(vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size)
-        total_patches = int(img_grid[0] * img_grid[1] * img_grid[2] + vid_grid[0] * vid_grid[1] * vid_grid[2])
-        pixel_values = jax.random.normal(rng, (total_patches, patch_dim)).astype(model.vllm_config.model_config.dtype)
+        patch_dim = int(vc.in_channels * vc.temporal_patch_size *
+                        vc.patch_size * vc.patch_size)
+        total_patches = int(img_grid[0] * img_grid[1] * img_grid[2] +
+                            vid_grid[0] * vid_grid[1] * vid_grid[2])
+        pixel_values = jax.random.normal(
+            rng, (total_patches, patch_dim)).astype(
+                model.vllm_config.model_config.dtype)
 
-        mm_result = model.embed_multimodal(
-            (img_grid, vid_grid), pixel_values=pixel_values)
+        mm_result = model.embed_multimodal((img_grid, vid_grid),
+                                           pixel_values=pixel_values)
         assert isinstance(mm_result, dict)
         embeds = mm_result.get("embeds", ())
         deepstack = mm_result.get("deepstack")
@@ -962,13 +997,10 @@ class TestServingIntegration:
         assert mm_flat.shape[0] == (n_img + n_vid)
 
         # Build a realistic placeholder sequence: vision_start + placeholders per item.
-        input_ids_list = (
-            [11, model.vision_start_token_id]
-            + [model.image_token_id] * n_img
-            + [12, model.vision_start_token_id]
-            + [model.video_token_id] * n_vid
-            + [13]
-        )
+        input_ids_list = ([11, model.vision_start_token_id] +
+                          [model.image_token_id] * n_img +
+                          [12, model.vision_start_token_id] +
+                          [model.video_token_id] * n_vid + [13])
         input_ids = jnp.array(input_ids_list, dtype=jnp.int32)
 
         # Merge multimodal embeddings into text embeddings.
@@ -977,16 +1009,21 @@ class TestServingIntegration:
         assert merged.shape == base_text.shape
 
         placeholder_mask = (np.array(input_ids) == model.image_token_id) | (
-            np.array(input_ids) == model.video_token_id
-        )
+            np.array(input_ids) == model.video_token_id)
         merged_np = np.array(merged)
         base_np = np.array(base_text)
         mm_np = np.array(mm_flat)
 
         # Placeholders are overwritten in-order.
-        np.testing.assert_allclose(merged_np[placeholder_mask], mm_np, rtol=0, atol=0)
+        np.testing.assert_allclose(merged_np[placeholder_mask],
+                                   mm_np,
+                                   rtol=0,
+                                   atol=0)
         # Non-placeholders remain identical to base text embeddings.
-        np.testing.assert_allclose(merged_np[~placeholder_mask], base_np[~placeholder_mask], rtol=0, atol=0)
+        np.testing.assert_allclose(merged_np[~placeholder_mask],
+                                   base_np[~placeholder_mask],
+                                   rtol=0,
+                                   atol=0)
 
         # The serving wrapper should produce positions compatible with apply_rope's MRoPE path.
         positions_3d, _ = build_mrope_input_positions(
@@ -1000,8 +1037,11 @@ class TestServingIntegration:
         )
         assert positions_3d.shape == (3, len(input_ids_list))
 
-        head_dim = int(model.config.hidden_size // model.config.num_attention_heads)
-        q = jax.random.normal(rng, (len(input_ids_list), model.config.num_attention_heads, head_dim)).astype(jnp.bfloat16)
+        head_dim = int(model.config.hidden_size //
+                       model.config.num_attention_heads)
+        q = jax.random.normal(
+            rng, (len(input_ids_list), model.config.num_attention_heads,
+                  head_dim)).astype(jnp.bfloat16)
         q_rot = apply_rope(
             q,
             positions_3d,
@@ -1013,11 +1053,11 @@ class TestServingIntegration:
         assert q_rot.shape == q.shape
 
     def test_mrope_wrapper_text_only_positions(
-        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
+            self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
         """Text-only input should produce sequential 3D positions."""
         with jax.set_mesh(mesh):
-            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng,
+                                                    mesh)
         tokens = [1, 2, 3, 4, 5, 6, 7, 8]
 
         positions, _ = model.get_mrope_input_positions(
@@ -1026,19 +1066,18 @@ class TestServingIntegration:
         )
         assert positions.shape == (3, 8)
         # All three axes should be identical for text-only
-        np.testing.assert_array_equal(
-            np.array(positions[0]), np.array(positions[1])
-        )
-        np.testing.assert_array_equal(
-            np.array(positions[1]), np.array(positions[2])
-        )
+        np.testing.assert_array_equal(np.array(positions[0]),
+                                      np.array(positions[1]))
+        np.testing.assert_array_equal(np.array(positions[1]),
+                                      np.array(positions[2]))
 
-    def test_kv_cache_updates_after_forward(
-        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
+    def test_kv_cache_updates_after_forward(self,
+                                            mock_vllm_config: MockVllmConfig,
+                                            rng: PRNGKey, mesh: Mesh):
         """KV cache should be updated after a forward pass."""
         with jax.set_mesh(mesh):
-            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng,
+                                                    mesh)
         input_ids = jnp.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=jnp.int32)
         attn_meta = _make_attention_metadata(input_ids.shape[0])
 
@@ -1053,41 +1092,47 @@ class TestServingIntegration:
         assert after_norm > 0
 
     def test_deepstack_injection_changes_placeholder_positions(
-        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
+            self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
         """DeepStack embeddings should affect outputs at placeholder positions."""
         with jax.set_mesh(mesh):
-            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng,
+                                                    mesh)
         grid = (1, 4, 4)
         n_img = _num_placeholders_for_grid(grid, model.spatial_merge_size)
         input_ids = jnp.array(
-            [1, model.vision_start_token_id] + [model.image_token_id] * n_img + [2, 3],
+            [1, model.vision_start_token_id] + [model.image_token_id] * n_img +
+            [2, 3],
             dtype=jnp.int32,
         )
         attn_meta = _make_attention_metadata(input_ids.shape[0])
 
         deepstack = [
-            jnp.full((n_img, model.config.hidden_size), 0.5,
+            jnp.full((n_img, model.config.hidden_size),
+                     0.5,
                      dtype=model.vllm_config.model_config.dtype)
         ]
         inputs_embeds = model.get_input_embeddings(input_ids, None)
 
         kv_caches_base = _make_kv_caches(model, mesh)
         kv_caches_deep = _make_kv_caches(model, mesh)
-        _, out_base, _, _ = model(kv_caches_base, input_ids, attn_meta, inputs_embeds)
-        _, out_deep, _, _ = model(kv_caches_deep, input_ids, attn_meta,
-                               inputs_embeds, deepstack_embeds=deepstack)
+        _, out_base, _, _ = model(kv_caches_base, input_ids, attn_meta,
+                                  inputs_embeds)
+        _, out_deep, _, _ = model(kv_caches_deep,
+                                  input_ids,
+                                  attn_meta,
+                                  inputs_embeds,
+                                  deepstack_embeds=deepstack)
 
         diff = np.abs(np.array(out_deep - out_base))
         placeholder_mask = np.array(input_ids) == model.image_token_id
         assert diff[placeholder_mask].max() > 0
 
     def test_deepstack_injection_uses_global_layer_indices(
-        self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
-    ):
+            self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
         """DeepStack injection should use global decoder layer indices."""
-        with jax.set_mesh(mesh): 
-            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng, mesh)
+        with jax.set_mesh(mesh):
+            model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng,
+                                                    mesh)
         language_model = model.language_model
         hidden_size = model.config.hidden_size
         seq_len = 4
@@ -1099,8 +1144,7 @@ class TestServingIntegration:
         language_model.embed_tokens = MagicMock(return_value=base_hidden)
         language_model.norm = MagicMock(side_effect=lambda x: x)
         language_model.layers = [
-            MagicMock(side_effect=lambda kv, x, md: (kv, x))
-            for _ in range(4)
+            MagicMock(side_effect=lambda kv, x, md: (kv, x)) for _ in range(4)
         ]
 
         injected = []
@@ -1113,12 +1157,13 @@ class TestServingIntegration:
         # Set deepstack_visual_indexes to target layers 1 and 2 (within start_layer..end_layer)
         language_model.deepstack_visual_indexes = [1, 2]
 
-        kv_caches = [jnp.zeros((1,), dtype=jnp.int32) for _ in range(2)]
+        kv_caches = [jnp.zeros((1, ), dtype=jnp.int32) for _ in range(2)]
         attn_meta = _make_attention_metadata(seq_len)
         visual_mask = jnp.array([True, False, False, False], dtype=jnp.bool_)
         # Two deepstack embeds, one per deepstack index
         deepstack = [
-            jnp.full((1, hidden_size), float(i),
+            jnp.full((1, hidden_size),
+                     float(i),
                      dtype=model.vllm_config.model_config.dtype)
             for i in range(2)
         ]

@@ -23,8 +23,8 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
-from tpu_inference.models.jax.utils.multi_modal_utils import \
-    normalize_mm_grid_thw,sanity_check_mm_encoder_outputs, flatten_embeddings
+from tpu_inference.models.jax.utils.multi_modal_utils import (
+    flatten_embeddings, normalize_mm_grid_thw, sanity_check_mm_encoder_outputs)
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -141,8 +141,8 @@ class MultiModalManager:
             for key in ("pixel_values", "pixel_values_videos"):
                 if key in batched_mm_inputs and isinstance(
                         batched_mm_inputs[key], list):
-                    batched_mm_inputs[key] = torch.cat(
-                        batched_mm_inputs[key], dim=0)
+                    batched_mm_inputs[key] = torch.cat(batched_mm_inputs[key],
+                                                       dim=0)
 
             image_grid_thw = normalize_mm_grid_thw(
                 batched_mm_inputs.pop("image_grid_thw", None))
@@ -183,8 +183,7 @@ class MultiModalManager:
             if deepstack_group_outputs is not None:
                 if len(deepstack_group_outputs) != len(curr_group_outputs):
                     raise ValueError(
-                        "DeepStack outputs must align with encoder outputs."
-                    )
+                        "DeepStack outputs must align with encoder outputs.")
                 if deepstack_outputs is None:
                     deepstack_outputs = []
                 deepstack_outputs.extend(deepstack_group_outputs)
@@ -209,9 +208,7 @@ class MultiModalManager:
 
     def gather_mm_embeddings(
         self,
-       
         scheduler_output: "VllmSchedulerOutput",
-       
         target_pad_len: int,
         req_ids_dp: dict[int, list[str]],
         padded_num_scheduled_tokens_per_dp_rank: int,
@@ -243,7 +240,6 @@ class MultiModalManager:
         assert (
             target_pad_len >= total_num_scheduled_tokens
         ), f"{target_pad_len=} should >= {total_num_scheduled_tokens=} for output is_mm_embedded"
-
 
         mm_embeds: list[jax.Array] = []
         is_mm_embed_cpu = np.zeros((target_pad_len, ), dtype=np.bool_)
@@ -308,33 +304,36 @@ class MultiModalManager:
                     mm_embeds.append(mm_embeds_item)
                     deepstack_output = self.runner.deepstack_cache.get(mm_hash)
                     if deepstack_output is not None:
-                          if deepstack_layers is None:
-                              deepstack_dim = deepstack_output[0].shape[1]
-                              deepstack_dtype = deepstack_output[0].dtype
-                              deepstack_layers = [[] for _ in range(len(deepstack_output))]
-                          for layer_idx, layer_embeds in enumerate(deepstack_output):
-                              if is_embed is not None:
-                                  layer_item = layer_embeds[
-                                      curr_embeds_start:curr_embeds_end]
-                              else:
-                                  layer_item = layer_embeds[start_idx:end_idx]
-                              deepstack_layers[layer_idx].append(layer_item)
-  
+                        if deepstack_layers is None:
+                            deepstack_dim = deepstack_output[0].shape[1]
+                            deepstack_dtype = deepstack_output[0].dtype
+                            deepstack_layers = [
+                                [] for _ in range(len(deepstack_output))
+                            ]
+                        for layer_idx, layer_embeds in enumerate(
+                                deepstack_output):
+                            if is_embed is not None:
+                                layer_item = layer_embeds[
+                                    curr_embeds_start:curr_embeds_end]
+                            else:
+                                layer_item = layer_embeds[start_idx:end_idx]
+                            deepstack_layers[layer_idx].append(layer_item)
+
                     req_start_pos = (rank_token_offset + req_start_idx +
-                                       start_pos - num_computed_tokens)
-  
+                                     start_pos - num_computed_tokens)
+
                     # use cpu numpy array for inplace modification
                     if is_embed is None:
-                          is_mm_embed_cpu[req_start_pos +
-                                          start_idx:req_start_pos +
-                                          end_idx] = True
+                        is_mm_embed_cpu[req_start_pos +
+                                        start_idx:req_start_pos +
+                                        end_idx] = True
                     else:
-                          embed_mask = is_embed.numpy() if hasattr(
-                          is_embed, "numpy") else np.asarray(is_embed,
-                                                             dtype=np.bool_)
-                          is_mm_embed_cpu[req_start_pos +
-                                          start_idx:req_start_pos +
-                                          end_idx] |= embed_mask
+                        embed_mask = is_embed.numpy() if hasattr(
+                            is_embed, "numpy") else np.asarray(is_embed,
+                                                               dtype=np.bool_)
+                        is_mm_embed_cpu[req_start_pos +
+                                        start_idx:req_start_pos +
+                                        end_idx] |= embed_mask
 
                 req_start_idx += num_scheduled_tokens
 
@@ -363,7 +362,8 @@ class MultiModalManager:
                     layer_flat = jnp.zeros((0, deepstack_dim),
                                            dtype=deepstack_dtype)
                 layer_padding = jnp.zeros(
-                    (target_pad_len - layer_flat.shape[0], layer_flat.shape[1]),
+                    (target_pad_len - layer_flat.shape[0],
+                     layer_flat.shape[1]),
                     dtype=layer_flat.dtype)
                 deepstack_embeds.append(
                     jnp.concatenate([layer_flat, layer_padding], axis=0))

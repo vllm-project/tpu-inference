@@ -1,53 +1,54 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import math
-from itertools import islice
 from functools import partial
-from typing import List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union, Iterable
+from itertools import islice
+from typing import (Iterable, List, Literal, NamedTuple, Optional, Tuple,
+                    TypedDict, Union)
 
 import jax
 import jax.numpy as jnp
+import torch
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
-import torch
 
 from tpu_inference import utils
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import (
-    attention,
-    sharded_flash_attention,
-)
+    attention, sharded_flash_attention)
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
-from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.conv import JaxConv
-from tpu_inference.layers.jax.norm import JaxRmsNorm, JaxLayerNorm
+from tpu_inference.layers.jax.embed import JaxEmbed
+from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
+from tpu_inference.layers.jax.norm import JaxLayerNorm, JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
-from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.jax_intermediate_tensor import \
+    JaxIntermediateTensors
 from tpu_inference.models.jax.qwen2 import Qwen2MLP as Qwen3MLP
-from tpu_inference.models.jax.qwen3 import (
-    Qwen3Attention,
-    Qwen3DecoderLayer,
-    Qwen3Model,
-)
+from tpu_inference.models.jax.qwen3 import (Qwen3Attention, Qwen3DecoderLayer,
+                                            Qwen3Model)
 from tpu_inference.models.jax.utils.multi_modal_utils import (
-    _merge_multimodal_embeddings,
-    merge_multimodal_embeddings,
-    normalize_mm_grid_thw,
-    reshape_mm_tensor,
-    split_mm_embeddings_by_grid,
-)
-from tpu_inference.models.jax.jax_intermediate_tensor import (
-    JaxIntermediateTensors,
-)
+    _merge_multimodal_embeddings, merge_multimodal_embeddings,
+    normalize_mm_grid_thw, reshape_mm_tensor, split_mm_embeddings_by_grid)
 from tpu_inference.models.jax.utils.weight_utils import (
-    get_default_maps,
-    load_hf_weights,
-    LoadableWithIterator,
-    load_nnx_param_from_reshaped_torch,
-)
+    LoadableWithIterator, load_nnx_param_from_reshaped_torch)
 
 logger = init_logger(__name__)
 
@@ -55,6 +56,7 @@ init_fn = nnx.initializers.uniform()
 
 DEFAULT_BLOCK_K_MAJOR = 128
 VISION_GRID_SIZE = 48
+
 
 def _sync_module_param_sharding(module: nnx.Module) -> None:
     for param in jax.tree_util.tree_leaves(nnx.state(module)):
@@ -66,6 +68,7 @@ def _sync_module_param_sharding(module: nnx.Module) -> None:
 
 
 class _Qwen3VLConfigAdapter:
+
     def __init__(self, config):
         self._config = config
         self._text_config = getattr(config, "text_config", None)
@@ -80,14 +83,13 @@ class _Qwen3VLConfigAdapter:
                 return getattr(self._text_config, name)
             except AttributeError:
                 pass
-        raise AttributeError(
-            f"Attribute '{name}' not found in either"
-            f" '{type(self._config).__name__}' or"
-            f" '{type(self._text_config).__name__}'"
-        )
+        raise AttributeError(f"Attribute '{name}' not found in either"
+                             f" '{type(self._config).__name__}' or"
+                             f" '{type(self._text_config).__name__}'")
 
 
 class _ModelConfigAdapter:
+
     def __init__(self, model_config):
         self._model_config = model_config
         self._hf_config_adapter = _Qwen3VLConfigAdapter(model_config.hf_config)
@@ -105,6 +107,7 @@ class _ModelConfigAdapter:
 
 
 class _VllmConfigAdapter:
+
     def __init__(self, vllm_config: VllmConfig):
         self._vllm_config = vllm_config
         self.model_config = _ModelConfigAdapter(vllm_config.model_config)
@@ -112,7 +115,7 @@ class _VllmConfigAdapter:
         self.quant_config = vllm_config.quant_config
 
     def __getattr__(self, name):
-            return getattr(self._vllm_config, name)
+        return getattr(self._vllm_config, name)
 
 
 def _infer_pos_embed_grid_hw(num_position_embeddings: int) -> Tuple[int, int]:
@@ -153,12 +156,11 @@ class Qwen3VLImageEmbeddingInputs(TypedDict):
 
 
 Qwen3VLImageInputs = Union[Qwen3VLImagePixelInputs,
-                            Qwen3VLImageEmbeddingInputs]
+                           Qwen3VLImageEmbeddingInputs]
 
 
 def generate_segment_ids_from_grid_thw(
-    grid_thw: Tuple[Tuple[int, int, int], ...],
-) -> jax.Array:
+    grid_thw: Tuple[Tuple[int, int, int], ...], ) -> jax.Array:
     """Generate segment IDs from grid dimensions for variable-length attention.
 
     Each frame gets a unique segment ID (starting from 1). For images (t=1),
@@ -180,10 +182,11 @@ def generate_segment_ids_from_grid_thw(
     for (t, h, w) in grid_thw:
         frame_size = h * w
         for _ in range(t):
-            segments.append(jnp.full((frame_size,), seg_id, dtype=jnp.int32))
+            segments.append(jnp.full((frame_size, ), seg_id, dtype=jnp.int32))
             seg_id += 1
 
-    return jnp.concatenate(segments, axis=0) if segments else jnp.zeros((0,), dtype=jnp.int32)
+    return jnp.concatenate(segments, axis=0) if segments else jnp.zeros(
+        (0, ), dtype=jnp.int32)
 
 
 def pad_segment_ids_for_attention(
@@ -294,8 +297,9 @@ def build_mrope_input_positions(
                 ed_video = len(input_tokens) + 1
         else:
             ed_video = len(input_tokens) + 1
-        
-        if ed_image == len(input_tokens) + 1 and ed_video == len(input_tokens) + 1:
+
+        if ed_image == len(input_tokens) + 1 and ed_video == len(
+                input_tokens) + 1:
             break
 
         if ed_image < ed_video:
@@ -321,8 +325,7 @@ def build_mrope_input_positions(
             jnp.broadcast_to(
                 jnp.arange(text_len, dtype=jnp.int32).reshape(1, -1),
                 (3, text_len),
-            ) + st_idx
-        )
+            ) + st_idx)
 
         # t_index always zero
         num_vision_tokens = llm_grid_t * llm_grid_h * llm_grid_w
@@ -343,8 +346,7 @@ def build_mrope_input_positions(
         ).flatten()
 
         llm_pos_ids_list.append(
-            jnp.stack([t_index, h_index, w_index]) + text_len + st_idx
-        )
+            jnp.stack([t_index, h_index, w_index]) + text_len + st_idx)
 
         st = ed + num_vision_tokens
 
@@ -356,8 +358,7 @@ def build_mrope_input_positions(
             jnp.broadcast_to(
                 jnp.arange(text_len, dtype=jnp.int32).reshape(1, -1),
                 (3, text_len),
-            ) + st_idx
-        )
+            ) + st_idx)
 
     llm_positions = jnp.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
     mrope_position_delta = int(llm_positions.max()) + 1 - len(input_tokens)
@@ -387,11 +388,17 @@ class Qwen3VLTextAttention(Qwen3Attention):
             positions = jnp.broadcast_to(positions[None, :],
                                          (3, positions.shape[0]))
 
-        q = apply_rope(q, positions, self.head_dim_original,
-                       self.rope_theta, self.rope_scaling,
+        q = apply_rope(q,
+                       positions,
+                       self.head_dim_original,
+                       self.rope_theta,
+                       self.rope_scaling,
                        rope_input_ordering="interleaved")
-        k = apply_rope(k, positions, self.head_dim_original,
-                       self.rope_theta, self.rope_scaling,
+        k = apply_rope(k,
+                       positions,
+                       self.head_dim_original,
+                       self.rope_theta,
+                       self.rope_scaling,
                        rope_input_ordering="interleaved")
 
         v = self.v_proj(x)
@@ -403,7 +410,10 @@ class Qwen3VLTextAttention(Qwen3Attention):
                                v_scale)
 
         new_kv_cache, outputs = attention(
-            kv_cache, q, k, v,
+            kv_cache,
+            q,
+            k,
+            v,
             attention_metadata,
             self.mesh,
             self.head_dim_original,
@@ -422,40 +432,58 @@ class Qwen3VLTextDecoderLayer(Qwen3DecoderLayer):
     Inherits __call__ from Qwen2DecoderLayer unchanged.
     """
 
-    def __init__(self, config, dtype, rng, mesh, kv_cache_dtype,
-                 quant_config, prefix=""):
+    def __init__(self,
+                 config,
+                 dtype,
+                 rng,
+                 mesh,
+                 kv_cache_dtype,
+                 quant_config,
+                 prefix=""):
         # Set up all attributes expected by inherited __call__
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
         self.input_layernorm = JaxRmsNorm(
-            hidden_size, epsilon=rms_norm_eps, dtype=dtype,
+            hidden_size,
+            epsilon=rms_norm_eps,
+            dtype=dtype,
             param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
-            rngs=rng, quant_config=quant_config,
+            rngs=rng,
+            quant_config=quant_config,
             prefix=prefix + ".input_layernorm",
         )
         self.self_attn = Qwen3VLTextAttention(
-            config=config, dtype=dtype, rng=rng, mesh=mesh,
-            kv_cache_dtype=kv_cache_dtype, quant_config=quant_config,
+            config=config,
+            dtype=dtype,
+            rng=rng,
+            mesh=mesh,
+            kv_cache_dtype=kv_cache_dtype,
+            quant_config=quant_config,
             prefix=prefix + ".self_attn",
         )
         self.post_attention_layernorm = JaxRmsNorm(
-            hidden_size, epsilon=rms_norm_eps, dtype=dtype,
+            hidden_size,
+            epsilon=rms_norm_eps,
+            dtype=dtype,
             param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
-            rngs=rng, quant_config=quant_config,
+            rngs=rng,
+            quant_config=quant_config,
             prefix=prefix + ".post_attention_layernorm",
         )
         self.mlp = Qwen3MLP(
-            config=config, dtype=dtype, rng=rng,
-            quant_config=quant_config, prefix=prefix + ".mlp",
+            config=config,
+            dtype=dtype,
+            rng=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".mlp",
         )
 
 
-def apply_rotary_pos_emb_vision(
-    x: jax.Array, rotary_pos_emb: jax.Array
-) -> jax.Array:
+def apply_rotary_pos_emb_vision(x: jax.Array,
+                                rotary_pos_emb: jax.Array) -> jax.Array:
 
     _, _, _, H = x.shape
     half_dim = H // 2
@@ -490,13 +518,11 @@ class Qwen3VLVisionRotaryEmbedding(JaxModule):
         self.theta = theta
 
     def __call__(self, seqlen: int) -> jax.Array:
-        inv_freq = 1.0 / (
-            self.theta ** (jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim)
-        )
+        inv_freq = 1.0 / (self.theta**(
+            jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim))
         seq = jnp.arange(seqlen, dtype=jnp.float32)
         freqs = jnp.outer(seq, inv_freq)
         return freqs.astype(jnp.bfloat16)
-
 
 
 class Qwen3VLVisionPatchEmbed(JaxModule):
@@ -521,12 +547,11 @@ class Qwen3VLVisionPatchEmbed(JaxModule):
             out_features=hidden_size,
             kernel_size=kernel_size,
             strides=kernel_size,
-            use_bias=True, # Unlike 2.5VL, uses bias for the convolution.
+            use_bias=True,  # Unlike 2.5VL, uses bias for the convolution.
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
-                init_fn, (None, None, None, None, "model")
-            ),
-            bias_init=nnx.with_partitioning(init_fn, ("model",)),
+                init_fn, (None, None, None, None, "model")),
+            bias_init=nnx.with_partitioning(init_fn, ("model", )),
             rngs=rngs,
         )
         self.proj.weight.set_metadata(
@@ -535,9 +560,7 @@ class Qwen3VLVisionPatchEmbed(JaxModule):
                 load_nnx_param_from_reshaped_torch,
                 permute_dims=(2, 3, 4, 1, 0),
                 param_name="visual.patch_embed.proj.weight",
-            )
-        )
-
+            ))
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Apply 3D patch embedding.
@@ -551,20 +574,17 @@ class Qwen3VLVisionPatchEmbed(JaxModule):
         L, dim = x.shape
         patch_volume = self.temporal_patch_size * self.patch_size * self.patch_size
         assert dim % patch_volume == 0, (
-            f"Input dim {dim} is not divisible by patch volume {patch_volume}"
-        )
+            f"Input dim {dim} is not divisible by patch volume {patch_volume}")
         C = dim // patch_volume
         # Reshape to (L, C, T, H, W) then transpose to (L, T, H, W, C)
         # for Conv3D with channels_last layout.
-        x = x.reshape(
-            L, C, self.temporal_patch_size, self.patch_size, self.patch_size
-        )
+        x = x.reshape(L, C, self.temporal_patch_size, self.patch_size,
+                      self.patch_size)
         x = jnp.transpose(x, (0, 2, 3, 4, 1))
         x = self.proj(x)
         # After conv, shape is (L, 1, 1, 1, hidden_size)
         x = x.reshape(L, self.hidden_size)
         return x
-
 
 
 class Qwen3VLVisionMLP(JaxModule):
@@ -584,7 +604,7 @@ class Qwen3VLVisionMLP(JaxModule):
             use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
-            bias_init=nnx.with_partitioning(init_fn, ("model",)),
+            bias_init=nnx.with_partitioning(init_fn, ("model", )),
         )
         self.fc2 = JaxLinear(
             intermediate_size,
@@ -593,21 +613,20 @@ class Qwen3VLVisionMLP(JaxModule):
             use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
-            bias_init=nnx.with_partitioning(init_fn, (None,)),
+            bias_init=nnx.with_partitioning(init_fn, (None, )),
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
         T, B, D = x.shape
-        
+
         # Flatten batch dimension to 2D for JaxLinear compatibility: (T, B, D) -> (T * B, D)
         x_2d = x.reshape(T * B, D)
         x_2d = self.fc1(x_2d)
         x_2d = jax.nn.gelu(x_2d, approximate=False)
         x_2d = self.fc2(x_2d)
-        
+
         # Reshape back to the original (T, B, D) format before returning
         return x_2d.reshape(T, B, D)
-
 
 
 class Qwen3VLVisionAttention(JaxModule):
@@ -625,12 +644,13 @@ class Qwen3VLVisionAttention(JaxModule):
         self.num_heads = num_heads
 
         sharding_size = mesh.shape["model"]
-        self.num_heads = utils.get_padded_num_heads(self.num_heads, sharding_size)
+        self.num_heads = utils.get_padded_num_heads(self.num_heads,
+                                                    sharding_size)
         self.head_dim = hidden_size // num_heads  # Original head dim
 
         self.mesh = mesh
 
-         # QKV projection
+        # QKV projection
         self.qkv_projection = JaxLinear(
             hidden_size,
             3 * hidden_size,
@@ -638,7 +658,7 @@ class Qwen3VLVisionAttention(JaxModule):
             use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
-            bias_init=nnx.with_partitioning(init_fn, ("model",)),
+            bias_init=nnx.with_partitioning(init_fn, ("model", )),
         )
         # Output projection
         self.proj = JaxLinear(
@@ -648,7 +668,7 @@ class Qwen3VLVisionAttention(JaxModule):
             use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
-            bias_init=nnx.with_partitioning(init_fn, (None,)),
+            bias_init=nnx.with_partitioning(init_fn, (None, )),
         )
 
         # Qwen3VL's Vision Transformer uses full bidirectional attention.
@@ -704,7 +724,8 @@ class Qwen3VLVisionAttention(JaxModule):
         # Pad sequence length to multiple of block size
         block_k_major = DEFAULT_BLOCK_K_MAJOR
         T_attn = q.shape[2]
-        padded_T = (T_attn + block_k_major - 1) // block_k_major * block_k_major
+        padded_T = (T_attn + block_k_major -
+                    1) // block_k_major * block_k_major
         pad_width = ((0, 0), (0, 0), (0, padded_T - T_attn), (0, 0))
 
         q = jnp.pad(q, pad_width, "constant")
@@ -712,7 +733,8 @@ class Qwen3VLVisionAttention(JaxModule):
         v = jnp.pad(v, pad_width, "constant")
 
         # Pad segment IDs for attention (padding tokens get segment_id=0)
-        padded_segment_ids = pad_segment_ids_for_attention(segment_ids, padded_T)
+        padded_segment_ids = pad_segment_ids_for_attention(
+            segment_ids, padded_T)
 
         output = self.flash_attention(q, k, v, padded_segment_ids)
 
@@ -724,12 +746,11 @@ class Qwen3VLVisionAttention(JaxModule):
         # Flatten the batch dimension to 2D for JaxLinear compatibility: (T, B, D) -> (T * B, D)
         output_2d = output.reshape(T * B, D)
         output_2d = self.proj(output_2d)
-        
+
         # Reshape back to the expected (T, B, D) format before returning
         output = output_2d.reshape(T, B, D)
 
         return output
-
 
 
 class Qwen3VLVisionBlock(JaxModule):
@@ -750,8 +771,8 @@ class Qwen3VLVisionBlock(JaxModule):
             epsilon=norm_eps,
             dtype=dtype,
             rngs=rngs,
-            scale_init=nnx.with_partitioning(init_fn, (None,)),
-            bias_init=nnx.with_partitioning(init_fn, (None,)),
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            bias_init=nnx.with_partitioning(init_fn, (None, )),
         )
         self.attn = Qwen3VLVisionAttention(
             hidden_size=hidden_size,
@@ -765,8 +786,8 @@ class Qwen3VLVisionBlock(JaxModule):
             epsilon=norm_eps,
             dtype=dtype,
             rngs=rngs,
-            scale_init=nnx.with_partitioning(init_fn, (None,)),
-            bias_init=nnx.with_partitioning(init_fn, (None,)),
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            bias_init=nnx.with_partitioning(init_fn, (None, )),
         )
         self.mlp = Qwen3VLVisionMLP(
             hidden_size=hidden_size,
@@ -813,8 +834,8 @@ class Qwen3VLVisionPatchMerger(JaxModule):
             epsilon=norm_eps,
             dtype=dtype,
             rngs=rngs,
-            scale_init=nnx.with_partitioning(init_fn, (None,)),
-            bias_init=nnx.with_partitioning(init_fn, (None,)),
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            bias_init=nnx.with_partitioning(init_fn, (None, )),
         )
 
         self.linear_fc1 = JaxLinear(
@@ -824,7 +845,7 @@ class Qwen3VLVisionPatchMerger(JaxModule):
             use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
-            bias_init=nnx.with_partitioning(init_fn, ("model",)),
+            bias_init=nnx.with_partitioning(init_fn, ("model", )),
         )
         self.linear_fc2 = JaxLinear(
             self.hidden_size,
@@ -833,7 +854,7 @@ class Qwen3VLVisionPatchMerger(JaxModule):
             use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
-            bias_init=nnx.with_partitioning(init_fn, (None,)),
+            bias_init=nnx.with_partitioning(init_fn, (None, )),
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -894,9 +915,9 @@ class Qwen3VLVisionTransformer(JaxModule):
         )
 
         # Learned positional embedding: VISION_GRID_SIZE x VISION_GRID_SIZE grid.
-        num_position_embeddings = getattr(
-            vision_config, "num_position_embeddings", VISION_GRID_SIZE * VISION_GRID_SIZE
-        )
+        num_position_embeddings = getattr(vision_config,
+                                          "num_position_embeddings",
+                                          VISION_GRID_SIZE * VISION_GRID_SIZE)
         self.pos_embed = JaxEmbed(
             num_embeddings=num_position_embeddings,
             features=self.hidden_size,
@@ -910,8 +931,7 @@ class Qwen3VLVisionTransformer(JaxModule):
                 load_nnx_param_from_reshaped_torch,
                 permute_dims=(0, 1),
                 param_name="visual.pos_embed.weight",
-            )
-        )
+            ))
         image_size = getattr(vision_config, "image_size", None)
         pos_embed_grid_h = pos_embed_grid_w = None
         if isinstance(image_size, (tuple, list)) and len(image_size) == 2:
@@ -937,8 +957,7 @@ class Qwen3VLVisionTransformer(JaxModule):
                     f"{image_size!r}; inferring from num_position_embeddings={num_position_embeddings}."
                 )
             pos_embed_grid_h, pos_embed_grid_w = _infer_pos_embed_grid_hw(
-                num_position_embeddings
-            )
+                num_position_embeddings)
         self.pos_embed_grid_h = pos_embed_grid_h
         self.pos_embed_grid_w = pos_embed_grid_w
 
@@ -955,14 +974,14 @@ class Qwen3VLVisionTransformer(JaxModule):
                 rngs=rngs,
                 mesh=mesh,
                 norm_eps=norm_eps,
-            )
-            for _ in range(vision_config.depth)
+            ) for _ in range(vision_config.depth)
         ])
 
         # Final merger settings
         # Qwen3VLConfig uses text_config for text model hidden_size
         text_config = getattr(hf_config, "text_config", hf_config)
-        out_hidden_size = getattr(vision_config, "out_hidden_size", text_config.hidden_size)
+        out_hidden_size = getattr(vision_config, "out_hidden_size",
+                                  text_config.hidden_size)
 
         self.merger = Qwen3VLVisionPatchMerger(
             d_model=out_hidden_size,
@@ -975,9 +994,8 @@ class Qwen3VLVisionTransformer(JaxModule):
         )
 
         # DeepStack configuration
-        self.deepstack_visual_indexes = tuple(getattr(
-            vision_config, "deepstack_visual_indexes", [8, 16, 24]
-        ))
+        self.deepstack_visual_indexes = tuple(
+            getattr(vision_config, "deepstack_visual_indexes", [8, 16, 24]))
         self.deepstack_merger_list = nnx.List([
             Qwen3VLVisionPatchMerger(
                 d_model=out_hidden_size,
@@ -987,19 +1005,16 @@ class Qwen3VLVisionTransformer(JaxModule):
                 rngs=rngs,
                 use_postshuffle_norm=True,  # DeepStack uses postshuffle norm
                 norm_eps=norm_eps,
-            )
-            for _ in range(len(self.deepstack_visual_indexes))
+            ) for _ in range(len(self.deepstack_visual_indexes))
         ])
 
-        additional_config = getattr(vllm_config, "additional_config", None) or {}
+        additional_config = getattr(vllm_config, "additional_config",
+                                    None) or {}
         self.enable_dynamic_image_sizes = additional_config.get(
-            "enable_dynamic_image_sizes", False
-        )
+            "enable_dynamic_image_sizes", False)
         _sync_module_param_sharding(self)
 
-    def rotary_pos_emb_thw(
-        self, t: int, h: int, w: int
-    ) -> jax.Array:
+    def rotary_pos_emb_thw(self, t: int, h: int, w: int) -> jax.Array:
         """Compute rotary position embeddings for a grid of patches.
 
         Args:
@@ -1013,33 +1028,26 @@ class Qwen3VLVisionTransformer(JaxModule):
         merge_size = self.spatial_merge_size
 
         hpos_ids, wpos_ids = jnp.indices((h, w))
-        hpos_ids = (
-            hpos_ids.reshape(
-                h // merge_size,
-                merge_size,
-                w // merge_size,
-                merge_size,
-            )
-            .transpose(0, 2, 1, 3)
-            .flatten()
-        )
-        wpos_ids = (
-            wpos_ids.reshape(
-                h // merge_size,
-                merge_size,
-                w // merge_size,
-                merge_size,
-            )
-            .transpose(0, 2, 1, 3)
-            .flatten()
-        )
+        hpos_ids = (hpos_ids.reshape(
+            h // merge_size,
+            merge_size,
+            w // merge_size,
+            merge_size,
+        ).transpose(0, 2, 1, 3).flatten())
+        wpos_ids = (wpos_ids.reshape(
+            h // merge_size,
+            merge_size,
+            w // merge_size,
+            merge_size,
+        ).transpose(0, 2, 1, 3).flatten())
         pos_ids = jnp.stack([hpos_ids, wpos_ids], axis=-1)
         pos_ids = jnp.tile(pos_ids, (t, 1))
 
         max_size = max(h, w)
         rotary_pos_emb_full = self.rotary_pos_emb(max_size)
 
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].reshape(pos_ids.shape[0], -1)
+        rotary_pos_emb = rotary_pos_emb_full[pos_ids].reshape(
+            pos_ids.shape[0], -1)
         rotary_pos_emb = rotary_pos_emb.reshape(
             rotary_pos_emb.shape[0] // self.spatial_merge_unit,
             self.spatial_merge_unit,
@@ -1049,8 +1057,7 @@ class Qwen3VLVisionTransformer(JaxModule):
         return rotary_pos_emb
 
     def fast_pos_embed_interpolate(
-        self, grid_thw: Tuple[Tuple[int, int, int], ...]
-    ) -> jax.Array:
+            self, grid_thw: Tuple[Tuple[int, int, int], ...]) -> jax.Array:
         """Bilinear interpolation for learned positional embeddings.
 
         Args:
@@ -1061,8 +1068,8 @@ class Qwen3VLVisionTransformer(JaxModule):
         """
         merge_size = self.spatial_merge_size
 
-        idx_list = [jnp.empty((0,), dtype=jnp.int32) for _ in range(4)]
-        weight_list = [jnp.empty((0,), dtype=jnp.float32) for _ in range(4)]
+        idx_list = [jnp.empty((0, ), dtype=jnp.int32) for _ in range(4)]
+        weight_list = [jnp.empty((0, ), dtype=jnp.float32) for _ in range(4)]
 
         grid_ts = [g[0] for g in grid_thw]
         grid_hs = [g[1] for g in grid_thw]
@@ -1076,12 +1083,10 @@ class Qwen3VLVisionTransformer(JaxModule):
             # Floor and ceil indices for bilinear interpolation
             h_idxs_floor = h_idxs.astype(jnp.int32)
             w_idxs_floor = w_idxs.astype(jnp.int32)
-            h_idxs_ceil = (h_idxs.astype(jnp.int32) + 1).clip(
-                max=self.pos_embed_grid_h - 1
-            )
-            w_idxs_ceil = (w_idxs.astype(jnp.int32) + 1).clip(
-                max=self.pos_embed_grid_w - 1
-            )
+            h_idxs_ceil = (h_idxs.astype(jnp.int32) +
+                           1).clip(max=self.pos_embed_grid_h - 1)
+            w_idxs_ceil = (w_idxs.astype(jnp.int32) +
+                           1).clip(max=self.pos_embed_grid_w - 1)
 
             # Interpolation weights
             dh = h_idxs - h_idxs_floor
@@ -1093,23 +1098,30 @@ class Qwen3VLVisionTransformer(JaxModule):
 
             # Compute 4 corner indices for bilinear interpolation
             indices = [
-                (base_h[:, None] + w_idxs_floor[None, :]).reshape(-1),  # top-left
-                (base_h[:, None] + w_idxs_ceil[None, :]).reshape(-1),   # top-right
-                (base_h_ceil[:, None] + w_idxs_floor[None, :]).reshape(-1),  # bottom-left
-                (base_h_ceil[:, None] + w_idxs_ceil[None, :]).reshape(-1),   # bottom-right
+                (base_h[:, None] +
+                 w_idxs_floor[None, :]).reshape(-1),  # top-left
+                (base_h[:, None] +
+                 w_idxs_ceil[None, :]).reshape(-1),  # top-right
+                (base_h_ceil[:, None] +
+                 w_idxs_floor[None, :]).reshape(-1),  # bottom-left
+                (base_h_ceil[:, None] +
+                 w_idxs_ceil[None, :]).reshape(-1),  # bottom-right
             ]
 
             # Compute weights for bilinear interpolation
             weights = [
-                ((1 - dh)[:, None] * (1 - dw)[None, :]).reshape(-1),  # top-left
-                ((1 - dh)[:, None] * dw[None, :]).reshape(-1),        # top-right
-                (dh[:, None] * (1 - dw)[None, :]).reshape(-1),        # bottom-left
-                (dh[:, None] * dw[None, :]).reshape(-1),              # bottom-right
+                ((1 - dh)[:, None] *
+                 (1 - dw)[None, :]).reshape(-1),  # top-left
+                ((1 - dh)[:, None] * dw[None, :]).reshape(-1),  # top-right
+                (dh[:, None] * (1 - dw)[None, :]).reshape(-1),  # bottom-left
+                (dh[:, None] * dw[None, :]).reshape(-1),  # bottom-right
             ]
 
             for i in range(4):
-                idx_list[i] = jnp.concatenate([idx_list[i], indices[i]], axis=0)
-                weight_list[i] = jnp.concatenate([weight_list[i], weights[i]], axis=0)
+                idx_list[i] = jnp.concatenate([idx_list[i], indices[i]],
+                                              axis=0)
+                weight_list[i] = jnp.concatenate([weight_list[i], weights[i]],
+                                                 axis=0)
 
         # Convert to JAX arrays
         idx_tensor = jnp.stack(idx_list, axis=0)  # int32, shape (4, N)
@@ -1117,7 +1129,8 @@ class Qwen3VLVisionTransformer(JaxModule):
 
         # Lookup embeddings and apply bilinear interpolation
         pos_embeds = self.pos_embed(idx_tensor) * weight_tensor[:, :, None]
-        patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
+        patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[
+            2] + pos_embeds[3]
 
         # Split embeddings for each image/video
         split_sizes = [h * w for h, w in zip(grid_hs, grid_ws)]
@@ -1125,20 +1138,21 @@ class Qwen3VLVisionTransformer(JaxModule):
         patch_pos_embeds_list = []
         offset = 0
         for size in split_sizes:
-            patch_pos_embeds_list.append(patch_pos_embeds[offset: offset + size])
+            patch_pos_embeds_list.append(patch_pos_embeds[offset:offset +
+                                                          size])
             offset += size
 
         # Rearrange embeddings to match patch ordering (with merge blocks)
         patch_pos_embeds_permute = []
-        for pos_embed, t, h, w in zip(patch_pos_embeds_list, grid_ts, grid_hs, grid_ws):
+        for pos_embed, t, h, w in zip(patch_pos_embeds_list, grid_ts, grid_hs,
+                                      grid_ws):
             # Repeat for temporal dimension
             pos_embed = jnp.tile(pos_embed, (t, 1))
 
             h_merged = h // merge_size
             w_merged = w // merge_size
-            pos_embed = pos_embed.reshape(
-                t, h_merged, merge_size, w_merged, merge_size, -1
-            )
+            pos_embed = pos_embed.reshape(t, h_merged, merge_size, w_merged,
+                                          merge_size, -1)
             pos_embed = jnp.transpose(pos_embed, (0, 1, 3, 2, 4, 5))
             pos_embed = pos_embed.reshape(-1, pos_embed.shape[-1])
 
@@ -1158,8 +1172,7 @@ class Qwen3VLVisionTransformer(JaxModule):
         # Reshape for merge block ordering
         seq_len = x.shape[0]
         hidden_states = hidden_states.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-        )
+            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
 
         # Add batch dimension: (seq, merge_unit, dim) -> (seq * merge_unit, 1, dim)
         hidden_states = hidden_states.reshape(seq_len, 1, -1)
@@ -1177,8 +1190,7 @@ class Qwen3VLVisionTransformer(JaxModule):
                 idx = self.deepstack_visual_indexes.index(layer_num)
                 # Squeeze batch dim for merger: (seq, 1, dim) -> (seq, dim)
                 deepstack_feat = self.deepstack_merger_list[idx](
-                    hidden_states.squeeze(1)
-                )
+                    hidden_states.squeeze(1))
                 deepstack_features.append(deepstack_feat)
 
         # Squeeze batch dim and apply final merger
@@ -1186,7 +1198,7 @@ class Qwen3VLVisionTransformer(JaxModule):
 
         return hidden_states, deepstack_features
 
-    @partial(jax.jit, static_argnames=("grid_thw",))
+    @partial(jax.jit, static_argnames=("grid_thw", ))
     def encode_jit(
         self, x: jax.Array, grid_thw: Tuple[Tuple[int, int, int], ...]
     ) -> Tuple[jax.Array, List[jax.Array]]:
@@ -1204,9 +1216,7 @@ class Qwen3VLVisionTransformer(JaxModule):
         rotary_pos_emb = rotary_pos_emb.reshape(-1, rotary_pos_emb.shape[-1])
 
         # pre-merge patch segment ids
-        segment_ids = generate_segment_ids_from_grid_thw(
-            grid_thw
-        )
+        segment_ids = generate_segment_ids_from_grid_thw(grid_thw)
         # TODO: (chore) remove all robustness in the code for less latency
         assert segment_ids.shape[0] == hidden_states.shape[0], (
             "segment_ids must match the patch sequence length. "
@@ -1215,8 +1225,7 @@ class Qwen3VLVisionTransformer(JaxModule):
         # Reshape for transformer
         seq_len = hidden_states.shape[0]
         hidden_states = hidden_states.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-        )
+            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         hidden_states = hidden_states.reshape(seq_len, 1, -1)
 
         deepstack_features = []
@@ -1230,8 +1239,7 @@ class Qwen3VLVisionTransformer(JaxModule):
             if layer_num in self.deepstack_visual_indexes:
                 idx = self.deepstack_visual_indexes.index(layer_num)
                 deepstack_feat = self.deepstack_merger_list[idx](
-                    hidden_states.squeeze(1)
-                )
+                    hidden_states.squeeze(1))
                 deepstack_features.append(deepstack_feat)
 
         hidden_states = self.merger(hidden_states.squeeze(1))
@@ -1252,7 +1260,6 @@ class Qwen3VLVisionTransformer(JaxModule):
             deepstack_features: List of intermediate features for DeepStack
         """
         return self.encode_jit(x, grid_thw)
-
 
 
 def _inject_visual_features(
@@ -1276,7 +1283,8 @@ def _inject_visual_features(
 
     visual_embeds = visual_embeds.astype(flat_hidden.dtype)
     dummy_row = jnp.zeros((1, flat_hidden.shape[-1]), dtype=flat_hidden.dtype)
-    padded_embeds = jnp.concatenate([dummy_row, visual_embeds, dummy_row], axis=0)
+    padded_embeds = jnp.concatenate([dummy_row, visual_embeds, dummy_row],
+                                    axis=0)
     gather_indices = jnp.cumsum(flat_mask, dtype=jnp.int32)
     max_index = visual_embeds.shape[0] + 1
     gather_indices = jnp.minimum(gather_indices, max_index)
@@ -1354,9 +1362,9 @@ class Qwen3VLModel(Qwen3Model):
         # Store DeepStack layer indices for injection during forward pass.
         vision_config = getattr(vllm_config.model_config.hf_config,
                                 "vision_config", None)
-        self.deepstack_visual_indexes = tuple(getattr(
-            vision_config, "deepstack_visual_indexes", [8, 16, 24]
-        )) if vision_config is not None else ()
+        self.deepstack_visual_indexes = tuple(
+            getattr(vision_config, "deepstack_visual_indexes",
+                    [8, 16, 24])) if vision_config is not None else ()
 
     def __call__(
         self,
@@ -1380,8 +1388,8 @@ class Qwen3VLModel(Qwen3Model):
                 if ds_idx < len(deepstack_visual_embeds):
                     ds_index_map[layer_idx] = ds_idx
 
-        for i, layer in enumerate(islice(self.layers, self.start_layer,
-                                         self.end_layer)):
+        for i, layer in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer)):
             global_i = self.start_layer + i
             kv_cache = kv_caches[i]
             kv_cache, x = layer(kv_cache, x, attention_metadata)
@@ -1389,8 +1397,8 @@ class Qwen3VLModel(Qwen3Model):
 
             if global_i in ds_index_map:
                 x = _inject_visual_features(
-                    x, visual_pos_mask, deepstack_visual_embeds[ds_index_map[global_i]]
-                )
+                    x, visual_pos_mask,
+                    deepstack_visual_embeds[ds_index_map[global_i]])
 
         if self.is_last_rank:
             x = self.norm(x)
@@ -1398,8 +1406,8 @@ class Qwen3VLModel(Qwen3Model):
         return kv_caches, x
 
 
-
 class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1436,13 +1444,13 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                 dtype=model_config.dtype,
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
-                kernel_init=nnx.with_partitioning(
-                    init_fn, (None, "model")),
+                kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             )
 
         self.image_token_id = config.image_token_id
         self.video_token_id = config.video_token_id
-        self.vision_start_token_id = getattr(config, "vision_start_token_id", 151652)
+        self.vision_start_token_id = getattr(config, "vision_start_token_id",
+                                             151652)
         self.spatial_merge_size = config.vision_config.spatial_merge_size
 
     def get_input_embeddings(
@@ -1472,7 +1480,8 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
             inputs_embeds = jnp.zeros(
                 embed_shape, dtype=self.vllm_config.model_config.dtype)
 
-        if multimodal_embeddings is not None and multimodal_embeddings.shape[0] != 0:
+        if multimodal_embeddings is not None and multimodal_embeddings.shape[
+                0] != 0:
             if is_multimodal is not None:
                 inputs_embeds = _merge_multimodal_embeddings(
                     inputs_embeds,
@@ -1521,10 +1530,9 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            return Qwen3VLImagePixelInputs(
-                type="pixel_values",
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw)
+            return Qwen3VLImagePixelInputs(type="pixel_values",
+                                           pixel_values=pixel_values,
+                                           image_grid_thw=image_grid_thw)
 
         # NOTE: Not supporting image embeddings precomputed. Matches Qwen2.5VL.
         # if image_embeds is not None:
@@ -1545,18 +1553,17 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                                               **kwargs: object) -> dict:
         mm_input_by_modality = {}
         for input_key in kwargs:
-            if input_key in ("pixel_values", "pixel_values_videos",
-                             "image_embeds"
-                             ) and "image" not in mm_input_by_modality:
+            if input_key in (
+                    "pixel_values", "pixel_values_videos",
+                    "image_embeds") and "image" not in mm_input_by_modality:
                 mm_input_by_modality[
                     "image"] = self._parse_and_validate_image_input(
                         image_grid_thw, **kwargs)
         return mm_input_by_modality
 
     def _process_image_input(
-            self, image_input: Qwen3VLImageInputs
-    ) -> tuple[tuple[jax.Array, ...],
-               Optional[list[list[jax.Array]]]]:
+        self, image_input: Qwen3VLImageInputs
+    ) -> tuple[tuple[jax.Array, ...], Optional[list[list[jax.Array]]]]:
 
         if not image_input:
             return (), None
@@ -1565,13 +1572,15 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
             return (), None
 
         if image_input["type"] == "image_embeds":
-            image_embeds = image_input["image_embeds"].astype(self.visual.dtype)
+            image_embeds = image_input["image_embeds"].astype(
+                self.visual.dtype)
             deepstack_embeds = None
         else:
             pixel_values = image_input["pixel_values"]
             if pixel_values is None:
                 return (), None
-            image_embeds, deepstack_embeds = self.visual(pixel_values, grid_thw)
+            image_embeds, deepstack_embeds = self.visual(
+                pixel_values, grid_thw)
         return split_mm_embeddings_by_grid(image_embeds, grid_thw,
                                            self.spatial_merge_size,
                                            deepstack_embeds)
@@ -1611,11 +1620,14 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                     if deepstack_outputs is None:
                         deepstack_outputs = []
                     deepstack_outputs.extend(deepstack_by_item)
-        
+
         if not multimodal_embeddings:
             return {}
 
-        return {"embeds": multimodal_embeddings, "deepstack": deepstack_outputs}
+        return {
+            "embeds": multimodal_embeddings,
+            "deepstack": deepstack_outputs
+        }
 
     def __call__(
         self,
@@ -1629,14 +1641,15 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
         _intermediate_tensors=None,
         _is_first_rank: bool = True,
         _is_last_rank: bool = True,
-        deepstack_embeds: Optional[Union[List[jax.Array], Tuple[jax.Array, ...]]] = None,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array], Optional[jax.Array]]:
+        deepstack_embeds: Optional[Union[List[jax.Array], Tuple[jax.Array,
+                                                                ...]]] = None,
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
+               Optional[jax.Array]]:
         visual_pos_mask = None
 
         if deepstack_embeds is not None and input_ids is not None:
             visual_pos_mask = (input_ids == self.image_token_id) | (
-                input_ids == self.video_token_id
-            )
+                input_ids == self.video_token_id)
 
         kv_caches, hidden_states = self.language_model(
             kv_caches=kv_caches,
@@ -1648,7 +1661,8 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
         )
 
         if not _is_last_rank:
-            hidden_states = JaxIntermediateTensors(tensors={"hidden_states": hidden_states})
+            hidden_states = JaxIntermediateTensors(
+                tensors={"hidden_states": hidden_states})
 
         return kv_caches, hidden_states, [], None
 
@@ -1697,8 +1711,8 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
             video_grid_thw=video_grid_thw or None,
             image_token_id=hf_config.image_token_id,
             video_token_id=hf_config.video_token_id,
-            vision_start_token_id=getattr(
-                hf_config, "vision_start_token_id", self.vision_start_token_id),
+            vision_start_token_id=getattr(hf_config, "vision_start_token_id",
+                                          self.vision_start_token_id),
             spatial_merge_size=hf_config.vision_config.spatial_merge_size,
         )
 
@@ -1715,14 +1729,12 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                 (name, fn, *args, **kwargs)
         """
         vc = self.config.vision_config
-        patch_input_dim = (
-            vc.in_channels * vc.temporal_patch_size * vc.patch_size * vc.patch_size
-        )
+        patch_input_dim = (vc.in_channels * vc.temporal_patch_size *
+                           vc.patch_size * vc.patch_size)
 
         image_shapes = []
         if warmup_config := self.vllm_config.additional_config.get(
-            "vision_warmup_config"
-        ):
+                "vision_warmup_config"):
             image_shapes = warmup_config.get("image_shapes", [])
 
         factor = vc.patch_size * vc.spatial_merge_size
@@ -1741,7 +1753,7 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                 (num_patches, patch_input_dim),
                 self.vllm_config.model_config.dtype,
             )
-            dummy_grid_thw = (grid_thw,)
+            dummy_grid_thw = (grid_thw, )
 
             run_compilation_fn(
                 "vision_encoder",
@@ -1751,7 +1763,8 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                 image_shape=input_hw,
             )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         if not isinstance(weights, Iterable):
             return super().load_weights(weights)
 
@@ -1759,12 +1772,13 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
             # Remap PyTorch vision tower keys
             if name.startswith("model.visual."):
                 name = name.replace("model.visual.", "visual.", 1)
-                
+
                 # Attention block remappings
                 if "blocks." in name:
                     # QKV projection: name attn.qkv -> attn.qkv_proj
                     if "attn.qkv." in name:
-                        name = name.replace("attn.qkv.", "attn.qkv_projection.")
+                        name = name.replace("attn.qkv.",
+                                            "attn.qkv_projection.")
                     # MLP feedforward layers: PyTorch uses linear_fc1/linear_fc2, JAX uses fc1/fc2
                     elif "mlp.linear_fc1." in name:
                         name = name.replace("mlp.linear_fc1.", "mlp.fc1.")
@@ -1774,7 +1788,7 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
             # Remap PyTorch language model keys (replace 'model.language_model.' with 'language_model.')
             elif name.startswith("model.language_model."):
                 name = name.replace("model.", "", 1)
-                
+
             return name
 
         def filter_weights(weights_iterator):
