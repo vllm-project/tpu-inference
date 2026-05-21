@@ -62,7 +62,7 @@ class TunableParams:
     decode_batch_size: int  # range from 1 to as high as possible before OOM with steps powers of two
     # Constraint: batch size % decode_batch_size = 0
 
-    # Below params if passsed in as int, all cases are the same.
+    # Below params if passed in as int, all cases are the same.
     num_kv_pages_per_block: int  # Number of KV pages to process per block. Range from 1 to as high as possible before OOM,
     # with steps of powers of two.
     num_queries_per_block: int  # for batched_decode, this is always 1
