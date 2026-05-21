@@ -625,13 +625,14 @@ class TestMultiModalManager:
             req_id_a: 20,
             req_id_b: 20,
         }
+        mock_scheduler_output.total_num_scheduled_tokens = 40
 
         # padded_per_rank=24 (>20); target_pad_len=48 (= 24 * 2).
         padded_per_rank = 24
         target_pad_len = padded_per_rank * 2
         req_ids_dp = {0: [req_id_a], 1: [req_id_b]}
 
-        mm_embeds, is_mm_embed = self.runner.mm_manager.gather_mm_embeddings(
+        mm_embeds, is_mm_embed, _ = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output,
             target_pad_len=target_pad_len,
             req_ids_dp=req_ids_dp,
