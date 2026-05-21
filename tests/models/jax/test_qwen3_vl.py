@@ -843,20 +843,24 @@ class TestQwen3VLForConditionalGeneration:
         np.testing.assert_array_equal(np.array(logits), np.array(mock_logits))
         model.lm_head.assert_called_once_with(hidden_states)
 
-    @patch('tpu_inference.models.jax.qwen3_vl.get_default_maps')
-    @patch('tpu_inference.models.jax.qwen3_vl.load_hf_weights')
+    @patch('tpu_inference.models.jax.utils.weight_utils.JaxAutoWeightsLoader')
     def test_load_weights(
-        self, mock_load_weights: MagicMock, mock_get_default_maps: MagicMock,
+        self, mock_loader_cls: MagicMock,
         model: Qwen3VLForConditionalGeneration,
-        mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh
+        mock_vllm_config: MockVllmConfig, mesh: Mesh
     ):
-        """load_weights should call load_hf_weights with proper args."""
-        model.load_weights(rng)
-        mock_load_weights.assert_called_once()
-        kwargs = mock_load_weights.call_args.kwargs
-        assert kwargs['vllm_config'] == mock_vllm_config
-        assert kwargs['model'] is model
-        assert kwargs['mesh'] is mesh
+        """load_weights should call JaxAutoWeightsLoader with proper args."""
+        mock_weights = [("model.language_model.embed_tokens.weight", torch.zeros((10, 10)))]
+        mock_loader = mock_loader_cls.return_value
+        
+        model.load_weights(mock_weights)
+        
+        mock_loader_cls.assert_called_once_with(
+            model,
+            pytorch_pooler=None,
+            skip_prefixes=None
+        )
+        mock_loader.load_weights.assert_called_once()
 
 
 class TestServingIntegration:

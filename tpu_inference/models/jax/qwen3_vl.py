@@ -601,7 +601,6 @@ class Qwen3VLVisionMLP(JaxModule):
         
         # Flatten batch dimension to 2D for JaxLinear compatibility: (T, B, D) -> (T * B, D)
         x_2d = x.reshape(T * B, D)
-        
         x_2d = self.fc1(x_2d)
         x_2d = jax.nn.gelu(x_2d, approximate=False)
         x_2d = self.fc2(x_2d)
@@ -1752,86 +1751,14 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                 image_shape=input_hw,
             )
 
-    # def load_weights(self, rng_key: jax.Array) -> None:
-    #     self.rng = nnx.Rngs(rng_key)
-
-    #     mappings = {
-    #         "model.language_model.embed_tokens": "language_model.embed_tokens.weight",
-    #         "model.language_model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
-    #         "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.weight",
-    #         "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.weight",
-    #         "model.language_model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.weight",
-    #         "model.language_model.layers.*.post_attention_layernorm": "language_model.layers.*.post_attention_layernorm.weight",
-    #         "model.language_model.layers.*.self_attn.k_proj": "language_model.layers.*.self_attn.k_proj.weight",
-    #         "model.language_model.layers.*.self_attn.o_proj": "language_model.layers.*.self_attn.o_proj.weight",
-    #         "model.language_model.layers.*.self_attn.q_proj": "language_model.layers.*.self_attn.q_proj.weight",
-    #         "model.language_model.layers.*.self_attn.v_proj": "language_model.layers.*.self_attn.v_proj.weight",
-    #         "model.language_model.layers.*.self_attn.q_norm": "language_model.layers.*.self_attn.q_norm.weight",
-    #         "model.language_model.layers.*.self_attn.k_norm": "language_model.layers.*.self_attn.k_norm.weight",
-    #         "model.language_model.norm": "language_model.norm.weight",
-    #         "model.visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
-    #         "model.visual.patch_embed.proj.bias": "visual.patch_embed.proj.bias",
-    #         "model.visual.pos_embed": "visual.pos_embed.embedding",
-    #         "model.visual.blocks.*.attn.qkv": "visual.blocks.*.attn.qkv_proj.kernel",
-    #         "model.visual.blocks.*.attn.qkv.bias": "visual.blocks.*.attn.qkv_proj.bias",
-    #         "model.visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.kernel",
-    #         "model.visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
-    #         "model.visual.blocks.*.mlp.linear_fc1": "visual.blocks.*.mlp.fc1.kernel",
-    #         "model.visual.blocks.*.mlp.linear_fc1.bias": "visual.blocks.*.mlp.fc1.bias",
-    #         "model.visual.blocks.*.mlp.linear_fc2": "visual.blocks.*.mlp.fc2.kernel",
-    #         "model.visual.blocks.*.mlp.linear_fc2.bias": "visual.blocks.*.mlp.fc2.bias",
-    #         "model.visual.blocks.*.norm1": "visual.blocks.*.norm1.scale",
-    #         "model.visual.blocks.*.norm1.bias": "visual.blocks.*.norm1.bias",
-    #         "model.visual.blocks.*.norm2": "visual.blocks.*.norm2.scale",
-    #         "model.visual.blocks.*.norm2.bias": "visual.blocks.*.norm2.bias",
-    #         "model.visual.merger.norm": "visual.merger.norm.scale",
-    #         "model.visual.merger.norm.bias": "visual.merger.norm.bias",
-    #         "model.visual.merger.linear_fc1": "visual.merger.linear_fc1.kernel",
-    #         "model.visual.merger.linear_fc1.bias": "visual.merger.linear_fc1.bias",
-    #         "model.visual.merger.linear_fc2": "visual.merger.linear_fc2.kernel",
-    #         "model.visual.merger.linear_fc2.bias": "visual.merger.linear_fc2.bias",
-    #     }
-
-    #     hf_config = self.vllm_config.model_config.hf_config
-    #     if not hf_config.tie_word_embeddings:
-    #         mappings["lm_head"] = "lm_head.weight"
-
-    #     # Add deepstack_merger_list mappings dynamically based on config
-    #     # weight_utils.py only handles "layers" and "blocks" wildcards,
-    #     # so we need explicit mappings for each deepstack merger index
-    #     vision_config = hf_config.vision_config
-    #     deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", [8, 16, 24])
-    #     for i in range(len(deepstack_indexes)):
-    #         mappings[f"model.visual.deepstack_merger_list.{i}.norm"] = f"visual.deepstack_merger_list.{i}.norm.scale"
-    #         mappings[f"model.visual.deepstack_merger_list.{i}.norm.bias"] = f"visual.deepstack_merger_list.{i}.norm.bias"
-    #         mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1"] = f"visual.deepstack_merger_list.{i}.linear_fc1.kernel"
-    #         mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc1.bias"
-    #         mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2"] = f"visual.deepstack_merger_list.{i}.linear_fc2.kernel"
-    #         mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc2.bias"
-
-    #     adapted_model_config = _ModelConfigAdapter(self.vllm_config.model_config)
-    #     metadata_map = get_default_maps(
-    #         adapted_model_config, self.mesh, mappings
-    #     )
-    #     load_hf_weights(
-    #         vllm_config=self.vllm_config,
-    #         model=self,
-    #         metadata_map=metadata_map,
-    #         mesh=self.mesh,
-    #     )
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         if not isinstance(weights, Iterable):
             return super().load_weights(weights)
 
         def map_name(name: str) -> str:
-            # 1. Remap PyTorch vision tower keys
+            # Remap PyTorch vision tower keys
             if name.startswith("model.visual."):
                 name = name.replace("model.visual.", "visual.", 1)
-                
-                # Vision Learned Positional Embedding: weight -> embedding
-                # if name == "visual.pos_embed.weight":
-                #     name = "visual.pos_embed.embedding"
                 
                 # Attention block remappings
                 if "blocks." in name:
@@ -1844,7 +1771,7 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                     elif "mlp.linear_fc2." in name:
                         name = name.replace("mlp.linear_fc2.", "mlp.fc2.")
 
-            # 2. Remap PyTorch language model keys (replace 'model.language_model.' with 'language_model.')
+            # Remap PyTorch language model keys (replace 'model.language_model.' with 'language_model.')
             elif name.startswith("model.language_model."):
                 name = name.replace("model.", "", 1)
                 
@@ -1852,9 +1779,6 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         def filter_weights(weights_iterator):
             for name, weight in weights_iterator:
-                # Handle standard tie_word_embeddings lm_head skipping if not present
-                if name == "lm_head.weight" and not hasattr(self, "lm_head"):
-                    continue
                 yield map_name(name), weight
 
         return super().load_weights(filter_weights(weights))
