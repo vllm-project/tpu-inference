@@ -124,15 +124,9 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
     client_args = client_options.get("args") or {}
     client_cmd_type = client_options.get("command_type")
 
-    # Verify dataset-name for both `vllm_bench_serve` and `lm_eval`
-    dataset_name = client_args.get("dataset-name")
-    if not dataset_name:
-        errors.append(
-            f"Validation Error: {file_path} is missing 'dataset-name' in client_command_options."
-        )
-
     # Specific Rules for `lm_eval`: must be a known dataset
     if client_cmd_type == "lm_eval":
+        dataset_name = client_args.get("dataset-name")
         allowed_datasets = {"math500", "mlperf", "mmlu"}
         if dataset_name not in allowed_datasets:
             errors.append(
@@ -142,14 +136,6 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
 
     # Specific Rules for `vllm_bench_serve`
     if client_cmd_type == "vllm_bench_serve":
-        if dataset_name:
-            # Check for dataset-path (Required if not a random dataset)
-            is_random = dataset_name in ["random", "random-mm"]
-            if not is_random and not client_args.get("dataset-path"):
-                errors.append(
-                    f"Validation Error: {file_path} has dataset-name '{dataset_name}' "
-                    "but is missing 'dataset-path' in client_command_options.")
-
         # Model consistency check to ensure client/server are aligned
         server_model = server_args.get("model")
         client_model = client_args.get("model")
@@ -183,11 +169,6 @@ def create_benchmark_steps(
     """
     Generates a list of Buildkite steps for a case.
     """
-    # Skip all non-essential validation if no_verify is set
-    if not no_verify:
-        validate_command_options(case_data, file_path, errors)
-        validate_parameter_dependencies(case_data, file_path, errors)
-
     # Identify Case Name
     try:
         model_name = extract_arg_from_command_options(case_data, "model")
@@ -203,11 +184,16 @@ def create_benchmark_steps(
     # Extract TPU types from the case data
     ci_queues = case_data.get("ci_queue", [])
 
-    # Validation: Ensure ci_queue is not empty
-    if not no_verify and not ci_queues:
-        errors.append(
-            f"Validation Error: 'ci_queue' is missing or empty in {file_path} "
-            f"for case '{case_name}'.")
+    # Skip validation if no_verify is set
+    if not no_verify:
+        validate_command_options(case_data, file_path, errors)
+        validate_parameter_dependencies(case_data, file_path, errors)
+
+        # Ensure ci_queue is not empty
+        if not ci_queues:
+            errors.append(
+                f"Validation Error: 'ci_queue' is missing or empty in {file_path} "
+                f"for case '{case_name}'.")
 
     # Merge Environment Variables (Global + Case Specific)
     combined_env = {**global_env, **case_data.get("env", {})}
