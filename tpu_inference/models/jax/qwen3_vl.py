@@ -1,13 +1,14 @@
 import math
 from itertools import islice
 from functools import partial
-from typing import List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union
+from typing import List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union, Iterable
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
+import torch
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import (
@@ -17,7 +18,7 @@ from tpu_inference.layers.common.attention_interface import (
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
@@ -43,6 +44,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import (
 from tpu_inference.models.jax.utils.weight_utils import (
     get_default_maps,
     load_hf_weights,
+    LoadableWithIterator,
 )
 
 logger = init_logger(__name__)
@@ -52,6 +54,24 @@ init_fn = nnx.initializers.uniform()
 DEFAULT_BLOCK_K_MAJOR = 128
 VISION_GRID_SIZE = 48
 
+class JaxLayerNorm(nnx.LayerNorm, JaxModule):
+    """LayerNorm layer that inherits from JaxModule and maps scale to weight for compatibility."""
+
+    def __init__(self, *args, **kwargs):
+        # nnx.LayerNorm uses `param_dtype` for parameter initialization dtype.
+        # Accept `dtype` as an alias for backward compatibility.
+        if "dtype" in kwargs and "param_dtype" not in kwargs:
+            kwargs["param_dtype"] = kwargs.pop("dtype")
+        nnx.LayerNorm.__init__(self, *args, **kwargs)
+        
+        # For compatibility, alias scale to weight
+        self.weight = self.scale
+        delattr(self, 'scale')
+
+    def __getattr__(self, name: str):
+        if name == "scale":
+            return self.weight
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
 def _sync_module_param_sharding(module: nnx.Module) -> None:
     for param in jax.tree_util.tree_leaves(nnx.state(module)):
@@ -565,23 +585,23 @@ class Qwen3VLVisionMLP(JaxModule):
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
     ):
-        self.fc1 = nnx.Linear(
+        self.fc1 = JaxLinear(
             hidden_size,
             intermediate_size,
+            rngs=rngs,
             use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             bias_init=nnx.with_partitioning(init_fn, ("model",)),
-            rngs=rngs,
         )
-        self.fc2 = nnx.Linear(
+        self.fc2 = JaxLinear(
             intermediate_size,
             hidden_size,
+            rngs=rngs,
             use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             bias_init=nnx.with_partitioning(init_fn, (None,)),
-            rngs=rngs,
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -611,26 +631,25 @@ class Qwen3VLVisionAttention(JaxModule):
 
         self.mesh = mesh
 
-        # QKV projection
-        self.qkv_proj = nnx.Linear(
+         # QKV projection
+        self.qkv_proj = JaxLinear(
             hidden_size,
             3 * hidden_size,
+            rngs=rngs,
             use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             bias_init=nnx.with_partitioning(init_fn, ("model",)),
-            rngs=rngs,
         )
-
         # Output projection
-        self.proj = nnx.Linear(
+        self.proj = JaxLinear(
             hidden_size,
             hidden_size,
+            rngs=rngs,
             use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             bias_init=nnx.with_partitioning(init_fn, (None,)),
-            rngs=rngs,
         )
 
         # Qwen3VL's Vision Transformer uses full bidirectional attention.
@@ -721,7 +740,7 @@ class Qwen3VLVisionBlock(JaxModule):
         mesh: Mesh,
         norm_eps: float = 1e-6,
     ):
-        self.norm1 = nnx.LayerNorm(
+        self.norm1 = JaxLayerNorm(
             hidden_size,
             epsilon=norm_eps,
             dtype=dtype,
@@ -736,7 +755,7 @@ class Qwen3VLVisionBlock(JaxModule):
             rngs=rngs,
             mesh=mesh,
         )
-        self.norm2 = nnx.LayerNorm(
+        self.norm2 = JaxLayerNorm(
             hidden_size,
             epsilon=norm_eps,
             dtype=dtype,
@@ -783,9 +802,8 @@ class Qwen3VLVisionPatchMerger(JaxModule):
         self.hidden_size = context_dim * (spatial_merge_size**2)
         self.use_postshuffle_norm = use_postshuffle_norm
 
-        # Normalization dimension depends on use_postshuffle_norm
         norm_dim = self.hidden_size if use_postshuffle_norm else context_dim
-        self.norm = nnx.LayerNorm(
+        self.norm = JaxLayerNorm(
             norm_dim,
             epsilon=norm_eps,
             dtype=dtype,
@@ -794,23 +812,23 @@ class Qwen3VLVisionPatchMerger(JaxModule):
             bias_init=nnx.with_partitioning(init_fn, (None,)),
         )
 
-        self.linear_fc1 = nnx.Linear(
+        self.linear_fc1 = JaxLinear(
             self.hidden_size,
             self.hidden_size,
+            rngs=rngs,
             use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             bias_init=nnx.with_partitioning(init_fn, ("model",)),
-            rngs=rngs,
         )
-        self.linear_fc2 = nnx.Linear(
+        self.linear_fc2 = JaxLinear(
             self.hidden_size,
             d_model,
+            rngs=rngs,
             use_bias=True,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
             bias_init=nnx.with_partitioning(init_fn, (None,)),
-            rngs=rngs,
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -944,9 +962,9 @@ class Qwen3VLVisionTransformer(JaxModule):
         )
 
         # DeepStack configuration
-        self.deepstack_visual_indexes = getattr(
+        self.deepstack_visual_indexes = tuple(getattr(
             vision_config, "deepstack_visual_indexes", [8, 16, 24]
-        )
+        ))
         self.deepstack_merger_list = nnx.List([
             Qwen3VLVisionPatchMerger(
                 d_model=out_hidden_size,
@@ -1323,9 +1341,9 @@ class Qwen3VLModel(Qwen3Model):
         # Store DeepStack layer indices for injection during forward pass.
         vision_config = getattr(vllm_config.model_config.hf_config,
                                 "vision_config", None)
-        self.deepstack_visual_indexes = getattr(
+        self.deepstack_visual_indexes = tuple(getattr(
             vision_config, "deepstack_visual_indexes", [8, 16, 24]
-        ) if vision_config is not None else []
+        )) if vision_config is not None else ()
 
     def __call__(
         self,
@@ -1720,70 +1738,109 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                 image_shape=input_hw,
             )
 
-    def load_weights(self, rng_key: jax.Array) -> None:
-        self.rng = nnx.Rngs(rng_key)
+    # def load_weights(self, rng_key: jax.Array) -> None:
+    #     self.rng = nnx.Rngs(rng_key)
 
-        mappings = {
-            "model.language_model.embed_tokens": "language_model.embed_tokens.weight",
-            "model.language_model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
-            "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.weight",
-            "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.weight",
-            "model.language_model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.weight",
-            "model.language_model.layers.*.post_attention_layernorm": "language_model.layers.*.post_attention_layernorm.weight",
-            "model.language_model.layers.*.self_attn.k_proj": "language_model.layers.*.self_attn.k_proj.weight",
-            "model.language_model.layers.*.self_attn.o_proj": "language_model.layers.*.self_attn.o_proj.weight",
-            "model.language_model.layers.*.self_attn.q_proj": "language_model.layers.*.self_attn.q_proj.weight",
-            "model.language_model.layers.*.self_attn.v_proj": "language_model.layers.*.self_attn.v_proj.weight",
-            "model.language_model.layers.*.self_attn.q_norm": "language_model.layers.*.self_attn.q_norm.weight",
-            "model.language_model.layers.*.self_attn.k_norm": "language_model.layers.*.self_attn.k_norm.weight",
-            "model.language_model.norm": "language_model.norm.weight",
-            "model.visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
-            "model.visual.patch_embed.proj.bias": "visual.patch_embed.proj.bias",
-            "model.visual.pos_embed": "visual.pos_embed.embedding",
-            "model.visual.blocks.*.attn.qkv": "visual.blocks.*.attn.qkv_proj.kernel",
-            "model.visual.blocks.*.attn.qkv.bias": "visual.blocks.*.attn.qkv_proj.bias",
-            "model.visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.kernel",
-            "model.visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
-            "model.visual.blocks.*.mlp.linear_fc1": "visual.blocks.*.mlp.fc1.kernel",
-            "model.visual.blocks.*.mlp.linear_fc1.bias": "visual.blocks.*.mlp.fc1.bias",
-            "model.visual.blocks.*.mlp.linear_fc2": "visual.blocks.*.mlp.fc2.kernel",
-            "model.visual.blocks.*.mlp.linear_fc2.bias": "visual.blocks.*.mlp.fc2.bias",
-            "model.visual.blocks.*.norm1": "visual.blocks.*.norm1.scale",
-            "model.visual.blocks.*.norm1.bias": "visual.blocks.*.norm1.bias",
-            "model.visual.blocks.*.norm2": "visual.blocks.*.norm2.scale",
-            "model.visual.blocks.*.norm2.bias": "visual.blocks.*.norm2.bias",
-            "model.visual.merger.norm": "visual.merger.norm.scale",
-            "model.visual.merger.norm.bias": "visual.merger.norm.bias",
-            "model.visual.merger.linear_fc1": "visual.merger.linear_fc1.kernel",
-            "model.visual.merger.linear_fc1.bias": "visual.merger.linear_fc1.bias",
-            "model.visual.merger.linear_fc2": "visual.merger.linear_fc2.kernel",
-            "model.visual.merger.linear_fc2.bias": "visual.merger.linear_fc2.bias",
-        }
+    #     mappings = {
+    #         "model.language_model.embed_tokens": "language_model.embed_tokens.weight",
+    #         "model.language_model.layers.*.input_layernorm": "language_model.layers.*.input_layernorm.weight",
+    #         "model.language_model.layers.*.mlp.down_proj": "language_model.layers.*.mlp.down_proj.weight",
+    #         "model.language_model.layers.*.mlp.gate_proj": "language_model.layers.*.mlp.gate_proj.weight",
+    #         "model.language_model.layers.*.mlp.up_proj": "language_model.layers.*.mlp.up_proj.weight",
+    #         "model.language_model.layers.*.post_attention_layernorm": "language_model.layers.*.post_attention_layernorm.weight",
+    #         "model.language_model.layers.*.self_attn.k_proj": "language_model.layers.*.self_attn.k_proj.weight",
+    #         "model.language_model.layers.*.self_attn.o_proj": "language_model.layers.*.self_attn.o_proj.weight",
+    #         "model.language_model.layers.*.self_attn.q_proj": "language_model.layers.*.self_attn.q_proj.weight",
+    #         "model.language_model.layers.*.self_attn.v_proj": "language_model.layers.*.self_attn.v_proj.weight",
+    #         "model.language_model.layers.*.self_attn.q_norm": "language_model.layers.*.self_attn.q_norm.weight",
+    #         "model.language_model.layers.*.self_attn.k_norm": "language_model.layers.*.self_attn.k_norm.weight",
+    #         "model.language_model.norm": "language_model.norm.weight",
+    #         "model.visual.patch_embed.proj": "visual.patch_embed.proj.kernel",
+    #         "model.visual.patch_embed.proj.bias": "visual.patch_embed.proj.bias",
+    #         "model.visual.pos_embed": "visual.pos_embed.embedding",
+    #         "model.visual.blocks.*.attn.qkv": "visual.blocks.*.attn.qkv_proj.kernel",
+    #         "model.visual.blocks.*.attn.qkv.bias": "visual.blocks.*.attn.qkv_proj.bias",
+    #         "model.visual.blocks.*.attn.proj": "visual.blocks.*.attn.proj.kernel",
+    #         "model.visual.blocks.*.attn.proj.bias": "visual.blocks.*.attn.proj.bias",
+    #         "model.visual.blocks.*.mlp.linear_fc1": "visual.blocks.*.mlp.fc1.kernel",
+    #         "model.visual.blocks.*.mlp.linear_fc1.bias": "visual.blocks.*.mlp.fc1.bias",
+    #         "model.visual.blocks.*.mlp.linear_fc2": "visual.blocks.*.mlp.fc2.kernel",
+    #         "model.visual.blocks.*.mlp.linear_fc2.bias": "visual.blocks.*.mlp.fc2.bias",
+    #         "model.visual.blocks.*.norm1": "visual.blocks.*.norm1.scale",
+    #         "model.visual.blocks.*.norm1.bias": "visual.blocks.*.norm1.bias",
+    #         "model.visual.blocks.*.norm2": "visual.blocks.*.norm2.scale",
+    #         "model.visual.blocks.*.norm2.bias": "visual.blocks.*.norm2.bias",
+    #         "model.visual.merger.norm": "visual.merger.norm.scale",
+    #         "model.visual.merger.norm.bias": "visual.merger.norm.bias",
+    #         "model.visual.merger.linear_fc1": "visual.merger.linear_fc1.kernel",
+    #         "model.visual.merger.linear_fc1.bias": "visual.merger.linear_fc1.bias",
+    #         "model.visual.merger.linear_fc2": "visual.merger.linear_fc2.kernel",
+    #         "model.visual.merger.linear_fc2.bias": "visual.merger.linear_fc2.bias",
+    #     }
 
-        hf_config = self.vllm_config.model_config.hf_config
-        if not hf_config.tie_word_embeddings:
-            mappings["lm_head"] = "lm_head.weight"
+    #     hf_config = self.vllm_config.model_config.hf_config
+    #     if not hf_config.tie_word_embeddings:
+    #         mappings["lm_head"] = "lm_head.weight"
 
-        # Add deepstack_merger_list mappings dynamically based on config
-        # weight_utils.py only handles "layers" and "blocks" wildcards,
-        # so we need explicit mappings for each deepstack merger index
-        vision_config = hf_config.vision_config
-        deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", [8, 16, 24])
-        for i in range(len(deepstack_indexes)):
-            mappings[f"model.visual.deepstack_merger_list.{i}.norm"] = f"visual.deepstack_merger_list.{i}.norm.scale"
-            mappings[f"model.visual.deepstack_merger_list.{i}.norm.bias"] = f"visual.deepstack_merger_list.{i}.norm.bias"
-            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1"] = f"visual.deepstack_merger_list.{i}.linear_fc1.kernel"
-            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc1.bias"
-            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2"] = f"visual.deepstack_merger_list.{i}.linear_fc2.kernel"
-            mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc2.bias"
+    #     # Add deepstack_merger_list mappings dynamically based on config
+    #     # weight_utils.py only handles "layers" and "blocks" wildcards,
+    #     # so we need explicit mappings for each deepstack merger index
+    #     vision_config = hf_config.vision_config
+    #     deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", [8, 16, 24])
+    #     for i in range(len(deepstack_indexes)):
+    #         mappings[f"model.visual.deepstack_merger_list.{i}.norm"] = f"visual.deepstack_merger_list.{i}.norm.scale"
+    #         mappings[f"model.visual.deepstack_merger_list.{i}.norm.bias"] = f"visual.deepstack_merger_list.{i}.norm.bias"
+    #         mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1"] = f"visual.deepstack_merger_list.{i}.linear_fc1.kernel"
+    #         mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc1.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc1.bias"
+    #         mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2"] = f"visual.deepstack_merger_list.{i}.linear_fc2.kernel"
+    #         mappings[f"model.visual.deepstack_merger_list.{i}.linear_fc2.bias"] = f"visual.deepstack_merger_list.{i}.linear_fc2.bias"
 
-        adapted_model_config = _ModelConfigAdapter(self.vllm_config.model_config)
-        metadata_map = get_default_maps(
-            adapted_model_config, self.mesh, mappings
-        )
-        load_hf_weights(
-            vllm_config=self.vllm_config,
-            model=self,
-            metadata_map=metadata_map,
-            mesh=self.mesh,
-        )
+    #     adapted_model_config = _ModelConfigAdapter(self.vllm_config.model_config)
+    #     metadata_map = get_default_maps(
+    #         adapted_model_config, self.mesh, mappings
+    #     )
+    #     load_hf_weights(
+    #         vllm_config=self.vllm_config,
+    #         model=self,
+    #         metadata_map=metadata_map,
+    #         mesh=self.mesh,
+    #     )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if not isinstance(weights, Iterable):
+            return super().load_weights(weights)
+
+        def map_name(name: str) -> str:
+            # 1. Remap PyTorch vision tower keys
+            if name.startswith("model.visual."):
+                name = name.replace("model.visual.", "visual.", 1)
+                
+                # Vision Learned Positional Embedding: weight -> embedding
+                if name == "visual.pos_embed.weight":
+                    name = "visual.pos_embed.embedding"
+                
+                # Attention block remappings
+                elif "blocks." in name:
+                    # QKV projection: name attn.qkv -> attn.qkv_proj
+                    if "attn.qkv." in name:
+                        name = name.replace("attn.qkv.", "attn.qkv_proj.")
+                    # MLP feedforward layers: PyTorch uses linear_fc1/linear_fc2, JAX uses fc1/fc2
+                    elif "mlp.linear_fc1." in name:
+                        name = name.replace("mlp.linear_fc1.", "mlp.fc1.")
+                    elif "mlp.linear_fc2." in name:
+                        name = name.replace("mlp.linear_fc2.", "mlp.fc2.")
+
+            # 2. Remap PyTorch language model keys (replace 'model.language_model.' with 'language_model.')
+            elif name.startswith("model.language_model."):
+                name = name.replace("model.", "", 1)
+                
+            return name
+
+        def filter_weights(weights_iterator):
+            for name, weight in weights_iterator:
+                # Handle standard tie_word_embeddings lm_head skipping if not present
+                if name == "lm_head.weight" and not hasattr(self, "lm_head"):
+                    continue
+                yield map_name(name), weight
+
+        return super().load_weights(filter_weights(weights))
