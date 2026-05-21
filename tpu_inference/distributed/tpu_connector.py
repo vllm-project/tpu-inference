@@ -110,6 +110,11 @@ ReqId = str
 
 logger = init_logger(__name__)
 
+# [EXPERIMENT] Fixed per-request KV transfer size (blocks). Replaces the full
+# max_model_len//block_size buffer to avoid transferring unused zero blocks.
+# Must be >= the actual blocks/req of the workload (1024 tokens / 64 = 16 here).
+_EXPERIMENTAL_FIXED_MAX_BLOCKS = 16
+
 
 @dataclass
 class SendMeta:
@@ -584,6 +589,11 @@ class TPUConnectorWorker:
         ) and not self.multi_host:
             block_size = self.vllm_config.cache_config.block_size
             max_blocks = self.vllm_config.model_config.max_model_len // block_size
+            # [EXPERIMENT] Override the per-request transfer size. The full
+            # max_model_len//block_size buffer (=144 here) transfers many unused
+            # (zero) blocks; this workload uses exactly 16 blocks/req. Producer
+            # and consumer MUST use the same value for is_ready() to match.
+            max_blocks = _EXPERIMENTAL_FIXED_MAX_BLOCKS
             self.host_kv_pool = HostKVPool(
                 pool_size=dist_utils.get_max_host_kv_buffer_size(),
                 num_layers=self.num_layers,
@@ -595,6 +605,9 @@ class TPUConnectorWorker:
         if not self.is_producer and not self.multi_host:
             block_size = self.vllm_config.cache_config.block_size
             max_blocks = self.vllm_config.model_config.max_model_len // block_size
+            # [EXPERIMENT] Match the producer's reduced transfer size (see the
+            # producer branch above). Must equal the producer value.
+            max_blocks = _EXPERIMENTAL_FIXED_MAX_BLOCKS
             # The producer registers its full host_kv_pool buffer (sized to
             # max_blocks_per_req) via await_pull, so the consumer must pull a
             # spec of the same determined size for is_ready() to ever match.
