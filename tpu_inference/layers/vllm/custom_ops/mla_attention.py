@@ -30,7 +30,7 @@ from vllm.model_executor.layers.mla import (MLAModules,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backend import AttentionType
 
-from tpu_inference import utils
+from tpu_inference import envs, utils
 from tpu_inference.utils import t2j
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -415,7 +415,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         if self.rotary_emb is not None:
             q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
 
-        if self.indexer and self.is_sparse:
+        if self.indexer and self.is_sparse and not envs.DISABLE_DSA_INDEXER:
             _topk_indices = self.indexer(hidden_states, q_c, positions,
                                          self.indexer_rope_emb)
 
