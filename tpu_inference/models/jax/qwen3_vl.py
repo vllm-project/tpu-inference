@@ -20,7 +20,8 @@ from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.embed import JaxEmbed
-from tpu_inference.layers.jax.norm import JaxRmsNorm
+from tpu_inference.layers.jax.conv import JaxConv
+from tpu_inference.layers.jax.norm import JaxRmsNorm, JaxLayerNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -45,6 +46,7 @@ from tpu_inference.models.jax.utils.weight_utils import (
     get_default_maps,
     load_hf_weights,
     LoadableWithIterator,
+    load_nnx_param_from_reshaped_torch,
 )
 
 logger = init_logger(__name__)
@@ -53,58 +55,6 @@ init_fn = nnx.initializers.uniform()
 
 DEFAULT_BLOCK_K_MAJOR = 128
 VISION_GRID_SIZE = 48
-
-class JaxLayerNorm(nnx.LayerNorm, JaxModule):
-    """LayerNorm layer that inherits from JaxModule and maps scale to weight for compatibility."""
-
-    def __init__(self, *args, **kwargs):
-        # nnx.LayerNorm uses `param_dtype` for parameter initialization dtype.
-        # Accept `dtype` as an alias for backward compatibility.
-        if "dtype" in kwargs and "param_dtype" not in kwargs:
-            kwargs["param_dtype"] = kwargs.pop("dtype")
-        nnx.LayerNorm.__init__(self, *args, **kwargs)
-        
-        # For compatibility, alias scale to weight
-        self.weight = self.scale
-        delattr(self, 'scale')
-
-    def __getattr__(self, name: str):
-        if name == "scale":
-            return self.weight
-        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
-
-class JaxConv(nnx.Conv, JaxModule):
-    """Convolution layer that inherits from JaxModule and maps kernel to weight for compatibility."""
-
-    def __init__(self, *args, **kwargs):
-        # nnx.Conv uses `param_dtype` for parameter initialization dtype.
-        # Accept `dtype` as an alias for backward compatibility.
-        if "dtype" in kwargs and "param_dtype" not in kwargs:
-            kwargs["param_dtype"] = kwargs.pop("dtype")
-        nnx.Conv.__init__(self, *args, **kwargs)
-        
-        # For compatibility, alias kernel to weight
-        self.weight = self.kernel
-        delattr(self, 'kernel')
-
-    def __getattr__(self, name: str):
-        if name == "kernel":
-            return self.weight
-        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
-
-
-def load_conv_weight(param: nnx.Param, torch_tensor: torch.Tensor):
-      # PyTorch layout: [out_channels, in_channels, t, h, w] -> (1152, 3, 2, 16, 16)
-      # JAX layout: [t, h, w, in_channels, out_channels] -> (2, 16, 16, 3, 1152)
-      permute_dims = (2, 3, 4, 1, 0)
-      jax_val = jnp.array(torch_tensor.permute(*permute_dims).float().cpu().numpy(), dtype=param.value.dtype)
-      param.value = jax.device_put(jax_val, param.value.sharding)
-
-
-def load_no_transpose_weight(param: nnx.Param, torch_tensor: torch.Tensor):
-    # Load weight directly without any transposition
-    jax_val = jnp.array(torch_tensor.float().cpu().numpy(), dtype=param.value.dtype)
-    param.value = jax.device_put(jax_val, param.value.sharding)
 
 def _sync_module_param_sharding(module: nnx.Module) -> None:
     for param in jax.tree_util.tree_leaves(nnx.state(module)):
@@ -579,7 +529,14 @@ class Qwen3VLVisionPatchEmbed(JaxModule):
             bias_init=nnx.with_partitioning(init_fn, ("model",)),
             rngs=rngs,
         )
-        self.proj.weight.set_metadata("weight_loader", load_conv_weight)
+        self.proj.weight.set_metadata(
+            "weight_loader",
+            partial(
+                load_nnx_param_from_reshaped_torch,
+                permute_dims=(2, 3, 4, 1, 0),
+                param_name="visual.patch_embed.proj.weight",
+            )
+        )
 
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -948,7 +905,14 @@ class Qwen3VLVisionTransformer(JaxModule):
             embedding_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rngs,
         )
-        self.pos_embed.weight.set_metadata("weight_loader", load_no_transpose_weight)
+        self.pos_embed.weight.set_metadata(
+            "weight_loader",
+            partial(
+                load_nnx_param_from_reshaped_torch,
+                permute_dims=(0, 1),
+                param_name="visual.pos_embed.weight",
+            )
+        )
         image_size = getattr(vision_config, "image_size", None)
         pos_embed_grid_h = pos_embed_grid_w = None
         if isinstance(image_size, (tuple, list)) and len(image_size) == 2:
