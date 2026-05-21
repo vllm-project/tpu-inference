@@ -57,16 +57,12 @@ def _dispatch_with_distribution(
     before it can decode), so masking is unnecessary on the decode path.
     """
     # ── Decode kernel → updates state in-place ──
-    # NOTE: pass `initial_state` through as-is. The kernels upcast to fp32
-    # on VMEM load for compute precision; HBM storage stays at the array's
-    # dtype. An `astype(jnp.float32)` here would materialize an fp32 copy
-    # of a bf16 state and undo the storage win before the kernel runs.
     o_d, state_1 = fused_decoding_gdn(
         q,
         k,
         v,
         g.astype(jnp.float32),
-        initial_state,
+        initial_state.astype(jnp.float32),
         state_indices,
         distribution,
         b,
@@ -147,22 +143,21 @@ def fused_gdn(
         initial_state: State cache ``[num_states, H_v, K, V]``.
         state_indices: ``i32[max_num_req]`` — indices into the state cache.
         distribution: ``i32[2]`` — ``(decode_end, total)``.
-        b: Raw betas ``[T, H_v]`` (sigmoid applied inside kernel).
-            ``None`` means beta=1 (no beta gating).
-        has_initial_state: Boolean tensor of shape ``[max_num_req]``.
-            ``True`` when the request's recurrent slot already holds a
-            valid prior state (chunked-prefill continuation, prefix-cache
-            hit, or running decode). ``False`` for brand-new prefills,
-            whose slot is zeroed inside the recurrent kernel before the
-            update so stale data from a previous tenant doesn't leak.
-            ``None`` (default) is treated as all-True, preserving the
-            pre-fix behaviour for callers that don't manage slot reuse.
+        b: Raw betas ``[T, H_v]`` (sigmoid applied inside kernel). ``None`` means
+          beta=1 (no beta gating).
+        has_initial_state: Boolean tensor of shape ``[max_num_req]``. ``True``
+          when the request's recurrent slot already holds a valid prior state
+          (chunked-prefill continuation, prefix-cache hit, or running decode).
+          ``False`` for brand-new prefills, whose slot is zeroed inside the
+          recurrent kernel before the update so stale data from a previous tenant
+          doesn't leak. ``None`` (default) is treated as all-True, preserving the
+          pre-fix behaviour for callers that don't manage slot reuse.
         scale: Scale factor.  Default ``K ** -0.5``.
         use_qk_l2norm_in_kernel: L2-normalize q, k inside the kernel.
         use_gate_in_kernel: Apply gate transformation inside kernel.
         A_log: Per-head log gate ``[H_v]`` float32.
-        dt_bias: Per-head bias ``[H_v]`` float32. Optional.
-            Broadcast to ``[H_v, num_lanes]`` internally.
+        dt_bias: Per-head bias ``[H_v]`` float32. Optional. Broadcast to ``[H_v,
+          num_lanes]`` internally.
         lower_bound: If set, use sigmoid gate instead of softplus.
 
     Returns:
@@ -269,14 +264,13 @@ def ragged_gated_delta_rule(
         query_start_loc: ``(num_seqs+1,)`` int32.
         state_indices: ``(num_seqs,)`` int32.
         distribution: ``(3,)`` int32 — ``(decode_end, prefill_end, mixed_end)``.
-        has_initial_state: Optional Boolean tensor of shape
-            ``(max_reqs,)``. ``True`` when the request's slot already
-            holds a valid prior recurrent state; ``False`` for brand-new
-            prefills (the recurrent kernel zeros h0 for those slots so
-            stale data from a reused mamba slot doesn't leak). ``None``
-            (default) is treated as all-True, preserving the
-            pre-PR-#2408 behaviour. Pass it when you want the same
-            stale-slot guard the chunked and ref impls already enforce.
+        has_initial_state: Optional Boolean tensor of shape ``(max_reqs,)``.
+          ``True`` when the request's slot already holds a valid prior recurrent
+          state; ``False`` for brand-new prefills (the recurrent kernel zeros h0
+          for those slots so stale data from a reused mamba slot doesn't leak).
+          ``None`` (default) is treated as all-True, preserving the pre-PR-#2408
+          behaviour. Pass it when you want the same stale-slot guard the chunked
+          and ref impls already enforce.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Key dimension.
