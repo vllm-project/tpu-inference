@@ -16,6 +16,7 @@ from tpu_inference.layers.common.attention_interface import (
 )
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
+from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.norm import JaxRmsNorm
@@ -108,7 +109,7 @@ class _VllmConfigAdapter:
         self.quant_config = vllm_config.quant_config
 
     def __getattr__(self, name):
-        return getattr(self._vllm_config, name)
+            return getattr(self._vllm_config, name)
 
 
 def _infer_pos_embed_grid_hw(num_position_embeddings: int) -> Tuple[int, int]:
@@ -478,7 +479,7 @@ def apply_rotary_pos_emb_vision(
     return x_rotated
 
 
-class Qwen3VLVisionRotaryEmbedding(nnx.Module):
+class Qwen3VLVisionRotaryEmbedding(JaxModule):
     """Rotary position embedding for vision encoder."""
 
     def __init__(self, dim: int, theta: float = 10000.0):
@@ -495,7 +496,7 @@ class Qwen3VLVisionRotaryEmbedding(nnx.Module):
 
 
 
-class Qwen3VLVisionPatchEmbed(nnx.Module):
+class Qwen3VLVisionPatchEmbed(JaxModule):
     """3D Patch Embedding for video/image input using 3D convolution."""
 
     def __init__(
@@ -554,7 +555,7 @@ class Qwen3VLVisionPatchEmbed(nnx.Module):
 
 
 
-class Qwen3VLVisionMLP(nnx.Module):
+class Qwen3VLVisionMLP(JaxModule):
     """SwiGLU-style MLP for vision encoder."""
 
     def __init__(
@@ -590,7 +591,7 @@ class Qwen3VLVisionMLP(nnx.Module):
 
 
 
-class Qwen3VLVisionAttention(nnx.Module):
+class Qwen3VLVisionAttention(JaxModule):
     """Full attention for vision encoder using sharded flash attention."""
 
     def __init__(
@@ -707,7 +708,7 @@ class Qwen3VLVisionAttention(nnx.Module):
 
 
 
-class Qwen3VLVisionBlock(nnx.Module):
+class Qwen3VLVisionBlock(JaxModule):
     """Transformer block for vision encoder."""
 
     def __init__(
@@ -761,7 +762,7 @@ class Qwen3VLVisionBlock(nnx.Module):
         return x
 
 
-class Qwen3VLVisionPatchMerger(nnx.Module):
+class Qwen3VLVisionPatchMerger(JaxModule):
     """Merge spatial patches and project to language model dimension.
 
     This module supports both:
@@ -832,7 +833,7 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
         return x
 
 
-class Qwen3VLVisionTransformer(nnx.Module):
+class Qwen3VLVisionTransformer(JaxModule):
     """Vision Transformer for Qwen3VL with DeepStack support."""
 
     def __init__(
@@ -1367,7 +1368,7 @@ class Qwen3VLModel(Qwen3Model):
 
 
 
-class Qwen3VLForConditionalGeneration(nnx.Module):
+class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
     def __init__(
         self,
         vllm_config: VllmConfig,
