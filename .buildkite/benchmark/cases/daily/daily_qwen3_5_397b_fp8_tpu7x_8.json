@@ -31,10 +31,7 @@
           "max-num-seqs": 8,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-8": 8
           },
           "max-model-len": 2048,
           "kv-cache-dtype": "fp8",
@@ -84,10 +81,7 @@
           "max-num-seqs": 8,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-8": 8
           },
           "max-model-len": 9216,
           "kv-cache-dtype": "fp8",
@@ -137,10 +131,7 @@
           "max-num-seqs": 8,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-8": 8
           },
           "max-model-len": 9216,
           "kv-cache-dtype": "fp8",

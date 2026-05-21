@@ -33,10 +33,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -82,10 +79,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -131,10 +125,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -180,10 +171,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -230,10 +218,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -280,10 +265,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -330,10 +312,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -380,10 +359,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -431,10 +407,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -480,10 +453,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -529,10 +499,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -578,10 +545,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -628,10 +592,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -677,10 +638,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -726,10 +684,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -775,10 +730,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -825,10 +777,7 @@
           "max-num-seqs": 512,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -877,10 +826,7 @@
           "max-num-seqs": 512,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -929,10 +875,7 @@
           "max-num-seqs": 512,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -981,10 +924,7 @@
           "max-num-seqs": 512,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -1034,10 +974,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -1083,10 +1020,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -1132,10 +1066,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -1181,10 +1112,7 @@
           "max-num-seqs": 1024,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -1231,10 +1159,7 @@
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
@@ -1283,10 +1208,7 @@
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -1335,10 +1257,7 @@
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 5120,
@@ -1387,10 +1306,7 @@
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v6e-8": 2,
-            "v7x-2": 2,
-            "v7x-8": 8,
-            "default": 1
+            "v7x-2": 2
           },
           "no-enable-prefix-caching": true,
           "max-model-len": 10240,
