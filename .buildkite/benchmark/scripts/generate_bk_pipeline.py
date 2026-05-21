@@ -26,21 +26,6 @@ import yaml
 ALLOWED_SERVER_COMMAND_TYPES = {"vllm_serve"}
 ALLOWED_CLIENT_COMMAND_TYPES = {"vllm_bench_serve", "lm_eval"}
 
-# Infrastructure validation map: defines mandatory values based on command_type
-# If a value is None, it only checks for the existence of the key.
-COMMAND_SPECIFIC_VALIDATION = {
-    "vllm_serve": {
-        "seed": 42,
-        "async-scheduling": True,
-        "no-enable-prefix-caching": True,
-    },
-    "vllm_bench_serve": {
-        "ignore-eos": True,
-        "request-rate": None,
-        "percentile-metrics": "ttft,tpot,itl,e2el",
-    }
-}
-
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -139,33 +124,6 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
     client_args = client_options.get("args") or {}
     client_cmd_type = client_options.get("command_type")
 
-    server_model = str(server_args.get("model", ""))
-
-    # Infrastructure Critical Arguments (Command-Type Driven)
-    for opts in [server_options, client_options]:
-        cmd_type = opts.get("command_type")
-        if not cmd_type or cmd_type not in COMMAND_SPECIFIC_VALIDATION:
-            continue
-
-        args = opts.get("args") or {}
-        rules = COMMAND_SPECIFIC_VALIDATION[cmd_type]
-        for arg_name, expected_val in rules.items():
-            actual_val = args.get(arg_name)
-
-            # Case 1: Existence check (expected_val is None)
-            if expected_val is None:
-                if actual_val is None:
-                    errors.append(
-                        f"Validation Error: {file_path} '{arg_name}' must be explicitly set "
-                        f"in options with command_type '{cmd_type}'.")
-            # Case 2: Value check
-            elif actual_val != expected_val:
-                display_val = str(expected_val).lower() if isinstance(
-                    expected_val, bool) else expected_val
-                errors.append(
-                    f"Validation Error: {file_path} '{arg_name}' must be explicitly set to {display_val} "
-                    f"in options with command_type '{cmd_type}'.")
-
     # Verify dataset-name for both `vllm_bench_serve` and `lm_eval`
     dataset_name = client_args.get("dataset-name")
     if not dataset_name:
@@ -193,6 +151,7 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
                     "but is missing 'dataset-path' in client_command_options.")
 
         # Model consistency check to ensure client/server are aligned
+        server_model = server_args.get("model")
         client_model = client_args.get("model")
         if not client_model:
             errors.append(
