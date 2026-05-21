@@ -73,6 +73,39 @@ class JaxLayerNorm(nnx.LayerNorm, JaxModule):
             return self.weight
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
+class JaxConv(nnx.Conv, JaxModule):
+    """Convolution layer that inherits from JaxModule and maps kernel to weight for compatibility."""
+
+    def __init__(self, *args, **kwargs):
+        # nnx.Conv uses `param_dtype` for parameter initialization dtype.
+        # Accept `dtype` as an alias for backward compatibility.
+        if "dtype" in kwargs and "param_dtype" not in kwargs:
+            kwargs["param_dtype"] = kwargs.pop("dtype")
+        nnx.Conv.__init__(self, *args, **kwargs)
+        
+        # For compatibility, alias kernel to weight
+        self.weight = self.kernel
+        delattr(self, 'kernel')
+
+    def __getattr__(self, name: str):
+        if name == "kernel":
+            return self.weight
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+
+
+def load_conv_weight(param: nnx.Param, torch_tensor: torch.Tensor):
+      # PyTorch layout: [out_channels, in_channels, t, h, w] -> (1152, 3, 2, 16, 16)
+      # JAX layout: [t, h, w, in_channels, out_channels] -> (2, 16, 16, 3, 1152)
+      permute_dims = (2, 3, 4, 1, 0)
+      jax_val = jnp.array(torch_tensor.permute(*permute_dims).float().cpu().numpy(), dtype=param.value.dtype)
+      param.value = jax.device_put(jax_val, param.value.sharding)
+
+
+def load_no_transpose_weight(param: nnx.Param, torch_tensor: torch.Tensor):
+    # Load weight directly without any transposition
+    jax_val = jnp.array(torch_tensor.float().cpu().numpy(), dtype=param.value.dtype)
+    param.value = jax.device_put(jax_val, param.value.sharding)
+
 def _sync_module_param_sharding(module: nnx.Module) -> None:
     for param in jax.tree_util.tree_leaves(nnx.state(module)):
         if isinstance(param, nnx.Param):
@@ -533,7 +566,7 @@ class Qwen3VLVisionPatchEmbed(JaxModule):
         self.hidden_size = hidden_size
 
         kernel_size = (temporal_patch_size, patch_size, patch_size)
-        self.proj = nnx.Conv(
+        self.proj = JaxConv(
             in_features=in_channels,
             out_features=hidden_size,
             kernel_size=kernel_size,
@@ -546,6 +579,8 @@ class Qwen3VLVisionPatchEmbed(JaxModule):
             bias_init=nnx.with_partitioning(init_fn, ("model",)),
             rngs=rngs,
         )
+        self.proj.weight.set_metadata("weight_loader", load_conv_weight)
+
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Apply 3D patch embedding.
@@ -605,9 +640,17 @@ class Qwen3VLVisionMLP(JaxModule):
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        x = self.fc1(x)
-        x = jax.nn.gelu(x, approximate=False)
-        return self.fc2(x)
+        T, B, D = x.shape
+        
+        # Flatten batch dimension to 2D for JaxLinear compatibility: (T, B, D) -> (T * B, D)
+        x_2d = x.reshape(T * B, D)
+        
+        x_2d = self.fc1(x_2d)
+        x_2d = jax.nn.gelu(x_2d, approximate=False)
+        x_2d = self.fc2(x_2d)
+        
+        # Reshape back to the original (T, B, D) format before returning
+        return x_2d.reshape(T, B, D)
 
 
 
@@ -632,7 +675,7 @@ class Qwen3VLVisionAttention(JaxModule):
         self.mesh = mesh
 
          # QKV projection
-        self.qkv_proj = JaxLinear(
+        self.qkv_projection = JaxLinear(
             hidden_size,
             3 * hidden_size,
             rngs=rngs,
@@ -679,7 +722,8 @@ class Qwen3VLVisionAttention(JaxModule):
         T, B, D = x.shape
         assert B == 1, "Vision attention currently only supports batch size 1"
 
-        qkv = self.qkv_proj(x)
+        x_2d = x.reshape(T * B, D)
+        qkv = self.qkv_projection(x_2d)
 
         q, k, v = jnp.split(qkv, 3, axis=-1)
 
@@ -721,7 +765,12 @@ class Qwen3VLVisionAttention(JaxModule):
         output = jnp.transpose(output, (2, 0, 1, 3))
         output = output.reshape(T, B, D)
 
-        output = self.proj(output)
+        # Flatten the batch dimension to 2D for JaxLinear compatibility: (T, B, D) -> (T * B, D)
+        output_2d = output.reshape(T * B, D)
+        output_2d = self.proj(output_2d)
+        
+        # Reshape back to the expected (T, B, D) format before returning
+        output = output_2d.reshape(T, B, D)
 
         return output
 
@@ -892,13 +941,14 @@ class Qwen3VLVisionTransformer(JaxModule):
         num_position_embeddings = getattr(
             vision_config, "num_position_embeddings", VISION_GRID_SIZE * VISION_GRID_SIZE
         )
-        self.pos_embed = nnx.Embed(
+        self.pos_embed = JaxEmbed(
             num_embeddings=num_position_embeddings,
             features=self.hidden_size,
             dtype=dtype,
             embedding_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rngs,
         )
+        self.pos_embed.weight.set_metadata("weight_loader", load_no_transpose_weight)
         image_size = getattr(vision_config, "image_size", None)
         pos_embed_grid_h = pos_embed_grid_w = None
         if isinstance(image_size, (tuple, list)) and len(image_size) == 2:
@@ -1394,7 +1444,7 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
         mesh: Mesh,
     ):
         self.vllm_config = vllm_config
-        self.rng = nnx.Rngs(rng_key)
+        rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
         config = vllm_config.model_config.hf_config
@@ -1403,14 +1453,14 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         self.visual = Qwen3VLVisionTransformer(
             vllm_config=vllm_config,
-            rngs=self.rng,
+            rngs=rng,
             mesh=mesh,
             norm_eps=getattr(text_config, "rms_norm_eps", 1e-6),
         )
 
         self.language_model = Qwen3VLModel(
             vllm_config=vllm_config,
-            rng=self.rng,
+            rng=rng,
             mesh=mesh,
         )
         model_config = vllm_config.model_config
@@ -1421,7 +1471,7 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                 einsum_str="TD,DV->TV",
                 kernel_shape=(hidden_size, vocab_size),
                 dtype=model_config.dtype,
-                rngs=self.rng,
+                rngs=rng,
                 quant_config=vllm_config.quant_config,
                 kernel_init=nnx.with_partitioning(
                     init_fn, (None, "model")),
@@ -1816,14 +1866,14 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                 name = name.replace("model.visual.", "visual.", 1)
                 
                 # Vision Learned Positional Embedding: weight -> embedding
-                if name == "visual.pos_embed.weight":
-                    name = "visual.pos_embed.embedding"
+                # if name == "visual.pos_embed.weight":
+                #     name = "visual.pos_embed.embedding"
                 
                 # Attention block remappings
-                elif "blocks." in name:
+                if "blocks." in name:
                     # QKV projection: name attn.qkv -> attn.qkv_proj
                     if "attn.qkv." in name:
-                        name = name.replace("attn.qkv.", "attn.qkv_proj.")
+                        name = name.replace("attn.qkv.", "attn.qkv_projection.")
                     # MLP feedforward layers: PyTorch uses linear_fc1/linear_fc2, JAX uses fc1/fc2
                     elif "mlp.linear_fc1." in name:
                         name = name.replace("mlp.linear_fc1.", "mlp.fc1.")
