@@ -42,7 +42,7 @@ class TuningKey:
     q_dtype: str  # Q activation dtype, fixed at fp8 for now
     total_num_pages: int  # Total number of pages in the cache, should be large enough to cover all sequences in the batch
     page_size_per_kv_packing: int  # Page size per KV packing, should be aligned with the kernel configuration
-    kv_packing: int  # Packing factor for KV, determined by the data type (e.g., 32 for fp8)
+    kv_packing: int  # Packing factor for KV, determined by the data type (e.g., 4 for fp8)
     max_num_seqs: int  # Maximum number of sequences in the batch, should be large enough to cover all sequences in the batch
     pages_per_seq: int  # Number of pages per sequence, determined by the maximum KV length and page size. Should be large enough to cover the longest sequence in the batch.
 
