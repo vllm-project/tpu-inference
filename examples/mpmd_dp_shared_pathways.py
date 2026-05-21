@@ -19,6 +19,19 @@ Run:
   python examples/mpmd_dp_shared_pathways.py \
     --tpu_type=<tpuv7x:NxM> --tpu_count=1
   (cluster/project/region/bucket/RM-address default to the values below.)
+  
+  
+Before re-running, make sure the RM exists:
+
+kubectl get pods | grep pathways-cluster
+
+If nothing's there, deploy it first (kubectl apply -f scripts/pathways/pathways_rm_shared.yaml) — the script's _validate_tpu_supported patch won't help if there's no RM to
+connect to.
+
+Then:
+
+python examples/mpmd_dp_shared_pathways.py
+
 """
 
 import multiprocessing
