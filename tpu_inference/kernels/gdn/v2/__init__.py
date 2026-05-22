@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Fused GDN (Gated Delta Networks) TPU kernels."""
+"""GDN v2 kernels.
 
-from tpu_inference.kernels.gdn.v1.fused_gdn_kernel_wrapper import fused_gdn
-
-__all__ = ["fused_gdn"]
+The v2 kernel has two implementations:
+- A chunked kernel implementaiton that does chunked recurrent scan for prefill
+  and mixed prefill and decode.
+- A decode only kernel only implementaiton for optimal performance for decode only requests.
+"""

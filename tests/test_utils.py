@@ -2,10 +2,13 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from jax.experimental import pallas as pl
+from jax.experimental.pallas import tpu as pltpu
 from torchax.ops.mappings import t2j as ref_t2j
 
 # Import the functions to be tested
@@ -232,3 +235,30 @@ def test_t2j_falls_back_on_exception(caplog):
 
     reference = ref_t2j(t)
     np.testing.assert_array_equal(result, reference)
+
+
+def poison_tpu_memory():
+    """Fills TPU VMEM and SMEM with NaNs to simulate garbage state."""
+    if jax.devices()[0].platform != "tpu":
+        return
+    tpu_info = pltpu.get_tpu_info()
+    # Security: Use a large but safe portion of VMEM/SMEM to avoid OOM.
+    vmem_size = (4 * 1024 * 1024) // 4  # 4MB
+    smem_size = (tpu_info.smem_capacity_bytes // 4) - 8192
+
+    def poison_kernel(in_ref, out_ref, v_scratch, s_scratch):
+        del in_ref, out_ref
+        v_scratch[...] = jnp.full_like(v_scratch, jnp.nan)
+        for i in range(s_scratch.shape[0]):
+            s_scratch[i] = 0x7FC00000  # IEEE 754 NaN bit pattern
+
+    pl.pallas_call(
+        poison_kernel,
+        out_shape=jax.ShapeDtypeStruct((1, ), jnp.float32),
+        grid=(1, ),
+        scratch_shapes=[
+            pltpu.VMEM((vmem_size // 128, 128), jnp.float32),
+            pltpu.SMEM((smem_size, ), jnp.int32),
+        ],
+        compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
+    )(jnp.zeros((1, ), dtype=jnp.float32))

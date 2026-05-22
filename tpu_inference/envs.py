@@ -308,10 +308,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
     env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
     "RAGGED_GATED_DELTA_RULE_IMPL":
-    env_with_choices("RAGGED_GATED_DELTA_RULE_IMPL", "chunked_jax_pd", [
-        "ref", "chunked_jax_pd", "chunked_kernel_pd", "chunked_kernel_p_jax_d",
-        "chunked_kernel_p_recurrent_kernel_d", "recurrent_kernel_pd"
-    ]),
+    env_with_choices(
+        "RAGGED_GATED_DELTA_RULE_IMPL",
+        "chunked_jax_pd",
+        [
+            "chunked_jax_pd", "chunked_kernel_pd",
+            "chunked_kernel_p_recurrent_kernel_d"
+        ],
+    ),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
     # kv offload to dram: skip pre-compiling swap-related jax functions
