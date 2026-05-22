@@ -90,6 +90,14 @@ fi
 echo "Successfully checked out ${VLLM_BRANCH}."
 git pull || echo "Warning: Failed to pull updates (may be on a tag)."
 
+# cherry pick https://github.com/vllm-project/vllm/pull/43038 to resolve PyPI wheel build issue caused by CUDA dependencies
+if ! GIT_COMMITTER_NAME="Buildkite Bot" GIT_COMMITTER_EMAIL="buildkite-bot@users.noreply.github.com" \
+     GIT_AUTHOR_NAME="Buildkite Bot" GIT_AUTHOR_EMAIL="buildkite-bot@users.noreply.github.com" \
+     git cherry-pick 0b59fc4; then
+    echo "ERROR: Failed to checkout upstream fix to disable build isolation."
+    exit 1
+fi
+
 # --- Step 2: Update tpu-inference version in requirements ---
 REQUIRED_LINE="tpu-inference==${TPU_INFERENCE_VERSION}"
 REQUIREMENTS_FILE="requirements/tpu.txt"
