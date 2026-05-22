@@ -645,11 +645,11 @@ def replace_set_lora(model):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
     ):
-        with torchax.default_env():
+        with torchax.default_env(), torch.no_grad():
             self._original_set_lora(index, lora_a, lora_b)
 
     def _tpu_reset_lora(self, index: int):
-        with torchax.default_env():
+        with torchax.default_env(), torch.no_grad():
             self._original_reset_lora(index)
 
     for _, module in model.named_modules():

@@ -15,7 +15,7 @@
 import functools
 import logging
 import random
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
@@ -82,6 +82,30 @@ from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extract_last_sampled_tokens)
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function, to_jax_dtype, to_torch_dtype)
+
+try:
+    import sys
+    import vllm.lora.utils as lora_utils_mod
+
+    # Patch is_base_embedding_weights to classify non-LoRA checkpoint keys as base weights
+    _orig_is_base_embedding_weights = getattr(lora_utils_mod, "is_base_embedding_weights", None)
+    def _patched_is_base_embedding_weights(name: str) -> bool:
+        lora_signatures = ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B")
+        if not any(sig in name for sig in lora_signatures):
+            return True
+        if _orig_is_base_embedding_weights is not None:
+            return _orig_is_base_embedding_weights(name)
+        return False
+    lora_utils_mod.is_base_embedding_weights = _patched_is_base_embedding_weights
+
+    # Target module updates in loaded modules to avoid broad sys.modules loops
+    for m in ("vllm.lora.utils", "vllm.lora.lora_model"):
+        if m in sys.modules:
+            mod = sys.modules[m]
+            if hasattr(mod, "is_base_embedding_weights"):
+                setattr(mod, "is_base_embedding_weights", _patched_is_base_embedding_weights)
+except Exception:
+    pass
 
 logger = init_logger(__name__)
 
@@ -625,6 +649,69 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Initialize to a constant size, and resize later after kv cache size is
         # known.
         self.device_buffer = common_utils.DeviceBuffer(initial_capacity=1024)
+
+    @contextmanager
+    def maybe_setup_dummy_loras(
+        self,
+        lora_config: Any,
+        remove_lora: bool = True,
+    ):
+        try:
+            import torchax
+            torchax.enable_globally()
+        except ImportError:
+            try:
+                import torch_xla2
+                torch_xla2.enable_globally()
+            except ImportError:
+                pass
+
+
+
+        with super().maybe_setup_dummy_loras(
+            lora_config, remove_lora
+        ) as res:
+            yield res
+
+    @contextmanager
+    def maybe_select_dummy_loras(
+        self,
+        lora_config: Any,
+        num_scheduled_tokens: Any,
+        mapping_type: Any = None,
+        num_sampled_tokens: Any = None,
+        num_active_loras: int = 0,
+    ):
+        try:
+            import torchax
+            torchax.enable_globally()
+        except ImportError:
+            try:
+                import torch_xla2
+                torch_xla2.enable_globally()
+            except ImportError:
+                pass
+
+
+
+        if mapping_type is None:
+            from vllm.lora.layers import LoRAMappingType
+            mapping_type = LoRAMappingType.LANGUAGE
+        with super().maybe_select_dummy_loras(
+            lora_config,
+            num_scheduled_tokens,
+            mapping_type=mapping_type,
+            num_sampled_tokens=num_sampled_tokens,
+            num_active_loras=num_active_loras,
+        ) as res:
+            yield res
+
+    def add_lora(self, lora_request: Any) -> bool:
+        import torch
+        from torch.utils._mode_utils import no_dispatch
+
+        with no_dispatch(), torch._C.DisableTorchFunction():
+            return super().add_lora(lora_request)
 
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
