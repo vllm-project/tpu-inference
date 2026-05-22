@@ -1505,7 +1505,7 @@ class MlaPrepareInputsAlignmentTest(jtu.JaxTestCase):
 
     def test_prepare_q_nope_inputs_pads_to_sublane_multiple(self):
         # fp8: sublane_multiple = (32 // 8) * 8 = 32.
-        # N=44 → padded to 64, T=112 → padded to 128, D=512 → already 128-aligned.
+        # N=44 padded to 64, T=112 padded to 128, D=512 already 128-aligned.
         dtype = jnp.float8_e4m3fn
         actual_N, actual_T, actual_D = 44, 112, 512
         sublane_multiple = get_dtype_packing(dtype) * 8  # 32
@@ -1535,7 +1535,8 @@ class MlaPrepareInputsAlignmentTest(jtu.JaxTestCase):
             ((0, N_padded - actual_N), (0, T_padded - actual_T),
              (0, D_padded - actual_D)),
         )
-        expected = jnp.transpose(q_ref, (1, 0, 2))  # (T_padded, N_padded, D_padded)
+        expected = jnp.transpose(q_ref,
+                                 (1, 0, 2))  # (T_padded, N_padded, D_padded)
         self.assertTrue(
             jnp.allclose(result[:actual_T, :actual_N, :actual_D],
                          expected[:actual_T, :actual_N, :actual_D]))
@@ -1547,26 +1548,27 @@ class MlaPrepareInputsAlignmentTest(jtu.JaxTestCase):
         dtype = jnp.float8_e4m3fn
         actual_N, actual_T, actual_D = 44, 112, 512
         sublane_multiple = get_dtype_packing(dtype) * 8  # 32
-        T_padded = align_to(actual_T, sublane_multiple)   # 128
-        N_padded = align_to(actual_N, sublane_multiple)   # 64
-        D_padded = align_to(actual_D, 128)                # 512
+        T_padded = align_to(actual_T, sublane_multiple)  # 128
+        N_padded = align_to(actual_N, sublane_multiple)  # 64
+        D_padded = align_to(actual_D, 128)  # 512
 
         # prepare_outputs receives (T_padded, N_padded, D_padded) — T-major layout.
         key = jax.random.PRNGKey(1)
-        out_tnd = jax.random.normal(key, (T_padded, N_padded, D_padded), dtype=dtype)
+        out_tnd = jax.random.normal(key, (T_padded, N_padded, D_padded),
+                                    dtype=dtype)
 
-        result = kernel_v2.prepare_outputs(out_tnd, actual_N, actual_T, actual_D)
+        result = kernel_v2.prepare_outputs(out_tnd, actual_N, actual_T,
+                                           actual_D)
 
         # Output must be (actual_N, actual_T, actual_D) — N-major layout.
         self.assertEqual(result.shape, (actual_N, actual_T, actual_D))
 
-        # Values must match jnp.transpose + slice.
-        expected = jnp.transpose(out_tnd, (1, 0, 2))[:actual_N, :actual_T, :actual_D]
+        expected = jnp.transpose(out_tnd,
+                                 (1, 0, 2))[:actual_N, :actual_T, :actual_D]
         self.assertTrue(jnp.allclose(result, expected))
 
     def test_prepare_q_nope_inputs_already_aligned(self):
         # When N and T are already sublane-aligned, no padding should be added.
-        # fp8: sublane_multiple=32; N=64 and T=128 are both multiples of 32.
         dtype = jnp.float8_e4m3fn
         actual_N, actual_T, actual_D = 64, 128, 512
 

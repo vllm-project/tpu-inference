@@ -221,6 +221,24 @@ class TestXposePipelineTiling(parameterized.TestCase):
                            n_tile=160,
                            m_tile=64)
 
+    def test_4d_non_sublane_tiled_axes_no_sublane_constraint(self):
+        # 4D shape (A, B, C, D) with parallel_axis=0, pipeline_axis=1,
+        # transpose_axes=(1, 0, 2, 3).
+        # Neither tiled axis is a sublane in the input or output so these axes do not
+        # need to be a multiple of `sublane_multiple` and code should not error.
+        shape = (14, 10, 128, 64)
+        input_data = jax.random.normal(jax.random.PRNGKey(0),
+                                       shape,
+                                       dtype=jnp.float8_e4m3fn)
+        result = xpose_pipeline(input_data,
+                                transpose_axes=(1, 0, 2, 3),
+                                n_tile=14,
+                                m_tile=10,
+                                parallel_axis=0,
+                                pipeline_axis=1)[0]
+        expected = jnp.transpose(input_data, (1, 0, 2, 3))
+        self.assertTrue(jnp.allclose(result, expected))
+
     def test_clamped_n_tile(self):
         # shape[0]=128, n_tile=160: 160 > 128, so n_tile is clamped to 128.
         # For fp8, sublane_multiple=32; prev_closest_valid_divisor(128, 128, multiple_of=32) = 128,

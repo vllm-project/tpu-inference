@@ -165,17 +165,29 @@ def xpose_pipeline(input: jax.Array,
     m_tile = m_tile if m_tile <= input.shape[pipeline_axis] else input.shape[
         pipeline_axis]
     # Find the best tile that (a) divides the axis evenly and (b) satisfies
-    # Pallas's sublane alignment (block dims must be multiples of
-    # get_dtype_packing(dtype) * 8). Callers are responsible for pre-aligning
-    # their axes; if no valid tile exists, ValueError is raised.
+    # Pallas's sublane alignment when the axis lands at the sublane position
+    # (ndim-2) in either the input or output VMEM block. Callers are responsible
+    # for pre-aligning their axes; if no valid tile exists, ValueError is raised.
+    sublane_pos = input.ndim - 2
+    # n_tile tiles parallel_axis: it's a sublane if parallel_axis is at ndim-2
+    # in the input block, or if after transposition it maps to ndim-2 in the
+    # output block (i.e. transpose_axes[ndim-2] == parallel_axis).
+    n_is_sublane = (parallel_axis == sublane_pos
+                    or transpose_axes[sublane_pos] == parallel_axis)
+    # m_tile tiles pipeline_axis: same logic.
+    m_is_sublane = (pipeline_axis == sublane_pos
+                    or transpose_axes[sublane_pos] == pipeline_axis)
+
     sublane_multiple = get_dtype_packing(input.dtype) * 8
+    n_multiple = sublane_multiple if n_is_sublane else 1
+    m_multiple = sublane_multiple if m_is_sublane else 1
 
     n_tile_new = prev_closest_valid_divisor(input.shape[parallel_axis],
                                             n_tile,
-                                            multiple_of=sublane_multiple)
+                                            multiple_of=n_multiple)
     m_tile_new = prev_closest_valid_divisor(input.shape[pipeline_axis],
                                             m_tile,
-                                            multiple_of=sublane_multiple)
+                                            multiple_of=m_multiple)
 
     if n_tile_new != n_tile:
         logger.warning(
@@ -233,15 +245,14 @@ def xpose_pipeline(input: jax.Array,
     shape_str = "x".join([str(i) for i in input.shape])
     transpose_str = "x".join([str(i) for i in transpose_axes])
     scope_name = f"xpose_pipeline_shape_{shape_str}_xpose_{transpose_str}_n_tile_{n_tile}_m_tile_{m_tile}_pa_{parallel_axis}_pi_{pipeline_axis}"
-    output = pl.pallas_call(xpose_kernel,
-                            grid=grid,
-                            compiler_params=pltpu.CompilerParams(
-                                dimension_semantics=("parallel", "arbitrary")),
-                            in_specs=input_specs,
-                            out_specs=output_specs,
-                            out_shape=[
-                                jax.ShapeDtypeStruct(shape=output_shape,
-                                                     dtype=input.dtype)
-                            ],
-                            name=scope_name)(input)[0]
-    return (output, )
+    return pl.pallas_call(xpose_kernel,
+                          grid=grid,
+                          compiler_params=pltpu.CompilerParams(
+                              dimension_semantics=("parallel", "arbitrary")),
+                          in_specs=input_specs,
+                          out_specs=output_specs,
+                          out_shape=[
+                              jax.ShapeDtypeStruct(shape=output_shape,
+                                                   dtype=input.dtype)
+                          ],
+                          name=scope_name)(input)

@@ -1406,8 +1406,6 @@ def prepare_outputs(
     actual_head_dim: int,
 ):
     # Physical transpose: (T, N, D) -> (N, T, D), pipelined over T.
-    # Both T and N are pre-aligned to sublane_multiple by prepare_q_nope_inputs,
-    # so xpose_pipeline runs with needs_padding=False — no extra pad or slice.
     try:
         # Tile to maximum of 160 (multi host bsz)
         # or nearest clean divisor of the number of tokens.
@@ -1423,8 +1421,7 @@ def prepare_outputs(
             f"(sublane_multiple={sublane_multiple}): {e}. "
             f"Falling back to jnp.transpose — this may be slower.")
         out = jnp.transpose(out, (1, 0, 2))
-    # Fold the T-unpadding into the existing N/D slice — one non-contiguous copy
-    # instead of a separate xpose_pipeline post-slice + this slice.
+
     return out[:actual_num_q_heads, :actual_max_num_tokens, :actual_head_dim]
 
 
