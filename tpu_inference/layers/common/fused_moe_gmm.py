@@ -95,6 +95,23 @@ def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
                 f"FusedMoE does not support {scoring_fn} scoring function")
 
 
+def _dequant_fp8_rhs(lhs, rhs, rhs_scale):
+    """Dequantize FP8 RHS in HBM (outside the Pallas kernel).
+
+    On TPU generations without native FP8 MXU (v4, v6e), gmm_v2's in-VMEM
+    dequant path (gmm_v2.py:417) lowers to a kernel whose scoped allocation
+    is ~3.5x the _gmm_vmem_estimate (e.g. 102M scoped vs 29M est at
+    tk=6144/tn=768 on v6e), tripping E1001 regardless of tile size.
+    Dequantizing here keeps f8e4m3fn out of the pallas_call entirely.
+
+    rhs: [E, K, N] fp8_e4m3fn; rhs_scale: [E, K//qbs, 1, N] f32
+    """
+    e, k, n = rhs.shape
+    rhs = rhs.astype(jnp.float32).reshape(e, rhs_scale.shape[1], -1, n)
+    rhs = (rhs * rhs_scale).reshape(e, k, n).astype(lhs.dtype)
+    return rhs
+
+
 def gmm_wrapper(lhs,
                 rhs,
                 rhs_scale,
@@ -103,6 +120,10 @@ def gmm_wrapper(lhs,
                 group_offset,
                 fuse_act=None,
                 preferred_element_type=None):
+    if (envs.MOE_DEQUANT_FP8_BEFORE_GMM and rhs_scale is not None
+            and rhs.dtype == jnp.float8_e4m3fn):
+        rhs = _dequant_fp8_rhs(lhs, rhs, rhs_scale)
+        rhs_scale = None
     gmm_res = gmm_v2(
         lhs=lhs,
         rhs=rhs,
