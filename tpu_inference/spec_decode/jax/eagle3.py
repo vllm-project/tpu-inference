@@ -132,8 +132,7 @@ class Eagle3Proposer:
             num_reqs: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray]:
         """JIT-compiled helper for preparing the input IDs for the draft model."""
 
-        def _body(query_start_loc, target_token_ids, next_token_ids,
-                  num_reqs):
+        def _body(query_start_loc, target_token_ids, next_token_ids, num_reqs):
             last_token_indices = query_start_loc[1:] - 1
             # Shift the input ids by one token.
             rolled_input_ids = jnp.roll(target_token_ids, -1, axis=0)
@@ -174,6 +173,7 @@ class Eagle3Proposer:
             exceeds_max_model_len = positions >= self.runner.max_model_len
             if exceeds_max_model_len.ndim == 2:
                 # TODO..: check 2d meaning, what is the 1d, what is the 2nd
+                # TODO: see https://screenshot.googleplex.com/C2uqEtjFGFuAvcu
                 exceeds_max_model_len_reduced = jnp.any(exceeds_max_model_len,
                                                         axis=0)
             else:
@@ -211,8 +211,7 @@ class Eagle3Proposer:
              _body,
              mesh=self.mesh,
              in_specs=(data_spec, data_spec, data_spec),
-             out_specs=(data_spec, data_spec, data_spec, data_spec,
-                        data_spec),
+             out_specs=(data_spec, data_spec, data_spec, data_spec, data_spec),
          )(positions, seq_lens, block_tables)
         return positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables
 
@@ -252,7 +251,7 @@ class Eagle3Proposer:
         next_prompt_token_id: jax.Array,
         is_in_prefill: jax.Array,
         num_rejected_tokens: jax.Array,
-        num_reqs_dp: np.ndarray, 
+        num_reqs_dp: np.ndarray,
     ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
         """Prepare drafter inputs based on target forward outputs.
 
@@ -275,10 +274,14 @@ class Eagle3Proposer:
         draft_kv_cache_group_id = num_kv_cache_groups - 1
         block_tables = self.runner.input_batch.block_table[
             draft_kv_cache_group_id].get_cpu_tensor().reshape(-1)
-        num_reqs = device_array(
-            self.mesh, num_reqs_dp, sharding=PartitionSpec(ShardingAxisName.ATTN_DATA))
-        block_tables = device_array(
-            self.mesh, block_tables, sharding=PartitionSpec(ShardingAxisName.ATTN_DATA))
+        num_reqs = device_array(self.mesh,
+                                num_reqs_dp,
+                                sharding=PartitionSpec(
+                                    ShardingAxisName.ATTN_DATA))
+        block_tables = device_array(self.mesh,
+                                    block_tables,
+                                    sharding=PartitionSpec(
+                                        ShardingAxisName.ATTN_DATA))
         return self._prepare_inputs(
             state=self.state,
             num_reqs=num_reqs,
@@ -382,8 +385,7 @@ class Eagle3Proposer:
              in_specs=(data_spec, ) * 8,
              out_specs=(data_spec, ) * 4,
          )(is_in_prefill, next_prompt_token_id, last_sampled_token_id,
-           query_start_loc, seq_lens, num_reqs, num_rejected_tokens,
-           input_ids)
+           query_start_loc, seq_lens, num_reqs, num_rejected_tokens, input_ids)
 
         attn_metadata = replace(attn_metadata, block_tables=block_tables)
         return self._filter_token_and_prepare_initial_inputs(
@@ -410,7 +412,7 @@ class Eagle3Proposer:
                           data_spec)
 
         def _select(input_ids, token_indices, input_positions,
-                           aux_hidden_states):
+                    aux_hidden_states):
             target_token_ids = input_ids[token_indices]
             # Update positions to match the selected tokens.
             if input_positions.ndim == 2:
@@ -449,13 +451,15 @@ class Eagle3Proposer:
         hidden_states: jax.Array,
         last_token_indices: jax.Array,
     ) -> jax.Array:
+
         def _select(hidden_states, last_token_indices):
             return hidden_states[last_token_indices]
 
         sample_hidden_states = jax.shard_map(
             _select,
             mesh=self.mesh,
-            in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA), PartitionSpec(ShardingAxisName.ATTN_DATA)),
+            in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA),
+                      PartitionSpec(ShardingAxisName.ATTN_DATA)),
             out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA),
         )(hidden_states, last_token_indices)
         return self._get_draft_token_ids(state, sample_hidden_states)
@@ -466,7 +470,9 @@ class Eagle3Proposer:
         logits = self.compute_logits_fn(state, hidden_states, lora_metadata)
         draft_token_ids = jnp.argmax(logits, axis=-1)
         return lax.with_sharding_constraint(
-            draft_token_ids, NamedSharding(self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA)))
+            draft_token_ids,
+            NamedSharding(self.mesh,
+                          PartitionSpec(ShardingAxisName.ATTN_DATA)))
 
     def _select_inputs_for_loop_speculation(
             self, state: nnx.State, positions: jax.Array, residual: jax.Array,

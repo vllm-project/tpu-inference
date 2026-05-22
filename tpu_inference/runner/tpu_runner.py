@@ -819,6 +819,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             kv_connector_output, logits_indices_selector, padded_num_reqs,
             expert_indices, full_hidden_states)
 
+    # need to examine
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
         # device_get should return immediately as we have scheduled it in previous function call.
@@ -891,7 +892,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + 1
             if req_idx in scheduler_output.scheduler_output.scheduled_spec_decode_tokens:
-                end_idx += len(scheduler_output.scheduler_output.scheduled_spec_decode_tokens[req_idx])
+                end_idx += len(scheduler_output.scheduler_output.
+                               scheduled_spec_decode_tokens[req_idx])
             assert end_idx <= self.max_model_len, (
                 "Sampled token IDs exceed the max model length. "
                 f"Total number of tokens: {end_idx} > max_model_len: "
@@ -1112,6 +1114,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logits, spec_decode_metadata.target_logits_indices)
             data_parallel_attn_sharding = NamedSharding(
                 self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+            # TODO: don't put `draft_token_ids` as a variable of spec_decode_metadata
+            # instead, extract it from `input_ids` and indices from `spec_decode_metadata`
+            # at here. This can simply some async + spec decoding logic in prepare_inputs
             next_tokens = self.rejection_sampler(
                 draft_token_ids=spec_decode_metadata.draft_token_ids,
                 num_draft_tokens=spec_decode_metadata.draft_lengths,
@@ -1432,10 +1437,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_num_reqs_per_dp_rank, logits_indices_selector,
                 max_num_reqs_per_dp_rank)
 
+    # TODO: need to examine
     def _prepare_async_token_substitution_indices(
             self, req_ids_dp, scheduled_tokens_per_dp_rank,
             padded_num_scheduled_tokens_per_dp_rank,
-            num_draft_tokens_per_dp_rank, dp_size):
+            num_draft_tokens_per_dp_rank, dp_size, spec_decode_metadata):
         """Prepare token substitution indices for async scheduling."""
         # For input_ids substitution.
         token_in_tpu_cur_input_indices_dp = {}
@@ -1453,7 +1459,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[
                 dp_rank]
-            num_draft_tokens = num_draft_tokens_per_dp_rank.get(dp_rank, {})
+            num_draft_tokens = num_draft_tokens_per_dp_rank[dp_rank]
             token_in_tpu_cur_input_indices_list = token_in_tpu_cur_input_indices_dp[
                 dp_rank]
             token_in_tpu_pre_next_tokens_indices_list = token_in_tpu_pre_next_tokens_indices_dp[
@@ -1465,13 +1471,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
             acc_cur_len = token_offset
-            # TODO(gxd3): support spec-decoding with DP.
-            draft_tokens_acc_cur_len = 0
+            draft_tokens_acc_cur_len = spec_decode_metadata.draft_token_ids.shape[
+                0] // dp_size * dp_rank
 
             for i, req_id in enumerate(req_ids_dp[dp_rank]):
                 acc_cur_len += num_scheduled_tokens_per_req[i]
-                if dp_rank == 0:
-                    draft_tokens_acc_cur_len += num_draft_tokens[i]
+                draft_tokens_acc_cur_len += num_draft_tokens[i]
                 if req_id not in self._pre_async_results.placeholder_req_id_to_index:
                     continue
 
@@ -1484,6 +1489,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     max_num_spec_tokens = self.speculative_config.num_speculative_tokens
                     assert num_scheduled_tokens_per_req[
                         i] <= max_num_spec_tokens + 1
+                    # TODO: placeholder_req_id_to_index can't be used?
+                    # TODO: consider support DP for non-async scheduling case first, later follow up on async.
+
                     idx = self._pre_async_results.placeholder_req_id_to_index[
                         req_id]
 
@@ -1504,6 +1512,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return token_in_tpu_cur_input_indices_dp, token_in_tpu_pre_next_tokens_indices_dp, draft_token_in_tpu_cur_indices_dp, draft_token_in_prev_next_tokens_indices_dp
 
+    # need to examine
     def _apply_async_token_substitution(self, input, next_tokens_in_tpu,
                                         token_in_tpu_cur_input_indices,
                                         token_in_tpu_pre_next_tokens_indices):
@@ -1576,6 +1585,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh, (seq_lens_subtract_indices, positions_subtract_indices))
 
         with self.maybe_forbid_compile:
+            # TODO: need to examine
             seq_lens, positions = _subtract_num_rejected_tokens_fn(
                 seq_lens, positions,
                 self._pre_async_results.spec_decode_num_rejected_tokens,

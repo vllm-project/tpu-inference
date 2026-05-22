@@ -201,13 +201,12 @@ class RejectionSampler:
         )
         return output_token_ids
 
-    # TODO: need adjustmnet......
     @staticmethod
     def parse_output(
         output_token_ids: jnp.ndarray,
         vocab_size: int,
         num_draft_tokens_cpu: np.ndarray,
-        batch_size: int, # -->
+        batch_size: int,
         padded_tokens_length: int,
         dp_size: int,
         req_indices_dp: dict,
@@ -236,26 +235,35 @@ class RejectionSampler:
         padded_tokens_length = padded_tokens_length // dp_size
         per_rank_output_size = output_token_ids_np_dp.size // dp_size
 
-
         # TODO: need to reorder reqs to input_batch's order at the end
-        # similar to logit_indice_selector.....
+        # similar to logit_indice_selector
+        # should be done.
 
-        per_rank_outputs = []
+        outputs = [[] for _ in range(batch_size)]
         for rank in range(dp_size):
-            output_token_ids_np = output_token_ids_np_dp[rank * per_rank_output_size : (1 + rank) * per_rank_output_size - 1]
+            output_token_ids_np = output_token_ids_np_dp[rank *
+                                                         per_rank_output_size:
+                                                         (1 + rank) *
+                                                         per_rank_output_size]
+            assert output_token_ids_np.size == per_rank_output_size
 
             # Split main tokens and bonus tokens
             main_tokens = output_token_ids_np[:
-                                          padded_tokens_length]  # [num_tokens]
+                                              padded_tokens_length]  # [num_tokens]
             bonus_tokens = output_token_ids_np[
                 padded_tokens_length:]  # [batch_size]
+            padded_num_seqs_per_rank = bonus_tokens.size
+            cur_rank_num_draft_tokens = num_draft_tokens_cpu[
+                rank * padded_num_seqs_per_rank:(rank + 1) *
+                padded_num_seqs_per_rank]
 
             # Reconstruct per-sequence outputs
-            outputs = []
-            start_idx = 0
 
-            for i in range(batch_size):
-                seq_length = int(num_draft_tokens_cpu[i])
+            start_idx = 0
+            req_indices = req_indices_dp[rank]
+            for i, req_idx in enumerate(req_indices):
+
+                seq_length = int(cur_rank_num_draft_tokens[i])
                 end_idx = start_idx + seq_length
 
                 # Get main tokens for this sequence
@@ -269,11 +277,12 @@ class RejectionSampler:
                 # Add bonus token if it's valid
                 bonus_token = bonus_tokens[i]
                 if bonus_token != PLACEHOLDER_TOKEN_ID and bonus_token < vocab_size:
-                    seq_tokens = np.concatenate([valid_main_tokens, [bonus_token]])
+                    seq_tokens = np.concatenate(
+                        [valid_main_tokens, [bonus_token]])
                 else:
                     seq_tokens = valid_main_tokens
 
-                outputs.append(seq_tokens.tolist())
+                outputs[req_idx] = seq_tokens.tolist()
                 start_idx = end_idx
 
         return outputs
