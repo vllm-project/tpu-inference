@@ -174,6 +174,13 @@ def gdn_attention_core_tpu(
 @GatedDeltaNetAttention.register_oot
 class VllmGatedDeltaNetAttention(GatedDeltaNetAttention):
 
+    def get_state_shape(
+        self,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # Dummy implementation to satisfy the abstract base class constraint.
+        # Upstream subclasses (e.g. QwenGatedDeltaNetAttention) override this.
+        return ((), (), (), ())
+
     def forward(
         self,
         hidden_states: torch.Tensor,
