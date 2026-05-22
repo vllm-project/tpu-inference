@@ -135,8 +135,8 @@ class KernelTunerBase(ABC):
             from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
                 SpannerStorageManager
             self.storage_manager = SpannerStorageManager()
-        self._KERNEL_INPUTS_CACHE = {}
-        self._TUNING_KEY = None
+        self._kernel_inputs_cache = {}
+        self._tuning_key = None
         self.tuner_config = tuner_config
         self.run_config = run_config
 
@@ -357,8 +357,8 @@ class KernelTunerBase(ABC):
         Returns:
             The kernel inputs corresponding to the given tuning key as a dictionary.
         """
-        if self._TUNING_KEY and tuning_key == self._TUNING_KEY:
-            return self._KERNEL_INPUTS_CACHE
+        if self._tuning_key and tuning_key == self._tuning_key:
+            return self._kernel_inputs_cache
         raise NotImplementedError(
             "Specific kernel should implement this to generate the inputs to kernel based on the tuning key with caching."
         )

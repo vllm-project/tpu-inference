@@ -102,11 +102,6 @@ def align_to(unpadded_dim, pad_multiple):
     return (unpadded_dim + pad_multiple - 1) // pad_multiple * pad_multiple
 
 
-def cdiv(a, b):
-    assert b != 0
-    return (a + b - 1) // b
-
-
 def enable_megacore() -> None:
     global _megacore
     _megacore = True

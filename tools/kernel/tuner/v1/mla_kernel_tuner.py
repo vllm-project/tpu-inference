@@ -19,6 +19,7 @@ import time
 import jax
 import jax.numpy as jnp
 import numpy as np
+from vllm.utils.math_utils import cdiv
 
 from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
                                                             RunConfig,
@@ -26,7 +27,7 @@ from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
                                                             TuningCase,
                                                             TuningStatus)
 from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
-from tpu_inference.utils import align_to, cdiv, get_dtype_packing
+from tpu_inference.utils import align_to, get_dtype_packing
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -143,6 +144,8 @@ def _generate_mla_inputs(
     new_kv_c = gen_random((total_q_len, lkv_dim), kv_dtype)
     new_k_pe = gen_random((total_q_len, r_dim), kv_dtype)
 
+    assert page_size % packing == 0, f"page_size ({page_size}) must be a multiple of packing ({packing})"
+
     cache_kv = gen_random(
         (total_num_pages, page_size // packing, packing, padded_kv_dim),
         kv_dtype,
@@ -254,16 +257,14 @@ class MlaKernelTuner(KernelTunerBase):
         return tuning_cases
 
     def generate_inputs(self, tuning_key: TuningKey):
-        # Generate some mock inputs for the kernel based on the tuning key.
-        if self._TUNING_KEY and tuning_key == self._TUNING_KEY:
-            return self._KERNEL_INPUTS_CACHE
-        self._TUNING_KEY = tuning_key
+        # Generate inputs for the kernel based on the tuning key.
+        if self._tuning_key and tuning_key == self._tuning_key:
+            return self._kernel_inputs_cache
+        self._tuning_key = tuning_key
         # recover kv_len from tuning_key
         kv_len = tuning_key.pages_per_seq * tuning_key.page_size_per_kv_packing * tuning_key.kv_packing
-        key = jax.random.PRNGKey(0)
-        seed = int(np.array(key).flatten()[0])
-        rng = np.random.default_rng(seed)
-        self._KERNEL_INPUTS_CACHE = _generate_mla_inputs(
+        rng = np.random.default_rng(0)
+        self._kernel_inputs_cache = _generate_mla_inputs(
             # the q_len and kv_len in the seq_lens impact the kernel run time so this need to set correctly according to benchmark
             seq_lens=[[1, kv_len] for _ in range(tuning_key.max_num_seqs)],
             num_heads=tuning_key.actual_num_q_heads,
@@ -277,27 +278,26 @@ class MlaKernelTuner(KernelTunerBase):
             rng=rng,
         )
 
-        return self._KERNEL_INPUTS_CACHE
+        return self._kernel_inputs_cache
 
     def run(self,
             tuning_key: TuningKey,
             tunable_params: TunableParams,
             iters: int = 1) -> tuple[TuningStatus, float, float]:
         logger.debug(
-            f"Running mock kernel with tuning_key={tuning_key}, tunable_params={tunable_params}, iters={iters}"
+            f"Running mla kernel with tuning_key={tuning_key}, tunable_params={tunable_params}, iters={iters}"
         )
         input_cache = self.generate_inputs(tuning_key)
-        start_ns = time.perf_counter_ns()
         try:
-            cache_kv = input_cache['cache_kv']
+            start_ns = time.perf_counter_ns()
             for _ in range(iters):
-                _, cache_kv = jax.block_until_ready(
+                _, input_cache['cache_kv'] = jax.block_until_ready(
                     mla_ragged_paged_attention(
                         ql_nope=input_cache['ql_nope'],
                         q_pe=input_cache['q_pe'],
                         new_kv_c=input_cache['new_kv_c'],
                         new_k_pe=input_cache['new_k_pe'],
-                        cache_kv=cache_kv,
+                        cache_kv=input_cache['cache_kv'],
                         kv_lens=input_cache['kv_lens'],
                         page_indices=input_cache['page_indices'],
                         cu_q_lens=input_cache['cu_q_lens'],
@@ -321,14 +321,14 @@ class MlaKernelTuner(KernelTunerBase):
                     ))
             end_ns = time.perf_counter_ns()
             latency_ns = (end_ns - start_ns)
-            return TuningStatus.SUCCESS, latency_ns / iters, latency_ns  # status, average latency, total latency
+            return TuningStatus.SUCCESS, latency_ns // iters, latency_ns  # status, average latency, total latency
         except Exception as err:
             if "RESOURCE_EXHAUSTED:" in str(err):
                 logger.warning(
-                    f"[Debug] Kernel run failed with OOM for {tuning_key=}, {tunable_params=}"
+                    f"Kernel run failed with OOM for {tuning_key=}, {tunable_params=}"
                 )
                 return TuningStatus.FAILED_OOM, float("inf"), float("inf")
             logger.warning(
-                f"[Debug] Failed with {tuning_key=}, {tunable_params=}, got error: {err=}"
+                f"Failed with {tuning_key=}, {tunable_params=}, got error: {err=}"
             )
             return TuningStatus.UNKNOWN_ERROR, float("inf"), float("inf")
