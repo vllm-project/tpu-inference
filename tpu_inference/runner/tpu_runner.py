@@ -879,7 +879,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _update_placeholder(self,
                             discard_sampled_tokens_req_indices,
                             request_seq_lens,
-                            spec_decode_metadata,
+                            scheduler_output: "VllmSchedulerOutput",
                             logits_indices_selector=None):
         placeholder_req_id_to_index: dict[str, int] = {}
         discard_sampled_tokens_req_indices_set = set(
@@ -890,8 +890,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + 1
-            if spec_decode_metadata is not None:
-                end_idx += spec_decode_metadata.draft_lengths_cpu[req_idx]
+            if req_idx in scheduler_output.scheduler_output.scheduled_spec_decode_tokens:
+                end_idx += len(scheduler_output.scheduler_output.scheduled_spec_decode_tokens[req_idx])
             assert end_idx <= self.max_model_len, (
                 "Sampled token IDs exceed the max model length. "
                 f"Total number of tokens: {end_idx} > max_model_len: "
@@ -1095,10 +1095,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     tpu_sampling_metadata,
                 )
         else:
-            # TODO(gxd3): wrap the spec decode sampling code block
-            # under maybe_forbid_compile as well.
-            # Currently when spec-decoding is enabled, serving-time
-            # jit-recompile might still happen.
             if tpu_sampling_metadata.do_sampling:
                 bonus_rng, rejection_rng = jax.random.split(step_rng)
             else:
@@ -1114,6 +1110,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             )
             target_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.target_logits_indices)
+            data_parallel_attn_sharding = NamedSharding(
+                self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
             next_tokens = self.rejection_sampler(
                 draft_token_ids=spec_decode_metadata.draft_token_ids,
                 num_draft_tokens=spec_decode_metadata.draft_lengths,
@@ -1121,6 +1119,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 target_logits=target_logits,
                 bonus_token_ids=bonus_token_ids,
                 sampling_metadata=tpu_sampling_metadata,
+                sharding=data_parallel_attn_sharding,
                 key=rejection_rng,
             )
 
@@ -1129,6 +1128,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             if tpu_sampling_metadata.logprobs:
                 logits = processed_logits if self.model_config.logprobs_mode == "processed_logprobs" else logits
+                if self.speculative_config:
+                    assert "logprobs and spec decoding not yet compatible"
                 logprobs = self._compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
@@ -1653,11 +1654,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 num_draft_tokens[req_idx] = len(draft_token_ids)
 
-            num_sampled_tokens = num_draft_tokens + 1
-            total_sampled_tokens = np.sum(num_sampled_tokens)
-            padded_logits_length = runner_utils.get_padded_token_len(
-                self.num_logits_paddings, total_sampled_tokens)
-            logits_indices_shape = (padded_logits_length, )
+            padded_logits_length = None
+            for dp_rank in range(dp_size):
+                cur_rank_req_idxs = req_indices_dp[dp_rank]
+                cur_rank_num_draft_tokens = num_draft_tokens[cur_rank_req_idxs]
+
+                num_sampled_tokens = cur_rank_num_draft_tokens + 1
+                total_sampled_tokens = np.sum(num_sampled_tokens)
+                if padded_logits_length is None:
+                    padded_logits_length = runner_utils.get_padded_token_len(
+                        self.num_logits_paddings, total_sampled_tokens)
+                else:
+                    padded_logits_length = max(
+                        padded_logits_length,
+                        runner_utils.get_padded_token_len(
+                            self.num_logits_paddings, total_sampled_tokens))
+
+            assert padded_logits_length is not None
+            logits_indices_shape = (padded_logits_length * dp_size, )
         else:
             logits_indices_shape = (padded_num_reqs, )
 
@@ -1790,10 +1804,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if use_spec_decode:
             spec_decode_metadata = (
                 self.speculative_decoding_manager.get_spec_decode_metadata(
-                    num_draft_tokens,
-                    query_start_loc_view[1:num_reqs + 1],
-                    padded_num_reqs,
-                    input_ids_view,
+                    num_draft_tokens_dp=num_draft_tokens,
+                    input_ids=input_ids_view,
+                    dp_size=dp_size,
+                    req_indices_dp=req_indices_dp,
+                    query_start_loc=query_start_loc_view,
+                    padded_num_reqs_per_dp_rank=padded_num_reqs_per_dp_rank,
+                    padded_logits_length_dp_rank=logits_indices_shape //
+                    dp_size,
+                    max_num_reqs_per_dp_rank=max_num_reqs_per_dp_rank,
+                    padded_num_scheduled_tokens_per_dp_rank=
+                    padded_num_scheduled_tokens_per_dp_rank,
+                    sharding=data_parallel_attn_sharding,
                 ))
             logits_indices_view[:] = spec_decode_metadata.final_logits_indices
 
@@ -1912,8 +1934,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_num_reqs=attn_padded_num_reqs,
             )
 
-            # This is for making these cpu buffers hidden during tracing
-            attention_metadata_gid.query_start_loc_cpu = query_start_loc_view
             return attention_metadata_gid
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]

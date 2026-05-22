@@ -22,14 +22,41 @@ from tpu_inference.runner.utils import SpecDecodeMetadata
 PLACEHOLDER_TOKEN_ID = -1
 
 
-@jax.jit(
-    static_argnames=["num_speculative_tokens", "max_num_seq", "vocab_size"])
+@jax.jit(static_argnames=[
+    "num_speculative_tokens", "max_num_reqs_per_dp_rank", "vocab_size",
+    "sharding"
+])
 def extract_last_sampled_tokens(
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         sampled_token_ids: jnp.ndarray, num_speculative_tokens: int,
-        vocab_size: int, max_num_seq: int) -> tuple[jnp.ndarray, jnp.ndarray]:
+        vocab_size: int, max_num_reqs_per_dp_rank: int,
+        sharding: jax.sharding.NamedSharding
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+
+    def _body(draft_lengths, sampled_token_ids):
+        return _extract_last_sampled_tokens(draft_lengths, sampled_token_ids,
+                                            num_speculative_tokens, vocab_size,
+                                            max_num_reqs_per_dp_rank)
+
+    data_spec = sharding.spec
+    return jax.shard_map(
+        _body,
+        mesh=sharding.mesh,
+        in_specs=(data_spec if spec_decode_metadata is not None else None,
+                  data_spec),
+        out_specs=(data_spec, data_spec),
+    )(spec_decode_metadata.draft_lengths
+      if spec_decode_metadata is not None else None, sampled_token_ids)
+
+
+@jax.jit(
+    static_argnames=["num_speculative_tokens", "max_num_seq", "vocab_size"])
+def _extract_last_sampled_tokens(
+        draft_lengths: Optional[jnp.ndarray], sampled_token_ids: jnp.ndarray,
+        num_speculative_tokens: int, vocab_size: int,
+        max_num_seq: int) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Extract the last sampled token and number rejected tokens per seq. """
-    if spec_decode_metadata is None:
+    if draft_lengths is None:
         # No speculative decoding in the previous step.
         batch_size = sampled_token_ids.shape[0]
         last_sampled_tokens = jnp.pad(sampled_token_ids,
@@ -38,9 +65,9 @@ def extract_last_sampled_tokens(
         num_rejected_tokens = jnp.zeros(max_num_seq, dtype=jnp.int32)
         return last_sampled_tokens, num_rejected_tokens
 
-    # If `spec_decode_metadata` is not None, `sampled_token_ids`
+    # If `draft_lengths` is not None, `sampled_token_ids`
     # is the output of the rejection sampler.
-    num_draft_tokens = spec_decode_metadata.draft_lengths
+    num_draft_tokens = draft_lengths
     batch_size = num_draft_tokens.shape[0]
     index_range = jax.lax.broadcasted_iota(
         jnp.int32, (batch_size, num_speculative_tokens), 1)

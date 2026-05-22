@@ -71,6 +71,7 @@ class SpeculativeDecodingManager:
             # For n-gram based proposer, the drafter run on host
             # cpu, therefore, we need to first copy the sampled
             # token ids from device to host, then run the ngram proposer.
+            # TODO: update runner_utils.host_extract_sampled_tokens to handle DP > 1
             valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
                 self.runner, spec_decode_metadata, sampled_output,
                 logits_indices_selector, discard_sampled_tokens_req_indices,
@@ -109,6 +110,9 @@ class SpeculativeDecodingManager:
         input_ids: jnp.ndarray,
         async_scheduling: bool,
         hidden_states: jnp.ndarray,
+        req_indices_dp: dict,
+        dp_size: int,
+        max_num_reqs_per_dp_rank: int
     ) -> list[list[int]] | jnp.ndarray:
         assert isinstance(self.runner.drafter, Eagle3Proposer)
         if isinstance(attn_metadata, dict):
@@ -131,19 +135,26 @@ class SpeculativeDecodingManager:
         max_num_seqs = attn_metadata.seq_lens.shape[0]
         next_prompt_token_id = np.zeros(max_num_seqs, dtype=np.int32)
         is_in_prefill = np.zeros(max_num_seqs, dtype=np.int32)
-        for i in discard_sampled_tokens_req_indices:
-            # Partial prefill
-            # Get the next token id from the request state.
-            req_id = req_ids[i]
-            req_state = self.runner.requests[req_id]
-            seq_len = (req_state.num_computed_tokens +
+
+        discard_sampled_tokens_req_indices_set = set(discard_sampled_tokens_req_indices)
+        num_reqs_dp = np.zeros((dp_size,), dtype=np.int32)
+        for rank in range(dp_size):
+            req_indices = req_indices_dp[rank]
+            num_reqs_dp[rank] = len(req_indices)
+            for j, req_idx in enumerate(req_indices):
+                if req_idx in discard_sampled_tokens_req_indices_set:
+                    # Partial prefill
+                    # Get the next token id from the request state.
+                    req_id = req_ids[req_idx]
+                    req_state = self.runner.requests[req_id]
+                    seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
-            next_token_id = req_state.get_token_id(seq_len)
-            next_prompt_token_id[i] = next_token_id
-            is_in_prefill[i] = 1
+                    next_token_id = req_state.get_token_id(seq_len)
+                    next_prompt_token_id[j + rank * max_num_reqs_per_dp_rank] = next_token_id
+                    is_in_prefill[j + rank * max_num_reqs_per_dp_rank] = 1
 
         next_prompt_token_id, is_in_prefill = device_array(
-            self.runner.mesh, (next_prompt_token_id, is_in_prefill))
+            self.runner.mesh, (next_prompt_token_id, is_in_prefill), sharding=(PartitionSpec(ShardingAxisName.ATTN_DATA)))
 
         if self.runner.speculative_config.method == "mtp":
             aux_hidden_states_for_drafter = (hidden_states, )
@@ -158,6 +169,7 @@ class SpeculativeDecodingManager:
             next_prompt_token_id,
             is_in_prefill,
             num_rejected_tokens,
+            num_reqs_dp,
         )
 
         self.runner.kv_caches, draft_token_ids = self.runner.drafter.propose(
@@ -180,12 +192,18 @@ class SpeculativeDecodingManager:
 
     def get_spec_decode_metadata(
         self,
-        num_draft_tokens: np.ndarray,
-        cu_num_scheduled_tokens: np.ndarray,
-        padded_num_reqs: int,
+        num_draft_tokens_dp: np.ndarray,
         input_ids: np.ndarray,
+        dp_size: int,
+        req_indices_dp: dict,
+        query_start_loc: np.ndarray,
+        padded_num_reqs_per_dp_rank: int,
+        padded_logits_length_dp_rank: int,
+        max_num_reqs_per_dp_rank: int,
+        padded_num_scheduled_tokens_per_dp_rank: int,
+        sharding,
     ) -> SpecDecodeMetadata:
-        # Inputs:
+        # (dp_size = 1) Example Inputs:
         # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
         # num_draft_tokens:         [  3,   0,   2,   0,   1]
         # Outputs:
@@ -197,68 +215,88 @@ class SpeculativeDecodingManager:
 
         # Compute the logits indices.
         # [4, 1, 3, 1, 2]
-        num_sampled_tokens = num_draft_tokens + 1
+        out_logits_indices = []
+        out_target_logits_indices = []
+        out_draft_token_ids = []
+        out_bonus_logits_indices = []
+        out_draft_lengths = []
 
-        # Step 1. cu_num_sampled_tokens: [4, 5, 8, 9, 11]
-        # arange: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
-        cu_num_sampled_tokens = np.cumsum(num_sampled_tokens)
-        arange = np.concatenate(
-            [self.runner.arange_cpu[:n] for n in num_sampled_tokens])
-        # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
-        logits_indices = np.repeat(
-            cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
-        # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
-        logits_indices += arange
-        # Compute the bonus logits indices.
-        bonus_logits_indices = cu_num_sampled_tokens - 1
+        def _pad(arr: np.ndarray, target_len: int) -> np.ndarray:
+            pad_len = target_len - arr.shape[0]
+            if pad_len == 0:
+                return arr
+            return np.concatenate([arr, np.zeros(pad_len, dtype=np.int32)])
 
-        # Compute the draft logits indices.
-        # arange: [0, 1, 2, 0, 1, 0]
-        arange = np.concatenate(
-            [self.runner.arange_cpu[:n] for n in num_draft_tokens])
-        # [0, 0, 0, 5, 5, 9]
-        target_logits_indices = np.repeat(
-            cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
-        # [0, 1, 2, 5, 6, 9]
-        target_logits_indices += arange
+        for dp_rank in range(dp_size):
+            per_rank_req_idxs = req_indices_dp[dp_rank]
+            n = len(per_rank_req_idxs)
 
-        # Compute the draft token ids.
-        # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
-        draft_token_ids = input_ids[logits_indices]
-        draft_token_ids = draft_token_ids[target_logits_indices + 1]
-        padded_logits_length = runner_utils.get_padded_token_len(
-            self.runner.num_logits_paddings, logits_indices.shape[0])
-        padded_logits_indices = np.concatenate([
-            logits_indices,
-            np.zeros(padded_logits_length - logits_indices.shape[0],
-                     dtype=np.int32)
-        ])
+            if n > 0:
+                cur_rank_req_idxs = req_indices_dp[dp_rank]
+                num_draft_tokens = num_draft_tokens_dp[cur_rank_req_idxs]
+                num_sampled_tokens = num_draft_tokens + 1
 
-        assert bonus_logits_indices.shape[0] <= padded_num_reqs, (
-            f"bonus_logits_indices.shape[0]={bonus_logits_indices.shape[0]} "
-            f"padded_num_reqs={padded_num_reqs}")
+                req_offset = dp_rank * max_num_reqs_per_dp_rank
+                local_query_start_loc = query_start_loc[
+                    req_offset + dp_rank:req_offset +
+                    max_num_reqs_per_dp_rank + dp_rank + 1]
+                cu_num_scheduled_tokens = local_query_start_loc[1:n + 1]
 
-        padded_bonus_logits_indices = np.concatenate([
-            bonus_logits_indices,
-            np.zeros(padded_num_reqs - bonus_logits_indices.shape[0],
-                     dtype=np.int32)
-        ])
-        padded_num_draft_tokens = np.concatenate([
-            num_draft_tokens,
-            np.zeros(padded_num_reqs - num_draft_tokens.shape[0],
-                     dtype=np.int32)
-        ])
-        padded_draft_token_ids = np.concatenate([
-            draft_token_ids,
-            np.zeros(padded_logits_length - draft_token_ids.shape[0],
-                     dtype=np.int32)
-        ])
-        padded_target_logits_indices = np.concatenate([
-            target_logits_indices,
-            np.zeros(padded_logits_length - target_logits_indices.shape[0],
-                     dtype=np.int32)
-        ])
+                # Step 1. cu_num_sampled_tokens: [4, 5, 8, 9, 11]
+                # arange: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
+                cu_num_sampled_tokens = np.cumsum(num_sampled_tokens)
+                arange = np.concatenate(
+                    [self.runner.arange_cpu[:n] for n in num_sampled_tokens])
+                # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
+                logits_indices = np.repeat(
+                    cu_num_scheduled_tokens - num_sampled_tokens,
+                    num_sampled_tokens)
+                # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
+                logits_indices += arange
+                # Compute the bonus logits indices.
+                bonus_logits_indices = cu_num_sampled_tokens - 1
 
+                # Compute the draft logits indices.
+                # arange: [0, 1, 2, 0, 1, 0]
+                arange = np.concatenate(
+                    [self.runner.arange_cpu[:n] for n in num_draft_tokens])
+                # [0, 0, 0, 5, 5, 9]
+                target_logits_indices = np.repeat(
+                    cu_num_sampled_tokens - num_sampled_tokens,
+                    num_draft_tokens)
+                # [0, 1, 2, 5, 6, 9]
+                target_logits_indices += arange
+
+                # Compute the draft token ids.
+                # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
+                draft_token_ids = input_ids[
+                    logits_indices +
+                    dp_rank * padded_num_scheduled_tokens_per_dp_rank]
+                draft_token_ids = draft_token_ids[target_logits_indices + 1]
+            else:
+                logits_indices = np.array([], dtype=np.int32)
+                target_logits_indices = np.array([], dtype=np.int32)
+                bonus_logits_indices = np.array([], dtype=np.int32)
+                draft_token_ids = np.array([], dtype=np.int32)
+                num_draft_tokens = np.array([], dtype=np.int32)
+
+            out_logits_indices.append(
+                _pad(logits_indices, padded_logits_length_dp_rank))
+            out_target_logits_indices.append(
+                _pad(target_logits_indices, padded_logits_length_dp_rank))
+            out_draft_token_ids.append(
+                _pad(draft_token_ids, padded_logits_length_dp_rank))
+            out_bonus_logits_indices.append(
+                _pad(bonus_logits_indices, padded_num_reqs_per_dp_rank))
+            out_draft_lengths.append(
+                _pad(num_draft_tokens, padded_num_reqs_per_dp_rank))
+
+        padded_logits_indices = np.concatenate(out_logits_indices)
+        padded_target_logits_indices = np.concatenate(
+            out_target_logits_indices)
+        padded_draft_token_ids = np.concatenate(out_draft_token_ids)
+        padded_bonus_logits_indices = np.concatenate(out_bonus_logits_indices)
+        padded_num_draft_tokens = np.concatenate(out_draft_lengths)
         padded_num_draft_tokens_cpu = padded_num_draft_tokens
         # CPU -> TPU copy.
         (padded_num_draft_tokens, padded_draft_token_ids,
@@ -267,7 +305,8 @@ class SpeculativeDecodingManager:
              self.runner.mesh,
              (padded_num_draft_tokens, padded_draft_token_ids,
               padded_logits_indices, padded_target_logits_indices,
-              padded_bonus_logits_indices))
+              padded_bonus_logits_indices),
+             sharding=sharding)
 
         metadata = SpecDecodeMetadata(
             draft_token_ids=padded_draft_token_ids,

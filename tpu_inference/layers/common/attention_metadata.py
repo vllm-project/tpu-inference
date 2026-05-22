@@ -60,5 +60,3 @@ class AttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
-
-    query_start_loc_cpu: Any = field(init=False)

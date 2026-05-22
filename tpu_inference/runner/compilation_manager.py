@@ -892,6 +892,9 @@ class CompilationManager:
                             _cache_collision_dummy=_cache_collision_dummy,
                             do_sampling=do_sampling)
 
+                    data_parallel_attn_sharding = NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(ShardingAxisName.ATTN_DATA))
                     self._run_compilation(
                         f"worker{self.runner.rank} {compilation_name}",
                         self.runner.rejection_sampler,
@@ -901,6 +904,7 @@ class CompilationManager:
                         target_probs,
                         bonus_token_ids,
                         sampling_metadata,
+                        data_parallel_attn_sharding,
                         self.runner.rng_params_for_sampling,
                         num_logits=num_logits,
                         num_reqs=num_reqs,
