@@ -79,7 +79,8 @@ def moe_apply(
     mesh: Mesh,
     extra_backend_kwargs: dict,
 ) -> jax.Array:
-    extra_backend_kwargs = dict(extra_backend_kwargs) if extra_backend_kwargs else {}
+    extra_backend_kwargs = dict(
+        extra_backend_kwargs) if extra_backend_kwargs else {}
     scatter_results = extra_backend_kwargs.pop("scatter_results", False)
 
     with jax.named_scope(layer._get_name()):
