@@ -381,7 +381,12 @@ class TPUWorker(WorkerBase):
                kv_transfer_config.kv_connector_module_path == \
                    "tpu_inference.distributed.tpu_connector" and \
                kv_transfer_config.is_kv_consumer and \
-               envs.TPU_MULTIHOST_BACKEND != "ray":
+               envs.TPU_MULTIHOST_BACKEND != "ray" and \
+               not envs.RAIDEN_USE_MAIN_CONSUMER:
+                # main-consumer path (RAIDEN_USE_MAIN_CONSUMER=1) pulls KV
+                # straight into device memory and never allocates the
+                # DeviceKVPool (see tpu_connector.py), so don't reserve HBM for
+                # a staging buffer that won't exist.
                 pool_size = get_max_device_kv_pool_size()
                 block_size = self.vllm_config.cache_config.block_size
                 max_blocks_per_req = (

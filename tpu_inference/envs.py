@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     PYTHON_TRACER_LEVEL: int = 1
     RAIDEN_PROFILE_START_STEP: int = -1
     RAIDEN_PROFILE_END_STEP: int = -1
+    RAIDEN_USE_MAIN_CONSUMER: bool = False
     USE_MOE_EP_KERNEL: bool = False
     USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
@@ -207,6 +208,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Step at which the worker stops profiling. -1 (default) disables profiling.
     "RAIDEN_PROFILE_END_STEP":
     lambda: int(os.getenv("RAIDEN_PROFILE_END_STEP") or "-1"),
+    # TPUConnector disagg decode-side KV pull path.
+    # True  = main-style direct-to-device pull (skip H2D copy + DeviceKVPool).
+    # False (default) = dev3 pull-to-host + batch_h2d_async into DeviceKVPool.
+    "RAIDEN_USE_MAIN_CONSUMER":
+    env_bool("RAIDEN_USE_MAIN_CONSUMER", default=False),
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
     env_bool("USE_MOE_EP_KERNEL", default=False),

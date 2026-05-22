@@ -115,6 +115,16 @@ logger = init_logger(__name__)
 # Must be >= the actual blocks/req of the workload (1024 tokens / 64 = 16 here).
 _EXPERIMENTAL_FIXED_MAX_BLOCKS = 16
 
+# [EXPERIMENT] Consumer pull path selector, read from envs.RAIDEN_USE_MAIN_CONSUMER
+# at point of use (not cached at import time):
+#   False (default): dev3 path -- pull KV into host memory, then batch_h2d_async
+#                    into a DeviceKVPool buffer. Returns (buf_idx, kv_device).
+#   True:            main-branch path -- pull KV straight into device memory and
+#                    skip the H2D copy / DeviceKVPool. Returns (-1, kv_device).
+# In BOTH paths the pull spec is sized to _EXPERIMENTAL_FIXED_MAX_BLOCKS so it
+# matches the producer's await_pull registration regardless of the choice.
+# Toggle per run via env RAIDEN_USE_MAIN_CONSUMER=1 on the decode (consumer) host.
+
 
 @dataclass
 class SendMeta:
@@ -612,29 +622,38 @@ class TPUConnectorWorker:
             # max_blocks_per_req) via await_pull, so the consumer must pull a
             # spec of the same determined size for is_ready() to ever match.
             self.max_blocks_per_req = max_blocks
-            pool_size = dist_utils.get_max_device_kv_pool_size()
-            # raiden's batch_h2d_async partial-copy path rejects destinations
-            # whose sharding.spec[0] is not None. The KV cache uses
-            # P('data', None, 'model') where 'data' has size 1 (physically
-            # replicated on the major axis), but the check is purely syntactic.
-            # Build a pool-specific sharding with None on the major axis —
-            # physically identical to the KV cache layout, syntactically
-            # accepted by the partial-copy fast path.
-            pool_spec = jax.sharding.PartitionSpec(None,
-                                                   *self.sharding.spec[1:])
-            pool_sharding = jax.sharding.NamedSharding(self.sharding.mesh,
-                                                       pool_spec,
-                                                       memory_kind='device')
-            self.device_kv_pool = DeviceKVPool(
-                pool_size=pool_size,
-                num_layers=self.num_layers,
-                max_blocks_per_req=max_blocks,
-                cache_inner_shape=kv_layer.shape[1:],
-                dtype=self.dtype,
-                device_sharding=pool_sharding)
-            logger.info(
-                f"TPUConnector Worker {self.node_id} --> initialized DeviceKVPool "
-                f"pool_size={pool_size}, max_blocks={max_blocks}")
+            if envs.RAIDEN_USE_MAIN_CONSUMER:
+                # main-consumer path pulls KV straight into device memory and
+                # never touches the DeviceKVPool, so skip allocating it. This
+                # frees the HBM staging buffer (the matching deduction in
+                # tpu_worker.py is also gated). self.device_kv_pool stays None.
+                logger.info(
+                    f"TPUConnector Worker {self.node_id} --> "
+                    f"RAIDEN_USE_MAIN_CONSUMER=1, skipping DeviceKVPool "
+                    f"allocation (max_blocks={max_blocks})")
+            else:
+                pool_size = dist_utils.get_max_device_kv_pool_size()
+                # raiden's batch_h2d_async partial-copy path rejects destinations
+                # whose sharding.spec[0] is not None. The KV cache uses
+                # P('data', None, 'model') where 'data' has size 1 (physically
+                # replicated on the major axis), but the check is purely syntactic.
+                # Build a pool-specific sharding with None on the major axis —
+                # physically identical to the KV cache layout, syntactically
+                # accepted by the partial-copy fast path.
+                pool_spec = jax.sharding.PartitionSpec(None,
+                                                       *self.sharding.spec[1:])
+                pool_sharding = jax.sharding.NamedSharding(
+                    self.sharding.mesh, pool_spec, memory_kind='device')
+                self.device_kv_pool = DeviceKVPool(
+                    pool_size=pool_size,
+                    num_layers=self.num_layers,
+                    max_blocks_per_req=max_blocks,
+                    cache_inner_shape=kv_layer.shape[1:],
+                    dtype=self.dtype,
+                    device_sharding=pool_sharding)
+                logger.info(
+                    f"TPUConnector Worker {self.node_id} --> initialized DeviceKVPool "
+                    f"pool_size={pool_size}, max_blocks={max_blocks}")
 
     def _maybe_start_p2p_server(self):
         if self.kv_transfer_server is not None:
@@ -851,21 +870,21 @@ class TPUConnectorWorker:
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
         )
         start_time = time.perf_counter()
-        kv_host = conn.pull(req_meta.uuid, kv_spec)
-        kv_size_mb = sum(k.nbytes for k in kv_host) / (1024 * 1024)
+        pulled_kv = conn.pull(req_meta.uuid, kv_spec)
+        kv_size_mb = sum(k.nbytes for k in pulled_kv) / (1024 * 1024)
         end_time_0, end_time_1 = time.perf_counter(), None
         prepare_time_ms = (end_time_0 - start_time) * 1000
         if dist_utils.get_enable_block_kv_transfer():
             while True:
                 end_time_1 = time.perf_counter()
                 if all(
-                        chunk.is_ready() for chunk in kv_host
+                        chunk.is_ready() for chunk in pulled_kv
                 ) or end_time_1 - end_time_0 > dist_utils.get_p2p_wait_pull_timeout(
                 ):
                     break
                 time.sleep(0.001)
             pull_time_ms = (end_time_1 - end_time_0) * 1000
-            if all(chunk.is_ready() for chunk in kv_host):
+            if all(chunk.is_ready() for chunk in pulled_kv):
                 logger.info(
                     f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
                     f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
@@ -887,6 +906,12 @@ class TPUConnectorWorker:
             self.transfer_stats.record_successful_transfer(
                 prepare_time_ms, pull_time_ms, kv_size_mb)
 
+        if envs.RAIDEN_USE_MAIN_CONSUMER:
+            # main-branch consumer: KV was pulled directly into device memory
+            # (device sharding from _get_kv_spec), so no H2D copy is needed.
+            # buf_idx=-1 signals there is no DeviceKVPool slot to return.
+            return -1, pulled_kv
+
         num_valid_blocks = len(remote_block_ids)
         h2d_start = time.perf_counter()
 
@@ -899,12 +924,12 @@ class TPUConnectorWorker:
             buf_idx = -1
             kv_device = [
                 jax.device_put(jnp.zeros(arr.shape, dtype=arr.dtype),
-                               self.sharding) for arr in kv_host
+                               self.sharding) for arr in pulled_kv
             ]
 
         try:
             futures = batch_h2d_async(
-                kv_host,
+                pulled_kv,
                 kv_device,
                 src_offsets_major_dim=[0],
                 dst_offsets_major_dim=[0],
@@ -938,10 +963,12 @@ class TPUConnectorWorker:
         assert self.max_blocks_per_req <= self.shape[0]
         shape = copy.copy(self.shape)
         shape[0] = self.max_blocks_per_req
-        return [
-            jax.ShapeDtypeStruct(
-                shape, self.dtype, sharding=self.host_sharding)
-        ] * self.num_layers
+        # main-consumer pulls straight into device memory; dev3 pulls into host
+        # memory and copies to device later via batch_h2d_async.
+        sharding = (self.sharding
+                    if envs.RAIDEN_USE_MAIN_CONSUMER else self.host_sharding)
+        return [jax.ShapeDtypeStruct(shape, self.dtype, sharding=sharding)
+                ] * self.num_layers
 
     def _maybe_build_notif_socket(self, req_meta: LoadMeta) -> zmq.Socket:
         remote_host = req_meta.remote_host
