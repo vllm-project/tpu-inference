@@ -58,3 +58,26 @@
 
 # Docker Configuration
 /docker/ @jrplatin @QiliangCui @yiw-wang
+
+# Tools (kernel tuner, etc.)
+/tools/ @vipannalla @kyuyeunk @patrickji2014
+
+# Generated artifacts (bot-updated)
+/support_matrices/ @buildkite-bot @CienetStingLin @boe20211
+
+# Unowned: scripts and examples — anyone can approve, no required CODEOWNER review
+/scripts/
+/examples/
+
+# Tests mirror production-code ownership (CODEOWNERS rules per subtree)
+/tests/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
+/tests/distributed/ @mrjunwan-lang @sixiang-google
+/tests/executors/ @sixiang-google @mrjunwan-lang
+/tests/kernels/ @kyuyeunk @bythew3i @a1yssan13
+/tests/layers/ @kyuyeunk @lk-chen
+/tests/lora/ @vanbasten23 @kyuyeunk
+/tests/models/ @kyuyeunk @lk-chen
+/tests/platforms/ @sixiang-google @mrjunwan-lang
+/tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang
+/tests/spec_decode/ @Lumosis @gxd3
+/tests/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
