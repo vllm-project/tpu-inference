@@ -176,7 +176,8 @@ class VllmGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_state_shape(
         self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int,
+                                                                        ...]]:
         # Dummy implementation to satisfy the abstract base class constraint.
         # Upstream subclasses (e.g. QwenGatedDeltaNetAttention) override this.
         return ((), (), (), ())
