@@ -41,6 +41,9 @@ making sure they go through standard function arguments:
    model's cache just-in-time for the execution, and proceed with the original forward pass.
 """
 
+from functools import partial
+import jax
+import jax.numpy as jnp
 import torch
 import torch.nn as nn
 import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
@@ -250,41 +253,173 @@ def _patched_flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
     return torch.cat(tuple(_patched_flatten_embeddings(t) for t in embeddings))
 
 
+@partial(jax.jit, static_argnums=(1, 2, 3, 4, 5))
+def pos_embed_interpolate_jax(
+    embed_weight: jax.Array,
+    t: int,
+    h: int,
+    w: int,
+    num_grid_per_side: int,
+    m_size: int,
+) -> jax.Array:
+    hidden_dim = embed_weight.shape[1]
+
+    h_idxs = jnp.linspace(0, num_grid_per_side - 1, h, dtype=jnp.float32)
+    w_idxs = jnp.linspace(0, num_grid_per_side - 1, w, dtype=jnp.float32)
+
+    h_floor = h_idxs.astype(jnp.int32)
+    w_floor = w_idxs.astype(jnp.int32)
+    h_ceil = jnp.clip(h_floor + 1, 0, num_grid_per_side - 1)
+    w_ceil = jnp.clip(w_floor + 1, 0, num_grid_per_side - 1)
+
+    dh = h_idxs - h_floor
+    dw = w_idxs - w_floor
+
+    dh_grid, dw_grid = jnp.meshgrid(dh, dw, indexing="ij")
+    h_floor_grid, w_floor_grid = jnp.meshgrid(h_floor, w_floor, indexing="ij")
+    h_ceil_grid, w_ceil_grid = jnp.meshgrid(h_ceil, w_ceil, indexing="ij")
+
+    w11 = dh_grid * dw_grid
+    w10 = dh_grid - w11
+    w01 = dw_grid - w11
+    w00 = 1.0 - dh_grid - w01
+
+    h_grid = jnp.stack([h_floor_grid, h_floor_grid, h_ceil_grid, h_ceil_grid])
+    w_grid = jnp.stack([w_floor_grid, w_ceil_grid, w_floor_grid, w_ceil_grid])
+    h_grid_idx = h_grid * num_grid_per_side
+
+    indices = (h_grid_idx + w_grid).reshape(4, -1)
+    weights = jnp.stack([w00, w01, w10, w11], axis=0).reshape(4, -1, 1)
+    weights = weights.astype(embed_weight.dtype)
+
+    embeds = embed_weight[indices]
+    embeds = embeds * weights
+    combined = embeds.sum(axis=0)
+
+    combined = combined.reshape(h // m_size, m_size, w // m_size, m_size, hidden_dim)
+    combined = combined.transpose(0, 2, 1, 3, 4).reshape(-1, hidden_dim)
+    
+    repeated = jnp.tile(combined, (t, 1))
+    return repeated
+
+
+@partial(jax.jit, static_argnums=(1, 2))
+def rot_pos_ids_jax(h: int, w: int, spatial_merge_size: int) -> jax.Array:
+    h_div = h // spatial_merge_size
+    w_div = w // spatial_merge_size
+
+    hpos_ids = jnp.broadcast_to(jnp.arange(h).reshape(h, 1), (h, w))
+    hpos_ids = hpos_ids.reshape(h_div, spatial_merge_size, w_div, spatial_merge_size)
+    hpos_ids = hpos_ids.transpose(0, 2, 1, 3).flatten()
+
+    wpos_ids = jnp.broadcast_to(jnp.arange(w).reshape(1, w), (h, w))
+    wpos_ids = wpos_ids.reshape(h_div, spatial_merge_size, w_div, spatial_merge_size)
+    wpos_ids = wpos_ids.transpose(0, 2, 1, 3).flatten()
+
+    return jnp.stack([hpos_ids, wpos_ids], axis=-1)
+
+
+@partial(jax.jit, static_argnums=(3, 4))
+def rot_pos_emb_jax(
+    cos_cache: jax.Array,
+    sin_cache: jax.Array,
+    grid_thw: tuple,
+    spatial_merge_size: int,
+    max_grid_size: int,
+) -> tuple[jax.Array, jax.Array]:
+    pos_ids_list = []
+    for t, h, w in grid_thw:
+        ids = rot_pos_ids_jax(h, w, spatial_merge_size)
+        if t > 1:
+            ids = jnp.tile(ids, (t, 1))
+        pos_ids_list.append(ids)
+    pos_ids = jnp.concatenate(pos_ids_list, axis=0)
+
+    cos_combined = cos_cache[pos_ids].reshape(pos_ids.shape[0], -1)
+    sin_combined = sin_cache[pos_ids].reshape(pos_ids.shape[0], -1)
+
+    return cos_combined, sin_combined
+
+
+def _patched_fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
+    embed_weight_jax = jax_view(self.pos_embed.weight)
+    
+    outputs = []
+    for t, h, w in grid_thw:
+        res_jax = pos_embed_interpolate_jax(
+            embed_weight_jax,
+            t,
+            h,
+            w,
+            self.num_grid_per_side,
+            self.spatial_merge_size,
+        )
+        outputs.append(torch_view(res_jax))
+        
+    return torch.cat(outputs, dim=0)
+
+
+def _patched_rot_pos_emb(self, grid_thw: list[list[int]]):
+    max_grid_size = max(max(h, w) for _, h, w in grid_thw)
+    
+    cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
+    cos_cache_jax = jax_view(cos)
+    sin_cache_jax = jax_view(sin)
+    
+    grid_thw_tuple = tuple(tuple(x) for x in grid_thw)
+    
+    cos_jax, sin_jax = rot_pos_emb_jax(
+        cos_cache_jax,
+        sin_cache_jax,
+        grid_thw_tuple,
+        self.spatial_merge_size,
+        max_grid_size,
+    )
+    
+    return torch_view(cos_jax), torch_view(sin_jax)
+
+
 def apply_qwen3_vl_patches(vllm_model):
-    """Apply Qwen3-VL specific patches for stateless Deepstack support."""
-    if not getattr(vllm_model, "use_deepstack", False):
-        return
+    """Apply Qwen3-VL specific patches for stateless Deepstack support and JIT compilation."""
+    if getattr(vllm_model, "use_deepstack", False):
 
-    # 1. Override deepstack setter to avoid stateful updates of native vLLM variables
-    orig_set_deepstack = getattr(vllm_model, "_set_deepstack_input_embeds",
-                                 None)
-    if orig_set_deepstack is not None:
-        vllm_model._set_deepstack_input_embeds = lambda embeds: _patched_set_deepstack(
-            vllm_model, embeds)
+        # 1. Override deepstack setter to avoid stateful updates of native vLLM variables
+        orig_set_deepstack = getattr(vllm_model, "_set_deepstack_input_embeds",
+                                     None)
+        if orig_set_deepstack is not None:
+            vllm_model._set_deepstack_input_embeds = lambda embeds: _patched_set_deepstack(
+                vllm_model, embeds)
 
-    # 2. Override deepstack getter to prefer JAX-compatible cached tensors
-    orig_get_deepstack = getattr(vllm_model, "_get_deepstack_input_embeds",
-                                 None)
-    if orig_get_deepstack is not None:
-        vllm_model._get_deepstack_input_embeds = lambda num_tokens: _patched_get_deepstack(
-            vllm_model, orig_get_deepstack, num_tokens)
+        # 2. Override deepstack getter to prefer JAX-compatible cached tensors
+        orig_get_deepstack = getattr(vllm_model, "_get_deepstack_input_embeds",
+                                     None)
+        if orig_get_deepstack is not None:
+            vllm_model._get_deepstack_input_embeds = lambda num_tokens: _patched_get_deepstack(
+                vllm_model, orig_get_deepstack, num_tokens)
 
-    # 3. Patch embed_input_ids to pack Deepstack vision features into main text embeddings
-    orig_embed_input_ids = getattr(vllm_model, "embed_input_ids", None)
-    if orig_embed_input_ids is not None:
-        vllm_model.embed_input_ids = lambda *args, **kwargs: _patched_embed_input_ids(
-            vllm_model, orig_embed_input_ids, *args, **kwargs)
+        # 3. Patch embed_input_ids to pack Deepstack vision features into main text embeddings
+        orig_embed_input_ids = getattr(vllm_model, "embed_input_ids", None)
+        if orig_embed_input_ids is not None:
+            vllm_model.embed_input_ids = lambda *args, **kwargs: _patched_embed_input_ids(
+                vllm_model, orig_embed_input_ids, *args, **kwargs)
 
-    # 4. Patch forward to unpack vision features and restore them before execution
-    orig_forward = vllm_model.forward
-    vllm_model.forward = lambda *args, **kwargs: _patched_forward(
-        vllm_model, orig_forward, *args, **kwargs)
+        # 4. Patch forward to unpack vision features and restore them before execution
+        orig_forward = vllm_model.forward
+        vllm_model.forward = lambda *args, **kwargs: _patched_forward(
+            vllm_model, orig_forward, *args, **kwargs)
 
     # 5. Patch _flatten_embeddings in vllm utils to handle negative indexes correctly in torchax
     vllm_utils._flatten_embeddings = _patched_flatten_embeddings
 
     # 6. Force HAS_TRITON to False to prevent JAX/Triton active driver crash on TPU
     qwen3_vl_mod.HAS_TRITON = False
+
+    # 7. Patch position embedding interpolation and rotary position embedding to use JAX JIT compiled implementations
+    if hasattr(vllm_model, "visual"):
+        vllm_model.visual.fast_pos_embed_interpolate = _patched_fast_pos_embed_interpolate.__get__(
+            vllm_model.visual, vllm_model.visual.__class__)
+        vllm_model.visual.rot_pos_emb = _patched_rot_pos_emb.__get__(
+            vllm_model.visual, vllm_model.visual.__class__)
 
 
 def is_qwen3_vl(vllm_model) -> bool:
