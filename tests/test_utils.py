@@ -32,7 +32,7 @@ def test_hbm_usage_bytes_ray_backend():
     mock_device1 = MagicMock()
     mock_device1.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
-        "bytes_limit": 128 * GBYTES,
+        "bytes_limit": 128 * GBYTES
     }
     mock_device2 = MagicMock()
     mock_device2.memory_stats.side_effect = Exception("Memory stats failed")
@@ -51,12 +51,12 @@ def test_hbm_usage_bytes_pathways_disabled():
     mock_device1 = MagicMock()
     mock_device1.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
-        "bytes_limit": 128 * GBYTES,
+        "bytes_limit": 128 * GBYTES
     }
     mock_device2 = MagicMock()
     mock_device2.memory_stats.return_value = {
         "bytes_in_use": 50 * GBYTES,
-        "bytes_limit": 128 * GBYTES,
+        "bytes_limit": 128 * GBYTES
     }
 
     devices = [mock_device1, mock_device2]
@@ -131,12 +131,12 @@ def test_hbm_usage_gb_pathways_disabled():
     mock_device1 = MagicMock()
     mock_device1.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
-        "bytes_limit": 128 * GBYTES,
+        "bytes_limit": 128 * GBYTES
     }
     mock_device2 = MagicMock()
     mock_device2.memory_stats.return_value = {
         "bytes_in_use": 50.5 * GBYTES,
-        "bytes_limit": 128.0 * GBYTES,
+        "bytes_limit": 128.0 * GBYTES
     }
 
     devices = [mock_device1, mock_device2]
@@ -205,16 +205,13 @@ def test_get_jax_dtype_from_str_dtype():
 
 # Special dtypes: our t2j uses a bit-cast via uint8 view instead of going
 # through float32, so we compare byte representations to the torchax reference.
-@pytest.mark.parametrize(
-    "torch_dtype,jax_dtype",
-    [
-        (torch.bfloat16, jnp.bfloat16),
-        (torch.float8_e4m3fn, jnp.float8_e4m3fn),
-        (torch.float8_e4m3fnuz, jnp.float8_e4m3fnuz),
-        (torch.float8_e5m2, jnp.float8_e5m2),
-        (torch.float8_e5m2fnuz, jnp.float8_e5m2fnuz),
-    ],
-)
+@pytest.mark.parametrize("torch_dtype,jax_dtype", [
+    (torch.bfloat16, jnp.bfloat16),
+    (torch.float8_e4m3fn, jnp.float8_e4m3fn),
+    (torch.float8_e4m3fnuz, jnp.float8_e4m3fnuz),
+    (torch.float8_e5m2, jnp.float8_e5m2),
+    (torch.float8_e5m2fnuz, jnp.float8_e5m2fnuz),
+])
 def test_t2j_numpy_unsupported_dtypes(torch_dtype, jax_dtype):
     # Generate random values via float32, then cast to the target dtype.
     t = torch.randn(50000, dtype=torch.float32)

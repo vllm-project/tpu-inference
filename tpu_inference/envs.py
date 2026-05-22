@@ -258,9 +258,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("ENABLE_QUANTIZED_MATMUL_KERNEL"),
     # Specify block quantization size
     "REQUANTIZE_BLOCK_SIZE":
-    lambda:
-    (int(block_size) if
-     (block_size := os.getenv("REQUANTIZE_BLOCK_SIZE")) is not None else None),
+    lambda: int(block_size) if
+    (block_size := os.getenv("REQUANTIZE_BLOCK_SIZE")) is not None else None,
     # Specify dtype for quantized linear weights
     "REQUANTIZE_WEIGHT_DTYPE":
     lambda: os.getenv("REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
@@ -269,8 +268,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("MOE_REQUANTIZE_WEIGHT_DTYPE", ""),
     # Specify requantization block size for MoE weights
     "MOE_REQUANTIZE_BLOCK_SIZE":
-    lambda: (int(block_size) if
-             (block_size := os.getenv("MOE_REQUANTIZE_BLOCK_SIZE")) else None),
+    lambda: int(block_size)
+    if (block_size := os.getenv("MOE_REQUANTIZE_BLOCK_SIZE")) else None,
     # By default, it only use max_reqs for attentions. But if set true, it
     # will precompile max_reqs to power-of-twos between min and max reqs,
     # and attention will have the num_reqs closer to actual num_reqs. This

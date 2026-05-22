@@ -29,18 +29,18 @@ import tpu_inference.kernels.gdn.triangle_solver as triangle_solver
 def l2norm(x: jnp.ndarray, dim: int = -1, eps: float = 1e-6) -> jnp.ndarray:
     """Normalizes x along the specified dimension using L2 norm.
 
-    Sum-of-squares and rsqrt run in fp32 even when ``x`` is bf16, to
-    match GPU FLA's ``l2norm_fwd``
-    (`vllm/model_executor/layers/fla/ops/l2norm.py`).
+  Sum-of-squares and rsqrt run in fp32 even when ``x`` is bf16, to
+  match GPU FLA's ``l2norm_fwd``
+  (`vllm/model_executor/layers/fla/ops/l2norm.py`).
 
-    Args:
-      x: Input array.
-      dim: Dimension along which to normalize.
-      eps: Epsilon value to avoid division by zero.
+  Args:
+    x: Input array.
+    dim: Dimension along which to normalize.
+    eps: Epsilon value to avoid division by zero.
 
-    Returns:
-      Normalized array, in the same dtype as ``x``.
-    """
+  Returns:
+    Normalized array, in the same dtype as ``x``.
+  """
     x_f32 = x.astype(jnp.float32)
     inv_norm = jax.lax.rsqrt((x_f32 * x_f32).sum(axis=dim, keepdims=True) +
                              eps)
@@ -141,15 +141,15 @@ def pack_inputs_single_stream(
     # where the token would go to maintain order (using side="right").
     # Subtracting 1 gives the index of the sequence the token actually belongs to.
     seq_id = (jnp.searchsorted(
-        effective_query_start_loc, jnp.arange(num_tokens), side="right") - 1)
+        effective_query_start_loc, jnp.arange(num_tokens), side='right') - 1)
     original_start = effective_query_start_loc[seq_id]
     new_start = new_query_start_loc[seq_id]
     padded_indices_valid = new_start + (jnp.arange(num_tokens) -
                                         original_start)
 
     max_packed_tokens = num_tokens + num_seqs * chunk_size
-    max_packed_tokens = (max_packed_tokens + chunk_size -
-                         1) // chunk_size * chunk_size
+    max_packed_tokens = ((max_packed_tokens + chunk_size - 1) // chunk_size *
+                         chunk_size)
 
     # Concatenate by dtype to reduce scatter operations
     beta_expanded = beta[..., None]
@@ -519,7 +519,7 @@ def recurrent_gated_delta_rule_step(
 
     # `Precision.HIGHEST` is required even with fp32 inputs: TPU MXU's
     # default mode downconverts fp32 operands to bf16 before multiply.
-    k_state = jnp.einsum("bhd, bhdm -> bhm",
+    k_state = jnp.einsum('bhd, bhdm -> bhm',
                          key,
                          state,
                          precision=jax.lax.Precision.HIGHEST)
@@ -527,7 +527,7 @@ def recurrent_gated_delta_rule_step(
 
     v_new = beta[..., None] * v_diff
 
-    q_state = jnp.einsum("bhd, bhdm -> bhm",
+    q_state = jnp.einsum('bhd, bhdm -> bhm',
                          query,
                          state,
                          precision=jax.lax.Precision.HIGHEST)

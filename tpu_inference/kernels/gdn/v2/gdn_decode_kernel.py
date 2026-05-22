@@ -93,9 +93,8 @@ def validate_gdn_inputs(
 
     # Dtype checks
     if k.dtype != dtype or v.dtype != dtype:
-        raise ValueError(
-            f"q/k/v must share the same dtype, got q={dtype}, k={k.dtype}, v={v.dtype}"
-        )
+        raise ValueError(f"q/k/v must share the same dtype, got q={dtype}, "
+                         f"k={k.dtype}, v={v.dtype}")
 
     if state_indices.dtype != jnp.int32:
         raise ValueError(

@@ -268,13 +268,13 @@ class GDNAttentionTest(parameterized.TestCase):
     def test_has_initial_state_zeros_stale_slot(self, test_config):
         """A new prefill landing on a slot whose previous tenant left
 
-        non-zero state must produce the same output and final state as it
-        would on a fresh-zero slot. This exercises the production bug fixed
-        by the `has_initial_state` plumbing: vLLM's mamba pool reuses
-        freed slots without clearing them, and previously the TPU GDN
-        kernel consumed the stale state, silently corrupting the new
-        request's recurrent trajectory.
-        """
+    non-zero state must produce the same output and final state as it
+    would on a fresh-zero slot. This exercises the production bug fixed
+    by the `has_initial_state` plumbing: vLLM's mamba pool reuses
+    freed slots without clearing them, and previously the TPU GDN
+    kernel consumed the stale state, silently corrupting the new
+    request's recurrent trajectory.
+    """
         kq_head_dim = 128
         v_head_dim = 128
         n_kq = 2
@@ -410,13 +410,13 @@ class GDNAttentionTest(parameterized.TestCase):
     def test_has_initial_state_preserves_continuation(self, test_config):
         """When ``has_initial_state[i]`` is True, the kernel must use the
 
-        slot's existing state as the prefill's initial state. This is the
-        chunked-prefill / prefix-cache continuation path: a prior step
-        wrote a recurrent/conv state to the slot, and the next prefill
-        chunk for the same request must continue from that state — not
-        from zero. Compares against running the equivalent single-shot
-        prefill on the concatenated token stream from a zero state.
-        """
+    slot's existing state as the prefill's initial state. This is the
+    chunked-prefill / prefix-cache continuation path: a prior step
+    wrote a recurrent/conv state to the slot, and the next prefill
+    chunk for the same request must continue from that state — not
+    from zero. Compares against running the equivalent single-shot
+    prefill on the concatenated token stream from a zero state.
+    """
         kq_head_dim = 128
         v_head_dim = 128
         n_kq = 2
@@ -533,17 +533,17 @@ class GDNAttentionTest(parameterized.TestCase):
     def test_l2norm_fp32_internal_more_precise_than_bf16(self, l2norm_fn):
         """The l2norm helper must do its sum-of-squares in fp32 even when
 
-        the input is bf16. This is what GPU FLA's ``l2norm_fwd`` does.
+    the input is bf16. This is what GPU FLA's ``l2norm_fwd`` does.
 
-        Regression test for the full-GPQA-Diamond drop we observed when
-        the reduction was left in bf16: pick a bf16 input that is
-        nontrivial (non-unit-norm, large magnitude so sum-of-squares is
-        well above 1.0) and compare both the current implementation and
-        a deliberately-bf16-only reduction against an fp64 reference.
-        The fp32-internal implementation must be at least as close to
-        the fp64 ground truth — the bf16 reduction loses precision in
-        the sum-of-squares accumulation.
-        """
+    Regression test for the full-GPQA-Diamond drop we observed when
+    the reduction was left in bf16: pick a bf16 input that is
+    nontrivial (non-unit-norm, large magnitude so sum-of-squares is
+    well above 1.0) and compare both the current implementation and
+    a deliberately-bf16-only reduction against an fp64 reference.
+    The fp32-internal implementation must be at least as close to
+    the fp64 ground truth — the bf16 reduction loses precision in
+    the sum-of-squares accumulation.
+    """
         rng = jax.random.key(13)
         # Vectors with components on the order of 5 — sum-of-squares is
         # ~d*25, well above the bf16 ULP near that magnitude.
@@ -590,10 +590,10 @@ class GDNAttentionTest(parameterized.TestCase):
     def test_l2norm_returns_input_dtype(self, l2norm_fn):
         """The l2norm helpers compute in fp32 internally but must return
 
-        the input dtype unchanged so callers' downstream layout
-        assumptions (e.g. ``compute_dtype`` casts in
-        `pack_inputs_single_stream`) keep working.
-        """
+    the input dtype unchanged so callers' downstream layout
+    assumptions (e.g. ``compute_dtype`` casts in
+    `pack_inputs_single_stream`) keep working.
+    """
         x = jax.random.normal(jax.random.key(17),
                               (4, 128)).astype(jnp.bfloat16)
         if l2norm_fn is l2norm_chunked:

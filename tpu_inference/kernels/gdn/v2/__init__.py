@@ -11,4 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GDN v2 kernels."""
+"""GDN v2 kernels.
+
+The v2 kernel has two implementations:
+- A chunked kernel implementaiton that does chunked recurrent scan for prefill
+  and mixed prefill and decode.
+- A decode only kernel only implementaiton for optimal performance for decode only requests.
+"""
