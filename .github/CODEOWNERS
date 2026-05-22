@@ -81,3 +81,6 @@
 /tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang
 /tests/spec_decode/ @Lumosis @gxd3
 /tests/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
+/tests/e2e/ @pv97 @wenxindongwork @jrplatin
+/tests/offload/ @juncgu-google @richardsliu
+/tests/scripts/ @jrplatin @QiliangCui
