@@ -20,7 +20,8 @@ import torch
 from einops import rearrange
 from torchax.interop import jax_view, torch_view
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
+    QwenGatedDeltaNetAttention
 
 from tpu_inference import envs
 from tpu_inference.layers.common.gdn_attention import (GdnAttentionConfig,
@@ -171,16 +172,8 @@ def gdn_attention_core_tpu(
     core_attn_out.copy_(torch_view(j_output_flat))
 
 
-@GatedDeltaNetAttention.register_oot
-class VllmGatedDeltaNetAttention(GatedDeltaNetAttention):
-
-    def get_state_shape(
-        self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int,
-                                                                        ...]]:
-        # Dummy implementation to satisfy the abstract base class constraint.
-        # Upstream subclasses (e.g. QwenGatedDeltaNetAttention) override this.
-        return ((), (), (), ())
+@QwenGatedDeltaNetAttention.register_oot
+class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
 
     def forward(
         self,
