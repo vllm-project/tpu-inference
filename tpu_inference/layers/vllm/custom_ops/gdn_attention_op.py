@@ -20,7 +20,7 @@ import torch
 from einops import rearrange
 from torchax.interop import jax_view, torch_view
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.mamba.gdn_linear_attn import \
+from vllm.model_executor.layers.mamba.gdn.base import \
     GatedDeltaNetAttention
 
 from tpu_inference import envs
