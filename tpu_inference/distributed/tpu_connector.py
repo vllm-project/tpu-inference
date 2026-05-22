@@ -816,6 +816,9 @@ class TPUConnectorWorker:
         logger.debug(
             f"Worker {self.node_id} -->get the buffer id {buffer_idx}")
         start_time = time.perf_counter()
+        logger.info(
+            f"Worker {self.node_id} --> TS_D2H_START req_id={req_id} | "
+            f"ts={time.time():.6f}")
         futures = batch_d2h_async(
             kv_src,
             dest_buffer,
@@ -910,6 +913,9 @@ class TPUConnectorWorker:
             # main-branch consumer: KV was pulled directly into device memory
             # (device sharding from _get_kv_spec), so no H2D copy is needed.
             # buf_idx=-1 signals there is no DeviceKVPool slot to return.
+            logger.info(
+                f"Worker {self.node_id} --> TS_DEVICE_ARRIVE req_id={req_id} | "
+                f"ts={time.time():.6f}")
             return -1, pulled_kv
 
         num_valid_blocks = len(remote_block_ids)
@@ -947,6 +953,9 @@ class TPUConnectorWorker:
                 self.device_kv_pool.return_buffer(buf_idx, kv_device)
             raise
         h2d_time_ms = (time.perf_counter() - h2d_start) * 1000
+        logger.info(
+            f"Worker {self.node_id} --> TS_DEVICE_ARRIVE req_id={req_id} | "
+            f"ts={time.time():.6f}")
         logger.info(
             f"Worker {self.node_id} --> kv transfer | H2D req_id={req_id} | "
             f"time={h2d_time_ms:.2f}ms | buf_idx={buf_idx} | "
