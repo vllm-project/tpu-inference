@@ -23,11 +23,6 @@ from enum import Enum
 import yaml
 from absl import flags
 
-from tools.kernel.tuner.v1.storage_management.local_db_manager import \
-    LocalDbManager
-from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
-    SpannerStorageManager
-
 FLAGS = flags.FLAGS
 
 logger = logging.getLogger(__name__)
@@ -131,10 +126,17 @@ class KernelTunerBase(ABC):
         assert tuner_config.tuning_key_class is not None, "tuning_key_class must be specified"
         assert tuner_config.tunable_params_class is not None, "tunable_params_class must be specified"
         assert tuner_config.kernel_tuner_name is not None, "kernel_tuner_name must be specified, which will be used as the identifier for this kernel tuner in the Buildkite pipeline generation and execution. It should match the key in the KERNEL_TUNER_REGISTRY in kernel_tuner_runner.py to ensure the correct kernel tuner is called during execution."
-        self.storage_manager = LocalDbManager(
-        ) if run_config.run_locally else SpannerStorageManager()
-        self._KERNEL_INPUTS_CACHE = {}
-        self._TUNING_KEY = None
+        # lazy import the storage manager to avoid import spanner when running locally
+        if run_config.run_locally:
+            from tools.kernel.tuner.v1.storage_management.local_db_manager import \
+                LocalDbManager
+            self.storage_manager = LocalDbManager()
+        else:
+            from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
+                SpannerStorageManager
+            self.storage_manager = SpannerStorageManager()
+        self._kernel_inputs_cache = {}
+        self._tuning_key = None
         self.tuner_config = tuner_config
         self.run_config = run_config
 
@@ -355,8 +357,8 @@ class KernelTunerBase(ABC):
         Returns:
             The kernel inputs corresponding to the given tuning key as a dictionary.
         """
-        if self._TUNING_KEY and tuning_key == self._TUNING_KEY:
-            return self._KERNEL_INPUTS_CACHE
+        if self._tuning_key and tuning_key == self._tuning_key:
+            return self._kernel_inputs_cache
         raise NotImplementedError(
             "Specific kernel should implement this to generate the inputs to kernel based on the tuning key with caching."
         )
