@@ -165,10 +165,8 @@ class TPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def _setup_dp_chip_isolation(self) -> None:
-        """Sets libtpu env vars so the process initializes JAX as a standalone
-        single-process cluster owning a disjoint slice of physical chips,
-        instead of every engine grabbing the same devices. Must run before
-        JAX initializes its TPU backend.
+        """Sets libtpu env vars so the process initializes JAX on a subset of
+        physical chips. Must run before JAX initializes its TPU backend.
         """
         from tpu_inference import tpu_info
 

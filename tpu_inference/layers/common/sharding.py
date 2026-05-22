@@ -192,20 +192,16 @@ class ShardingConfigManager:
                            and not vllm_envs.VLLM_TPU_USING_PATHWAYS)
         if (envs.TPU_MULTIPROCESS_DP and data_parallelism > 1
                 and not multiprocess_dp):
-            logger.warning(
+            raise ValueError(
                 "TPU_MULTIPROCESS_DP is set but is not supported for MoE "
                 "models, with attention DP (enable_dp_attention), or on "
-                "Pathways. Falling back to single-process SPMD data "
-                "parallelism.")
+                "Pathways. Please disable TPU_MULTIPROCESS_DP.")
         if multiprocess_dp:
-            # Each engine process is tensor-parallel only.
             data_parallelism = 1
             logger.warning(
-                "TPU_MULTIPROCESS_DP is enabled: vLLM will spawn one engine "
-                "process per DP rank with internal load balancing. This is "
-                "supported for online serving (`vllm serve` / AsyncLLM) "
-                "only -- vLLM has no synchronous DP client, so the offline "
-                "LLM().generate() API will hang. Use `vllm serve` instead.")
+                "TPU_MULTIPROCESS_DP is enabled: supported for online serving "
+                "only. The offline LLM().generate() API will hang. "
+                "Use `vllm serve` instead.")
         expert_parallelism = sharding_strategy.get("expert_parallelism", 1)
         sequence_parallelism = sharding_strategy.get("sequence_parallelism", 1)
         device_indexes = sharding_strategy.get("device_indexes", None)
@@ -282,8 +278,6 @@ class ShardingConfigManager:
             decode_context_parallelism=decode_context_parallelism)
 
         # Must override here to avoid vLLM spinning up multiple DP engines.
-        # In multiprocess-DP mode this is exactly what we want, so the
-        # override is skipped and vLLM spawns one engine per DP rank.
         if (not multiprocess_dp
                 and vllm_config.parallel_config.data_parallel_size > 1):
             vllm_config.parallel_config.data_parallel_size = 1
