@@ -164,26 +164,11 @@ def xpose_pipeline(input: jax.Array,
         parallel_axis]
     m_tile = m_tile if m_tile <= input.shape[pipeline_axis] else input.shape[
         pipeline_axis]
-    # Find the best tile that (a) divides the axis inclusively
-    # and (b) satisfies Pallas's sublane alignment
-    # If block dims are not divisible by
-    # get_dtype_packing(dtype) * 8 then they will be padded and sliced.
+    # Find the best tile that (a) divides the axis evenly and (b) satisfies
+    # Pallas's sublane alignment (block dims must be multiples of
+    # get_dtype_packing(dtype) * 8). Callers are responsible for pre-aligning
+    # their axes; if no valid tile exists, ValueError is raised.
     sublane_multiple = get_dtype_packing(input.dtype) * 8
-
-    # Pad the input tile dimensions to the nearest multiple of sublane_multiple.
-    pipeline_axis_size = input.shape[pipeline_axis]
-    padded_pipeline_axis_size = ((input.shape[pipeline_axis] - 1 ) // sublane_multiple + 1) * sublane_multiple
-    parallel_axis_size = input.shape[parallel_axis]
-    padded_parallel_axis_size = ((input.shape[parallel_axis] - 1 ) // sublane_multiple + 1) * sublane_multiple
-    paddings = [(0, 0) for _ in range(input.ndim)]
-    paddings[parallel_axis] = (0, padded_parallel_axis_size - parallel_axis_size)
-    paddings[pipeline_axis] = (0, padded_pipeline_axis_size - pipeline_axis_size)
-    raw_input_shape = input.shape
-    input = jnp.pad(
-        input,
-        paddings,
-        constant_values=0
-    )
 
     n_tile_new = prev_closest_valid_divisor(input.shape[parallel_axis],
                                             n_tile,
@@ -213,7 +198,6 @@ def xpose_pipeline(input: jax.Array,
     full_block_shape = tuple(full_block_shape)
     transposed_block_shape = tuple(full_block_shape[i] for i in transpose_axes)
     transposed_input_shape = tuple(input.shape[i] for i in transpose_axes)
-    transposed_raw_input_shape = tuple(raw_input_shape[i] for i in transpose_axes)
     output_shape = transposed_input_shape
 
     # The transposition settings will influence the input and output index maps.
@@ -249,20 +233,15 @@ def xpose_pipeline(input: jax.Array,
     shape_str = "x".join([str(i) for i in input.shape])
     transpose_str = "x".join([str(i) for i in transpose_axes])
     scope_name = f"xpose_pipeline_shape_{shape_str}_xpose_{transpose_str}_n_tile_{n_tile}_m_tile_{m_tile}_pa_{parallel_axis}_pi_{pipeline_axis}"
-    padded_output = pl.pallas_call(xpose_kernel,
-                          grid=grid,
-                          compiler_params=pltpu.CompilerParams(
-                              dimension_semantics=("parallel", "arbitrary")),
-                          in_specs=input_specs,
-                          out_specs=output_specs,
-                          out_shape=[
-                              jax.ShapeDtypeStruct(shape=output_shape,
-                                                   dtype=input.dtype)
-                          ],
-                          name=scope_name)(input)[0]
-    output = jax.lax.dynamic_slice(
-        padded_output,
-        [0] * len(transposed_raw_input_shape),
-        list(transposed_raw_input_shape),
-    )
+    output = pl.pallas_call(xpose_kernel,
+                            grid=grid,
+                            compiler_params=pltpu.CompilerParams(
+                                dimension_semantics=("parallel", "arbitrary")),
+                            in_specs=input_specs,
+                            out_specs=output_specs,
+                            out_shape=[
+                                jax.ShapeDtypeStruct(shape=output_shape,
+                                                     dtype=input.dtype)
+                            ],
+                            name=scope_name)(input)[0]
     return (output, )

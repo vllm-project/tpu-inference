@@ -1355,14 +1355,18 @@ def prepare_q_nope_inputs(
 
     Returns: [max_num_tokens, num_q_heads, head_dim]
     """
-    actual_num_q_heads, _, actual_head_dim = q.shape
-    num_q_heads = align_to(actual_num_q_heads, get_dtype_packing(q.dtype))
+    actual_num_q_heads, actual_max_num_tokens, actual_head_dim = q.shape
+    # Align both N and T to sublane_multiple (i.e. dtype_packing * 8) in
+    # This is needed to transpose the inputs and pass to the MLA kernel.
+    sublane_multiple = get_dtype_packing(q.dtype) * 8
+    num_q_heads = align_to(actual_num_q_heads, sublane_multiple)
+    max_num_tokens = align_to(actual_max_num_tokens, sublane_multiple)
     head_dim = align_to(actual_head_dim, 128)
     q = jnp.pad(
         q,
         (
             (0, num_q_heads - actual_num_q_heads),
-            (0, 0),
+            (0, max_num_tokens - actual_max_num_tokens),
             (0, head_dim - actual_head_dim),
         ),
         constant_values=0,
@@ -1372,7 +1376,6 @@ def prepare_q_nope_inputs(
         q = xpose_pipeline(q, transpose_axes=(1, 0, 2), n_tile=128,
                            m_tile=32)[0]
     except ValueError as e:
-        sublane_multiple = get_dtype_packing(q.dtype) * 8
         logger.warning(
             f"xpose_pipeline failed for shape={q.shape} dtype={q.dtype} "
             f"(sublane_multiple={sublane_multiple}): {e}. "
@@ -1397,11 +1400,14 @@ def prepare_kv_inputs(kv: jax.Array):
 
 
 def prepare_outputs(
-    out,  # [max_num_tokens, num_q_heads, head_dim]
+    out,  # [max_num_tokens_padded, num_q_heads_padded, head_dim_padded]
     actual_num_q_heads: int,
+    actual_max_num_tokens: int,
     actual_head_dim: int,
 ):
     # Physical transpose: (T, N, D) -> (N, T, D), pipelined over T.
+    # Both T and N are pre-aligned to sublane_multiple by prepare_q_nope_inputs,
+    # so xpose_pipeline runs with needs_padding=False — no extra pad or slice.
     try:
         # Tile to maximum of 160 (multi host bsz)
         # or nearest clean divisor of the number of tokens.
@@ -1417,7 +1423,9 @@ def prepare_outputs(
             f"(sublane_multiple={sublane_multiple}): {e}. "
             f"Falling back to jnp.transpose — this may be slower.")
         out = jnp.transpose(out, (1, 0, 2))
-    return out[:actual_num_q_heads, :, :actual_head_dim]
+    # Fold the T-unpadding into the existing N/D slice — one non-contiguous copy
+    # instead of a separate xpose_pipeline post-slice + this slice.
+    return out[:actual_num_q_heads, :actual_max_num_tokens, :actual_head_dim]
 
 
 @functools.partial(
@@ -1559,7 +1567,7 @@ def mla_ragged_paged_attention(
         decode_batch_size=decode_batch_size,
         debug_mode=debug_mode,
     )
-    actual_num_q_heads, _, actual_lkv_dim = ql_nope.shape
+    actual_num_q_heads, actual_max_num_tokens, actual_lkv_dim = ql_nope.shape
 
     ql_nope = prepare_q_nope_inputs(
         ql_nope)  # [max_num_tokens, num_q_heads, lkv_dim]
@@ -1836,7 +1844,7 @@ def mla_ragged_paged_attention(
         case=MlaCase.MIXED,
     )
     output = prepare_outputs(
-        ql_nope, actual_num_q_heads,
+        ql_nope, actual_num_q_heads, actual_max_num_tokens,
         actual_lkv_dim)  # [max_num_tokens, actual_num_q_heads, actual_lkv_dim]
 
     return output, updated_kv

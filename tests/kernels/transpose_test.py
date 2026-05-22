@@ -81,14 +81,6 @@ class TransposeTest(parameterized.TestCase):
         self.assertTrue(jnp.allclose(result[0], expected))
 
     @parameterized.parameters(
-        # parallel axis (0) needs padding: 300 → 320 (not divisible by 32).
-        dict(shape=(300, 192, 128), transpose_axes=(1, 0, 2), n_tile=160,
-             m_tile=64),
-        # pipeline axis (1) needs padding: 100 → 128 (not divisible by 32).
-        dict(shape=(128, 100, 128), transpose_axes=(1, 0, 2), n_tile=128,
-             m_tile=64),
-        dict(shape=(112, 128), transpose_axes=(1, 0), n_tile=32,
-             m_tile=128),
         dict(shape=(1024, 2048), transpose_axes=(1, 0), n_tile=128,
              m_tile=128),
         dict(shape=(2048, 1024), transpose_axes=(1, 0), n_tile=256,
@@ -216,26 +208,9 @@ class TestXposePipelineTiling(parameterized.TestCase):
         expected = jnp.transpose(input_data, (1, 0, 2))
         self.assertTrue(jnp.allclose(result, expected))
 
-    def test_no_aligned_divisor_pads_and_transposes(self):
+    def test_no_aligned_divisor_raises(self):
         # shape[0]=300: no divisor of 300 is both <= 160 and % 32 == 0.
-        # xpose_pipeline should pad axis 0 from 300 to 320 (next multiple of 32)
-        # so that a valid tile (160) exists, then slice the output back to (192, 300, 128).
-        shape = (300, 192, 128)
-        input_data = jax.random.normal(jax.random.PRNGKey(0),
-                                       shape,
-                                       dtype=jnp.float8_e4m3fn)
-        result = xpose_pipeline(input_data,
-                                transpose_axes=(1, 0, 2),
-                                n_tile=160,
-                                m_tile=64)[0]
-        expected = jnp.transpose(input_data, (1, 0, 2))
-        self.assertEqual(result.shape, expected.shape)
-        self.assertTrue(jnp.allclose(result, expected))
-
-    def test_n_tile_smaller_than_sublane_multiple_raises(self):
-        # shape[0]=300 pads to 320. sublane_multiple=32 for fp8.
-        # n_tile=16 < sublane_multiple=32, so prev_closest_valid_divisor(320, 16, multiple_of=32)
-        # raises: no divisor of 320 is both <= 16 and divisible by 32.
+        # Callers are responsible for pre-aligning axes; xpose_pipeline raises.
         shape = (300, 192, 128)
         input_data = jax.random.normal(jax.random.PRNGKey(0),
                                        shape,
@@ -243,7 +218,7 @@ class TestXposePipelineTiling(parameterized.TestCase):
         with self.assertRaises(ValueError):
             xpose_pipeline(input_data,
                            transpose_axes=(1, 0, 2),
-                           n_tile=16,
+                           n_tile=160,
                            m_tile=64)
 
     def test_clamped_n_tile(self):
