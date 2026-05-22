@@ -173,7 +173,7 @@ class TPUWorker(WorkerBase):
         parallel_config = self.vllm_config.parallel_config
         dp_rank = getattr(parallel_config, "data_parallel_index", 0) or 0
 
-        sharding_config = getattr(self.vllm_config, "sharding_config", None)
+        sharding_config = self.vllm_config.sharding_config
         num_devices = sharding_config.total_devices
 
         cores_per_chip = tpu_info.get_num_cores_per_chip()
