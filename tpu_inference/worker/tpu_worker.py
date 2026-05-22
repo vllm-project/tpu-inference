@@ -165,11 +165,7 @@ class TPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def _setup_dp_chip_isolation(self) -> None:
-        """Pin this data-parallel rank's engine process to its own TPU chips.
-
-        With vLLM-native multi-process DP (TPU_MULTIPROCESS_DP=1) each DP
-        rank runs as a separate engine process spawned by vLLM. This sets
-        the libtpu env vars so the process initializes JAX as a standalone
+        """Sets libtpu env vars so the process initializes JAX as a standalone
         single-process cluster owning a disjoint slice of physical chips,
         instead of every engine grabbing the same devices. Must run before
         JAX initializes its TPU backend.

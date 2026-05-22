@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 import jax.numpy as jnp
 import numpy as np
+import vllm.envs as vllm_envs
 from jax.sharding import Mesh
 
 from tpu_inference import envs, utils
@@ -177,23 +178,25 @@ class ShardingConfigManager:
         enable_dp_attention = sharding_strategy.get("enable_dp_attention",
                                                     False)
         # vLLM-native multi-process data parallelism: one engine process per
-        # DP rank, fronted by a single load-balanced API endpoint. 
+        # DP rank, fronted by a single load-balanced API endpoint.
         #
         # It is not used (we fall back to single-process SPMD DP) when:
-        #  - the model is MoE 
+        #  - the model is MoE
         #  - attention DP is enabled
+        #  - running on Pathways
         model_config = vllm_config.model_config
         multiprocess_dp = (envs.TPU_MULTIPROCESS_DP and data_parallelism > 1
                            and model_config is not None
                            and not model_config.is_moe
-                           and not enable_dp_attention)
+                           and not enable_dp_attention
+                           and not vllm_envs.VLLM_TPU_USING_PATHWAYS)
         if (envs.TPU_MULTIPROCESS_DP and data_parallelism > 1
                 and not multiprocess_dp):
             logger.warning(
                 "TPU_MULTIPROCESS_DP is set but is not supported for MoE "
-                "models or with attention DP (enable_dp_attention). " 
-                "Falling back to single-process "
-                "SPMD data parallelism.")
+                "models, with attention DP (enable_dp_attention), or on "
+                "Pathways. Falling back to single-process SPMD data "
+                "parallelism.")
         if multiprocess_dp:
             # Each engine process is tensor-parallel only.
             data_parallelism = 1
