@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    shard_linear_weights, to_parameter_list)
+    format_linear_scale, shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_quantized_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import FP8
@@ -147,9 +147,11 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
 
         assert self.block_quant
         weight = t2j(layer.weight, use_dlpack=False)
+        weight = jnp.transpose(weight)
         delattr(layer, "weight")
 
         weight_scale = t2j(layer.weight_scale_inv, use_dlpack=False)
+        weight_scale = jnp.transpose(weight_scale)
         delattr(layer, "weight_scale_inv")
 
         if layer.bias is not None and not layer.skip_bias_add:
@@ -169,19 +171,18 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             output_sizes=tuple(self.linear_config.output_sizes),
             requant_weight_dtype=self.linear_config.requant_weight_dtype,
             fuse_matmuls=self.linear_config.fuse_matmuls,
-            n_shards=self.linear_config.n_shards)
-        if self.linear_config.enable_quantized_matmul_kernel:
-            # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
-            weights.weight_scale = jnp.expand_dims(
-                jnp.transpose(weights.weight_scale),
-                axis=1,
-            )
+            n_shards=self.linear_config.n_shards,
+            transposed=False)
+        weights.weight_scale = format_linear_scale(
+            weights.weight_scale,
+            self.linear_config.enable_quantized_matmul_kernel)
         weights = torch_view(
             shard_linear_weights(
                 weights,
                 mesh=self.linear_config.mesh,
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
+                transposed=False,
             ))
 
         if self.linear_config.fuse_matmuls:

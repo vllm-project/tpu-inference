@@ -33,8 +33,8 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
+    format_linear_scale, LinearWeights, process_linear_weights,
+    shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.quantization.configs import \
@@ -113,6 +113,7 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = t2j(layer.weight, use_dlpack=False)
+        weight = jnp.transpose(weight)
         delattr(layer, "weight")
 
         weight_scale = layer.weight_scale
@@ -148,15 +149,20 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
                 fused=self.linear_config.fuse_matmuls,
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
+                transposed=False,
             )
 
         weights = process_int8_linear_weights(weight, weight_scale, bias)
+        weights.weight_scale = format_linear_scale(
+            weights.weight_scale,
+            self.linear_config.enable_quantized_matmul_kernel)
         weights = torch_view(
             shard_linear_weights(
                 weights,
                 mesh=self.linear_config.mesh,
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
+                transposed=False,
             ))
 
         if self.linear_config.fuse_matmuls:

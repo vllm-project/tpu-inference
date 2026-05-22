@@ -50,8 +50,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
+    format_linear_scale, LinearWeights, process_linear_weights,
+    shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import NVFP4
@@ -170,10 +170,12 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
         def _unpack_and_scale(weight_packed, weight_scale,
                               weight_global_scale):
             fp4 = u8_unpack_e2m1(weight_packed)  # (O, I) float4_e2m1fn
+            fp4 = jnp.transpose(fp4)
 
             # Combine FP8 block scale & FP32 global scale
             block_scale = weight_scale.astype(
                 jnp.float32) * weight_global_scale  # (O, I/group)
+            block_scale = jnp.transpose(block_scale)
 
             return fp4, block_scale
 
@@ -189,14 +191,18 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
             fused=self.linear_config.fuse_matmuls,
             output_sizes=self.linear_config.output_sizes,
             reorder_size=self.linear_config.n_shards,
+            transposed=False,
         )
-
+        weights.weight_scale = format_linear_scale(
+            weights.weight_scale,
+            self.linear_config.enable_quantized_matmul_kernel)
         weights = torch_view(
             shard_linear_weights(
                 weights,
                 mesh=self.linear_config.mesh,
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
+                transposed=False,
             ))
 
         if self.linear_config.fuse_matmuls:

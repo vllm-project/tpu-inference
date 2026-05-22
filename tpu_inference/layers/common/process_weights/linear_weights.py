@@ -15,6 +15,7 @@
 from dataclasses import dataclass, fields
 
 import jax
+import jax.numpy as jnp
 import torch
 from jax._src import mesh as meshlib
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -80,12 +81,25 @@ def get_model_matmul_fusion_assignment(model_name: str, batch_size: int,
     return MODEL_MATMUL_FUSION_TRUTH_TABLE.get(key, True)
 
 
+def format_linear_scale(weight_scale: jax.Array | Tensor | list | None, enable_kernel: bool) -> jax.Array | Tensor | list | None:
+    if weight_scale is None:
+        return None
+    if isinstance(weight_scale, (list, tuple)):
+        return [format_linear_scale(s, enable_kernel) for s in weight_scale]
+    scale = jax_view(weight_scale)
+    if scale.ndim == 2:
+        if enable_kernel:
+            scale = jnp.expand_dims(scale, (0, 2))
+        return torch_view(scale) if isinstance(weight_scale, Tensor) else scale
+    return weight_scale
+
+
 def process_linear_weights(
     weights: LinearWeights,
     fused: bool = False,
     output_sizes: list[int] | None = None,
     reorder_size: int | None = None,
-    transposed: bool = True,
+    transposed: bool = False,
     per_tensor: bool = False,
 ) -> LinearWeights:
     weight = weights.weight
@@ -149,17 +163,17 @@ def shard_linear_weights(
     mesh: Mesh | None,
     weight_p_spec: PartitionSpec,
     bias_p_spec: PartitionSpec,
-    transposed: bool = True,
+    transposed: bool = False,
     per_tensor: bool = False,
 ) -> LinearWeights:
     # jax==0.8.1 introduces jax.sharding.get_mesh(), but current
     # v6e test environment uses 0.8.0, so we use jax._src.mesh instead.
     mesh = mesh or meshlib.get_concrete_mesh()
-    if not transposed:
-        # By defualt, we use transposed weights. If it is not transposed,
+    if transposed:
+        # By default, we use non-transposed (k, n) weights. If it is transposed,
         # we need to transpose the sharding as well.
         weight_p_spec = PartitionSpec(*weight_p_spec[::-1])
-        bias_p_spec = PartitionSpec(weight_p_spec[0])
+        bias_p_spec = PartitionSpec(weight_p_spec[1])
 
     weight_sharding = NamedSharding(mesh, weight_p_spec)
     bias_sharding = NamedSharding(mesh, bias_p_spec)
@@ -168,16 +182,19 @@ def shard_linear_weights(
         weights.weight_scale, list
         | tuple) and weights.weight_scale else jax_view(weights.weight_scale)
 
-    if isinstance(sample_scale, jax.Array) and len(sample_scale.shape) == 3:
-        num_blocks = sample_scale.shape[0]
+    if isinstance(sample_scale, jax.Array) and (len(sample_scale.shape) == 3 or len(sample_scale.shape) == 4):
+        num_blocks = sample_scale.shape[0] if sample_scale.ndim == 3 else sample_scale.shape[1]
         if len(weight_p_spec) != 2:
             raise ValueError(
                 F"The weight sharding shape length should be 2, but given {len(weight_p_spec)}."
             )
         # Cannot be sharded on the first dimension in case the number of blocks is 1.
-        in_axis = weight_p_spec[1] if num_blocks > 1 else None
-        out_axis = weight_p_spec[0]
-        weight_scale_p_spec = P(in_axis, None, out_axis)
+        in_axis = weight_p_spec[0] if num_blocks > 1 else None
+        out_axis = weight_p_spec[1]
+        if sample_scale.ndim == 4:
+            weight_scale_p_spec = P(None, in_axis, None, out_axis)
+        else:
+            weight_scale_p_spec = P(in_axis, None, out_axis)
         weight_scale_sharding = NamedSharding(mesh, weight_scale_p_spec)
     elif isinstance(sample_scale, jax.Array) and len(
             sample_scale.shape) == 2 and not per_tensor:

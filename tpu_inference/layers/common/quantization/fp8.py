@@ -86,6 +86,7 @@ class Fp8LinearMethod:
     'requant_weight_dtype',
     'fuse_matmuls',
     'n_shards',
+    'transposed',
 ))
 def process_blockwise_fp8_linear_weights(
     weight: jax.Array,
@@ -98,6 +99,7 @@ def process_blockwise_fp8_linear_weights(
     requant_weight_dtype,
     fuse_matmuls,
     n_shards,
+    transposed: bool = False,
 ) -> LinearWeights:
     if envs.DISABLE_WEIGHT_REQUANTIZATION:
         logger.info_once(
@@ -116,20 +118,23 @@ def process_blockwise_fp8_linear_weights(
             fused=fuse_matmuls,
             output_sizes=output_sizes,
             reorder_size=n_shards,
+            transposed=transposed,
         )
 
         if fuse_matmuls:
+            dim = 0 if transposed else 1
             weight_scale_processed = reorder_concatenated_tensor_for_sharding(
-                weight_scale, output_sizes_blocks, n_shards, dim=0)
+                weight_scale, output_sizes_blocks, n_shards, dim=dim)
         else:
             weight_scale_processed = []
             start = 0
+            dim = 0 if transposed else 1
             for size in output_sizes_blocks:
                 end = start + size
                 tensor_split = jax.lax.slice_in_dim(weight_scale,
                                                     start,
                                                     end,
-                                                    axis=0)
+                                                    axis=dim)
                 weight_scale_processed.append(tensor_split)
                 start = end
 
@@ -140,21 +145,22 @@ def process_blockwise_fp8_linear_weights(
     weight_scales = []
     original_block_size = weight_block_size[0]
     start = 0
+    dim = 0 if transposed else 1
     for output_size in output_sizes:
         end = start + output_size
 
-        weight_slice = weight[start:end]
-        weight_scale_slice = weight_scale[start // original_block_size:math.
-                                          ceil(end / original_block_size)]
+        weight_slice = weight[start:end] if transposed else weight[:, start:end]
+        weight_scale_slice = weight_scale[start // original_block_size:math.ceil(end / original_block_size)] if transposed else weight_scale[:, start // original_block_size:math.ceil(end / original_block_size)]
         dequantized_weight = dequantize_tensor(
             weight_slice,
             weight_scale_slice,
             (0, 1),
-            block_size=weight_block_size,
+            block_size=weight_block_size if transposed else weight_block_size[::-1],
         )
         weight_slice, weight_scale_slice = quantize_tensor(
             requant_weight_dtype,
             dequantized_weight,
+            axis=1 if transposed else 0,
             block_size=requant_block_size)
 
         weights.append(weight_slice)
@@ -162,8 +168,8 @@ def process_blockwise_fp8_linear_weights(
 
         start = end
 
-    weight = jnp.concat(weights, axis=0)
-    weight_scale = jnp.concat(weight_scales, axis=0)
+    weight = jnp.concat(weights, axis=dim)
+    weight_scale = jnp.concat(weight_scales, axis=0 if (weight_scales and weight_scales[0].ndim == 1) else dim)
 
     return process_linear_weights(
         LinearWeights(
@@ -175,4 +181,5 @@ def process_blockwise_fp8_linear_weights(
         fused=fuse_matmuls,
         output_sizes=output_sizes,
         reorder_size=n_shards,
+        transposed=transposed,
     )

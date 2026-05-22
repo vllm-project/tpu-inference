@@ -80,7 +80,7 @@ def xla_quantized_matmul(
 
     Args:
         x:  Activation.
-        w_q: Weight quantized array. [n_output_features, n_input_features]
+        w_q: Weight quantized array. [n_input_features, n_output_features]
         w_s: Weight quantization scale. [n_output_features]
         mesh: Mesh to shard on.
         weight_sharding: PartitionSpec for the weight tensor.
@@ -90,22 +90,17 @@ def xla_quantized_matmul(
     """
     skip_scale = False
     if w_scale is not None and w_scale.ndim == 2:
-        # If w_scale is 2D, we assume 2d-blockwise quantization. Because the scale
-        # is not constant along the contracting axis (different blocks in the same
-        # row have different scales), we mathematically cannot pull the scale out of
-        # the matmul summation. Thus, we must de-quantize the weights first before
-        # performing the matmul.
         skip_scale = True
-        out_features, in_features = w_q.shape
-        out_blocks, in_blocks = w_scale.shape
-        block_size_out = out_features // out_blocks
+        in_features, out_features = w_q.shape
+        in_blocks, out_blocks = w_scale.shape
         block_size_in = in_features // in_blocks
+        block_size_out = out_features // out_blocks
 
-        w_q_reshaped = w_q.reshape(out_blocks, block_size_out, in_blocks,
-                                   block_size_in)
+        w_q_reshaped = w_q.reshape(in_blocks, block_size_in, out_blocks,
+                                   block_size_out)
         w_q = (w_q_reshaped.astype(jnp.float32) *
                w_scale[:, jnp.newaxis, :, jnp.newaxis]).reshape(
-                   out_features, in_features).astype(x.dtype)
+                   in_features, out_features).astype(x.dtype)
 
         # in this case, we don't want to quantize the activations
         quantize_activation = False
@@ -122,7 +117,7 @@ def xla_quantized_matmul(
         out = jax.lax.dot_general(
             x_q,
             w_q,
-            dimension_numbers=(((1, ), (1, )), ((), ())),
+            dimension_numbers=(((1, ), (0, )), ((), ())),
             preferred_element_type=acc_dtype,
         ).astype(jnp.float32)
         out *= x_scale
@@ -130,7 +125,7 @@ def xla_quantized_matmul(
         out = jax.lax.dot_general(
             x,
             w_q,
-            dimension_numbers=(((1, ), (1, )), ((), ())),
+            dimension_numbers=(((1, ), (0, )), ((), ())),
             preferred_element_type=jnp.float32,
         )
     if not skip_scale:

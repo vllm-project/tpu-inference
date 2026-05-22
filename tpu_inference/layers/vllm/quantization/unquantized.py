@@ -15,6 +15,7 @@
 from typing import Any, Callable, Optional
 
 import jax
+import jax.numpy as jnp
 import torch
 import vllm.envs as vllm_envs
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -250,9 +251,10 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             return
         # Under Pathways, shard weights directly onto the TPU mesh to avoid
         # placing a full unsharded copy on a single device (OOM).
-        weight_sharding = NamedSharding(self.linear_config.mesh,
-                                        self.linear_config.weight_sharding)
-        weight = _load_weight_for_layer(layer, "weight", weight_sharding)
+        loading_sharding = NamedSharding(self.linear_config.mesh,
+                                         PartitionSpec(*self.linear_config.weight_sharding[::-1]))
+        weight = _load_weight_for_layer(layer, "weight", loading_sharding)
+        weight = jnp.transpose(weight)
 
         # Free CPU memory immediately
         layer.weight.untyped_storage().resize_(0)
@@ -283,6 +285,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                 fused=self.linear_config.fuse_matmuls,
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
+                transposed=False,
             )
 
         weights = process_unquantized_linear_weights(weight, bias)
@@ -292,6 +295,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                 mesh=self.linear_config.mesh,
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
+                transposed=False,
             ))
         if self.linear_config.fuse_matmuls:
             layer.weight = Parameter(weights.weight, requires_grad=False)

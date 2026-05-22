@@ -36,8 +36,8 @@ from vllm.scalar_type import scalar_types
 
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
+    format_linear_scale, LinearWeights, process_linear_weights,
+    shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.quantization.configs import \
@@ -181,9 +181,12 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
         ) -> LinearWeights:
             # Convert from uint4 to int4.
             weight = (uint_weight - 8).astype(jnp.int4)
+            weight = jnp.transpose(weight)
 
             if weight_scale.shape[-1] == 1:
                 weight_scale = jnp.squeeze(weight_scale, -1)
+            elif weight_scale.ndim == 2:
+                weight_scale = jnp.transpose(weight_scale)
 
             processed_weights = process_linear_weights(
                 LinearWeights(
@@ -196,21 +199,14 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
                 per_tensor=per_tensor,
+                transposed=False,
             )
-
-            # W4A8 scale comes as (out_features, num_blocks), but the kernel
-            # expects (num_blocks, 1, out_features). We format the weight scales
-            # here after processing so that slicing on dim=0 succeeds.
-            if isinstance(processed_weights.weight_scale, list):
-                raise ValueError("Unexpected weight scale format.")
-
-            if processed_weights.weight_scale is not None and processed_weights.weight_scale.ndim == 2:
-                processed_weights.weight_scale = jnp.expand_dims(
-                    jnp.transpose(processed_weights.weight_scale, (1, 0)), 1)
-
             return processed_weights
 
         weights = process_uint4_linear_weights(uint_weight, weight_scale, bias)
+        weights.weight_scale = format_linear_scale(
+            weights.weight_scale,
+            self.linear_config.enable_quantized_matmul_kernel)
         weights = torch_view(
             shard_linear_weights(
                 weights,
@@ -218,6 +214,7 @@ class VllmCompressedTensorsW4A8Fp8(CompressedTensorsW4A8Fp8):
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
                 per_tensor=per_tensor,
+                transposed=False,
             ))
 
         if self.linear_config.fuse_matmuls:
