@@ -62,12 +62,12 @@
 # Tools (kernel tuner, etc.)
 /tools/ @vipannalla @kyuyeunk @patrickji2014
 
-# Generated artifacts (bot-updated)
-/support_matrices/ @buildkite-bot @CienetStingLin @boe20211
-
-# Unowned: scripts and examples — anyone can approve, no required CODEOWNER review
+# Unowned: scripts, examples, and bot-updated support_matrices —
+# anyone can approve, no required CODEOWNER review. Bot pushes to
+# support_matrices bypass branch protection at the push level.
 /scripts/
 /examples/
+/support_matrices/
 
 # Tests mirror production-code ownership (CODEOWNERS rules per subtree)
 /tests/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
