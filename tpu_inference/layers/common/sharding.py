@@ -22,9 +22,12 @@ import numpy as np
 from jax.sharding import Mesh
 
 from tpu_inference import envs, utils
+from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
 
 MESH_AXIS_NAMES = ("data", "attn_dp", "attn_dp_expert", "expert", "model",
                    "dcp")
@@ -171,14 +174,41 @@ class ShardingConfigManager:
         ss_tensor_parallelsim = sharding_strategy.get("tensor_parallelism",
                                                       None)
         data_parallelism = parallel_config.data_parallel_size
+        enable_dp_attention = sharding_strategy.get("enable_dp_attention",
+                                                    False)
+        # vLLM-native multi-process data parallelism: one engine process per
+        # DP rank, fronted by a single load-balanced API endpoint. 
+        #
+        # It is not used (we fall back to single-process SPMD DP) when:
+        #  - the model is MoE 
+        #  - attention DP is enabled
+        model_config = vllm_config.model_config
+        multiprocess_dp = (envs.TPU_MULTIPROCESS_DP and data_parallelism > 1
+                           and model_config is not None
+                           and not model_config.is_moe
+                           and not enable_dp_attention)
+        if (envs.TPU_MULTIPROCESS_DP and data_parallelism > 1
+                and not multiprocess_dp):
+            logger.warning(
+                "TPU_MULTIPROCESS_DP is set but is not supported for MoE "
+                "models or with attention DP (enable_dp_attention). " 
+                "Falling back to single-process "
+                "SPMD data parallelism.")
+        if multiprocess_dp:
+            # Each engine process is tensor-parallel only.
+            data_parallelism = 1
+            logger.warning(
+                "TPU_MULTIPROCESS_DP is enabled: vLLM will spawn one engine "
+                "process per DP rank with internal load balancing. This is "
+                "supported for online serving (`vllm serve` / AsyncLLM) "
+                "only -- vLLM has no synchronous DP client, so the offline "
+                "LLM().generate() API will hang. Use `vllm serve` instead.")
         expert_parallelism = sharding_strategy.get("expert_parallelism", 1)
         sequence_parallelism = sharding_strategy.get("sequence_parallelism", 1)
         device_indexes = sharding_strategy.get("device_indexes", None)
 
         decode_context_parallelism = parallel_config.decode_context_parallel_size
 
-        enable_dp_attention = sharding_strategy.get("enable_dp_attention",
-                                                    False)
         if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
             # The user has explicitly set the tensor parallelism in the sharding config.
             tensor_parallelism = ss_tensor_parallelsim
@@ -249,7 +279,10 @@ class ShardingConfigManager:
             decode_context_parallelism=decode_context_parallelism)
 
         # Must override here to avoid vLLM spinning up multiple DP engines.
-        if vllm_config.parallel_config.data_parallel_size > 1:
+        # In multiprocess-DP mode this is exactly what we want, so the
+        # override is skipped and vLLM spawns one engine per DP rank.
+        if (not multiprocess_dp
+                and vllm_config.parallel_config.data_parallel_size > 1):
             vllm_config.parallel_config.data_parallel_size = 1
             vllm_config.parallel_config.data_parallel_rank = 0
             vllm_config.parallel_config.data_parallel_size_local = 1
