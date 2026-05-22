@@ -50,6 +50,10 @@ ENV_VARS=(
   -e MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
   -e MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
   -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
+  -e USE_CHAT_TEMPLATE="${USE_CHAT_TEMPLATE:-}"
+  -e BENCH_DATASET="${BENCH_DATASET:-}"
+  -e USE_BATCHED_RPA_KERNEL="${USE_BATCHED_RPA_KERNEL:-}"
+  -e GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"
   # For kernel tuning pipeline env vars
   -e KERNEL_TUNING_CASE_SET_ID="${KERNEL_TUNING_CASE_SET_ID:-}"
   -e KERNEL_TUNING_RUN_ID="${KERNEL_TUNING_RUN_ID:-}"
@@ -121,12 +125,16 @@ echo "[INFO] Detected JAX Version: ${JAX_VERSION}"
 CACHE_NAMESPACE="jax${JAX_VERSION}_tpu${TPU_VERSION:-tpu6e}"
 FINAL_CACHE_PATH="${GCS_CACHE_BASE}/${CACHE_NAMESPACE}"
 
-LOCAL_JAX_CACHE_DIR="/tmp/tpu_jax_cache/${CACHE_NAMESPACE}"
-mkdir -p "$LOCAL_JAX_CACHE_DIR"
+LOCAL_JAX_CACHE_DIR="/mnt/disks/persist/tpu_jax_cache/${CACHE_NAMESPACE}"
+
+if ! mkdir -p "$LOCAL_JAX_CACHE_DIR"; then
+  echo "[ERROR] Failed to create $LOCAL_JAX_CACHE_DIR on persistent disk."
+  exit 1
+fi
 echo "[INFO] Pulling JAX Cache from GCS to local directory..."
 # Parallel CI builds‘ pushes are safe because JAX's compilation cache 
 # entries are content-addressed. Concurrent pushes are thus idempotent;
-gsutil -m rsync -r "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" || echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
+gsutil -m rsync -d -r "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" || echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
 
 # ==========================================
 # 2. Run Docker Container

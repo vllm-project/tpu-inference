@@ -164,10 +164,54 @@ class TPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+    def _setup_dp_chip_isolation(self) -> None:
+        """Sets libtpu env vars so the process initializes JAX on a subset of
+        physical chips. Must run before JAX initializes its TPU backend.
+        """
+        from tpu_inference import tpu_info
+
+        parallel_config = self.vllm_config.parallel_config
+        dp_rank = getattr(parallel_config, "data_parallel_index", 0) or 0
+
+        sharding_config = self.vllm_config.sharding_config
+        num_devices = sharding_config.total_devices
+
+        cores_per_chip = tpu_info.get_num_cores_per_chip()
+        chips_per_rank = math.ceil(num_devices / cores_per_chip)
+        total_chips = tpu_info.get_num_chips()
+
+        start_chip = dp_rank * chips_per_rank
+        end_chip = start_chip + chips_per_rank
+        if total_chips and end_chip > total_chips:
+            raise ValueError(
+                f"Multi-process DP rank {dp_rank} needs TPU chips "
+                f"[{start_chip}, {end_chip}) but the host only has "
+                f"{total_chips} chips. Reduce --data-parallel-size or "
+                f"--tensor-parallel-size.")
+
+        visible_chips = ",".join(str(c) for c in range(start_chip, end_chip))
+        # Unique libtpu port per rank so the runtimes can coexist on a host.
+        tpu_port = jax_parallel_state.BASE_JAX_PORT + dp_rank
+
+        os.environ["TPU_VISIBLE_CHIPS"] = visible_chips
+        os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,{chips_per_rank},1"
+        os.environ["TPU_PROCESS_BOUNDS"] = "1,1,1"
+        os.environ["TPU_PROCESS_PORT"] = str(tpu_port)
+        os.environ["TPU_PROCESS_ADDRESSES"] = f"localhost:{tpu_port}"
+        os.environ["CLOUD_TPU_TASK_ID"] = "0"
+        logger.info(
+            "Multi-process DP | rank=%d | TPU_VISIBLE_CHIPS=%s | "
+            "TPU_CHIPS_PER_PROCESS_BOUNDS=1,%d,1 | TPU_PROCESS_PORT=%d",
+            dp_rank, visible_chips, chips_per_rank, tpu_port)
+
     def init_device(self,
                     tpu_process_bounds="",
                     tpu_chips_per_process_bounds="",
                     tpu_visible_chips=""):
+
+        if (envs.TPU_MULTIPROCESS_DP
+                and self.parallel_config.pipeline_parallel_size == 1):
+            self._setup_dp_chip_isolation()
 
         # set tpu visible devices for Jax runtime in PP.
         multihost_backend = envs.TPU_MULTIHOST_BACKEND

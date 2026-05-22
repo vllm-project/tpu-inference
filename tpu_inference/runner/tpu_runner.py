@@ -313,6 +313,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._init_random()
         self._init_mesh()
         self._init_phased_profiling()
+        self._init_aggregated_stats_logging()
         self._init_mm()
         self._init_inputs()
         self._init_speculative_decoding()
@@ -465,7 +466,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.phase_based_profiler = None
         if self.phased_profiling_dir:
             self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
-                self.phased_profiling_dir, worker_rank=self.rank)
+                self.phased_profiling_dir)
+
+    def _init_aggregated_stats_logging(self) -> None:
+        self.aggregated_stats_dir = envs.AGGREGATED_STATS_DIR
+        self.aggregated_stats_logger = None
+        # Only enable stats aggregation on one worker to avoid duplicate records
+        if self.aggregated_stats_dir and self.rank == 0:
+            self.aggregated_stats_logger = runner_utils.AggregatedStatsLogger(
+                self.aggregated_stats_dir)
 
     def _init_mm(self) -> None:
         self.is_multimodal_model = None
@@ -565,8 +574,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # the max_reqs. If ATTN_BUCKETIZE_NUM_REQS=true, it is the
         # power-of-two between min and max reqs.
         # User can set ATTN_CUSTOM_NUM_REQS_BUCKETS to provide custom buckets.
-        self.attn_num_reqs_paddings = runner_utils.get_attn_req_paddings(
-            min_req_size=min_num_reqs, max_req_size=self.max_num_reqs)
+        self.attn_num_reqs_paddings_per_dp = runner_utils.get_attn_req_paddings(
+            min_req_size=MIN_NUM_SEQS,
+            max_req_size=scheduler_config.max_num_seqs)
+        self.attn_num_reqs_paddings = [
+            padding * self.dp_size
+            for padding in self.attn_num_reqs_paddings_per_dp
+        ]
+
         self.num_reqs_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_reqs_paddings
         ]
@@ -655,10 +670,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # tuple of array leaves and reconstructs the nnx.State inside the
         # jit. Pre-flatten here so subsequent dispatches skip the per-call
         # walk of `nnx.Variable` wrappers
-        if isinstance(self.state, nnx.State):
-            self.state_leaves = tuple(jax.tree_util.tree_leaves(self.state))
-        else:
-            self.state_leaves = self.state
+        self.state_leaves = model.state_leaves
         self.lora_manager = model.lora_manager
         self.model = model.model
 
@@ -699,6 +711,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                     and hasattr(self.model_config.hf_config,
                                                 "architectures")
                                     and not disable_mm_from_limits)
+
+        # Clear JIT compilation caches from weight loading to free XLA
+        # program reservations (bytes_reserved) on TPU HBM.
+        jax.clear_caches()
+        logger.info("Cleared JIT caches after weight loading")
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
@@ -1038,7 +1055,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         hidden_states = self._select_from_array_fn(hidden_states,
                                                    logits_indices)
         logits = self.compute_logits_fn(
-            self.state,
+            self.state_leaves,
             hidden_states,
             lora_metadata,
         )
@@ -1406,7 +1423,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
         attn_padded_num_reqs = runner_utils.get_padded_token_len(
-            self.attn_num_reqs_paddings, padded_num_reqs)
+            self.attn_num_reqs_paddings_per_dp,
+            max_num_reqs_across_dp) * dp_size
 
         # logits_indices_selector reorders per-rank outputs back to the
         # original batch ordering; with a single rank the ordering is already
@@ -1757,15 +1775,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 1)
             logits_indices_cpu[_num_reqs:] = -1
 
-        # Please see runner_utils.PhasedBasedProfiler for details
-        if self.phase_based_profiler:
+            # Calculate batch composition statistics for active hardware profilers
+            # and/or continuous batch logging.
+        if self.phase_based_profiler or self.aggregated_stats_logger:
             self.batch_counter += 1
             batch_composition_stats = runner_utils.get_batch_composition_stats(
                 self.batch_counter, self.input_batch,
                 total_num_scheduled_tokens, num_reqs,
                 padded_total_num_scheduled_tokens, scheduler_output)
 
-            self.phase_based_profiler.step(batch_composition_stats)
+            if self.phase_based_profiler:
+                self.phase_based_profiler.step(batch_composition_stats)
+            if self.aggregated_stats_logger:
+                self.aggregated_stats_logger.log(batch_composition_stats)
 
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
@@ -2007,7 +2029,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.is_multimodal_model and mm_embeds is not None:
             assert self.embed_input_ids_fn is not None
             inputs_embeds = self.embed_input_ids_fn(
-                self.state,
+                self.state_leaves,
                 input_ids,
                 mm_embeds,
                 is_multimodal=is_mm_embed,

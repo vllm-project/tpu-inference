@@ -132,7 +132,7 @@ def get_padded_token_len(paddings: list[int], x: int) -> int:
     """Return the first element in paddings list greater or equal to x.
     """
     index = bisect.bisect_left(paddings, x)
-    assert index < len(paddings)
+    assert index < len(paddings), f"{paddings=}, {x=}"
     return paddings[index]
 
 
@@ -472,7 +472,6 @@ class PhasedBasedProfiler:
         default_profiling_options: The default profiling options.
         current_phase: The current phase.
         worker_rank: The rank of the current worker process.
-        aggregated_stats_logger: An instance of AggregatedStatsLogger to log stats continuously.
     """
 
     def __init__(self,
@@ -507,10 +506,6 @@ class PhasedBasedProfiler:
 
         self.worker_rank = worker_rank
         self.aggregated_stats_logger = None
-
-        if self.worker_rank == 0 and envs.ENABLE_AGGREGATED_STATS_LOGGER:
-            self.aggregated_stats_logger = AggregatedStatsLogger(
-                self.profile_dir, flush_interval)
 
         logger.info(
             "Phased-based profiler enabled. Traces will be saved to: %s",
@@ -683,7 +678,6 @@ class PhasedBasedProfiler:
     def step(self, batch_composition_stats: dict) -> None:
         """
         Steps the profiler and logs batch composition stats.
-        Continuous logging is handled by `AggregatedStatsLogger` if enabled.
 
         Args:
             batch_composition_stats: The batch composition stats,  which is a dict
@@ -697,22 +691,18 @@ class PhasedBasedProfiler:
                     phase: The phase of the inference the batch is in.
         """
 
+        have_seen_all_phases = all(self.inference_phase_seen.values())
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
             "total_num_scheduled_tokens"] > 1
-
-        if is_past_initial_request:
-            if self.aggregated_stats_logger is not None:
-                self.aggregated_stats_logger.log(batch_composition_stats)
-
-            have_seen_all_phases = all(self.inference_phase_seen.values())
-            if (not have_seen_all_phases or self.current_phase != ""):
-                # We haven't started profiling yet
-                if self.profiling_n_steps_left <= 0:
-                    self._start_profiling(batch_composition_stats)
-                # We are in the middle of profiling a given phase
-                else:
-                    self._step_or_stop_profiling(batch_composition_stats)
+        if is_past_initial_request and (not have_seen_all_phases
+                                        or self.current_phase != ""):
+            # We haven't started profiling yet
+            if self.profiling_n_steps_left <= 0:
+                self._start_profiling(batch_composition_stats)
+            # We are in the middle of profiling a given phase
+            else:
+                self._step_or_stop_profiling(batch_composition_stats)
 
 
 @functools.partial(
