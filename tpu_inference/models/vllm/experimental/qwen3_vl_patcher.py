@@ -253,6 +253,34 @@ def _patched_flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
     return torch.cat(tuple(_patched_flatten_embeddings(t) for t in embeddings))
 
 
+def _jax_compatible_merge_multimodal_embeddings(
+    inputs_embeds, multimodal_embeddings, is_multimodal
+):
+    if len(multimodal_embeddings) == 0:
+        return inputs_embeds
+
+    import torch
+
+    mm_embeds_flat = vllm_utils._flatten_embeddings(multimodal_embeddings)
+    input_dtype = inputs_embeds.dtype
+    mm_embeds_flat = mm_embeds_flat.to(dtype=input_dtype)
+
+    # Create a dummy row to handle indices for non-multimodal tokens.
+    dummy_row = torch.zeros_like(mm_embeds_flat[0:1])
+    # Prepend the dummy row.
+    flattened_padded = torch.cat([dummy_row, mm_embeds_flat], dim=0)
+
+    # For non-multimodal tokens, cumsum points to 0.
+    # For multimodal tokens, it points to their 1-based index in the padded array.
+    gather_indices = is_multimodal.to(torch.int64).cumsum(dim=0)
+    update_values = flattened_padded[gather_indices]
+
+    condition = is_multimodal.unsqueeze(-1)
+    new_embeds = torch.where(condition, update_values, inputs_embeds)
+
+    return new_embeds
+
+
 @partial(jax.jit, static_argnums=(1, 2, 3, 4, 5))
 def pos_embed_interpolate_jax(
     embed_weight: jax.Array,
@@ -411,7 +439,15 @@ def apply_qwen3_vl_patches(vllm_model):
     # 5. Patch _flatten_embeddings in vllm utils to handle negative indexes correctly in torchax
     vllm_utils._flatten_embeddings = _patched_flatten_embeddings
 
-    # 6. Force HAS_TRITON to False to prevent JAX/Triton active driver crash on TPU
+    # 6. Patch merge_multimodal_embeddings in both utils and locally imported references to support JAX static math ops
+    vllm_utils._merge_multimodal_embeddings = (
+        _jax_compatible_merge_multimodal_embeddings
+    )
+    qwen3_vl_mod._merge_multimodal_embeddings = (
+        _jax_compatible_merge_multimodal_embeddings
+    )
+
+    # 7. Force HAS_TRITON to False to prevent JAX/Triton active driver crash on TPU
     qwen3_vl_mod.HAS_TRITON = False
 
     # 7. Patch position embedding interpolation and rotary position embedding to use JAX JIT compiled implementations
