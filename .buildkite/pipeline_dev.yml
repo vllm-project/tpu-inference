@@ -40,14 +40,14 @@ steps:
   # -----------------------------------------------------------------
   # Build Step (required by all demo steps below)
   # -----------------------------------------------------------------
-  # - label: ":docker: Build and Push Base Image (tpu7x)"
-  #   key: tpu7x_build_docker
-  #   agents:
-  #     queue: cpu_64_core
-  #   env:
-  #     TPU_VERSION: "tpu7x"
-  #   commands:
-  #     - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+  - label: ":docker: Build and Push Base Image (tpu7x)"
+    key: tpu7x_build_docker
+    agents:
+      queue: cpu_64_core
+    env:
+      TPU_VERSION: "tpu7x"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
   # Demo 1: offline_inference.py
