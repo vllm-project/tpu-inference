@@ -99,13 +99,11 @@ steps:
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
-      BENCHMARK_DOCKER_ARGS_STR: "-v /scratch/xprof_dump:/scratch/xprof_dump"
     agents:
       queue: tpu_v7x_8_queue
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash -c '
-          PHASED_PROFILING_DIR=/scratch/xprof_dump/kernel/ \
           ENABLE_QUANTIZED_MATMUL_KERNEL=1 REQUANTIZE_BLOCK_SIZE=512 \
           MODEL_IMPL_TYPE=vllm USE_BATCHED_RPA_KERNEL=1 \
           LIBTPU_INIT_ARGS="--xla_tpu_enable_sparse_core_collective_offload_all_reduce=false --xla_tpu_all_gather_collective_matmul_mode=post_spmd_conservative --xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd_conservative --xla_jf_crs_combiner_threshold_in_bytes=0 --xla_tpu_scheduler_percent_shared_memory_limit=1000 --xla_jf_enable_producer_consumer_multi_output_fusion=false --xla_tpu_enable_domain_passes=true --xla_collective_optimize_constant_table=ENABLED --xla_jf_fusion_max_instruction_count_for_window_config=65536" \
@@ -117,13 +115,11 @@ steps:
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
-      BENCHMARK_DOCKER_ARGS_STR: "-v /scratch/xprof_dump:/scratch/xprof_dump"
     agents:
       queue: tpu_v7x_8_queue
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash -c '
-          PHASED_PROFILING_DIR=/scratch/xprof_dump/xla/ \
           ENABLE_QUANTIZED_MATMUL_KERNEL=0 \
           MODEL_IMPL_TYPE=vllm USE_BATCHED_RPA_KERNEL=1 \
           LIBTPU_INIT_ARGS="--xla_tpu_enable_sparse_core_collective_offload_all_reduce=false --xla_tpu_all_gather_collective_matmul_mode=post_spmd_conservative --xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd_conservative --xla_jf_crs_combiner_threshold_in_bytes=0 --xla_tpu_scheduler_percent_shared_memory_limit=1000 --xla_jf_enable_producer_consumer_multi_output_fusion=false --xla_tpu_enable_domain_passes=true --xla_collective_optimize_constant_table=ENABLED --xla_jf_fusion_max_instruction_count_for_window_config=65536" \
