@@ -30,6 +30,7 @@ from jax._src.pallas.utils import next_power_of_2
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.parallel import ParallelConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
@@ -295,7 +296,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
-        self.parallel_config = vllm_config.parallel_config
+        self.parallel_config: ParallelConfig = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
@@ -465,8 +466,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.phased_profiling_dir = envs.PHASED_PROFILING_DIR
         self.phase_based_profiler = None
         if self.phased_profiling_dir:
+            # Under MPMD each DP rank runs its own profiler on the same host
+            # and produces an identically-named xplane.pb (same hostname,
+            # same JAX worker id). Without a per-rank segment they collide on
+            # the second-resolution timestamp dir and one rank's capture
+            # overwrites another's.
+            dp_rank = self.parallel_config.data_parallel_index if envs.TPU_MULTIPROCESS_DP else 0
             self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
-                self.phased_profiling_dir)
+                self.phased_profiling_dir, worker_rank=dp_rank)
 
     def _init_aggregated_stats_logging(self) -> None:
         self.aggregated_stats_dir = envs.AGGREGATED_STATS_DIR
