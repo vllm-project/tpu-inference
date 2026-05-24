@@ -20,6 +20,7 @@ from typing import Any, Callable, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3_5 import \
     Qwen3_5MoeForConditionalGeneration
@@ -37,7 +38,10 @@ JITTABLE_ARCHS = {
 
 def is_jittable_architecture(vllm_model) -> bool:
     """Check if the given vLLM model is of an architecture that supports JIT compilation."""
-    is_jittable = any(isinstance(vllm_model, arch) for arch in JITTABLE_ARCHS)
+    is_jittable = (any(
+        isinstance(vllm_model, arch) for arch in JITTABLE_ARCHS)
+                   or type(vllm_model).__name__
+                   == "Qwen3OmniMoeThinkerForConditionalGeneration")
     if is_jittable:
         logger.info_once(
             f"{type(vllm_model)}'s vision tower supports JIT compilation.")
@@ -64,8 +68,9 @@ def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
         vllm_model: The Vllm model instance containing the configuration.
     """
     if is_jittable_architecture(vllm_model):
-        return jax.jit(static_argnames=("image_grid_thw", "video_grid_thw",
-                                        "grid_thw"))(embed_multimodal_func_jax)
+        return jax.jit(static_argnames=(
+            "image_grid_thw", "video_grid_thw", "grid_thw",
+            "audio_feature_lengths"))(embed_multimodal_func_jax)
     else:
         return embed_multimodal_func_jax
 
@@ -133,7 +138,9 @@ def maybe_precompile_vision_encoder_fn(
     #   in_channels * temporal_patch_size * patch_size * patch_size
     # e.g. for Qwen3.5: 3 * 2 * 16 * 16 = 1536
     # Ref: https://github.com/vllm-project/vllm/blob/eb6661d52/vllm/model_executor/models/qwen3_vl.py#L1941
-    vc = vllm_config.model_config.hf_config.vision_config
+    # vc = vllm_config.model_config.hf_config.vision_config
+    hf_config = vllm_config.model_config.hf_config
+    vc = getattr(hf_config, "thinker_config", hf_config).vision_config
     patch_input_dim = (vc.in_channels * vc.temporal_patch_size *
                        vc.patch_size * vc.patch_size)
     spatial_merge_unit = vc.spatial_merge_size**2
@@ -183,4 +190,15 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
     for k, v in kwargs.items():
         if k in ("image_grid_thw", "video_grid_thw", "grid_thw"):
             kwargs[k] = GridTHW(v.tolist())
-    return kwargs
+
+        def _convert(obj, key=None):
+            if isinstance(obj, dict):
+                return {k: _convert(v, k) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [_convert(x, key) for x in obj]
+            elif isinstance(obj,
+                            torch.Tensor) and key == "audio_feature_lengths":
+                return tuple(obj.tolist())
+            return obj
+
+    return _convert(kwargs)
