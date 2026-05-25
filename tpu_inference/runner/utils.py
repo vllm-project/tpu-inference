@@ -763,7 +763,6 @@ class PhasedBasedProfiler:
 @functools.partial(
     jax.tree_util.register_dataclass,
     data_fields=[
-        "draft_token_ids",
         "draft_lengths",
         "target_logits_indices",
         "bonus_logits_indices",
@@ -775,7 +774,6 @@ class PhasedBasedProfiler:
 @dataclass
 class SpecDecodeMetadata:
     """Metadata for speculative decoding on JAX/TPU, containing all necessary indices."""
-    draft_token_ids: jnp.ndarray
     draft_lengths: jnp.ndarray
     target_logits_indices: jnp.ndarray
     bonus_logits_indices: jnp.ndarray
@@ -801,7 +799,7 @@ def host_extract_sampled_tokens(
         valid_sampled_token_ids = runner.rejection_sampler.parse_output(
             next_tokens, runner.input_batch.vocab_size,
             spec_decode_metadata.draft_lengths_cpu, num_reqs,
-            spec_decode_metadata.draft_token_ids.shape[0])
+            spec_decode_metadata.final_logits_indices.shape[0])
     # Mask out the sampled tokens that should not be sampled.
     for i in discard_sampled_tokens_req_indices:
         valid_sampled_token_ids[i].clear()

@@ -113,6 +113,7 @@ def _test_correctness_helper(
                 "enable_weights_track": False
             },
             "async_scheduling": async_scheduling,
+            "download_dir": "/mnt/pd",
         }
         if extra_kwargs:
             kwargs.update(extra_kwargs)
@@ -216,6 +217,7 @@ def _test_performance_helper(
             },
             "disable_log_stats": False,
             "async_scheduling": async_scheduling,
+            "download_dir": "/mnt/pd",
         }
         if extra_kwargs:
             kwargs.update(extra_kwargs)
@@ -318,8 +320,14 @@ def test_eagle3_correctness(
         async_scheduling=async_scheduling)
 
 
-@pytest.mark.parametrize("max_num_seqs", [1, 20])
-@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    "max_num_seqs,async_scheduling",
+    [
+        (1, False),
+        (20, False),
+        (20, True),
+    ],
+)
 def test_eagle3_performance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -350,7 +358,7 @@ def test_eagle3_performance(
 
 @pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
                     reason="MTP is only supported with vllm model impl.")
-@pytest.mark.parametrize("async_scheduling", [False])
+@pytest.mark.parametrize("async_scheduling", [False, True])
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -389,8 +397,14 @@ def test_mtp_correctness(
 
 @pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
                     reason="MTP is only supported with vllm model impl.")
-@pytest.mark.parametrize("max_num_seqs", [1, 20])
-@pytest.mark.parametrize("async_scheduling", [False])
+@pytest.mark.parametrize(
+    "max_num_seqs,async_scheduling",
+    [
+        (1, False),
+        (20, False),
+        (20, True),
+    ],
+)
 def test_mtp_performance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,

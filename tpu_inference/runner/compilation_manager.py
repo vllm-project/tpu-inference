@@ -815,10 +815,44 @@ class CompilationManager:
             "Compiling speculative_decoding with different input shapes.")
         self._precompile_rejection_sampler()
         self._precompile_extract_last_sampled_tokens()
+        self._precompile_extract_draft_token_ids()
         if self.runner.speculative_config.method == "eagle3":
             self._precompile_eagle3_helpers()
         if self.runner.speculative_config.method == "mtp":
             self._precompile_mtp_helpers()
+
+    def _precompile_extract_draft_token_ids(self) -> None:
+        logger.info(
+            "Compiling extract_draft_token_ids with different input shapes.")
+        data_parallel_attn_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+        for num_tokens in self.runner.num_tokens_paddings:
+            for num_logits in self.runner.num_logits_paddings:
+                if self._should_skip_padding_combination(num_tokens,
+                                                         num_logits,
+                                                         only_equal=False):
+                    continue
+                input_ids = self._create_dummy_tensor(
+                    (num_tokens, ),
+                    jnp.int32,
+                    sharding=data_parallel_attn_sharding)
+                final_logits_indices = self._create_dummy_tensor(
+                    (num_logits, ),
+                    jnp.int32,
+                    sharding=data_parallel_attn_sharding)
+                target_logits_indices = self._create_dummy_tensor(
+                    (num_logits, ),
+                    jnp.int32,
+                    sharding=data_parallel_attn_sharding)
+                self._run_compilation(
+                    f"worker{self.runner.rank} extract_draft_token_ids",
+                    self.runner._extract_draft_token_ids,
+                    input_ids,
+                    final_logits_indices,
+                    target_logits_indices,
+                    num_tokens=num_tokens,
+                    num_logits=num_logits,
+                )
 
     def _precompile_extract_last_sampled_tokens(self) -> None:
         logger.info(
@@ -859,8 +893,6 @@ class CompilationManager:
                     jnp.int32,
                     sharding=data_parallel_attn_sharding)
                 spec_decode_metadata = SpecDecodeMetadata(
-                    draft_token_ids=self._create_dummy_tensor((num_logits, ),
-                                                              jnp.int32),
                     draft_lengths=self._create_dummy_tensor((num_reqs, ),
                                                             jnp.int32),
                     target_logits_indices=self._create_dummy_tensor(
