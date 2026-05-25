@@ -23,7 +23,9 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3_5 import \
-    Qwen3_5MoeForConditionalGeneration, Qwen3OmniMoeThinkerForConditionalGeneration
+    Qwen3_5MoeForConditionalGeneration
+from vllm.model_executor.models.qwen3_omni_moe_thinker import \
+    Qwen3OmniMoeThinkerForConditionalGeneration
 
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
@@ -33,7 +35,7 @@ logger = init_logger(__name__)
 # Architectures whose embed_multimodal function is safe to wrap with jax.jit.
 JITTABLE_ARCHS = {
     Qwen3_5MoeForConditionalGeneration,
-    Qwen3OmniMoeThinkerForConditionalGeneration
+    Qwen3OmniMoeThinkerForConditionalGeneration,
 }
 
 

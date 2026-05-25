@@ -473,6 +473,7 @@ class VllmModelWrapper:
                 # Extract audio_feature_lengths from the top-level kwargs so it is not moved to JAX
                 audio_feature_lengths = kwargs.pop("audio_feature_lengths",
                                                    None)
+
                 def move(v: torch.Tensor) -> torch.Tensor:
                     if not isinstance(v, torch.Tensor):
                         logger.warning(f"Expect torch.Tensor, got {type(v)}")
@@ -490,7 +491,7 @@ class VllmModelWrapper:
                 if audio_feature_lengths is not None:
                     call_kwargs[
                         "audio_feature_lengths"] = audio_feature_lengths
-                
+
                 return maybe_jit_embed_multimodal_func(
                     embed_multimodal_func_jax,
                     self.model.vllm_model)(params_and_buffers, **call_kwargs)
