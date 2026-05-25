@@ -49,28 +49,102 @@ get_vllm_commit_hash() {
   echo "$commit_hash"
 }
 
-# Function to process every JSON file in the cases directory
-process_json_benchmark_cases() {
-  local case_folder="$1"
-  local generator="$2"
-  local priority="$3"
+# Function to upload a light-weight step that intentionally fails to block PR merge
+upload_blocking_failure_step() {
+  local label="$1"
+  local detailed_message="$2"
+  local artifact_name="benchmark_errors.log"
 
-  echo "--- Generating dynamic pipelines from $case_folder"
-
-  shopt -s nullglob
-  local files=("$case_folder"/*.json)
+  echo "🚨 Error: $label"
   
-  if [ ${#files[@]} -eq 0 ]; then
-    echo "No JSON files found in $case_folder."
-    return
+  # Write detailed errors to a file and upload as an artifact
+  echo "$detailed_message" > "$artifact_name"
+  buildkite-agent artifact upload "$artifact_name"
+
+  cat <<- YAML | buildkite-agent pipeline upload
+steps:
+  - label: "$label"
+    agents:
+      queue: cpu
+    command: |
+      echo "=========================================================="
+      echo "❌ Benchmark Pipeline Generation/Validation Failures"
+      echo "=========================================================="
+      echo "Detailed error log is available in Buildkite Artifacts: $artifact_name"
+      echo ""
+      buildkite-agent artifact download "$artifact_name" .
+      cat "$artifact_name"
+      exit 1
+YAML
+}
+
+# Function to process JSON benchmark cases from a folder and/or a list of specific files
+process_json_benchmark_cases() {
+  local case_folder="${1:-}"
+  local generator="${2:-}"
+  local priority="${3:-}"
+  local extra_files="${4:-}" # Optional: newline-separated list of files
+  local error_msgs=()
+
+  echo "--- Generating dynamic pipelines from $case_folder and $extra_files"
+
+  # Helper function to process a single benchmark file. 
+  # Any failure (generation or upload) is captured in error_msgs.
+  _process_benchmark_file() {
+    local f="$1"
+    local no_verify="${2:-false}"
+
+    if [ ! -f "$f" ]; then
+      # If the file does not exist (e.g., deleted in the current PR), skip it gracefully.
+      echo "--- Skipping non-existent file (might be deleted): $f"
+      return
+    fi
+
+    echo "--- Processing case file: $f (no-verify: $no_verify)"
+    
+    local py_output
+    # 1. Generate pipeline and capture output/exit code (including stderr)
+    if ! py_output=$(python3 "$generator" --input "$f" --no-verify "$no_verify" 2>&1); then
+      echo "🚨 Generator failed for $f"
+      error_msgs+=("❌ Generation Failure in $f:\n$py_output")
+      return
+    fi
+
+    # 2. Upload the captured YAML (stdout from python)
+    if ! upload_with_priority <(echo "$py_output") "$priority"; then
+      echo "🚨 Upload failed for $f"
+      error_msgs+=("❌ Upload Failure for $f")
+      return
+    fi
+  }
+
+  # 1. Process files from case_folder (Baseline: non-blocking business validation)
+  if [ -n "$case_folder" ] && [ -d "$case_folder" ]; then
+    shopt -s nullglob
+    local folder_files=("$case_folder"/*.json)
+    for f in "${folder_files[@]}"; do
+      # Skip files that are explicitly listed in extra_files to avoid duplicate uploads
+      # and ensure they are processed with mandatory verification.
+      if [[ "$extra_files" == *"$f"* ]]; then
+        echo "--- Skipping $f in folder pass (will be verified in extra_files pass)"
+        continue
+      fi
+      _process_benchmark_file "$f" "true"
+    done
   fi
 
-  for case_file in "${files[@]}"; do
-    echo "Processing case file: $case_file"
-    if upload_with_priority <(python3 "$generator" --input "$case_file") "$priority"; then
-      echo "Successfully uploaded pipeline for $case_file"
-    else
-      echo "🚨 Error: Failed to generate or upload pipeline for $case_file"
-    fi
-  done
+  # 2. Process extra_files (Target: with full mandatory validation)
+  if [ -n "$extra_files" ]; then
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      _process_benchmark_file "$f" "false"
+    done <<< "$extra_files"
+  fi
+
+  # 3. If any errors occurred (in either pass), upload ONE aggregate failure step to block CI
+  if [ ${#error_msgs[@]} -gt 0 ]; then
+    local final_report
+    final_report=$(printf "%b\n\n" "${error_msgs[@]}")
+    upload_blocking_failure_step "❌ Benchmark Pipeline Generation Failures" "$final_report"
+  fi
 }
