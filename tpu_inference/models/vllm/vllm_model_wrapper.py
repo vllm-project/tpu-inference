@@ -58,6 +58,8 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
     maybe_apply_qwen3_vl_patches
+from tpu_inference.models.vllm.experimental.gemma4_mm_patcher import \
+    maybe_apply_gemma4_mm_patches
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
     maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn,
     maybe_prepare_for_jit)
@@ -263,6 +265,9 @@ class VllmModelWrapper:
 
         # NOTE: Apply Qwen3-VL model specific patches
         maybe_apply_qwen3_vl_patches(self.model.vllm_model)
+
+        # NOTE: Apply Gemma-4 stateless PLE patches
+        maybe_apply_gemma4_mm_patches(self.model.vllm_model)
 
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
