@@ -29,7 +29,7 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import JaxEinsum, JaxLmHead
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
@@ -340,13 +340,12 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
                 tp_size = vllm_config.parallel_config.tensor_parallel_size if vllm_config.parallel_config is not None else 1
                 padded_vocab_size = utils.align_to(vocab_size, tp_size)
                 hidden_size = model_config.hf_config.hidden_size
-                self.lm_head = JaxEinsum(
-                    einsum_str="TD,DV->TV",
-                    kernel_shape=(hidden_size, padded_vocab_size),
+                self.lm_head = JaxLmHead(
+                    hidden_size=hidden_size,
+                    vocab_size=padded_vocab_size,
                     dtype=model_config.dtype,
                     param_dtype=model_config.dtype,
                     rngs=rng,
-                    quant_config=vllm_config.quant_config,
                     prefix="lm_head",
                 )
             else:

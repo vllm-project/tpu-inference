@@ -160,12 +160,10 @@ class TestGemma4ForConditionalGeneration:
             mock_vllm_config=mock_vllm_config,
         )
 
-    @pytest.mark.parametrize(
-        "model_name",
-        [
-            "google/gemma-4-E2B-it",
-            # "google/gemma-4-E4B-it",  # add when E4B bringup lands
-        ])
+    @pytest.mark.parametrize("model_name", [
+        "google/gemma-4-E2B-it",
+        "google/gemma-4-E4B-it",
+    ])
     def test_e_family_model_loading(
         self,
         model_name,

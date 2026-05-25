@@ -334,6 +334,7 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
 
     vllm_config.model_config.dtype = dtype
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    vllm_config.quant_config = quant_config
     with set_current_vllm_config(vllm_config):
         jax_qkv_linear = QKVParallelLinear(
             hidden_size=4096,

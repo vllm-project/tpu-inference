@@ -80,13 +80,13 @@ result so inputs are only regenerated when the key changes.
 
 ```python
     def generate_inputs(self, tuning_key: MyTuningKey) -> dict:
-        if self._TUNING_KEY and tuning_key == self._TUNING_KEY:
-            return self._KERNEL_INPUTS_CACHE
-        self._TUNING_KEY = tuning_key
-        self._KERNEL_INPUTS_CACHE = {
+        if self._tuning_key and tuning_key == self._tuning_key:
+            return self._kernel_inputs_cache
+        self._tuning_key = tuning_key
+        self._kernel_inputs_cache = {
             'x': jnp.ones((tuning_key.batch_size, tuning_key.seq_len)),
         }
-        return self._KERNEL_INPUTS_CACHE
+        return self._kernel_inputs_cache
 ```
 
 #### `run(tuning_key, tunable_params, iters) -> tuple[TuningStatus, float, float]`
@@ -119,6 +119,7 @@ from tools.kernel.tuner.v1.my_kernel_tuner import MyKernelTuner
 KERNEL_TUNER_REGISTRY = {
     'example_kernel_tuner':    ExampleKernelTuner,
     'rpa_v3_kernel_tuner':  RpaV3KernelTuner,
+    'mla_kernel_tuner': MlaKernelTuner,
     'my_kernel_tuner':      MyKernelTuner,   # <-- add this
 }
 ```

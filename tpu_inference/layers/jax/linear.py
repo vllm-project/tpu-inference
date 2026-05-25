@@ -122,3 +122,50 @@ class JaxLinear(JaxEinsum):
                            quant_config=quant_config,
                            prefix=prefix,
                            **kwargs)
+
+
+class JaxLmHead(nnx.Einsum, JaxModule):
+    """Output projection (vocab head).
+
+    Mirrors vLLM's `ParallelLMHead`: it is NOT a `LinearBase`-equivalent,
+    so quant configs do not dispatch onto it. Use this for `lm_head` even
+    on native FP8 / INT8 checkpoints whose `lm_head.weight` is bf16 — they
+    would otherwise be assigned to a quantized slot pinned to `cpu_mesh()`
+    and stranded on CPU at `create_jit_model` time.
+
+    Intentionally does NOT inherit from `JaxEinsum` so that any
+    `isinstance(layer, JaxEinsum)` check in a quant config naturally
+    skips this class.
+    """
+
+    def __init__(self,
+                 hidden_size: int,
+                 vocab_size: int,
+                 rngs,
+                 *,
+                 prefix: str = "lm_head",
+                 kernel_metadata={},
+                 **kwargs):
+        # nnx.Einsum uses `param_dtype` for parameter initialization dtype.
+        # Accept `dtype` as an alias for backward compatibility, but forward it
+        # as `param_dtype` so that weights are created with the correct dtype.
+        if "dtype" in kwargs and "param_dtype" not in kwargs:
+            kwargs["param_dtype"] = kwargs.pop("dtype")
+        if "eager_sharding" not in kernel_metadata:
+            kernel_metadata["eager_sharding"] = False
+        nnx.Einsum.__init__(self,
+                            rngs=rngs,
+                            einsum_str="TD,DV->TV",
+                            kernel_shape=(hidden_size, vocab_size),
+                            kernel_metadata=kernel_metadata,
+                            **kwargs)
+        # HF stores this weight under `lm_head.weight`; alias for named_parameters().
+        self.weight = self.kernel
+        delattr(self, 'kernel')
+        if hasattr(self.weight, "out_sharding"):
+            self.weight.set_metadata('sharding', self.weight.out_sharding)
+        self.prefix = prefix
+        self.quant_method = None
+
+    def __call__(self, inputs: jax.Array) -> jax.Array:
+        return jax.numpy.einsum(self.einsum_str, inputs, self.weight.value)

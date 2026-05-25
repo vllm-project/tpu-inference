@@ -79,14 +79,14 @@ class ExampleKernelTuner(KernelTunerBase):
 
     def generate_inputs(self, tuning_key: TuningKey):
         # Generate some mock inputs for the kernel based on the tuning key.
-        if self._TUNING_KEY and tuning_key == self._TUNING_KEY:
-            return self._KERNEL_INPUTS_CACHE
-        self._TUNING_KEY = tuning_key
-        self._KERNEL_INPUTS_CACHE = {
+        if self._tuning_key and tuning_key == self._tuning_key:
+            return self._kernel_inputs_cache
+        self._tuning_key = tuning_key
+        self._kernel_inputs_cache = {
             'input1': tuning_key.key1,
             'input2': tuning_key.key2
         }
-        return self._KERNEL_INPUTS_CACHE
+        return self._kernel_inputs_cache
 
     def run(self,
             tuning_key: TuningKey,

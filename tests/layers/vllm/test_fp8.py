@@ -431,9 +431,9 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
 
     a = torch.randn((num_tokens, hidden_size), dtype=dtype) / 10
     w1 = torch.randn(
-        (num_experts, 2 * intermediate_size, hidden_size), dtype=dtype) / 10
+        (num_experts, 2 * intermediate_size, hidden_size), dtype=dtype) / 100
     w2 = torch.randn(
-        (num_experts, hidden_size, intermediate_size), dtype=dtype) / 10
+        (num_experts, hidden_size, intermediate_size), dtype=dtype) / 100
     score = torch.randn((num_tokens, num_experts), dtype=dtype)
 
     engine_args = EngineArgs(model=MODELS[0],

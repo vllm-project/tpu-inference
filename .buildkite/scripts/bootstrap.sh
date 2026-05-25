@@ -111,7 +111,6 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
       exit 1
     fi
 
-
     MODEL_FILES="add_model_to_ci\.py|tpu_optimized_model_template\.yml|vllm_native_model_template\.yml"
     FEATURE_FILES="add_feature_to_ci\.py|feature_template\.yml|parallelism_template\.yml"
 
@@ -190,7 +189,23 @@ upload_benchmark_pipeline() {
     # Upload benchmark pipelines
     local case_folder=".buildkite/benchmark/cases/ci"
     local generator_script="${SCRIPT_DIR}/../benchmark/scripts/generate_bk_pipeline.py"
-    process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY"
+    local changed_cases=""
+
+    # For PR builds, identify changed benchmark cases outside of ci folder
+    if [ "$BUILDKITE_PULL_REQUEST" != "false" ] && [ -n "${FILES_CHANGED:-}" ]; then
+        echo "--- Identifying changed benchmark cases in PR"
+        export UPLOAD_DB="false"
+        changed_cases=$(echo "$FILES_CHANGED" | grep "^\.buildkite/benchmark/cases/.*\.json$" | grep -v "^\.buildkite/benchmark/cases/ci/" || true)
+        if [ -n "$changed_cases" ]; then
+            echo "Found changed benchmark cases to include:"
+            echo "$changed_cases"
+            # Note: We keep changed_cases as a newline-separated string
+            # to correctly handle filenames with spaces in process_json_benchmark_cases.
+        fi
+    fi
+
+    # Process both fixed ci folder and any extra changed cases
+    process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY" "$changed_cases"
 }
 
 echo "--- Starting Buildkite Bootstrap"
