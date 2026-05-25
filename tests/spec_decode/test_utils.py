@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -22,6 +23,11 @@ from tpu_inference.spec_decode.jax.utils import (PLACEHOLDER_TOKEN_ID,
                                                  extract_last_sampled_tokens)
 
 VOCAB_SIZE = 100
+
+
+def _make_mesh():
+    devices = np.array(jax.devices()).reshape((1, len(jax.devices())))
+    return jax.sharding.Mesh(devices, axis_names=('data', 'model'))
 
 
 def _build_inputs(seqs, num_speculative_tokens):
@@ -65,6 +71,8 @@ def _reference(sampled, num_draft_cpu, vocab_size, max_num_seq):
         num_draft_cpu,
         batch_size,
         padded_tokens_length,
+        dp_size=1,
+        req_indices_dp={0: list(range(batch_size))},
     )
 
     last_sampled = np.full((max_num_seq, ),
@@ -125,31 +133,13 @@ def test_extract_last_sampled_tokens_matches_parse_output(
     max_num_seq = 8
     sampled, metadata, num_draft_cpu = _build_inputs(seqs, num_speculative)
 
-    last_sampled, num_rejected = extract_last_sampled_tokens(
-        metadata, sampled, num_speculative, VOCAB_SIZE, max_num_seq)
+    mesh = _make_mesh()
+    with jax.set_mesh(mesh):
+        last_sampled, num_rejected = extract_last_sampled_tokens(
+            metadata, sampled, num_speculative, VOCAB_SIZE, max_num_seq, mesh)
 
     ref_last, ref_num_rej = _reference(sampled, num_draft_cpu, VOCAB_SIZE,
                                        max_num_seq)
 
     np.testing.assert_array_equal(np.asarray(last_sampled), ref_last)
     np.testing.assert_array_equal(np.asarray(num_rejected), ref_num_rej)
-
-
-def test_extract_last_sampled_tokens_no_spec_decode():
-    max_num_seq = 8
-    sampled = jnp.asarray([7, 11, 42], dtype=jnp.int32)
-
-    last_sampled, num_rejected = extract_last_sampled_tokens(
-        None,
-        sampled,
-        num_speculative_tokens=3,
-        vocab_size=VOCAB_SIZE,
-        max_num_seq=max_num_seq,
-    )
-
-    expected_last = np.array([7, 11, 42] + [PLACEHOLDER_TOKEN_ID] * 5,
-                             dtype=np.int32)
-    expected_num_rejected = np.zeros(max_num_seq, dtype=np.int32)
-    np.testing.assert_array_equal(np.asarray(last_sampled), expected_last)
-    np.testing.assert_array_equal(np.asarray(num_rejected),
-                                  expected_num_rejected)

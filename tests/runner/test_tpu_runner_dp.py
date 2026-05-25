@@ -1230,6 +1230,7 @@ class TestSamplingMetadataPassthrough:
         runner.dp_size = 2
         runner.max_num_reqs = 8
         runner.max_num_blocks_per_req = 8
+        runner.speculative_config = None
         runner.input_batch.num_reqs = 2
         runner.input_batch.req_ids = ["req1", "req2"]
         runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1}
