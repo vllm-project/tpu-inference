@@ -58,6 +58,19 @@ def has_jittable_vision(vllm_model) -> bool:
         is_qwen3_vl
     return is_jittable_architecture(vllm_model) or is_qwen3_vl(vllm_model)
 
+def get_vision_config(hf_config: Any) -> Any:
+    """Extract vision configuration from hf_config, supporting nested/thinker wrappers."""
+
+    if hasattr(hf_config, "vision_config"):
+        return hf_config.vision_config
+    # Dynamic inspection of attributes (e.g. thinker_config)
+    for k in dir(hf_config):
+        if not k.startswith("_"):
+            val = getattr(hf_config, k, None)
+            if hasattr(val, "vision_config"):
+                return val.vision_config
+  
+    return hf_config
 
 def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
                                     vllm_model) -> Callable:
@@ -138,9 +151,7 @@ def maybe_precompile_vision_encoder_fn(
     #   in_channels * temporal_patch_size * patch_size * patch_size
     # e.g. for Qwen3.5: 3 * 2 * 16 * 16 = 1536
     # Ref: https://github.com/vllm-project/vllm/blob/eb6661d52/vllm/model_executor/models/qwen3_vl.py#L1941
-    # vc = vllm_config.model_config.hf_config.vision_config
-    hf_config = vllm_config.model_config.hf_config
-    vc = getattr(hf_config, "thinker_config", hf_config).vision_config
+    vc = get_vision_config(hf_config)
     patch_input_dim = (vc.in_channels * vc.temporal_patch_size *
                        vc.patch_size * vc.patch_size)
     spatial_merge_unit = vc.spatial_merge_size**2
@@ -191,14 +202,14 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
         if k in ("image_grid_thw", "video_grid_thw", "grid_thw"):
             kwargs[k] = GridTHW(v.tolist())
 
-        def _convert(obj, key=None):
-            if isinstance(obj, dict):
-                return {k: _convert(v, k) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [_convert(x, key) for x in obj]
-            elif isinstance(obj,
-                            torch.Tensor) and key == "audio_feature_lengths":
-                return tuple(obj.tolist())
-            return obj
+    def _convert(obj, key=None):
+        if isinstance(obj, dict):
+            return {k: _convert(v, k) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [_convert(x, key) for x in obj]
+        elif isinstance(obj,
+                        torch.Tensor) and key == "audio_feature_lengths":
+            return tuple(obj.tolist())
+        return obj
 
     return _convert(kwargs)
