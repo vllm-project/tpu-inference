@@ -132,7 +132,7 @@ def flash_attention(
         block_sizes = BlockSizes.get_default(batch_size, num_heads, q_seq_len,
                                              kv_seq_len, d_model)
         # TODO (KWang1998 & hfan): tune the block sizes properly.
-        if kv_seq_len <= 21760:
+        if kv_seq_len <= 92800:
             # Override block_k/block_k_major to use `_flash_attention_kernel_single_batch_single_step`.
             block_sizes = BlockSizes(block_q=block_sizes.block_q,
                                      block_b=block_sizes.block_b,
