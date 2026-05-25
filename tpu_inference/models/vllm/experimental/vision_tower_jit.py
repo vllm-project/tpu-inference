@@ -23,7 +23,7 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3_5 import \
-    Qwen3_5MoeForConditionalGeneration
+    Qwen3_5MoeForConditionalGeneration, Qwen3OmniMoeThinkerForConditionalGeneration
 
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
@@ -33,15 +33,13 @@ logger = init_logger(__name__)
 # Architectures whose embed_multimodal function is safe to wrap with jax.jit.
 JITTABLE_ARCHS = {
     Qwen3_5MoeForConditionalGeneration,
+    Qwen3OmniMoeThinkerForConditionalGeneration
 }
 
 
 def is_jittable_architecture(vllm_model) -> bool:
     """Check if the given vLLM model is of an architecture that supports JIT compilation."""
-    is_jittable = (any(
-        isinstance(vllm_model, arch) for arch in JITTABLE_ARCHS)
-                   or type(vllm_model).__name__
-                   == "Qwen3OmniMoeThinkerForConditionalGeneration")
+    is_jittable = any(isinstance(vllm_model, arch) for arch in JITTABLE_ARCHS)
     if is_jittable:
         logger.info_once(
             f"{type(vllm_model)}'s vision tower supports JIT compilation.")
