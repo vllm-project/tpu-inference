@@ -151,7 +151,7 @@ def maybe_precompile_vision_encoder_fn(
     #   in_channels * temporal_patch_size * patch_size * patch_size
     # e.g. for Qwen3.5: 3 * 2 * 16 * 16 = 1536
     # Ref: https://github.com/vllm-project/vllm/blob/eb6661d52/vllm/model_executor/models/qwen3_vl.py#L1941
-    vc = get_vision_config(hf_config)
+    vc = get_vision_config(vllm_config.model_config.hf_config)
     patch_input_dim = (vc.in_channels * vc.temporal_patch_size *
                        vc.patch_size * vc.patch_size)
     spatial_merge_unit = vc.spatial_merge_size**2
