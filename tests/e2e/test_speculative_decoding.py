@@ -113,7 +113,6 @@ def _test_correctness_helper(
                 "enable_weights_track": False
             },
             "async_scheduling": async_scheduling,
-            "download_dir": "/mnt/pd",
         }
         if extra_kwargs:
             kwargs.update(extra_kwargs)
@@ -217,7 +216,6 @@ def _test_performance_helper(
             },
             "disable_log_stats": False,
             "async_scheduling": async_scheduling,
-            "download_dir": "/mnt/pd",
         }
         if extra_kwargs:
             kwargs.update(extra_kwargs)
