@@ -499,7 +499,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 raise NotImplementedError(
                     "Unsupported speculative decoding method: "
                     f"{self.speculative_config.method}")
-            self.rejection_sampler = RejectionSampler()
+            self.rejection_sampler = RejectionSampler(self.mesh)
 
     def _init_inputs(self) -> None:
         model_config = self.model_config
@@ -1119,10 +1119,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     tpu_sampling_metadata,
                 )
         else:
-            # TODO(gxd3): wrap the spec decode sampling code block
-            # under maybe_forbid_compile as well.
-            # Currently when spec-decoding is enabled, serving-time
-            # jit-recompile might still happen.
             if tpu_sampling_metadata.do_sampling:
                 bonus_rng, rejection_rng = jax.random.split(step_rng)
             else:
@@ -1204,7 +1200,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 last_sampled_token_id, num_rejected_tokens = extract_last_sampled_tokens(
                     spec_decode_metadata, next_tokens,
                     self.speculative_config.num_speculative_tokens,
-                    self.input_batch.vocab_size, self.max_num_reqs)
+                    self.input_batch.vocab_size,
+                    self.max_num_reqs // self.dp_size, self.mesh)
                 self.speculative_decoding_manager.propose_draft_token_ids(
                     next_tokens,
                     logits_indices_selector,
@@ -1616,8 +1613,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         assert num_reqs > 0
 
         dp_size = self.dp_size
-        if self.speculative_config and dp_size > 1:
-            assert "Spec decoding not yet support when dp > 1"
+        if self.speculative_config and dp_size > 1 and self.scheduler_config.async_scheduling:
+            assert "Spec decoding + async scheduling not yet support when dp > 1"
 
         data_parallel_attn_sharding = NamedSharding(
             self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
@@ -1664,23 +1661,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
                                                     key="seq_lens")
 
-        use_spec_decode = len(
-            scheduler_output.scheduled_spec_decode_tokens) > 0
+        if self.speculative_config:
+            padded_logits_length = None
+            for dp_rank in range(dp_size):
+                cur_rank_req_idxs = req_indices_dp[dp_rank]
+                cur_rank_num_draft_tokens = num_draft_tokens[cur_rank_req_idxs]
 
-        if use_spec_decode:
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-            for (
-                    req_id,
-                    draft_token_ids,
-            ) in scheduler_output.scheduled_spec_decode_tokens.items():
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                num_draft_tokens[req_idx] = len(draft_token_ids)
+                num_sampled_tokens = cur_rank_num_draft_tokens + 1
+                total_sampled_tokens = np.sum(num_sampled_tokens)
+                if padded_logits_length is None:
+                    padded_logits_length = runner_utils.get_padded_token_len(
+                        self.num_logits_paddings, total_sampled_tokens)
+                else:
+                    padded_logits_length = max(
+                        padded_logits_length,
+                        runner_utils.get_padded_token_len(
+                            self.num_logits_paddings, total_sampled_tokens))
 
-            num_sampled_tokens = num_draft_tokens + 1
-            total_sampled_tokens = np.sum(num_sampled_tokens)
-            padded_logits_length = runner_utils.get_padded_token_len(
-                self.num_logits_paddings, total_sampled_tokens)
-            logits_indices_shape = (padded_logits_length, )
+            assert padded_logits_length is not None
+            logits_indices_shape = (padded_logits_length * dp_size, )
         else:
             logits_indices_shape = (padded_num_reqs, )
 
@@ -1811,16 +1810,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         request_distribution = np.array(_request_distribution,
                                         dtype=np.int32).ravel()
 
-        use_spec_decode = len(
-            scheduler_output.scheduled_spec_decode_tokens) > 0
         spec_decode_metadata = None
-        if use_spec_decode:
+        if self.speculative_config:
             spec_decode_metadata = (
                 self.speculative_decoding_manager.get_spec_decode_metadata(
-                    num_draft_tokens,
-                    query_start_loc_view[1:num_reqs + 1],
-                    padded_num_reqs,
-                    input_ids_view,
+                    num_draft_tokens_dp=num_draft_tokens,
+                    dp_size=dp_size,
+                    req_indices_dp=req_indices_dp,
+                    query_start_loc=query_start_loc_view,
+                    padded_num_reqs_per_dp_rank=padded_num_reqs_per_dp_rank,
+                    padded_logits_length_dp_rank=(logits_indices_shape[0] //
+                                                  dp_size),
+                    max_num_reqs_per_dp_rank=max_num_reqs_per_dp_rank,
                 ))
             logits_indices_view[:] = spec_decode_metadata.final_logits_indices
 
