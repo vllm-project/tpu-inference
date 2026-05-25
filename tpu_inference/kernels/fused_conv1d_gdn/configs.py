@@ -74,6 +74,12 @@ class GDNConfigs:
     def padded_batch_size(self) -> int:
         return pl.cdiv(self.batch_size, self.tile_size) * self.tile_size
 
+    @property
+    def aligned_num_v_heads(self) -> int:
+        tpu_info = pltpu.get_tpu_info()
+        num_lanes = tpu_info.num_lanes
+        return pl.cdiv(self.num_v_heads, num_lanes) * num_lanes
+
     def get_out_shape(self) -> tuple[int, ...]:
         return (self.padded_batch_size, self.num_v_heads, self.v_head_dim)
 
@@ -102,10 +108,12 @@ class GDNConfigs:
         return dict(
             qkv_scratch_ref=pltpu.VMEM(buffer_act_shape + (self.dim_size, ),
                                        self.act_dtype),
-            b_scratch_ref=pltpu.VMEM(buffer_act_shape + (self.num_v_heads, ),
-                                     self.act_dtype),
-            a_scratch_ref=pltpu.VMEM(buffer_act_shape + (self.num_v_heads, ),
-                                     self.act_dtype),
+            b_scratch_ref=pltpu.VMEM(
+                buffer_act_shape + (self.aligned_num_v_heads, ),
+                self.act_dtype),
+            a_scratch_ref=pltpu.VMEM(
+                buffer_act_shape + (self.aligned_num_v_heads, ),
+                self.act_dtype),
             out_scratch_ref=pltpu.VMEM(buffer_out_shape, self.act_dtype),
             conv_state_scratch_ref=pltpu.VMEM(buffer_conv_shape, jnp.float32),
             recurrent_state_scratch_ref=pltpu.VMEM(

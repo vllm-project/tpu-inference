@@ -328,7 +328,7 @@ def fused_conv1d_gdn(
     act_dtype = qkv.dtype
     assert a.dtype == b.dtype == qkv.dtype == act_dtype
 
-    tile_size = 8
+    tile_size = 4
     cfgs = configs.GDNConfigs(
         batch_size=batch_size,
         kernel_size=kernel_size,
@@ -347,13 +347,18 @@ def fused_conv1d_gdn(
     )
 
     padded_batch_size = cfgs.padded_batch_size
+    batch_padding_size = padded_batch_size - batch_size
+    num_v_padding_size = cfgs.aligned_num_v_heads - n_v
     packing = cfgs.act_packing
-    qkv = jnp.pad(qkv, ((0, padded_batch_size - batch_size), (0, 0)))
-    b = jnp.pad(b, ((0, padded_batch_size - batch_size), (0, 0)))
-    a = jnp.pad(a, ((0, padded_batch_size - batch_size), (0, 0)))
-    qkv = qkv.reshape(padded_batch_size // packing, packing, dim)
-    b = b.reshape(padded_batch_size // packing, packing, n_v)
-    a = a.reshape(padded_batch_size // packing, packing, n_v)
+    qkv = jnp.pad(qkv, ((0, batch_padding_size), (0, 0)))
+    b = jnp.pad(b, ((0, batch_padding_size), (0, num_v_padding_size)))
+    a = jnp.pad(a, ((0, batch_padding_size), (0, num_v_padding_size)))
+    a_log = jnp.pad(a_log, ((0, num_v_padding_size)))
+    dt_bias = jnp.pad(dt_bias, ((0, num_v_padding_size)))
+
+    qkv = qkv.reshape(padded_batch_size // packing, packing, -1)
+    b = b.reshape(padded_batch_size // packing, packing, -1)
+    a = a.reshape(padded_batch_size // packing, packing, -1)
 
     # Step 3: States and weights pre-processing.
     # TODO(kyuyeunk): To eliminate runtime cost, move this logic into model

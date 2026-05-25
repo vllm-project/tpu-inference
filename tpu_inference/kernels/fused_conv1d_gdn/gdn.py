@@ -129,14 +129,18 @@ def recurrent_gdn(
     q, k, q_k, v = split_and_compute_qkv(qkv, cfgs)
 
     a_log = gdn_weights_ref.a_log[...].reshape(1, 1, 1, -1)
+    a_log = a_log.astype(cfgs.dtypes.compute)
     dt_bias = gdn_weights_ref.dt_bias[...].reshape(1, 1, 1, -1)
+    dt_bias = dt_bias.astype(cfgs.dtypes.compute)
 
     beta = jax.nn.sigmoid(b)
     gating = -jnp.exp(a_log) * jax.nn.softplus(a + dt_bias)
     gating = jnp.exp(gating)
 
     beta = non_xlu_transpose(beta, src_dim=3, dst_dim=1)
+    beta = beta[:, :cfgs.num_v_heads]
     gating = non_xlu_transpose(gating, src_dim=3, dst_dim=1)
+    gating = gating[:, :cfgs.num_v_heads]
 
     for head_start in range(0, cfgs.num_v_heads, cfgs.head_tile_size):
         head_end = min(head_start + cfgs.head_tile_size, cfgs.num_v_heads)
@@ -212,4 +216,5 @@ def recurrent_gdn(
             prev_state = state
 
             out_ref[row, head_slice] = out[:, 0].astype(cfgs.act_dtype)
-        prev_recurrent_state_ref[head_slice] = prev_state
+        prev_recurrent_state_ref[head_slice] = prev_state.astype(
+            cfgs.dtypes.recurrent_state)
