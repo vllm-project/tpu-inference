@@ -149,13 +149,21 @@ def process_blockwise_fp8_linear_weights(
     for output_size in output_sizes:
         end = start + output_size
 
-        weight_slice = weight[start:end] if transposed else weight[:, start:end]
-        weight_scale_slice = weight_scale[start // original_block_size:math.ceil(end / original_block_size)] if transposed else weight_scale[:, start // original_block_size:math.ceil(end / original_block_size)]
+        weight_slice = weight[start:end] if transposed else weight[:,
+                                                                   start:end]
+        weight_scale_slice = weight_scale[
+            start // original_block_size:math.
+            ceil(end / original_block_size
+                 )] if transposed else weight_scale[:, start //
+                                                    original_block_size:math.
+                                                    ceil(end /
+                                                         original_block_size)]
         dequantized_weight = dequantize_tensor(
             weight_slice,
             weight_scale_slice,
             (0, 1),
-            block_size=weight_block_size if transposed else weight_block_size[::-1],
+            block_size=weight_block_size
+            if transposed else weight_block_size[::-1],
         )
         weight_slice, weight_scale_slice = quantize_tensor(
             requant_weight_dtype,
@@ -169,7 +177,9 @@ def process_blockwise_fp8_linear_weights(
         start = end
 
     weight = jnp.concat(weights, axis=dim)
-    weight_scale = jnp.concat(weight_scales, axis=0 if (weight_scales and weight_scales[0].ndim == 1) else dim)
+    weight_scale = jnp.concat(
+        weight_scales,
+        axis=0 if (weight_scales and weight_scales[0].ndim == 1) else dim)
 
     return process_linear_weights(
         LinearWeights(

@@ -50,7 +50,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    format_linear_scale, LinearWeights, process_linear_weights,
+    LinearWeights, format_linear_scale, process_linear_weights,
     shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, shard_moe_weights)

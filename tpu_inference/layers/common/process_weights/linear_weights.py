@@ -21,7 +21,7 @@ from jax._src import mesh as meshlib
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn import ParameterList
 from torch.nn.parameter import Parameter
-from torchax.interop import jax_view
+from torchax.interop import jax_view, torch_view
 from torchax.tensor import Tensor
 
 from tpu_inference.layers.common.utils import (
@@ -81,7 +81,9 @@ def get_model_matmul_fusion_assignment(model_name: str, batch_size: int,
     return MODEL_MATMUL_FUSION_TRUTH_TABLE.get(key, True)
 
 
-def format_linear_scale(weight_scale: jax.Array | Tensor | list | None, enable_kernel: bool) -> jax.Array | Tensor | list | None:
+def format_linear_scale(
+        weight_scale: jax.Array | Tensor | list | None,
+        enable_kernel: bool) -> jax.Array | Tensor | list | None:
     if weight_scale is None:
         return None
     if isinstance(weight_scale, (list, tuple)):
@@ -182,8 +184,10 @@ def shard_linear_weights(
         weights.weight_scale, list
         | tuple) and weights.weight_scale else jax_view(weights.weight_scale)
 
-    if isinstance(sample_scale, jax.Array) and (len(sample_scale.shape) == 3 or len(sample_scale.shape) == 4):
-        num_blocks = sample_scale.shape[0] if sample_scale.ndim == 3 else sample_scale.shape[1]
+    if isinstance(sample_scale, jax.Array) and (len(sample_scale.shape) == 3 or
+                                                len(sample_scale.shape) == 4):
+        num_blocks = sample_scale.shape[
+            0] if sample_scale.ndim == 3 else sample_scale.shape[1]
         if len(weight_p_spec) != 2:
             raise ValueError(
                 F"The weight sharding shape length should be 2, but given {len(weight_p_spec)}."

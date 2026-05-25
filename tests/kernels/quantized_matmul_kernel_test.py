@@ -116,7 +116,10 @@ class QuantizedMatmulKernelTest(jtu.JaxTestCase):
         if block_size is None:
             w_scale_xla = jnp.squeeze(w_scale)
             expected = xla_quantized_matmul(
-                x, jnp.transpose(w_q), w_scale_xla, quantize_activation=quantize_activation)
+                x,
+                jnp.transpose(w_q),
+                w_scale_xla,
+                quantize_activation=quantize_activation)
         else:
             expected = reference_block_quantized_matmul(
                 x, w_q, w_scale, block_size, x_q_dtype)

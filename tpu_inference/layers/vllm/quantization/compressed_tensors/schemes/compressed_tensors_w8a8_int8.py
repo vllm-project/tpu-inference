@@ -33,7 +33,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    format_linear_scale, LinearWeights, process_linear_weights,
+    LinearWeights, format_linear_scale, process_linear_weights,
     shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation

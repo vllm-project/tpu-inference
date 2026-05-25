@@ -25,8 +25,8 @@ from jax.sharding import PartitionSpec as P
 
 from tpu_inference.layers.common.linear import sharded_quantized_batched_matmul
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
-from tpu_inference.layers.common.process_weights.linear_weights import \
-    format_linear_scale, shard_linear_weights
+from tpu_inference.layers.common.process_weights.linear_weights import (
+    format_linear_scale, shard_linear_weights)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_quantized_moe_weights)
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
@@ -183,7 +183,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             # 3D weight (matches kernel_shape).
             self.kernel_shape = layer.kernel_shape
         else:
-            self.kernel_shape = (self.in_features, 
+            self.kernel_shape = (self.in_features,
                                  math.prod(self.out_features))
 
     def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
@@ -236,7 +236,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         layer.weight_scale_inv = nnx.Param(
             kernel_init(
                 rngs.params(),
-                [(self.in_features + block_k - 1) // block_k, 
+                [(self.in_features + block_k - 1) // block_k,
                  (out_features + block_n - 1) // block_n],
                 layer.dtype,
             ),

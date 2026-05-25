@@ -27,7 +27,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    format_linear_scale, LinearWeights, process_linear_weights,
+    LinearWeights, format_linear_scale, process_linear_weights,
     shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
@@ -124,7 +124,8 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                         self.linear_config.output_sizes):
                     end = start + output_size
                     weights.append(
-                        dequantize_tensor(weight[:, start:end], weight_scale[i]))
+                        dequantize_tensor(weight[:, start:end],
+                                          weight_scale[i]))
                     start = end
                 weight = jnp.concat(weights, axis=1)
                 # Requantize into per-tensor.

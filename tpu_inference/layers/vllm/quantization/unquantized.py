@@ -251,8 +251,9 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             return
         # Under Pathways, shard weights directly onto the TPU mesh to avoid
         # placing a full unsharded copy on a single device (OOM).
-        loading_sharding = NamedSharding(self.linear_config.mesh,
-                                         PartitionSpec(*self.linear_config.weight_sharding[::-1]))
+        loading_sharding = NamedSharding(
+            self.linear_config.mesh,
+            PartitionSpec(*self.linear_config.weight_sharding[::-1]))
         weight = _load_weight_for_layer(layer, "weight", loading_sharding)
         weight = jnp.transpose(weight)
 

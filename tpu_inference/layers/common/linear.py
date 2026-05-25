@@ -69,14 +69,17 @@ def sharded_quantized_matmul(x: jax.Array,
     # with the kernel and thus we disable it for now.
     in_axis, out_axis = weight_spec
     x_sharding = P(ShardingAxisName.ATTN_DATA, in_axis)
-    enable_quantized_matmul_kernel = w_s is not None and (len(w_s.shape) == 3 or len(w_s.shape) == 4)
+    enable_quantized_matmul_kernel = w_s is not None and (len(
+        w_s.shape) == 3 or len(w_s.shape) == 4)
     if enable_quantized_matmul_kernel:
         if w_s.ndim == 4:
             _, num_blocks, __, ___ = w_s.shape
-            scale_sharding = P(None, in_axis if num_blocks > 1 else None, None, out_axis)
+            scale_sharding = P(None, in_axis if num_blocks > 1 else None, None,
+                               out_axis)
         else:
             num_blocks, _, __ = w_s.shape
-            scale_sharding = P(in_axis if num_blocks > 1 else None, None, out_axis)
+            scale_sharding = P(in_axis if num_blocks > 1 else None, None,
+                               out_axis)
     else:
         # 2D-Blockwise case (e.g. from skipped re-quantization)
         if w_s is not None and len(w_s.shape) == 2:
