@@ -72,6 +72,30 @@ class BlockSizes:
         )
 
 
+def _estimate_single_step_vmem_bytes(
+    q_seq_len: int,
+    kv_seq_len: int,
+    d_model: int,
+    has_ab: bool,
+    has_segment_ids: bool,
+) -> int:
+    """Estimate VMEM bytes used by the single-step flash attention kernel."""
+    block_q = 128
+    q_bytes = block_q * d_model * 2
+    k_bytes = kv_seq_len * d_model * 2
+    v_bytes = kv_seq_len * d_model * 2
+    s_bytes = block_q * kv_seq_len * 4
+    p_bytes = block_q * kv_seq_len * 4
+    o_bytes = block_q * d_model * 2
+    ab_bytes = block_q * kv_seq_len * 4 if has_ab else 0
+    seg_bytes = (block_q * 128 * 4 + 8 * kv_seq_len * 4) if has_segment_ids else 0
+
+    total = (
+        q_bytes + k_bytes + v_bytes + s_bytes + p_bytes + o_bytes + ab_bytes + seg_bytes
+    )
+    return int(total * 1.10)
+
+
 @jax.jit(static_argnames=[
     "causal",
     "sm_scale",
@@ -131,8 +155,19 @@ def flash_attention(
     if block_sizes is None:
         block_sizes = BlockSizes.get_default(batch_size, num_heads, q_seq_len,
                                              kv_seq_len, d_model)
-        # TODO (KWang1998 & hfan): tune the block sizes properly.
-        if kv_seq_len <= 92800:
+        # Determine the safe VMEM budget for single-step kernel
+        # Use vmem_limit_bytes if specified, otherwise default to 14MB (safe limit for 16MB TPU v5e)
+        budget = vmem_limit_bytes if vmem_limit_bytes is not None else 14 * 1024 * 1024
+
+        estimated_bytes = _estimate_single_step_vmem_bytes(
+            q_seq_len=q_seq_len,
+            kv_seq_len=kv_seq_len,
+            d_model=d_model,
+            has_ab=(ab is not None),
+            has_segment_ids=(segment_ids is not None),
+        )
+
+        if estimated_bytes <= budget:
             # Override block_k/block_k_major to use `_flash_attention_kernel_single_batch_single_step`.
             block_sizes = BlockSizes(block_q=block_sizes.block_q,
                                      block_b=block_sizes.block_b,
