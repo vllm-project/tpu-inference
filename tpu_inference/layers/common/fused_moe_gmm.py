@@ -648,6 +648,7 @@ def fused_moe_func(
             mesh=mesh,
             enable_rs_kernel=actual_enable_rs_kernel,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
+            scatter_results=scatter_results,
         )
     else:
         x = tensor_parallel_gmm(
@@ -666,6 +667,7 @@ def fused_moe_func(
             mesh=mesh,
             enable_rs_kernel=actual_enable_rs_kernel,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
+            scatter_results=scatter_results,
         )
 
     return x[:num_tokens, :hidden_size]
