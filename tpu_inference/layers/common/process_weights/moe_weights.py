@@ -693,7 +693,7 @@ def process_quantized_moe_weights(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
     mesh: Mesh,
-    activation: str,
+    activation: str | MoEActivation,
     weight_block_size: tuple[int, ...] | None = None,
     desired_quant_dtype: jnp.dtype | None = None,
     requant_block_size: int | None = None,
@@ -1036,7 +1036,7 @@ def _process_quantized_moe_weights_impl(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
     mesh: Mesh,
-    activation: str,
+    activation: str | MoEActivation,
     weight_block_size: tuple[int, ...] | None = None,
     desired_quant_dtype: jnp.dtype | None = None,
     requant_block_size: int | None = None,
@@ -1049,7 +1049,8 @@ def _process_quantized_moe_weights_impl(
     w13_bias = weights.w13_bias
     w2_bias = weights.w2_bias
 
-    w13_interleave = activation == "swigluoai"
+    w13_interleave = (activation == "swigluoai"
+                      or activation == MoEActivation.SWIGLUOAI)
     w13_reorder_size = get_mesh_shape_product(mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
