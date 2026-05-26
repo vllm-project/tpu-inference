@@ -594,13 +594,16 @@ class PhasedBasedProfiler:
 
             logger.info(f"Starting profiling for {self.current_phase} phase")
             logger.info(f"Batch composition stats: {batch_composition_stats}")
-            self.profile_dir_with_phase_suffix = os.path.join(
-                self.profile_dir, self.current_phase)
-            self.profile_dir_with_phase_suffix = os.path.join(
-                self.profile_dir_with_phase_suffix,
-                f"dp_rank_{self.worker_rank}")
+            phase_dir = os.path.join(self.profile_dir, self.current_phase)
+            os.makedirs(phase_dir, exist_ok=True)
 
-            # Create the profile subdirectory if it doesn't exist
+            # Resolve the canonical destination ts before start_trace so all
+            # DP ranks land in the same <phase>/plugins/profile/<ts>/ dir
+            # when capture is moved out of the sandbox.
+            self._canonical_dst_ts = self._resolve_canonical_dst_ts(phase_dir)
+
+            self.profile_dir_with_phase_suffix = os.path.join(
+                phase_dir, f"dp_rank_{self.worker_rank}")
             os.makedirs(self.profile_dir_with_phase_suffix, exist_ok=True)
 
             # Write the batch composition stats to a file to make it easier to
@@ -636,99 +639,97 @@ class PhasedBasedProfiler:
             self.profiling_n_steps_left -= 1
             if self.profiling_n_steps_left <= 0:
                 jax.profiler.stop_trace()
-                self._merge_profile_directories()
+                self._move_capture_to_dst_dir()
                 logger.info(
                     f"Profiling for {self.current_phase} phase finished")
                 self.current_phase = ""
 
-    def _merge_profile_directories(self) -> None:
+    # How long non-zero DP ranks will wait for rank 0 to publish the
+    # canonical-ts marker before falling back to their own timestamp.
+    _CANONICAL_TS_POLL_TIMEOUT_S = 5.0
+    _CANONICAL_TS_POLL_INTERVAL_S = 0.05
+
+    def _resolve_canonical_dst_ts(self, phase_dir: str) -> str:
+        """Resolve the canonical destination timestamp for this phase.
+
+        Rank 0 picks the ts (wall clock now) and writes it atomically to a
+        marker file keyed by parent PID; non-zero ranks poll for the marker
+        and read the ts so all ranks end up moving their captures into the
+        same <phase>/plugins/profile/<canonical_ts>/ dir.
+
+        The parent PID in the marker name keeps a current-session marker
+        distinct from any leftover marker from a prior `vllm serve` run
+        sharing the same PHASED_PROFILING_DIR.
         """
-        Consolidates phase trace artifacts so downstream tools (c2xprof,
-        TensorBoard profile plugin) see a single distributed session.
+        marker = os.path.join(phase_dir, f".canonical_ts_{os.getppid()}")
+        if self.worker_rank == 0:
+            canonical_ts = datetime.datetime.now().strftime(
+                "%Y_%m_%d_%H_%M_%S")
+            marker_tmp = f"{marker}.tmp"
+            with open(marker_tmp, "w") as f:
+                f.write(canonical_ts)
+            os.replace(marker_tmp, marker)
+            return canonical_ts
 
-        Two split states are handled in sequence; the function is safe to
-        call from every rank after its own jax.profiler.stop_trace.
-
-        1. MPMD on a single host: each DP rank captured into
-           <phase>/dp_rank_<N>/plugins/profile/<ts>/ with an identically-
-           named xplane.pb (same hostname + same JAX worker id across
-           ranks). Hoist each rank's files up to
-           <phase>/plugins/profile/<ts>/ under TPU_MULTIPROCESS_DP, with
-           `dp<N>` injected into the filename so per-rank captures
-           coexist instead of clobbering each other.
-
-        2. Disjoint timestamp dirs: ray multi-host startup skew (or, after
-           step 1, the per-rank stop_trace timestamps in MPMD) produces
-           multiple <ts>/ subdirs under <phase>/plugins/profile/. Collapse
-           them into the earliest timestamp dir.
-
-        Example multi-host split state before merge:
-          .../plugins/profile/2026_05_06_04_47_36/j-1b8d22de-2250-4697-9dfc-ray-node-1-0.xplane.pb
-          .../plugins/profile/2026_05_06_04_47_38/j-1b8d22de-2250-4697-9dfc-ray-node-0-0.xplane.pb
-        After merge: both files under 2026_05_06_04_47_36/.
-        """
-        source_profile_path = os.path.join(self.profile_dir_with_phase_suffix,
-                                           "plugins", "profile")
-        if not os.path.exists(source_profile_path):
-            return
-
-        # Step 1: hoist this rank's files up out of the dp_rank_N segment so
-        # the multi-timestamp merge below sees all ranks at the shared level.
-        phase_dir = os.path.dirname(self.profile_dir_with_phase_suffix)
-        target_profile_path = os.path.join(phase_dir, "plugins", "profile")
-        if os.path.realpath(source_profile_path) != os.path.realpath(
-                target_profile_path):
+        deadline = time.monotonic() + self._CANONICAL_TS_POLL_TIMEOUT_S
+        while time.monotonic() < deadline:
             try:
-                for ts in os.listdir(source_profile_path):
-                    src_ts_dir = os.path.join(source_profile_path, ts)
-                    if not os.path.isdir(src_ts_dir):
-                        continue
-                    dst_ts_dir = os.path.join(target_profile_path, ts)
-                    os.makedirs(dst_ts_dir, exist_ok=True)
-                    for fname in os.listdir(src_ts_dir):
-                        new_fname = (_inject_dp_rank_into_filename(
-                            fname, self.worker_rank)
-                                     if envs.TPU_MULTIPROCESS_DP else fname)
-                        shutil.move(os.path.join(src_ts_dir, fname),
-                                    os.path.join(dst_ts_dir, new_fname))
-                    try:
-                        os.rmdir(src_ts_dir)
-                    except OSError:
-                        pass
-                for cleanup in (source_profile_path,
-                                os.path.dirname(source_profile_path)):
-                    try:
-                        os.rmdir(cleanup)
-                    except OSError:
-                        pass
-            except Exception as e:
-                logger.warning("Failed to hoist DP profile directories: %s", e)
+                with open(marker) as f:
+                    ts = f.read().strip()
+                if ts:
+                    return ts
+            except OSError:
+                pass
+            time.sleep(self._CANONICAL_TS_POLL_INTERVAL_S)
 
-        # Step 2: collapse multiple timestamp subdirs (from multi-host skew
-        # or per-rank stop_trace times under MPMD) into the earliest one.
+        fallback_ts = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        logger.warning(
+            "dp_rank %d did not find rank 0's canonical-ts marker at %s "
+            "within %.1fs; falling back to own timestamp %s — this rank's "
+            "capture will land in a separate ts dir from rank 0's.",
+            self.worker_rank, marker, self._CANONICAL_TS_POLL_TIMEOUT_S,
+            fallback_ts)
+        return fallback_ts
+
+    def _move_capture_to_dst_dir(self) -> None:
+        """Move this rank's capture from the dp_rank_<N> sandbox to the
+        user-facing <phase>/plugins/profile/<canonical_dst_ts>/ dir.
+
+        Under MPMD, prefixes the filename with dp{N}_ so per-rank captures
+        coexist in the same ts dir without clobbering. Cleans up the now-
+        empty plugins/ subtree under the sandbox; the dp_rank_<N>/ dir
+        itself is kept for the per-rank batch_composition_stats JSONs.
+        """
+        sandbox = os.path.join(self.profile_dir_with_phase_suffix, "plugins",
+                               "profile")
+        if not os.path.exists(sandbox):
+            return
+        phase_dir = os.path.dirname(self.profile_dir_with_phase_suffix)
+        dst_ts_dir = os.path.join(phase_dir, "plugins", "profile",
+                                  self._canonical_dst_ts)
         try:
-            dirs = sorted([
-                d for d in os.listdir(target_profile_path)
-                if os.path.isdir(os.path.join(target_profile_path, d))
-            ])
-            if len(dirs) <= 1:
-                return
-
-            target_dir = os.path.join(target_profile_path, dirs[0])
-            for src in dirs[1:]:
-                src_dir = os.path.join(target_profile_path, src)
-                for f in os.listdir(src_dir):
-                    src_file = os.path.join(src_dir, f)
-                    dst_file = os.path.join(target_dir, f)
-                    shutil.move(src_file, dst_file)
+            os.makedirs(dst_ts_dir, exist_ok=True)
+            for ts in os.listdir(sandbox):
+                src_ts_dir = os.path.join(sandbox, ts)
+                if not os.path.isdir(src_ts_dir):
+                    continue
+                for fname in os.listdir(src_ts_dir):
+                    new_fname = (_inject_dp_rank_into_filename(
+                        fname, self.worker_rank)
+                                 if envs.TPU_MULTIPROCESS_DP else fname)
+                    shutil.move(os.path.join(src_ts_dir, fname),
+                                os.path.join(dst_ts_dir, new_fname))
                 try:
-                    os.rmdir(src_dir)
-                except Exception:
+                    os.rmdir(src_ts_dir)
+                except OSError:
                     pass
-            logger.info("Successfully merged profile directories into: %s",
-                        dirs[0])
+            for cleanup in (sandbox, os.path.dirname(sandbox)):
+                try:
+                    os.rmdir(cleanup)
+                except OSError:
+                    pass
         except Exception as e:
-            logger.warning("Failed to merge profile directories: %s", e)
+            logger.warning("Failed to move profile capture to dst dir: %s", e)
 
     def step(self, batch_composition_stats: dict) -> None:
         """
