@@ -494,7 +494,7 @@ def profiler_fixture(tmp_path):
          patch(f"{target_module}.determine_phase_from_batch_composition_stats") as mock_determine_phase, \
          patch.object(PhasedBasedProfiler, "_resolve_canonical_dst_ts",
                       return_value="2024_01_01_12_00_00"), \
-         patch.object(PhasedBasedProfiler, "_move_capture_to_dst_dir"):
+         patch.object(PhasedBasedProfiler, "_merge_profile_directories"):
 
         mock_now = MagicMock()
         mock_now.strftime.return_value = "2024_01_01_12_00_00"
@@ -767,7 +767,7 @@ def test_resolve_canonical_dst_ts_non_zero_rank_falls_back_on_timeout(
     _dt.datetime.strptime(ts, "%Y_%m_%d_%H_%M_%S")
 
 
-def test_move_capture_to_dst_dir_single_rank(tmp_path):
+def test_merge_profile_directories_single_rank(tmp_path):
     """Single rank, non-MPMD: capture moves from sandbox to <phase>/plugins/
     profile/<canonical_ts>/ with original filename preserved."""
     profiler = PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=0)
@@ -779,7 +779,7 @@ def test_move_capture_to_dst_dir_single_rank(tmp_path):
     _stage_dp_rank_capture(rank_dir, "2026_05_06_04_47_36_jax",
                            "t1v-n-host-w-0.xplane.pb", "data_0")
 
-    profiler._move_capture_to_dst_dir()
+    profiler._merge_profile_directories()
 
     dst = phase_dir / "plugins" / "profile" / "2026_05_06_04_47_36"
     assert (dst / "t1v-n-host-w-0.xplane.pb").read_text() == "data_0"
@@ -788,7 +788,7 @@ def test_move_capture_to_dst_dir_single_rank(tmp_path):
     assert rank_dir.exists()
 
 
-def test_move_capture_to_dst_dir_mpmd(tmp_path, monkeypatch):
+def test_merge_profile_directories_mpmd(tmp_path, monkeypatch):
     """MPMD: 4 ranks captured to their own sandboxes with identical
     filenames; each moves to the SAME canonical ts dir with dp{N}_ prefix."""
     monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
@@ -809,7 +809,7 @@ def test_move_capture_to_dst_dir_mpmd(tmp_path, monkeypatch):
         # Add the trace file in the same staged ts dir.
         (rank_dir / "plugins" / "profile" / f"jax_ts_{rank}" /
          "t1v-n-host-w-0.trace.json.gz").write_text(f"rank_{rank}_trace")
-        profiler._move_capture_to_dst_dir()
+        profiler._merge_profile_directories()
 
     dst = phase_dir / "plugins" / "profile" / canonical_ts
     assert dst.exists()
@@ -821,7 +821,7 @@ def test_move_capture_to_dst_dir_mpmd(tmp_path, monkeypatch):
         assert not (phase_dir / f"dp_rank_{rank}" / "plugins").exists()
 
 
-def test_move_capture_does_not_touch_stale_prior_run_data(tmp_path):
+def test_merge_profile_directories_ignores_stale_prior_run_data(tmp_path):
     """Stale ts dirs from prior runs in <phase>/plugins/profile/ stay put;
     the new run lands in its own canonical ts dir and never reads stale dirs."""
     phase_dir = tmp_path / "prefill_heavy"
@@ -837,7 +837,7 @@ def test_move_capture_does_not_touch_stale_prior_run_data(tmp_path):
     profiler._canonical_dst_ts = "2026_05_06_04_47_36"
     _stage_dp_rank_capture(rank_dir, "jax_ts", "new.xplane.pb", "NEW")
 
-    profiler._move_capture_to_dst_dir()
+    profiler._merge_profile_directories()
 
     # Stale data untouched.
     assert (stale / "old_data.xplane.pb").read_text() == "OLD"

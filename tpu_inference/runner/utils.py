@@ -639,7 +639,7 @@ class PhasedBasedProfiler:
             self.profiling_n_steps_left -= 1
             if self.profiling_n_steps_left <= 0:
                 jax.profiler.stop_trace()
-                self._move_capture_to_dst_dir()
+                self._merge_profile_directories()
                 logger.info(
                     f"Profiling for {self.current_phase} phase finished")
                 self.current_phase = ""
@@ -691,26 +691,43 @@ class PhasedBasedProfiler:
             fallback_ts)
         return fallback_ts
 
-    def _move_capture_to_dst_dir(self) -> None:
-        """Move this rank's capture from the dp_rank_<N> sandbox to the
-        user-facing <phase>/plugins/profile/<canonical_dst_ts>/ dir.
-
-        Under MPMD, prefixes the filename with dp{N}_ so per-rank captures
-        coexist in the same ts dir without clobbering. Cleans up the now-
-        empty plugins/ subtree under the sandbox; the dp_rank_<N>/ dir
-        itself is kept for the per-rank batch_composition_stats JSONs.
+    def _merge_profile_directories(self) -> None:
         """
-        sandbox = os.path.join(self.profile_dir_with_phase_suffix, "plugins",
-                               "profile")
-        if not os.path.exists(sandbox):
+        Consolidates phase trace artifacts so downstream tools (c2xprof,
+        TensorBoard profile plugin) see a single distributed session.
+
+        Two split states are handled in sequence; the function is safe to
+        call from every rank after its own jax.profiler.stop_trace.
+
+        1. MPMD on a single host: each DP rank captured into
+           <phase>/dp_rank_<N>/plugins/profile/<ts>/ with an identically-
+           named xplane.pb (same hostname + same JAX worker id across
+           ranks). Hoist each rank's files up to
+           <phase>/plugins/profile/<ts>/ under TPU_MULTIPROCESS_DP, with
+           `dp<N>` injected into the filename so per-rank captures
+           coexist instead of clobbering each other.
+
+        2. Disjoint timestamp dirs: ray multi-host startup skew (or, after
+           step 1, the per-rank stop_trace timestamps in MPMD) produces
+           multiple <ts>/ subdirs under <phase>/plugins/profile/. Collapse
+           them into the earliest timestamp dir.
+
+        Example multi-host split state before merge:
+          .../plugins/profile/2026_05_06_04_47_36/j-1b8d22de-2250-4697-9dfc-ray-node-1-0.xplane.pb
+          .../plugins/profile/2026_05_06_04_47_38/j-1b8d22de-2250-4697-9dfc-ray-node-0-0.xplane.pb
+        After merge: both files under 2026_05_06_04_47_36/.
+        """
+        source_profile_path = os.path.join(self.profile_dir_with_phase_suffix,
+                                           "plugins", "profile")
+        if not os.path.exists(source_profile_path):
             return
         phase_dir = os.path.dirname(self.profile_dir_with_phase_suffix)
         dst_ts_dir = os.path.join(phase_dir, "plugins", "profile",
                                   self._canonical_dst_ts)
         try:
             os.makedirs(dst_ts_dir, exist_ok=True)
-            for ts in os.listdir(sandbox):
-                src_ts_dir = os.path.join(sandbox, ts)
+            for ts in os.listdir(source_profile_path):
+                src_ts_dir = os.path.join(source_profile_path, ts)
                 if not os.path.isdir(src_ts_dir):
                     continue
                 for fname in os.listdir(src_ts_dir):
@@ -723,7 +740,8 @@ class PhasedBasedProfiler:
                     os.rmdir(src_ts_dir)
                 except OSError:
                     pass
-            for cleanup in (sandbox, os.path.dirname(sandbox)):
+            for cleanup in (source_profile_path,
+                            os.path.dirname(source_profile_path)):
                 try:
                     os.rmdir(cleanup)
                 except OSError:
