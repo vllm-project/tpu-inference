@@ -711,78 +711,35 @@ def test_phased_profiler_skips_decode_only_steps_based_on_kv_len(
     assert profiler.current_phase == ""
 
 
-def test_merge_profile_directories_ray_multihost(tmp_path):
-    """Ray multi-host: per-host timestamp dirs collapse into the earliest one.
-
-    Under the current code, profile_dir_with_phase_suffix always has a
-    dp_rank_N segment. The merge first hoists files up from
-    <phase>/dp_rank_0/plugins/profile/<ts>/ to <phase>/plugins/profile/<ts>/,
-    then collapses the timestamp dirs. Host-id-tagged filenames are
-    preserved (no dp{N}_ prefix is injected because TPU_MULTIPROCESS_DP is
-    off).
-    """
+def test_merge_multihost_profile_directories(tmp_path):
+    """Tests that multi-host profile directories with different timestamps are consolidated correctly."""
     profiler = PhasedBasedProfiler(profile_dir=str(tmp_path))
     phase_dir = tmp_path / "prefill_heavy"
-    rank_dir = phase_dir / "dp_rank_0"
-    profiler.profile_dir_with_phase_suffix = str(rank_dir)
+    profiler.profile_dir_with_phase_suffix = str(phase_dir)
 
-    profile_path = rank_dir / "plugins" / "profile"
+    profile_path = phase_dir / "plugins" / "profile"
     dir_early = profile_path / "2026_05_06_04_47_36"
     dir_late = profile_path / "2026_05_06_04_47_38"
+
+    # Create the nested timestamped directories
     dir_early.mkdir(parents=True, exist_ok=True)
     dir_late.mkdir(parents=True, exist_ok=True)
-    (dir_early / "node-1-0.xplane.pb").write_text("dummy_trace_data_1")
-    (dir_late / "node-0-0.xplane.pb").write_text("dummy_trace_data_0")
 
-    profiler._merge_profile_directories()
+    # Create dummy host files inside each directory
+    file_early = dir_early / "node-1-0.xplane.pb"
+    file_late = dir_late / "node-0-0.xplane.pb"
+    file_early.write_text("dummy_trace_data_1")
+    file_late.write_text("dummy_trace_data_0")
 
-    # Files end up at <phase>/plugins/profile/<earliest_ts>/, not under dp_rank_0.
-    merged_dir = phase_dir / "plugins" / "profile" / "2026_05_06_04_47_36"
-    assert merged_dir.exists()
+    # Execute consolidation merge
+    profiler._merge_multihost_profile_directories()
+
+    # Verify that the trailing directory is deleted and all files are merged into the earliest directory
+    assert dir_early.exists()
     assert not dir_late.exists()
-    assert not (rank_dir / "plugins").exists()
-    assert (merged_dir /
+    assert (dir_early / "node-1-0.xplane.pb").exists()
+    assert (dir_early / "node-0-0.xplane.pb").exists()
+    assert (dir_early /
             "node-1-0.xplane.pb").read_text() == "dummy_trace_data_1"
-    assert (merged_dir /
+    assert (dir_early /
             "node-0-0.xplane.pb").read_text() == "dummy_trace_data_0"
-
-
-def test_merge_profile_directories_mpmd(tmp_path, monkeypatch):
-    """MPMD: 4 ranks each capture to their own dp_rank_N/plugins/profile/<ts>/
-    with identical filenames; merge hoists each up with dp{N}_ prefix so
-    they coexist in one <phase>/plugins/profile/<earliest_ts>/ dir."""
-    monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
-
-    phase_dir = tmp_path / "prefill_heavy"
-    profilers = []
-    for rank in range(4):
-        rank_dir = phase_dir / f"dp_rank_{rank}"
-        profiler = PhasedBasedProfiler(profile_dir=str(tmp_path),
-                                       worker_rank=rank)
-        profiler.profile_dir_with_phase_suffix = str(rank_dir)
-        # Each rank's stop_trace lands in its own second-resolution dir.
-        ts_dir = rank_dir / "plugins" / "profile" / f"2026_05_06_04_47_{36 + rank:02d}"
-        ts_dir.mkdir(parents=True)
-        # Identical filename across ranks — the collision the fix avoids.
-        (ts_dir / "t1v-n-host-w-0.xplane.pb").write_text(f"rank_{rank}_xplane")
-        (ts_dir /
-         "t1v-n-host-w-0.trace.json.gz").write_text(f"rank_{rank}_trace")
-        profilers.append(profiler)
-
-    for profiler in profilers:
-        profiler._merge_profile_directories()
-
-    merged_dir = phase_dir / "plugins" / "profile" / "2026_05_06_04_47_36"
-    assert merged_dir.exists()
-    for rank in range(4):
-        xplane = merged_dir / f"dp{rank}_t1v-n-host-w-0.xplane.pb"
-        trace = merged_dir / f"dp{rank}_t1v-n-host-w-0.trace.json.gz"
-        assert xplane.read_text() == f"rank_{rank}_xplane"
-        assert trace.read_text() == f"rank_{rank}_trace"
-        # Per-rank plugins/ subtree cleaned up; dp_rank_N/ remains for the
-        # batch_composition_stats JSONs (which this test doesn't stage).
-        assert not (phase_dir / f"dp_rank_{rank}" / "plugins").exists()
-    # Trailing timestamp dirs collapsed into the earliest.
-    for rank in range(1, 4):
-        assert not (phase_dir / "plugins" / "profile" /
-                    f"2026_05_06_04_47_{36 + rank:02d}").exists()
