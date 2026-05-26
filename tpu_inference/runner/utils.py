@@ -694,7 +694,8 @@ class PhasedBasedProfiler:
     def _merge_profile_directories(self) -> None:
         """
         Consolidates phase trace artifacts so downstream tools (c2xprof,
-        TensorBoard profile plugin) see a single distributed session.
+        TensorBoard profile plugin, `scripts/merge_xprof.py`) see a single
+        distributed session.
 
         Two split states are handled in sequence; the function is safe to
         call from every rank after its own jax.profiler.stop_trace.
@@ -746,8 +747,10 @@ class PhasedBasedProfiler:
                     os.rmdir(cleanup)
                 except OSError:
                     pass
+            logger.info(
+                f"Successfully merged profile directories into: {dst_ts_dir}")
         except Exception as e:
-            logger.warning("Failed to move profile capture to dst dir: %s", e)
+            logger.warning("Failed to merge profile directories: %s", e)
 
     def step(self, batch_composition_stats: dict) -> None:
         """
