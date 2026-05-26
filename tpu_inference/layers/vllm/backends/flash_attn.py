@@ -12,14 +12,16 @@ from torchax.ops.mappings import t2j
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl,
-                                       AttentionLayer, AttentionType)
+                                       AttentionLayer, AttentionType,
+                                       AttentionMetadataBuilder,
+                                       CommonAttentionMetadata)
 from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
                                                  register_backend)
 
 from tpu_inference import utils
-from tpu_inference.layers.common.attention_interface import attention, sharded_flash_attention, BlockSizes
+from tpu_inference.layers.common.attention_interface import attention, sharded_flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.kernels.flash_attention.kernel import SegmentIds
+from tpu_inference.kernels.flash_attention.kernel import SegmentIds, BlockSizes
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
@@ -31,12 +33,43 @@ logger = init_logger(__name__)
 TPU_HEAD_SIZE_ALIGNMENT = 128
 
 
+class PallasAttentionMetadataBuilder(AttentionMetadataBuilder[AttentionMetadata]):
+
+    def __init__(
+        self,
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> AttentionMetadata:
+        # Return a dummy metadata shell. The actual metadata is built dynamically
+        # by GKE Model Runner's JAX compilation pipeline before execution.
+        return AttentionMetadata(
+            seq_lens=jnp.array([]),
+            block_tables=None,
+            query_start_loc=jnp.array([]),
+            request_distribution=jnp.array([]),
+        )
+
+
 @register_backend(AttentionBackendEnum.FLASH_ATTN)
 class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN"
+
+    @staticmethod
+    def get_builder_cls() -> type["PallasAttentionMetadataBuilder"]:
+        return PallasAttentionMetadataBuilder
 
     @staticmethod
     def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
@@ -412,7 +445,6 @@ def _jax_encoder_only_attn_func(
         mesh=mesh,
         causal=False,
         sm_scale=scale,
-        block_sizes=block_sizes,
     )
     output_bhtd = kernel(
         q_bhtd,
