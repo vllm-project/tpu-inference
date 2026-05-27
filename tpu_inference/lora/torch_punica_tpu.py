@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import functools
 import math
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, TYPE_CHECKING, Union
 
 import torch
 import torch.nn.functional as F
-import torchax
-import vllm.lora.punica_wrapper.utils as _punica_utils
+try:
+    import torchax
+except ImportError:
+    import torch_xla2 as torchax
 from vllm.lora.punica_wrapper.utils import convert_mapping
-from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -19,11 +19,6 @@ if TYPE_CHECKING:
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from tpu_inference.lora.torch_lora_ops import bgmv_expand_slice, bgmv_shrink
-
-# Pin memory is unsupported on TPU; force `pin_memory` off for
-# `async_tensor_h2d` calls.
-_punica_utils.async_tensor_h2d = functools.partial(
-    _punica_utils.async_tensor_h2d, pin_memory=is_pin_memory_available())
 
 
 class PunicaWrapperTPU(PunicaWrapperBase):
@@ -148,8 +143,15 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
         """
-        raise NotImplementedError(
-            "NYI: torch_punica_tpu.PunicaWrapperTPU.add_lora_embedding.")
+        # Embedding layer has a single output slice of size hidden_size (y.shape[-1])
+        return self.add_expand(
+            y=y,
+            x=(x,),
+            lora_b_stacked=(lora_b_stacked,),
+            output_slices=(y.shape[-1],),
+            offset_start=0,
+            add_inputs=add_inputs,
+        )
 
     def add_lora_linear(self,
                         y: torch.Tensor,
@@ -222,12 +224,31 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             y (torch.Tensor): Output tensor.
             x (torch.Tensor): Input tensor.
             lora_a_stacked (torch.Tensor): lora_a's weights.
-            lora_b_stacked (torch.Tensor):lora_b's weights.
+            lora_b_stacked (torch.Tensor): lora_b's weights.
             scale (float): Scaling factor.
-            buffer (Optional[torch.Tensor]):Default to None.
+            buffer (Optional[torch.Tensor]): Default to None.
         """
-        raise NotImplementedError(
-            "NYI: torch_punica_tpu.PunicaWrapperTPU.add_lora_logits.")
+        y_org = y
+        y = y.view(-1, y.shape[-1])
+        x = x.view(-1, x.shape[-1])
+
+        # Logits processing operates on request sampler mappings
+        sampler_indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
+
+        # Execute shrink step into internal low-rank buffer
+        buffer_tpu = bgmv_shrink(x, lora_a_stacked, sampler_indices, scale)
+
+        # Expand step back to full logits space using a single-slice mapping
+        y = bgmv_expand_slice(
+            buffer_tpu,
+            lora_b_stacked,
+            y,
+            sampler_indices,
+            slice_offset=0,
+            slice_size=y.shape[-1],
+            add_inputs=True,
+        )
+        return y.view(y_org.shape)
 
     @property
     def token_lora_indices(self) -> torch.Tensor:
