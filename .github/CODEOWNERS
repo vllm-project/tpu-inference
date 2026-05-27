@@ -22,7 +22,8 @@
 /tpu_inference/distributed/ @mrjunwan-lang @sixiang-google
 
 # Kernel Implementations (Performance-critical)
-/tpu_inference/kernels/ @kyuyeunk @bythew3i @a1yssan13 
+/tpu_inference/kernels/ @kyuyeunk @bythew3i @a1yssan13
+/tpu_inference/kernels/mla @m-liu @gxd @gpolovets1 @kyuyeunk
 
 # Model layers
 /tpu_inference/layers/ @kyuyeunk @lk-chen
