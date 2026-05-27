@@ -7,7 +7,7 @@
 # Analysis includes full history from tpu_commons and tpu_inference paths.
 
 # Default owners for everything in the repo (fallback)
-* @vipannalla @kyuyeunk
+* @vipannalla @kyuyeunk @QiliangCui
 
 # CI/CD and Build Configuration
 /.buildkite/ @jcyang43 @QiliangCui @yiw-wang @CienetStingLin
