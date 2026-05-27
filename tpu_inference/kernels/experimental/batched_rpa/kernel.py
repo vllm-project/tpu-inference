@@ -136,12 +136,17 @@ def rpa_body(
     for b_idx in range(cfgs.batch_size):
         s_idx = schedule_ref.s_idx[step, b_idx]
         is_valid = s_idx != -1
+        # Clamp the sentinel (-1, written by mask_out_steps for padded steps)
+        # so the eager arm of jnp.where below reads an in-bounds slot. The
+        # kernel runs with disable_bounds_checks=True, which assumes indices
+        # are already in range.
+        safe_s_idx = jnp.maximum(0, s_idx)
         q_idx = schedule_ref.q_idx[step, b_idx]
         k_idx = schedule_ref.k_idx[step, b_idx]
         k_id = jnp.where(is_valid, k_idx * cfgs.bkv_sz, 0)
-        kv_len = jnp.where(is_valid, kv_lens_ref[s_idx], 0)
-        q_start = jnp.where(is_valid, cu_q_lens_ref[s_idx], 0)
-        q_end = jnp.where(is_valid, cu_q_lens_ref[s_idx + 1], 0)
+        kv_len = jnp.where(is_valid, kv_lens_ref[safe_s_idx], 0)
+        q_start = jnp.where(is_valid, cu_q_lens_ref[safe_s_idx], 0)
+        q_end = jnp.where(is_valid, cu_q_lens_ref[safe_s_idx + 1], 0)
         q_len = q_end - q_start
         offset = kv_len - q_len
 
