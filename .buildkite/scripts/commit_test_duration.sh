@@ -39,18 +39,6 @@ git fetch origin "${TARGET_BRANCH}"
 git checkout "${TARGET_BRANCH}"
 git reset --hard origin/"${TARGET_BRANCH}"
 
-VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
-
-if [ -z "${VLLM_COMMIT_HASH}" ]; then
-    echo "VLLM_COMMIT_HASH not found in buildkite meta-data"
-    exit 1
-fi
-
-if [ -z "${BUILDKITE_COMMIT:-}" ]; then
-    echo "BUILDKITE_COMMIT not found"
-    exit 1
-fi
-
 git add .buildkite/.test_durations
 
 # --- Check for changes before committing ---
