@@ -12,11 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Register custom op to vLLM so that vLLM model implementation will instantiante
-# classes with definitions in tpu-inference.
-import sys
-import types
-
 from tpu_inference.layers.vllm.custom_ops import embedding as embedding
 from tpu_inference.layers.vllm.custom_ops import fused_moe as fused_moe
 from tpu_inference.layers.vllm.custom_ops import \
@@ -25,7 +20,5 @@ from tpu_inference.layers.vllm.custom_ops import linear as linear
 from tpu_inference.layers.vllm.custom_ops import mla_attention as mla_attention
 from tpu_inference.layers.vllm.custom_ops import rope as rope
 
-# by pass install cutlass as it only invoked
-# if the code is executing on an NVIDIA GPU using specific quantization paths
-if "cutlass" not in sys.modules:
-    sys.modules["cutlass"] = types.ModuleType("cutlass")
+# Register custom op to vLLM so that vLLM model implementation will instantiante
+# classes with definitions in tpu-inference.
