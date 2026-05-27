@@ -68,6 +68,7 @@ steps:
   
    - label: "Commit support matrices if is nightly build or release tag specified"
      <<: *run-on-nightly-or-tag
+     if: build.branch == "main"
      key: commit_support_matrices
      depends_on:
        - "v6_generate_matrices"
@@ -89,7 +90,7 @@ steps:
        - bash .buildkite/scripts/notify_test_results.sh
 
    - label: "Record verified commit hashes"
-     if: build.env("NIGHTLY") == "1"
+     if: build.branch == "main" && build.env("NIGHTLY") == "1"
      key: record_verified_commit_hashes
      depends_on:
        - notify_test_results
@@ -101,3 +102,17 @@ steps:
       - GITHUB_PAT
      command:
        - bash .buildkite/scripts/commit_verified_commit_hashes.sh
+
+   - label: "Upload pytest duration artifact"
+     if: build.branch == "main" && build.env("NIGHTLY") == "1" && build.env("MODEL_IMPL_TYPE") == "auto"
+     key: update_unit_test_duration_file
+     artifact_paths: /mnt/disks/persist/models/.test_durations
+     agents:
+       queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+     secrets:
+       - GITHUB_PAT
+     commands:
+       - |
+         .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x --store-durations --cov tpu_inference tests/ --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_multi_request_accuracy_test.py --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_performance_test.py --ignore=/workspace/tpu_inference/tests/core/test_dp_group_sampling_prefix_cache.py; if [ -f .test_durations ]; then cp .test_durations /tmp/hf_home/.test_durations; else exit 1; fi"
+       - cp /mnt/disks/persist/models/.test_durations .buildkite/
+       - bash .buildkite/scripts/commit_test_duration.sh
