@@ -256,8 +256,7 @@ if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
     python3 "$SCRIPT_DIR/generate_decode_only_bm_dataset.py" \
         --input-len "$DECODE_INPUT_LEN" \
         --num-distinct "$MAX_DISTINCT_PROMPTS" \
-        --output-file "$DECODE_DATASET_PATH" \
-        --model "$MODEL"
+        --output-file "$DECODE_DATASET_PATH"
         
     CLIENT_CMD+=( "--dataset-path" "$DECODE_DATASET_PATH" )
     
@@ -268,6 +267,18 @@ if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
     fi
     
     DATASET="decode_only_override"
+    # =========================================================================
+    # Hot-Patch Injection
+    # =========================================================================
+    echo "[INFO] Injecting vLLM Dataset Hot-Patch for pure Decode-Only..."
+    
+    if [[ "${CLIENT_CMD[0]}" == "vllm" ]]; then
+        CLIENT_CMD=( "python3" "$SCRIPT_DIR/vllm_tokenizer_patch.py" "${CLIENT_CMD[@]:1}" )
+        echo "[INFO] Successfully wrapped CLIENT_CMD with vllm_tokenizer_patch.py"
+    else
+        echo "[WARNING] CLIENT_CMD does not start with 'vllm'. Patch injection skipped."
+    fi
+
     echo "[INFO] Interception complete. Dataset path and shuffle disabled."
     echo "====================================================================="
 fi

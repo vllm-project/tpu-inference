@@ -9,7 +9,7 @@
   },
   "benchmark_cases": [
     {
-      "case_name": "Qwen3_5-397B-Decode-GBS128",
+      "case_name": "Qwen3_5-397B-Decode-GBS1",
       "ci_queue": [
         "tpu_v7x_8_queue"
       ],
@@ -18,7 +18,7 @@
         "EXPECTED_ETEL": 3600000,
         "INPUT_LEN": 8192,
         "OUTPUT_LEN": 1024,
-        "MAX_DISTINCT_PROMPTS": 32
+        "MAX_DISTINCT_PROMPTS": 1
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -29,7 +29,7 @@
         },
         "args": {
           "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-          "max-num-seqs": 128,
+          "max-num-seqs": 1,
           "max-num-batched-tokens": 16384,
           "tensor-parallel-size": {
             "v7x-8": 8
@@ -50,16 +50,16 @@
           "request-rate": "inf",
           "dataset-name": "custom",
           "custom-output-len": 1024,
-          "num-prompts": 1000,
+          "num-prompts": 80,
           "percentile-metrics": "ttft,tpot,e2el",
           "ignore-eos": true,
-          "max-concurrency": 128,
+          "max-concurrency": 1,
           "skip-chat-template": true
         }
       }
     },
     {
-      "case_name": "Qwen3_5-397B-Decode-GBS256",
+      "case_name": "Qwen3_5-397B-Decode-GBS4",
       "ci_queue": [
         "tpu_v7x_8_queue"
       ],
@@ -68,7 +68,7 @@
         "EXPECTED_ETEL": 3600000,
         "INPUT_LEN": 8192,
         "OUTPUT_LEN": 1024,
-        "MAX_DISTINCT_PROMPTS": 32
+        "MAX_DISTINCT_PROMPTS": 4
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -79,7 +79,7 @@
         },
         "args": {
           "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-          "max-num-seqs": 256,
+          "max-num-seqs": 4,
           "max-num-batched-tokens": 16384,
           "tensor-parallel-size": {
             "v7x-8": 8
@@ -100,10 +100,10 @@
           "request-rate": "inf",
           "dataset-name": "custom",
           "custom-output-len": 1024,
-          "num-prompts": 2000,
+          "num-prompts": 200,
           "percentile-metrics": "ttft,tpot,e2el",
           "ignore-eos": true,
-          "max-concurrency": 256,
+          "max-concurrency": 4,
           "skip-chat-template": true
         }
       }
