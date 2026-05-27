@@ -330,7 +330,7 @@ inspect|cs=testing_tuning_infra_11|run=001> query_run_status
 query_min_latency [--case_set_id ID] [--run_id ID]  [--show FIELD ...]
 ```
 
-For each unique `TuningKey`, shows the best measured latency and the corresponding `TunableParam` configuration. If repeatable --show option is specified, only the FIELDs are shown. Without --show option, all the fields in TuningKey and TunableParams are show as a table format in console.
+For each unique `TuningKey`, shows the best measured latency and the corresponding `TunableParam` configuration. If repeatable --show option is specified, only the FIELDs are shown. Without --show option, all the fields in TuningKey and TunableParams are shown as a table.
 
 ```
 inspect|cs=mla_tuning_0|run=4> query_min_latency --show max_num_tokens --show actual_num_q_heads --show actual_lkv_dim  --show actual_r_dim  --show decode_batch_size  --show num_kv_pages_per_block --show latency_us
@@ -349,7 +349,7 @@ query_case_latency  Query latency for tuning cases with optional field filters
                         (--case_set_id ID --run_id ID [--filter-key FIELD=VALUE ...] [--show FIELD ...] [--show_all])
 ```
 
-FIELD can be any key in tuning_key or tunable_params. --show option behaves the same as above. --show_all option will enable all the cases even the case tuning failed.
+FIELD can be any key in tuning_key or tunable_params. --show option behaves the same as above. --show_all includes all cases, even ones where tuning failed.
 
 ```
 inspect|cs=mla_tuning_0|run=4> query_case_latency --filter-key max_num_tokens=4 --show max_num_tokens --show actual_num_q_heads --show actual_lkv_dim  --show actual_r_dim  --show decode_batch_size  --show num_kv_pages_per_block --show latency_us --show_all

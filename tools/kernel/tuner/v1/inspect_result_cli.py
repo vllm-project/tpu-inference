@@ -24,7 +24,7 @@ Commands:
     query_run_status    Show timing info for a run (--case_set_id ID --run_id ID)
     query_min_latency   Show best latency per TuningKey (--case_set_id ID --run_id ID [--show FIELD ...])
     query_case_latency  Query latency for tuning cases with optional field filters
-                        (--case_set_id ID --run_id ID [--filter-key FIELD=VALUE ...])
+                        (--case_set_id ID --run_id ID [--filter_key FIELD=VALUE ...])
                         FIELD can be any key in tuning_key or tunable_params.
 """
 
@@ -201,17 +201,24 @@ def _matches_filter(kv: dict, filter_keys: list) -> bool:
 
     for kv_str in filter_keys:
         if '=' not in kv_str:
-            continue
+            raise ValueError(
+                f'Warning: invalid filter "{kv_str}" ignored (expected format FIELD=VALUE)'
+            )
         field, raw = kv_str.split('=', 1)
         field = field.strip()
         raw = raw.strip()
         if field not in combined:
-            return False
+            raise ValueError(
+                f'Filter field "{field}" not found in tuning_key or tunable_params'
+            )
         stored = combined[field]
         if stored is None:
             if raw.lower() not in ('none', 'null', ''):
                 return False
         elif isinstance(stored, bool):
+            if raw.lower() not in ('true', 'false', '1', '0', 'yes', 'no'):
+                raise ValueError(
+                    f'Invalid boolean value "{raw}" for field "{field}"')
             if stored != (raw.lower() in ('true', '1', 'yes')):
                 return False
         elif isinstance(stored, int):
@@ -236,6 +243,14 @@ def _matches_filter(kv: dict, filter_keys: list) -> bool:
             if str(stored) != raw:
                 return False
     return True
+
+
+def row_sort_key(row):
+    status = row.get('ProcessedStatus')
+    lat = row.get('Latency')
+    if status == 'SUCCESS':
+        return (0, lat, row.get('CaseId'))
+    return (1, float('inf'), row.get('CaseId'))
 
 
 def local_query_case_latency(db_path,
@@ -287,14 +302,7 @@ def local_query_case_latency(db_path,
             'CaseId': r.get('CaseId'),
         })
 
-    def _sort_key(row):
-        status = row.get('ProcessedStatus')
-        lat = row.get('Latency')
-        if status == 'SUCCESS' and lat:
-            return (0, lat, row.get('CaseId'))
-        return (1, float('inf'), row.get('CaseId'))
-
-    return sorted(rows, key=_sort_key)
+    return sorted(rows, key=row_sort_key)
 
 
 # ---------------------------------------------------------------------------
@@ -524,14 +532,7 @@ def spanner_query_case_latency(db,
                 'CaseId': case_id,
             })
 
-    def _sort_key(row):
-        status = row.get('ProcessedStatus')
-        lat = row.get('Latency')
-        if status == 'SUCCESS' and lat:
-            return (0, lat, row.get('CaseId'))
-        return (1, float('inf'), row.get('CaseId'))
-
-    return sorted(rows, key=_sort_key)
+    return sorted(rows, key=row_sort_key)
 
 
 # ---------------------------------------------------------------------------
@@ -556,26 +557,30 @@ def _print_table(rows, headers=None):
         print(fmt.format(*[str(row.get(h, '')) for h in headers]))
 
 
-def _print_min_latency(rows, show_fields=None):
-    """Print query_min_latency results as a table.
+def _print_flattened_table(rows,
+                           builtin_cols,
+                           row_builder,
+                           show_fields=None,
+                           empty_msg='  (no results)',
+                           count_suffix=''):
+    """Shared helper: flatten rows, resolve show_fields, and print a table.
 
-    Each row is flattened: built-in columns (case_id, latency_us, warmup_us)
-    come first, then every key from tuning_key and tunable_params.
-    If show_fields is given, only those columns are displayed.
+    Args:
+        rows: raw result rows.
+        builtin_cols: ordered list of column names produced by row_builder.
+        row_builder: callable(row) -> dict containing exactly the builtin cols.
+            tuning_key and tunable_params are merged in automatically after.
+        show_fields: optional list of columns to display (subset of all_cols).
+        empty_msg: message printed when rows is empty.
+        count_suffix: appended to the trailing "(N result(s))" line.
     """
     if not rows:
-        print('  (no successful results)')
+        print(empty_msg)
         return
-
-    builtin_cols = ['case_id', 'latency_us', 'warmup_us']
 
     flat_rows = []
     for r in rows:
-        flat = {
-            'case_id': r['CaseId'],
-            'latency_us': r['Latency'],
-            'warmup_us': r['WarmupTime'],
-        }
+        flat = row_builder(r)
         flat.update(r.get('tuning_key') or {})
         flat.update(r.get('tunable_params') or {})
         flat_rows.append(flat)
@@ -595,57 +600,49 @@ def _print_min_latency(rows, show_fields=None):
         cols = all_cols
 
     _print_table(flat_rows, headers=cols)
-    print(f'  ({len(rows)} result(s))')
+    print(f'  ({len(rows)} result(s){count_suffix})')
+
+
+def _print_min_latency(rows, show_fields=None):
+    """Print query_min_latency results as a table."""
+    _print_flattened_table(
+        rows,
+        builtin_cols=['case_id', 'latency_us', 'warmup_us'],
+        row_builder=lambda r: {
+            'case_id': r['CaseId'],
+            'latency_us': r['Latency'],
+            'warmup_us': r['WarmupTime'],
+        },
+        show_fields=show_fields,
+        empty_msg='  (no successful results)',
+    )
 
 
 def _print_case_latency(rows, show_fields=None):
-    """Print query_case_latency results as a table.
+    """Print query_case_latency results as a table."""
 
-    Each row is flattened: built-in columns
-    (case_id, processed_status, latency_us, warmup_us, total_time_us)
-    come first, then every key from tuning_key and tunable_params.
-    If show_fields is given, only those columns are displayed.
-    """
-    if not rows:
-        print('  (no matching results)')
-        return
-
-    builtin_cols = [
-        'case_id', 'processed_status', 'latency_us', 'warmup_us',
-        'total_time_us'
-    ]
-
-    flat_rows = []
-    for r in rows:
+    def _build_row(r):
         status = r.get('ProcessedStatus')
         is_success = status == 'SUCCESS'
-        flat = {
+        return {
             'case_id': r['CaseId'],
             'processed_status': status,
             'latency_us': r['Latency'] if is_success else 'FAILURE',
             'warmup_us': r['WarmupTime'] if is_success else 'FAILURE',
             'total_time_us': r.get('TotalTime'),
         }
-        flat.update(r.get('tuning_key') or {})
-        flat.update(r.get('tunable_params') or {})
-        flat_rows.append(flat)
 
-    all_extra = [k for k in flat_rows[0] if k not in builtin_cols]
-    all_cols = builtin_cols + all_extra
-
-    if show_fields:
-        unknown = [f for f in show_fields if f not in all_cols]
-        if unknown:
-            print(f'  Warning: unknown field(s) ignored: {", ".join(unknown)}')
-        cols = [f for f in show_fields if f in all_cols]
-        if not cols:
-            print('  (no valid --show fields; showing all columns)')
-            cols = all_cols
-    else:
-        cols = all_cols
-
-    _print_table(flat_rows, headers=cols)
-    print(f'  ({len(rows)} result(s), sorted by latency)')
+    _print_flattened_table(
+        rows,
+        builtin_cols=[
+            'case_id', 'processed_status', 'latency_us', 'warmup_us',
+            'total_time_us'
+        ],
+        row_builder=_build_row,
+        show_fields=show_fields,
+        empty_msg='  (no matching results)',
+        count_suffix=', sorted by latency',
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -726,26 +723,26 @@ def _build_parser():
         help='Query latency for tuning cases, with optional field filters.',
         description=
         ('Show latency for all successful tuning cases matching the given filters.\n'
-         'Use --filter-key FIELD=VALUE (repeatable) to filter by any field of\n'
+         'Use --filter_key FIELD=VALUE (repeatable) to filter by any field of\n'
          'tuning_key or tunable_params in the stored CaseKeyValue.\n\n'
          'FIELD can be any key present in the tuning_key or tunable_params\n'
          'sub-dicts of the case — field names vary by case set type.\n\n'
          'Example:\n'
          '  query_case_latency --case_set_id X --run_id Y \\\n'
-         '    --filter-key max_num_tokens=4 --filter-key q_dtype=fp8'),
+         '    --filter_key max_num_tokens=4 --filter_key q_dtype=fp8'),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument('--case_set_id', required=True)
     p.add_argument('--run_id', required=True)
     p.add_argument(
-        '--filter-key',
+        '--filter_key',
         dest='filter_keys',
         action='append',
         default=[],
         metavar='FIELD=VALUE',
         help=
         ('Filter by a TuningKey or TunableParams field. '
-         'Repeat for multiple filters. Example: --filter-key max_num_tokens=4'
+         'Repeat for multiple filters. Example: --filter_key max_num_tokens=4'
          ),
     )
 
@@ -946,8 +943,8 @@ Commands:
   query_run_status [--case_set_id ID] [--run_id ID]
   query_min_latency [--case_set_id ID] [--run_id ID] [--show FIELD ...]
       --show: columns to display (default: all). Built-ins: case_id, latency_us, warmup_us
-  query_case_latency [--case_set_id ID] [--run_id ID] [--filter-key FIELD=VALUE ...] [--show FIELD ...] [--show_all]
-      --filter-key: any key in tuning_key or tunable_params (varies by case set type)
+  query_case_latency [--case_set_id ID] [--run_id ID] [--filter_key FIELD=VALUE ...] [--show FIELD ...] [--show_all]
+      --filter_key: any key in tuning_key or tunable_params (varies by case set type)
       --show: columns to display (default: all). Built-ins: case_id, processed_status,
               latency_us, warmup_us, total_time_us
       --show_all: include unsuccessful rows (default shows only successful rows)
@@ -967,6 +964,9 @@ def _setup_console_history():
     try:
         import readline  # pylint: disable=import-outside-toplevel
     except ImportError:
+        print(
+            'Warning: readline module not available; command history disabled.'
+        )
         return None
 
     # Allow overriding location, but default to a clear log-like filename.
@@ -977,6 +977,9 @@ def _setup_console_history():
         if os.path.exists(history_path):
             readline.read_history_file(history_path)
     except OSError:
+        print(
+            f'Warning: could not read history file at {history_path}; starting with empty history.'
+        )
         pass
 
     readline.set_history_length(2000)
@@ -985,6 +988,7 @@ def _setup_console_history():
         try:
             readline.write_history_file(history_path)
         except OSError:
+            print(f'Warning: could not write history file at {history_path}.')
             pass
 
     atexit.register(_save_history)
