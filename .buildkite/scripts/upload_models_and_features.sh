@@ -33,8 +33,8 @@ case "${MODEL_IMPL_TYPE}" in
     ;;
 esac
 
-if [[ ! "${JOB_PRIORITY:-1}" =~ ^[0-9]+$ ]]; then
-  echo "ERROR: JOB_PRIORITY must be a non-negative integer, got: '${JOB_PRIORITY:-}'"
+if [[ ! "${JOB_PRIORITY:-1}" =~ ^-?[0-9]+$ ]]; then
+  echo "ERROR: JOB_PRIORITY must be an integer, got: '${JOB_PRIORITY:-}'"
   exit 1
 fi
 
