@@ -70,14 +70,9 @@ logger = init_logger(__name__)
 
 class _VllmRunner(torch.nn.Module):
 
-    def __init__(self,
-                 vllm_model: torch.nn.Module,
-                 vllm_config: VllmConfig,
-                 is_draft_model: bool = False):
+    def __init__(self, vllm_model: torch.nn.Module):
         super().__init__()
         self.vllm_model = vllm_model
-        self.vllm_config = vllm_config
-        self.is_draft_model = is_draft_model
         has_pooler = is_pooling_model(vllm_model)
         self.pooler = vllm_model.pooler if has_pooler else None
 
@@ -242,8 +237,7 @@ class VllmModelWrapper:
             set_eagle3_aux_hidden_state_layers(
                 vllm_model, self.vllm_config.speculative_config)
 
-        self.model = _VllmRunner(vllm_model, self.vllm_config,
-                                 self.is_draft_model)
+        self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
         self._pooler: Pooler | None = self.model.pooler
