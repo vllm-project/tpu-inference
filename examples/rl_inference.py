@@ -26,6 +26,7 @@ def create_parser():
     sampling_group.add_argument("--top-p", type=float)
     sampling_group.add_argument("--top-k", type=int)
     sampling_group.add_argument("--log-probs", type=int)
+    sampling_group.add_argument("--prompt-logprobs", type=int)
 
     return parser
 
@@ -37,6 +38,7 @@ def main(args: dict):
     top_p = args.pop("top_p")
     top_k = args.pop("top_k")
     log_probs = args.pop("log_probs")
+    prompt_logprobs = args.pop("prompt_logprobs")
 
     # Create an LLM
     args["enable_return_routed_experts"] = True
@@ -54,6 +56,8 @@ def main(args: dict):
         sampling_params.top_k = top_k
     if log_probs is not None:
         sampling_params.logprobs = log_probs
+    if prompt_logprobs is not None:
+        sampling_params.prompt_logprobs = prompt_logprobs
 
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
@@ -145,6 +149,17 @@ def main(args: dict):
 
             if completion.logprobs is not None:
                 print(f"Logprobs for first token: {completion.logprobs[0]}")
+
+        if hasattr(output, 'prompt_logprobs'
+                   ) and output.prompt_logprobs is not None:
+            print(f"Prompt logprobs (first 5 tokens):")
+            # prompt_logprobs is a LogprobsTensors in vLLM V1
+            ids = output.prompt_logprobs.logprob_token_ids
+            probs = output.prompt_logprobs.logprobs
+            for i in range(min(5, ids.shape[0])):
+                print(
+                    f"  Token {i}: ids={ids[i].tolist()}, logprobs={probs[i].tolist()}"
+                )
 
         print("-" * 50)
 

@@ -19,6 +19,7 @@ def create_parser():
     EngineArgs.add_cli_args(parser)
     parser.set_defaults(model="meta-llama/Llama-3.2-1B-Instruct")
     parser.set_defaults(max_model_len=1024)
+    parser.set_defaults(max_logprobs=5)
 
     # Add sampling params
     sampling_group = parser.add_argument_group("Sampling parameters")
@@ -64,6 +65,7 @@ def main(args: dict):
         sampling_params.top_p = top_p
     if top_k is not None:
         sampling_params.top_k = top_k
+    sampling_params.prompt_logprobs = 5
 
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
@@ -133,6 +135,24 @@ def main(args: dict):
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+
+        # output.prompt_logprobs is a list with one entry per prompt token.
+        # The first entry is None (no logprob for the first token); each other
+        # entry is a dict mapping token_id -> Logprob(logprob, rank,
+        # decoded_token).
+        prompt_logprobs = output.prompt_logprobs
+        if prompt_logprobs is not None:
+            print("Prompt logprobs (top-k per position):")
+            for pos, lp_dict in enumerate(prompt_logprobs):
+                if lp_dict is None:
+                    print(f"  [{pos}] <no logprob for first token>")
+                    continue
+                ranked = sorted(lp_dict.items(),
+                                key=lambda kv: kv[1].rank)
+                entries = ", ".join(
+                    f"{lp.decoded_token!r}({tok_id}): {lp.logprob:.4f}"
+                    for tok_id, lp in ranked)
+                print(f"  [{pos}] {entries}")
         print("-" * 50)
 
 
