@@ -58,6 +58,7 @@ def has_jittable_vision(vllm_model) -> bool:
         is_qwen3_vl
     return is_jittable_architecture(vllm_model) or is_qwen3_vl(vllm_model)
 
+
 def get_vision_config(hf_config: Any) -> Any:
     """Extract vision configuration from hf_config, supporting nested/thinker wrappers."""
 
@@ -66,6 +67,7 @@ def get_vision_config(hf_config: Any) -> Any:
     if hasattr(hf_config, "thinker_config"):
         return hf_config.thinker_config.vision_config
     return hf_config
+
 
 def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
                                     vllm_model) -> Callable:

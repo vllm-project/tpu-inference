@@ -82,9 +82,11 @@ def _patched_set_deepstack(vllm_model, deepstack_input_embeds):
             num_levels = deepstack_input_embeds.size(0)
             for idx in range(num_levels):
                 key = f"deepstack_input_embeds_{idx}"
-                vllm_model._deepstack_tensors[key] = deepstack_input_embeds[idx]
+                vllm_model._deepstack_tensors[key] = deepstack_input_embeds[
+                    idx]
         else:
-            vllm_model._deepstack_tensors["deepstack_input_embeds_0"] = deepstack_input_embeds
+            vllm_model._deepstack_tensors[
+                "deepstack_input_embeds_0"] = deepstack_input_embeds
 
 
 def _convert_to_torchax_tensor(v):
