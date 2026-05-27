@@ -94,7 +94,6 @@ INVALID_TOKEN_ID = -1
 # Smallest output size
 MIN_NUM_SEQS = 8
 
-
 # Match keys for the attention input/output projections we want to relayout.
 # Substring match against `jax.tree_util.keystr(path)` for each state leaf.
 _ATTN_PROJ_KEY_SUBSTRS = (
@@ -148,8 +147,7 @@ def _pin_attn_proj_layouts(state: Any) -> tuple[Any, int]:
     for path, leaf in leaves_with_paths:
         path_str = jax.tree_util.keystr(path)
         try:
-            is_attn_proj = any(s in path_str
-                               for s in _ATTN_PROJ_KEY_SUBSTRS)
+            is_attn_proj = any(s in path_str for s in _ATTN_PROJ_KEY_SUBSTRS)
             is_2d_float = (hasattr(leaf, "ndim") and leaf.ndim == 2
                            and hasattr(leaf, "dtype")
                            and jnp.issubdtype(leaf.dtype, jnp.floating))
@@ -159,18 +157,16 @@ def _pin_attn_proj_layouts(state: Any) -> tuple[Any, int]:
                     and hasattr(leaf, "sharding")):
                 tile = _attn_proj_tile_for_dtype(leaf.dtype)
                 if tile is not None:
-                    fmt = Format(
-                        Layout(major_to_minor=(0, 1), tiling=tile),
-                        leaf.sharding)
+                    fmt = Format(Layout(major_to_minor=(0, 1), tiling=tile),
+                                 leaf.sharding)
                     leaf = jax.device_put(leaf, fmt)
                     n_pinned += 1
                     logger.debug("pinned T(16,128) on %s shape=%s dtype=%s",
                                  path_str, leaf.shape, leaf.dtype)
         except Exception as e:
             # Don't fail load on layout-pin issues; just log and continue.
-            logger.warning(
-                "Skipping layout pin for %s (%s): %s", path_str,
-                getattr(leaf, "shape", "?"), e)
+            logger.warning("Skipping layout pin for %s (%s): %s", path_str,
+                           getattr(leaf, "shape", "?"), e)
         new_leaves.append(leaf)
     return jax.tree_util.tree_unflatten(treedef, new_leaves), n_pinned
 
@@ -1251,6 +1247,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
             padded_num_reqs,
+            _,
+            _,
         ) = self._prepare_inputs(scheduler_output)
 
         init_tokens = input_ids
@@ -1323,9 +1321,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 is_first_rank=self.is_first_rank,
                 is_last_rank=self.is_last_rank,
                 dp_size=self.dp_size,
-                collect_expert_indices=getattr(
-                    self.vllm_config.model_config,
-                    "enable_return_routed_experts", False),
+                collect_expert_indices=getattr(self.vllm_config.model_config,
+                                               "enable_return_routed_experts",
+                                               False),
             )
         self.rng_params_for_sampling = final_rng
 
