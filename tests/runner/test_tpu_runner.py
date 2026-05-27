@@ -206,6 +206,8 @@ class TestTPUJaxRunner:
         runner.max_num_reqs = 8
         runner.max_model_len = 512
         runner.dp_size = 1
+        runner.vllm_config.parallel_config.data_parallel_size = 1
+        runner.vllm_config.parallel_config.is_moe_model = False
         runner.input_batch.num_reqs = 2
         runner.input_batch.req_ids = ["req1", "req2"]
         runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1}
@@ -265,6 +267,8 @@ class TestTPUJaxRunner:
             np.array([0, 1, -1, -1, -1, -1, -1, -1], dtype=np.int32),
             None,
             None,
+            None,
+            None,
             None)
 
         # Execute target method
@@ -297,6 +301,8 @@ class TestTPUJaxRunner:
         runner.max_num_reqs = 8
         runner.max_model_len = 512
         runner.dp_size = 1
+        runner.vllm_config.parallel_config.data_parallel_size = 1
+        runner.vllm_config.parallel_config.is_moe_model = False
         runner.input_batch.num_reqs = 3
         runner.input_batch.req_ids = ["req1", "req2", "req3"]
         runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1, "req3": 2}
@@ -386,6 +392,8 @@ class TestTPUJaxRunner:
             np.array([0, 1, 2, -1, -1, -1, -1, -1], dtype=np.int32),
             None,
             None,
+            None,
+            None,
             None)
 
         # Execute target method
@@ -449,6 +457,8 @@ class TestTPUJaxRunner:
         runner.max_num_reqs = 8
         runner.max_model_len = 512
         runner.dp_size = 2
+        runner.vllm_config.parallel_config.data_parallel_size = 2
+        runner.vllm_config.parallel_config.is_moe_model = False
         runner.input_batch.num_reqs = 3
         runner.input_batch.req_ids = ["req1", "req2", "req3"]
         # req1 and req2 are in Rank 0 (slots 0, 1)
@@ -541,6 +551,8 @@ class TestTPUJaxRunner:
                      dtype=np.int32),  # logits_indices
             None,
             [0, 1, 4],  # logits_indices_selector
+            None,
+            None,
             None)
 
         # Execute target method
