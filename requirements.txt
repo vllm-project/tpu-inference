@@ -1,4 +1,4 @@
---extra-index-url https://storage.googleapis.com/jax-releases/libtpu_releases.html
+--find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 tpu-info==0.7.1
 yapf==0.43.0
 pytest
