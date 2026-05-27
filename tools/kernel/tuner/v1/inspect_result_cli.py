@@ -32,8 +32,10 @@ import argparse
 import ast
 import atexit
 import json
+import math
 import os
 from collections import defaultdict
+from enum import Enum
 
 # ---------------------------------------------------------------------------
 # Local backend helpers
@@ -186,10 +188,16 @@ def local_query_min_latency(db_path, case_set_id, run_id):
 # ---------------------------------------------------------------------------
 # Filtering helpers
 # ---------------------------------------------------------------------------
+class FilterResult(Enum):
+    MATCH = 1
+    NO_MATCH = 2
+    INVALID_FILTER = 3
 
 
-def _matches_filter(kv: dict, filter_keys: list) -> bool:
-    """Return True if a CaseKeyValue dict passes all KEY=VALUE filters.
+def _matches_filter(kv: dict, filter_keys: list) -> FilterResult:
+    """Return FilterResult.MATCH if a CaseKeyValue dict passes all KEY=VALUE filters. Return
+    FilterResult.NO_MATCH if any filter does not match, or FilterResult.INVALID_FILTER if any
+    filter is malformed.
 
     filter_keys is a list of strings like ["max_num_tokens=4", "q_dtype=fp8"].
     Fields are looked up in both tuning_key and tunable_params sub-dicts.
@@ -201,48 +209,52 @@ def _matches_filter(kv: dict, filter_keys: list) -> bool:
 
     for kv_str in filter_keys:
         if '=' not in kv_str:
-            raise ValueError(
+            print(
                 f'Warning: invalid filter "{kv_str}" ignored (expected format FIELD=VALUE)'
             )
+            return FilterResult.INVALID_FILTER
         field, raw = kv_str.split('=', 1)
         field = field.strip()
         raw = raw.strip()
         if field not in combined:
-            raise ValueError(
-                f'Filter field "{field}" not found in tuning_key or tunable_params'
+            print(
+                f'Warning: Filter field "{field}" not found in tuning_key or tunable_params'
             )
+            return FilterResult.INVALID_FILTER
         stored = combined[field]
         if stored is None:
             if raw.lower() not in ('none', 'null', ''):
-                return False
+                return FilterResult.NO_MATCH
         elif isinstance(stored, bool):
             if raw.lower() not in ('true', 'false', '1', '0', 'yes', 'no'):
-                raise ValueError(
-                    f'Invalid boolean value "{raw}" for field "{field}"')
+                print(
+                    f'Warning: Invalid boolean value "{raw}" for field "{field}"'
+                )
+                return FilterResult.INVALID_FILTER
             if stored != (raw.lower() in ('true', '1', 'yes')):
-                return False
+                return FilterResult.NO_MATCH
         elif isinstance(stored, int):
             try:
                 if stored != int(raw):
-                    return False
+                    return FilterResult.NO_MATCH
             except ValueError:
-                return False
+                return FilterResult.INVALID_FILTER
         elif isinstance(stored, float):
             try:
-                if stored != float(raw):
-                    return False
+                if not math.isclose(stored, float(raw), rel_tol=1e-9):
+                    return FilterResult.NO_MATCH
             except ValueError:
-                return False
+                return FilterResult.INVALID_FILTER
         elif isinstance(stored, list):
             try:
                 if stored != list(ast.literal_eval(raw)):
-                    return False
+                    return FilterResult.NO_MATCH
             except Exception:  # pylint: disable=broad-except
-                return False
+                return FilterResult.INVALID_FILTER
         else:
             if str(stored) != raw:
-                return False
-    return True
+                return FilterResult.NO_MATCH
+    return FilterResult.MATCH
 
 
 def row_sort_key(row):
@@ -285,13 +297,24 @@ def local_query_case_latency(db_path,
     for r in relevant:
         kv_str = case_kv_map.get((r['ID'], r['CaseId']))
         if not kv_str:
+            print(
+                f'Warning: no CaseKeyValue found for CaseId={r["CaseId"]}; skipping'
+            )
             continue
         try:
             kv = json.loads(kv_str)
         except (json.JSONDecodeError, TypeError):
+            print(
+                f'Warning: failed to decode CaseKeyValue for CaseId={r["CaseId"]}; skipping'
+            )
             continue
-        if filter_keys and not _matches_filter(kv, filter_keys):
-            continue
+        if filter_keys:
+            result = _matches_filter(kv, filter_keys)
+            if result == FilterResult.INVALID_FILTER:
+                print('One or more invalid filters; aborting query.')
+                return []
+            if result != FilterResult.MATCH:
+                continue
         rows.append({
             'tuning_key': kv.get('tuning_key'),
             'tunable_params': kv.get('tunable_params'),
