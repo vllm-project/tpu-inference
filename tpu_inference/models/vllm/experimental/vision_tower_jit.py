@@ -63,13 +63,8 @@ def get_vision_config(hf_config: Any) -> Any:
 
     if hasattr(hf_config, "vision_config"):
         return hf_config.vision_config
-    # Dynamic inspection of attributes (e.g. thinker_config)
-    for k in dir(hf_config):
-        if not k.startswith("_"):
-            val = getattr(hf_config, k, None)
-            if hasattr(val, "vision_config"):
-                return val.vision_config
-  
+    if hasattr(hf_config, "thinker_config"):
+        return hf_config.thinker_config.vision_config
     return hf_config
 
 def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
@@ -202,14 +197,7 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
         if k in ("image_grid_thw", "video_grid_thw", "grid_thw"):
             kwargs[k] = GridTHW(v.tolist())
 
-    def _convert(obj, key=None):
-        if isinstance(obj, dict):
-            return {k: _convert(v, k) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [_convert(x, key) for x in obj]
-        elif isinstance(obj,
-                        torch.Tensor) and key == "audio_feature_lengths":
-            return tuple(obj.tolist())
-        return obj
+        elif k == "audio_feature_lengths" and isinstance(v, torch.Tensor):
+            kwargs[k] = tuple(v.tolist())
 
-    return _convert(kwargs)
+    return kwargs
