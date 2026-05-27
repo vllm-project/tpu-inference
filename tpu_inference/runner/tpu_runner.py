@@ -1355,6 +1355,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
             padded_num_reqs,
+            _,
+            _,
         ) = self._prepare_inputs(scheduler_output)
 
         init_tokens = input_ids
@@ -1394,33 +1396,43 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # stays on-device (no per-step host sync). `sample` and self.mesh are
         # stable objects passed straight through so the jit cache persists;
         # per-call sampling data goes via `sampling_metadata`.
-        generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices = continue_decode(
-            state=self.state_leaves,
-            model_fn=self.model_fn,
-            compute_logits_fn=self.compute_logits_fn,
-            sample_fn=sample,
-            mesh=self.mesh,
-            sampling_metadata=sampling_metadata,
-            init_state=init_state,
-            kv_caches=self.kv_caches,
-            max_decode_steps=max_decode_steps,
-            static_max_decode_steps=user_max_decode_steps,
-            eos_token_id=self.eos_token_id,
-            padding_token_id=self.pad_token_id,
-            rng=self.rng_params_for_sampling,
-            terminate_on_any_eos=terminate_on_any_eos,
-            inputs_embeds=None,
-            layer_name_to_kvcache_index=tuple(
-                self.layer_name_to_kvcache_index.items()),
-            lora_metadata=lora_metadata,
-            intermediate_tensors=None,
-            is_first_rank=self.is_first_rank,
-            is_last_rank=self.is_last_rank,
-            dp_size=self.dp_size,
-            collect_expert_indices=getattr(
-                self.vllm_config.model_config,
-                "enable_return_routed_experts", False),
-        )
+        #
+        # Mirror the non-continue path's wrappers so anything inside model_fn
+        # / sampling that reads vllm.forward_context.get_forward_context()
+        # during tracing (attention layers, MoE config, etc.) sees the right
+        # state, and so any registered KV connector still gets its publish
+        # hook around the model run.
+        with self.maybe_forbid_compile, \
+             set_forward_context(None, self.vllm_config), \
+             self.maybe_get_kv_connector_output(
+                 scheduler_output) as kv_connector_output:
+            generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices = continue_decode(
+                state=self.state_leaves,
+                model_fn=self.model_fn,
+                compute_logits_fn=self.compute_logits_fn,
+                sample_fn=sample,
+                mesh=self.mesh,
+                sampling_metadata=sampling_metadata,
+                init_state=init_state,
+                kv_caches=self.kv_caches,
+                max_decode_steps=max_decode_steps,
+                static_max_decode_steps=user_max_decode_steps,
+                eos_token_id=self.eos_token_id,
+                padding_token_id=self.pad_token_id,
+                rng=self.rng_params_for_sampling,
+                terminate_on_any_eos=terminate_on_any_eos,
+                inputs_embeds=None,
+                layer_name_to_kvcache_index=tuple(
+                    self.layer_name_to_kvcache_index.items()),
+                lora_metadata=lora_metadata,
+                intermediate_tensors=None,
+                is_first_rank=self.is_first_rank,
+                is_last_rank=self.is_last_rank,
+                dp_size=self.dp_size,
+                collect_expert_indices=getattr(self.vllm_config.model_config,
+                                               "enable_return_routed_experts",
+                                               False),
+            )
         self.rng_params_for_sampling = final_rng
 
         self.kv_caches = final_kv_caches
