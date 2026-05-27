@@ -22,6 +22,22 @@ FEATURE_LIST_KEY="feature-list"
 
 MODEL_IMPL_TYPE="${MODEL_IMPL_TYPE:-auto}"
 
+# Validate inputs that will later be interpolated into uploaded pipeline YAML.
+# Reject anything that isn't on the allowlist / numeric to prevent injection of
+# extra YAML keys (e.g. via embedded newlines or quotes) through env vars.
+case "${MODEL_IMPL_TYPE}" in
+  auto|flax_nnx|vllm) ;;
+  *)
+    echo "ERROR: MODEL_IMPL_TYPE must be one of auto|flax_nnx|vllm, got: '${MODEL_IMPL_TYPE}'"
+    exit 1
+    ;;
+esac
+
+if [[ ! "${JOB_PRIORITY:-1}" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: JOB_PRIORITY must be a non-negative integer, got: '${JOB_PRIORITY:-}'"
+  exit 1
+fi
+
 failure_handler() {
   local exit_code=$?
   local line_no=$1
