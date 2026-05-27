@@ -15,7 +15,7 @@ from dataclasses import dataclass, fields
 
 import jax
 import jax.numpy as jnp
-from jax.experimental.layout import Layout, with_layout_constraint
+from jax.experimental.layout import Layout
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.tensor import Tensor
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -322,10 +322,6 @@ def process_moe_weights(
     w13_weight = jnp.swapaxes(w13_weight, 1, 2)
     w2_weight = jnp.swapaxes(w2_weight, 1, 2)
 
-    # Workaround for JAX error "must have valid byte strides"
-    w13_weight = with_layout_constraint(w13_weight, Layout((0, 1, 2)))
-    w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
-
     if w13_weight_scale is not None:
         # For block scales (experts, out_blocks, in_blocks), we need to maintain
         # the block dims
@@ -373,8 +369,6 @@ def process_moe_weights(
                 intermediate_size,
             )
             w13_weight = jnp.swapaxes(w13_weight, 1, 2)
-            w13_weight = with_layout_constraint(w13_weight, Layout(
-                (0, 1, 2, 3)))
 
             # Fused moe kernel expects dims to be multiple of 256.
             pad_width_intermediate_size = (align_to(intermediate_size, 256) -
