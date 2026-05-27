@@ -281,6 +281,7 @@ class TestTPUWorker:
             self, mock_ensure_kv_transfer_initialized, mock_jax, mock_utils,
             mock_runner_cls, mock_vllm_config, mock_get_pp_group):
         """Tests init_device when devices are provided during construction."""
+        mock_vllm_config.parallel_config.cpu_distributed_timeout_seconds = 60
         mock_devices = ['tpu:0', 'tpu:1']
         worker = TPUWorker(vllm_config=mock_vllm_config,
                            local_rank=0,
