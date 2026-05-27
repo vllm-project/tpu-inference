@@ -1782,20 +1782,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 1)
             logits_indices_cpu[_num_reqs:] = -1
 
-            # Calculate batch composition statistics for active hardware profilers
-            # and/or continuous batch logging.
-        if self.phase_based_profiler or self.aggregated_stats_logger:
-            self.batch_counter += 1
-            batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.batch_counter, self.input_batch,
-                total_num_scheduled_tokens, num_reqs,
-                padded_total_num_scheduled_tokens, scheduler_output)
-
-            if self.phase_based_profiler:
-                self.phase_based_profiler.step(batch_composition_stats)
-            if self.aggregated_stats_logger:
-                self.aggregated_stats_logger.log(batch_composition_stats)
-
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
@@ -1812,6 +1798,48 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
         request_distribution = np.array(_request_distribution,
                                         dtype=np.int32).ravel()
+
+        # Calculate batch composition statistics for active hardware profilers
+        # and/or continuous batch logging.
+        if self.phase_based_profiler or self.aggregated_stats_logger:
+            self.batch_counter += 1
+            batch_composition_stats = runner_utils.get_batch_composition_stats(
+                self.batch_counter, self.input_batch,
+                total_num_scheduled_tokens, num_reqs,
+                padded_total_num_scheduled_tokens, scheduler_output)
+
+            # Add extra info for repro
+            batch_composition_stats[
+                "kv_lens"] = self.input_batch.num_computed_tokens_cpu[:
+                                                                      num_reqs].tolist(
+                                                                      )
+            num_scheduled = [
+                scheduler_output.num_scheduled_tokens[req_id]
+                for req_id in self.input_batch.req_ids[:num_reqs]
+            ]
+            batch_composition_stats["num_scheduled_tokens"] = num_scheduled
+            batch_composition_stats["cu_q_lens"] = [
+                0
+            ] + np.cumsum(num_scheduled).tolist()
+            batch_composition_stats[
+                "distribution"] = request_distribution.tolist()
+
+            if hasattr(self.input_batch,
+                       "block_table") and self.input_batch.block_table:
+                # Assume gid=0 for simplicity
+                block_table_obj = self.input_batch.block_table[0]
+                cpu_tensor = block_table_obj.get_cpu_tensor()
+                req_indices = [
+                    self.input_batch.req_id_to_index[req_id]
+                    for req_id in self.input_batch.req_ids[:num_reqs]
+                ]
+                batch_composition_stats["page_indices"] = cpu_tensor[
+                    req_indices].tolist()
+
+            if self.phase_based_profiler:
+                self.phase_based_profiler.step(batch_composition_stats)
+            if self.aggregated_stats_logger:
+                self.aggregated_stats_logger.log(batch_composition_stats)
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
