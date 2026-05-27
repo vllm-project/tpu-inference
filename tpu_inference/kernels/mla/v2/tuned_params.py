@@ -1,8 +1,23 @@
-import dataclasses
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from dataclasses import dataclass
+
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
+
 
 @dataclass(frozen=True)
 class TuningKey:
@@ -13,14 +28,14 @@ class TuningKey:
     actual_r_dim: int  # Actual ROPE head dimension, <= r_dim in the model config, fixed at 64 for now
     kv_dtype: str = "float8_e4m3fn"  # KV cache and KV input data type, fixed at fp8 for now
     q_dtype: str = "float8_e4m3fn"  # Q activation dtype, fixed at fp8 for now
-    total_num_pages: int = 1506 # Total number of pages in the cache, should be large enough to cover all sequences in the batch
+    total_num_pages: int = 1506  # Total number of pages in the cache, should be large enough to cover all sequences in the batch
     page_size_per_kv_packing: int = 256  # Page size per KV packing, should be aligned with the kernel configuration
     kv_packing: int = 4  # Packing factor for KV, determined by the data type (e.g., 4 for fp8)
-    max_num_seqs: int = 160 # Maximum number of sequences in the batch, should be large enough to cover all sequences in the batch
-    pages_per_seq: int = 9 # Number of pages per sequence, determined by the maximum KV length and page size. Should be large enough to cover the longest sequence in the batch.
+    max_num_seqs: int = 160  # Maximum number of sequences in the batch, should be large enough to cover all sequences in the batch
+    pages_per_seq: int = 9  # Number of pages per sequence, determined by the maximum KV length and page size. Should be large enough to cover the longest sequence in the batch.
 
-    s_dtype: str = "bfloat16" # Post QK einsum data type feeding into softmax, fixed at bf16 for now
-    soft_cap: float | None = None # Optional softmax cap, if None, no capping is applied. If set, should be a positive value.
+    s_dtype: str = "bfloat16"  # Post QK einsum data type feeding into softmax, fixed at bf16 for now
+    soft_cap: float | None = None  # Optional softmax cap, if None, no capping is applied. If set, should be a positive value.
     # sm_scale: float = 0.1352337788608801 # Scaling factor applied to the softmax input
     # mask_value: float | None = -3.38953e+38 # Optional mask value for masked positions
 
@@ -35,7 +50,7 @@ class TunableParams:
     # Constraint: batch size % decode_batch_size = 0
 
     num_kv_pages_per_block: int  # Number of KV pages to process per block. Range from 1 to as high as possible before OOM,
-                                 # with steps of powers of two.
+    # with steps of powers of two.
     num_queries_per_block: int  # for batched_decode, this is always 1
     vmem_limit_bytes: int  # 16MiB(?) to 64MiB, increments of 8MiB.
     # Select lowest value that gives the highest performance
@@ -48,7 +63,8 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=128,
         actual_lkv_dim=512,
         actual_r_dim=64,
-    ): TunableParams(
+    ):
+    TunableParams(
         decode_batch_size=8,
         num_kv_pages_per_block=3,
         num_queries_per_block=1,
@@ -60,7 +76,8 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=128,
         actual_lkv_dim=512,
         actual_r_dim=64,
-    ): TunableParams(
+    ):
+    TunableParams(
         decode_batch_size=8,
         num_kv_pages_per_block=3,
         num_queries_per_block=1,
@@ -72,7 +89,8 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=128,
         actual_lkv_dim=512,
         actual_r_dim=64,
-    ): TunableParams(
+    ):
+    TunableParams(
         decode_batch_size=8,
         num_kv_pages_per_block=3,
         num_queries_per_block=1,
@@ -84,7 +102,8 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=128,
         actual_lkv_dim=512,
         actual_r_dim=64,
-    ): TunableParams(
+    ):
+    TunableParams(
         decode_batch_size=8,
         num_kv_pages_per_block=3,
         num_queries_per_block=1,
@@ -96,7 +115,8 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=128,
         actual_lkv_dim=512,
         actual_r_dim=64,
-    ): TunableParams(
+    ):
+    TunableParams(
         decode_batch_size=4,
         num_kv_pages_per_block=3,
         num_queries_per_block=1,
@@ -108,7 +128,8 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=128,
         actual_lkv_dim=512,
         actual_r_dim=64,
-    ): TunableParams(
+    ):
+    TunableParams(
         decode_batch_size=8,
         num_kv_pages_per_block=3,
         num_queries_per_block=1,
@@ -120,7 +141,8 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=128,
         actual_lkv_dim=512,
         actual_r_dim=64,
-    ): TunableParams(
+    ):
+    TunableParams(
         decode_batch_size=8,
         num_kv_pages_per_block=3,
         num_queries_per_block=1,
@@ -132,7 +154,8 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=128,
         actual_lkv_dim=512,
         actual_r_dim=64,
-    ): TunableParams(
+    ):
+    TunableParams(
         decode_batch_size=8,
         num_kv_pages_per_block=3,
         num_queries_per_block=1,
@@ -144,7 +167,8 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=128,
         actual_lkv_dim=512,
         actual_r_dim=64,
-    ): TunableParams(
+    ):
+    TunableParams(
         decode_batch_size=8,
         num_kv_pages_per_block=3,
         num_queries_per_block=1,
@@ -152,11 +176,14 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
     ),
 }
 
+
 def get_tuned_params(tuning_key: TuningKey) -> TunableParams:
     if tuning_key in tuned_params_mapping:
         return tuned_params_mapping[tuning_key]
     else:
-        logger.warning(f"No tuned parameters found for the given tuning key: {tuning_key}, using default parameters")
+        logger.warning(
+            f"No tuned parameters found for the given tuning key: {tuning_key}, using default parameters"
+        )
         return TunableParams(
             decode_batch_size=4,
             num_kv_pages_per_block=3,
