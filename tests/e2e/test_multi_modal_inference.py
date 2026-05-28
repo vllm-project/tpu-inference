@@ -8,7 +8,6 @@ import difflib
 import os
 from dataclasses import asdict
 
-import jax
 import pytest
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -63,7 +62,13 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes,
 
     # --- Configuration ---
     model = model_name
-    num_chips = len(jax.devices())
+
+    # Count visible TPU accelerators via filesystem devices instead of JAX.
+    # This prevents the master process from locking the TPU backend (/dev/vfio/0)
+    # and blocking the spawned vLLM worker child processes.
+    import glob
+    accel_devices = glob.glob("/dev/accel*")
+    num_chips = len(accel_devices) if accel_devices else 1
 
     # Hardware topology checking to prevent Out Of Memory (OOM) on smaller single-host slices
     if "30B" in model:
