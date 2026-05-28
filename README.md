@@ -9,6 +9,21 @@
 | <a href="https://docs.vllm.ai/projects/tpu/en/latest/"><b>Documentation</b></a> | <a href="https://blog.vllm.ai/"><b>Blog</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a>  (#sig-tpu) |
 </p>
 
+<p align="center">
+  <!-- Row 1: Status and Publishing -->
+  <a href="https://github.com/vllm-project/tpu-inference/actions"><img src="https://badgen.net/github/checks/vllm-project/tpu-inference/main?label=CI" alt="CI Build Status"></a>
+  <a href="https://pypi.org/project/tpu-inference/"><img src="https://badgen.net/pypi/v/tpu-inference?color=3488b1" alt="PyPI Version"></a>
+  <a href="https://pypi.org/project/tpu-inference/"><img src="https://badgen.net/badge/downloads/12k%2Fmonth/3488b1" alt="PyPI Downloads"></a>
+  <a href="https://github.com/vllm-project/tpu-inference/blob/main/LICENSE"><img src="https://badgen.net/badge/license/Apache%202.0/3488b1" alt="License"></a>
+</p>
+
+<p align="center">
+  <!-- Row 2: Community and Activity -->
+  <a href="https://github.com/vllm-project/tpu-inference/stargazers"><img src="https://badgen.net/github/stars/vllm-project/tpu-inference?color=yellow&icon=github" alt="GitHub Stars"></a>
+  <a href="https://github.com/vllm-project/tpu-inference/commits/main"><img src="https://badgen.net/github/last-commit/vllm-project/tpu-inference/main?color=blue&icon=github" alt="Last Commit"></a>
+  <a href="https://github.com/vllm-project/tpu-inference/graphs/contributors"><img src="https://badgen.net/github/contributors/vllm-project/tpu-inference?color=orange&icon=github" alt="Contributors"></a>
+</p>
+
 ---
 
 <p>
@@ -17,7 +32,7 @@
 </p>
 
 <!-- START: issue_badges -->
-[![bug](https://img.shields.io/badge/bug-12-d73a4a?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22bug%22) [![good first issue](https://img.shields.io/badge/good%20first%20issue-8-7057ff?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good%20first%20issue%22) [![enhancement](https://img.shields.io/badge/enhancement-7-a2eeef?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22enhancement%22) [![contribution-welcome](https://img.shields.io/badge/contribution--welcome-5-ededed?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22contribution-welcome%22) [![auto-generated](https://img.shields.io/badge/auto--generated-5-ededed?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22auto-generated%22) [![View All Issues](https://img.shields.io/badge/View%20All%20Issues-184-238636?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues)
+[![bug](https://badgen.net/github/label-issues/vllm-project/tpu-inference/bug/open?color=d73a4a&icon=github)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22bug%22) [![good first issue](https://badgen.net/github/label-issues/vllm-project/tpu-inference/good%20first%20issue/open?color=7057ff&icon=github)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) [![help wanted](https://badgen.net/github/label-issues/vllm-project/tpu-inference/help%20wanted/open?color=008672&icon=github)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22) [![enhancement](https://badgen.net/github/label-issues/vllm-project/tpu-inference/enhancement/open?color=a2eeef&icon=github)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22enhancement%22) [![issues & prs](https://badgen.net/github/open-issues/vllm-project/tpu-inference?color=238636&icon=github&label=issues%20%26%20prs)](https://github.com/vllm-project/tpu-inference/issues)
 <!-- END: issue_badges -->
 
 ## Latest News
@@ -76,7 +91,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-05-20 11:09 PM UTC*
+*Last Updated: 2026-05-28 08:16 PM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -515,7 +530,6 @@ Below is the live status of our supported models, features, and kernels. Click o
 <!-- START: nightly_model_support -->
 | Model | Type | Unit&nbsp;Test | Correctness&nbsp;Test | Performance&nbsp;Test |
 | --- | --- | --- | --- | --- |
-| [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | Multimodal | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [google/gemma-3-27b-it](https://huggingface.co/google/gemma-3-27b-it) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [meta-llama/Llama-3.3-70B-Instruct](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
@@ -524,13 +538,15 @@ Below is the live status of our supported models, features, and kernels. Click o
 | [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [Qwen/Qwen3-Coder-480B-A35B-Instruct](https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [Qwen/Qwen3.5-397B-A17B](https://huggingface.co/Qwen/Qwen3.5-397B-A17B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
+| [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | Multimodal | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> |
 | [Qwen/Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) | Embedding | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> |
 | [deepseek-ai/DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> |
 | [openai/gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> |
 | [google/gemma-4-31B-it](https://huggingface.co/google/gemma-4-31B-it) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
 | [google/gemma-4-E2B-it](https://huggingface.co/google/gemma-4-E2B-it) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
+| [google/gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
+| [moonshotai/Kimi-K2.6](https://huggingface.co/moonshotai/Kimi-K2.6) | Text | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it) | Multimodal | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
-| [moonshotai/Kimi-K2.6](https://huggingface.co/moonshotai/Kimi-K2.6) | Text | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [deepseek-ai/DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [Qwen/Qwen3-Omni-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
@@ -639,12 +655,6 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
-      <td>runai_model_streamer_loader</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-    </tr>
-    <tr>
       <td>hybrid kv cache</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -652,6 +662,12 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>multi-host</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>runai_model_streamer_loader</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -912,7 +928,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 ## 🤝 Contribute
 
 <!-- START: issue_badges -->
-[![bug](https://img.shields.io/badge/bug-12-d73a4a?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22bug%22) [![good first issue](https://img.shields.io/badge/good%20first%20issue-8-7057ff?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good%20first%20issue%22) [![enhancement](https://img.shields.io/badge/enhancement-7-a2eeef?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22enhancement%22) [![contribution-welcome](https://img.shields.io/badge/contribution--welcome-5-ededed?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22contribution-welcome%22) [![auto-generated](https://img.shields.io/badge/auto--generated-5-ededed?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22auto-generated%22) [![View All Issues](https://img.shields.io/badge/View%20All%20Issues-184-238636?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues)
+[![bug](https://badgen.net/github/label-issues/vllm-project/tpu-inference/bug/open?color=d73a4a&icon=github)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22bug%22) [![good first issue](https://badgen.net/github/label-issues/vllm-project/tpu-inference/good%20first%20issue/open?color=7057ff&icon=github)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) [![help wanted](https://badgen.net/github/label-issues/vllm-project/tpu-inference/help%20wanted/open?color=008672&icon=github)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22) [![enhancement](https://badgen.net/github/label-issues/vllm-project/tpu-inference/enhancement/open?color=a2eeef&icon=github)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22enhancement%22) [![issues & prs](https://badgen.net/github/open-issues/vllm-project/tpu-inference?color=238636&icon=github&label=issues%20%26%20prs)](https://github.com/vllm-project/tpu-inference/issues)
 <!-- END: issue_badges -->
 
 We're thrilled you're interested in contributing to the vLLM TPU project! Your help is essential for making our tools better for everyone. There are many ways to get involved, even if you're not ready to write code.
