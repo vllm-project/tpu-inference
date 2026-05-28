@@ -56,6 +56,8 @@ from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
+from tpu_inference.models.vllm.experimental.qwen3_omni_patcher import \
+    maybe_apply_qwen3_omni_patches
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
     maybe_apply_qwen3_vl_patches
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
@@ -263,9 +265,6 @@ class VllmModelWrapper:
 
         # NOTE: Apply Qwen3-VL model specific patches
         maybe_apply_qwen3_vl_patches(self.model.vllm_model)
-
-        from tpu_inference.models.vllm.experimental.qwen3_omni_patcher import \
-            maybe_apply_qwen3_omni_patches
         maybe_apply_qwen3_omni_patches(self.model.vllm_model)
 
         loading_end = time.time()
@@ -470,10 +469,6 @@ class VllmModelWrapper:
 
                 kwargs = maybe_prepare_for_jit(kwargs, self.model.vllm_model)
 
-                # Extract audio_feature_lengths from the top-level kwargs so it is not moved to JAX
-                # audio_feature_lengths = kwargs.pop("audio_feature_lengths",
-                #                                    None)
-
                 def move(v: torch.Tensor) -> torch.Tensor:
                     if not isinstance(v, torch.Tensor):
                         logger.warning(f"Expect torch.Tensor, got {type(v)}")
@@ -486,11 +481,6 @@ class VllmModelWrapper:
                     k: jax.tree.map(move, v)
                     for k, v in kwargs.items()
                 }
-
-                # Pass audio_feature_lengths as a top-level static argument
-                # if audio_feature_lengths is not None:
-                #     call_kwargs[
-                #         "audio_feature_lengths"] = audio_feature_lengths
 
                 return maybe_jit_embed_multimodal_func(
                     embed_multimodal_func_jax,
