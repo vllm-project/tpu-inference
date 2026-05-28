@@ -40,15 +40,17 @@
 /tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
 /tpu_inference/runner/tpu_runner.py @jrplatin @kyuyeunk @wenxindongwork @sixiang-google
 /tpu_inference/runner/persistent_batch_manager.py @jrplatin @wenxindongwork
-/tpu_inference/runner/speculative_decoding_manager.py @Lumosis @gxd3
 /tpu_inference/executors/ @sixiang-google @mrjunwan-lang
 /tpu_inference/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
+/tpu_inference/layers/common/sharding.py @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
 
 # Worker Management
 /tpu_inference/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
 
 # Speculative Decoding
 /tpu_inference/spec_decode/ @Lumosis @gxd3
+/tpu_inference/layers/jax/sample/rejection_sampler.py @Lumosis @gxd3
+/tpu_inference/runner/speculative_decoding_manager.py @Lumosis @gxd3
 
 # Platform Support
 /tpu_inference/platforms/ @sixiang-google @mrjunwan-lang
@@ -81,6 +83,7 @@
 /tests/platforms/ @sixiang-google @mrjunwan-lang
 /tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang
 /tests/spec_decode/ @Lumosis @gxd3
+/tests/layers/jax/sample/test_rejection_sampler.py @Lumosis @gxd3
 /tests/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
 /tests/e2e/ @pv97 @wenxindongwork @jrplatin @Lumosis @gxd3
 /tests/offload/ @juncgu-google @richardsliu
