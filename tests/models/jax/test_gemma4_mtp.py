@@ -42,6 +42,7 @@ class DummyTextConfig:
             "full_attention"
         ]
         self.rope_theta = 10000.0
+        self.rope_local_base_freq = 10000.0
         self.rope_scaling = None
         self.head_dim = 256
         self.global_head_dim = 512

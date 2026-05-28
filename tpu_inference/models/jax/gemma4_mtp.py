@@ -176,7 +176,7 @@ class Gemma4MTPAttention(JaxModule):
             self.rope_proportion = rope_parameters.get("partial_rotary_factor",
                                                        1.0)
         else:
-            self.rope_theta = (config.rope_local_base_freq
+            self.rope_theta = (getattr(config, "rope_local_base_freq", 10000.0)
                                if self.is_sliding else config.rope_theta)
             self.rope_scaling = getattr(config, "rope_scaling", None)
             self.rope_proportion = 0.25 if not self.is_sliding else 1.0
@@ -345,6 +345,7 @@ class Gemma4MTPDecoderLayer(JaxModule):
             dtype=dtype,
             rng=rng,
             quant_config=quant_config,
+            intermediate_size=config.intermediate_size,
             prefix=prefix + ".mlp",
         )
         self.post_feedforward_layernorm = JaxRmsNorm(
