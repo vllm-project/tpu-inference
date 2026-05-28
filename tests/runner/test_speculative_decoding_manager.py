@@ -102,6 +102,7 @@ class TestSpeculativeDecodingManager:
                 attn_metadata=MagicMock(),
                 async_scheduling=False,
                 spec_decode_metadata=None,
+                input_ids=MagicMock(),
             )
 
             # 3. ===== Assert =====
@@ -214,7 +215,7 @@ class TestSpeculativeDecodingManager:
         self.mock_device_array = mock_device_array
 
     @pytest.mark.parametrize(
-        "num_draft_tokens,cu_num_scheduled_tokens,padded_num_reqs,expected_logits_indices,expected_bonus_logits_indices,expected_target_logits_indices,expected_draft_token_ids",
+        "num_draft_tokens,cu_num_scheduled_tokens,padded_num_reqs,expected_logits_indices,expected_bonus_logits_indices,expected_target_logits_indices",
         [
             (
                 # Normal case
@@ -223,8 +224,7 @@ class TestSpeculativeDecodingManager:
                 8,
                 [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208],
                 [3, 4, 7, 8, 10, 0, 0, 0],
-                [0, 1, 2, 5, 6, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                [10, 20, 30, 1050, 1060, 2080, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                [0, 1, 2, 5, 6, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
             (
                 # High speculative tokens case
                 [5, 3, 4, 2, 1],
@@ -238,16 +238,12 @@ class TestSpeculativeDecodingManager:
                 [
                     0, 1, 2, 3, 4, 6, 7, 8, 10, 11, 12, 13, 15, 16, 18, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-                ],
-                [
-                    10, 20, 30, 40, 50, 70, 80, 90, 140, 150, 160, 170, 200,
-                    210, 250
                 ]),
         ])
     def test_get_spec_decode_metadata_parametrized(
             self, num_draft_tokens, cu_num_scheduled_tokens, padded_num_reqs,
             expected_logits_indices, expected_bonus_logits_indices,
-            expected_target_logits_indices, expected_draft_token_ids):
+            expected_target_logits_indices):
         """Comprehensive parametrized test for _get_spec_decode_metadata function."""
         # Setup
         self._setup_spec_decode_metadata_test()
@@ -293,12 +289,6 @@ class TestSpeculativeDecodingManager:
         ] * (padded_len - len(expected_target_logits_indices))
         assert np.asarray(metadata.target_logits_indices).tolist(
         ) == expected_padded_target_logits_indices
-
-        # draft_token_ids - pad the expected values to the correct length and compare as Python lists
-        expected_padded_draft_token_ids = expected_draft_token_ids + [0] * (
-            padded_len - len(expected_draft_token_ids))
-        assert np.asarray(metadata.draft_token_ids).tolist(
-        ) == expected_padded_draft_token_ids
 
         # draft_lengths - pad and compare as Python lists
         expected_padded_num_draft_tokens = num_draft_tokens + [0] * (

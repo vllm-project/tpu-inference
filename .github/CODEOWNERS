@@ -7,7 +7,7 @@
 # Analysis includes full history from tpu_commons and tpu_inference paths.
 
 # Default owners for everything in the repo (fallback)
-* @vipannalla @kyuyeunk
+* @vipannalla @kyuyeunk @QiliangCui
 
 # CI/CD and Build Configuration
 /.buildkite/ @jcyang43 @QiliangCui @yiw-wang @CienetStingLin
@@ -22,7 +22,8 @@
 /tpu_inference/distributed/ @mrjunwan-lang @sixiang-google
 
 # Kernel Implementations (Performance-critical)
-/tpu_inference/kernels/ @kyuyeunk @bythew3i @a1yssan13 
+/tpu_inference/kernels/ @kyuyeunk @bythew3i @a1yssan13
+/tpu_inference/kernels/mla/ @m-liu @gxd3 @gpolovets1 @kyuyeunk
 
 # Model layers
 /tpu_inference/layers/ @kyuyeunk @lk-chen
@@ -81,6 +82,6 @@
 /tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang
 /tests/spec_decode/ @Lumosis @gxd3
 /tests/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
-/tests/e2e/ @pv97 @wenxindongwork @jrplatin
+/tests/e2e/ @pv97 @wenxindongwork @jrplatin @Lumosis @gxd3
 /tests/offload/ @juncgu-google @richardsliu
 /tests/scripts/ @jrplatin @QiliangCui

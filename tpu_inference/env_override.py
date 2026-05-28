@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the tpu-inference project
 
 import os
+import sys
+import types
 
 # Disable CUDA-specific shared experts stream for TPU
 # This prevents errors when trying to create CUDA streams on TPU hardware
@@ -29,3 +31,8 @@ try:
         vllm.RequestOutputKind = RequestOutputKind
 except ImportError:
     pass
+
+# Bypass cutlass installation requirement. It is unconditionally imported by
+# upstream vLLM (e.g. DeepSeek V4 ops), but only actually invoked on NVIDIA GPUs.
+if "cutlass" not in sys.modules:
+    sys.modules["cutlass"] = types.ModuleType("cutlass")

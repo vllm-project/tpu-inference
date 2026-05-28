@@ -324,7 +324,10 @@ def main():
     }
 
     print(
-        yaml.dump(grouped_pipeline, sort_keys=False, default_flow_style=False))
+        yaml.dump(grouped_pipeline,
+                  sort_keys=False,
+                  default_flow_style=False,
+                  width=float('inf')))
 
 
 if __name__ == "__main__":
