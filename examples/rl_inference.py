@@ -26,7 +26,6 @@ def create_parser():
     sampling_group.add_argument("--top-p", type=float)
     sampling_group.add_argument("--top-k", type=int)
     sampling_group.add_argument("--log-probs", type=int)
-    sampling_group.add_argument("--prompt-logprobs", type=int)
 
     return parser
 
@@ -38,12 +37,9 @@ def main(args: dict):
     top_p = args.pop("top_p")
     top_k = args.pop("top_k")
     log_probs = args.pop("log_probs")
-    prompt_logprobs = args.pop("prompt_logprobs")
 
     # Create an LLM
-    if args.get("enable_return_routed_experts") is None:
-        args["enable_return_routed_experts"] = False
-
+    args["enable_return_routed_experts"] = True
     llm = LLM(**args)
 
     # Create a sampling params object
@@ -58,8 +54,6 @@ def main(args: dict):
         sampling_params.top_k = top_k
     if log_probs is not None:
         sampling_params.logprobs = log_probs
-    if prompt_logprobs is not None:
-        sampling_params.prompt_logprobs = prompt_logprobs
 
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
@@ -151,19 +145,6 @@ def main(args: dict):
 
             if completion.logprobs is not None:
                 print(f"Logprobs for first token: {completion.logprobs[0]}")
-
-        prompt_logprobs = output.prompt_logprobs
-        if prompt_logprobs is not None:
-            print("Prompt logprobs (top-k per position):")
-            for pos, lp_dict in enumerate(prompt_logprobs):
-                if lp_dict is None:
-                    print(f"  [{pos}] <no logprob for first token>")
-                    continue
-                ranked = sorted(lp_dict.items(), key=lambda kv: kv[1].rank)
-                entries = ", ".join(
-                    f"{lp.decoded_token!r}({tok_id}): {lp.logprob:.4f}"
-                    for tok_id, lp in ranked)
-                print(f"  [{pos}] {entries}")
 
         print("-" * 50)
 

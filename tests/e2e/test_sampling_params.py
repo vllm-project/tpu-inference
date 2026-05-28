@@ -296,6 +296,65 @@ class TestLogprobs:
                 )
 
 
+class TestPromptLogprobs:
+    """Tests for prompt_logprobs parameter."""
+
+    def test_prompt_logprobs_returns_probabilities(self, llm: LLM):
+        """prompt_logprobs parameter should return log probabilities for prompt tokens."""
+        prompt = "Hello, my name is"
+        sampling_params = SamplingParams(temperature=0,
+                                         max_tokens=5,
+                                         prompt_logprobs=5)
+
+        outputs = llm.generate([prompt], sampling_params)
+        output = outputs[0]
+
+        # Check that prompt_logprobs are returned
+        assert output.prompt_logprobs is not None, "prompt_logprobs should be returned"
+        assert len(output.prompt_logprobs
+                   ) > 0, "prompt_logprobs should contain entries"
+
+        # The first token does not have prompt logprobs (by definition)
+        assert output.prompt_logprobs[0] is None
+
+        # Each subsequent prompt token should have logprob information
+        for token_logprobs in output.prompt_logprobs[1:]:
+            assert token_logprobs is not None
+            # Should have up to 5 top logprobs + 1 ground-truth logprob if not in top k
+            assert len(token_logprobs) <= 6
+
+    def test_prompt_logprobs_none_returns_no_probabilities(self, llm: LLM):
+        """When prompt_logprobs=None, no prompt log probabilities should be returned."""
+        prompt = "Hello, my name is"
+        sampling_params = SamplingParams(temperature=0,
+                                         max_tokens=5,
+                                         prompt_logprobs=None)
+
+        outputs = llm.generate([prompt], sampling_params)
+        output = outputs[0]
+
+        # prompt_logprobs should be None when not requested
+        assert output.prompt_logprobs is None, "prompt_logprobs should be None when not requested"
+
+    def test_prompt_logprobs_values_are_valid(self, llm: LLM):
+        """Prompt log probabilities should be valid (negative or zero)."""
+        prompt = "Hello, my name is"
+        sampling_params = SamplingParams(temperature=0,
+                                         max_tokens=3,
+                                         prompt_logprobs=3)
+
+        outputs = llm.generate([prompt], sampling_params)
+        output = outputs[0]
+
+        assert output.prompt_logprobs is not None
+        for token_logprobs in output.prompt_logprobs[1:]:
+            for token_id, logprob_obj in token_logprobs.items():
+                # Log probabilities should be <= 0
+                assert logprob_obj.logprob <= 0, (
+                    f"Prompt log probability should be <= 0, got {logprob_obj.logprob}"
+                )
+
+
 class TestCombinedParameters:
     """Tests for combinations of sampling parameters."""
 
