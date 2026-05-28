@@ -41,7 +41,9 @@ def main(args: dict):
     prompt_logprobs = args.pop("prompt_logprobs")
 
     # Create an LLM
-    args["enable_return_routed_experts"] = True
+    if args.get("enable_return_routed_experts") is None:
+        args["enable_return_routed_experts"] = False
+
     llm = LLM(**args)
 
     # Create a sampling params object
@@ -150,16 +152,19 @@ def main(args: dict):
             if completion.logprobs is not None:
                 print(f"Logprobs for first token: {completion.logprobs[0]}")
 
-        if hasattr(output, 'prompt_logprobs'
-                   ) and output.prompt_logprobs is not None:
-            print(f"Prompt logprobs (first 5 tokens):")
-            # prompt_logprobs is a LogprobsTensors in vLLM V1
-            ids = output.prompt_logprobs.logprob_token_ids
-            probs = output.prompt_logprobs.logprobs
-            for i in range(min(5, ids.shape[0])):
-                print(
-                    f"  Token {i}: ids={ids[i].tolist()}, logprobs={probs[i].tolist()}"
-                )
+        prompt_logprobs = output.prompt_logprobs
+        if prompt_logprobs is not None:
+            print("Prompt logprobs (top-k per position):")
+            for pos, lp_dict in enumerate(prompt_logprobs):
+                if lp_dict is None:
+                    print(f"  [{pos}] <no logprob for first token>")
+                    continue
+                ranked = sorted(lp_dict.items(),
+                                key=lambda kv: kv[1].rank)
+                entries = ", ".join(
+                    f"{lp.decoded_token!r}({tok_id}): {lp.logprob:.4f}"
+                    for tok_id, lp in ranked)
+                print(f"  [{pos}] {entries}")
 
         print("-" * 50)
 
