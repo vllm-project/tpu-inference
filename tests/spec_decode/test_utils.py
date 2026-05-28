@@ -45,7 +45,6 @@ def _build_inputs(seqs, num_speculative_tokens):
     num_draft_cpu = np.asarray(num_draft, dtype=np.int32)
 
     metadata = SpecDecodeMetadata(
-        draft_token_ids=jnp.zeros(int(num_draft_cpu.sum()), dtype=jnp.int32),
         draft_lengths=jnp.asarray(num_draft_cpu),
         target_logits_indices=jnp.zeros(int(num_draft_cpu.sum()),
                                         dtype=jnp.int32),

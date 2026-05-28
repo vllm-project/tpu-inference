@@ -80,6 +80,7 @@ class SpeculativeDecodingManager:
                 self.runner.input_batch.num_tokens_no_spec,
                 self.runner.input_batch.token_ids_cpu)
         elif self.runner.speculative_config.use_eagle():
+            assert input_ids is not None
             self._draft_token_ids = self.propose_eagle3_draft_token_ids(
                 spec_decode_metadata,
                 last_sampled_token_id,
@@ -222,10 +223,7 @@ class SpeculativeDecodingManager:
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
-        # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
-        draft_token_ids = input_ids[logits_indices]
-        draft_token_ids = draft_token_ids[target_logits_indices + 1]
         padded_logits_length = runner_utils.get_padded_token_len(
             self.runner.num_logits_paddings, logits_indices.shape[0])
         padded_logits_indices = np.concatenate([
@@ -248,11 +246,6 @@ class SpeculativeDecodingManager:
             np.zeros(padded_num_reqs - num_draft_tokens.shape[0],
                      dtype=np.int32)
         ])
-        padded_draft_token_ids = np.concatenate([
-            draft_token_ids,
-            np.zeros(padded_logits_length - draft_token_ids.shape[0],
-                     dtype=np.int32)
-        ])
         padded_target_logits_indices = np.concatenate([
             target_logits_indices,
             np.zeros(padded_logits_length - target_logits_indices.shape[0],
@@ -261,16 +254,14 @@ class SpeculativeDecodingManager:
 
         padded_num_draft_tokens_cpu = padded_num_draft_tokens
         # CPU -> TPU copy.
-        (padded_num_draft_tokens, padded_draft_token_ids,
-         padded_logits_indices, padded_target_logits_indices,
+        (padded_num_draft_tokens, padded_logits_indices,
+         padded_target_logits_indices,
          padded_bonus_logits_indices) = device_array(
              self.runner.mesh,
-             (padded_num_draft_tokens, padded_draft_token_ids,
-              padded_logits_indices, padded_target_logits_indices,
-              padded_bonus_logits_indices))
+             (padded_num_draft_tokens, padded_logits_indices,
+              padded_target_logits_indices, padded_bonus_logits_indices))
 
         metadata = SpecDecodeMetadata(
-            draft_token_ids=padded_draft_token_ids,
             draft_lengths=padded_num_draft_tokens,
             target_logits_indices=padded_target_logits_indices,
             bonus_logits_indices=padded_bonus_logits_indices,
