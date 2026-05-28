@@ -153,9 +153,9 @@ process_models() {
                         else result="Text"
                         fi
                     elif [ "$stage" == "Machine Type" ]; then
-                        if [ "$tpu_version" == "v6" ]; then
+                        if [ "$tpu_version" == "v6e" ]; then
                             result="v6e"
-                        elif [ "$tpu_version" == "v7" ]; then
+                        elif [ "$tpu_version" == "tpu7x" ]; then
                             result="v7x"
                         else
                             result="unknown"
@@ -165,13 +165,11 @@ process_models() {
                     else
                         local hw_label=""
                         case "$prefix" in
-                            "v6") hw_label="v6e_" ;;
-                            "v7") hw_label="tpu7x_" ;;
+                            "v6") hw_label="v6e" ;;
+                            "v7") hw_label="tpu7x" ;;
                         esac
-                        local meta_key="${hw_label}${framework}:${model}:${stage}"
-                        echo "[DEBUG] Looking up meta-data key: ${meta_key}"
+                        local meta_key="${hw_label}_${framework}:${model}:${stage}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
-                        echo "[DEBUG] Result found: ${result}"
                     fi
                     
                     row="$row,$result"
