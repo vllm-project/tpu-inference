@@ -165,7 +165,7 @@ process_models() {
                     else
                         local hw_label=""
                         case "$prefix" in
-                            "v6") hw_label="v6e" ;;
+                            "v6") hw_label="tpu6e" ;;
                             "v7") hw_label="tpu7x" ;;
                         esac
                         local meta_key="${hw_label}_${framework}:${model}:${stage}"
