@@ -300,8 +300,8 @@ class InputBatch:
             if sampling_params.logprobs is not None:
                 self.num_logprobs[req_id] = sampling_params.logprobs
             if sampling_params.prompt_logprobs is not None:
-                num_k = (self.vocab_size if sampling_params.prompt_logprobs == -1
-                         else sampling_params.prompt_logprobs)
+                num_k = (self.vocab_size if sampling_params.prompt_logprobs
+                         == -1 else sampling_params.prompt_logprobs)
                 self.num_prompt_logprobs[req_id] = num_k
                 n = len(request.prompt_token_ids) - 1
                 if n > 0:
@@ -557,7 +557,7 @@ class InputBatch:
     @property
     def max_num_logprobs(self) -> Optional[int]:
         return max(self.num_logprobs.values()) if self.num_logprobs else None
-    
+
     @property
     def max_num_prompt_logprobs(self) -> Optional[int]:
         return (max(self.num_prompt_logprobs.values())

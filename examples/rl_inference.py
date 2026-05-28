@@ -159,8 +159,7 @@ def main(args: dict):
                 if lp_dict is None:
                     print(f"  [{pos}] <no logprob for first token>")
                     continue
-                ranked = sorted(lp_dict.items(),
-                                key=lambda kv: kv[1].rank)
+                ranked = sorted(lp_dict.items(), key=lambda kv: kv[1].rank)
                 entries = ", ".join(
                     f"{lp.decoded_token!r}({tok_id}): {lp.logprob:.4f}"
                     for tok_id, lp in ranked)

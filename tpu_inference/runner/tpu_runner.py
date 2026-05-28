@@ -113,7 +113,8 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                  discard_sampled_tokens_req_indices: list[int],
                  logits_indices_selector: Optional[List[int]] = None,
                  logprobs_tensors: Optional[LogprobsTensors] = None,
-                 prompt_logprobs_async_data: Optional["PromptLogprobsAsyncData"] = None,
+                 prompt_logprobs_async_data: Optional[
+                     "PromptLogprobsAsyncData"] = None,
                  expert_indices: Optional[jax.Array] = None,
                  total_num_scheduled_tokens: int = 0,
                  spec_decode_metadata: Optional[SpecDecodeMetadata] = None,
@@ -142,7 +143,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
             # Use materialize to ensure logprobs are ready on host when we return async results
             self._model_runner_output.logprobs = _jax_logprobs_materialize(
                 self._logprobs_tensors, self.logits_indices_selector)
-            
+
         if self._prompt_logprobs_async_data is not None:
             self._model_runner_output.prompt_logprobs_dict = (
                 self._runner._get_prompt_logprobs_dict(
@@ -181,11 +182,11 @@ class PromptLogprobsReqSnap:
     """Per-request state snapshotted at step N for use in get_output()."""
     req_id: str
     req_state: CachedRequestState  # stable ref; in_progress_prompt_logprobs_cpu pre-allocated
-    req_offset: int    # absolute row index into the full-batch logprobs tensor
-    start_idx: int     # where to write in the accumulator (= num_computed_tokens at step N)
-    num_logits: int    # rows to copy from the tensor into the accumulator
+    req_offset: int  # absolute row index into the full-batch logprobs tensor
+    start_idx: int  # where to write in the accumulator (= num_computed_tokens at step N)
+    num_logits: int  # rows to copy from the tensor into the accumulator
     is_last_chunk: bool
-    num_k: int         # num_prompt_logprobs for this request
+    num_k: int  # num_prompt_logprobs for this request
 
 
 @dataclass
@@ -840,8 +841,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         (scheduler_output, attn_metadata, sampling_metadata, input_ids,
          hidden_states, logits, aux_hidden_states, spec_decode_metadata,
          kv_connector_output, logits_indices_selector, padded_num_reqs,
-         expert_indices, full_hidden_states, full_logits,
-         req_ids_dp) = (
+         expert_indices, full_hidden_states, full_logits, req_ids_dp) = (
              self.execute_model_state.scheduler_output,
              self.execute_model_state.attn_metadata,
              self.execute_model_state.sampling_metadata,
@@ -1016,7 +1016,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_num_scheduled_tokens_per_dp_rank)
         else:
             mm_embeds, is_mm_embed = None, None
-        
+
         if self.is_multimodal_model and self.input_batch.num_prompt_logprobs:
             raise ValueError(
                 "prompt_logprobs is not supported for multimodal models.")
@@ -1214,7 +1214,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
             else:
                 logprobs = None
-            
+
             prompt_logprobs_async = self._compute_prompt_logprobs(
                 full_logits, input_ids, scheduler_output, req_ids_dp)
 
@@ -1373,8 +1373,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
-            prompt_logprobs_dict=(self._get_prompt_logprobs_dict(
-                prompt_logprobs_async) if prompt_logprobs_async else {}),
+            prompt_logprobs_dict=(
+                self._get_prompt_logprobs_dict(prompt_logprobs_async)
+                if prompt_logprobs_async else {}),
             pooler_output=[],
             kv_connector_output=kv_connector_output,
         )
@@ -1441,7 +1442,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
         logprobs = compute_logprobs(logits)
         return gather_logprobs(logprobs, next_tokens, max_logprobs)
-    
+
     def _compute_prompt_logprobs(
         self,
         full_logits: Optional[jax.Array],
@@ -1485,7 +1486,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     num_k = self.input_batch.num_prompt_logprobs[req_id]
                     req_state = self.requests[req_id]
                     start_idx = req_state.num_computed_tokens
-                    num_remaining = req_state.num_prompt_tokens - (start_idx + 1)
+                    num_remaining = req_state.num_prompt_tokens - (start_idx +
+                                                                   1)
                     if num_scheduled <= num_remaining:
                         num_logits = num_scheduled
                         is_last_chunk = False
@@ -1522,8 +1524,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         token_ids_np = np.asarray(
             jax.device_get(data.tensors.logprob_token_ids))
         logprobs_np = np.asarray(jax.device_get(data.tensors.logprobs))
-        ranks_np = np.asarray(
-            jax.device_get(data.tensors.selected_token_ranks))
+        ranks_np = np.asarray(jax.device_get(
+            data.tensors.selected_token_ranks))
 
         prompt_logprobs_dict: Dict[str, Any] = {}
         completed_snaps: List[PromptLogprobsReqSnap] = []
@@ -1551,7 +1553,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     prompt_logprobs_dict[snap.req_id] = LogprobsTensors(
                         logprob_token_ids=torch.from_numpy(ids_buf.copy()),
                         logprobs=torch.from_numpy(lp_buf.copy()),
-                        selected_token_ranks=torch.from_numpy(ranks_buf.copy()),
+                        selected_token_ranks=torch.from_numpy(
+                            ranks_buf.copy()),
                     )
                 completed_snaps.append(snap)
 
