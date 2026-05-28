@@ -14,7 +14,6 @@
 """TPU-Friendly MLA Ragged Paged Attention kernel."""
 
 import functools
-import logging
 import math
 from enum import Enum
 
@@ -27,8 +26,9 @@ from jax.experimental.pallas import tpu as pltpu
 import tpu_inference.envs as envs
 from tpu_inference.kernels.mla.v2 import kv_utils
 from tpu_inference.kernels.mla.v2.transpose import xpose_pipeline
+from tpu_inference.logger import init_logger
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 _XPOSE_N_TILE_SIZE = envs.MLA_XPOSE_N_TILE_SIZE
 
