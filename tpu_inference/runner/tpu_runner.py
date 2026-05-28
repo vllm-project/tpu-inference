@@ -1203,7 +1203,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                  scheduler_output) as kv_connector_output:
             generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices = continue_decode(
                 state=self.state_leaves,
-                model_fn=self.model_fn,
+                model_fn=getattr(self.model, "step_fn_no_options",
+                                 self.model_fn),
                 compute_logits_fn=self.compute_logits_fn,
                 sample_fn=sample,
                 mesh=self.mesh,
