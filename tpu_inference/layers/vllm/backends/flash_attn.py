@@ -128,8 +128,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Alibi slopes is not supported.")
         self.kv_cache_quantized_dtype = None
         if kv_cache_dtype != "auto":
-            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
-                kv_cache_dtype)
+            self.kv_cache_quantized_dtype = utils.to_jax_dtype(kv_cache_dtype)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
@@ -160,8 +159,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
         attn_metadata: AttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if output_scale is not None:
+        if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported for "
                 "PallasAttentionBackendImpl")
@@ -212,7 +212,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
         )
         vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
-        return torch_view(outputs)
+        out_torch = torch_view(outputs)
+        if output is not None:
+            output.copy_(out_torch)
+        return out_torch
 
 
 @jax.jit(

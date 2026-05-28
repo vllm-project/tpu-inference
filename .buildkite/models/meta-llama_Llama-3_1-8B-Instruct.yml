@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pipeline-name: meta-llama/Llama-3.1-8B-Instruct
-# pipeline-type: text-only
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for meta-llama/Llama-3.1-8B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_1-8B-Instruct_UnitTest"
@@ -46,7 +44,7 @@ steps:
     soft_fail: true
     env:
       TEST_MODEL: meta-llama/Llama-3.1-8B-Instruct
-      TENSOR_PARALLEL_SIZE: 1
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
       MINIMUM_ACCURACY_THRESHOLD: 0.75
     commands:
       - |
@@ -73,7 +71,7 @@ steps:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     env:
       TEST_MODEL: meta-llama/Llama-3.1-8B-Instruct
-      TENSOR_PARALLEL_SIZE: 1
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
       MINIMUM_THROUGHPUT_THRESHOLD: 10.77
       INPUT_LEN: 1800
       OUTPUT_LEN: 128

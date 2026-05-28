@@ -1,0 +1,323 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import jax.numpy as jnp
+import torch
+import torchax
+import vllm.model_executor.layers.attention.mla_attention as vllm_mla_attn
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
+from torch.nn import Parameter
+from torchax.interop import jax_view, torch_view
+from vllm.config import CacheConfig
+from vllm.model_executor.layers.attention.attention import \
+    get_attention_context
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.mla import (MLAModules,
+                                            MultiHeadLatentAttentionWrapper)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.v1.attention.backend import AttentionType
+
+from tpu_inference import utils
+from tpu_inference.layers.common.quantization import quantize_tensor
+from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.utils import general_device_put
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
+
+
+# Provides a no-op implementation for upstream MLA prefill backend.
+# This is used since upstream vllm has moved prefill backend ownership
+# to the MLAAttention __init__ method:
+# https://github.com/vllm-project/vllm/pull/41744.
+class DummyMLAPrefillBackend:
+
+    def __init__(self, **kwargs):
+        pass
+
+    def forward(self, *args, **kwargs):
+        pass
+
+
+class VllmMLAAttention(MLAAttention):
+
+    def __init__(
+        self,
+        num_heads: int,
+        scale: float,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        q_lora_rank: int | None,
+        kv_lora_rank: int,
+        kv_b_proj: ColumnParallelLinear,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        use_sparse: bool = False,
+        indexer: object | None = None,
+        **extra_impl_args,
+    ):
+        torch.nn.Module.__init__(self)
+        vllm_mla_attn.get_mla_prefill_backend = lambda config: DummyMLAPrefillBackend
+        super().__init__(
+            num_heads,
+            scale,
+            qk_nope_head_dim,
+            qk_rope_head_dim,
+            v_head_dim,
+            q_lora_rank,
+            kv_lora_rank,
+            kv_b_proj,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=prefix,
+            use_sparse=use_sparse,
+            indexer=indexer,
+            **extra_impl_args,
+        )
+
+        # For compatibility reasons.
+        self.kv_sharing_target_layer_name = None
+        self.attn_type = AttentionType.DECODER
+        self.sliding_window = None
+
+        self.kv_cache_quantized_dtype = None
+        if self.kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = utils.to_jax_dtype(
+                self.kv_cache_dtype)
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        with torchax.default_env():
+            super().process_weights_after_loading(act_dtype)
+
+            # NOTE: vLLM dequantizes kv_b_proj weights which causes more memory
+            # usage than expected.
+            # quantize W_UK_T, W_UV back to cache type and transfer
+            # `W_UK_T`, `W_UV` to TPUs
+            # Try to get the mesh from the first possible path.
+            quant_method = getattr(self.kv_b_proj, 'quant_method', None)
+            linear_config = getattr(quant_method, 'linear_config', None)
+            mesh = getattr(linear_config, 'mesh', None)
+            if mesh is None:
+                # If the first path failed, mesh will be None. Try the second path.
+                scheme = getattr(self.kv_b_proj, 'scheme', None)
+                linear_config = getattr(scheme, 'linear_config', None)
+                mesh = getattr(linear_config, 'mesh', None)
+
+            if mesh is None:
+                # If mesh is still None after trying all paths, raise an error.
+                raise ValueError(
+                    "Could not find JAX Mesh. Failed to access "
+                    "'.quant_method.linear_config.mesh' or "
+                    "'.scheme.linear_config.mesh' on the kv_b_proj layer.")
+
+            sharding = NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))
+            self.W_UK_T, self.W_UK_T_scale = quantize_tensor(
+                self.kv_cache_quantized_dtype, jax_view(self.W_UK_T), axis=1)
+            self.W_UK_T = torch_view(general_device_put(self.W_UK_T, sharding))
+            self.W_UK_T_scale = torch_view(
+                general_device_put(jnp.expand_dims(self.W_UK_T_scale, 1),
+                                   sharding))
+
+            self.W_UV, self.W_UV_scale = quantize_tensor(
+                self.kv_cache_quantized_dtype, jax_view(self.W_UV), axis=1)
+            self.W_UV = torch_view(general_device_put(self.W_UV, sharding))
+            self.W_UV_scale = torch_view(
+                general_device_put(jnp.expand_dims(self.W_UV_scale, 0),
+                                   sharding))
+
+            self.W_UK_T = Parameter(self.W_UK_T, requires_grad=False)
+            self.W_UK_T_scale = Parameter(self.W_UK_T_scale,
+                                          requires_grad=False)
+            self.W_UV = Parameter(self.W_UV, requires_grad=False)
+            self.W_UV_scale = Parameter(self.W_UV_scale, requires_grad=False)
+
+            # Delete kv_b_proj_params as the dequantized weights are now stored
+            # in self.W_UK_T and self.W_UV.
+            kv_b_proj_params = dict(self.kv_b_proj.named_parameters())
+            for key in kv_b_proj_params.keys():
+                delattr(self.kv_b_proj, key)
+
+    def forward(self,
+                q: tuple[torch.Tensor, torch.Tensor],
+                kv_c_normed: torch.Tensor,
+                k_pe: torch.Tensor,
+                output: torch.Tensor | None = None,
+                **kwargs) -> torch.Tensor:
+        if self.calculate_kv_scales:
+            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe,
+                                                self.layer_name)
+
+        # Get the KV cache
+        vllm_model_wrapper_context = get_vllm_model_wrapper_context()
+        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
+            self.layer_name]
+        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
+
+        # Get the mesh
+        mesh = vllm_model_wrapper_context.mesh
+
+        # Get the attention metadata
+        attn_metadata, _, _, _ = get_attention_context(self.layer_name)
+
+        # Run the fundamental MLA forward pass from the impl
+        outputs, new_kv_cache = self.impl.forward(q,
+                                                  kv_c_normed,
+                                                  k_pe,
+                                                  kv_cache,
+                                                  attn_metadata,
+                                                  mesh,
+                                                  self,
+                                                  output=output,
+                                                  **kwargs)
+
+        # Update KV cache
+        vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
+
+        if outputs is not output and output is not None:
+            output.copy_(outputs)
+
+        return torch_view(outputs)
+
+
+@MultiHeadLatentAttentionWrapper.register_oot
+class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        scale: float,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        q_lora_rank: int | None,
+        kv_lora_rank: int,
+        mla_modules: MLAModules,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        skip_topk: bool = False,
+    ) -> None:
+        torch.nn.Module.__init__(self)
+
+        self.hidden_size = hidden_size
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.num_heads = num_heads
+        self.fused_qkv_a_proj = mla_modules.fused_qkv_a_proj
+        self.kv_a_proj_with_mqa = mla_modules.kv_a_proj_with_mqa
+        self.q_a_layernorm = mla_modules.q_a_layernorm
+        self.q_b_proj = mla_modules.q_b_proj
+        self.q_proj = mla_modules.q_proj
+        self.kv_a_layernorm = mla_modules.kv_a_layernorm
+        self.kv_b_proj = mla_modules.kv_b_proj
+        self.rotary_emb = mla_modules.rotary_emb
+        self.o_proj = mla_modules.o_proj
+        self.indexer = mla_modules.indexer
+        self.indexer_rope_emb = mla_modules.indexer_rotary_emb
+        self.is_sparse = mla_modules.is_sparse
+        self.skip_topk = skip_topk
+
+        if self.indexer is not None and not self.skip_topk:
+            assert hasattr(self.indexer, "topk_tokens")
+            self.topk_tokens = self.indexer.topk_tokens
+            self.topk_indices_buffer = mla_modules.topk_indices_buffer
+
+        self.mla_attn = VllmMLAAttention(
+            num_heads=self.num_heads,
+            scale=scale,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.kv_lora_rank,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            kv_b_proj=self.kv_b_proj,
+            use_sparse=self.is_sparse,
+            indexer=self.indexer,
+        )
+
+        self.prefix = prefix
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        q_c = None
+        kv_lora = None
+
+        if self.q_lora_rank is not None:
+            assert self.fused_qkv_a_proj is not None, (
+                "fused_qkv_a_proj is required when q_lora_rank is not None")
+            assert self.q_a_layernorm is not None, (
+                "q_a_layernorm is required when q_lora_rank is not None")
+            assert self.q_b_proj is not None, (
+                "q_b_proj is required when q_lora_rank is not None")
+
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, kv_lora = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            q_c = self.q_a_layernorm(q_c)
+            q = self.q_b_proj(q_c)[0]
+        else:
+            assert self.kv_a_proj_with_mqa is not None, (
+                "kv_a_proj_with_mqa is required when q_lora_rank is None")
+            assert self.q_proj is not None, (
+                "q_proj is required when q_lora_rank is None")
+            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
+            q = self.q_proj(hidden_states)[0]
+
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim],
+                                   dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+
+        q = q.view(-1, self.num_heads, self.qk_head_dim)
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
+                               dim=-1)
+
+        # Add head dim of 1 to k_pe
+        k_pe = k_pe.unsqueeze(1)
+
+        if self.rotary_emb is not None:
+            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+
+        if self.indexer and self.is_sparse:
+            _topk_indices = self.indexer(hidden_states, q_c, positions,
+                                         self.indexer_rope_emb)
+
+        if llama_4_scaling is not None:
+            q_nope *= llama_4_scaling
+            q_pe *= llama_4_scaling
+
+        attn_out = self.mla_attn(
+            (q_nope, q_pe),
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0],
+                          self.num_heads * self.v_head_dim),
+        )
+
+        return self.o_proj(attn_out)[0]

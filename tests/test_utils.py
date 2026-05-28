@@ -2,14 +2,21 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
+import torch
+from jax.experimental import pallas as pl
+from jax.experimental.pallas import tpu as pltpu
+from torchax.ops.mappings import t2j as ref_t2j
 
 # Import the functions to be tested
 from tpu_inference.utils import (GBYTES, enable_megacore,
                                  get_jax_dtype_from_str_dtype, get_megacore,
                                  get_padded_head_dim, hbm_usage_bytes,
                                  hbm_usage_gb)
+from tpu_inference.utils import t2j as t2j
 
 
 def test_enable_and_get_megacore():
@@ -191,3 +198,67 @@ def test_get_jax_dtype_from_str_dtype():
     assert get_jax_dtype_from_str_dtype("fp8") == jnp.float8_e4m3fn
     assert get_jax_dtype_from_str_dtype("fp8_e4m3") == jnp.float8_e4m3fn
     assert get_jax_dtype_from_str_dtype("fp8_e5m2") == jnp.float8_e5m2
+
+
+# --- t2j tests ---
+
+
+# Special dtypes: our t2j uses a bit-cast via uint8 view instead of going
+# through float32, so we compare byte representations to the torchax reference.
+@pytest.mark.parametrize("torch_dtype,jax_dtype", [
+    (torch.bfloat16, jnp.bfloat16),
+    (torch.float8_e4m3fn, jnp.float8_e4m3fn),
+    (torch.float8_e4m3fnuz, jnp.float8_e4m3fnuz),
+    (torch.float8_e5m2, jnp.float8_e5m2),
+    (torch.float8_e5m2fnuz, jnp.float8_e5m2fnuz),
+])
+def test_t2j_numpy_unsupported_dtypes(torch_dtype, jax_dtype):
+    # Generate random values via float32, then cast to the target dtype.
+    t = torch.randn(50000, dtype=torch.float32)
+    info = torch.finfo(torch_dtype)
+    t = torch.clamp(t, min=info.min, max=info.max)
+    t = t.to(torch_dtype)
+
+    result = t2j(t)
+    reference = ref_t2j(t)
+    assert result.dtype == jax_dtype
+    np.testing.assert_array_equal(result, reference)
+
+
+def test_t2j_falls_back_on_exception(caplog):
+    """When the bit-cast path raises, t2j falls back to torchax."""
+    t = torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
+
+    with patch("tpu_inference.utils.jnp.array",
+               side_effect=RuntimeError("boom")):
+        result = t2j(t)
+
+    reference = ref_t2j(t)
+    np.testing.assert_array_equal(result, reference)
+
+
+def poison_tpu_memory():
+    """Fills TPU VMEM and SMEM with NaNs to simulate garbage state."""
+    if jax.devices()[0].platform != "tpu":
+        return
+    tpu_info = pltpu.get_tpu_info()
+    # Security: Use a large but safe portion of VMEM/SMEM to avoid OOM.
+    vmem_size = (4 * 1024 * 1024) // 4  # 4MB
+    smem_size = (tpu_info.smem_capacity_bytes // 4) - 8192
+
+    def poison_kernel(in_ref, out_ref, v_scratch, s_scratch):
+        del in_ref, out_ref
+        v_scratch[...] = jnp.full_like(v_scratch, jnp.nan)
+        for i in range(s_scratch.shape[0]):
+            s_scratch[i] = 0x7FC00000  # IEEE 754 NaN bit pattern
+
+    pl.pallas_call(
+        poison_kernel,
+        out_shape=jax.ShapeDtypeStruct((1, ), jnp.float32),
+        grid=(1, ),
+        scratch_shapes=[
+            pltpu.VMEM((vmem_size // 128, 128), jnp.float32),
+            pltpu.SMEM((smem_size, ), jnp.int32),
+        ],
+        compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
+    )(jnp.zeros((1, ), dtype=jnp.float32))

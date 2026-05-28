@@ -38,12 +38,14 @@ class MockParamLlama4:
     sharding: Tuple[str | None, ...] | None = None
     value: Any = field(init=False)
     sharding: Any = field(init=False)
+    out_sharding: Any = field(init=False)
 
     def __init__(self, shape=(32, 128)):
         self.shape = shape
         self.value = jnp.zeros(self.shape, dtype=self.dtype)
         # The sharding spec is accessed during weight loading
         self.sharding = SimpleNamespace(spec=self.sharding)
+        self.out_sharding = self.sharding
 
     # Allow the mock parameter's value to be updated
     def __setattr__(self, name, value):

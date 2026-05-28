@@ -23,8 +23,8 @@ import torchax
 from jax.sharding import Mesh
 from vllm.v1.attention.backend import AttentionType
 
-from tpu_inference.layers.vllm.mla_attention import (
-    VllmTPUMLAAttention, VllmTPUMultiHeadLatentAttentionWrapper)
+from tpu_inference.layers.vllm.custom_ops.mla_attention import (
+    VllmMLAAttention, VllmMultiHeadLatentAttentionWrapper)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 
@@ -51,7 +51,7 @@ class TestVllmTPUMLAAttention:
         mock_super_init.side_effect = side_effect
 
         kv_b_proj = MagicMock()
-        attn = VllmTPUMLAAttention(
+        attn = VllmMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -80,7 +80,7 @@ class TestVllmTPUMLAAttention:
         mock_super_init.side_effect = side_effect
 
         kv_b_proj = MagicMock()
-        attn = VllmTPUMLAAttention(
+        attn = VllmMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -106,7 +106,7 @@ class TestVllmTPUMLAAttention:
 
         # Mock a linear layer (to simulate column parallel linear)
         kv_b_proj = torch.nn.Linear(10, 10)
-        attn = VllmTPUMLAAttention(
+        attn = VllmMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -122,7 +122,8 @@ class TestVllmTPUMLAAttention:
                                             env=torchax.default_env())
         attn.W_UV = torchax.tensor.Tensor(jnp.ones((10, 10)),
                                           env=torchax.default_env())
-        attn.kv_b_proj = MagicMock()
+        attn.kv_b_proj = MagicMock(spec=torch.nn.Module)
+        attn.kv_b_proj.quant_method = MagicMock()
         attn.kv_b_proj.quant_method.linear_config.mesh = mesh
         attn.kv_b_proj.named_parameters.return_value = {}
 
@@ -140,7 +141,9 @@ class TestVllmTPUMLAAttention:
             assert isinstance(attn.W_UV, torch.nn.Parameter)
             assert not attn.W_UV.requires_grad
 
-    @patch("tpu_inference.layers.vllm.mla_attention.get_attention_context")
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.mla_attention.get_attention_context"
+    )
     @patch(
         "vllm.model_executor.layers.attention.mla_attention.MLAAttention.__init__",
         autospec=True)
@@ -151,7 +154,7 @@ class TestVllmTPUMLAAttention:
 
         mock_super_init.side_effect = side_effect
 
-        attn = VllmTPUMLAAttention(
+        attn = VllmMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -175,7 +178,7 @@ class TestVllmTPUMLAAttention:
         mock_get_attention_context.return_value = (mock_attn_metadata, None,
                                                    None, None)
 
-        q = torch.rand(1, 10)
+        q = (torch.rand(1, 5), torch.rand(1, 5))
         kv_c_normed = torch.rand(1, 10)
         k_pe = torch.rand(1, 10)
 
@@ -188,17 +191,23 @@ class TestVllmTPUMLAAttention:
             outputs = attn.forward(q, kv_c_normed, k_pe)
 
             mock_get_attention_context.assert_called_once_with("test_layer")
-            attn.impl.forward.assert_called_once_with(q, kv_c_normed, k_pe,
+            attn.impl.forward.assert_called_once_with(q,
+                                                      kv_c_normed,
+                                                      k_pe,
                                                       kv_cache,
-                                                      mock_attn_metadata, mesh,
-                                                      attn)
+                                                      mock_attn_metadata,
+                                                      mesh,
+                                                      attn,
+                                                      output=None)
 
             assert isinstance(outputs, torch.Tensor)
             context = get_vllm_model_wrapper_context()
             assert context.kv_caches[0] is mock_new_kv_cache
 
     @patch("torch.ops.vllm.maybe_calc_kv_scales", create=True)
-    @patch("tpu_inference.layers.vllm.mla_attention.get_attention_context")
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.mla_attention.get_attention_context"
+    )
     @patch(
         "vllm.model_executor.layers.attention.mla_attention.MLAAttention.__init__",
         autospec=True)
@@ -211,7 +220,7 @@ class TestVllmTPUMLAAttention:
 
         mock_super_init.side_effect = side_effect
 
-        attn = VllmTPUMLAAttention(
+        attn = VllmMLAAttention(
             num_heads=8,
             scale=1.0,
             qk_nope_head_dim=64,
@@ -230,7 +239,7 @@ class TestVllmTPUMLAAttention:
         mock_get_attention_context.return_value = (MagicMock(), None, None,
                                                    None)
 
-        q = torch.rand(1, 10)
+        q = (torch.rand(1, 5), torch.rand(1, 5))
         kv_c_normed = torch.rand(1, 10)
         k_pe = torch.rand(1, 10)
 
@@ -246,8 +255,9 @@ class TestVllmTPUMLAAttention:
 
 class TestVllmTPUMultiHeadLatentAttentionWrapper:
 
-    @patch("tpu_inference.layers.vllm.mla_attention.VllmTPUMLAAttention",
-           autospec=True)
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.mla_attention.VllmMLAAttention",
+        autospec=True)
     def test_init(self, mock_tpu_mla_attn):
         mla_modules = MagicMock()
         mla_modules.fused_qkv_a_proj = "fused_qkv_a_proj"
@@ -263,7 +273,7 @@ class TestVllmTPUMultiHeadLatentAttentionWrapper:
         mla_modules.indexer_rotary_emb = "indexer_rotary_emb"
         mla_modules.is_sparse = False
 
-        wrapper = VllmTPUMultiHeadLatentAttentionWrapper(
+        wrapper = VllmMultiHeadLatentAttentionWrapper(
             hidden_size=128,
             num_heads=8,
             scale=1.0,

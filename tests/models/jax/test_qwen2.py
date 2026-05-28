@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, set_current_vllm_config
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.distributed.jax_parallel_state import \
@@ -40,6 +40,7 @@ class MockVllmConfig:
         self.load_config.download_dir = None
         self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
         self.quant_config = None
+        self.parallel_config = None
 
 
 @pytest.fixture(scope="module")
@@ -140,7 +141,7 @@ class TestQwen2ForCausalLM:
         hidden_size = hf_config.hidden_size
         num_heads = hf_config.num_attention_heads
         num_kv_heads = hf_config.num_key_value_heads
-        rope_theta = hf_config.rope_theta
+        rope_theta = hf_config.rope_parameters["rope_theta"]
         original_head_dim = hidden_size // num_heads
         head_dim = 128
         intermediate_size = hf_config.intermediate_size
@@ -164,7 +165,7 @@ class TestQwen2ForCausalLM:
         assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
 
         # Test model load
-        with jax.set_mesh(mesh):
+        with jax.set_mesh(mesh), set_current_vllm_config(mock_vllm_config):
             loader = get_model_loader(LoadConfig(load_format="hf"))
             loader.load_weights(model, model_config)
 
@@ -181,7 +182,7 @@ class TestQwen2ForCausalLM:
             jnp.bfloat16)
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
-        kv_caches, hidden_states, aux_hidden_states = model(
+        kv_caches, hidden_states, aux_hidden_states, _ = model(
             kv_caches, input_ids, attention_metadata)
         assert hidden_states.shape == (8, hidden_size)
         assert len(aux_hidden_states) == 0

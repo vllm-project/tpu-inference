@@ -21,7 +21,7 @@ import torch
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
 from transformers import AutoModelForCausalLM
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, set_current_vllm_config
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.distributed.jax_parallel_state import \
@@ -39,13 +39,14 @@ from tpu_inference.runner.kv_cache import create_kv_caches
 class MockVllmConfig:
 
     def __init__(self, model: str, kv_cache_dtype: str):
-        self.model_config = ModelConfig(model)
+        self.model_config = ModelConfig(model=model)
         self.model_config.dtype = jnp.bfloat16
         self.load_config = MagicMock()
         self.load_config.download_dir = None
         self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
         self.quant_config = None
         self.additional_config = {}
+        self.parallel_config = None
 
 
 @pytest.fixture(scope="module")
@@ -157,7 +158,7 @@ class TestQwen3ForCausalLM:
         hidden_size = hf_config.hidden_size
         num_heads = hf_config.num_attention_heads
         num_kv_heads = hf_config.num_key_value_heads
-        rope_theta = hf_config.rope_theta
+        rope_theta = hf_config.rope_parameters["rope_theta"]
         original_head_dim = hf_config.head_dim
         head_dim = 128
         intermediate_size = hf_config.intermediate_size
@@ -181,7 +182,7 @@ class TestQwen3ForCausalLM:
         assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
 
         # Test model load
-        with jax.set_mesh(mesh):
+        with jax.set_mesh(mesh), set_current_vllm_config(mock_vllm_config):
             loader = get_model_loader(LoadConfig(load_format="hf"))
             loader.load_weights(model, model_config)
 
@@ -205,7 +206,7 @@ class TestQwen3ForCausalLM:
             jnp.bfloat16)
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
-        kv_caches, hidden_states, aux_hidden_states = model(
+        kv_caches, hidden_states, aux_hidden_states, _ = model(
             kv_caches, input_ids, attention_metadata)
         assert hidden_states.shape == (8, hidden_size)
         assert len(aux_hidden_states) == 0
@@ -227,6 +228,7 @@ class TestQwen3ForCausalLM:
         config.model_config.hf_config.num_hidden_layers = 4
         config.load_config.load_format = "skip_layers_model_loader_for_test"
         config.load_config.num_layers_to_load_for_test = 4
+        config.parallel_config = None
 
         init_pp_distributed_environment(
             ip="",
@@ -246,7 +248,7 @@ class TestQwen3ForCausalLM:
                         description=f"load_weights({model_name})",
                         threshold_multiplier=0.001,
                         min_threshold_bytes=1,
-                ):
+                ), set_current_vllm_config(config):
                     loader.load_weights(model, config.model_config)
 
     @pytest.mark.parametrize("model_name",
@@ -265,6 +267,7 @@ class TestQwen3ForCausalLM:
         mock_vllm_config.model_config.hf_config.num_hidden_layers = 4
         mock_vllm_config.load_config.load_format = load_format
         mock_vllm_config.load_config.num_layers_to_load_for_test = 4
+        mock_vllm_config.parallel_config = None
 
         init_pp_distributed_environment(
             ip="",
@@ -296,7 +299,7 @@ class TestQwen3ForCausalLM:
                     model,
                     description=f"load_weights({model_name})",
                     threshold_multiplier=0.3,
-            ):
+            ), set_current_vllm_config(mock_vllm_config):
                 loader.load_weights(model, model_config)
 
         layer_idx = model.model.start_layer
@@ -351,3 +354,42 @@ class TestQwen3ForCausalLM:
                 rtol=1e-2,
                 atol=1e-2,
             )
+
+    def test_vocab_padding_for_sharding(self, rng, mesh):
+        """Verify that embed_tokens shape is rounded up when tensor_parallel_size > 1."""
+        from tpu_inference.distributed.jax_parallel_state import \
+            init_pp_distributed_environment
+
+        init_pp_distributed_environment(
+            ip="",
+            rank=0,
+            world_size=1,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
+
+        model_name = "Qwen/Qwen3-0.6B"
+        mock_vllm_config = MockVllmConfig(model_name, "auto")
+
+        # Set tensor_parallel_size = 2
+        mock_vllm_config.parallel_config = MagicMock()
+        mock_vllm_config.parallel_config.tensor_parallel_size = 2
+
+        # Get original vocab size
+        vocab_size = mock_vllm_config.model_config.get_vocab_size()
+
+        # Initialize model
+        with jax.set_mesh(mesh):
+            model = Qwen3ForCausalLM(mock_vllm_config, rng, mesh)
+
+        # Verify embed_tokens shape
+        embed_weight = model.model.embed_tokens.weight[...]
+
+        # Expected shape: (padded_vocab_size, hidden_size)
+        tp_size = 2
+        expected_padded_vocab_size = (vocab_size + tp_size -
+                                      1) // tp_size * tp_size
+
+        assert embed_weight.shape[0] == expected_padded_vocab_size
+        if vocab_size % 2 != 0:
+            assert embed_weight.shape[0] > vocab_size

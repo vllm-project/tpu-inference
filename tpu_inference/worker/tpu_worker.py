@@ -19,7 +19,7 @@ from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
@@ -30,6 +30,7 @@ from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.offload.metrics import TPUKVCacheStatsLogger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -76,7 +77,10 @@ class PPConfig:
             chips_per_stage = math.ceil(total_cores_per_stage / cores_per_chip)
 
             if chips_per_stage > 0:
-                start_chip = self.rank * chips_per_stage
+                multihost_backend = envs.TPU_MULTIHOST_BACKEND
+                # For multi-host PP, each host is an independent JAX cluster,
+                # so chips always start from index 0 on each host.
+                start_chip = 0 if multihost_backend == "ray" else self.rank * chips_per_stage
                 self.default_tpu_visible_chips = ",".join(
                     str(i)
                     for i in range(start_chip, start_chip + chips_per_stage))
@@ -142,12 +146,11 @@ class TPUWorker(WorkerBase):
             )
             os.makedirs(self.profile_dir, exist_ok=True)
 
-        use_jax_profiler_server = os.getenv("USE_JAX_PROFILER_SERVER", False)
+        use_jax_profiler_server = envs.USE_JAX_PROFILER_SERVER
         # Only one instance of profiler is allowed
         if use_jax_profiler_server and self.rank < 1:
             if not self.devices or 0 in self.device_ranks:
-                jax_profiler_server_port = int(
-                    os.getenv("JAX_PROFILER_SERVER_PORT", 9999))
+                jax_profiler_server_port = envs.JAX_PROFILER_SERVER_PORT
                 logger.info(
                     f"Starting JAX profiler server on port {jax_profiler_server_port}"
                 )
@@ -161,31 +164,90 @@ class TPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+    def _setup_dp_chip_isolation(self) -> None:
+        """Sets libtpu env vars so the process initializes JAX on a subset of
+        physical chips. Must run before JAX initializes its TPU backend.
+        """
+        from tpu_inference import tpu_info
+
+        parallel_config = self.vllm_config.parallel_config
+        dp_rank = getattr(parallel_config, "data_parallel_index", 0) or 0
+
+        sharding_config = self.vllm_config.sharding_config
+        num_devices = sharding_config.total_devices
+
+        cores_per_chip = tpu_info.get_num_cores_per_chip()
+        chips_per_rank = math.ceil(num_devices / cores_per_chip)
+        total_chips = tpu_info.get_num_chips()
+
+        start_chip = dp_rank * chips_per_rank
+        end_chip = start_chip + chips_per_rank
+        if total_chips and end_chip > total_chips:
+            raise ValueError(
+                f"Multi-process DP rank {dp_rank} needs TPU chips "
+                f"[{start_chip}, {end_chip}) but the host only has "
+                f"{total_chips} chips. Reduce --data-parallel-size or "
+                f"--tensor-parallel-size.")
+
+        visible_chips = ",".join(str(c) for c in range(start_chip, end_chip))
+        # Unique libtpu port per rank so the runtimes can coexist on a host.
+        tpu_port = jax_parallel_state.BASE_JAX_PORT + dp_rank
+
+        os.environ["TPU_VISIBLE_CHIPS"] = visible_chips
+        os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,{chips_per_rank},1"
+        os.environ["TPU_PROCESS_BOUNDS"] = "1,1,1"
+        os.environ["TPU_PROCESS_PORT"] = str(tpu_port)
+        os.environ["TPU_PROCESS_ADDRESSES"] = f"localhost:{tpu_port}"
+        os.environ["CLOUD_TPU_TASK_ID"] = "0"
+        logger.info(
+            "Multi-process DP | rank=%d | TPU_VISIBLE_CHIPS=%s | "
+            "TPU_CHIPS_PER_PROCESS_BOUNDS=1,%d,1 | TPU_PROCESS_PORT=%d",
+            dp_rank, visible_chips, chips_per_rank, tpu_port)
+
     def init_device(self,
                     tpu_process_bounds="",
                     tpu_chips_per_process_bounds="",
                     tpu_visible_chips=""):
-        # set tpu visible devices for Jax runtime in single host PP.
-        multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "").lower()
-        if multihost_backend != "ray" and self.parallel_config.pipeline_parallel_size > 1:
-            tpu_ports = [
-                jax_parallel_state.BASE_JAX_PORT + i
-                for i in range(self.pp_config.pp_world_size)
-            ]
-            os.environ["TPU_PROCESS_ADDRESSES"] = ",".join(
-                [f"localhost:{port}" for port in tpu_ports])
-            os.environ["TPU_PROCESS_PORT"] = f"{tpu_ports[self.rank]}"
-            os.environ["CLOUD_TPU_TASK_ID"] = f"{self.rank}"
 
-            # Note: Below is the setting for v6e8 host (8 chips of v6e)
-            # Replace with your own topology.
-            # There are 2 ways of subslicing a v6e
-            # 1) 2 slices with 4 TPU chips each, we can do PP=2, TP=1/2/3/4
-            #   TPU_PROCESS_BOUNDS = "1,1,1"
-            #   TPU_CHIPS_PER_PROCESS_BOUNDS = "1,4,1"
-            #   TPU_VISIBLE_CHIPS = "0,1,2,3" or "4,5,6,7"
-            # 2) 1 chip for each subslice, with at most 8 subslices,
-            #    we can do TP=1, PP=1/2/3/4/5/6/7/8
+        if (envs.TPU_MULTIPROCESS_DP
+                and self.parallel_config.pipeline_parallel_size == 1):
+            self._setup_dp_chip_isolation()
+
+        # set tpu visible devices for Jax runtime in PP.
+        multihost_backend = envs.TPU_MULTIHOST_BACKEND
+        if self.parallel_config.pipeline_parallel_size > 1:
+            # Log environment variables for debugging
+            tpu_env_vars = [
+                "TPU_PROCESS_ADDRESSES",
+                "TPU_PROCESS_PORT",
+                "CLOUD_TPU_TASK_ID",
+                "TPU_PROCESS_BOUNDS",
+                "TPU_CHIPS_PER_PROCESS_BOUNDS",
+                "TPU_VISIBLE_CHIPS",
+            ]
+            env_dump = {v: os.environ.get(v) for v in tpu_env_vars}
+            logger.debug(
+                f"TPUWorker | Worker {self.rank} JAX/TPU environment before init_device: {env_dump}"
+            )
+            if multihost_backend == "ray":
+                # For multi-host PP on Ray, isolate each host as its own JAX cluster.
+                # This ensures TP collectives work correctly on the local chips
+                # despite non-contiguous global ID layouts.
+                port = os.environ.get("TPU_PROCESS_PORT", "8476")
+                os.environ["TPU_PROCESS_ADDRESSES"] = f"localhost:{port}"
+                os.environ["TPU_PROCESS_PORT"] = port
+                os.environ["CLOUD_TPU_TASK_ID"] = "0"
+            else:
+                # Single host PP logic
+                tpu_ports = [
+                    jax_parallel_state.BASE_JAX_PORT + i
+                    for i in range(self.pp_config.pp_world_size)
+                ]
+                os.environ["TPU_PROCESS_ADDRESSES"] = ",".join(
+                    [f"localhost:{port}" for port in tpu_ports])
+                os.environ["TPU_PROCESS_PORT"] = f"{tpu_ports[self.rank]}"
+                os.environ["CLOUD_TPU_TASK_ID"] = f"{self.rank}"
+
             os.environ[
                 "TPU_PROCESS_BOUNDS"] = tpu_process_bounds \
                     if tpu_process_bounds \
@@ -194,10 +256,20 @@ class TPUWorker(WorkerBase):
                 "TPU_CHIPS_PER_PROCESS_BOUNDS"] = tpu_chips_per_process_bounds \
                     if tpu_chips_per_process_bounds \
                         else self.pp_config.default_tpu_chips_per_process_bounds
+
+            # If TPU_VISIBLE_CHIPS is already set (e.g. by Ray), keep it.
+            # Otherwise use the default from pp_config.
+            if not tpu_visible_chips:
+                tpu_visible_chips = os.environ.get("TPU_VISIBLE_CHIPS")
             os.environ[
                 "TPU_VISIBLE_CHIPS"] = tpu_visible_chips \
                     if tpu_visible_chips \
                         else self.pp_config.default_tpu_visible_chips
+
+            env_dump = {v: os.environ.get(v) for v in tpu_env_vars}
+            logger.debug(
+                f"TPUWorker | Worker {self.rank} JAX/TPU environment after init_device: {env_dump}"
+            )
 
         if not self.devices:
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
@@ -258,8 +330,6 @@ class TPUWorker(WorkerBase):
             self.devices[0],
             need_pp=self.parallel_config.pipeline_parallel_size > 1)
 
-        ensure_kv_transfer_initialized(self.vllm_config)
-
         is_first_rank = True
         is_last_rank = True
         self.topology_order_id = self.rank
@@ -288,6 +358,23 @@ class TPUWorker(WorkerBase):
                     f"local_devices={jax.local_devices()}")
         vllm_utils.report_usage_stats(self.vllm_config)
 
+        # Initialize the background metrics logger ONLY if KV offloading is enabled
+        self.stats_logger = None
+        if self.vllm_config.kv_transfer_config is not None:
+            kv_transfer_config = self.vllm_config.kv_transfer_config
+            if (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+                    and kv_transfer_config.kv_connector_module_path
+                    == "tpu_inference.offload.tpu_offload_connector"):
+
+                # Start the background thread (logging every TPU_OFFLOAD_METRICS_LOG_INTERVAL seconds)
+                self.stats_logger = TPUKVCacheStatsLogger(
+                    log_interval=envs.TPU_OFFLOAD_METRICS_LOG_INTERVAL,
+                    model_name=self.model_config.model,
+                    device_type=self.device_config.device_type)
+                logger.info(
+                    f"TPUKVCacheStatsLogger initialized on worker rank {self.rank}."
+                )
+
     def initialize_pp_transfer_connect(self):
         if self.rank == 0:
             return
@@ -308,6 +395,30 @@ class TPUWorker(WorkerBase):
         total_hbm_limit_gb = round(total_hbm_limit / utils.GBYTES, 2)
         total_hbm_limit_cap_gb = round(total_hbm_limit_cap / utils.GBYTES, 2)
         total_hbm_used_gb = round(total_hbm_used / utils.GBYTES, 2)
+
+        if self.vllm_config.kv_transfer_config is not None:
+            kv_transfer_config = self.vllm_config.kv_transfer_config
+            if kv_transfer_config.kv_connector == "TPUOffloadConnector" and \
+               kv_transfer_config.kv_connector_module_path == "tpu_inference.offload.tpu_offload_connector":
+                # If kv offloading is enabled, we need to account for the memory used by the KV transfer buffer.
+                staging_buffer_pages = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
+
+                # TODO(jcgu): verify page_size_bytes
+                kv_cache_specs = self.get_kv_cache_spec()
+                num_layers = len(kv_cache_specs)
+                assert len(kv_cache_specs) >= 1
+                # TODO(jcgu): hybrid-kv is not supported yet.
+                _layer_name, _layer_spec = next(iter(kv_cache_specs.items()))
+                vllm_page_size_bytes = _layer_spec.page_size_bytes
+                # rpa_page_size_bytes = get_rpa_page_size_bytes(self.model_runner.mesh,
+                #                                             kv_cache_specs)
+                stage_buffer_size_bytes = staging_buffer_pages * num_layers * vllm_page_size_bytes
+
+                total_hbm_avail = total_hbm_avail - stage_buffer_size_bytes
+                logger.info(
+                    f"  ALERT: KV offloading enabled. Deducting {stage_buffer_size_bytes} Bytes ({staging_buffer_pages} pages) from available HBM for staging buffer."
+                )
+
         total_hbm_avail_gb = round(total_hbm_avail / utils.GBYTES, 2)
 
         logger.info(f"Memory statistics | "
@@ -332,7 +443,6 @@ class TPUWorker(WorkerBase):
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise for the same reasons outlined in
         # the `get_kv_cache_spec` method.
-
         if self.parallel_config.pipeline_parallel_size == 1 or self.rank == 0:
             intermediate_tensors = None
         else:
@@ -390,12 +500,15 @@ class TPUWorker(WorkerBase):
     def load_model(self) -> None:
         self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self) -> float:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         self.model_runner._init_random()
-        return self.compilation_config.compilation_time
+        return CompilationTimes(
+            language_model=self.compilation_config.compilation_time,
+            encoder=0.0,
+        )
 
     def get_model(self):
         return self.model_runner.get_model()
@@ -418,6 +531,11 @@ class TPUWorker(WorkerBase):
         # and the vLLM side should be updated to handle the translation.
         return self.model_runner.get_kv_cache_spec()
 
+    def get_kv_connector_handshake_metadata(self) -> dict | None:
+        """Get KV connector metadata from this worker if available."""
+        # NOTE: we are not using it right now.
+        return
+
     def initialize_from_config(
         self,
         kv_cache_config: KVCacheConfig,
@@ -429,6 +547,10 @@ class TPUWorker(WorkerBase):
                  and self.model_runner.model_config.enforce_eager)):
             self.model_runner.compilation_manager._precompile_sampling()
             self.model_runner.compilation_manager._precompile_gather_logprobs()
+
+        # Init kv cache connector here, because it requires `kv_cache_config`.
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+
         self.model_runner.initialize_kv_cache(kv_cache_config,
                                               self.topology_order_id)
 
@@ -456,8 +578,3 @@ class TPUWorker(WorkerBase):
 
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
-
-    # Ray executor do not need handshake metadata
-    # as we pass the kv_parameters through proxy server
-    def get_kv_connector_handshake_metadata(self) -> None:
-        pass

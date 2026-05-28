@@ -2,8 +2,9 @@
 import time
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from functools import wraps
-from typing import Any, Callable, List, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -15,13 +16,17 @@ from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
 from jax._src.numpy.scalar_types import _ScalarMeta
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from torchax.ops.mappings import j2t_dtype, t2j_dtype
+from torchax.ops.mappings import j2t_dtype
+from torchax.ops.mappings import t2j as torchax_t2j
+from torchax.ops.mappings import t2j_dtype
 from vllm import envs as vllm_envs
 from vllm import utils
 
 from tpu_inference import envs
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 GBYTES = 1024 * 1024 * 1024
 TPU_HEAD_SIZE_ALIGNMENT = 128
@@ -61,8 +66,36 @@ def to_torch_dtype(dtype: str | jnp.dtype | torch.dtype) -> torch.dtype:
     return j2t_dtype(dtype)
 
 
+_NUMPY_UNSUPPORTED_DTYPES = {
+    torch.bfloat16: jnp.bfloat16,
+    torch.float8_e4m3fn: jnp.float8_e4m3fn,
+    torch.float8_e4m3fnuz: jnp.float8_e4m3fnuz,
+    torch.float8_e5m2: jnp.float8_e5m2,
+    torch.float8_e5m2fnuz: jnp.float8_e5m2fnuz,
+}
+
+
+def t2j(t: torch.Tensor, use_dlpack=False):
+    # torchax's t2j is not efficient to handle types in
+    # _NUMPY_UNSUPPORTED_DTYPES, it need to convert to
+    # float32. For large tensor, that could be expensive.
+    # https://github.com/google/torchax/blob/main/torchax/ops/mappings.py#L55
+    # Here, we do a bit cast instead.
+    # TODO(gxd3): upstream this improvement to the torchax library.
+    try:
+        if t.dtype in _NUMPY_UNSUPPORTED_DTYPES:
+            # This bit cast require t to be continguous and more than 1 dimension.
+            if t.is_contiguous() and t.dim():
+                bytes = t.cpu().view(torch.uint8).detach().numpy()
+                return jnp.array(bytes).view(
+                    _NUMPY_UNSUPPORTED_DTYPES[t.dtype])
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning("t2j bit cast failed, falling back to torchax t2j: %s",
+                       e)
+    return torchax_t2j(t, use_dlpack=use_dlpack)
+
+
 _megacore = False
-logger = init_logger(__name__)
 
 
 def align_to(unpadded_dim, pad_multiple):
@@ -262,7 +295,10 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             if ordered_devices is not None:
                 ordered_devices = np.array(ordered_devices)
                 ordered_devices = ordered_devices.reshape(axis_shapes)
-                mesh = mesh_lib.Mesh(ordered_devices, axis_names)
+                mesh = mesh_lib.Mesh(ordered_devices,
+                                     axis_names,
+                                     axis_types=(mesh_lib.AxisType.Auto, ) *
+                                     len(axis_shapes))
                 logger.info("Use customized mesh: %s", mesh)
                 return mesh
 
@@ -280,7 +316,10 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
             "jax.make_mesh failed due to topology constraints. Falling back to manual mesh: %s",
             e)
         ordered_devices = np.array(devices).reshape(axis_shapes)
-        return mesh_lib.Mesh(ordered_devices, axis_names)
+        return mesh_lib.Mesh(ordered_devices,
+                             axis_names,
+                             axis_types=(mesh_lib.AxisType.Auto, ) *
+                             len(axis_shapes))
 
 
 def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
@@ -371,3 +410,89 @@ def time_function(func):
         return result
 
     return wrapper
+
+
+@dataclass(frozen=True)
+class DeviceBufferMetadata:
+    """Metadata for the layout of a DeviceBuffer."""
+    keys: Tuple[str, ...]
+    sizes: Tuple[int, ...]
+
+
+class DeviceBuffer:
+    """
+    A utility to pack 1D numpy arrays into a monolithic buffer.
+    Supports appending data or getting views, then tagging the accumulated
+    data with a key. The internal buffer grows dynamically as needed.
+    """
+
+    def __init__(self, initial_capacity: int = 1024):
+        self.buffer = np.zeros(initial_capacity, dtype=np.int32)
+        self._offset = 0
+        self._last_offset = 0
+        self._keys: List[str] = []
+        self._sizes: List[int] = []
+
+    def _ensure_capacity(self, size: int):
+        """Ensure the internal buffer has enough space for 'size' more elements."""
+        if self._offset + size > self.buffer.size:
+            new_capacity = max(self.buffer.size * 2,
+                               self._offset + size + 1024)
+            new_buffer = np.zeros(new_capacity, dtype=np.int32)
+            new_buffer[:self._offset] = self.buffer[:self._offset]
+            self.buffer = new_buffer
+
+    def append(self, array: np.ndarray, key: Optional[str] = None):
+        """Append data to the buffer and advance offset."""
+        size = array.size
+        self._ensure_capacity(size)
+        self.buffer[self._offset:self._offset + size] = array.ravel()
+        self._offset += size
+        if key:
+            self.set_key(key)
+
+    def get_view(self,
+                 shape: Union[int, Tuple[int, ...]],
+                 key: Optional[str] = None) -> np.ndarray:
+        """Reserve space in the buffer and return a reshaped view for direct writing."""
+        if isinstance(shape, (int, np.integer)):
+            size = int(shape)
+            shape = (size, )
+        else:
+            size = int(np.prod(shape))
+
+        self._ensure_capacity(size)
+        view = self.buffer[self._offset:self._offset + size].reshape(shape)
+        self._offset += size
+        if key:
+            self.set_key(key)
+        return view
+
+    def set_key(self, key: str):
+        """Tag all data accumulated since the last set_key() call."""
+        size = self._offset - self._last_offset
+        self._keys.append(key)
+        self._sizes.append(size)
+        self._last_offset = self._offset
+
+    def build(self) -> Tuple[np.ndarray, DeviceBufferMetadata]:
+        """Return the active portion of the buffer and its layout metadata."""
+        return self.buffer[:self._offset], DeviceBufferMetadata(
+            keys=tuple(self._keys), sizes=tuple(self._sizes))
+
+    def reset(self):
+        """Reset offsets and metadata for reuse. Keeps the allocated buffer."""
+        self._offset = 0
+        self._last_offset = 0
+        self._keys = []
+        self._sizes = []
+
+    @staticmethod
+    def unpack_arrays(blob: jax.Array,
+                      metadata: DeviceBufferMetadata) -> Dict[str, jax.Array]:
+        """
+        Unpack a 1D blob into a dictionary of arrays based on provided metadata.
+        """
+        indices = tuple(np.cumsum(metadata.sizes)[:-1])
+        parts = jnp.split(blob, indices)
+        return {key: parts[i] for i, key in enumerate(metadata.keys)}

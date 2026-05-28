@@ -10,7 +10,6 @@
 # python3 examples/tpu_profiling.py --input-len 1 --output-len 1 --batch-size=256
 
 import argparse
-import dataclasses
 import os
 import time
 
@@ -38,7 +37,7 @@ def main(args: argparse.Namespace):
     args.profiler_config = profiler_config
 
     engine_args = EngineArgs.from_cli_args(args)
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
 
     sampling_params = SamplingParams(
         temperature=0.0,

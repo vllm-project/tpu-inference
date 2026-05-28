@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest.mock import MagicMock
+
 import jax
 import pytest
 from jax import numpy as jnp
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.model_loader import get_model_loader
 
 from tpu_inference.distributed.jax_parallel_state import \
@@ -28,17 +31,20 @@ from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
 
 class TestQwen3MoeForCausalLM:
 
-    @pytest.mark.parametrize("model_name", [
-        "Qwen/Qwen3-30B-A3B-Instruct-2507",
-        "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
-    ])
-    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
-                                                       (3, 4)])
+    @pytest.mark.parametrize(
+        "model_name,pp_rank,pp_world_size,load_format",
+        [(model, rank, world, fmt) for model in [
+            "Qwen/Qwen3-30B-A3B-Instruct-2507",
+            "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+        ] for rank, world in [(0, 1), (0, 4), (1, 4), (3, 4)]
+         for fmt in ["skip_layers_model_loader_for_test", "jax_dummy"]
+         if not (world == 1 and fmt == "jax_dummy")])
     def test_model_loading(
             self,
             model_name,
             pp_rank,
             pp_world_size,
+            load_format,
             # following are defined in conftest.py
             rng,
             mesh,
@@ -49,8 +55,10 @@ class TestQwen3MoeForCausalLM:
         vllm_config = mock_vllm_config(model_name, kv_cache_type)
         # No need to load full model.
         vllm_config.model_config.hf_config.num_hidden_layers = 4
-        vllm_config.load_config.load_format = "skip_layers_model_loader_for_test"
+        vllm_config.load_config.load_format = load_format
         vllm_config.load_config.num_layers_to_load_for_test = 4
+        vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.enable_expert_parallel = False
 
         init_pp_distributed_environment(
             ip="",
@@ -82,7 +90,7 @@ class TestQwen3MoeForCausalLM:
                     model,
                     description=f"load_weights({model_name})",
                     threshold_multiplier=0.3,
-            ):
+            ), set_current_vllm_config(vllm_config):
                 loader.load_weights(model, model_config)
 
         layer_idx = model.model.start_layer
@@ -97,7 +105,7 @@ class TestQwen3MoeForCausalLM:
                                          kv_dtype)
 
         with jax.set_mesh(mesh):
-            jax_output, _ = jax_layer_0(
+            kv_cache, jax_output, _ = jax_layer_0(
                 kv_cache=jnp.zeros(cache_shape, dtype=kv_dtype),
                 x=input_tensor_jax,
                 attention_metadata=AttentionMetadata(

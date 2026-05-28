@@ -155,7 +155,7 @@ class JaxMoE(JaxModule):
     num_expert_parallelism: int
     random_init: bool = False
     moe_backend: MoEBackend = MoEBackend.DENSE_MAT
-    scoring_func = "softmax"
+    scoring_func: str = "softmax"
 
     # --- Sparse MoE Specific Attributes ---
     num_experts_per_tok: int = 1  # Required for Sparse, optional/derived for Dense
@@ -169,19 +169,39 @@ class JaxMoE(JaxModule):
     # ---- Quantization Specific Attributes ----
     quant_config: Optional[QuantizationConfig] = None
     prefix: str = ""
+    enable_return_routed_experts: bool = False
 
-    def __call__(self, x_TD: Float):
+    def __call__(
+        self,
+        x_TD: jax.Array,
+        router_logits: Optional[jax.Array] = None
+    ) -> tuple[jax.Array, Optional[jax.Array]]:
         """Performs the forward pass of the MoE layer.
 
         Args:
             x_TD: Input array of shape (sequence_length, d_model).
+            router_logits: Optional pre-computed router logits. If not provided, logits will be computed using the router.
 
         Returns:
             Output array of shape (sequence_length, d_model) after passing through MoE.
+            If `enable_return_routed_experts` is True, also returns the indices of the selected experts.
         """
-        if self.quant_method is not None:
-            return self.quant_method.apply_jax(self, x_TD)
-        raise ValueError("Expected quant_method to be set!")
+        if self.quant_method is None:
+            raise ValueError("Expected quant_method to be set!")
+        if router_logits is None:
+            router_logits = self.router(x_TD)
+        x_TD = self.quant_method.apply_jax(self,
+                                           x_TD,
+                                           router_logits=router_logits)
+        if self.enable_return_routed_experts:
+            if self.moe_backend in MoEBackend.fused_moe_backends():
+                _, selected_experts_TX = jax.lax.top_k(
+                    router_logits, self.num_experts_per_tok)
+            else:
+                _, selected_experts_TX = router_logits
+            return x_TD, selected_experts_TX
+        else:
+            return x_TD, None
 
     def __post_init__(self, rngs: nnx.Rngs):
         """Generates the kernels (weights) for the router and experts (gating, up-projection, and down-projection layers)."""
@@ -255,7 +275,10 @@ class JaxMoE(JaxModule):
             original_load_weights_fn=self._load_weights,
             weights=weights)
 
-    def _load_weights(self, weights: Iterable):
+    def _load_weights(self,
+                      weights: Iterable,
+                      *,
+                      mesh: jax.sharding.Mesh | None = None):
         """Load HF weights into the layer.
 
         self.quant_method might reuse this method if the quantization method has specific logic for loading weights.
@@ -306,7 +329,7 @@ class JaxMoE(JaxModule):
                 with cpu_mesh_context():
                     weights = jnp.concatenate(param._weights_to_load, axis=0)
                 try:
-                    param.value = shard_put(weights, param.sharding)
+                    param.value = shard_put(weights, param.sharding, mesh)
                     loaded_names.add(param_name)
                 except Exception as e:
                     raise RuntimeError(

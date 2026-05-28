@@ -23,7 +23,8 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference import envs
-from tpu_inference.layers.common.utils import general_device_put
+from tpu_inference.layers.common.utils import (general_device_put,
+                                               truncate_sharded_tensor)
 
 
 class UtilsTest(jtu.JaxTestCase):
@@ -66,8 +67,7 @@ class UtilsTest(jtu.JaxTestCase):
         tensor = jnp.ones((8, 8))
 
         with mock.patch.object(envs, 'TPU_MULTIHOST_BACKEND', 'ray'):
-            with mock.patch('jax.make_array_from_single_device_arrays'
-                            ) as mock_make_array:
+            with mock.patch('jax.make_array_from_callback') as mock_make_array:
                 mock_make_array.return_value = tensor
 
                 result = general_device_put(tensor, self.sharding)
@@ -79,7 +79,6 @@ class UtilsTest(jtu.JaxTestCase):
                 # Check that x_split contains device_put result
                 # Since we didn't mock device_put, it runs on the tensor slice.
                 # We can check the length of x_split
-                self.assertEqual(len(args[2]), self.num_devices)
                 self.assertAllClose(result, tensor)
 
     def test_general_device_put_multihost_pytree(self):
@@ -87,8 +86,7 @@ class UtilsTest(jtu.JaxTestCase):
         tree = [t1, t1]
 
         with mock.patch.object(envs, 'TPU_MULTIHOST_BACKEND', 'ray'):
-            with mock.patch('jax.make_array_from_single_device_arrays'
-                            ) as mock_make_array:
+            with mock.patch('jax.make_array_from_callback') as mock_make_array:
                 mock_make_array.return_value = t1
 
                 result = general_device_put(tree, self.sharding)
@@ -96,6 +94,20 @@ class UtilsTest(jtu.JaxTestCase):
                 self.assertEqual(mock_make_array.call_count, 2)
                 self.assertIsInstance(result, list)
                 self.assertEqual(len(result), 2)
+
+    def test_truncate_sharded_tensor(self):
+        # Shape: (2, 20), n_shards=4, so each shard has size 5 on the last dim
+        t = jnp.arange(40).reshape(2, 20)
+        n_shards = 4
+        truncate_size = 3
+
+        result = truncate_sharded_tensor(t, truncate_size, n_shards)
+
+        # Expected: reshape to (2, 4, 5), truncate to (2, 4, 3), reshape to (2, 12)
+        expected = t.reshape(2, 4, 5)[:, :, :truncate_size].reshape(2, 12)
+
+        self.assertEqual(result.shape, (2, 12))
+        self.assertAllClose(result, expected)
 
 
 if __name__ == "__main__":

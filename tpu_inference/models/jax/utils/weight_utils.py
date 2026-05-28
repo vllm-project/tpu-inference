@@ -27,6 +27,7 @@ from typing import Any, Iterable, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 import torchax
 from flax import nnx
@@ -34,8 +35,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jax.sharding import SingleDeviceSharding, get_mesh
 from safetensors import safe_open
-from torchax.ops.mappings import t2j
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.models.utils import AutoWeightsLoader
@@ -47,6 +47,7 @@ from tpu_inference.layers.jax import JaxModule, JaxModuleList
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
+from tpu_inference.utils import t2j
 
 logger = init_logger(__name__)
 
@@ -230,13 +231,18 @@ def shard_put(x: jax.Array,
         x_mesh = x.sharding.mesh
 
     if math.prod(mesh.axis_sizes) == 1:
-        return general_device_put(x,
-                                  mesh.devices.flatten()[0],
-                                  source_mesh=x_mesh)
+        return jax.device_put(x, mesh.devices.flatten()[0])
+
+    if shardings is None:
+        shardings = ()
 
     if isinstance(shardings, tuple):
         return general_device_put(x,
                                   NamedSharding(mesh, P(*shardings)),
+                                  source_mesh=x_mesh)
+    elif isinstance(shardings, P):
+        return general_device_put(x,
+                                  NamedSharding(mesh, shardings),
                                   source_mesh=x_mesh)
     else:
         return general_device_put(x, shardings, source_mesh=x_mesh)
@@ -248,6 +254,8 @@ def get_default_maps(model_config, mesh: Mesh,
     sharding_size = mesh.shape["model"]
 
     hf_config = model_config.hf_config
+    if text_config := getattr(hf_config, "text_config", None):
+        hf_config = text_config
 
     num_heads = hf_config.num_attention_heads
     num_kv_heads = hf_config.num_key_value_heads
@@ -446,8 +454,8 @@ def _load_and_shard_weight(vllm_config,
         assert model_weight.value.shape == hf_weight.shape, f"{hf_key}: {model_weight.value.shape} != {hf_weight.shape}"
 
     # Update the model weight
-    spec = model_weight.sharding.spec if isinstance(
-        model_weight.sharding, NamedSharding) else model_weight.sharding
+    spec = model_sharding.spec if isinstance(model_sharding,
+                                             NamedSharding) else model_sharding
     model_weight.value = shard(hf_weight, spec)
 
 
@@ -758,27 +766,31 @@ def jax_array_from_reshaped_torch(
 
 def assign_and_shard_param(jax_param: nnx.Param,
                            jax_weight: jax.Array,
-                           param_name: str = "Unknown"):
+                           param_name: str = "Unknown",
+                           mesh: Optional[Mesh] = None) -> None:
     """Distributes a JAX array across devices according to the `nnx.Param`'s sharding metadata, assigns it to the parameter, and marks it as loaded.
 
     Args:
         jax_param: The target nnx.Param to assign the weight to.
         jax_weight: The JAX array containing the weight data.
         param_name: The name of the parameter, used for error logging.
+        mesh: The device mesh to shard the parameter on.
     """
     spec = jax_param.get_metadata().get("sharding", ())
     if isinstance(spec, NamedSharding):
         spec = spec.spec
     elif isinstance(spec, SingleDeviceSharding):
         spec = ()
-    mesh = jax_param.get_metadata().get("mesh", None)
-
+    param_mesh = jax_param.get_metadata().get("mesh") or mesh
+    shape = jax_weight.shape
     try:
-        jax_param.value = shard_put(jax_weight, spec, mesh=mesh)
+        jax_param.value = shard_put(jax_weight, spec, mesh=param_mesh)
         jax_param.set_metadata("_is_loaded", True)
+        del jax_weight
+        jax.clear_caches()
     except Exception as e:
         raise RuntimeError(
-            f"Failed to load weight '{param_name}' with shape {jax_weight.shape} into param with shape {jax_param.value.shape}"
+            f"Failed to load weight '{param_name}' with shape {shape} into param with shape {jax_param.value.shape}"
         ) from e
 
 
@@ -801,9 +813,53 @@ def load_nnx_param_from_reshaped_torch(
         reshape_dims: Optional tuple specifying the shape to reshape the torch weight to before permutation. If None, no reshaping is applied.
         permute_dims: Optional tuple specifying the permutation of dimensions. If None, no-op for 1D tensors and transpose for 2D tensors is applied.
     """
-    jax_weight = jax_array_from_reshaped_torch(torch_weight,
-                                               reshape_dims=reshape_dims,
-                                               permute_dims=permute_dims)
+    try:
+        jax_weight = jax_array_from_reshaped_torch(torch_weight,
+                                                   reshape_dims=reshape_dims,
+                                                   permute_dims=permute_dims)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to convert torch weight for '{param_name}' ({torch_weight.shape}) to JAX array, with reshape_dims={reshape_dims} and permute_dims={permute_dims}"
+        ) from e
+
+    if jax_weight.shape != jax_param.value.shape:
+        # Retrieve current config to determine if the model task is embedding/pooling
+        is_embedding_task = False
+        try:
+            is_embedding_task = (get_current_vllm_config().model_config.
+                                 runner_type == "pooling")
+        except Exception as e:
+            logger.debug(
+                "Failed to retrieve vllm_config to check for embedding task status. Defaulting is_embedding_task to False: %s",
+                e)
+            is_embedding_task = False
+
+        is_vocab_layer = param_name.endswith(
+            (".embed_tokens.weight", ".lm_head.weight", ".wte.weight",
+             ".pooler.weight", "embed_tokens.weight", "lm_head.weight",
+             "wte.weight", "pooler.weight"))
+
+        if is_vocab_layer or is_embedding_task:
+            if all(
+                    w <= p
+                    for w, p in zip(jax_weight.shape, jax_param.value.shape)
+            ) and any(
+                    w < p
+                    for w, p in zip(jax_weight.shape, jax_param.value.shape)):
+                pad_width = tuple(
+                    (0, p - w)
+                    for w, p in zip(jax_weight.shape, jax_param.value.shape))
+                logger.info(
+                    f"Padding weight '{param_name}' from {jax_weight.shape} to {jax_param.value.shape}"
+                )
+                # Use NumPy to keep it on Host
+                jax_weight_np = np.pad(np.asarray(jax_weight), pad_width)
+                with cpu_mesh_context():
+                    jax_weight = jnp.array(jax_weight_np)
+        else:
+            raise ValueError(
+                f"Shape mismatch in non-vocab layer '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
+            )
 
     assert tuple(jax_weight.shape) == jax_param.value.shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.value.shape}"
@@ -814,8 +870,13 @@ def load_nnx_param_from_reshaped_torch(
 class JaxAutoWeightsLoader(AutoWeightsLoader):
     """A weights loader for JAX models."""
 
-    def __init__(self, model, **kwargs):
+    def __init__(self,
+                 model,
+                 pytorch_pooler: Optional[torch.nn.Module] = None,
+                 **kwargs):
         assert isinstance(model, JaxModule)
+        self.pytorch_pooler = pytorch_pooler
+        self.pooler_weights = {}
 
         for name, param in model.named_parameters():
             if not hasattr(param, "weight_loader"):
@@ -863,9 +924,63 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         self._process_weights_after_loading_per_module = defaultdict(
             lambda: False)
 
+    def _add_loadable_non_param_tensors(self, module: JaxModule,
+                                        child_params: dict[str, Any]):
+        """
+        Add tensor names that are not in the model params that may be in the
+        safetensors, e.g., batch normalization stats and registered buffers.
+        """
+        ...
+
     def _load_module(self, base_prefix: str, module: JaxModule,
                      weights: Iterable) -> Iterable:
-        yield from super()._load_module(base_prefix, module, weights)
+        """Load weights into the JAX module, performing prefix adjustments and interception.
+
+        Args:
+            base_prefix: The prefix string of the current base module.
+            module: The JAX module into which the weights are loaded.
+            weights: The iterable collection of torch weights to load.
+
+        Returns:
+            Iterable: The iterable collection after performing custom mappings and intercepts.
+        """
+
+        def _map_weights(w_iter):
+            if base_prefix == "":
+                root_children = {name for name, _ in module.named_children()}
+                has_model_child = "model" in root_children
+            else:
+                root_children = set()
+                has_model_child = False
+
+            for name, weight in w_iter:
+                if self.pytorch_pooler is not None:
+                    match = re.match(r"^(?:model\.)?pooler\.(.*)$", name)
+                    if match:
+                        pooler_key = match.group(1)
+                        self.pooler_weights[pooler_key] = weight
+                        continue
+
+                if base_prefix == "":
+                    top_level = name.split('.')[0]
+                    if top_level in root_children:
+                        # Path A: Root child, load as-is
+                        pass
+                    elif has_model_child and not name.startswith("model."):
+                        # Path B: Not root child, but root has 'model', prepend 'model.'
+                        name = "model." + name
+                    # Path C: Fallback to as-is
+
+                yield name, weight
+
+        yield from super()._load_module(base_prefix, module,
+                                        _map_weights(weights))
+
+        if base_prefix == "" and self.pytorch_pooler is not None and self.pooler_weights:
+            logger.info(
+                f"Loading {len(self.pooler_weights)} weights into CPU Pooler")
+            self.pytorch_pooler.load_state_dict(self.pooler_weights,
+                                                strict=False)
         # Post-process module after loading weights. Unlike vLLM post-process
         # weights after loading all weights, we do it per-module here to
         # avoid OOM.
@@ -874,6 +989,7 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         if (quant_method := getattr(module, 'quant_method', None)) is not None:
             assert isinstance(quant_method, QuantizeMethodBase)
             loaded = quant_method.process_weights_after_loading(module)
+            jax.clear_caches()
             assert isinstance(loaded, bool)
             self._process_weights_after_loading_per_module[
                 base_prefix] = loaded
@@ -891,8 +1007,11 @@ class LoadableWithIterator:
             # Use next parent class in MRO.
             return super().load_weights(weights)
 
+        pytorch_pooler = getattr(getattr(self, "vllm_config", None),
+                                 "pytorch_pooler", None)
         loader = JaxAutoWeightsLoader(
             self,
+            pytorch_pooler=pytorch_pooler,
             skip_prefixes=(["lm_head"]
                            if not hasattr(self, 'lm_head') else None))
         return loader.load_weights(weights)
@@ -908,24 +1027,50 @@ class JaxDummyModelLoader(DummyModelLoader):
 
     def load_weights(self, model: JaxModule,
                      model_config: ModelConfig) -> None:
-        if getattr(model_config.hf_config,
-                   "num_local_experts", 0) > 0 or getattr(
-                       model_config.hf_config, "num_experts", 0) > 0:
-            raise NotImplementedError(
-                "JaxDummyModelLoader does not support MoE models yet.")
-
         weight_loading_start_counter = time.perf_counter()
-        for param_name, param in model.named_parameters():
-            dummy_weight = jax.random.uniform(
-                key=jax.random.PRNGKey(0),
-                shape=param.value.shape,
-                dtype=param.value.dtype,
-                # upstream claims this range works well
-                # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
-                minval=-1e-3,
-                maxval=1e-3,
-            )
-            assign_and_shard_param(param, dummy_weight, param_name)
+        mesh = jax.sharding.get_mesh()
+
+        def _load_dummy_weight_on_thread(param_name, param):
+            with cpu_mesh_context():
+                is_moe = hasattr(param, "_weights_to_load")
+                param_shape = param.value.shape
+
+                if is_moe:
+                    # For MoE parameters, the normal loading flow reads PyTorch
+                    # weights which are transposed (out_features, in_features)
+                    # compared to JAX. The downstream post-loading fusion methods
+                    # expect this transposed shape (E, F, D) instead of (E, D, F).
+                    # E = number of experts, D = input dimension, F = feed forward dimension
+                    num_experts, input_dim, intermediate_dim = param_shape
+                    param_shape = (num_experts, intermediate_dim, input_dim)
+
+                dummy_weight = jax.random.uniform(
+                    key=jax.random.PRNGKey(0),
+                    shape=param_shape,
+                    dtype=param.value.dtype,
+                    # upstream claims this range works well
+                    # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
+                    minval=-1e-3,
+                    maxval=1e-3,
+                )
+
+                if is_moe:
+                    param._weights_to_load[:] = jnp.vsplit(
+                        dummy_weight, indices_or_sections=num_experts)
+
+            # We must explicitly pass the `mesh` captured from the main thread
+            # into the worker threads. JAX mesh contexts are thread-local, so
+            # worker threads do not inherit the active TPU mesh.
+            assign_and_shard_param(param, dummy_weight, param_name, mesh=mesh)
+
+        with ThreadPoolExecutor(max_workers=64) as executor:
+            futures = [
+                executor.submit(_load_dummy_weight_on_thread, param_name,
+                                param)
+                for param_name, param in model.named_parameters()
+            ]
+            for future in futures:
+                future.result()
 
         self._process_weights_after_loading(model)
         logger.info_once(

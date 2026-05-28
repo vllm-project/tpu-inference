@@ -26,7 +26,9 @@ On the client side, run:
 
 import argparse
 import asyncio
+import contextlib
 import gc
+import logging
 import random
 import time
 import warnings
@@ -36,8 +38,8 @@ from typing import Optional
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS,
-                                  OPENAI_COMPATIBLE_BACKENDS, RequestFuncInput,
-                                  RequestFuncOutput)
+                                  OPENAI_COMPATIBLE_BACKENDS,
+                                  RequestFuncOutput, start_stop_profile)
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
@@ -52,12 +54,14 @@ except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
 # yapf: disable
+from benchmark_core import BenchmarkContext, SampleRequest
 from benchmark_dataset import (GPQADataset, MLPerfDataset, MMLUDataset,
-                               RandomDataset, SampleRequest, SonnetDataset)
+                               MMMUProDataset, RandomDataset, SonnetDataset)
 # yapf: disable
 from benchmark_utils import (eval_benchmark_dataset_result,
                              sample_warmup_requests)
 
+logger = logging.getLogger(__name__)
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
 
@@ -142,8 +146,9 @@ def calculate_metrics(
     tokenizer: PreTrainedTokenizerBase,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
-) -> tuple[BenchmarkMetrics, list[int]]:
+) -> tuple[BenchmarkMetrics, list[int], list[int]]:
     actual_output_lens: list[int] = []
+    actual_input_lens: list[int] = []
     total_input = 0
     completed = 0
     good_completed = 0
@@ -154,6 +159,7 @@ def calculate_metrics(
     e2els: list[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
+            logger.debug(f"Prompt: {input_requests[i].prompt}\nOutput: {outputs[i].generated_text}")
             output_len = outputs[i].output_tokens
 
             if not output_len:
@@ -166,7 +172,12 @@ def calculate_metrics(
                     tokenizer(outputs[i].generated_text,
                               add_special_tokens=False).input_ids)
             actual_output_lens.append(output_len)
-            total_input += input_requests[i].prompt_len
+            # Prefer server-reported prompt_tokens (accounts for chat template
+            # and multimodal tokens); fall back to client-side prompt_len.
+            input_len = (outputs[i].prompt_tokens
+                         or input_requests[i].prompt_len)
+            actual_input_lens.append(input_len)
+            total_input += input_len
             tpot = 0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
@@ -180,6 +191,7 @@ def calculate_metrics(
             completed += 1
         else:
             actual_output_lens.append(0)
+            actual_input_lens.append(0)
 
     if goodput_config_dict:
         valid_metrics = []
@@ -240,7 +252,7 @@ def calculate_metrics(
                              for p in selected_percentiles],
     )
 
-    return metrics, actual_output_lens
+    return metrics, actual_output_lens, actual_input_lens
 
 
 async def benchmark(
@@ -267,6 +279,15 @@ async def benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
+    ctx = BenchmarkContext(
+        api_url=api_url,
+        model=model_id,
+        model_name=model_name,
+        logprobs=logprobs,
+        ignore_eos=ignore_eos,
+        extra_body=extra_body,
+    )
+
     warmup_requests = None
     if args.warmup_mode == "full":
         warmup_requests = input_requests
@@ -276,28 +297,8 @@ async def benchmark(
     if warmup_requests:
         print(f"Warmup (mode: {args.warmup_mode}) is starting.")
         for warmup_request in tqdm(warmup_requests):
-            test_prompt, test_prompt_len, test_output_len, test_mm_content = (
-                warmup_request.prompt,
-                warmup_request.prompt_len,
-                warmup_request.expected_output_len,
-                warmup_request.multi_modal_data,
-            )
 
-            assert test_mm_content is None or isinstance(test_mm_content, dict)
-            test_input = RequestFuncInput(
-                model=model_id,
-                model_name=model_name,
-                prompt=test_prompt,
-                api_url=api_url,
-                prompt_len=test_prompt_len,
-                output_len=test_output_len,
-                logprobs=logprobs,
-                multi_modal_content=test_mm_content,
-                ignore_eos=ignore_eos,
-                extra_body=extra_body,
-            )
-
-            test_output = await request_func(request_func_input=test_input)
+            test_output = await request_func(ctx=ctx, request_func_input=warmup_request)
             if not test_output.success:
                 raise ValueError(
                     "Warmup failed - Please make sure benchmark arguments "
@@ -306,20 +307,7 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            model_name=model_name,
-            prompt=test_prompt,
-            api_url=base_url + "/start_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            multi_modal_content=test_mm_content,
-            ignore_eos=ignore_eos,
-            extra_body=extra_body,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
+        if await start_stop_profile(base_url, "start"):
             print("Profiler started")
 
     distribution = "Poisson process" if burstiness == 1.0 else "Gamma distribution"
@@ -330,72 +318,30 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
-    # This can be used once the minimum Python version is 3.10 or higher,
-    # and it will simplify the code in limited_request_func.
-    #    semaphore = (asyncio.Semaphore(max_concurrency)
-    #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = asyncio.Semaphore(max_concurrency) \
+                    if max_concurrency else contextlib.nullcontext()
 
     async def limited_request_func(request_func_input, pbar):
-        if semaphore is None:
-            return await request_func(request_func_input=request_func_input,
-                                      pbar=pbar)
         async with semaphore:
-            return await request_func(request_func_input=request_func_input,
-                                      pbar=pbar)
+            return await request_func(
+                ctx=ctx,
+                request_func_input=request_func_input,
+                pbar=pbar,
+            )
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate, burstiness):
-        prompt, prompt_len, output_len, mm_content = (
-            request.prompt,
-            request.prompt_len,
-            request.expected_output_len,
-            request.multi_modal_data,
-        )
-        req_model_id, req_model_name = model_id, model_name
-
-        request_kwargs = dict(
-            model=req_model_id,
-            model_name=req_model_name,
-            prompt=prompt,
-            api_url=api_url,
-            prompt_len=prompt_len,
-            output_len=output_len,
-            logprobs=logprobs,
-            multi_modal_content=mm_content,
-            ignore_eos=ignore_eos,
-            extra_body=extra_body,
-        )
-
-        # For MMLMDataset, MLPerfDataset
-        if request.completion is not None:
-            request_kwargs["completion"] = request.completion
-
-        # For Random (synthetic), Sonnet
-        if request.request_id is not None:
-            request_kwargs["request_id"] = request.request_id
-
-        request_func_input = RequestFuncInput(**request_kwargs)
 
         tasks.append(
             asyncio.create_task(
-                limited_request_func(request_func_input=request_func_input,
+                limited_request_func(request_func_input=request,
                                      pbar=pbar)))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if profile:
         print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
+        if await start_stop_profile(base_url, "stop"):
             print("Profiler stopped")
 
     if pbar is not None:
@@ -403,7 +349,7 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
-    metrics, actual_output_lens = calculate_metrics(
+    metrics, actual_output_lens, input_lens = calculate_metrics(
         input_requests=input_requests,
         outputs=outputs,
         dur_s=benchmark_duration,
@@ -439,7 +385,7 @@ async def benchmark(
         metrics.request_goodput if goodput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
-        "input_lens": [output.prompt_len for output in outputs],
+        "input_lens": input_lens,
         "output_lens": actual_output_lens,
         "ttfts": [output.ttft for output in outputs],
         "itls": [output.itl for output in outputs],
@@ -524,6 +470,11 @@ def parse_goodput(slo_pairs):
 
 
 def main(args: argparse.Namespace):
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+    else:
+        logger.setLevel(logging.INFO)
+
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -547,6 +498,13 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code,
     )
 
+    if args.dataset_name == "mmmu_pro":
+        message = (
+            "MMMU-Pro must use --backend vllm-chat "
+            "and should also use --endpoint=/v1/chat/completions."
+        )
+        assert args.backend == "vllm-chat", message
+
     if args.dataset_name is None:
         raise ValueError(
             "Please specify '--dataset-name' and the corresponding "
@@ -555,7 +513,7 @@ def main(args: argparse.Namespace):
     if args.dataset_name == "sonnet":
         dataset = SonnetDataset(dataset_path=args.dataset_path)
         # For the "sonnet" dataset, formatting depends on the backend.
-        if args.backend == "openai-chat":
+        if args.backend == "vllm-chat":
             input_requests = dataset.sample(
                 num_requests=args.num_prompts,
                 input_len=args.sonnet_input_len,
@@ -591,6 +549,7 @@ def main(args: argparse.Namespace):
                                     num_requests=args.num_prompts,
                                     input_len=args.mmlu_input_len,
                                     output_len=args.mmlu_output_len,
+                                    chat_template_system_prompt=args.chat_template_system_prompt,
                                     ),
             "mlperf":
             lambda: MLPerfDataset(random_seed=args.seed,
@@ -607,7 +566,18 @@ def main(args: argparse.Namespace):
                                     tokenizer=tokenizer,
                                     num_requests=args.num_prompts,
                                     output_len=args.gpqa_output_len,
+                                    chat_template_system_prompt=args.chat_template_system_prompt,
                                     ),
+            "mmmu_pro":
+            lambda: MMMUProDataset(
+                random_seed=args.seed,
+                dataset_path=args.dataset_path,
+                subset=args.mmmu_pro_subset,
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                output_len=args.mmmu_pro_output_len,
+            ),
             "random":
             lambda: RandomDataset(random_seed=args.seed,
                                   dataset_path=args.dataset_path).sample(
@@ -713,7 +683,7 @@ if __name__ == "__main__":
         default="sharegpt",
         choices=[
             "sharegpt", "burstgpt", "sonnet", "random", "hf", "custom", "mmlu",
-            "mlperf", "gpqa"
+            "mlperf", "gpqa", "mmmu_pro"
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -848,6 +818,12 @@ if __name__ == "__main__":
         default="benchmark-serving",
         help="Specify the prefix of request id.",
     )
+    parser.add_argument(
+        "--chat-template-system-prompt",
+        type=str,
+        default="Reasoning effort: high",
+        help="The system prompt to use when applying a chat template.",
+    )
 
     # group for dataset specific arguments
     mmlu_group = parser.add_argument_group("mmlu dataset options")
@@ -910,6 +886,22 @@ if __name__ == "__main__":
         "--gpqa-use-chat-template",
         action="store_true",
         help="Whether to format GPQA prompts using the tokenizer's chat template.",
+    )
+
+    mmmu_pro_group = parser.add_argument_group("mmmu_pro dataset options")
+    mmmu_pro_group.add_argument(
+        "--mmmu-pro-subset",
+        type=str,
+        default="vision",
+        choices=["vision", "standard (10 options)"],
+        help="MMMU-Pro subset to use. 'vision' has questions encoded in images; "
+        "'standard (10 options)' has text questions with images and 10 choices.",
+    )
+    mmmu_pro_group.add_argument(
+        "--mmmu-pro-output-len",
+        type=int,
+        default=16,
+        help="Output length for each request. Default is 16 (single-letter answer).",
     )
 
     sonnet_group = parser.add_argument_group("sonnet dataset options")
@@ -1032,6 +1024,11 @@ if __name__ == "__main__":
         default="sampled",
         choices=["none", "sampled", "full"],
         help="Whether to warmup first, and set the warmup mode",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Whether to print debug logs.",
     )
 
     args = parser.parse_args()

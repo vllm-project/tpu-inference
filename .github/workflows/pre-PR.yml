@@ -82,7 +82,10 @@ jobs:
           fi
 
       - name: Update PR body
-        if: env.TEMPLATE_CONTENT != ''
+        # Ignore 403 errors for forked PRs (read-only GITHUB_TOKEN)
+        if: |
+          env.TEMPLATE_CONTENT != '' &&
+          github.event.pull_request.head.repo.full_name == github.repository
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ github.event.pull_request.number }}

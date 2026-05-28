@@ -56,25 +56,9 @@ MODELS = [
 ]
 
 
-def ref_quantize_fp8(x: torch.Tensor,
-                     dtype: torch.dtype,
-                     per_tensor: bool = False):
-    dtype_info = torch.finfo(dtype)
-    dtype_max = float(dtype_info.max)
-    dtype_min = float(dtype_info.min)
-
-    dim = () if per_tensor else 1
-    x_abs_max = torch.amax(torch.abs(x), dim=dim, keepdim=True)
-    if per_tensor:
-        x_abs_max = torch.squeeze(x_abs_max, dim=-1)
-    x_s = x_abs_max / dtype_max
-    x_q = torch.clip(x / x_s, dtype_min, dtype_max).to(dtype)
-    return x_q, x_s.to(torch.float32)
-
-
 def ref_w8a8_fp8_dynamic(x: torch.Tensor, w_q: torch.Tensor, w_s: torch.Tensor,
                          b: Optional[torch.Tensor]):
-    x_q, x_s = ref_quantize_fp8(x, w_q.dtype)
+    x_q, x_s = test_utils.ref_quantize_fp8(x, w_q.dtype)
     out = torch.einsum('bd,fd->bf', x_q.to(torch.float32),
                        w_q.to(torch.float32))
     out = (out * x_s) * w_s.T
@@ -176,15 +160,18 @@ def initialize_layer_weights(layer: torch.nn.Module):
     assert isinstance(scheme, VllmCompressedTensorsW8A8Fp8)
     quant_config = scheme.linear_config
     assert isinstance(quant_config, VllmQuantLinearConfig)
-    per_tensor = scheme.strategy == QuantizationStrategy.TENSOR
+    if scheme.strategy == QuantizationStrategy.TENSOR:
+        quant_axis = None
+    else:
+        quant_axis = 1
 
     weight_list = []
     weight_scale_list = []
     for output_size in quant_config.output_sizes:
         weight = torch.rand(
             (output_size, layer.input_size), dtype=torch.bfloat16) / 10
-        weight_, weight_scale_ = ref_quantize_fp8(weight, torch.float8_e4m3fn,
-                                                  per_tensor)
+        weight_, weight_scale_ = test_utils.ref_quantize_fp8(
+            weight, torch.float8_e4m3fn, axis=quant_axis)
         weight_list.append(weight_)
         weight_scale_list.append(weight_scale_)
 
@@ -274,7 +261,8 @@ def test_loading_model(model, mesh):
     vllm_config.quant_config = get_tpu_quantization_config(vllm_config, mesh)
     vllm_config.device_config.device = "cpu"
 
-    vllm_model = vllm_get_model(vllm_config=vllm_config)
+    with set_current_vllm_config(vllm_config):
+        vllm_model = vllm_get_model(vllm_config=vllm_config)
     layers = test_utils.find_all_layer_type(vllm_model, LinearBase)
     for layer in layers:
         assert isinstance(layer.quant_config, VllmCompressedTensorsConfig)
@@ -449,3 +437,34 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
     initialize_layer_weights(linear_layer)
     ref_output, layer_output = return_ref_and_layer_output(linear_layer)
     torch.testing.assert_close(ref_output, layer_output)
+
+
+def test_blockwise_config_construction():
+    from unittest.mock import MagicMock, patch
+
+    from compressed_tensors.quantization import (QuantizationArgs,
+                                                 QuantizationStrategy)
+
+    from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
+        VllmCompressedTensorsW8A8Fp8
+    from tpu_inference.layers.vllm.quantization.configs import \
+        VllmQuantLinearConfig
+
+    weight_quant = QuantizationArgs(num_bits=8,
+                                    type="float",
+                                    strategy=QuantizationStrategy.BLOCK,
+                                    block_structure=(128, 128))
+    mock_linear_config = MagicMock(spec=VllmQuantLinearConfig)
+
+    with patch(
+            'vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8.get_current_vllm_config'
+    ) as mock_get_config:
+        mock_get_config.return_value.model_config.dtype = "float32"
+        scheme = VllmCompressedTensorsW8A8Fp8(weight_quant=weight_quant,
+                                              is_static_input_scheme=False,
+                                              linear_config=mock_linear_config)
+
+    assert scheme.weight_block_size == [128, 128]
+    assert scheme.cutlass_block_fp8_supported is False
+    assert not scheme.use_aiter_and_is_supported
+    assert scheme.act_q_group_shape == (1, 128)

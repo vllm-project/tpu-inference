@@ -42,6 +42,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
+from tests.layers.common import utils as test_utils
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     _shard_module_to_tpu
 from tpu_inference.layers.vllm.quantization.configs import \
@@ -234,7 +235,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, stage) -> None:
     vllm_config = dist_init
     vllm_config.lora_config = lora_config
 
-    mesh = _create_mesh()
+    mesh = test_utils.get_spmd_mesh(jax.local_device_count())
     linear, lora_linear = _create_column_parallel_packed_layer(
         repeats, vllm_config, mesh)
     _verify_lora_linear_layer(linear, lora_linear)
@@ -366,7 +367,7 @@ def test_linear_parallel(dist_init, num_loras, layer_type, stage) -> None:
     vllm_config = dist_init
     vllm_config.lora_config = lora_config
 
-    mesh = _create_mesh()
+    mesh = test_utils.get_spmd_mesh(jax.local_device_count())
     linear, lora_linear = _create_random_linear_parallel_layer(
         layer_type, vllm_config, mesh)
     _verify_lora_linear_layer(linear, lora_linear)
@@ -517,14 +518,6 @@ def _create_random_linear_parallel_layer(layer_type, vllm_config, mesh):
 
 def _get_devices():
     return jax.devices()
-
-
-def _create_mesh():
-    axis_names = ("data", "model")
-    devices = _get_devices()
-    mesh_shape = (1, len(devices))
-    mesh = jax.make_mesh(mesh_shape, axis_names, devices=devices)
-    return mesh
 
 
 def _verify_lora_linear_layer(linear, lora_linear):

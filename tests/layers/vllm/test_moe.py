@@ -21,7 +21,7 @@ import pytest
 from tpu_inference.layers.common.moe import MoEBackend
 # We assume the function is in a file that can be imported.
 # If testing locally without the full repo, you might need to adjust imports.
-from tpu_inference.layers.vllm.moe import \
+from tpu_inference.layers.vllm.interface.moe import \
     select_moe_backend_from_fused_moe_config
 
 

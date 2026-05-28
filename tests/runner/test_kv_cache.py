@@ -31,8 +31,10 @@ from tpu_inference.utils import get_dtype_packing
 @pytest.fixture
 def mesh():
     devices = np.array(jax.local_devices()[:1])
-    devices = devices.reshape((1, 1, -1))
-    return Mesh(devices, axis_names=("data", "attn_dp", "model"))
+    devices = devices.reshape((1, 1, 1, 1, 1, -1))
+    return Mesh(devices,
+                axis_names=("data", "attn_dp", "attn_dp_expert", "expert",
+                            "model", "dcp"))
 
 
 def test_create_kv_caches(mesh: Mesh):
@@ -46,17 +48,22 @@ def test_create_kv_caches(mesh: Mesh):
     head_size = 128
     layer_names = ["decoder.0", "decoder.1", "decoder.2"]  # Test with 3 layers
 
-    expected_sharding = NamedSharding(
-        mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None, "model"))
     expected_dtype = jnp.bfloat16
-    expected_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
-                                                  num_kv_heads, head_size,
-                                                  expected_dtype)
 
     with patch("tpu_inference.logger.init_logger",
                return_value=MagicMock()), patch(
                    "tpu_inference.utils.hbm_usage_gb",
-                   return_value=[(0.0, 0.0), (0.0, 0.0)]):
+                   return_value=[
+                       (0.0, 0.0), (0.0, 0.0)
+                   ]), patch("tpu_inference.envs.NEW_MODEL_DESIGN", True):
+        expected_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT,
+                          ShardingAxisName.KV_CACHE_HEAD))
+        expected_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks,
+                                                      block_size, num_kv_heads,
+                                                      head_size,
+                                                      expected_dtype)
         kv_caches = create_kv_caches(
             num_blocks=num_blocks,
             block_size=block_size,
@@ -92,7 +99,7 @@ def test_create_kv_caches_mla(mesh: Mesh):
 
     # For MLA, sharding is by the 'model' axis on the token dimension.
     expected_sharding = NamedSharding(
-        mesh, PartitionSpec(ShardingAxisName.MLP_TENSOR))
+        mesh, PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT))
     expected_dtype = jnp.bfloat16
     expected_shape = get_kv_cache_shape_with_mesh(
         mesh,
@@ -107,7 +114,9 @@ def test_create_kv_caches_mla(mesh: Mesh):
     with patch("tpu_inference.logger.init_logger",
                return_value=MagicMock()), patch(
                    "tpu_inference.utils.hbm_usage_gb",
-                   return_value=[(0.0, 0.0), (0.0, 0.0)]):
+                   return_value=[
+                       (0.0, 0.0), (0.0, 0.0)
+                   ]), patch("tpu_inference.envs.NEW_MODEL_DESIGN", True):
         kv_caches = create_kv_caches(
             num_blocks=num_blocks,
             block_size=block_size,
@@ -204,3 +213,49 @@ def test_get_attention_page_size_bytes_mla(mesh: Mesh):
         (32 // get_dtype_packing(jnp.bfloat16)) * np.prod(shape)) // 8
 
     assert page_size_bytes == expected_page_size
+
+
+def test_create_kv_caches_batch_equivalence(mesh: Mesh):
+    """
+    Tests that calling create_kv_caches once with N layer names is equivalent to
+    calling it N times with a single layer name and aggregating the results.
+    """
+    num_blocks = 16
+    block_size = 8
+    num_kv_heads = 4
+    head_size = 64
+    layer_names = ["layer.0", "layer.1", "layer.2"]
+
+    with patch("tpu_inference.logger.init_logger", return_value=MagicMock()), \
+         patch("tpu_inference.utils.hbm_usage_gb", return_value=[(0.0, 0.0)]):
+
+        # Single batch call
+        kv_caches_batch = create_kv_caches(
+            num_blocks=num_blocks,
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            mesh=mesh,
+            layer_names=layer_names,
+        )
+
+        # Multiple iterative calls
+        kv_caches_iterative = []
+        for name in layer_names:
+            layer_cache = create_kv_caches(
+                num_blocks=num_blocks,
+                block_size=block_size,
+                num_kv_heads=num_kv_heads,
+                head_size=head_size,
+                mesh=mesh,
+                layer_names=[name],
+            )
+            kv_caches_iterative.extend(layer_cache)
+
+        assert len(kv_caches_batch) == len(kv_caches_iterative)
+        for b_cache, i_cache in zip(kv_caches_batch, kv_caches_iterative):
+            assert b_cache.shape == i_cache.shape
+            assert b_cache.dtype == i_cache.dtype
+            assert b_cache.sharding == i_cache.sharding
+            # Note: Content is empty/uninitialized, so we don't compare values,
+            # just the metadata and allocation properties.

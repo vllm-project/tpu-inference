@@ -103,6 +103,28 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
     return split_tensors
 
 
+def truncate_sharded_tensor(sharded_tensor: jax.Array, truncate_size: int,
+                            n_shards: int):
+    """
+    Truncate each shard of a sharded tensor to a specified size.
+    For example, let the sharded_tensor be:
+        AAAAA | BBBBB | CCCCC | DDDDD
+        Shard0   Shard1   Shard2   Shard3
+    and let truncate_size = 3 and n_shards = 4.
+    The output is:
+         AAA   |  BBB   |  CCC   |  DDD
+        Shard0   Shard1   Shard2   Shard3
+    Args:
+        sharded_tensor: the input tensor, sharded on the last dim.
+        truncate_size: the new size of each shard on the last dim.
+        n_shards: num of shards.
+    """
+    new_shape = sharded_tensor.shape[:-1] + (n_shards, -1)
+    sharded_tensor = sharded_tensor.reshape(new_shape)
+    truncated_tensor = sharded_tensor[..., :truncate_size]
+    return truncated_tensor.reshape(sharded_tensor.shape[:-2] + (-1, ))
+
+
 def general_device_put(tensor: jax.Array,
                        sharding: Sharding,
                        *,
@@ -129,20 +151,13 @@ def general_device_put(tensor: jax.Array,
         # NOTE: at here, num_global_devices != num_local_devices
         # meaning we are in multi-host setup. Each host will run the same process
         # and each process only need to handle the devices accessible to this host.
-        shape = t.shape
         ctx = nullcontext() if source_mesh is None else jax.set_mesh(
             source_mesh)
         # `t[i]` needs to be operated in the same mesh as `t`, which is provided as
         # `source_mesh`.
         with ctx:
-            x_split = [
-                jax.device_put(t[i], device) for device, i in
-                sharding.addressable_devices_indices_map(shape).items()
-            ]
-        global_array = jax.make_array_from_single_device_arrays(shape,
-                                                                sharding,
-                                                                x_split,
-                                                                dtype=t.dtype)
+            global_array = jax.make_array_from_callback(
+                t.shape, sharding, lambda index: t[index])
         if layout is not None:
             dst_mesh = sharding.mesh
             with jax.set_mesh(dst_mesh):

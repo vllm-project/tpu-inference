@@ -633,7 +633,12 @@ class LlamaGuard4ForCausalLM(nnx.Module):
     def embed_input_ids(
             self,
             input_ids: jax.Array,
-            multimodal_embeddings: Optional[jax.Array] = None) -> jax.Array:
+            multimodal_embeddings: jax.Array | None = None,
+            *,
+            is_multimodal: jax.Array | None = None,
+        ) -> jax.Array:
+
+        del is_multimodal
 
 
         inputs_embeds = self.embedder.encode(input_ids)
@@ -647,7 +652,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
 
         return inputs_embeds
 
-    def embed_multimodal(self, image_grid_thw, **kwargs) -> List[jax.Array]:
+    def embed_multimodal(self, **kwargs) -> List[jax.Array]:
         pixel_values = kwargs.pop("pixel_values")
         patches_per_image = kwargs.pop("patches_per_image", None)
 
