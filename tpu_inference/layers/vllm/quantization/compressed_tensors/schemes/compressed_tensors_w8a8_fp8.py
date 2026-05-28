@@ -27,8 +27,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    LinearWeights, format_linear_scale, process_linear_weights,
-    shard_linear_weights, to_parameter_list)
+    LinearWeights, process_linear_weights, shard_linear_weights,
+    to_parameter_list)
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
 from tpu_inference.layers.common.quantization.fp8 import \
@@ -152,7 +152,8 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
                 per_tensor=per_tensor,
-                transposed=False,
+                enable_kernel=self.linear_config.
+                enable_quantized_matmul_kernel,
             )
 
         if self.weight_block_size is not None:
@@ -166,13 +167,11 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 requant_weight_dtype=self.linear_config.requant_weight_dtype,
                 fuse_matmuls=self.linear_config.fuse_matmuls,
                 n_shards=self.linear_config.n_shards,
-                transposed=False)
+                enable_kernel=self.linear_config.enable_quantized_matmul_kernel
+            )
         else:
             weights = process_fp8_linear_weights(weight, weight_scale, bias)
 
-        weights.weight_scale = format_linear_scale(
-            weights.weight_scale,
-            self.linear_config.enable_quantized_matmul_kernel)
         weights = torch_view(
             shard_linear_weights(
                 weights,
@@ -180,7 +179,6 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
                 per_tensor=per_tensor,
-                transposed=False,
             ))
 
         if self.linear_config.fuse_matmuls:

@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
-    format_linear_scale, shard_linear_weights, to_parameter_list)
+    shard_linear_weights, to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_quantized_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import FP8
@@ -172,17 +172,13 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             requant_weight_dtype=self.linear_config.requant_weight_dtype,
             fuse_matmuls=self.linear_config.fuse_matmuls,
             n_shards=self.linear_config.n_shards,
-            transposed=False)
-        weights.weight_scale = format_linear_scale(
-            weights.weight_scale,
-            self.linear_config.enable_quantized_matmul_kernel)
+            enable_kernel=self.linear_config.enable_quantized_matmul_kernel)
         weights = torch_view(
             shard_linear_weights(
                 weights,
                 mesh=self.linear_config.mesh,
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
-                transposed=False,
             ))
 
         if self.linear_config.fuse_matmuls:

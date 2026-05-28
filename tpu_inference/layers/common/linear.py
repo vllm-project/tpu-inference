@@ -19,8 +19,75 @@ from jax.sharding import PartitionSpec as P
 
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.quantized_matmul.util import (
-    xla_quantized_batched_matmul, xla_quantized_matmul)
+    quantize_tensor, xla_quantized_batched_matmul)
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
+
+
+def xla_quantized_matmul(
+    x: jax.Array,
+    w_q: jax.Array,
+    w_scale: jax.Array,
+    quantize_activation=True,
+) -> jax.Array:
+    """
+    Reference (pure JAX) implementation of the quantized matmul kernel below.
+
+    Args:
+        x:  Activation.
+        w_q: Weight quantized array. [n_input_features, n_output_features]
+        w_s: Weight quantization scale. [n_output_features]
+        mesh: Mesh to shard on.
+        weight_sharding: PartitionSpec for the weight tensor.
+
+    Returns:
+        Output of the quantized matmul.
+    """
+    skip_scale = False
+    if w_scale is not None and w_scale.ndim == 2:
+        skip_scale = True
+        in_features, out_features = w_q.shape
+        in_blocks, out_blocks = w_scale.shape
+        block_size_in = in_features // in_blocks
+        block_size_out = out_features // out_blocks
+
+        w_q_reshaped = w_q.reshape(in_blocks, block_size_in, out_blocks,
+                                   block_size_out)
+        w_q = (w_q_reshaped.astype(jnp.float32) *
+               w_scale[:, jnp.newaxis, :, jnp.newaxis]).reshape(
+                   in_features, out_features).astype(x.dtype)
+
+        # in this case, we don't want to quantize the activations
+        quantize_activation = False
+        logger.info_once(
+            "Skipping activation quantization due to weight requantization being disabled."
+        )
+
+    if quantize_activation:
+        acc_dtype = jnp.float32
+        if quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer):
+            acc_dtype = jnp.int32
+
+        x_q, x_scale = quantize_tensor(x, w_q.dtype)
+        out = jax.lax.dot_general(
+            x_q,
+            w_q,
+            dimension_numbers=(((1, ), (0, )), ((), ())),
+            preferred_element_type=acc_dtype,
+        ).astype(jnp.float32)
+        out *= x_scale
+    else:
+        out = jax.lax.dot_general(
+            x,
+            w_q,
+            dimension_numbers=(((1, ), (0, )), ((), ())),
+            preferred_element_type=jnp.float32,
+        )
+    if not skip_scale:
+        out *= jnp.expand_dims(w_scale, 0)
+    return out.astype(x.dtype)
 
 
 def _get_x_q_dtype(w_q_dtype: jnp.dtype) -> jnp.dtype:

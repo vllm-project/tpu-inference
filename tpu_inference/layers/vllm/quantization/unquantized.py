@@ -286,7 +286,6 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                 fused=self.linear_config.fuse_matmuls,
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
-                transposed=False,
             )
 
         weights = process_unquantized_linear_weights(weight, bias)
@@ -296,7 +295,6 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                 mesh=self.linear_config.mesh,
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
-                transposed=False,
             ))
         if self.linear_config.fuse_matmuls:
             layer.weight = Parameter(weights.weight, requires_grad=False)

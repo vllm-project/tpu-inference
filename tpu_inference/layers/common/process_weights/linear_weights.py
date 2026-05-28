@@ -101,15 +101,15 @@ def process_linear_weights(
     fused: bool = False,
     output_sizes: list[int] | None = None,
     reorder_size: int | None = None,
-    transposed: bool = False,
     per_tensor: bool = False,
+    enable_kernel: bool = False,
 ) -> LinearWeights:
     weight = weights.weight
     weight_scale = weights.weight_scale
     zero_point = weights.zero_point
     bias = weights.bias
 
-    dim = 0 if transposed else -1
+    dim = -1
     if output_sizes is None:
         output_sizes = [weight.shape[dim]]
 
@@ -152,6 +152,8 @@ def process_linear_weights(
         if bias is not None:
             bias = slice_tensor(bias)
 
+    weight_scale = format_linear_scale(weight_scale, enable_kernel)
+
     return LinearWeights(
         weight=weight,
         weight_scale=weight_scale,
@@ -165,18 +167,11 @@ def shard_linear_weights(
     mesh: Mesh | None,
     weight_p_spec: PartitionSpec,
     bias_p_spec: PartitionSpec,
-    transposed: bool = False,
     per_tensor: bool = False,
 ) -> LinearWeights:
     # jax==0.8.1 introduces jax.sharding.get_mesh(), but current
     # v6e test environment uses 0.8.0, so we use jax._src.mesh instead.
     mesh = mesh or meshlib.get_concrete_mesh()
-    if transposed:
-        # By default, we use non-transposed (k, n) weights. If it is transposed,
-        # we need to transpose the sharding as well.
-        weight_p_spec = PartitionSpec(*weight_p_spec[::-1])
-        bias_p_spec = PartitionSpec(weight_p_spec[1])
-
     weight_sharding = NamedSharding(mesh, weight_p_spec)
     bias_sharding = NamedSharding(mesh, bias_p_spec)
     # If weight_scale is a list (split weights), we check the first element.

@@ -25,8 +25,8 @@ from jax.sharding import PartitionSpec as P
 
 from tpu_inference.layers.common.linear import sharded_quantized_batched_matmul
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
-from tpu_inference.layers.common.process_weights.linear_weights import (
-    format_linear_scale, shard_linear_weights)
+from tpu_inference.layers.common.process_weights.linear_weights import \
+    shard_linear_weights
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_quantized_moe_weights)
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
@@ -290,14 +290,11 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 requant_weight_dtype=self.linear_config.requant_weight_dtype,
                 fuse_matmuls=self.linear_config.fuse_matmuls,
                 n_shards=self.linear_config.n_shards,
-                transposed=False)
+                enable_kernel=self.linear_config.enable_quantized_matmul_kernel
+            )
             delattr(layer, 'weight')
             delattr(layer, 'weight_scale_inv')
             delattr(layer, 'bias')
-
-            weights.weight_scale = format_linear_scale(
-                weights.weight_scale,
-                self.linear_config.enable_quantized_matmul_kernel)
 
         # Put onto the device.
         weights = shard_linear_weights(
@@ -305,7 +302,6 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             mesh=None,
             weight_p_spec=self.linear_config.weight_sharding,
             bias_p_spec=self.linear_config.bias_sharding,
-            transposed=False,
         )
         if self.linear_config.fuse_matmuls:
             layer.weight = nnx.Param(weights.weight)
