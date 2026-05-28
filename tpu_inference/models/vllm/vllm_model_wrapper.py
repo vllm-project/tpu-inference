@@ -378,48 +378,7 @@ class VllmModelWrapper:
 
     def jit_step_func(self):
 
-        compiler_options = {
-            "xla_tpu_all_gather_collective_matmul_mode":
-            "post_spmd_conservative",
-            "xla_tpu_reduce_scatter_collective_matmul_mode":
-            "post_spmd_conservative",
-            "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
-        }
-
-        sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
-        if sc_offload_bytes > 0:
-            threshold_bytes = str(sc_offload_bytes)
-            compiler_options[
-                "xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes"] = (
-                    threshold_bytes)
-            compiler_options[
-                "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
-                    threshold_bytes)
-
-        # NOTE(continue_decode hack): compiler_options were moved off this
-        # nested-jittable step_fun and onto the top-level _decode_core jit in
-        # decode_loop.py (JAX forbids compiler_options on a nested jit). This
-        # regresses the normal decode path, which loses these XLA collective-
-        # matmul flags -- intentionally accepted for now to unblock the
-        # continue_decode path. Revert / split into a separate entry point
-        # before relying on the default path.
-        @jax.jit(
-            donate_argnames=("kv_caches", ),
-            out_shardings=(
-                None,  # kv_caches - keep original sharding
-                NamedSharding(self.mesh,
-                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
-                None,  # empty list
-                None,  # expert ids
-            ),
-            compiler_options=compiler_options,
-            static_argnames=(
-                "layer_name_to_kvcache_index",
-                "is_first_rank",
-                "is_last_rank",
-            ),
-        )
-        def step_fun(
+        def step_fun_impl(
             params_and_buffers,  # This has been wrapped into torchax TorchValue
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
@@ -486,18 +445,7 @@ class VllmModelWrapper:
                 expert_indices = None
             return new_kv_caches, output, aux_hidden_states, expert_indices
 
-        @jax.jit(
-            donate_argnames=("kv_caches", ),
-            out_shardings=(
-                None,  # kv_caches - keep original sharding
-                NamedSharding(self.mesh,
-                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
-                None,  # list of aux hidden states
-                None,  # expert ids
-            ),
-            static_argnames=("layer_name_to_kvcache_index", "spec_step_idx"),
-        )
-        def draft_step_fun(
+        def draft_step_fun_impl(
             params_and_buffers,
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
@@ -539,7 +487,76 @@ class VllmModelWrapper:
                 hidden_states, hidden_prenorm = jax_view(output_from_torch)
             return new_kv_caches, hidden_states, [hidden_prenorm], None
 
-        return draft_step_fun if self.is_draft_model else step_fun
+        draft_step_fun = jax.jit(
+            draft_step_fun_impl,
+            donate_argnames=("kv_caches", ),
+            out_shardings=(
+                None,  # kv_caches - keep original sharding
+                NamedSharding(self.mesh,
+                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+                None,  # list of aux hidden states
+                None,  # expert ids
+            ),
+            static_argnames=("layer_name_to_kvcache_index", "spec_step_idx"),
+        )
+
+        step_fun_no_options = jax.jit(
+            step_fun_impl,
+            donate_argnames=("kv_caches", ),
+            out_shardings=(
+                None,  # kv_caches - keep original sharding
+                NamedSharding(self.mesh,
+                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+                None,  # empty list
+                None,  # expert ids
+            ),
+            static_argnames=(
+                "layer_name_to_kvcache_index",
+                "is_first_rank",
+                "is_last_rank",
+            ),
+        )
+
+        compiler_options = {
+            "xla_tpu_all_gather_collective_matmul_mode":
+            "post_spmd_conservative",
+            "xla_tpu_reduce_scatter_collective_matmul_mode":
+            "post_spmd_conservative",
+            "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
+        }
+        sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
+        if sc_offload_bytes > 0:
+            threshold_bytes = str(sc_offload_bytes)
+            compiler_options[
+                "xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes"] = (
+                    threshold_bytes)
+            compiler_options[
+                "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
+                    threshold_bytes)
+        step_fun_with_options = jax.jit(
+            step_fun_impl,
+            donate_argnames=("kv_caches", ),
+            out_shardings=(
+                None,  # kv_caches - keep original sharding
+                NamedSharding(self.mesh,
+                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+                None,  # empty list
+                None,  # expert ids
+            ),
+            static_argnames=(
+                "layer_name_to_kvcache_index",
+                "is_first_rank",
+                "is_last_rank",
+            ),
+            compiler_options=compiler_options,
+        )
+
+        if self.is_draft_model:
+            self.step_fn_no_options = draft_step_fun
+            return draft_step_fun
+        else:
+            self.step_fn_no_options = step_fun_no_options
+            return step_fun_with_options
 
     def wrap_precompile_vision_encoder_fn(
         self,
