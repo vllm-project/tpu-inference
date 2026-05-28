@@ -354,8 +354,6 @@ def test_eagle3_performance(
         model_name='meta-llama/Llama-3.1-8B-Instruct')
 
 
-@pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
-                    reason="MTP is only supported with vllm model impl.")
 @pytest.mark.parametrize("async_scheduling", [False, True])
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
@@ -367,8 +365,8 @@ def test_mtp_correctness(
     they should be the same when using MTP speculative decoding.
     '''
     model_name = "Qwen/Qwen3.5-4B"
-    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
-    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
 
     extra_kwargs = {
         "seed": 42,
@@ -393,8 +391,6 @@ def test_mtp_correctness(
     )
 
 
-@pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
-                    reason="MTP is only supported with vllm model impl.")
 @pytest.mark.parametrize(
     "max_num_seqs,async_scheduling",
     [
@@ -413,8 +409,8 @@ def test_mtp_performance(
     Test that MTP speculative decoding achieves the expected acceptance rate.
     '''
     model_name = "Qwen/Qwen3.5-4B"
-    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
-    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
 
     extra_kwargs = {
         "seed": 42,
