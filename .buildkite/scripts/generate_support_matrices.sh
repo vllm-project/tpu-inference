@@ -24,11 +24,11 @@ DEFAULT_FEATURES_FILE=".buildkite/features/default_features.txt"
 # Note: This script assumes the metadata keys contain newline-separated lists.
 mapfile -t model_list < <(buildkite-agent meta-data get "${MODEL_LIST_KEY}" --default "")
 mapfile -t metadata_feature_list < <(buildkite-agent meta-data get "${FEATURE_LIST_KEY}" --default "")
-MODEL_STAGES=("Type" "UnitTest" "Accuracy/Correctness" "Benchmark")
-FEATURE_STAGES=("CorrectnessTest" "PerformanceTest")
-FEATURE_STAGES_QUANTIZATION=("QuantizationMethods" "RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
-FEATURE_STAGES_MICROBENCHMARKS=("CorrectnessTest" "PerformanceTest")
-PARALLELISM_STAGES=("Single-Host CorrectnessTest" "Single-Host PerformanceTest" "Multi-Host CorrectnessTest" "Multi-Host PerformanceTest")
+MODEL_STAGES=("Type" "Machine Type" "Framework" "UnitTest" "Accuracy/Correctness" "Benchmark")
+FEATURE_STAGES=("Machine Type" "Framework" "CorrectnessTest" "PerformanceTest")
+FEATURE_STAGES_QUANTIZATION=("Machine Type" "Framework" "QuantizationMethods" "RecommendedTPUGenerations" "CorrectnessTest" "PerformanceTest")
+FEATURE_STAGES_MICROBENCHMARKS=("Machine Type" "Framework" "CorrectnessTest" "PerformanceTest")
+PARALLELISM_STAGES=("Machine Type" "Framework" "Single-Host CorrectnessTest" "Single-Host PerformanceTest" "Multi-Host CorrectnessTest" "Multi-Host PerformanceTest")
 
 get_tpu_generation() {
     local key="$1"
@@ -107,7 +107,7 @@ process_models() {
         local category_csv="${TPU_DIR}/model_support_matrix.csv"
         # Initialize CSV if not exists
         if [ ! -f "$category_csv" ]; then
-            echo "Model,Type,UnitTest,Accuracy/Correctness,Benchmark" > "$category_csv"
+            echo "Model,Type,Machine Type,Framework,UnitTest,Accuracy/Correctness,Benchmark" > "$category_csv"
             model_csv_files+=("$category_csv")
         fi
         # Build Row
@@ -124,6 +124,10 @@ process_models() {
                 else 
                     result="Text"
                 fi
+            elif [ "$stage" == "Machine Type" ]; then
+                result="Multimodal"
+            elif [ "$stage" == "Framework" ]; then
+                result="Multimodal"
             else
                 result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}:${stage}" --default "❓ Untested")
             fi
