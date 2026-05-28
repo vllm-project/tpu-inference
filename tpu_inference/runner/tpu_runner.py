@@ -1103,9 +1103,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         full_hidden_states = hidden_states
 
         if self.input_batch.num_prompt_logprobs:
-            # Compute logits for ALL token positions once, then select decode
-            # rows — avoids a second compute_logits_fn call (which would require
-            # another large matmul + all-gather across TP devices).
+            # Compute logits for ALL token positions once.
             full_logits = self.compute_logits_fn(
                 self.state_leaves,
                 full_hidden_states,
