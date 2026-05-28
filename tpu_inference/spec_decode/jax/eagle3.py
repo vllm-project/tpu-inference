@@ -140,7 +140,8 @@ class Eagle3Proposer:
             num_reqs: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray]:
         """JIT-compiled helper for preparing the input IDs for the draft model."""
 
-        def _body(query_start_loc, target_token_ids, next_token_ids, num_reqs):
+        def _sharded_prepare_input_ids(query_start_loc, target_token_ids,
+                                       next_token_ids, num_reqs):
             last_token_indices = query_start_loc[1:] - 1
             # Shift the input ids by one token.
             rolled_input_ids = jnp.roll(target_token_ids, -1, axis=0)
@@ -164,7 +165,7 @@ class Eagle3Proposer:
 
         data_spec = PartitionSpec(ShardingAxisName.ATTN_DATA)
         return jax.shard_map(
-            _body,
+            _sharded_prepare_input_ids,
             mesh=self.mesh,
             in_specs=(data_spec, data_spec, data_spec, data_spec),
             out_specs=(data_spec, data_spec),
@@ -176,7 +177,8 @@ class Eagle3Proposer:
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
         """JIT-compiled helper for preparing inputs in the loop of prediction."""
 
-        def _body(positions, seq_lens, block_tables):
+        def _sharded_update_inputs_for_loop_speculation(
+                positions, seq_lens, block_tables):
             positions += 1
             exceeds_max_model_len = positions >= self.runner.max_model_len
             if exceeds_max_model_len.ndim == 2:
@@ -214,7 +216,7 @@ class Eagle3Proposer:
         data_spec = PartitionSpec(ShardingAxisName.ATTN_DATA)
         (positions, clamped_positions, new_seq_lens, query_start_loc,
          new_block_tables) = jax.shard_map(
-             _body,
+             _sharded_update_inputs_for_loop_speculation,
              mesh=self.mesh,
              in_specs=(data_spec, data_spec, data_spec),
              out_specs=(data_spec, data_spec, data_spec, data_spec, data_spec),
@@ -413,8 +415,8 @@ class Eagle3Proposer:
                           if attn_metadata.input_positions.ndim == 2 else
                           data_spec)
 
-        def _select(input_ids, token_indices, input_positions,
-                    aux_hidden_states):
+        def _sharded_select_target_tokens_and_hidden_states(
+                input_ids, token_indices, input_positions, aux_hidden_states):
             target_token_ids = input_ids[token_indices]
             # Update positions to match the selected tokens.
             if input_positions.ndim == 2:
@@ -427,7 +429,7 @@ class Eagle3Proposer:
             return target_token_ids, input_positions, aux_states_processed
 
         target_token_ids, input_positions, aux_states_processed = jax.shard_map(
-            _select,
+            _sharded_select_target_tokens_and_hidden_states,
             mesh=self.mesh,
             in_specs=(data_spec, data_spec, positions_spec, data_spec),
             out_specs=(data_spec, positions_spec, data_spec),
