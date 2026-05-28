@@ -596,7 +596,9 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
                             dummy_tensor = torch.zeros(param.value.shape,
                                                        dtype=torch.int32)
                         else:
-                            dummy_tensor = torch.zeros(param.value.shape,
+                            # centroids.weight must be generated in PyTorch layout
+                            # (out_features, in_features), which is transposed compared to JAX.
+                            dummy_tensor = torch.zeros(param.value.shape[::-1],
                                                        dtype=torch.float32)
                         yield key, dummy_tensor
 
