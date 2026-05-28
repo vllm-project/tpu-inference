@@ -71,11 +71,11 @@ FRAMEWORKS=("flax_nnx" "vllm")
 
 
 if [[ "$RUN_V6" == "true" ]]; then
-    ACTIVE_CONFIGS+=("v6e:v6")
+    ACTIVE_CONFIGS+=("v6")
 fi
 
 if [[ "$RUN_V7" == "true" ]]; then
-    ACTIVE_CONFIGS+=("v7x:v7")
+    ACTIVE_CONFIGS+=("v7")
 fi
 
 # Determine sub-directory based on TPU_VERSION
@@ -133,7 +133,7 @@ process_models() {
         # Second-level loop: Machine type configuration
         for config in "${ACTIVE_CONFIGS[@]}"; do
             # Parse in order: display name (v6e), Metadata prefix (v6)
-            IFS=":" read -r tpu_version prefix <<< "$config"
+            IFS=":" read -r prefix <<< "$config"
 
             # Third-level loop: Model
             for model in "${model_list[@]:-}"; do
@@ -143,7 +143,7 @@ process_models() {
                 category=$(buildkite-agent meta-data get "${prefix}${model}_category" --default "text-only")
                 
                 local row="\"$model\""
-                
+                echo "[DEBUG] prefix: ${prefix}"
                 for stage in "${MODEL_STAGES[@]}"; do
                     local result
                     if [ "$stage" == "Type" ]; then
@@ -153,9 +153,9 @@ process_models() {
                         else result="Text"
                         fi
                     elif [ "$stage" == "Machine Type" ]; then
-                        if [ "$tpu_version" == "v6e" ]; then
+                        if [ "$prefix" == "v6" ]; then
                             result="v6e"
-                        elif [ "$tpu_version" == "tpu7x" ]; then
+                        elif [ "$prefix" == "v7" ]; then
                             result="v7x"
                         else
                             result="unknown"
