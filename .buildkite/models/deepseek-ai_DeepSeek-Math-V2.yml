@@ -74,7 +74,7 @@ steps:
       MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:deepseek-ai_DeepSeek-Math-V2:Benchmark" "passed"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:deepseek-ai/DeepSeek-Math-V2:Benchmark" "passed"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance benchmark result for deepseek-ai/DeepSeek-Math-V2"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_deepseek-ai_DeepSeek-Math-V2_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-Math-V2_Benchmark"
