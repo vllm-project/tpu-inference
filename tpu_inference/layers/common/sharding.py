@@ -183,8 +183,6 @@ class ShardingConfigManager:
         # It is not used (we fall back to single-process SPMD DP) when:
         #  - attention DP is enabled
         #  - running on Pathways
-        # MoE without attention DP is fine — experts shard inside each replica
-        # so each MPMD process still owns a self-contained model.
         multiprocess_dp = (envs.TPU_MULTIPROCESS_DP and data_parallelism > 1
                            and not enable_dp_attention
                            and not vllm_envs.VLLM_TPU_USING_PATHWAYS)
