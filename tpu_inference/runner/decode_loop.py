@@ -98,7 +98,6 @@ def _split_rngs(rng, static_size, dynamic_size):
         "sample_fn",
         "mesh",
         "static_max_decode_steps",
-        "terminate_on_any_eos",
         "eos_token_id",
         "padding_token_id",
         "dp_size",
@@ -143,7 +142,6 @@ def _decode_core(
     mesh,
     max_decode_steps,
     static_max_decode_steps,
-    terminate_on_any_eos,
     eos_token_id,
     padding_token_id,
     dp_size,
@@ -235,9 +233,7 @@ def _decode_core(
         i = carry[0]
         eos_flag = carry[-1]
         not_done = i < max_decode_steps
-        if terminate_on_any_eos:
-            return jnp.logical_and(not_done, jnp.logical_not(eos_flag))
-        return not_done
+        return jnp.logical_and(not_done, jnp.logical_not(eos_flag))
 
     def body_fn(carry):
         i, ct, am, pos, sl, kvc, tb, eb, eos_flag = _unpack(carry)
@@ -283,7 +279,6 @@ def continue_decode(
     *,
     mesh: Any,
     sampling_metadata: Any,
-    terminate_on_any_eos: bool = False,
     inputs_embeds: jax.Array | None = None,
     layer_name_to_kvcache_index: tuple[tuple[str, int], ...] = (),
     lora_metadata: dict | None = None,
@@ -312,8 +307,6 @@ def continue_decode(
       rng: RNG key.
       mesh: Device mesh (static; stable runner object).
       sampling_metadata: Per-call sampling metadata pytree (traced).
-      terminate_on_any_eos: Whether to early-exit on-device when any request
-        hits EOS (data-dependent trip count, no host sync).
       inputs_embeds: Optional input embeddings.
       layer_name_to_kvcache_index: Mapping from layer name to KV cache index.
       lora_metadata: Optional LoRA metadata.
@@ -414,7 +407,6 @@ def continue_decode(
          mesh=mesh,
          max_decode_steps=max_decode_steps,
          static_max_decode_steps=static_max_decode_steps,
-         terminate_on_any_eos=terminate_on_any_eos,
          eos_token_id=eos_token_id,
          padding_token_id=padding_token_id,
          dp_size=dp_size,
