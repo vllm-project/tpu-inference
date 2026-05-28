@@ -171,42 +171,50 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         )
 
         mesh = jax.sharding.get_abstract_mesh()
-
-        # Collapse the N-D mesh into a 2D view: one axis for all mesh axes
-        # backing ATTN_DATA (flattened) and one for all mesh axes backing
-        # ATTN_HEAD (flattened). Then split the head axis into
-        # (kv_head, replica) of sizes (head_size // replicas, replicas).
-        #
-        # The `replica` sub-axis is later marked replicated via `shard_map`
-        # with no data movement, since `_tile_kv` already placed identical
-        # KV-head copies on each replica-group of devices when
-        # TP > total_num_kv_heads.
+        # Split the `kv_head` mesh axis (size kv_size) into a pair
+        # `(kv_head, replica)` of sizes `(kv_size // replicas, replicas)`.
+        # The `replica` sub-axis is later replicated via `shard_map` with no
+        # data movement, since `_tile_kv` already placed identical KV-head
+        # copies on each replica-group of devices when TP > total_num_kv_heads.
         replicas = self.num_kv_head_replicas
-        attn_data_axis = 'attn_data'
-        attn_head_axis = 'attn_head'
-        replica_axis = 'replica'
+        kv_head_axis = None
+        for a in reversed(mesh.axis_names):
+            if a in ShardingAxisName.ATTN_HEAD and get_mesh_shape_product(
+                    mesh, a) >= replicas:
+                kv_head_axis = a
+                break
 
-        attn_data_size = get_mesh_shape_product(mesh,
-                                                ShardingAxisName.ATTN_DATA)
-        attn_head_size = get_mesh_shape_product(mesh,
-                                                ShardingAxisName.ATTN_HEAD)
-
-        if attn_head_size % replicas != 0:
+        if kv_head_axis is None:
             raise ValueError(
-                f"Flattened ATTN_HEAD mesh size ({attn_head_size}) must be "
-                f"divisible by num_kv_head_replicas ({replicas})")
+                f"Cannot find a mesh axis to split for KV-head replication: "
+                f"no axis in {mesh.axis_names} contains "
+                f"{ShardingAxisName.ATTN_HEAD} and has size >= {replicas}")
 
+        replica_axis = 'replica'
+        data_axis = ShardingAxisName.ATTN_DATA
+        head_axis = ShardingAxisName.ATTN_HEAD
+
+        i = mesh.axis_names.index(kv_head_axis)
+        kv_size = mesh.axis_sizes[i]
+        kv_type = mesh.axis_types[i]
         new_mesh = jax.sharding.AbstractMesh(
-            (attn_data_size, attn_head_size // replicas, replicas),
-            (attn_data_axis, attn_head_axis, replica_axis),
+            mesh.axis_sizes[:i] + (kv_size // replicas, replicas) +
+            mesh.axis_sizes[i + 1:],
+            mesh.axis_names[:i] + (kv_head_axis, replica_axis) +
+            mesh.axis_names[i + 1:],
+            mesh.axis_types[:i] + (kv_type, kv_type) + mesh.axis_types[i + 1:],
         )
+        if isinstance(head_axis, tuple):
+            in_head_axis = list(head_axis)
+            in_head_axis.insert(
+                in_head_axis.index(kv_head_axis) + 1, replica_axis)
+        else:
+            in_head_axis = (head_axis, replica_axis)
 
-        @shard_map(
-            mesh=new_mesh,
-            in_specs=P(attn_data_axis, (attn_head_axis, replica_axis)),
-            out_specs=P(attn_data_axis, attn_head_axis),
-            check_vma=False,
-        )
+        @shard_map(mesh=new_mesh,
+                   in_specs=P(data_axis, in_head_axis),
+                   out_specs=P(data_axis, head_axis),
+                   check_vma=False)
         def _mark_kv_head_replicated(t):
             return t
 
