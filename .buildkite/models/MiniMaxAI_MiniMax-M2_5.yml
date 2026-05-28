@@ -13,17 +13,17 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Unit tests for MiniMaxAI/MiniMax-M2.5"
-    key: "${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Unit tests for MiniMaxAI/MiniMax-M2.5"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MiniMaxAI_MiniMax-M2_5_UnitTest"
     soft_fail: true
     agents:
       queue: cpu  # TODO: replace with execution environment
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_UnitTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record unit test result for MiniMaxAI/MiniMax-M2.5"
-    key: "${TPU_VERSION:-tpu6e}_record_MiniMaxAI_MiniMax-M2_5_UnitTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_UnitTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MiniMaxAI_MiniMax-M2_5_UnitTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record unit test result for MiniMaxAI/MiniMax-M2.5"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_MiniMaxAI_MiniMax-M2_5_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MiniMaxAI_MiniMax-M2_5_UnitTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "MiniMaxAI/MiniMax-M2.5"
@@ -33,11 +33,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_UnitTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MiniMaxAI_MiniMax-M2_5_UnitTest
 
-  - label: "${TPU_VERSION:-tpu6e} Accuracy for MiniMaxAI/MiniMax-M2.5"
-    key: "${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_MiniMaxAI_MiniMax-M2_5_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Accuracy for MiniMaxAI/MiniMax-M2.5"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MiniMaxAI_MiniMax-M2_5_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_MiniMaxAI_MiniMax-M2_5_UnitTest"
     soft_fail: true
     agents:
       queue: cpu  # TODO: replace with execution environment
@@ -47,10 +47,10 @@ steps:
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_Accuracy" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for MiniMaxAI/MiniMax-M2.5"
-    key: "${TPU_VERSION:-tpu6e}_record_MiniMaxAI_MiniMax-M2_5_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_Accuracy"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MiniMaxAI_MiniMax-M2_5_Accuracy" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record accuracy result for MiniMaxAI/MiniMax-M2.5"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_MiniMaxAI_MiniMax-M2_5_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MiniMaxAI_MiniMax-M2_5_Accuracy"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "MiniMaxAI/MiniMax-M2.5"
@@ -60,11 +60,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_Accuracy
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MiniMaxAI_MiniMax-M2_5_Accuracy
 
-  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for MiniMaxAI/MiniMax-M2.5"
-    key: "${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_MiniMaxAI_MiniMax-M2_5_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Performance benchmarks for MiniMaxAI/MiniMax-M2.5"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MiniMaxAI_MiniMax-M2_5_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_MiniMaxAI_MiniMax-M2_5_Accuracy"
     soft_fail: true
     agents:
       queue: cpu  # TODO: replace with execution environment
@@ -74,10 +74,10 @@ steps:
       MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_Benchmark" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for MiniMaxAI/MiniMax-M2.5"
-    key: "${TPU_VERSION:-tpu6e}_record_MiniMaxAI_MiniMax-M2_5_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_Benchmark"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MiniMaxAI_MiniMax-M2_5_Benchmark" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance benchmark result for MiniMaxAI/MiniMax-M2.5"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_MiniMaxAI_MiniMax-M2_5_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MiniMaxAI_MiniMax-M2_5_Benchmark"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "MiniMaxAI/MiniMax-M2.5"
@@ -87,4 +87,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_MiniMaxAI_MiniMax-M2_5_Benchmark
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MiniMaxAI_MiniMax-M2_5_Benchmark

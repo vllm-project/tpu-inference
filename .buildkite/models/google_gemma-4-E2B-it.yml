@@ -18,8 +18,8 @@
 # correctness bug in our path).
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-E2B-it"
-    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Unit tests for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_google_gemma-4-E2B-it_UnitTest"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     soft_fail: true
@@ -35,9 +35,9 @@ steps:
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-E2B-it --tensor-parallel-size 1 --max-num-batched-tokens 4096 --max-model-len 4096 --use-chat-template'
 
-  - label: "${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-4-E2B-it"
-    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_UnitTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record unit test result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_google_gemma-4-E2B-it_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_google_gemma-4-E2B-it_UnitTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "google/gemma-4-E2B-it"
@@ -47,11 +47,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_google_gemma-4-E2B-it_UnitTest
 
-  - label: "${TPU_VERSION:-tpu6e} Accuracy for google/gemma-4-E2B-it"
-    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Accuracy for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_google_gemma-4-E2B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_google_gemma-4-E2B-it_UnitTest"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     soft_fail: true
@@ -69,9 +69,9 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
 
-  - label: "${TPU_VERSION:-tpu6e} Record integration test result for google/gemma-4-E2B-it"
-    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record integration test result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_google_gemma-4-E2B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_google_gemma-4-E2B-it_Accuracy"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "google/gemma-4-E2B-it"
@@ -81,11 +81,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_google_gemma-4-E2B-it_Accuracy
 
-  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for google/gemma-4-E2B-it"
-    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Performance benchmarks for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_google_gemma-4-E2B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_google_gemma-4-E2B-it_Accuracy"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     soft_fail: true
@@ -115,9 +115,9 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh bash -c 'TIMEOUT_SECONDS=960 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
 
-  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-E2B-it"
-    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance benchmark result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_google_gemma-4-E2B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_google_gemma-4-E2B-it_Benchmark"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "google/gemma-4-E2B-it"
@@ -127,4 +127,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_google_gemma-4-E2B-it_Benchmark
