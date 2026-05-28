@@ -106,42 +106,6 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <br>
 
-### 🤝 How to Contribute a Model in 3 Steps
-
-Do you see a model in the **[Tested Models Matrix](#tested-models)** above that is marked as **❓ Untested** or **❌ Failing**? These are our active targets! Follow this quick roadmap to claim and add support:
-
----
-
-#### 1️⃣ Step 1: Pick and Claim Your Target 🎯
-* **Find a target:** Look at the Support Matrix above for any model marked **❓ Untested** or **❌ Failing**.
-* **Claim it:** To avoid overlapping work, search our issues or open a new one titled `[Model Support] Add <Model Name>` to let the community know you are actively working on it.
-
----
-
-#### 2️⃣ Step 2: Select Your Path & Set Up 💻
-Choose your developer frontend path depending on your background and model:
-* 🔹 **Torchax Path:** *Best for bringing existing upstream PyTorch vLLM models to TPU instantly.* Read the [Torchax Model Development Guide](docs/developer_guides/torchax_model_development.md).
-* 🔹 **JAX Native Path:** *Best for custom TPU layers, expert optimization, or Mixture of Experts (MoE).* Read the [JAX Model Development Guide](docs/developer_guides/jax_model_development.md).
-
-**Set up your workspace in 60 seconds:**
-```bash
-git clone https://github.com/vllm-project/tpu-inference.git && cd tpu-inference
-pip install -e ".[dev]"
-pip install pre-commit && pre-commit install
-```
-
----
-
-#### 3️⃣ Step 3: Run Local Tests & Submit PR 🚀
-Verify your model's weight loader logic and layers locally before opening a PR:
-```bash
-# Verify your model locally
-pytest tests/models/jax/test_your_model_name.py
-```
-* **Submit PR:** Open a pull request on GitHub. **Ensure you include/update the model's unit test in `tests/models/`!**
-* **Watch it Land:** Our automated CI fleet will compile and benchmark your code on real Google Cloud TPU VM nodes. Once merged, **your model status in this README will automatically update to ✅ Passing within 24 hours!**
-
-<br>
 
 
 ### Release Support Matrices
@@ -943,17 +907,28 @@ pytest tests/models/jax/test_your_model_name.py
 [![bug](https://img.shields.io/badge/bug-15-d73a4a?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22bug%22) [![needs more info](https://img.shields.io/badge/needs%20more%20info-6-aaaaff?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22needs%20more%20info%22) [![contribution-welcome](https://img.shields.io/badge/contribution--welcome-5-ededed?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22contribution-welcome%22) [![enhancement](https://img.shields.io/badge/enhancement-5-a2eeef?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22enhancement%22) [![good first issue](https://img.shields.io/badge/good%20first%20issue-5-7057ff?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good%20first%20issue%22) [![Total Open Issues](https://img.shields.io/badge/Total%20Open%20Issues-54-238636?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues)
 <!-- END: issue_badges -->
 
-We're thrilled you're interested in contributing to the vLLM TPU project! Your help is essential for making our tools better for everyone. There are many ways to get involved, even if you're not ready to write code.
+We're thrilled you're interested in contributing to the vLLM TPU project! Your help is essential for making our tools better for everyone.
 
-**Ways to Contribute:**
+### 🚀 Add or Fix a Model in 3 Steps
+If you're ready to write code, implementing or fixing a model is the highest-impact way to start!
 
-- **🐞 Submit Bugs & Suggest Features:** See an issue or have an idea? Open a [new issue](https://github.com/vllm-project/tpu-inference/issues/new/choose) to let us know.
-- **👀 Provide Feedback on Pull Requests:** Lend your expertise by reviewing [open pull requests](https://github.com/vllm-project/tpu-inference/pulls) and helping us improve the quality of our codebase.
-- **📚 Improve Our Documentation:** Help us make our guides clearer. Fix a typo, clarify a confusing section, or write a new recipe.
+1. **Pick a Target:** Look at the **[Tested Models Matrix](#tested-models)** above. Any model marked **❓ Untested** or **❌ Failing** is an active target. Open or comment on its GitHub issue to claim it and prevent double-work.
+2. **Select Your Path & Set Up:** Read the [Torchax Guide](docs/developer_guides/torchax_model_development.md) (for PyTorch models) or [JAX Guide](docs/developer_guides/jax_model_development.md) (for native JAX models), then initialize your workspace:
+   ```bash
+   git clone https://github.com/vllm-project/tpu-inference.git && cd tpu-inference
+   pip install -e ".[dev]" && pre-commit install
+   ```
+3. **Verify & Submit PR:** Implement your model, verify it locally with `pytest tests/models/jax/test_your_model_name.py`, and open a pull request. **Ensure you include/update the model's unit test in `tests/models/`!** Once merged, the README matrix will automatically update to ✅ Passing within 24 hours.
 
-If you're ready to contribute code, our **[Contributing Guide](https://github.com/vllm-project/tpu-inference/blob/main/CONTRIBUTING.md)** is the best place to start. It covers everything you need to know, including:
+---
 
-- **Tips for finding an issue to work on** (we recommend starting with our **[good-first issues](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)**!.
+### 💡 Other Ways to Get Involved
+Even if you're not ready to write model code, you can make a huge difference:
+* **🐞 Submit Bugs & Suggest Features:** Spotted a bug or have an optimization idea? Open a [new issue](https://github.com/vllm-project/tpu-inference/new/choose) to let us know.
+* **👀 Provide PR Feedback:** Lend your expertise by reviewing [open pull requests](https://github.com/vllm-project/tpu-inference/pulls) and helping us improve quality.
+* **📚 Improve Our Documentation:** Help us make our guides clearer. Fix a typo, clarify a confusing section, or contribute a new recipe to the [AI Hypercomputer Recipes](https://github.com/AI-Hypercomputer/tpu-recipes).
+
+*For a full guide on our formatting rules, git workflow, and directory structures, check out our complete **[Contributing Guide](CONTRIBUTING.md)**.*
 
 <br>
 
