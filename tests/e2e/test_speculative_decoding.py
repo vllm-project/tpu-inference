@@ -318,8 +318,14 @@ def test_eagle3_correctness(
         async_scheduling=async_scheduling)
 
 
-@pytest.mark.parametrize("max_num_seqs", [1, 20])
-@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    "max_num_seqs,async_scheduling",
+    [
+        (1, False),
+        (20, False),
+        (20, True),
+    ],
+)
 def test_eagle3_performance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -350,7 +356,7 @@ def test_eagle3_performance(
 
 @pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
                     reason="MTP is only supported with vllm model impl.")
-@pytest.mark.parametrize("async_scheduling", [False])
+@pytest.mark.parametrize("async_scheduling", [False, True])
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -389,8 +395,14 @@ def test_mtp_correctness(
 
 @pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
                     reason="MTP is only supported with vllm model impl.")
-@pytest.mark.parametrize("max_num_seqs", [1, 20])
-@pytest.mark.parametrize("async_scheduling", [False])
+@pytest.mark.parametrize(
+    "max_num_seqs,async_scheduling",
+    [
+        (1, False),
+        (20, False),
+        (20, True),
+    ],
+)
 def test_mtp_performance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,

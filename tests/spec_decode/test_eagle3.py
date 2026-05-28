@@ -132,8 +132,6 @@ def test_prepare_inputs():
         block_tables=jnp.array([]),  # This will be replaced by the mock
         request_distribution=None,
     )
-    attn_metadata.query_start_loc_cpu = qsl_cpu
-    attn_metadata.seq_lens_cpu = sl_cpu
 
     # Expected results
     expected_new_qsl = np.zeros(max_num_seqs + 1, dtype=np.int32)
