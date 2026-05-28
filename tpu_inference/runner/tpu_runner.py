@@ -1356,10 +1356,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         expert_indices: Optional[jax.Array] = None,
         full_hidden_states: Optional[jax.Array] = None,
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
-        safe_req_id_to_index = {
-            req_id: self.input_batch.req_id_to_index.get(req_id, 0)
-            for req_id in scheduler_output.num_scheduled_tokens.keys()
-        }
         if padded_num_reqs is None:
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
                 self.input_batch.num_reqs, self.max_num_reqs)
@@ -1517,7 +1513,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Return Model output to executor
             model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
-                req_id_to_index=safe_req_id_to_index,
+                req_id_to_index=self.input_batch.req_id_to_index.copy(),
                 sampled_token_ids=[],  # Fill in async get
                 logprobs=None,
                 prompt_logprobs_dict=prompt_logprobs_dict,
@@ -1569,13 +1565,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             logprobs_lists = None
 
-        safe_req_id_to_index = {
-            req_id: self.input_batch.req_id_to_index.get(req_id, 0)
-            for req_id in scheduler_output.num_scheduled_tokens.keys()
-        }
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
-            req_id_to_index=safe_req_id_to_index,
+            req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,

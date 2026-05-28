@@ -553,6 +553,7 @@ class TestTPUJaxRunner:
         # Verify generated tokens are trimmed at EOS and placed in output
         output = runner._continue_decode_output
         assert output is not None
+        assert output.req_id_to_index == {"req1": 0, "req2": 1, "req3": 2}
 
         # req1: [101, 102, 999] (length 3)
         assert output.sampled_token_ids[0] == [101, 102, 999]
