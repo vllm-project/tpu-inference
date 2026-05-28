@@ -26,6 +26,8 @@ from vllm.model_executor.models.qwen3_5 import \
     Qwen3_5MoeForConditionalGeneration
 from vllm.model_executor.models.qwen3_omni_moe_thinker import \
     Qwen3OmniMoeThinkerForConditionalGeneration
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import \
+    Qwen3OmniMoeConfig
 
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
@@ -62,11 +64,9 @@ def has_jittable_vision(vllm_model) -> bool:
 def get_vision_config(hf_config: Any) -> Any:
     """Extract vision configuration from hf_config, supporting nested/thinker wrappers."""
 
-    if hasattr(hf_config, "vision_config"):
-        return hf_config.vision_config
-    if hasattr(hf_config, "thinker_config"):
+    if isinstance(hf_config, Qwen3OmniMoeConfig):
         return hf_config.thinker_config.vision_config
-    return hf_config
+    return hf_config.vision_config
 
 
 def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
