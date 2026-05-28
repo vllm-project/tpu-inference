@@ -1385,6 +1385,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if max_decode_steps <= 0:
             max_decode_steps = 1
 
+        max_decode_steps_arr = jnp.array(max_decode_steps, dtype=jnp.int32)
+
         lora_metadata = self.lora_utils.extract_lora_metadata()
 
         terminate_on_any_eos = self.vllm_config.additional_config.get(
@@ -1415,7 +1417,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
                 init_state=init_state,
                 kv_caches=self.kv_caches,
-                max_decode_steps=max_decode_steps,
+                max_decode_steps=max_decode_steps_arr,
                 static_max_decode_steps=user_max_decode_steps,
                 eos_token_id=self.eos_token_id,
                 padding_token_id=self.pad_token_id,
@@ -1524,7 +1526,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 reasons.append("kv_cache_limit")
             termination_reason = "_".join(reasons) if reasons else "max_steps"
 
-        logger.info(
+        logger.debug(
             "continue_decode finished: actual steps: %d, reason: %s, initial_active_reqs: %d (max_steps: %d, EOS hits: %d)",
             actual_steps, termination_reason, num_reqs, max_decode_steps,
             num_eos_hits)
@@ -1536,6 +1538,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
+            kv_connector_output=kv_connector_output,
         )
 
         if expert_indices_cpu is not None:
