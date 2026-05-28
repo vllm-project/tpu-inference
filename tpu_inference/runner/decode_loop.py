@@ -81,13 +81,13 @@ def _update_loop_state(
     return new_active_mask, next_input_ids, new_positions, new_seq_lens, step_record_tokens, any_hit_eos
 
 
-@functools.partial(jax.jit, static_argnums=(1, 2))
+@functools.partial(jax.jit, static_argnums=(1, ))
 def _split_rngs(rng, static_size, dynamic_size):
     all_rngs = jax.random.split(rng, static_size + 1)
     # Keep the per-step keys as an array (not a Python tuple): the decode loop
     # is a lax.while_loop, so step keys are indexed by a *traced* step counter,
     # which requires array indexing.
-    return all_rngs[:dynamic_size], all_rngs[dynamic_size]
+    return all_rngs[:static_size], all_rngs[dynamic_size]
 
 
 @functools.partial(
@@ -97,7 +97,7 @@ def _split_rngs(rng, static_size, dynamic_size):
         "compute_logits_fn",
         "sample_fn",
         "mesh",
-        "max_decode_steps",
+        "static_max_decode_steps",
         "terminate_on_any_eos",
         "eos_token_id",
         "padding_token_id",
@@ -114,10 +114,10 @@ def _split_rngs(rng, static_size, dynamic_size):
     # Hoisted here from the model's step_fun: JAX forbids compiler_options on
     # a nested jit, so they must live on this top-level loop jit instead.
     compiler_options={
-        "xla_tpu_all_gather_collective_matmul_mode":
-        "post_spmd_conservative",
+        "xla_tpu_all_gather_collective_matmul_mode": "post_spmd_conservative",
         "xla_tpu_reduce_scatter_collective_matmul_mode":
         "post_spmd_conservative",
+        "xla_tpu_use_minor_sharding_for_major_trivial_input": "true"
     },
 )
 def _decode_core(
@@ -142,6 +142,7 @@ def _decode_core(
     sample_fn,
     mesh,
     max_decode_steps,
+    static_max_decode_steps,
     terminate_on_any_eos,
     eos_token_id,
     padding_token_id,
@@ -212,12 +213,12 @@ def _decode_core(
                 kvc, step_record_tokens, expert_indices_step, any_hit_eos)
 
     batch_size = current_tokens.shape[0]
-    token_buffer = jnp.full((max_decode_steps, batch_size),
+    token_buffer = jnp.full((static_max_decode_steps, batch_size),
                             padding_token_id,
                             dtype=current_tokens.dtype)
     expert_buffer = None
     if has_experts:
-        expert_buffer = jnp.zeros((max_decode_steps, ) + expert_shape,
+        expert_buffer = jnp.zeros((static_max_decode_steps, ) + expert_shape,
                                   dtype=expert_dtype)
 
     def _pack(i, ct, am, pos, sl, kvc, tb, eb, eos):
@@ -390,8 +391,8 @@ def continue_decode(
             expert_shape = tuple(expert_struct.shape)
             expert_dtype = expert_struct.dtype
 
-    (step_counter, current_tokens, active_mask, positions, seq_lens,
-     kv_caches, token_buffer, expert_buffer) = _decode_core(
+    (step_counter, current_tokens, active_mask, positions, seq_lens, kv_caches,
+     token_buffer, expert_buffer) = _decode_core(
          state=state,
          kv_caches=kv_caches,
          step_rngs=step_rngs,
@@ -412,6 +413,7 @@ def continue_decode(
          sample_fn=sample_fn,
          mesh=mesh,
          max_decode_steps=max_decode_steps,
+         static_max_decode_steps=static_max_decode_steps,
          terminate_on_any_eos=terminate_on_any_eos,
          eos_token_id=eos_token_id,
          padding_token_id=padding_token_id,
