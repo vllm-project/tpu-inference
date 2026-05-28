@@ -138,10 +138,9 @@ process_models() {
             # Third-level loop: Model
             for model in "${model_list[@]:-}"; do
                 if [[ -z "$model" ]]; then continue; fi
-                
                 # Get the category (default: text-only)
                 local category
-                category=$(buildkite-agent meta-data get "${prefix}_${model}_category" --default "text-only")
+                category=$(buildkite-agent meta-data get "${prefix}${model}_category" --default "text-only")
                 
                 local row="\"$model\""
                 
@@ -165,7 +164,9 @@ process_models() {
                         result="${framework}"
                     else
                         local meta_key="${prefix}:${framework}:${model}:${stage}"
+                        echo "[DEBUG] Looking up meta-data key: ${meta_key}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
+                        echo "[DEBUG] Result found: ${result}"
                     fi
                     
                     row="$row,$result"
