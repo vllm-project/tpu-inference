@@ -511,15 +511,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         """Generative model or pooling model select different computations."""
         self.enable_continue_decode = self.vllm_config.additional_config.get(
             "enable_continue_decode", False)
-        eos_token_id = runner_utils.get_eos_token_id(self.model_config)
-        if isinstance(eos_token_id, int):
-            self.eos_token_id = (eos_token_id, )
-        elif isinstance(eos_token_id, list):
-            self.eos_token_id = tuple(eos_token_id)
-        elif eos_token_id is None:
-            self.eos_token_id = ()
-        else:
-            self.eos_token_id = tuple(eos_token_id)
+        self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
         self.pad_token_id = runner_utils.get_pad_token_id(self.model_config)
 
     def _init_random(self):
