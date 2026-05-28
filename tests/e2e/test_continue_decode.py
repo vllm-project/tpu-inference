@@ -177,49 +177,19 @@ def _check_performance(
         f"({min_speedup:.2f}x): {speedup:.2f}x")
 
 
-@pytest.fixture
-def test_prompts():
+def generate_test_prompts(num_prompts: int = 4) -> list[str]:
+    base_text = (
+        "The rapid advancement of artificial intelligence has transformed "
+        "numerous industries and continues to reshape our understanding of "
+        "technology's potential. Machine learning algorithms have become "
+        "increasingly sophisticated, enabling computers to perform tasks "
+        "that were once thought to require human intelligence. From natural "
+        "language processing to computer vision, AI systems are now capable "
+        "of understanding context, recognizing patterns, and making decisions "
+        "with remarkable accuracy. ")
     return [
-        """The following are multiple choice questions (with answers) about computer science:
-
-Question: What is the worst-case time complexity of quicksort?
-Choices:
-(A) O(n log n)
-(B) O(n)
-(C) O(n^2)
-(D) O(log n)
-
-Please think carefully and give the answer.""",
-        """The following are multiple choice questions (with answers) about machine learning:
-
-Question: Which of the following activation functions suffers most from the vanishing gradient problem?
-Choices:
-(A) ReLU
-(B) LeakyReLU
-(C) Sigmoid
-(D) GELU
-
-Please think carefully and give the answer.""",
-        """The following are multiple choice questions (with answers) about linear algebra:
-
-Question: What is the determinant of an orthogonal matrix?
-Choices:
-(A) 0
-(B) 1 or -1
-(C) Any positive real number
-(D) Depends on the matrix dimensions
-
-Please think carefully and give the answer.""",
-        """The following are multiple choice questions (with answers) about hardware architecture:
-
-Question: In a highly pipelined processor, which hazard occurs when a requested instruction depends on the results of a previous instruction that has not yet completed?
-Choices:
-(A) Structural hazard
-(B) Control hazard
-(C) Data hazard
-(D) Exception hazard
-
-Please think carefully and give the answer."""
+        f"Prompt {i}: {base_text} Write an essay on this topic."
+        for i in range(num_prompts)
     ]
 
 
@@ -276,8 +246,7 @@ def sampling_params():
     ],
     ids=lambda x: x["id"],
 )
-def test_continue_decode_correctness_matrix(matrix_case, test_prompts,
-                                            sampling_params):
+def test_continue_decode_correctness_matrix(matrix_case, sampling_params):
     """Verify continue_decode correctness across benchmarking script execution scenarios."""
     os.environ['SKIP_JAX_PRECOMPILE'] = '1'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
@@ -292,17 +261,19 @@ def test_continue_decode_correctness_matrix(matrix_case, test_prompts,
         additional_config={},
     )
 
+    prompts = generate_test_prompts(4)
+
     # 1. Generate ground-truth outputs using baseline single-step decoding
     config.additional_config = {"enable_continue_decode": False}
     baseline_outputs, _ = _run_inference_and_return_outputs(config,
-                                                            test_prompts,
+                                                            prompts,
                                                             sampling_params,
                                                             enable_export=True)
 
     # 2. Generate outputs using optimized multi-step continue decode
     config.additional_config = {"enable_continue_decode": True}
     continue_decode_outputs, _ = _run_inference_and_return_outputs(
-        config, test_prompts, sampling_params, enable_export=True)
+        config, prompts, sampling_params, enable_export=True)
 
     # 3. Call shared correctness verification logic matching test_data_parallel.py
     _check_correctness(f"Continue decode ({matrix_case['id']})",
@@ -354,7 +325,7 @@ def test_continue_decode_correctness_matrix(matrix_case, test_prompts,
     ],
     ids=lambda x: x["id"],
 )
-def test_continue_decode_performance_overhead(perf_case, test_prompts):
+def test_continue_decode_performance_overhead(perf_case):
     """Verify that continue_decode performance overhead matches benchmark scenarios on MMLU workloads."""
     os.environ['SKIP_JAX_PRECOMPILE'] = '0'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
@@ -370,6 +341,8 @@ def test_continue_decode_performance_overhead(perf_case, test_prompts):
         additional_config={},
     )
 
+    prompts = generate_test_prompts(4)
+
     # Configure sampling params based on random length scenario requirement on MMLU prompts
     if perf_case["random_len"]:
         # Simulate --random-range-ratio=0.8 on target output generation lengths matching default random dataset base length (128)
@@ -382,7 +355,7 @@ def test_continue_decode_performance_overhead(perf_case, test_prompts):
         sampling_params = [
             SamplingParams(temperature=0.0,
                            max_tokens=random.randint(low, high),
-                           ignore_eos=True) for _ in test_prompts
+                           ignore_eos=True) for _ in prompts
         ]
     else:
         sampling_params = SamplingParams(temperature=0.0,
@@ -392,17 +365,17 @@ def test_continue_decode_performance_overhead(perf_case, test_prompts):
     # Measure baseline execution without continue decode (standard step-by-step decoding)
     config.additional_config = {"enable_continue_decode": False}
     _, latency_baseline = _run_inference_and_return_outputs(
-        config, test_prompts, sampling_params, enable_export=False)
+        config, prompts, sampling_params, enable_export=False)
 
     # Measure execution with continue decode enabled
     config.additional_config = {"enable_continue_decode": True}
     _, latency_continue_decode = _run_inference_and_return_outputs(
-        config, test_prompts, sampling_params, enable_export=False)
+        config, prompts, sampling_params, enable_export=False)
 
     _check_performance(
         f"Continue decode ({perf_case['id']})",
         latency_baseline,
         latency_continue_decode,
-        len(test_prompts),
+        len(prompts),
         min_speedup=1.05,
     )
