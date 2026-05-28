@@ -21,13 +21,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import \
+    Qwen3OmniMoeConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3_5 import \
     Qwen3_5MoeForConditionalGeneration
 from vllm.model_executor.models.qwen3_omni_moe_thinker import \
     Qwen3OmniMoeThinkerForConditionalGeneration
-from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import \
-    Qwen3OmniMoeConfig
 
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype

@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import vllm.model_executor.models.utils as vllm_utils
 from vllm.model_executor.layers.attention.mm_encoder_attention import \
     MMEncoderAttention
 from vllm.model_executor.models.utils import _merge_multimodal_embeddings
@@ -505,7 +506,6 @@ def apply_qwen3_omni_patches(vllm_model):
         vllm_model, *args, **kwargs)
 
     # 5. Patch _flatten_embeddings in vllm utils to handle negative indexes correctly in torchax
-    import vllm.model_executor.models.utils as vllm_utils
     vllm_utils._flatten_embeddings = _patched_flatten_embeddings
 
 
