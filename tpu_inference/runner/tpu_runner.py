@@ -1021,6 +1021,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             raise ValueError(
                 "prompt_logprobs is not supported for multimodal models.")
 
+        if self.speculative_config and self.input_batch.num_prompt_logprobs:
+            raise ValueError(
+                "prompt_logprobs is not supported with speculative decoding.")
+
         # NOTE(Wenlong): For multi-modal model,
         # it will embed the text tokens and merge with the existing modality embeds
         # Later, the multi-modality model will take the embedding as the input.
