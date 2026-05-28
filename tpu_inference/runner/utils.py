@@ -836,7 +836,7 @@ def host_extract_sampled_tokens(
     return valid_sampled_token_ids
 
 
-def get_eos_token_id(model_config: Any) -> int:
+def get_eos_token_id(model_config: Any) -> tuple[int, ...]:
     """Extract EOS token ID from the model configuration with fallback."""
     eos_token_id = model_config.get_vocab_size() - 1
     if hasattr(model_config, "hf_config"):
@@ -844,7 +844,15 @@ def get_eos_token_id(model_config: Any) -> int:
                                eos_token_id)
         if eos_token_id is None:
             eos_token_id = model_config.get_vocab_size() - 1
-    return eos_token_id
+
+    if isinstance(eos_token_id, int):
+        return (eos_token_id, )
+    elif isinstance(eos_token_id, list):
+        return tuple(eos_token_id)
+    elif eos_token_id is None:
+        return ()
+    else:
+        return tuple(eos_token_id)
 
 
 def get_pad_token_id(model_config: Any) -> int:
