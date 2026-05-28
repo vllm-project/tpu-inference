@@ -16,30 +16,28 @@
 # Exit immediately if a command exits with a non-zero status.
 set -ex
 
-# Get the absolute directory of the script to resolve paths correctly.
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-
-# Change to the script's directory to ensure relative paths for logging.
-cd "$SCRIPT_DIR"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Configuration ---
-export LOG_DIR=./results
+export LOG_DIR=$1
 export MODEL_NAME=$MODEL
 export TASK_NAME=math500
 OUTPUT_PREFIX="${TASK_NAME}_$(echo "$MODEL_NAME" | sed 's/\//-/g')"
 export OUTPUT_PREFIX
 
 export OUTPUT_BASE_PATH=$LOG_DIR/$OUTPUT_PREFIX.json
-export ACCURACY_JSON_PATH=/workspace/math500_accuracy.json
+export ACCURACY_JSON_PATH=$LOG_DIR/math500_accuracy.json
 
 echo "Running lm_eval, output will be timestamped in: $LOG_DIR"
+
+unset MODEL_IMPL_TYPE VLLM_XLA_CHECK_RECOMPILATION
 
 mkdir -p "$LOG_DIR"
 
 CMD=(
     lm_eval
     --model vllm
-    --model_args "pretrained=$MODEL_NAME,tensor_parallel_size=${TP_SIZE:-8},dtype=auto,max_model_len=2048,gpu_memory_utilization=0.98"
+    --model_args "pretrained=$MODEL_NAME,tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-8},dtype=auto,max_model_len=$MAX_MODEL_LEN,gpu_memory_utilization=0.98"
     --tasks "$TASK_NAME"
     --include_path "$SCRIPT_DIR"
     --num_fewshot 4
@@ -48,8 +46,10 @@ CMD=(
     --apply_chat_template
 )
 
+eval "CLIENT_CMD_ENVS=(${CLIENT_CMD_ENVS_STR:-})"
+echo "[DEBUG] Executing lm_eval_cmd: SKIP_JAX_PRECOMPILE=1 ${CLIENT_CMD_ENVS[*]:-} ${CMD[*]}"
 # Execute the command, allowing stderr for error visibility
-if ! SKIP_JAX_PRECOMPILE=1 "${CMD[@]}"; then
+if ! env SKIP_JAX_PRECOMPILE=1 "${CLIENT_CMD_ENVS[@]}" "${CMD[@]}"; then
     echo "Error: lm_eval command failed. See output above for details."
     exit 1
 fi
@@ -68,4 +68,4 @@ fi
 echo "Found and using file: $LATEST_FILE"
 
 echo "Parsing results and writing to $ACCURACY_JSON_PATH..."
-python parse_lm_eval_math500_results.py "$LATEST_FILE" > "$ACCURACY_JSON_PATH"
+python "$SCRIPT_DIR/parse_lm_eval_math500_results.py" "$LATEST_FILE" > "$ACCURACY_JSON_PATH"
