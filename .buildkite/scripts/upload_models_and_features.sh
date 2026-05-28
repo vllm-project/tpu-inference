@@ -46,18 +46,23 @@ add_kernel_microbenchmarks() {
   fi
 }
 
-case "${MODEL_IMPL_TYPE}" in
-  "auto")
-    TARGET_FOLDERS=("parallelism" "models" "features" "rl")
-    add_kernel_microbenchmarks
-    ;;
-  "flax_nnx")
-    TARGET_FOLDERS=("quantization" "parallelism" "features")
-    ;;
-  "vllm")
-    TARGET_FOLDERS=("quantization" "parallelism" "models" "features")
-    ;;
-esac
+TARGET_FOLDERS=("quantization" "parallelism" "models" "features" "rl")
+add_kernel_microbenchmarks
+
+# case "${MODEL_IMPL_TYPE}" in
+#   # "auto")
+#   #   TARGET_FOLDERS=("parallelism" "models" "features" "rl")
+#   #   add_kernel_microbenchmarks
+#   #   ;;
+#   "flax_nnx")
+#     TARGET_FOLDERS=("quantization" "parallelism" "models" "features" "rl")
+#     add_kernel_microbenchmarks
+#     ;;
+#   "vllm")
+#     TARGET_FOLDERS=("quantization" "parallelism" "models" "features" "rl")
+#     add_kernel_microbenchmarks
+#     ;;
+# esac
 
 # Arrays to store YAML content fragments (without 'steps:' header)
 pipeline_v6e_fragments=()
@@ -140,11 +145,11 @@ if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
   export TENSOR_PARALLEL_SIZE_SINGLE=1
   export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v6_matrix" "true"
-
+  
   # Loop through each model implementation type
   for IMPL_TYPE in "vllm" "flax_nnx"; do
     export MODEL_IMPL_TYPE="${IMPL_TYPE}"
-    echo "Uploading pipeline group for: ${MODEL_IMPL_TYPE}"
+    echo "Uploading v6e pipeline group for: ${MODEL_IMPL_TYPE}"
     {
       echo "priority: ${JOB_PRIORITY:-1}"
       echo "steps:"
@@ -156,7 +161,6 @@ if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
       printf "%s\n" "${pipeline_v6e_fragments[@]}" | sed 's/^/      /'
     } | buildkite-agent pipeline upload
   done
-
 else
   echo "--- No .yml files found, nothing to upload."
   exit 0
@@ -175,8 +179,7 @@ if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   # Loop through each model implementation type
   for IMPL_TYPE in "vllm" "flax_nnx"; do
     export MODEL_IMPL_TYPE="${IMPL_TYPE}"
-    echo "Uploading pipeline group for: ${MODEL_IMPL_TYPE}"
-    
+    echo "Uploading v7x pipeline group for: ${MODEL_IMPL_TYPE}"
     {
       echo "priority: ${JOB_PRIORITY:-1}"
       echo "steps:"
@@ -188,7 +191,6 @@ if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
       printf "%s\n" "${pipeline_v7x_fragments[@]}" | sed 's/^/      /'
     } | buildkite-agent pipeline upload
   done
-
 else
   echo "--- No .yml files found, nothing to upload."
   exit 0
