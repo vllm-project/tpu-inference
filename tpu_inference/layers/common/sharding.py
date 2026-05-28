@@ -181,21 +181,19 @@ class ShardingConfigManager:
         # DP rank, fronted by a single load-balanced API endpoint.
         #
         # It is not used (we fall back to single-process SPMD DP) when:
-        #  - the model is MoE
         #  - attention DP is enabled
         #  - running on Pathways
-        model_config = vllm_config.model_config
+        # MoE without attention DP is fine — experts shard inside each replica
+        # so each MPMD process still owns a self-contained model.
         multiprocess_dp = (envs.TPU_MULTIPROCESS_DP and data_parallelism > 1
-                           and model_config is not None
-                           and not model_config.is_moe
                            and not enable_dp_attention
                            and not vllm_envs.VLLM_TPU_USING_PATHWAYS)
         if (envs.TPU_MULTIPROCESS_DP and data_parallelism > 1
                 and not multiprocess_dp):
             raise ValueError(
-                "TPU_MULTIPROCESS_DP is set but is not supported for MoE "
-                "models, with attention DP (enable_dp_attention), or on "
-                "Pathways. Please disable TPU_MULTIPROCESS_DP.")
+                "TPU_MULTIPROCESS_DP is set but is not supported with "
+                "attention DP (enable_dp_attention) or on Pathways. "
+                "Please disable TPU_MULTIPROCESS_DP.")
         if multiprocess_dp:
             data_parallelism = 1
             logger.warning(
