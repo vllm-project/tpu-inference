@@ -66,7 +66,17 @@ get_quantization_method() {
 declare -a model_csv_files=()
 declare -a feature_csv_files=()
 declare -a default_feature_names=()
+declare -a ACTIVE_CONFIGS=()
 FRAMEWORKS=("flax_nnx" "vllm")
+
+
+if [[ "$RUN_V6" == "true" ]]; then
+    ACTIVE_CONFIGS+=("v6e:v6")
+fi
+
+if [[ "$RUN_V7" == "true" ]]; then
+    ACTIVE_CONFIGS+=("v7x:v7")
+fi
 
 # Determine sub-directory based on TPU_VERSION
 if [[ "${TPU_VERSION:-tpu6e}" == "v7"* ]]; then
@@ -121,13 +131,9 @@ process_models() {
     for framework in "${FRAMEWORKS[@]}"; do
         
         # Second-level loop: Machine type configuration
-        for config in "RUN_V7:v7" "RUN_V6:v6"; do
-            # Parse in order: execution flag (RUN_V7), display name (v7x), Metadata prefix (v7)
-            IFS=":" read -r run_flag tpu_version prefix <<< "$config"
-            
-            # Check if the Buildkite flag enables this version, skip if not
-            if [[ "$run_flag" == "RUN_V6" && "$RUN_V6" != "true" ]]; then continue; fi
-            if [[ "$run_flag" == "RUN_V7" && "$RUN_V7" != "true" ]]; then continue; fi
+        for config in "${ACTIVE_CONFIGS[@]}"; do
+            # Parse in order: display name (v6e), Metadata prefix (v6)
+            IFS=":" read -r tpu_version prefix <<< "$config"
 
             # Third-level loop: Model
             for model in "${model_list[@]:-}"; do
@@ -179,50 +185,50 @@ process_models() {
     done
 }
 
-# process_models1() {
-#     for model in "${model_list[@]:-}"; do
-#         if [[ -z "$model" ]]; then continue; fi
-#         # Get category (default: text-only)
-#         local category
-#         category=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}_category" --default "text-only")
-#         # Use the TPU_DIR prefix for the CSV path
-#         local category_csv="${TPU_DIR}/model_support_matrix.csv"
-#         # Initialize CSV if not exists
-#         if [ ! -f "$category_csv" ]; then
-#             echo "Model,Type,Machine Type,Framework,UnitTest,Accuracy/Correctness,Benchmark" > "$category_csv"
-#             model_csv_files+=("$category_csv")
-#         fi
-#         # Build Row
-#         local row="\"$model\""
-#         for stage in "${MODEL_STAGES[@]}"; do
-#             local result
-#             if [ "$stage" == "Type" ]; then
-#                 if [ "$category" == "multimodal" ]; then
-#                     result="Multimodal"
-#                 elif [ "$category" == "embedding" ]; then
-#                     result="Embedding"
-#                 elif [ "$category" == "diffusion" ]; then
-#                     result="Diffusion"
-#                 else 
-#                     result="Text"
-#                 fi
-#             elif [ "$stage" == "Machine Type" ]; then
-#                 result="Multimodal"
-#             elif [ "$stage" == "Framework" ]; then
-#                 result="Multimodal"
-#             else
-#                 result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}:${stage}" --default "❓ Untested")
-#             fi
-#             row="$row,$result"
+process_models1() {
+    for model in "${model_list[@]:-}"; do
+        if [[ -z "$model" ]]; then continue; fi
+        # Get category (default: text-only)
+        local category
+        category=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}_category" --default "text-only")
+        # Use the TPU_DIR prefix for the CSV path
+        local category_csv="${TPU_DIR}/model_support_matrix.csv"
+        # Initialize CSV if not exists
+        if [ ! -f "$category_csv" ]; then
+            echo "Model,Type,Machine Type,Framework,UnitTest,Accuracy/Correctness,Benchmark" > "$category_csv"
+            model_csv_files+=("$category_csv")
+        fi
+        # Build Row
+        local row="\"$model\""
+        for stage in "${MODEL_STAGES[@]}"; do
+            local result
+            if [ "$stage" == "Type" ]; then
+                if [ "$category" == "multimodal" ]; then
+                    result="Multimodal"
+                elif [ "$category" == "embedding" ]; then
+                    result="Embedding"
+                elif [ "$category" == "diffusion" ]; then
+                    result="Diffusion"
+                else 
+                    result="Text"
+                fi
+            elif [ "$stage" == "Machine Type" ]; then
+                result="Multimodal"
+            elif [ "$stage" == "Framework" ]; then
+                result="Multimodal"
+            else
+                result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}:${stage}" --default "❓ Untested")
+            fi
+            row="$row,$result"
 
-#             if [ "$stage" != "Type" ] && [ "${result}" != "✅ Passing" ] && [ "${result}" != "⚪ N/A" ] && [ "${result}" != "❓ Untested" ] && [ "${result}" != "not enough HBM" ]; then
+            if [ "$stage" != "Type" ] && [ "${result}" != "✅ Passing" ] && [ "${result}" != "⚪ N/A" ] && [ "${result}" != "❓ Untested" ] && [ "${result}" != "not enough HBM" ]; then
 
-#                 ANY_FAILED=true
-#             fi
-#         done
-#         echo "$row" >> "$category_csv"
-#     done
-# }
+                ANY_FAILED=true
+            fi
+        done
+        echo "$row" >> "$category_csv"
+    done
+}
 
 # Process Features (Split by Category)
 process_features() {
