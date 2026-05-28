@@ -248,7 +248,13 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
     if devices is None:
         devices = xb.devices()
     # Sort the devices in case it's passed in an arbitary order
-    devices = sorted(devices, key=lambda x: x.coords)
+    try:
+        devices = sorted(devices, key=lambda x: x.coords)
+    except AttributeError:
+        logger.warning(
+            "TPU devices do not have 'coords' attribute. Falling back to sorting by process_index and id."
+        )
+        devices = sorted(devices, key=lambda x: (x.process_index, x.id))
 
     def _is_1D(axis_shapes):
         return sum(x > 1 for x in axis_shapes) == 1
