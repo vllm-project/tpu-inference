@@ -181,12 +181,12 @@ class AsyncPreResults:
 class PromptLogprobsReqSnap:
     """Per-request state snapshotted at step N for use in get_output()."""
     req_id: str
-    req_state: CachedRequestState  # stable ref; in_progress_prompt_logprobs_cpu pre-allocated
-    req_offset: int  # absolute row index into the full-batch logprobs tensor
-    start_idx: int  # where to write in the accumulator (= num_computed_tokens at step N)
-    num_logits: int  # rows to copy from the tensor into the accumulator
+    req_state: CachedRequestState  # Stable request state reference.
+    req_offset: int  # Absolute row index into the full-batch logprobs tensor.
+    start_idx: int  # Number of computed tokens.
+    num_logits: int  # Number of rows to copy from the TPU tensor to the CPU accumulator.
     is_last_chunk: bool
-    num_k: int  # num_prompt_logprobs for this request
+    num_k: int  # Number of top logprobs to retain for this request.
 
 
 @dataclass
