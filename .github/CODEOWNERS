@@ -23,7 +23,7 @@
 
 # Kernel Implementations (Performance-critical)
 /tpu_inference/kernels/ @kyuyeunk @bythew3i @a1yssan13
-/tpu_inference/kernels/mla @m-liu @gxd @gpolovets1 @kyuyeunk
+/tpu_inference/kernels/mla/ @m-liu @gxd3 @gpolovets1 @kyuyeunk
 
 # Model layers
 /tpu_inference/layers/ @kyuyeunk @lk-chen
@@ -82,6 +82,6 @@
 /tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang
 /tests/spec_decode/ @Lumosis @gxd3
 /tests/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
-/tests/e2e/ @pv97 @wenxindongwork @jrplatin
+/tests/e2e/ @pv97 @wenxindongwork @jrplatin @Lumosis @gxd3
 /tests/offload/ @juncgu-google @richardsliu
 /tests/scripts/ @jrplatin @QiliangCui
