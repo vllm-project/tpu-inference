@@ -384,6 +384,8 @@ def inner_kernel(
             tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(acc_ref.dtype)
             num_blocks = cfgs.num_quant_blocks_per_tile_k
 
+            # Pad tiled_rhs along K dimension if tile_k is not a multiple of quant_block_size,
+            # to avoid shape mismatch during reshape.
             pad_len = num_blocks * rhs_qbs - cfgs.tiles.tile_k
             if pad_len > 0:
                 zeros = jnp.zeros((pad_len, rhs_tile_n), dtype=tiled_rhs.dtype)

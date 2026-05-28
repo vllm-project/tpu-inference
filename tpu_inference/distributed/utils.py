@@ -122,6 +122,8 @@ def get_device_topology_order_id(local_devices, global_devices) -> int:
 
     # 1. Find the 'anchor' (minimum coordinate) for the local devices.
     #    This represents the physical top-left corner of the local machine.
+    #    Fallback to process_index if JAX devices do not have 'coords' attribute
+    #    (e.g., in some Ray or GKE environments).
     try:
         local_anchor = min(d.coords for d in local_devices)
     except AttributeError:

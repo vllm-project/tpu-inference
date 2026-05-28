@@ -247,7 +247,8 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                         devices: Sequence[xc.Device] | None = None):
     if devices is None:
         devices = xb.devices()
-    # Sort the devices in case it's passed in an arbitary order
+    # Sort the devices in case it's passed in an arbitary order.
+    # Fallback to sorting by process_index and id if 'coords' is missing
     try:
         devices = sorted(devices, key=lambda x: x.coords)
     except AttributeError:

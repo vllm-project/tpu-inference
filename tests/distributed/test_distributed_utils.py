@@ -118,3 +118,26 @@ def test_get_device_topology_order_id_not_in_global():
     ]
     with pytest.raises(ValueError, match="do not exist in the global device:"):
         get_device_topology_order_id(local_devices, global_devices)
+
+
+def test_get_device_topology_order_id_missing_coords():
+    """
+    Tests fallback to process_index when coords is missing.
+    """
+
+    class TpuDeviceNoCoords:
+
+        def __init__(self, id, process_index):
+            self.id = id
+            self.process_index = process_index
+
+    global_devices = [
+        TpuDeviceNoCoords(id=0, process_index=0),
+        TpuDeviceNoCoords(id=1, process_index=1),
+    ]
+
+    local_devices = [TpuDeviceNoCoords(id=0, process_index=0)]
+    assert get_device_topology_order_id(local_devices, global_devices) == 0
+
+    local_devices = [TpuDeviceNoCoords(id=1, process_index=1)]
+    assert get_device_topology_order_id(local_devices, global_devices) == 1
