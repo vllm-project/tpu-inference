@@ -163,7 +163,7 @@ process_models() {
                     elif [ "$stage" == "Framework" ]; then
                         result="${framework}"
                     else
-                        local meta_key="${prefix}:${framework}:${model}:${stage}"
+                        local meta_key="${prefix}_${framework}:${model}:${stage}"
                         echo "[DEBUG] Looking up meta-data key: ${meta_key}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
                         echo "[DEBUG] Result found: ${result}"
