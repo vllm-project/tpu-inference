@@ -1389,9 +1389,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         lora_metadata = self.lora_utils.extract_lora_metadata()
 
-        terminate_on_any_eos = self.vllm_config.additional_config.get(
-            "terminate_on_any_eos", False)
-
         # max_decode_steps is a Python int (static loop bound). The loop is a
         # single jax.jit'd, kv-cache-donating fused while_loop: in-place KV
         # update keeps peak HBM flat, and the data-dependent EOS early-exit
@@ -1422,7 +1419,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 eos_token_id=self.eos_token_id,
                 padding_token_id=self.pad_token_id,
                 rng=self.rng_params_for_sampling,
-                terminate_on_any_eos=terminate_on_any_eos,
                 inputs_embeds=None,
                 layer_name_to_kvcache_index=tuple(
                     self.layer_name_to_kvcache_index.items()),
@@ -1516,7 +1512,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             expert_indices_cpu = np.concatenate(expert_indices_list, axis=1)
 
         termination_reason = "unknown"
-        if terminate_on_any_eos and actual_steps < max_decode_steps:
+        if actual_steps < max_decode_steps:
             termination_reason = "eos_hit"
         elif actual_steps == max_decode_steps:
             reasons = []

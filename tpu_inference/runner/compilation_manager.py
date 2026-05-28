@@ -1613,9 +1613,6 @@ class CompilationManager:
             do_sampling=False,
             logprobs=False)
 
-        terminate_on_any_eos = self.runner.vllm_config.additional_config.get(
-            "terminate_on_any_eos", False)
-
         for num_reqs in self.runner.num_reqs_paddings:
             init_tokens = self._create_dummy_tensor((num_reqs, ), jnp.int32,
                                                     dp_sharding)
@@ -1711,7 +1708,6 @@ class CompilationManager:
                 eos_token_id,
                 padding_token_id,
                 rng,
-                terminate_on_any_eos,
                 layer_name_to_kvcache_index,
                 lora_metadata,
                 is_first_rank,
@@ -1733,7 +1729,6 @@ class CompilationManager:
                     eos_token_id=eos_token_id,
                     padding_token_id=padding_token_id,
                     rng=rng,
-                    terminate_on_any_eos=terminate_on_any_eos,
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index,
                     lora_metadata=lora_metadata,
                     is_first_rank=is_first_rank,
@@ -1760,7 +1755,6 @@ class CompilationManager:
                 self.runner.eos_token_id,
                 self.runner.pad_token_id,
                 self.runner.rng_params_for_sampling,
-                terminate_on_any_eos,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
                 lora_metadata,
                 self.runner.is_first_rank,
