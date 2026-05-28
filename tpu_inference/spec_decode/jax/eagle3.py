@@ -113,7 +113,10 @@ class Eagle3Proposer:
 
             # 1. Resolve draft embed param in self.state
             draft_embed_param = None
-            for path in ["model.embed_tokens.weight", "model.embed.embedding"]:
+            for path in [
+                    "model.embed_tokens.weight", "model.embed.embedding",
+                    "model.embed_tokens.embedding"
+            ]:
                 try:
                     draft_embed_param = get_param(self.state, path)
                     logger.info(f"Resolved draft model embedding path: {path}")
@@ -123,7 +126,10 @@ class Eagle3Proposer:
 
             # 2. Resolve target embed param in target_model (which is already the target state)
             target_embed_param = None
-            for path in ["model.embed_tokens.weight", "model.embed.embedding"]:
+            for path in [
+                    "model.embed_tokens.weight", "model.embed.embedding",
+                    "model.embed_tokens.embedding"
+            ]:
                 try:
                     target_embed_param = get_param(target_model, path)
                     logger.info(

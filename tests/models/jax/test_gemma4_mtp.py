@@ -137,7 +137,14 @@ class TestGemma4MTPForCausalLM:
         with jax.set_mesh(mesh):
             loader = get_model_loader(vllm_config.load_config)
             with set_current_vllm_config(vllm_config):
-                loader.load_weights(model, model_config)
+                if use_ordered_embeddings and load_format == "skip_layers_model_loader_for_test":
+                    with pytest.raises(
+                            ValueError,
+                            match="Ordered embeddings masking is enabled"):
+                        loader.load_weights(model, model_config)
+                    return
+                else:
+                    loader.load_weights(model, model_config)
 
         # Validate layer counts and partitioning
         assert model.model is not None

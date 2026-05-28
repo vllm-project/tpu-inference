@@ -577,30 +577,17 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
                     loaded_keys.add(clean_name)
                     yield clean_name, tensor
 
-            # If ordered embeddings are enabled but missing in PyTorch checkpoint files,
-            # dynamically yield dummy tensors for them to satisfy default loader tracking.
             if getattr(self, "masked_embedding", None) is not None:
-                import torch
-                from vllm.logger import init_logger
-                logger = init_logger(__name__)
                 for key in [
                         "masked_embedding.token_ordering",
                         "masked_embedding.centroids.weight"
                 ]:
                     if key not in loaded_keys:
-                        logger.info(
-                            f"Checkpoint is missing parameter '{key}'. Injecting dummy weight."
+                        raise ValueError(
+                            f"Ordered embeddings masking is enabled at runtime, but the "
+                            f"required parameter '{key}' is missing from the loaded checkpoint. "
+                            f"Please use a draft checkpoint that was trained with centroids masking."
                         )
-                        param = dict(self.named_parameters())[key]
-                        if "token_ordering" in key:
-                            dummy_tensor = torch.zeros(param.value.shape,
-                                                       dtype=torch.int32)
-                        else:
-                            # centroids.weight must be generated in PyTorch layout
-                            # (out_features, in_features), which is transposed compared to JAX.
-                            dummy_tensor = torch.zeros(param.value.shape[::-1],
-                                                       dtype=torch.float32)
-                        yield key, dummy_tensor
 
         mapped_weights = clean_and_map(weights)
 
