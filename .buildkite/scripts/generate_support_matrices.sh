@@ -407,8 +407,8 @@ buildkite-agent meta-data set "CI_TESTS_FAILED" "${ANY_FAILED}"
 for csv_file in "${model_csv_files[@]:-}"; do
     if [[ -n "$csv_file" && -f "$csv_file" ]]; then
         header=$(head -n 1 "$csv_file")
-        # Sort data rows based on the 'Type' column
-        sorted_content=$(tail -n +2 "$csv_file" | sort -t',' -k2,2)
+        # Sort by Framework (k4), Machine Type (k3), Type (k2), then Model Name (k1)
+        sorted_content=$(tail -n +2 "$csv_file" | sort -t',' -k4,4 -k3,3 -k2,2 -k1,1)
 
         # Reconstruct the file with sorted data
         echo "$header" > "$csv_file"
