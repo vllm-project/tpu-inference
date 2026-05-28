@@ -34,7 +34,8 @@ EXPECTED_TEXTS = (
         ("Qwen/Qwen3-VL-30B-A3B-Instruct", "vllm"),
     ],
 )
-def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes, model_name, model_impl_type):
+def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes,
+                               model_name, model_impl_type):
     """
     Runs multi-modal inference and verifies the output.
     """
@@ -54,7 +55,9 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes, model_na
     # Hardware topology checking to prevent Out Of Memory (OOM) on smaller single-host slices
     if "30B" in model:
         if num_chips < 4:
-            pytest.skip(f"Skipping 30B model: Requires at least 4 TPU chips (found {num_chips}) to prevent OOM.")
+            pytest.skip(
+                f"Skipping 30B model: Requires at least 4 TPU chips (found {num_chips}) to prevent OOM."
+            )
         tensor_parallel_size = num_chips
     else:
         # For 3B / 7B models, run on 1 or 2 chips maximum to minimize communication latency
@@ -70,7 +73,9 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes, model_na
     gpu_memory_utilization = 0.75
     modality = "image"
 
-    print(f"Preparing for multi-modal inference with model {model} (MODEL_IMPL_TYPE={os.environ.get('MODEL_IMPL_TYPE', 'auto')}, TP={tensor_parallel_size})...")
+    print(
+        f"Preparing for multi-modal inference with model {model} (MODEL_IMPL_TYPE={os.environ.get('MODEL_IMPL_TYPE', 'auto')}, TP={tensor_parallel_size})..."
+    )
 
     # --- Prepare Inputs ---
     image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
@@ -147,8 +152,13 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes, model_na
     print(f"Similarity Score: {similarity_score:.4f}")
 
     # Keyword fallback validation for model size/architecture variations
-    expected_keywords = ["tower", "cherry", "blossom", "tree", "pink", "skytree", "landmark", "bloom"]
-    matching_keywords = [kw for kw in expected_keywords if kw in generated_text.lower()]
+    expected_keywords = [
+        "tower", "cherry", "blossom", "tree", "pink", "skytree", "landmark",
+        "bloom"
+    ]
+    matching_keywords = [
+        kw for kw in expected_keywords if kw in generated_text.lower()
+    ]
     print(f"Matching keywords: {matching_keywords}")
 
     assert similarity_score >= 0.85 or len(matching_keywords) >= 3, (
