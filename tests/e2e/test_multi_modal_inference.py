@@ -23,6 +23,19 @@ EXPECTED_TEXTS = (
     "The image depicts a stunning view of the Tokyo Skytree, a tall broadcasting tower located in the Odaiba district of Tokyo, Japan. The skytree is surrounded by cherry blossom trees in full bloom, creating a picturesque and vibrant scene. The cherry blossoms are in various stages of bloom, with some branches densely covered",
 )
 
+def _cleanup_tpu_zombies():
+    """Clears lingering JAX/libtpu process locks under our user to prevent TPU OOM."""
+    import subprocess
+    try:
+        # Kill orphaned EngineCore child workers
+        subprocess.run(["pkill", "-9", "-f", "VLLM::EngineCore"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Kill orphaned vLLM engine subprocesses
+        subprocess.run(["pkill", "-9", "-f", "vllm"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Clear JAX libtpu shared memory lockfiles
+        subprocess.run("rm -f /tmp/libtpu*", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
 
 # NOTE: Parameterized across key model variants and execution backends
 @pytest.mark.parametrize("enable_dynamic_image_sizes", [False, True])
@@ -119,50 +132,58 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes,
     pass_config = {k: v for k, v in pass_config.items() if v is not None}
     engine_args["compilation_config"]["pass_config"] = pass_config
 
-    llm = LLM(**engine_args)
+    # Clean up before initialization to release any stale locks immediately
+    _cleanup_tpu_zombies()
 
-    sampling_params = SamplingParams(
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    try:
+        llm = LLM(**engine_args)
 
-    inputs = {
-        "prompt": prompt,
-        "multi_modal_data": {
-            "image": image
-        },
-    }
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
-    # --- Run Inference ---
-    print("Running inference...")
-    outputs = llm.generate(inputs, sampling_params)
+        inputs = {
+            "prompt": prompt,
+            "multi_modal_data": {
+                "image": image
+            },
+        }
 
-    # --- Verification ---
-    generated_text = outputs[0].outputs[0].text.strip()
+        # --- Run Inference ---
+        print("Running inference...")
+        outputs = llm.generate(inputs, sampling_params)
 
-    print("-" * 50)
-    print("Generated Text:")
-    print(generated_text)
-    print("-" * 50)
+        # --- Verification ---
+        generated_text = outputs[0].outputs[0].text.strip()
 
-    # Check output against the closest known-good caption.
-    similarity_score = max(
-        difflib.SequenceMatcher(None, generated_text, expected).ratio()
-        for expected in EXPECTED_TEXTS)
-    print(f"Similarity Score: {similarity_score:.4f}")
+        print("-" * 50)
+        print("Generated Text:")
+        print(generated_text)
+        print("-" * 50)
 
-    # Keyword fallback validation for model size/architecture variations
-    expected_keywords = [
-        "tower", "cherry", "blossom", "tree", "pink", "skytree", "landmark",
-        "bloom"
-    ]
-    matching_keywords = [
-        kw for kw in expected_keywords if kw in generated_text.lower()
-    ]
-    print(f"Matching keywords: {matching_keywords}")
+        # Check output against the closest known-good caption.
+        similarity_score = max(
+            difflib.SequenceMatcher(None, generated_text, expected).ratio()
+            for expected in EXPECTED_TEXTS
+        )
+        print(f"Similarity Score: {similarity_score:.4f}")
 
-    assert similarity_score >= 0.85 or len(matching_keywords) >= 3, (
-        f"Text verification failed.\n"
-        f"Generated: {generated_text}\n"
-        f"Expected similarity >= 0.85 (got {similarity_score:.2f}) or at least 3 keywords (got {len(matching_keywords)})"
-    )
+        # Keyword fallback validation for model size/architecture variations
+        expected_keywords = [
+            "tower", "cherry", "blossom", "tree", "pink", "skytree", "landmark",
+            "bloom"
+        ]
+        matching_keywords = [
+            kw for kw in expected_keywords if kw in generated_text.lower()
+        ]
+        print(f"Matching keywords: {matching_keywords}")
+
+        assert similarity_score >= 0.85 or len(matching_keywords) >= 3, (
+            f"Text verification failed.\n"
+            f"Generated: {generated_text}\n"
+            f"Expected similarity >= 0.85 (got {similarity_score:.2f}) or at least 3 keywords (got {len(matching_keywords)})"
+        )
+    finally:
+        # Re-run cleanup on test teardown to release TPU locking resources immediately
+        _cleanup_tpu_zombies()

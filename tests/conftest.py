@@ -53,6 +53,32 @@ def pytest_configure(config):
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _cleanup_tpu_zombies():
+    """
+    Automated self-healing fixture to clear lingering JAX/libtpu process locks.
+
+    Orphaned 'VLLM::EngineCore' child workers or lingering JAX lockfiles from prior
+    crashed/aborted test runs can block JAX backend initialization. This fixture
+    reaps them both during session setup and session teardown.
+    """
+    import subprocess
+    def reap():
+        try:
+            # Kill orphaned EngineCore child workers spawned under our user
+            subprocess.run(["pkill", "-9", "-f", "VLLM::EngineCore"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Kill orphaned vLLM engine subprocesses
+            subprocess.run(["pkill", "-9", "-f", "vllm"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Clear JAX libtpu shared memory lockfiles
+            subprocess.run("rm -f /tmp/libtpu*", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    reap()
+    yield
+    reap()
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _prewarm_jax_compilation_cache():
     """
     Pre-warms the JAX compilation cache singleton before any tests run.
