@@ -106,6 +106,44 @@ Below is the live status of our supported models, features, and kernels. Click o
 
 <br>
 
+### 🤝 How to Contribute a Model in 3 Steps
+
+Do you see a model in the **[Tested Models Matrix](#tested-models)** above that is marked as **❓ Untested** or **❌ Failing**? These are our active targets! Follow this quick roadmap to claim and add support:
+
+---
+
+#### 1️⃣ Step 1: Pick and Claim Your Target 🎯
+* **Find a target:** Look at the Support Matrix above for any model marked **❓ Untested** or **❌ Failing**.
+* **Claim it:** To avoid overlapping work, search our issues or open a new one titled `[Model Support] Add <Model Name>` to let the community know you are actively working on it.
+
+---
+
+#### 2️⃣ Step 2: Select Your Path & Set Up 💻
+Choose your developer frontend path depending on your background and model:
+* 🔹 **Torchax Path:** *Best for bringing existing upstream PyTorch vLLM models to TPU instantly.* Read the [Torchax Model Development Guide](docs/developer_guides/torchax_model_development.md).
+* 🔹 **JAX Native Path:** *Best for custom TPU layers, expert optimization, or Mixture of Experts (MoE).* Read the [JAX Model Development Guide](docs/developer_guides/jax_model_development.md).
+
+**Set up your workspace in 60 seconds:**
+```bash
+git clone https://github.com/vllm-project/tpu-inference.git && cd tpu-inference
+pip install -e ".[dev]"
+pip install pre-commit && pre-commit install
+```
+
+---
+
+#### 3️⃣ Step 3: Run Local Tests & Submit PR 🚀
+Verify your model's weight loader logic and layers locally before opening a PR:
+```bash
+# Verify your model locally
+pytest tests/models/jax/test_your_model_name.py
+```
+* **Submit PR:** Open a pull request on GitHub. **Ensure you include/update the model's unit test in `tests/models/`!**
+* **Watch it Land:** Our automated CI fleet will compile and benchmark your code on real Google Cloud TPU VM nodes. Once merged, **your model status in this README will automatically update to ✅ Passing within 24 hours!**
+
+<br>
+
+
 ### Release Support Matrices
 
 <details open markdown="1">

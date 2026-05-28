@@ -49,7 +49,41 @@ If you are interested in contributing to the project or want to learn more about
 
 ## Contribute
 
-We're always looking for ways to partner with the community to accelerate vLLM TPU development. If you're interested in contributing to this effort, check out the [Contributing guide](https://github.com/vllm-project/tpu-inference/blob/main/CONTRIBUTING.md) and [Issues](https://github.com/vllm-project/tpu-inference/issues) to start. We recommend filtering Issues on the [**good first issue** tag](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+state%3Aopen+label%3A%22good+first+issue%22) if it's your first time contributing.
+### 🤝 How to Contribute a Model in 3 Steps
+
+Do you see a model in the **[Tested Models Matrix](recommended_models_features.md)** that is marked as **❓ Untested** or **❌ Failing**? These are our active targets! Follow this quick roadmap to claim and add support:
+
+---
+
+#### 1️⃣ Step 1: Pick and Claim Your Target 🎯
+* **Find a target:** Look at the Recommended Models page above for any model marked **❓ Untested** or **❌ Failing**.
+* **Claim it:** To avoid overlapping work, search our issues or open a new one titled `[Model Support] Add <Model Name>` to let the community know you are actively working on it.
+
+---
+
+#### 2️⃣ Step 2: Select Your Path & Set Up 💻
+Choose your developer frontend path depending on your background and model:
+* 🔹 **Torchax Path:** *Best for bringing existing upstream PyTorch vLLM models to TPU instantly.* Read the [Torchax Model Development Guide](developer_guides/torchax_model_development.md).
+* 🔹 **JAX Native Path:** *Best for custom TPU layers, expert optimization, or Mixture of Experts (MoE).* Read the [JAX Model Development Guide](developer_guides/jax_model_development.md).
+
+**Set up your workspace in 60 seconds:**
+```bash
+git clone https://github.com/vllm-project/tpu-inference.git && cd tpu-inference
+pip install -e ".[dev]"
+pip install pre-commit && pre-commit install
+```
+
+---
+
+#### 3️⃣ Step 3: Run Local Tests & Submit PR 🚀
+Verify your model's weight loader logic and layers locally before opening a PR:
+```bash
+# Verify your model locally
+pytest tests/models/jax/test_your_model_name.py
+```
+* **Submit PR:** Open a pull request on GitHub. **Ensure you include/update the model's unit test in `tests/models/`!**
+* **Watch it Land:** Our automated CI fleet will compile and benchmark your code on real Google Cloud TPU VM nodes. Once merged, **your model status in the live Support Matrix will automatically update to ✅ Passing within 24 hours!**
+
 
 ## Contact us
 
