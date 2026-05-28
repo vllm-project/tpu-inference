@@ -13,17 +13,17 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Unit tests for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
-    key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Unit tests for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record unit test result for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
-    key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:mmeta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal:UnitTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record unit test result for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
@@ -33,20 +33,20 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest
 
-  - label: "${TPU_VERSION:-tpu6e} Accuracy for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
-    key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
-    key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal:Accuracy/Correctness" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
@@ -56,20 +56,20 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy
 
-  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
-    key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Benchmark" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
-    key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Benchmark"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}::meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal:Benchmark" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance benchmark result for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Benchmark"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
@@ -79,4 +79,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Benchmark
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Benchmark

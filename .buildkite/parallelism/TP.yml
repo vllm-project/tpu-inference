@@ -13,8 +13,8 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for TP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for TP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_TP_CorrectnessTest_Single_Host"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
@@ -22,9 +22,9 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh --model_name "meta-llama/Llama-3.1-8B-Instruct" --use_moe_ep_kernel 0 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 0 --flex_threshold 0.3 --strict_threshold 0.2
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for TP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest_Single_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for TP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_TP_CorrectnessTest_Single_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_TP_CorrectnessTest_Single_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "TP"
@@ -34,11 +34,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Single_Host
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_TP_CorrectnessTest_Single_Host
 
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for TP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Single_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for TP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_TP_PerformanceTest_Single_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_TP_CorrectnessTest_Single_Host"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
@@ -46,9 +46,9 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_tensor_parallel.py'
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for TP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_TP_PerformanceTest_Single_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for TP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_TP_PerformanceTest_Single_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_TP_PerformanceTest_Single_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "TP"
@@ -58,19 +58,19 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Single_Host
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_TP_PerformanceTest_Single_Host
 
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for TP (multi-host)"
-    key: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Multi_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for TP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_TP_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Multi_Host" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for TP (multi-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest_Multi_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Multi_Host"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:TP:Multi-Host CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for TP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_TP_CorrectnessTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_TP_CorrectnessTest_Multi_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "TP"
@@ -80,20 +80,20 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Multi_Host
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_TP_CorrectnessTest_Multi_Host
 
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for TP (multi-host)"
-    key: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Multi_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest_Multi_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for TP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_TP_PerformanceTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_TP_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Multi_Host" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for TP (multi-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_TP_PerformanceTest_Multi_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Multi_Host"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:TP:Multi-Host PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for TP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_TP_PerformanceTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_TP_PerformanceTest_Multi_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "TP"
@@ -103,4 +103,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Multi_Host
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_TP_PerformanceTest_Multi_Host

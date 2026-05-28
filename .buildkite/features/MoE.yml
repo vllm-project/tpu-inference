@@ -13,17 +13,17 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for MoE"
-    key: "${TPU_VERSION:-tpu6e}_MoE_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for MoE"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MoE_CorrectnessTest"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_MoE_CorrectnessTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for MoE"
-    key: "${TPU_VERSION:-tpu6e}_record_MoE_CorrectnessTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_MoE_CorrectnessTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:MoE:CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for MoE"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_MoE_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MoE_CorrectnessTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "MoE"
@@ -33,20 +33,20 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_MoE_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MoE_CorrectnessTest
 
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for MoE"
-    key: "${TPU_VERSION:-tpu6e}_MoE_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_MoE_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for MoE"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MoE_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_MoE_CorrectnessTest"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_MoE_PerformanceTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for MoE"
-    key: "${TPU_VERSION:-tpu6e}_record_MoE_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_MoE_PerformanceTest"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:MoE:PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for MoE"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_MoE_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MoE_PerformanceTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "MoE"
@@ -56,4 +56,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_MoE_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_MoE_PerformanceTest

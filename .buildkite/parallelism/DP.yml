@@ -13,8 +13,8 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for DP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for DP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DP_CorrectnessTest_Single_Host"
     soft_fail: true
     env:
       NEW_MODEL_DESIGN: "1"
@@ -24,9 +24,9 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py::test_dp_correctness'
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for DP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_DP_CorrectnessTest_Single_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for DP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_DP_CorrectnessTest_Single_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DP_CorrectnessTest_Single_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "DP"
@@ -36,11 +36,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Single_Host
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DP_CorrectnessTest_Single_Host
 
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for DP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Single_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_DP_CorrectnessTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for DP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DP_PerformanceTest_Single_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_DP_CorrectnessTest_Single_Host"
     soft_fail: true
     env:
       NEW_MODEL_DESIGN: "1"
@@ -50,9 +50,9 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py::test_dp_performance'
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for DP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_DP_PerformanceTest_Single_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for DP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_DP_PerformanceTest_Single_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DP_PerformanceTest_Single_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "DP"
@@ -62,10 +62,10 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Single_Host
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DP_PerformanceTest_Single_Host
 
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for DP (multi-host)"
-    key: "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Multi_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for DP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DP_CorrectnessTest_Multi_Host"
     soft_fail: true
     env:
       NEW_MODEL_DESIGN: "1"
@@ -73,10 +73,10 @@ steps:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Multi_Host" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for DP (multi-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_DP_CorrectnessTest_Multi_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Multi_Host"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:DP:Multi-Host CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for DP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_DP_CorrectnessTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DP_CorrectnessTest_Multi_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "DP"
@@ -86,11 +86,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Multi_Host
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DP_CorrectnessTest_Multi_Host
 
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for DP (multi-host)"
-    key: "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Multi_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_DP_CorrectnessTest_Multi_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for DP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DP_PerformanceTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_DP_CorrectnessTest_Multi_Host"
     soft_fail: true
     env:
       NEW_MODEL_DESIGN: "1"
@@ -98,10 +98,10 @@ steps:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Multi_Host" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for DP (multi-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_DP_PerformanceTest_Multi_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Multi_Host"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:DP:Multi-Host PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for DP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_DP_PerformanceTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DP_PerformanceTest_Multi_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "DP"
@@ -111,4 +111,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Multi_Host
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DP_PerformanceTest_Multi_Host

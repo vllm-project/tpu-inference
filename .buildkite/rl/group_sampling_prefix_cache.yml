@@ -19,17 +19,17 @@ steps:
   # ------------------------------------------------------------------
   # Correctness tests
   # ------------------------------------------------------------------
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for group_sampling_prefix_cache"
-    key: "${TPU_VERSION:-tpu6e}_group_sampling_prefix_cache_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for group_sampling_prefix_cache"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_group_sampling_prefix_cache_CorrectnessTest"
     soft_fail: true
     if: build.env("NIGHTLY") == "1"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/core/test_dp_group_sampling_prefix_cache.py::TestGroupSamplingPrefixCache::test_group_sampling_produces_diverse_outputs
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for group_sampling_prefix_cache"
-    key: "${TPU_VERSION:-tpu6e}_record_group_sampling_prefix_cache_CorrectnessTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_group_sampling_prefix_cache_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for group_sampling_prefix_cache"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_group_sampling_prefix_cache_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_group_sampling_prefix_cache_CorrectnessTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Group sampling prefix cache"
@@ -39,23 +39,23 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_group_sampling_prefix_cache_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_group_sampling_prefix_cache_CorrectnessTest
 
   # ------------------------------------------------------------------
   # Performance tests
   # ------------------------------------------------------------------
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for group_sampling_prefix_cache"
-    key: "${TPU_VERSION:-tpu6e}_group_sampling_prefix_cache_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_group_sampling_prefix_cache_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for group_sampling_prefix_cache"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_group_sampling_prefix_cache_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_group_sampling_prefix_cache_CorrectnessTest"
     soft_fail: true
     if: build.env("NIGHTLY") == "1"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/core/test_dp_group_sampling_prefix_cache.py::TestGroupSamplingPrefixCache::test_group_sampling_hits_prefix_cache
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for group_sampling_prefix_cache"
-    key: "${TPU_VERSION:-tpu6e}_record_group_sampling_prefix_cache_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_group_sampling_prefix_cache_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for group_sampling_prefix_cache"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_group_sampling_prefix_cache_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_group_sampling_prefix_cache_PerformanceTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Group sampling prefix cache"
@@ -65,4 +65,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_group_sampling_prefix_cache_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_group_sampling_prefix_cache_PerformanceTest
