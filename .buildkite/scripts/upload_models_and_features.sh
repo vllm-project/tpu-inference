@@ -46,8 +46,12 @@ add_kernel_microbenchmarks() {
   fi
 }
 
-TARGET_FOLDERS=("quantization" "parallelism" "models" "features" "rl")
-add_kernel_microbenchmarks
+# TARGET_FOLDERS=("quantization" "parallelism" "models" "features" "rl")
+# add_kernel_microbenchmarks
+
+# for test
+TARGET_FOLDERS=("models")
+# add_kernel_microbenchmarks
 
 # case "${MODEL_IMPL_TYPE}" in
 #   # "auto")
@@ -71,6 +75,7 @@ pipeline_v7x_fragments=()
 # Declare separate arrays for each list
 declare -a model_list
 declare -a feature_list
+FRAMEWORKS=("vllm" "flax_nnx")
 
 
 for folder_path in "${TARGET_FOLDERS[@]}"; do
@@ -101,9 +106,9 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
         "models")
           model_list+=("$subject_name")
           ;;
-        "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "rl")
-          feature_list+=("${subject_name}")
-          ;;
+        # "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "rl")
+        #   feature_list+=("${subject_name}")
+        #   ;;
       esac
     fi
 
@@ -147,7 +152,7 @@ if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
   buildkite-agent meta-data set "run_v6_matrix" "true"
   
   # Loop through each model implementation type
-  for IMPL_TYPE in "vllm" "flax_nnx"; do
+  for IMPL_TYPE in "${FRAMEWORKS[@]}"; do
     export MODEL_IMPL_TYPE="${IMPL_TYPE}"
     echo "Uploading v6e pipeline group for: ${MODEL_IMPL_TYPE}"
     {
@@ -177,7 +182,7 @@ if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   buildkite-agent meta-data set "run_v7_matrix" "true"
 
   # Loop through each model implementation type
-  for IMPL_TYPE in "vllm" "flax_nnx"; do
+  for IMPL_TYPE in "${FRAMEWORKS[@]}"; do
     export MODEL_IMPL_TYPE="${IMPL_TYPE}"
     echo "Uploading v7x pipeline group for: ${MODEL_IMPL_TYPE}"
     {
