@@ -62,7 +62,7 @@ esac
 
 # Save the results using the hardware-specific prefix.
 buildkite-agent meta-data set "${TPU_METADATA_PREFIX}${CI_TARGET}_category" "${CI_CATEGORY}"
-buildkite-agent meta-data set "${TPU_METADATA_PREFIX}${CI_TARGET}:${CI_STAGE}" "${message}"
+buildkite-agent meta-data set "${TPU_METADATA_PREFIX}:${MODEL_IMPL_TYPE}:${CI_TARGET}:${CI_STAGE}" "${message}"
 
 if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "unverified" ] && [ "${OUTCOME}" != "not enough HBM" ]; then
     exit 1

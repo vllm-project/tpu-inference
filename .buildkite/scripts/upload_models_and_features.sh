@@ -20,8 +20,6 @@ BUILDKITE_DIR=".buildkite"
 MODEL_LIST_KEY="model-list"
 FEATURE_LIST_KEY="feature-list"
 
-MODEL_IMPL_TYPE="${MODEL_IMPL_TYPE:-auto}"
-
 failure_handler() {
   local exit_code=$?
   local line_no=$1
@@ -142,14 +140,23 @@ if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
   export TENSOR_PARALLEL_SIZE_SINGLE=1
   export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v6_matrix" "true"
-  {
-    echo "priority: ${JOB_PRIORITY:-1}"
-    echo "steps:"
-    echo "  - group: \"TPU v6e nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
-    echo "    key: \"v6e-group\""
-    echo "    steps:"
-    printf "%s\n" "${pipeline_v6e_fragments[@]}" | sed 's/^/      /'
-  } | buildkite-agent pipeline upload
+
+  # Loop through each model implementation type
+  for IMPL_TYPE in "vllm" "flax_nnx"; do
+    export MODEL_IMPL_TYPE="${IMPL_TYPE}"
+    echo "Uploading pipeline group for: ${MODEL_IMPL_TYPE}"
+    {
+      echo "priority: ${JOB_PRIORITY:-1}"
+      echo "steps:"
+      echo "  - group: \"TPU v6e nightly Tests (${MODEL_IMPL_TYPE})\""
+      echo "    key: \"v6e-group-${MODEL_IMPL_TYPE}\""
+      echo "    env:"
+      echo "      MODEL_IMPL_TYPE: \"${MODEL_IMPL_TYPE}\""
+      echo "    steps:"
+      printf "%s\n" "${pipeline_v6e_fragments[@]}" | sed 's/^/      /'
+    } | buildkite-agent pipeline upload
+  done
+
 else
   echo "--- No .yml files found, nothing to upload."
   exit 0
@@ -164,14 +171,24 @@ if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   export TENSOR_PARALLEL_SIZE_SINGLE=2
   export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v7_matrix" "true"
-  {
-    echo "priority: ${JOB_PRIORITY:-1}"
-    echo "steps:"
-    echo "  - group: \"TPU v7x nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
-    echo "    key: \"v7x-group\""
-    echo "    steps:"
-    printf "%s\n" "${pipeline_v7x_fragments[@]}" | sed 's/^/      /'
-  } | buildkite-agent pipeline upload
+
+  # Loop through each model implementation type
+  for IMPL_TYPE in "vllm" "flax_nnx"; do
+    export MODEL_IMPL_TYPE="${IMPL_TYPE}"
+    echo "Uploading pipeline group for: ${MODEL_IMPL_TYPE}"
+    
+    {
+      echo "priority: ${JOB_PRIORITY:-1}"
+      echo "steps:"
+      echo "  - group: \"TPU v7x nightly Tests (${MODEL_IMPL_TYPE})\""
+      echo "    key: \"v7x-group-${MODEL_IMPL_TYPE}\""
+      echo "    env:"
+      echo "      MODEL_IMPL_TYPE: \"${MODEL_IMPL_TYPE}\""
+      echo "    steps:"
+      printf "%s\n" "${pipeline_v7x_fragments[@]}" | sed 's/^/      /'
+    } | buildkite-agent pipeline upload
+  done
+
 else
   echo "--- No .yml files found, nothing to upload."
   exit 0
