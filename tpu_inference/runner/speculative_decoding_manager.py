@@ -306,6 +306,18 @@ class SpeculativeDecodingManager:
         padded_bonus_logits_indices = np.concatenate(out_bonus_logits_indices)
         padded_num_draft_tokens = np.concatenate(out_draft_lengths)
         padded_num_draft_tokens_cpu = padded_num_draft_tokens
+        print(
+            f"DEBUG [Host]: padded_num_draft_tokens CPU={padded_num_draft_tokens}",
+            flush=True)
+        print(
+            f"DEBUG [Host]: padded_logits_indices CPU={padded_logits_indices}",
+            flush=True)
+        print(
+            f"DEBUG [Host]: padded_target_logits_indices CPU={padded_target_logits_indices}",
+            flush=True)
+        print(
+            f"DEBUG [Host]: padded_bonus_logits_indices CPU={padded_bonus_logits_indices}",
+            flush=True)
         # CPU -> TPU copy.
         (padded_num_draft_tokens, padded_logits_indices,
          padded_target_logits_indices,

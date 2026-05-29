@@ -26,7 +26,7 @@ from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
-from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
+from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear, JaxLmHead
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
@@ -476,7 +476,6 @@ class Gemma4MultiTokenPredictor(JaxModule):
         hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
         layer_name_to_kv_cache: Optional[dict] = None,
-        spec_step_idx: int = 0,
     ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
         inputs_embeds = self.embed_input_ids(input_ids)
 
@@ -484,7 +483,7 @@ class Gemma4MultiTokenPredictor(JaxModule):
         hidden_states = self.pre_projection(combined)
 
         for i, layer in enumerate(self.layers):
-            layer_name = f"layer.{i}"
+            layer_name = f"draft_layer.{i}"
             if layer_name_to_kv_cache and layer_name in layer_name_to_kv_cache:
                 cache_idx = layer_name_to_kv_cache[layer_name]
             else:
@@ -532,15 +531,13 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
         self.final_logit_softcapping = getattr(text_config,
                                                "final_logit_softcapping", None)
 
-        if not getattr(draft_config, "tie_word_embeddings", True):
-            self.lm_head = JaxEinsum(
-                einsum_str="TD,DV->TV",
-                kernel_shape=(text_config.hidden_size, text_config.vocab_size),
-                dtype=dtype,
-                rngs=rng,
-                quant_config=vllm_config.quant_config,
-                prefix="lm_head",
-            )
+        self.lm_head = JaxLmHead(
+            text_config.hidden_size,
+            text_config.vocab_size,
+            rngs=rng,
+            dtype=dtype,
+            prefix="lm_head",
+        )
 
         if getattr(draft_config, "use_ordered_embeddings", False):
             num_centroids = getattr(draft_config, "num_centroids", 2048)
@@ -576,6 +573,12 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
                     ("model.", "lm_head", "masked_embedding")):
                     loaded_keys.add(clean_name)
                     yield clean_name, tensor
+                    if clean_name == "model.embed_tokens.weight" and getattr(
+                            self.vllm_config.speculative_config.
+                            draft_model_config.hf_config,
+                            "tie_word_embeddings", True):
+                        loaded_keys.add("lm_head.weight")
+                        yield "lm_head.weight", tensor
 
             if getattr(self, "masked_embedding", None) is not None:
                 for key in [
@@ -621,7 +624,6 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
         attention_metadata: AttentionMetadata,
         layer_name_to_kvcache_index: Optional[Sequence[Tuple[str,
                                                              int]]] = None,
-        spec_step_idx: int = 0,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
                Optional[jax.Array]]:
@@ -634,14 +636,13 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
             hidden_states,
             attention_metadata,
             layer_name_to_kv_cache=layer_name_to_kv_cache,
-            spec_step_idx=spec_step_idx,
         )
 
         return kv_caches, draft_hidden_states, [backbone_hidden_states], None
 
     def _get_full_lm_head_weight(self) -> jax.Array:
         if hasattr(self, "lm_head"):
-            return self.lm_head.kernel.value
+            return self.lm_head.weight.value
         else:
             return self.model.embed_tokens.embedding.value
 
