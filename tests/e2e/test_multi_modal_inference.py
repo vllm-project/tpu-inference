@@ -71,6 +71,13 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes,
     accel_devices = glob.glob("/dev/accel*")
     num_chips = len(accel_devices) if accel_devices else 1
 
+    # Count visible TPU accelerators via filesystem devices instead of JAX.
+    # This prevents the master process from locking the TPU backend (/dev/vfio/0)
+    # and blocking the spawned vLLM worker child processes.
+    import glob
+    accel_devices = glob.glob("/dev/accel*")
+    num_chips = len(accel_devices) if accel_devices else 1
+
     # Hardware topology checking to prevent Out Of Memory (OOM) on smaller single-host slices
     if "30B" in model:
         if num_chips < 4:
@@ -143,7 +150,16 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes,
 
     try:
         llm = LLM(**engine_args)
+    # Clean up before initialization to release any stale locks immediately
+    _cleanup_tpu_zombies()
 
+    try:
+        llm = LLM(**engine_args)
+
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
         sampling_params = SamplingParams(
             temperature=temperature,
             max_tokens=max_tokens,
@@ -155,11 +171,22 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes,
                 "image": image
             },
         }
+        inputs = {
+            "prompt": prompt,
+            "multi_modal_data": {
+                "image": image
+            },
+        }
 
         # --- Run Inference ---
         print("Running inference...")
         outputs = llm.generate(inputs, sampling_params)
+        # --- Run Inference ---
+        print("Running inference...")
+        outputs = llm.generate(inputs, sampling_params)
 
+        # --- Verification ---
+        generated_text = outputs[0].outputs[0].text.strip()
         # --- Verification ---
         generated_text = outputs[0].outputs[0].text.strip()
 
@@ -167,7 +194,17 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes,
         print("Generated Text:")
         print(generated_text)
         print("-" * 50)
+        print("-" * 50)
+        print("Generated Text:")
+        print(generated_text)
+        print("-" * 50)
 
+        # Check output against the closest known-good caption.
+        similarity_score = max(
+            difflib.SequenceMatcher(None, generated_text, expected).ratio()
+            for expected in EXPECTED_TEXTS
+        )
+        print(f"Similarity Score: {similarity_score:.4f}")
         # Check output against the closest known-good caption.
         similarity_score = max(
             difflib.SequenceMatcher(None, generated_text, expected).ratio()
