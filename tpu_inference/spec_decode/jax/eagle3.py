@@ -66,6 +66,8 @@ class Eagle3Proposer:
         self.rng_key = jax.random.key(self.vllm_config.model_config.seed)
         self.max_num_tokens = runner.max_num_tokens
         self.token_arange = jnp.arange(self.max_num_tokens)
+        self.constant_draft_positions = self.speculative_config.use_gemma4_mtp(
+        )
 
     def load_model(self, target_model: Any) -> None:
         """Loads the draft model."""
@@ -622,8 +624,17 @@ class Eagle3Proposer:
         for i in range(num_speculative_tokens - 1):
             input_ids_loop = draft_token_ids_list[-1]
 
-            positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables = self._update_inputs_for_loop_speculation(
-                positions, attn_metadata.seq_lens, attn_metadata.block_tables)
+            if self.constant_draft_positions:
+                # For MTP sharing verifier caches: positions, sequence lengths, and block tables remain constant.
+                clamped_positions = attn_metadata.input_positions
+                new_seq_lens = attn_metadata.seq_lens
+                query_start_loc = attn_metadata.query_start_loc
+                new_block_tables = attn_metadata.block_tables
+            else:
+                # Eagle3: advance positions sequentially
+                positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables = self._update_inputs_for_loop_speculation(
+                    positions, attn_metadata.seq_lens,
+                    attn_metadata.block_tables)
 
             attn_metadata = replace(
                 attn_metadata,
