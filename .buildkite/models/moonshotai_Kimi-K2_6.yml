@@ -50,7 +50,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2_6_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for moonshotai/Kimi-K2.6"
-    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2_6_Accuracy"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2_6_Accuracy_Correctness"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_moonshotai_Kimi-K2_6_UnitTest"
     soft_fail: true
     agents:
@@ -63,8 +63,8 @@ steps:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2_6_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for moonshotai/Kimi-K2_6"
-    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_moonshotai_Kimi-K2_6_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2_6_Accuracy"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_moonshotai_Kimi-K2_6_Accuracy_Correctness"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2_6_Accuracy_Correctness"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "moonshotai/Kimi-K2.6"
@@ -78,7 +78,7 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for moonshotai/Kimi-K2.6"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2_6_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_moonshotai_Kimi-K2_6_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_moonshotai_Kimi-K2_6_Accuracy_Correctness"
     soft_fail: true
     agents:
       queue: cpu  # TODO: replace with execution environment

@@ -36,7 +36,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for deepseek-ai/DeepSeek-V3.2"
-    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2_Accuracy"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2_Accuracy_Correctness"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_deepseek-ai_DeepSeek-V3_2_UnitTest"
     soft_fail: true
     agents:
@@ -49,8 +49,8 @@ steps:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for deepseek-ai/DeepSeek-V3.2"
-    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_deepseek-ai_DeepSeek-V3_2_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2_Accuracy"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_deepseek-ai_DeepSeek-V3_2_Accuracy_Correctness"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2_Accuracy_Correctness"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "deepseek-ai/DeepSeek-V3.2"
@@ -64,7 +64,7 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for deepseek-ai/DeepSeek-V3.2"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_deepseek-ai_DeepSeek-V3_2_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_deepseek-ai_DeepSeek-V3_2_Accuracy_Correctness"
     soft_fail: true
     agents:
       queue: cpu  # TODO: replace with execution environment

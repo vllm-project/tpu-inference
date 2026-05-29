@@ -35,7 +35,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest
 
   - label: "${{TPU_VERSION:-tpu6e}} Accuracy for {MODEL_NAME}/{CATEGORY}"
-    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
+    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy_Correctness"
     depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
     soft_fail: true
     agents:
@@ -49,8 +49,8 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
   - label: "${{TPU_VERSION:-tpu6e}} Record accuracy result for {MODEL_NAME}/{CATEGORY}"
-    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
+    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy_Correctness"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy_Correctness"
     env:
       CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
       CI_TARGET: "{MODEL_NAME}/{CATEGORY}"
@@ -64,7 +64,7 @@ steps:
 
   - label: "${{TPU_VERSION:-tpu6e}} Performance benchmarks for {MODEL_NAME}/{CATEGORY}"
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Benchmark"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy_Correctness"
     soft_fail: true
     agents:
       queue: "{QUEUE}"

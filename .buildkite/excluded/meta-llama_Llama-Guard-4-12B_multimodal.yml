@@ -48,7 +48,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-Guard-4-12B_text-only_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for meta-llama/Llama-Guard-4-12B/multimodal"
-    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-Guard-4-12B_multimodal_Accuracy"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-Guard-4-12B_multimodal_Accuracy_Correctness"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-Guard-4-12B_multimodal_UnitTest"
     soft_fail: true
     agents:
@@ -61,8 +61,8 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/safety_model_benchmark.sh --mode accuracy --benchmark multimodal
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for meta-llama/Llama-Guard-4-12B/multimodal"
-    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-Guard-4-12B_multimodal_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-Guard-4-12B_multimodal_Accuracy"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-Guard-4-12B_multimodal_Accuracy_Correctness"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-Guard-4-12B_multimodal_Accuracy_Correctness"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "meta-llama/Llama-Guard-4-12B/multimodal"
@@ -76,7 +76,7 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for meta-llama/Llama-Guard-4-12B/multimodal"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-Guard-4-12B_multimodal_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-Guard-4-12B_multimodal_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-Guard-4-12B_multimodal_Accuracy_Correctness"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"

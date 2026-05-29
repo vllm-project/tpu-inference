@@ -43,7 +43,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-120b_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for openai/gpt-oss-120b"
-    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-120b_Accuracy"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-120b_Accuracy_Correctness"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_openai_gpt-oss-120b_UnitTest"
     agents:
       queue: cpu  # TODO: replace with execution environment
@@ -52,7 +52,7 @@ steps:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-120b_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for openai/gpt-oss-120b"
-    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_openai_gpt-oss-120b_Accuracy"
+    key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_openai_gpt-oss-120b_Accuracy_Correctness"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-120b_UnitTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -67,7 +67,7 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for openai/gpt-oss-120b"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-120b_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_openai_gpt-oss-120b_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_openai_gpt-oss-120b_Accuracy_Correctness"
     agents:
       queue: cpu  # TODO: replace with execution environment
     soft_fail: true
