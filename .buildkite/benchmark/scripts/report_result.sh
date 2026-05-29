@@ -376,9 +376,9 @@ else
   fi
 fi
 
-if [[ "${MLCOMPASS_EXPORT_ENABLED:-true}" == "true" ]] then
+if [[ "${MLCOMPASS_EXPORT_ENABLED:-false}" == "true" ]] then
   echo "--- Reporting to MLCompass"
-  python3 ./mlcompass_export.py
+  python3 "$(dirname "${BASH_SOURCE[0]}")"/mlcompass_export.py
 else
   echo "--- Reporting to MLCompass (skipped)"
 fi
