@@ -46,7 +46,7 @@ def __call__(
     …
 ```
 
-For reference, check out [our Llama implementation](https://github.com/vllm-project/tpu-inference/blob/aad6cc2a36a2cf0de681f76055ce632d5abeca5f/tpu_inference/models/jax/llama3.py).
+For reference, check out [our Llama implementation](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/models/jax/llama3.py).
 
 ## 3. Implement the weight loading logic
 
@@ -54,7 +54,7 @@ You now need to implement the `load_weights` method in your `*ForCausalLM` class
 
 ## 4. Register your model
 
-TPU Inference relies on a model registry to determine how to run each model. A list of pre-registered architectures can be found [here](https://github.com/vllm-project/tpu-inference/blob/aad6cc2a36a2cf0de681f76055ce632d5abeca5f/tpu_inference/models/jax/model_loader.py#L22).
+TPU Inference relies on a model registry to determine how to run each model. A list of pre-registered architectures can be found [here](https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/models/common/model_loader.py).
 
 If your model is not on this list, you must register it to TPU Inference. You can load an external model using a plugin (similar to [vLLM’s plugins](https://docs.vllm.ai/en/latest/contributing/model/registration.html)) without modifying the TPU Inference codebase.
 
