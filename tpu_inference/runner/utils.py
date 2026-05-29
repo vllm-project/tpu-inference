@@ -891,6 +891,9 @@ def host_extract_sampled_tokens(
         sampled_output: jnp.ndarray, logits_indices_selector: np.ndarray,
         discard_sampled_tokens_req_indices: list, num_reqs: int):
     """host retrieve the sampled tokens for the current step."""
+    print(
+        f"DEBUG [Host]: Waiting for TPU output in host_extract_sampled_tokens (spec={spec_decode_metadata is not None})..."
+    )
     next_tokens = sampled_output
     if spec_decode_metadata is None:
         next_tokens = np.asarray(jax.device_get(next_tokens))
@@ -905,6 +908,7 @@ def host_extract_sampled_tokens(
             spec_decode_metadata.draft_lengths_cpu, num_reqs,
             spec_decode_metadata.final_logits_indices.shape[0], runner.dp_size,
             spec_decode_metadata.req_indices_dp)
+    print("DEBUG [Host]: TPU output retrieved successfully!")
     # Mask out the sampled tokens that should not be sampled.
     for i in discard_sampled_tokens_req_indices:
         valid_sampled_token_ids[i].clear()
