@@ -392,6 +392,15 @@ class TPUWorker(WorkerBase):
         total_hbm_limit_cap = total_hbm_limit * gpu_memory_utilization
         total_hbm_avail = int(total_hbm_limit_cap - total_hbm_used)
 
+        # Scale down the total HBM available by the KV Cache replication factor
+        # to prevent over-allocating blocks when EP/SP are active.
+        sharding_cfg = getattr(self.vllm_config, "sharding_config", None)
+        expert_size = getattr(sharding_cfg, "expert_size", None) if sharding_cfg else None
+        sequence_size = getattr(sharding_cfg, "sequence_size", None) if sharding_cfg else None
+        replication_factor = (expert_size * sequence_size) if (expert_size is not None and sequence_size is not None) else 1
+
+        total_hbm_avail = total_hbm_avail // replication_factor
+
         total_hbm_limit_gb = round(total_hbm_limit / utils.GBYTES, 2)
         total_hbm_limit_cap_gb = round(total_hbm_limit_cap / utils.GBYTES, 2)
         total_hbm_used_gb = round(total_hbm_used / utils.GBYTES, 2)
@@ -421,11 +430,14 @@ class TPUWorker(WorkerBase):
 
         total_hbm_avail_gb = round(total_hbm_avail / utils.GBYTES, 2)
 
-        logger.info(f"Memory statistics | "
-                    f"{total_hbm_limit_gb=}GiB | "
-                    f"{total_hbm_limit_cap_gb=}GiB | "
-                    f"{total_hbm_used_gb=}GiB | "
-                    f"{total_hbm_avail_gb=}GiB")
+        logger.info(
+            f"Memory statistics | "
+            f"{total_hbm_limit_gb=}GiB | "
+            f"{total_hbm_limit_cap_gb=}GiB | "
+            f"{total_hbm_used_gb=}GiB | "
+            f"replication_factor={replication_factor} | "
+            f"{total_hbm_avail_gb=}GiB"
+        )
 
         if total_hbm_avail <= 0:
             raise ValueError(f"{total_hbm_used_gb=}GiB exceeds "

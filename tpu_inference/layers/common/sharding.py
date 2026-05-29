@@ -109,6 +109,22 @@ class LazyShardingAxisName:
 
     def __getattr__(self, name):
         self._initialize()
+        if name == "KV_CACHE_HEAD" and self._cls is ShardingAxisNameBase:
+            from vllm.config import get_current_vllm_config
+            try:
+                vllm_config = get_current_vllm_config()
+            except Exception:
+                vllm_config = None
+
+            enable_dp_attention = False
+            if vllm_config is not None:
+                enable_dp_attention = vllm_config.additional_config.get(
+                    "sharding", {}).get("sharding_strategy", {}).get(
+                        "enable_dp_attention", False)
+
+            if not enable_dp_attention:
+                return getattr(self._cls, "MODEL", "model")
+
         return getattr(self._cls, name)
 
 
