@@ -390,7 +390,7 @@ def ragged_paged_attention(
     out_dtype: jnp.dtype | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
-    p_same_dtype_as_v: bool = False,
+    p_same_dtype_as_v: bool = True,
     s_dtype: jnp.dtype = jnp.bfloat16,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
@@ -444,7 +444,7 @@ def ragged_paged_attention(
         raise ValueError("Debug mode is not supported.")
 
     if out_dtype is None:
-        out_dtype = queries.dtype
+        out_dtype = queries.dtype if queries.dtype == jnp.float32 else jnp.bfloat16
     if mask_value is None:
         mask_value = jnp.finfo(out_dtype).min
     if vmem_limit_bytes is None:
