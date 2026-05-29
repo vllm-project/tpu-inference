@@ -515,8 +515,8 @@ class VllmModelWrapper:
                         "call_args": call_args,
                         "call_kwargs": {
                             "is_multimodal":
-                            torch_view(is_multimodal)
-                            if is_multimodal is not None else False,
+                            torch_view(is_multimodal) if is_multimodal
+                            is not None else torch.tensor(False),
                         },
                     },
                     tie_weights=False,
