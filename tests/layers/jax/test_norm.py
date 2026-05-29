@@ -108,14 +108,12 @@ class TestJaxLayerNorm:
             num_features=16,
             rngs=rngs,
         )
-        # 1. 'scale' attribute should NOT exist directly in __dict__
         assert "scale" not in jax_ln.__dict__
-        # 2. 'weight' attribute should exist and be an nnx.Param
         assert "weight" in jax_ln.__dict__
         assert isinstance(jax_ln.weight, nnx.Param)
-        # 3. Accessing .scale should fall back to returning .weight via __getattr__
         assert jax_ln.scale is jax_ln.weight
-        # 4. Check named_parameters yields 'weight' and NOT 'scale'
+
         named_params = dict(jax_ln.named_parameters())
+
         assert "weight" in named_params
         assert "scale" not in named_params
