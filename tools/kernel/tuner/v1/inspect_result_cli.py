@@ -1003,7 +1003,6 @@ def _setup_console_history():
         print(
             f'Warning: could not read history file at {history_path}; starting with empty history.'
         )
-        pass
 
     readline.set_history_length(2000)
 
@@ -1012,7 +1011,6 @@ def _setup_console_history():
             readline.write_history_file(history_path)
         except OSError:
             print(f'Warning: could not write history file at {history_path}.')
-            pass
 
     atexit.register(_save_history)
     return history_path
