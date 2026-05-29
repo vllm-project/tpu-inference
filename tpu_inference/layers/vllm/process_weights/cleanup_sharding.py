@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
+
 import jax
 import torch
 import torchax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from torch.nn.utils import stateless as torch_stateless
 from torch.utils import _pytree as pytree
 from torchax.interop import jax_view, torch_view
 from vllm import envs as vllm_envs
@@ -38,8 +41,32 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-def shard_model_to_tpu(model: torch.nn.Module,
-                       mesh: Mesh) -> dict[str, torchax.torch.Tensor]:
+@contextlib.contextmanager
+def reparametrize(
+    model: torch.nn.Module,
+    params_and_buffers: dict[str, torch.Tensor],
+):
+    """Temporary replace the parameters and buffers for the give model."""
+    # While we are using a "private" interface _reparametrize_module here,
+    # it's quite stable since the first introduction from 2021.
+    # See: https://github.com/pytorch/pytorch/pull/61447
+
+    # Note: Coupled with the implementation of shard_model_to_tpu.
+    # The tie_weights need to be True, since we are using the interfaces,
+    # named_parameters and named_buffers, and the linked parameter/buffer
+    # is not included in the extracted tensors.
+    with torch_stateless._reparametrize_module(
+            model,
+            params_and_buffers,
+            tie_weights=True,
+    ):
+        yield
+
+
+def shard_model_to_tpu(
+    model: torch.nn.Module,
+    mesh: Mesh,
+) -> dict[str, torch.Tensor]:
     """
     Shard the model weights and move them to TPU.
     At the same time, also turn the weight tensors into torchax tensors so that
@@ -80,6 +107,7 @@ def update_lora(model: torch.nn.Module,
 
 
 def _extract_all_params_buffers(model: torch.nn.Module):
+    # Note: Coupled with reparametrize context manger.
     return dict(model.named_parameters()), dict(model.named_buffers())
 
 
