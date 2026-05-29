@@ -163,12 +163,7 @@ process_models() {
                     elif [ "$stage" == "Framework" ]; then
                         result="${framework}"
                     else
-                        local hw_label=""
-                        case "$prefix" in
-                            "v6") hw_label="tpu6e" ;;
-                            "v7") hw_label="tpu7x" ;;
-                        esac
-                        local meta_key="${hw_label}_${framework}:${model}:${stage}"
+                        local meta_key="${prefix}_${framework}:${model}:${stage}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
                     fi
                     
