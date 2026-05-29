@@ -843,7 +843,7 @@ class PhasedBasedProfiler:
         "final_logits_indices",
     ],
     meta_fields=[],
-    drop_fields=["draft_lengths_cpu"],
+    drop_fields=["draft_lengths_cpu", "req_indices_dp"],
 )
 @dataclass
 class SpecDecodeMetadata:
@@ -854,6 +854,7 @@ class SpecDecodeMetadata:
     final_logits_indices: jnp.ndarray
 
     draft_lengths_cpu: Any = field(init=False, default=None)
+    req_indices_dp: dict = field(init=False, default_factory=dict)
 
 
 def host_extract_sampled_tokens(
@@ -873,7 +874,8 @@ def host_extract_sampled_tokens(
         valid_sampled_token_ids = runner.rejection_sampler.parse_output(
             next_tokens, runner.input_batch.vocab_size,
             spec_decode_metadata.draft_lengths_cpu, num_reqs,
-            spec_decode_metadata.final_logits_indices.shape[0])
+            spec_decode_metadata.final_logits_indices.shape[0], runner.dp_size,
+            spec_decode_metadata.req_indices_dp)
     # Mask out the sampled tokens that should not be sampled.
     for i in discard_sampled_tokens_req_indices:
         valid_sampled_token_ids[i].clear()
