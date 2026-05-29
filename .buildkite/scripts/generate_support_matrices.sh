@@ -126,8 +126,11 @@ process_models() {
             for model in "${model_list[@]:-}"; do
                 if [[ -z "$model" ]]; then continue; fi
                 # Get the category (default: text-only)
+                local safe_model
+                safe_model=$(echo "$model" | tr -s '/:.[[:space:]]' '_')
+                local category_key="${CI_TPU_VERSION}_${safe_model}_category"
                 local category
-                category=$(buildkite-agent meta-data get "${CI_TPU_VERSION}${model}_category" --default "text-only")
+                category=$(buildkite-agent meta-data get "${category_key}" --default "text-only")
                 
                 local row="\"$model\""
                 echo "[DEBUG] CI_TPU_VERSION: ${CI_TPU_VERSION}"
@@ -190,8 +193,11 @@ process_features() {
                 if [[ -z "$feature" ]]; then continue; fi
 
                 # Get Category (default: feature support matrix)
+                local safe_feature
+                safe_feature=$(echo "$feature" | tr -s '/:.[[:space:]]' '_')
+                local category_key="${CI_TPU_VERSION}_${safe_feature}_category"
                 local category
-                category=$(buildkite-agent meta-data get "${CI_TPU_VERSION}${feature}_category" --default "feature support matrix")
+                category=$(buildkite-agent meta-data get "${category_key}" --default "feature support matrix")
 
                 local category_filename=${category// /_}
                 local category_csv="${category_filename}.csv"
