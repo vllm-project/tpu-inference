@@ -137,6 +137,10 @@ def gdn_attention_core_tpu(
     seq_lens_sliced = truncate_sharded_tensor(attn_metadata.seq_lens,
                                               padded_num_reqs_per_dp, dp_size)
 
+    # Extract cached GDN schedule table and total blocks if available
+    gdn_schedule_table = attn_metadata.gdn_schedule_table
+    gdn_total_blocks = attn_metadata.gdn_total_blocks
+
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
          j_mixed_qkv,
@@ -158,7 +162,10 @@ def gdn_attention_core_tpu(
          d_v,
          kernel_size,
          mesh=mesh,
-         config=config)
+         config=config,
+         gdn_schedule_table=gdn_schedule_table,
+         gdn_total_blocks=gdn_total_blocks,
+     )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]
         new_conv_state = jnp.concatenate(

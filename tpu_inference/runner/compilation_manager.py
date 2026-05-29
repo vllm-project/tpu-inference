@@ -259,6 +259,40 @@ class CompilationManager:
             return block_tables
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
+            # Create dummy GDN schedule arrays for models with mamba layers
+            gdn_schedule_table = None
+            gdn_total_blocks = None
+            if self.runner.kv_cache_config.has_mamba_layers:
+                from jax.experimental.pallas import tpu as pltpu
+
+                from tpu_inference.kernels.gdn.v2 import compute_schedule_v2
+
+                # chunk_size = 32 (hardcoded in gdn_attention.py)
+                gdn_chunk_size = 32
+                max_blocks = (num_tokens + gdn_chunk_size -
+                              1) // gdn_chunk_size
+                max_num_seqs_per_dp = self.runner.max_num_reqs // dp_size
+                safe_max_blocks = int(max_blocks + max_num_seqs_per_dp * 2)
+
+                num_sublanes = pltpu.get_tpu_info().num_sublanes
+                model_dtype = to_jax_dtype(self.runner.model_config.dtype)
+                per_rank_table, _ = compute_schedule_v2.make_gdn_schedule_arrays(
+                    safe_max_blocks, model_dtype, num_sublanes, is_dummy=True)
+                num_cols = per_rank_table.shape[1]
+
+                schedule_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+                gdn_total_blocks_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+                gdn_schedule_table = jax.device_put(
+                    jnp.zeros((dp_size * safe_max_blocks, num_cols),
+                              dtype=jnp.int32), schedule_sharding)
+                gdn_total_blocks = jax.device_put(
+                    jnp.zeros((dp_size, 1), dtype=jnp.int32),
+                    gdn_total_blocks_sharding)
+
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
@@ -267,6 +301,8 @@ class CompilationManager:
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
+                gdn_schedule_table=gdn_schedule_table,
+                gdn_total_blocks=gdn_total_blocks,
             )
             return attention_metadata_gid
 

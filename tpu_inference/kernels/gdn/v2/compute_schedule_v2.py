@@ -259,3 +259,55 @@ def compute_schedule_table_v2(
     total_blocks = jnp.maximum(total_prefill_blocks, num_decode_batches)
 
     return final_table, total_blocks
+
+
+def make_gdn_schedule_arrays(
+    safe_max_blocks: int,
+    qkv_dtype,
+    num_sublanes: int,
+    is_dummy: bool,
+    query_start_loc=None,
+    decode_tokens=None,
+    num_valid_seqs=None,
+    num_tokens=None,
+    chunk_size=None,
+    BT=None,
+) -> tuple[jax.Array, jax.Array]:
+    """Create GDN schedule arrays with correct dtype-aware sublane sizing.
+
+    Args:
+        safe_max_blocks: Static maximum number of schedule blocks (for shape).
+        qkv_dtype: dtype of mixed_qkv (e.g. jnp.bfloat16). Used to compute
+            sublanesize = 4 // itemsize * num_sublanes correctly.
+        num_sublanes: Raw sublane count from pltpu.get_tpu_info().num_sublanes.
+        is_dummy: If True, return zero arrays with correct shapes (for
+            compilation pre-allocation). If False, compute actual schedule.
+        query_start_loc: Per-rank query start locations (required if not dummy).
+        decode_tokens: Number of decode tokens (required if not dummy).
+        num_valid_seqs: Number of valid sequences (required if not dummy).
+        num_tokens: Static max tokens for safe_max_blocks (required if not dummy).
+        chunk_size: Chunk size for schedule computation (required if not dummy).
+        BT: Decode block size (required if not dummy).
+
+    Returns:
+        Tuple of (schedule_table, total_blocks_arr):
+          - schedule_table: (safe_max_blocks, num_cols) int32
+          - total_blocks_arr: (1, 1) int32, stacks to (dp_size, 1) via shard_map
+    """
+    sublanesize = 4 // jnp.dtype(qkv_dtype).itemsize * num_sublanes
+    num_cols = 11 + 3 * sublanesize
+    if is_dummy:
+        return (
+            jnp.zeros((safe_max_blocks, num_cols), dtype=jnp.int32),
+            jnp.zeros((1, 1), dtype=jnp.int32),
+        )
+    table, total_blocks = compute_schedule_table_v2(
+        query_start_loc,
+        decode_tokens,
+        num_valid_seqs,
+        num_tokens,
+        chunk_size,
+        BT,
+        alignment=sublanesize,
+    )
+    return table, jnp.expand_dims(jnp.expand_dims(total_blocks, 0), -1)

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -1075,6 +1076,8 @@ def recurrent_scan(
     BT: int = 128,
     use_qk_norm_in_gdn: bool = True,
     has_initial_state: jax.Array | None = None,
+    gdn_schedule_table: Optional[jax.Array] = None,
+    gdn_total_blocks: Optional[jax.Array] = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Fused recurrent scan kernel for GDN on TPU v7.
 
@@ -1130,20 +1133,29 @@ def recurrent_scan(
     # Assuming length 1 per decode request, this is also the number of decode
     # requests.
     decode_tokens = distribution[0]
-    schedule_table, total_blocks = (
-        compute_schedule_table_v2.compute_schedule_table_v2(
-            query_start_loc,
-            decode_tokens,
-            distribution[2],
-            num_tokens,
-            chunk_size,
-            BT,
-            alignment=sublanesize,
-        ))
+
+    # Use cached GDN schedule table if provided, otherwise compute locally
+    if gdn_schedule_table is not None and gdn_total_blocks is not None:
+        # Use precomputed schedule table from tpu_runner
+        # gdn_total_blocks arrives as (1, 1) from shard_map slicing, squeeze to (1,)
+        schedule_table = gdn_schedule_table
+        total_blocks_arr = jnp.squeeze(gdn_total_blocks,
+                                       axis=-1)  # (1, 1) -> (1,)
+    else:
+        schedule_table, total_blocks = (
+            compute_schedule_table_v2.compute_schedule_table_v2(
+                query_start_loc,
+                decode_tokens,
+                distribution[2],
+                num_tokens,
+                chunk_size,
+                BT,
+                alignment=sublanesize,
+            ))
+        total_blocks_arr = jnp.expand_dims(total_blocks, 0)
 
     # sublane,128
     decode_tokens_arr = jnp.expand_dims(decode_tokens, 0)
-    total_blocks_arr = jnp.expand_dims(total_blocks, 0)
 
     grid_spec = pl.GridSpec(
         grid=(1, ),
@@ -1185,7 +1197,11 @@ def recurrent_scan(
         ),
         grid_spec=grid_spec,
         input_output_aliases={1: 0},
-        compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
+        compiler_params=pltpu.CompilerParams(
+            disable_bounds_checks=True,
+            vmem_limit_bytes=int(pltpu.get_tpu_info().vmem_capacity_bytes *
+                                 0.8),
+        ),
     )(
         mixed_qkv,
         recurrent_state,

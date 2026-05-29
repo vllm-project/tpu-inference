@@ -28,6 +28,8 @@ import jax
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "gdn_schedule_table",
+        "gdn_total_blocks",
     ],
     meta_fields=["padded_num_reqs"],
     drop_fields=["query_start_loc_cpu", "seq_lens_cpu"],
@@ -53,6 +55,15 @@ class AttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+
+    # (dp_size * safe_max_blocks, cols), sharded P(ATTN_DATA, None)
+    # Cached GDN schedule table for efficient computation across layers.
+    # Computed once per step in tpu_runner when has_mamba_layers is True.
+    gdn_schedule_table: jax.Array | None = None
+    # (dp_size, 1), sharded P(ATTN_DATA, None)
+    # Total blocks per DP rank for GDN schedule. Used with gdn_schedule_table.
+    # Shape (dp_size, 1) so each shard sees (1, 1); recurrent_scan squeezes to (1,).
+    gdn_total_blocks: jax.Array | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket
     # contains only max_reqs by default to reduce model precompilation time.

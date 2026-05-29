@@ -29,6 +29,7 @@ from flax import nnx
 from jax._src import mesh as mesh_lib
 from jax._src.pallas.utils import next_power_of_2
 from jax.experimental import mesh_utils
+from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.parallel import ParallelConfig
@@ -52,6 +53,8 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
+from tpu_inference.kernels.gdn.v2 import \
+    compute_schedule_v2 as compute_schedule_table_v2
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
@@ -1599,6 +1602,77 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return prompt_logprobs_dict
 
+    @functools.partial(jax.jit, static_argnums=(0, 3, 4))
+    def _precompute_gdn_schedule(
+        self,
+        query_start_loc: jax.Array,
+        request_distribution: jax.Array,
+        max_tokens: int,
+        chunk_size: int,
+    ) -> tuple[jax.Array, jax.Array]:
+        """Precompute GDN schedule table on TPU for all DP ranks.
+        
+        Args:
+            query_start_loc: (dp_size * max_num_reqs_per_rank + dp_size,) start locations
+            request_distribution: (dp_size * 3,) distribution per rank
+            max_tokens: Maximum tokens across all DP ranks
+            chunk_size: Chunk size for GDN computation
+            
+        Returns:
+            gdn_schedule_table: (dp_size * safe_max_blocks, cols) schedule table
+            gdn_total_blocks: (dp_size, 1) total blocks per DP rank
+        """
+        # Compute safe_max_blocks statically from configuration
+        max_blocks = (max_tokens + chunk_size - 1) // chunk_size
+        max_num_seqs_per_rank = self.scheduler_config.max_num_seqs
+        safe_max_blocks = max_blocks + max_num_seqs_per_rank * 2
+
+        # Dtype-aware sublane size: 4 // itemsize * num_sublanes
+        num_sublanes = pltpu.get_tpu_info().num_sublanes
+        qkv_dtype = to_jax_dtype(self.model_config.dtype)
+
+        def compute_schedule_local(
+            local_query_start_loc: jax.Array,
+            local_distribution: jax.Array,
+        ) -> tuple[jax.Array, jax.Array]:
+            """Compute schedule for a single DP rank."""
+            decode_tokens = local_distribution[0]
+            num_valid_seqs = local_distribution[2]
+
+            return compute_schedule_table_v2.make_gdn_schedule_arrays(
+                safe_max_blocks,
+                qkv_dtype,
+                num_sublanes,
+                is_dummy=False,
+                query_start_loc=local_query_start_loc,
+                decode_tokens=decode_tokens,
+                num_valid_seqs=num_valid_seqs,
+                num_tokens=max_tokens,
+                chunk_size=chunk_size,
+                BT=chunk_size,
+            )
+
+        # Use shard_map to run on each DP rank
+        mapped_fn = jax.shard_map(
+            compute_schedule_local,
+            mesh=self.mesh,
+            in_specs=(
+                PartitionSpec(ShardingAxisName.ATTN_DATA),  # query_start_loc
+                PartitionSpec(
+                    ShardingAxisName.ATTN_DATA),  # request_distribution
+            ),
+            out_specs=(
+                PartitionSpec(ShardingAxisName.ATTN_DATA,
+                              None),  # schedule_table
+                PartitionSpec(
+                    ShardingAxisName.ATTN_DATA,
+                    None),  # total_blocks_arr (1,1) per rank -> (dp_size, 1)
+            ),
+            check_vma=False,
+        )
+
+        return mapped_fn(query_start_loc, request_distribution)
+
     def _prepare_input_metadata(self, scheduler_output: "VllmSchedulerOutput"):
 
         dp_size = self.dp_size
@@ -2127,6 +2201,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             seq_lens, positions = self._subtract_num_rejected_tokens(
                 seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank)
 
+        # Precompute GDN schedule table for models with mamba layers
+        gdn_schedule_table = None
+        gdn_total_blocks = None
+        if self.kv_cache_config.has_mamba_layers:
+            # Use padded token count - this is the actual shape that mixed_qkv will have
+            # Same for all ranks due to bucketing, matches mixed_qkv.shape[0] in recurrent_scan
+            # Chunk size used in GDN attention (hardcoded to 32 in gdn_attention.py)
+            gdn_chunk_size = 32
+
+            gdn_schedule_table, gdn_total_blocks = self._precompute_gdn_schedule(
+                query_start_loc,
+                request_distribution,
+                padded_num_scheduled_tokens_per_dp_rank,  # Static bucketed shape
+                gdn_chunk_size,
+            )
+
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
@@ -2136,6 +2226,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
+                gdn_schedule_table=gdn_schedule_table,
+                gdn_total_blocks=gdn_total_blocks,
             )
 
             return attention_metadata_gid

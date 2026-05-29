@@ -15,6 +15,7 @@
 
 import dataclasses
 import enum
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -102,6 +103,8 @@ def ragged_gated_delta_rule_wrapper(
     n_v: int,
     d_k: int,
     d_v: int,
+    gdn_schedule_table: Optional[jnp.ndarray] = None,
+    gdn_total_blocks: Optional[jnp.ndarray] = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies the gated delta rule over ragged seq lengths using various implementations.
 
@@ -259,6 +262,8 @@ def ragged_gated_delta_rule_wrapper(
                 BT=chunk_size,
                 use_qk_norm_in_gdn=config.use_qk_norm_in_gdn,
                 has_initial_state=has_initial_state,
+                gdn_schedule_table=gdn_schedule_table,
+                gdn_total_blocks=gdn_total_blocks,
             )
 
         else:

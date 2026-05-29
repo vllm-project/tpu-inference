@@ -54,6 +54,8 @@ def run_jax_gdn_attention_local(
     state_indices: jnp.ndarray,
     distribution: jnp.ndarray,
     seq_lens: jnp.ndarray,
+    gdn_schedule_table: Optional[jnp.ndarray],
+    gdn_total_blocks: Optional[jnp.ndarray],
     n_kq: int,
     n_v: int,
     d_k: int,
@@ -163,6 +165,8 @@ def run_jax_gdn_attention_local(
             config=wrapper_config,
             chunk_size=32,
             has_initial_state=has_initial_state,
+            gdn_schedule_table=gdn_schedule_table,
+            gdn_total_blocks=gdn_total_blocks,
         )
 
     return (new_conv_state, new_recurrent_state), output
@@ -189,6 +193,8 @@ def run_jax_gdn_attention(
     kernel_size: int,
     mesh: jax.sharding.Mesh,
     config: GdnAttentionConfig = GdnAttentionConfig(),
+    gdn_schedule_table: Optional[jnp.ndarray] = None,
+    gdn_total_blocks: Optional[jnp.ndarray] = None,
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Runs the Jax GDN attention mechanism.
 
@@ -249,6 +255,10 @@ def run_jax_gdn_attention(
         P(ShardingAxisName.ATTN_DATA),  # state_indices
         P(ShardingAxisName.ATTN_DATA),  # distribution
         P(ShardingAxisName.ATTN_DATA),  # seq_lens
+        P(ShardingAxisName.ATTN_DATA, None)
+        if gdn_schedule_table is not None else None,  # gdn_schedule_table
+        P(ShardingAxisName.ATTN_DATA, None) if gdn_total_blocks is not None
+        else None,  # gdn_total_blocks (8, 1) -> (1, 1) per rank
     )
 
     out_specs = (
@@ -295,6 +305,8 @@ def run_jax_gdn_attention(
         state_indices,
         distribution,
         seq_lens,
+        gdn_schedule_table,
+        gdn_total_blocks,
     )
 
     return (new_conv_state, new_recurrent_state), output
