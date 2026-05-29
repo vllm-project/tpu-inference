@@ -194,8 +194,8 @@ class TestFp8BlockwiseJaxLinear:
             output = layer(x)
 
         assert output.shape == (batch_size, out_features)
-        assert layer.weight.shape == (out_features, in_features)
-        expected_weight_sharding = weight_sharding[::-1]
+        assert layer.weight.shape == (in_features, out_features)
+        expected_weight_sharding = weight_sharding
         assert sharding_to_tuple(layer.weight.sharding) == expected_weight_sharding
         if use_bias:
             assert layer.bias.shape == (out_features, )
@@ -242,10 +242,10 @@ class TestFp8BlockwiseJaxLinear:
         # Output shape should be (B, N, H)
         expected_shape = (batch_size, ) + kernel_shape[1:]
         assert output.shape == expected_shape
-        assert layer.weight.shape == (math.prod(kernel_shape[1:]), kernel_shape[0])
+        assert layer.weight.shape == (kernel_shape[0], math.prod(kernel_shape[1:]))
 
-        expected_weight_sharding = ('out',) if 'out' in weight_sharding else (None,)
-        expected_weight_sharding += ('in',) if 'in' in weight_sharding else (None,)
+        expected_weight_sharding = ('in',) if 'in' in weight_sharding else (None,)
+        expected_weight_sharding += ('out',) if 'out' in weight_sharding else (None,)
         assert sharding_to_tuple(layer.weight.sharding) == expected_weight_sharding
         if use_bias:
             assert layer.bias.shape == (math.prod(kernel_shape[1:]),)
@@ -327,7 +327,7 @@ class TestFp8TensorwiseJaxLinear:
             assert hasattr(layer, 'weight_scale')
             assert layer.weight.value.dtype == jnp.float8_e4m3fn
             assert layer.weight_scale.value.dtype == jnp.float32
-            assert layer.weight.value.shape == (16, 32)
+            assert layer.weight.value.shape == (32, 16)
             assert layer.weight_scale.value.shape == (16, )
             assert hasattr(layer.weight, 'weight_loader')
 

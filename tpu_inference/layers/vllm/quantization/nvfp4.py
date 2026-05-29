@@ -169,10 +169,12 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
         def _unpack_and_scale(weight_packed, weight_scale,
                               weight_global_scale):
             fp4 = u8_unpack_e2m1(weight_packed)  # (O, I) float4_e2m1fn
+            fp4 = jnp.transpose(fp4)
 
             # Combine FP8 block scale & FP32 global scale
             block_scale = weight_scale.astype(
                 jnp.float32) * weight_global_scale  # (O, I/group)
+            block_scale = jnp.transpose(block_scale)
 
             return fp4, block_scale
 
@@ -188,8 +190,8 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
             fused=self.linear_config.fuse_matmuls,
             output_sizes=self.linear_config.output_sizes,
             reorder_size=self.linear_config.n_shards,
+            enable_kernel=self.linear_config.enable_quantized_matmul_kernel,
         )
-
         weights = torch_view(
             shard_linear_weights(
                 weights,
