@@ -63,12 +63,15 @@ spec:
                   export VLLM_ENGINE_READY_TIMEOUT_S=7200
                   export MODEL_IMPL_TYPE=vllm
                   export NEW_MODEL_DESIGN=1
-                  export SKIP_JAX_PRECOMPILE=0
+                  export SKIP_JAX_PRECOMPILE=1
+
+                  export TPU_COLOCATED_DP=1
 
                   # Launch vllm serve via Pathways
                   JAX_PLATFORMS=proxy,cpu \
                   JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
-                  python /workspace/tpu_inference/examples/offline_inference.py --model Qwen/Qwen3-235B-A22B --tensor-parallel-size 8 --load-format dummy --additional_config='{"sharding":{"sharding_strategy": {"enable_dp_attention":1}}}' --data-parallel-size 2
+                  python /workspace/tpu_inference/examples/offline_inference.py  --data-parallel-size 2 --tensor-parallel-size 8 
+                  # python /workspace/tpu_inference/examples/offline_inference.py --model Qwen/Qwen3-235B-A22B --tensor-parallel-size 8 --load-format dummy --additional_config='{"sharding":{"sharding_strategy": {"enable_dp_attention":1}}}' --data-parallel-size 2
                   # vllm serve Qwen/Qwen3-30B-A3B \
                   #   --tensor-parallel-size 2 \
                   #   --data-parallel-size 8 \
@@ -259,7 +262,7 @@ spec:
             - env:
               - name: GRPC_SERVER_ADDRESS
                 value: '''0.0.0.0:50051'''
-              image: us-east5-docker.pkg.dev/cloud-tpu-inference-test/wenxindong/colocated_python:latest
+              image: us-east5-docker.pkg.dev/cloud-tpu-inference-test/wenxindong/colocated_python:patched
               imagePullPolicy: Always
               name: colocated-python-sidecar
               ports:
