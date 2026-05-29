@@ -1444,7 +1444,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA))(
                 input_ids, logits_indices, target_logits_indices)
 
-        return ret   
+        return ret
 
     def _get_prompt_logprobs_dict(
         self,
