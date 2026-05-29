@@ -52,7 +52,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         weight_quant: QuantizationArgs,
         is_static_input_scheme: bool,
         linear_config: VllmQuantLinearConfig,
-        is_forced: bool = False,
+        quantize_on_load: bool = False,
     ):
         # Per https://github.com/vllm-project/vllm/pull/32929,
         # init_fp8_linear_kernel is now called by super().__init__
@@ -71,7 +71,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         self.use_marlin = True
 
         self.linear_config = linear_config
-        self.is_forced = is_forced
+        self.quantize_on_load = quantize_on_load
 
     def create_weights(
         self,
@@ -100,8 +100,8 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             **extra_weight_attrs,
         )
         self.use_marlin = True
-        if self.is_forced:
-            # If forced, we want to load the natively BF16/FP16 weights in their original dtype.
+        if self.quantize_on_load:
+            # If quantizing the weights on load, we want to load the natively BF16/FP16 weights in their original dtype.
             # Replace the layer.weight parameter with a parameter of params_dtype.
             output_size_per_partition = sum(output_partition_sizes)
             from vllm.model_executor.parameter import ModelWeightParameter
@@ -220,7 +220,6 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                         axis=1,
                     )
 
-        logger.info_once(f"Quantizing {weight.dtype} weight to fp8")
         weights = torch_view(
             shard_linear_weights(
                 weights,
