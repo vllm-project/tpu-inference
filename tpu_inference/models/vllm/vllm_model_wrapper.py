@@ -511,9 +511,8 @@ class VllmModelWrapper:
             with torchax.default_env(), enable_torch_wrap(False):
                 trace_name = get_embed_multimodal_trace_name(kwargs)
                 kwargs = maybe_prepare_for_jit(kwargs, self.model.vllm_model)
-
-                if (envs.VLLM_TPU_ENABLE_FLAX_ENCODER
-                        and envs.VLLM_TPU_ENABLE_CPU_PADDING
+                # pad patches on host.
+                if (envs.VLLM_TPU_ENABLE_CPU_PADDING
                         and is_qwen3_vl(self.model.vllm_model)):
                     if "pixel_values" in kwargs:
                         pv = kwargs["pixel_values"]
