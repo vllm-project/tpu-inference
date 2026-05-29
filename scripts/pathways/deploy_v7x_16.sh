@@ -1,11 +1,13 @@
 #!/bin/bash
-# Quick deploy script for v5p PathwaysJob workload:
+# Quick deploy script for v7x-16 PathwaysJob workload:
 #   1. Tars the local tpu-inference repo (excluding heavy/unnecessary dirs)
 #   2. Uploads it to GCS
-#   3. Deletes the existing PathwaysJob workload
-#   4. Applies the updated workload YAML
+#   3. Patches the colocated_python image with the latest tpu-inference code
+#      and pushes it as a new tag (the original :latest is untouched).
+#   4. Deletes the existing PathwaysJob workload
+#   5. Applies the updated workload YAML
 #
-# Usage: ./deploy_v5p.sh
+# Usage: ./deploy_v7x_16.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +16,9 @@ YAML_FILE="${SCRIPT_DIR}/pathways_job_v7x_16.yaml"
 
 GCS_BUCKET="gs://wenxindong-multipod-dev"
 GCS_PATCH_PATH="${GCS_BUCKET}/patches/tpu-inference.tar.gz"
+
+BASE_COLOCATED_IMAGE="us-east5-docker.pkg.dev/cloud-tpu-inference-test/wenxindong/colocated_python:latest"
+PATCHED_COLOCATED_IMAGE="us-east5-docker.pkg.dev/cloud-tpu-inference-test/wenxindong/colocated_python:patched"
 
 WORKLOAD_NAME="wenxindongtest"
 KUBE_CONTEXT="gke_cloud-tpu-inference-test_us-central1_wenxindong-pw-tpu7x-16"
@@ -32,6 +37,35 @@ tar czf /tmp/tpu-inference.tar.gz \
 
 echo "=== Uploading to ${GCS_PATCH_PATH} ==="
 gcloud storage cp /tmp/tpu-inference.tar.gz "${GCS_PATCH_PATH}"
+
+
+echo "=== Patching colocated_python image with latest tpu-inference ==="
+gcloud auth configure-docker us-east5-docker.pkg.dev --quiet
+
+docker pull "${BASE_COLOCATED_IMAGE}"
+
+PATCH_CONTAINER="colocated-python-patch-$$"
+# Override the entrypoint so we can exec into a long-running container.
+# `docker commit` preserves the original image's ENTRYPOINT/CMD, so the
+# resulting patched image still launches the colocated_python gRPC server.
+docker run -d --name "${PATCH_CONTAINER}" --entrypoint sleep "${BASE_COLOCATED_IMAGE}" infinity
+trap 'docker rm -f "${PATCH_CONTAINER}" >/dev/null 2>&1 || true' EXIT
+
+# Copy the freshly-built tarball (identical bytes to what we just uploaded
+# to GCS) into the container and install it editable.
+docker cp /tmp/tpu-inference.tar.gz "${PATCH_CONTAINER}:/tmp/tpu-inference.tar.gz"
+docker exec "${PATCH_CONTAINER}" bash -c '
+  set -e
+  mkdir -p /workspace/tpu-inference
+  tar xzf /tmp/tpu-inference.tar.gz -C /workspace/tpu-inference
+  pip install --no-deps -e /workspace/tpu-inference
+'
+
+docker commit "${PATCH_CONTAINER}" "${PATCHED_COLOCATED_IMAGE}"
+docker push "${PATCHED_COLOCATED_IMAGE}"
+docker rm -f "${PATCH_CONTAINER}" >/dev/null 2>&1 || true
+trap - EXIT
+
 
 echo "=== Deleting existing workload '${WORKLOAD_NAME}' (if any) ==="
 kubectl --context="${KUBE_CONTEXT}" delete jobset "${WORKLOAD_NAME}" --ignore-not-found
