@@ -20,7 +20,7 @@ steps:
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:Qwen/Qwen3-Omni-30B-A3B-Instruct:UnitTest" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen/Qwen3-Omni-30B-A3B-Instruct_UnitTest" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record unit test result for Qwen/Qwen3-Omni-30B-A3B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"
@@ -43,7 +43,7 @@ steps:
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:Qwen/Qwen3-Omni-30B-A3B-Instruct:Accuracy/Correctness" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen/Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record accuracy result for Qwen/Qwen3-Omni-30B-A3B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
@@ -66,7 +66,7 @@ steps:
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:Qwen/Qwen3-Omni-30B-A3B-Instruct:Benchmark" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen/Qwen3-Omni-30B-A3B-Instruct_Benchmark" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance benchmark result for Qwen/Qwen3-Omni-30B-A3B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark"

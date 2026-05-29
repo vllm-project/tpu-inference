@@ -20,7 +20,7 @@ steps:
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:moonshotai/Kimi-K2-Thinking:UnitTest" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai/Kimi-K2-Thinking_UnitTest" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record unit test result for moonshotai/Kimi-K2-Thinking"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_moonshotai_Kimi-K2-Thinking_UnitTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2-Thinking_UnitTest"
@@ -43,7 +43,7 @@ steps:
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:moonshotai/Kimi-K2-Thinking:Accuracy/Correctness" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai/Kimi-K2-Thinking_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record integration test result for moonshotai/Kimi-K2-Thinking"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_moonshotai_Kimi-K2-Thinking_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2-Thinking_Accuracy"
@@ -66,7 +66,7 @@ steps:
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:moonshotai/Kimi-K2-Thinking:Benchmark" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai/Kimi-K2-Thinking_Benchmark" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance benchmark result for moonshotai/Kimi-K2-Thinking"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_moonshotai_Kimi-K2-Thinking_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2-Thinking_Benchmark"

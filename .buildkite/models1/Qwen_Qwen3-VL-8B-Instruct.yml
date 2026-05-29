@@ -20,7 +20,7 @@ steps:
       queue: cpu  # TODO: replace with execution environment
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:Qwen/Qwen3-VL-8B-Instruct:UnitTest" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen/Qwen3-VL-8B-Instruct_UnitTest" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record unit test result for Qwen/Qwen3-VL-8B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Qwen_Qwen3-VL-8B-Instruct_UnitTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-VL-8B-Instruct_UnitTest"
@@ -47,7 +47,7 @@ steps:
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:Qwen/Qwen3-VL-8B-Instruct:Accuracy/Correctness" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen/Qwen3-VL-8B-Instruct_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record accuracy result for Qwen/Qwen3-VL-8B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Qwen_Qwen3-VL-8B-Instruct_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-VL-8B-Instruct_Accuracy"
@@ -74,7 +74,7 @@ steps:
       MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:Qwen/Qwen3-VL-8B-Instruct:Benchmark" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen/Qwen3-VL-8B-Instruct_Benchmark" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance benchmark result for Qwen/Qwen3-VL-8B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Qwen_Qwen3-VL-8B-Instruct_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-VL-8B-Instruct_Benchmark"

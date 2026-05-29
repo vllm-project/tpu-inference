@@ -20,7 +20,7 @@ steps:
       queue: cpu  # TODO: replace with execution environment
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:deepseek-ai/DeepSeek-V3.2-Speciale:UnitTest" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2-Speciale_UnitTest" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record unit test result for deepseek-ai/DeepSeek-V3.2-Speciale"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_deepseek-ai_DeepSeek-V3_2-Speciale_UnitTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2-Speciale_UnitTest"
@@ -47,7 +47,7 @@ steps:
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:deepseek-ai/DeepSeek-V3.2-Speciale:Accuracy/Correctness" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2-Speciale_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record accuracy result for deepseek-ai/DeepSeek-V3.2-Speciale"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_deepseek-ai_DeepSeek-V3_2-Speciale_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2-Speciale_Accuracy"
@@ -74,7 +74,7 @@ steps:
       MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:deepseek-ai/DeepSeek-V3.2-Speciale:Benchmark" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2-Speciale_Benchmark" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance benchmark result for deepseek-ai/DeepSeek-V3.2-Speciale"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_deepseek-ai_DeepSeek-V3_2-Speciale_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-V3_2-Speciale_Benchmark"

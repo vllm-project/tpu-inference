@@ -70,7 +70,7 @@ steps:
       queue: "${TPU_QUEUE_MULTI:-tpu_v7x_8_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:EP:Multi-Host CorrectnessTest" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_EP:Multi-Host CorrectnessTest" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record correctness test result for EP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_EP_CorrectnessTest_Multi_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_EP_CorrectnessTest_Multi_Host"
@@ -92,7 +92,7 @@ steps:
       queue: "${TPU_QUEUE_MULTI:-tpu_v7x_8_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:EP:Multi-Host PerformanceTest" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_EP:Multi-Host PerformanceTest" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance test result for EP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_EP_PerformanceTest_Multi_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_EP_PerformanceTest_Multi_Host"
