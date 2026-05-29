@@ -110,7 +110,7 @@ steps:
        - bash .buildkite/scripts/commit_verified_commit_hashes.sh
 
    - label: "Upload pytest duration artifact"
-     if: build.branch == "main" && build.env("NIGHTLY") == "1" && build.env("MODEL_IMPL_TYPE") == "auto"
+     if: build.branch == "main" && build.env("NIGHTLY") == "1" && (build.env("MODEL_IMPL_TYPE") == "auto" || build.env("MODEL_IMPL_TYPE") == null)
      key: update_unit_test_duration_file
      artifact_paths: /mnt/disks/persist/models/.test_durations
      agents:
