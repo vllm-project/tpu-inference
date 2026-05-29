@@ -146,7 +146,7 @@ def ragged_gated_delta_rule_wrapper(
 
     def decode_only_branch(_):
         num_tokens = mixed_qkv.shape[0]
-        pad_size = num_tokens - state_indices.shape[0]
+        pad_size = max(0, num_tokens - state_indices.shape[0])
         padded_state_indices = jnp.pad(state_indices, (0, pad_size),
                                        mode='constant',
                                        constant_values=0)

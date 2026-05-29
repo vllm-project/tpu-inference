@@ -294,7 +294,7 @@ def ragged_conv1d(
 
     def decode_only_branch(_):
         num_tokens = x.shape[0]
-        pad_size = num_tokens - state_indices.shape[0]
+        pad_size = max(0, num_tokens - state_indices.shape[0])
         padded_state_indices = jnp.pad(state_indices, (0, pad_size),
                                        mode='constant',
                                        constant_values=0)

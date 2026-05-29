@@ -87,7 +87,7 @@ class TestProcessWeights(unittest.TestCase):
         )
 
         # 3D scale sharding: P(in_axis, None, out_axis)
-        expected_scale_spec = P('data', None, 'model')
+        expected_scale_spec = P('model', None, 'data')
         self.assertEqual(sharded_weights.weight_scale.sharding,
                          NamedSharding(mesh, expected_scale_spec))
 

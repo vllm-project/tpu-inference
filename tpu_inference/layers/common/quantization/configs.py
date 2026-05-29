@@ -30,7 +30,7 @@ class QuantLinearConfig:
         self.output_sharding = None
         self.mesh = None
 
-        self.bias_sharding = P(self.weight_sharding[0])
+        self.bias_sharding = P(self.weight_sharding[1])
         self.n_shards = len(output_sizes)
         self.enable_quantized_matmul_kernel = envs.ENABLE_QUANTIZED_MATMUL_KERNEL
         self.requant_block_size = envs.REQUANTIZE_BLOCK_SIZE
