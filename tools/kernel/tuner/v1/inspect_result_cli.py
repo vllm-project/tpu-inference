@@ -544,8 +544,13 @@ def spanner_query_case_latency(db,
                 kv = json.loads(kv_str)
             except (json.JSONDecodeError, TypeError):
                 continue
-            if filter_keys and not _matches_filter(kv, filter_keys):
-                continue
+            if filter_keys:
+                result = _matches_filter(kv, filter_keys)
+                if result == FilterResult.INVALID_FILTER:
+                    print('One or more invalid filters; aborting query.')
+                    return []
+                if result != FilterResult.MATCH:
+                    continue
             rows.append({
                 'tuning_key': kv.get('tuning_key'),
                 'tunable_params': kv.get('tunable_params'),
@@ -603,13 +608,31 @@ def _print_flattened_table(rows,
         return
 
     flat_rows = []
+    all_extra = []
+    seen_extra = set()
+    colliding_fields = set()
     for r in rows:
         flat = row_builder(r)
-        flat.update(r.get('tuning_key') or {})
-        flat.update(r.get('tunable_params') or {})
+        dynamic_fields = {}
+        dynamic_fields.update(r.get('tuning_key') or {})
+        dynamic_fields.update(r.get('tunable_params') or {})
+
+        for field in list(dynamic_fields):
+            if field in builtin_cols:
+                colliding_fields.add(field)
+                del dynamic_fields[field]
+                continue
+            if field not in seen_extra:
+                seen_extra.add(field)
+                all_extra.append(field)
+
+        flat.update(dynamic_fields)
         flat_rows.append(flat)
 
-    all_extra = [k for k in flat_rows[0] if k not in builtin_cols]
+    if colliding_fields:
+        print('  Warning: dynamic field(s) ignored due to built-in column '
+              f'name collision: {", ".join(sorted(colliding_fields))}')
+
     all_cols = builtin_cols + all_extra
 
     if show_fields:
