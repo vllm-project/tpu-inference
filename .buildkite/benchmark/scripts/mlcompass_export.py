@@ -3,7 +3,13 @@ import os
 import sys
 import time
 import uuid
+import google.auth
 from google.cloud import bigquery
+
+credentials, project_id = google.auth.default()
+print(project_id)
+print(credentials)
+print(credentials.service_account_email)
 
 # sys.argv[0] is always the script name itself
 print(f"Script name: {sys.argv[0]}")

@@ -8,3 +8,4 @@ scikit-learn
 pandas
 gdown<6.0.0
 google-cloud-bigquery
+google-cloud
