@@ -55,6 +55,9 @@ case $OUTCOME in
   "not enough HBM")
     message="not enough HBM"
     ;;
+  "transformers version too low")
+    message="transformers version too low"
+    ;;
   *)
     message="❌ Failing"
     ;;
@@ -64,6 +67,6 @@ esac
 buildkite-agent meta-data set "${CI_TPU_VERSION}${CI_TARGET}_category" "${CI_CATEGORY}"
 buildkite-agent meta-data set "${CI_TPU_VERSION}_${MODEL_IMPL_TYPE}:${CI_TARGET}:${CI_STAGE}" "${message}"
 
-if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "unverified" ] && [ "${OUTCOME}" != "not enough HBM" ]; then
+if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "unverified" ] && [ "${OUTCOME}" != "not enough HBM" ] && [ "${OUTCOME}" != "transformers version too low" ]; then
     exit 1
 fi

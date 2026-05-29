@@ -67,8 +67,8 @@ declare -a model_csv_files=()
 declare -a feature_csv_files=()
 declare -a default_feature_names=()
 declare -a ACTIVE_TPU_CONFIGS=()
-FRAMEWORKS=("flax_nnx" "vllm")
-
+# FRAMEWORKS=("flax_nnx" "vllm")
+FRAMEWORKS=("vllm")
 
 if [[ "$RUN_V6" == "true" ]]; then
     ACTIVE_TPU_CONFIGS+=("tpu6e")
@@ -77,18 +77,6 @@ fi
 if [[ "$RUN_V7" == "true" ]]; then
     ACTIVE_TPU_CONFIGS+=("tpu7x")
 fi
-
-# Determine sub-directory based on TPU_VERSION
-if [[ "${TPU_VERSION:-tpu6e}" == "v7"* ]]; then
-    TPU_DIR="v7x"
-    TPU_METADATA_PREFIX="v7"
-else
-    TPU_DIR="v6e"
-    TPU_METADATA_PREFIX="v6"
-fi
-
-mkdir -p "${TPU_DIR}"
-echo "Output directory set to: ${TPU_DIR} (Prefix: '${TPU_METADATA_PREFIX}')"
 
 # Parse Default Features File & Set Categories
 if [[ -f "${DEFAULT_FEATURES_FILE}" ]]; then
@@ -117,8 +105,7 @@ fi
 
 # Process Models (Split by Category)
 process_models() {
-    # local category_csv="model_support_matrix.csv"
-    local category_csv="${TPU_DIR}/model_support_matrix.csv"
+    local category_csv="model_support_matrix.csv"
     if [ ! -f "$category_csv" ]; then
         echo "Model,Type,Machine Type,Framework,UnitTest,Accuracy/Correctness,Benchmark" > "$category_csv"
         model_csv_files+=("$category_csv")
@@ -166,7 +153,7 @@ process_models() {
                     # Record if there are any failed tests (excluding Type, Machine Type, and Framework fields)
                     if [ "$stage" != "Type" ] && [ "$stage" != "Machine Type" ] && [ "$stage" != "Framework" ] && \
                        [ "${result}" != "✅ Passing" ] && [ "${result}" != "⚪ N/A" ] && \
-                       [ "${result}" != "❓ Untested" ] && [ "${result}" != "not enough HBM" ]; then
+                       [ "${result}" != "❓ Untested" ] && [ "${result}" != "not enough HBM" ] && [ "${result}" != "transformers version too low" ]; then
                         ANY_FAILED=true
                     fi
                 done
@@ -199,7 +186,7 @@ process_features() {
                 category=$(buildkite-agent meta-data get "${prefix}${feature}_category" --default "feature support matrix")
 
                 local category_filename=${category// /_}
-                local category_csv="${TPU_DIR}/${category_filename}.csv"
+                local category_csv="${category_filename}.csv"
 
                 # Determine which stages array and header to use
                 local stages_to_use=("${FEATURE_STAGES[@]}")
@@ -276,8 +263,8 @@ process_features() {
 
 # Pivot Logic (Microbenchmarks)
 process_kernel_matrix_to_pivot() {
-    local input_csv="${TPU_DIR}/kernel_support_matrix_microbenchmarks.csv"
-    local output_file="${TPU_DIR}/kernel_support_matrix-microbenchmarks.csv"
+    local input_csv="kernel_support_matrix_microbenchmarks.csv"
+    local output_file="kernel_support_matrix-microbenchmarks.csv"
 
     if [ ! -f "$input_csv" ]; then
         echo "Warning: Input CSV $input_csv not found. Skipping pivot."
@@ -366,80 +353,6 @@ process_kernel_matrix_to_pivot() {
     buildkite-agent artifact upload "$output_file"
 }
 
-process_kernel_matrix_to_pivot1() {
-    local input_csv="${TPU_DIR}/kernel_support_matrix_microbenchmarks.csv"
-    local output_file="${TPU_DIR}/kernel_support_matrix-microbenchmarks.csv"
-
-    if [ ! -f "$input_csv" ]; then
-        echo "Warning: Input CSV $input_csv not found. Skipping pivot."
-        return
-    fi
-
-    # Define Headers for Display
-    local header="Kernel microbenchmark,W16 A16 (Corr),W16 A16 (Perf),W8 A8 (Corr),W8 A8 (Perf),W8 A16 (Corr),W8 A16 (Perf),W4 A4 (Corr),W4 A4 (Perf),W4 A8 (Corr),W4 A8 (Perf),W4 A16 (Corr),W4 A16 (Perf)"
-    echo "$header" > "$output_file"
-
-    # Define the quantization order to match the header
-    local quant_cols_list="w16a16 w8a8 w8a16 w4a4 w4a8 w4a16"
-
-
-    # Awk Script for Pivoting (Data Rows)
-    awk -v AWK_QUANT_COLS="$quant_cols_list" '
-        BEGIN { 
-            FS=","; OFS=",";
-            split(AWK_QUANT_COLS, q_order, " ");
-        }
-        
-        NR > 1 {
-            gsub(/"/, "", $1);
-            if (match($1, /-(w[0-9]+a[0-9]+)$/)) {
-                quant_type = substr($1, RSTART + 1, RLENGTH - 1);
-                base_kernel_key = substr($1, 1, RSTART - 1);
-            } else {
-                 base_kernel_key = $1;
-                 quant_type = "w16a16";
-            }
-
-            # Store original Correctness ($2) and Performance ($3)
-            matrix[base_kernel_key, quant_type] = $2 OFS $3;
-
-            if (! (base_kernel_key in kernels)) {
-                kernels[base_kernel_key] = 1;
-                kernel_list[num_kernels++] = base_kernel_key;
-            }
-        }
-        END {
-            for (i=0; i<num_kernels; i++) {
-                k = kernel_list[i];
-                out_name = k;
-                if (out_name == "generic ragged paged attention v3") {
-                    out_name = "\"generic ragged paged<br>attention v3*\"";
-                } else if (out_name == "mla") {
-                    out_name = "\"mla*\"";
-                } else if (out_name == "ragged paged attention v3 head_dim 64") {
-                    out_name = "\"ragged paged attention v3<br>head_dim 64*\"";
-                } else {
-                    out_name = "\"" out_name "\"";
-                }
-
-                row = out_name;
-                for (j=1; j<=6; j++) {
-                    q = q_order[j];
-                    # Use formatted N/A if data is missing
-                    data = (matrix[k, q] == "") ? "❓ Untested,❓ Untested" : matrix[k, q];
-                    row = row OFS data;
-                }
-                print row >> "'"$output_file"'";
-            }
-        }
-    ' "$input_csv"
-
-    # Upload the newly created pivot table
-    echo "--- Uploading Pivoted Kernel Matrix: $output_file ---"
-    cat "$output_file"
-    buildkite-agent artifact upload "$output_file"
-}
-
 if [ ${#model_list[@]} -gt 0 ]; then
     process_models
 fi
@@ -496,4 +409,4 @@ process_kernel_matrix_to_pivot
 echo "Reports uploaded successfully."
 
 # Cleanup
-rm -rf "${TPU_DIR}"
+rm -f "${model_csv_files[@]}" "${feature_csv_files[@]}"

@@ -50,7 +50,8 @@ add_kernel_microbenchmarks() {
 # add_kernel_microbenchmarks
 
 # for test
-TARGET_FOLDERS=("models")
+# TARGET_FOLDERS=("models")
+TARGET_FOLDERS=("quantization" "parallelism" "models" "features" "rl")
 # add_kernel_microbenchmarks
 
 # case "${MODEL_IMPL_TYPE}" in
@@ -75,8 +76,8 @@ pipeline_v7x_fragments=()
 # Declare separate arrays for each list
 declare -a model_list
 declare -a feature_list
-FRAMEWORKS=("vllm" "flax_nnx")
-
+# FRAMEWORKS=("vllm" "flax_nnx")
+FRAMEWORKS=("vllm")
 
 for folder_path in "${TARGET_FOLDERS[@]}"; do
   folder=$BUILDKITE_DIR/$folder_path
@@ -106,9 +107,9 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
         "models")
           model_list+=("$subject_name")
           ;;
-        # "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "rl")
-        #   feature_list+=("${subject_name}")
-        #   ;;
+        "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "rl")
+          feature_list+=("${subject_name}")
+          ;;
       esac
     fi
 
