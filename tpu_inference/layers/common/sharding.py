@@ -243,10 +243,16 @@ class ShardingConfigManager:
 
             num_kv_heads_per_device_in_kv_cache = max(1, (num_kv_heads * 2) /
                                                       packing)
-            attn_dp = max(
-                int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
-                1)
-            tensor_parallelism = tensor_parallelism // attn_dp
+            attn_dp_size = sharding_strategy.get("attn_dp_size", None)
+            if attn_dp_size is None:
+                attn_dp = max(
+                    int(tensor_parallelism //
+                        num_kv_heads_per_device_in_kv_cache), 1)
+                tensor_parallelism = tensor_parallelism // attn_dp
+            else:
+                attn_dp = attn_dp_size
+                assert tensor_parallelism % attn_dp_size == 0
+                tensor_parallelism = tensor_parallelism // attn_dp
 
             # If Attention DP is active or TP perfectly saturates the KV heads limit,
             # prioritize TP for KV heads and shift all expert parallelism to attn_dp_expert.
@@ -291,11 +297,6 @@ class ShardingConfigManager:
     def validate(cls, vllm_config, sharding_strategy):
         total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism * sharding_strategy.attention_data_expert_parallelism
         if total_dp_size > 1:
-            if vllm_config.speculative_config is not None:
-                raise ValueError(
-                    f"Speculative decoding is not supported with data parallelism "
-                    f"(DP size: {total_dp_size}). Please disable speculative decoding or "
-                    f"set data parallelism to 1.")
             if vllm_config.lora_config is not None:
                 raise ValueError(
                     f"LoRA is not supported with data parallelism "
