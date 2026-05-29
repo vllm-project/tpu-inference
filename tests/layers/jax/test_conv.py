@@ -84,17 +84,12 @@ class TestJaxConv:
             rngs=rngs,
         )
 
-        # 1. 'kernel' attribute should NOT exist directly in __dict__
         assert "kernel" not in jax_conv.__dict__
-
-        # 2. 'weight' attribute should exist and be an nnx.Param
         assert "weight" in jax_conv.__dict__
         assert isinstance(jax_conv.weight, nnx.Param)
 
-        # 3. Accessing .kernel should fall back to returning .weight via __getattr__
         assert jax_conv.kernel is jax_conv.weight
 
-        # 4. Check named_parameters yields 'weight' and NOT 'kernel'
         named_params = dict(jax_conv.named_parameters())
         assert "weight" in named_params
         assert "kernel" not in named_params
