@@ -360,10 +360,10 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
   echo "Executing Atomic Upsert SQL:"
   echo "$SQL"
 
-  gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
-    --project="$GCP_PROJECT_ID" \
-    --instance="$GCP_INSTANCE_ID" \
-    --sql="$SQL"
+  # gcloud spanner databases execute-sql "$GCP_DATABASE_ID" \
+  #   --project="$GCP_PROJECT_ID" \
+  #   --instance="$GCP_INSTANCE_ID" \
+  #   --sql="$SQL"
   echo "--- Reporting finished (DB written)"
 else
   echo "--- Reporting finished (Local test scenario: GCP variables not set, skipping DB reporting)"
@@ -374,4 +374,11 @@ else
   else
     echo "Warning: $RESULT_FILE not found. No results to display."
   fi
+fi
+
+if [[ "${MLCOMPASS_EXPORT_ENABLED:-true}" == "true" ]] then
+  echo "--- Reporting to MLCompass"
+  python3 ./mlcompass_export.py
+else
+  echo "--- Reporting to MLCompass (skipped)"
 fi
