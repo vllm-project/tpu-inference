@@ -23,16 +23,24 @@ EXPECTED_TEXTS = (
     "This image captures a beautiful and iconic scene: the **Tokyo Tower**, viewed through the blossoming branches of a **cherry blossom tree**. Here's a breakdown of the content:*   **Foreground:** The image is framed by the delicate, pink blossoms of a cherry tree."
 )
 
+
 def _cleanup_tpu_zombies():
     """Clears lingering JAX/libtpu process locks under our user to prevent TPU OOM."""
     import subprocess
     try:
         # Kill orphaned EngineCore child workers
-        subprocess.run(["pkill", "-9", "-f", "VLLM::EngineCore"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["pkill", "-9", "-f", "VLLM::EngineCore"],
+                       stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
         # Kill orphaned vLLM engine subprocesses
-        subprocess.run(["pkill", "-9", "-f", "vllm"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["pkill", "-9", "-f", "vllm"],
+                       stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
         # Clear JAX libtpu shared memory lockfiles
-        subprocess.run("rm -f /tmp/libtpu*", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run("rm -f /tmp/libtpu*",
+                       shell=True,
+                       stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
@@ -171,15 +179,13 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes,
         # Check output against the closest known-good caption.
         similarity_score = max(
             difflib.SequenceMatcher(None, generated_text, expected).ratio()
-            for expected in EXPECTED_TEXTS
-        )
+            for expected in EXPECTED_TEXTS)
         print(f"Similarity Score: {similarity_score:.4f}")
 
         assert similarity_score >= 0.85, (
             f"Text verification failed.\n"
             f"Generated: {generated_text}\n"
-            f"Expected similarity >= 0.85 (got {similarity_score:.2f})"
-        )
+            f"Expected similarity >= 0.85 (got {similarity_score:.2f})")
     finally:
         # Re-run cleanup on test teardown to release TPU locking resources immediately
         _cleanup_tpu_zombies()
