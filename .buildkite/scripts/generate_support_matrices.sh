@@ -67,6 +67,7 @@ declare -a model_csv_files=()
 declare -a feature_csv_files=()
 declare -a default_feature_names=()
 declare -a ACTIVE_TPU_CONFIGS=()
+CI_TPU_VERSION=""
 # FRAMEWORKS=("flax_nnx" "vllm")
 FRAMEWORKS=("vllm")
 
@@ -119,8 +120,7 @@ process_models() {
         
         # Second-level loop: Machine type configuration
         for config in "${ACTIVE_TPU_CONFIGS[@]}"; do
-            # Parse in order: display name (v6e), Metadata CI_TPU_VERSION (v6)
-            IFS=":" read -r CI_TPU_VERSION <<< "$config"
+            CI_TPU_VERSION="$config"
 
             # Third-level loop: Model
             for model in "${model_list[@]:-}"; do
@@ -175,7 +175,7 @@ process_features() {
         
         # Second-level loop: Machine type configuration 
         for config in "${ACTIVE_TPU_CONFIGS[@]:-${ACTIVE_CONFIGS[@]}}"; do
-            IFS=":" read -r prefix <<< "$config"
+            CI_TPU_VERSION="$config"
 
             # Third-level loop: Features
             for feature in "$@"; do
@@ -183,7 +183,7 @@ process_features() {
 
                 # Get Category (default: feature support matrix)
                 local category
-                category=$(buildkite-agent meta-data get "${prefix}${feature}_category" --default "feature support matrix")
+                category=$(buildkite-agent meta-data get "${CI_TPU_VERSION}${feature}_category" --default "feature support matrix")
 
                 local category_filename=${category// /_}
                 local category_csv="${category_filename}.csv"
