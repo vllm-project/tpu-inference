@@ -13,14 +13,14 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Unit tests for Qwen/Qwen3-Embedding-8B"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Unit tests for Qwen/Qwen3-Embedding-8B"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-Embedding-8B_UnitTest"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/models/jax/test_qwen3.py::TestQwen3ForCausalLM::test_vocab_padding_for_sharding
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record unit test result for Qwen/Qwen3-Embedding-8B"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record unit test result for Qwen/Qwen3-Embedding-8B"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Qwen_Qwen3-Embedding-8B_UnitTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-Embedding-8B_UnitTest"
     env:
@@ -34,7 +34,7 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-Embedding-8B_UnitTest
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Accuracy for Qwen/Qwen3-Embedding-8B"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for Qwen/Qwen3-Embedding-8B"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-Embedding-8B_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Qwen_Qwen3-Embedding-8B_UnitTest"
     soft_fail: true
@@ -46,7 +46,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_step_pooling.py
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record accuracy result for Qwen/Qwen3-Embedding-8B"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for Qwen/Qwen3-Embedding-8B"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Qwen_Qwen3-Embedding-8B_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-Embedding-8B_Accuracy"
     env:
@@ -60,7 +60,7 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-Embedding-8B_Accuracy
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Performance benchmarks for Qwen/Qwen3-Embedding-8B"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for Qwen/Qwen3-Embedding-8B"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-Embedding-8B_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Qwen_Qwen3-Embedding-8B_Accuracy"
     soft_fail: true
@@ -71,8 +71,8 @@ steps:
       TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen/Qwen3-Embedding-8B_Benchmark" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance benchmark result for Qwen/Qwen3-Embedding-8B"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-Embedding-8B_Benchmark" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance benchmark result for Qwen/Qwen3-Embedding-8B"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Qwen_Qwen3-Embedding-8B_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3-Embedding-8B_Benchmark"
     env:

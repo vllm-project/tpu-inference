@@ -13,15 +13,15 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Correctness tests for Quantized KV Cache"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for Quantized KV Cache"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_KV_Cache_CorrectnessTest"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized KV Cache:CorrectnessTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record correctness test result for Quantized KV Cache"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_KV_Cache_CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for Quantized KV Cache"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Quantized_KV_Cache_CorrectnessTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_KV_Cache_CorrectnessTest"
     env:
@@ -35,7 +35,7 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_KV_Cache_CorrectnessTest
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Performance tests for Quantized KV Cache"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for Quantized KV Cache"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_KV_Cache_PerformanceTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Quantized_KV_Cache_CorrectnessTest"
     soft_fail: true
@@ -43,8 +43,8 @@ steps:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized KV Cache:PerformanceTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance test result for Quantized KV Cache"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_KV_Cache_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for Quantized KV Cache"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Quantized_KV_Cache_PerformanceTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_KV_Cache_PerformanceTest"
     env:

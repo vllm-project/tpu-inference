@@ -15,14 +15,14 @@
 # Sampling parameters control how the model selects tokens during generation.
 # These tests verify that temperature, top_p, top_k, and logprobs work correctly.
 steps:
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Correctness tests for sampling_params"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for sampling_params"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_sampling_params_CorrectnessTest"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_sampling_params.py
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record correctness test result for sampling_params"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for sampling_params"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_sampling_params_CorrectnessTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_sampling_params_CorrectnessTest"
     env:

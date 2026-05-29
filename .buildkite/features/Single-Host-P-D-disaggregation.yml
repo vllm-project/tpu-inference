@@ -13,7 +13,7 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Correctness tests for Single-Host P-D disaggregation"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for Single-Host P-D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_SingleHostPDDisaggregation_CorrectnessTest"
     soft_fail: true
     agents:
@@ -23,7 +23,7 @@ steps:
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_local_disagg.py::test_disaggregated_serving \
           /workspace/tpu_inference/tests/e2e/test_local_disagg.py::test_disaggregated_serving_correctness
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record correctness test result for Single-Host P-D disaggregation"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for Single-Host P-D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_SingleHostPDDisaggregation_CorrectnessTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_SingleHostPDDisaggregation_CorrectnessTest"
     env:

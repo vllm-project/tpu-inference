@@ -13,15 +13,15 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Correctness tests for Quantized Attention"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for Quantized Attention"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_Attention_CorrectnessTest"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized Attention:CorrectnessTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record correctness test result for Quantized Attention"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_Attention_CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for Quantized Attention"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Quantized_Attention_CorrectnessTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_Attention_CorrectnessTest"
     env:
@@ -35,7 +35,7 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_Attention_CorrectnessTest
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Performance tests for Quantized Attention"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for Quantized Attention"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_Attention_PerformanceTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Quantized_Attention_CorrectnessTest"
     soft_fail: true
@@ -43,8 +43,8 @@ steps:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized Attention:PerformanceTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance test result for Quantized Attention"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_Attention_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for Quantized Attention"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_Quantized_Attention_PerformanceTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Quantized_Attention_PerformanceTest"
     env:

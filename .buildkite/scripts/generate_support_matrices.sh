@@ -144,7 +144,7 @@ process_models() {
                     elif [ "$stage" == "Framework" ]; then
                         result="${framework}"
                     else
-                        local meta_key="${CI_TPU_VERSION}_${framework}_${model}_${stage}"
+                        local meta_key="${CI_TPU_VERSION}_${framework}_${model}:${stage}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
                     fi
                     
@@ -227,7 +227,7 @@ process_features() {
                     elif [[ "$mode" == "DEFAULT" ]]; then
                         result="✅ Passing"
                     else
-                        local meta_key="${CI_TPU_VERSION}_${framework}_${feature}_${stage}"
+                        local meta_key="${CI_TPU_VERSION}_${framework}_${feature}:${stage}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
                         # Format any remaining custom strings from upstream configs
                         local result_lower

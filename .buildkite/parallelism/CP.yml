@@ -13,15 +13,15 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Correctness tests for CP (single-host)"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for CP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_CorrectnessTest_Single_Host"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP:Single-Host CorrectnessTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record correctness test result for CP (single-host)"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_CorrectnessTest_Single_Host" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for CP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_CP_CorrectnessTest_Single_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_CorrectnessTest_Single_Host"
     env:
@@ -35,7 +35,7 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_CorrectnessTest_Single_Host
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Performance tests for CP (single-host)"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for CP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_PerformanceTest_Single_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_CP_CorrectnessTest_Single_Host"
     soft_fail: true
@@ -43,8 +43,8 @@ steps:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP:Single-Host PerformanceTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance test result for CP (single-host)"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_PerformanceTest_Single_Host" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for CP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_CP_PerformanceTest_Single_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_PerformanceTest_Single_Host"
     env:
@@ -58,15 +58,15 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_PerformanceTest_Single_Host
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Correctness tests for CP (multi-host)"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for CP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP:Multi-Host CorrectnessTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record correctness test result for CP (multi-host)"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_CorrectnessTest_Multi_Host" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for CP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_CP_CorrectnessTest_Multi_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_CorrectnessTest_Multi_Host"
     env:
@@ -79,7 +79,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_CorrectnessTest_Multi_Host
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Performance tests for CP (multi-host)"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for CP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_PerformanceTest_Multi_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_CP_CorrectnessTest_Multi_Host"
     soft_fail: true
@@ -87,8 +87,8 @@ steps:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP:Multi-Host PerformanceTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance test result for CP (multi-host)"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_PerformanceTest_Multi_Host" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for CP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_CP_PerformanceTest_Multi_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_CP_PerformanceTest_Multi_Host"
     env:

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Correctness tests for DCN-based P/D disaggregation"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for DCN-based P/D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DCN_based_P-D_disaggregation_CorrectnessTest"
     soft_fail: true
     env:
@@ -29,7 +29,7 @@ steps:
       - |
         .buildkite/scripts/run_disagg.sh
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record correctness test result for DCN-based P/D disaggregation"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for DCN-based P/D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_DCN_based_P-D_disaggregation_CorrectnessTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DCN_based_P-D_disaggregation_CorrectnessTest"
     env:
@@ -43,7 +43,7 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DCN_based_P-D_disaggregation_CorrectnessTest
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Performance tests for DCN-based P/D disaggregation"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for DCN-based P/D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DCN_based_P-D_disaggregation_PerformanceTest"
     soft_fail: true
     env:
@@ -61,7 +61,7 @@ steps:
       - |
         .buildkite/scripts/run_disagg.sh
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance test result for DCN-based P/D disaggregation"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for DCN-based P/D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_DCN_based_P-D_disaggregation_PerformanceTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_DCN_based_P-D_disaggregation_PerformanceTest"
     env:

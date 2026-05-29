@@ -13,18 +13,18 @@
 # limitations under the License.
 
 steps:
-  - label: ${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Unit tests for {MODEL_NAME}/{CATEGORY}"
-    key: ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
+  - label: "${{TPU_VERSION:-tpu6e}} Unit tests for {MODEL_NAME}/{CATEGORY}"
+    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
     soft_fail: true
     agents:
       queue: "{QUEUE}"
     commands:
       - echo "placeholder"  # TODO: replace with your unit test command
-  - label: ${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record unit test result for {MODEL_NAME}/{CATEGORY}"
-    key: ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
-    depends_on: ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
+  - label: "${{TPU_VERSION:-tpu6e}} Record unit test result for {MODEL_NAME}/{CATEGORY}"
+    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
     env:
-      CI_TPU_VERSION: ${TPU_VERSION:-tpu6e}"
+      CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
       CI_TARGET: "{MODEL_NAME}/{CATEGORY}"
       CI_STAGE: "UnitTest"
       CI_CATEGORY: "{CATEGORY}"
@@ -34,9 +34,9 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest
 
-  - label: ${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for {MODEL_NAME}/{CATEGORY}"
-    key: ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
-    depends_on: ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
+  - label: "${{TPU_VERSION:-tpu6e}} Accuracy for {MODEL_NAME}/{CATEGORY}"
+    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
     soft_fail: true
     agents:
       queue: "{QUEUE}"
@@ -48,11 +48,11 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
-  - label: ${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for {MODEL_NAME}/{CATEGORY}"
-    key: ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
-    depends_on: ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
+  - label: "${{TPU_VERSION:-tpu6e}} Record accuracy result for {MODEL_NAME}/{CATEGORY}"
+    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
     env:
-      CI_TPU_VERSION: ${TPU_VERSION:-tpu6e}"
+      CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
       CI_TARGET: "{MODEL_NAME}/{CATEGORY}"
       CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "{CATEGORY}"
@@ -62,9 +62,9 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy
 
-  - label: ${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for {MODEL_NAME}/{CATEGORY}"
-    key: ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Benchmark"
-    depends_on: ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
+  - label: "${{TPU_VERSION:-tpu6e}} Performance benchmarks for {MODEL_NAME}/{CATEGORY}"
+    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Benchmark"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
     soft_fail: true
     agents:
       queue: "{QUEUE}"
@@ -76,11 +76,11 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
-  - label: ${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance benchmark result for {MODEL_NAME}/{CATEGORY}"
-    key: ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Benchmark"
-    depends_on: ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Benchmark"
+  - label: "${{TPU_VERSION:-tpu6e}} Record performance benchmark result for {MODEL_NAME}/{CATEGORY}"
+    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Benchmark"
+    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Benchmark"
     env:
-      CI_TPU_VERSION: ${TPU_VERSION:-tpu6e}"
+      CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
       CI_TARGET: "{MODEL_NAME}/{CATEGORY}"
       CI_STAGE: "Benchmark"
       CI_CATEGORY: "{CATEGORY}"

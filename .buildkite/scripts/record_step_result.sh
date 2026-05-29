@@ -65,7 +65,7 @@ esac
 
 # Save the results using the hardware-specific prefix.
 buildkite-agent meta-data set "${CI_TPU_VERSION}${CI_TARGET}_category" "${CI_CATEGORY}"
-buildkite-agent meta-data set "${CI_TPU_VERSION}_${MODEL_IMPL_TYPE}:${CI_TARGET}:${CI_STAGE}" "${message}"
+buildkite-agent meta-data set "${CI_TPU_VERSION}_${MODEL_IMPL_TYPE}_${CI_TARGET}:${CI_STAGE}" "${message}"
 
 if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "unverified" ] && [ "${OUTCOME}" != "not enough HBM" ] && [ "${OUTCOME}" != "transformers version too low" ]; then
     exit 1

@@ -13,15 +13,15 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Unit tests for openai/gpt-oss-20b"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Unit tests for openai/gpt-oss-20b"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-20b_UnitTest"
     soft_fail: true
     agents:
       queue: cpu  # TODO: replace with execution environment
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai/gpt-oss-20b_UnitTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record unit test result for openai/gpt-oss-20b"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-20b_UnitTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record unit test result for openai/gpt-oss-20b"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_openai_gpt-oss-20b_UnitTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-20b_UnitTest"
     env:
@@ -35,7 +35,7 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-20b_UnitTest
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Accuracy for openai/gpt-oss-20b"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for openai/gpt-oss-20b"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-20b_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_openai_gpt-oss-20b_UnitTest"
     soft_fail: true
@@ -47,8 +47,8 @@ steps:
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai/gpt-oss-20b_Accuracy_Correctness" "passed"
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record accuracy result for openai/gpt-oss-20b"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-20b_Accuracy" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for openai/gpt-oss-20b"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_openai_gpt-oss-20b_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-20b_Accuracy"
     env:
@@ -62,7 +62,7 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-20b_Accuracy
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Performance benchmarks for openai/gpt-oss-20b"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for openai/gpt-oss-20b"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-20b_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_openai_gpt-oss-20b_Accuracy"
     soft_fail: true
@@ -74,8 +74,8 @@ steps:
       MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai/gpt-oss-20b_Benchmark" "passed"
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance benchmark result for openai/gpt-oss-20b"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-20b_Benchmark" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance benchmark result for openai/gpt-oss-20b"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_openai_gpt-oss-20b_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_openai_gpt-oss-20b_Benchmark"
     env:

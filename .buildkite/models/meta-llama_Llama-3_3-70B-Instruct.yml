@@ -13,7 +13,7 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Unit tests for meta-llama/Llama-3.3-70B-Instruct"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Unit tests for meta-llama/Llama-3.3-70B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-3_3-70B-Instruct_UnitTest"
     soft_fail: true
     agents:
@@ -22,7 +22,7 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_llama3.py'
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record unit test result for meta-llama/Llama-3.3-70B-Instruct"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record unit test result for meta-llama/Llama-3.3-70B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-3_3-70B-Instruct_UnitTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-3_3-70B-Instruct_UnitTest"
     env:
@@ -36,7 +36,7 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-3_3-70B-Instruct_UnitTest
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Accuracy for meta-llama/Llama-3.3-70B-Instruct"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for meta-llama/Llama-3.3-70B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-3_3-70B-Instruct_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-3_3-70B-Instruct_UnitTest"
     soft_fail: true
@@ -49,7 +49,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record accuracy result for meta-llama/Llama-3.3-70B-Instruct"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for meta-llama/Llama-3.3-70B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-3_3-70B-Instruct_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-3_3-70B-Instruct_Accuracy"
     env:
@@ -63,7 +63,7 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-3_3-70B-Instruct_Accuracy
 
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Performance benchmarks for meta-llama/Llama-3.3-70B-Instruct"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for meta-llama/Llama-3.3-70B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-3_3-70B-Instruct_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-3_3-70B-Instruct_Accuracy"
     soft_fail: true
@@ -82,7 +82,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
-  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance benchmark result for meta-llama/Llama-3.3-70B-Instruct"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance benchmark result for meta-llama/Llama-3.3-70B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-3_3-70B-Instruct_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-3_3-70B-Instruct_Benchmark"
     env:
