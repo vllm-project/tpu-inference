@@ -148,7 +148,7 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
             if "e2el" not in metrics_list:
                 errors.append(
                     f"Validation Error: {file_path} has 'percentile-metrics' set to '{percentile_metrics}' "
-                    f"but it must include 'e2el' for proper infrastructure reporting."
+                    f"but it must include 'e2el' for proper benchmark reporting."
                 )
 
         # Model consistency check to ensure client/server are aligned
