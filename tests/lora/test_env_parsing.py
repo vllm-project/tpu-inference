@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
 from tpu_inference.lora.lora_manager import parse_lora_module_path_env
+
 
 def test_parse_lora_module_path_env(monkeypatch):
     # Test case 1: Missing env var
@@ -21,7 +21,8 @@ def test_parse_lora_module_path_env(monkeypatch):
     assert parse_lora_module_path_env() is None
 
     # Test case 2: Standard format with mapping
-    monkeypatch.setenv("LORA_MODULE_PATH", "something/(query|key|value|out)/something")
+    monkeypatch.setenv("LORA_MODULE_PATH",
+                       "something/(query|key|value|out)/something")
     expected = sorted(["q_proj", "k_proj", "v_proj", "o_proj"])
     result = parse_lora_module_path_env()
     assert sorted(result) == expected

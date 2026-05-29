@@ -14,8 +14,10 @@
 
 import re
 from typing import List, Optional
+
 import torchax
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+
 from tpu_inference import envs
 
 # MaxText/Pax style name to HuggingFace/vLLM canonical target module mapping.
@@ -81,7 +83,8 @@ def parse_lora_module_path_env() -> Optional[List[str]]:
         matches = LORA_GROUP_PATTERN.findall(env_val)
         for group in matches:
             for module in group.split('|'):
-                target_modules.add(MAXTEXT_TO_HF_LORA_MAPPING.get(module, module))
+                target_modules.add(
+                    MAXTEXT_TO_HF_LORA_MAPPING.get(module, module))
     else:
         # No parentheses found, assume standard list
         # Split by comma or pipe

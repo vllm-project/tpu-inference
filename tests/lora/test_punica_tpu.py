@@ -16,7 +16,7 @@ import jax
 import pytest
 import torch
 import torchax
-from tpu_inference.lora.torch_lora_ops import bgmv_expand_slice, bgmv_shrink
+
 from tpu_inference.lora.torch_punica_tpu import PunicaWrapperTPU
 
 tpu_available = False
@@ -30,9 +30,12 @@ pytestmark = pytest.mark.skipif(not tpu_available, reason="No TPU found")
 
 
 def test_add_lora_embedding():
+
     class DummyWrapper:
+
         def __init__(self, idxs):
             self.idxs = idxs
+
         def _get_token_lora_indices(self, x):
             return self.idxs
 
@@ -43,14 +46,22 @@ def test_add_lora_embedding():
 
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
         x = torch.rand(num_tokens, max_lora_rank, device='jax')
-        lora_b_stacked = torch.rand(max_loras, 1, hidden_size, max_lora_rank, device='jax')
+        lora_b_stacked = torch.rand(max_loras,
+                                    1,
+                                    hidden_size,
+                                    max_lora_rank,
+                                    device='jax')
         y = torch.zeros(num_tokens, hidden_size, device='jax')
-        idxs = torch.randint(0, max_loras, (num_tokens,), device='jax', dtype=torch.int32)
+        idxs = torch.randint(0,
+                             max_loras, (num_tokens, ),
+                             device='jax',
+                             dtype=torch.int32)
 
         wrapper = DummyWrapper(idxs)
-        
-        actual = PunicaWrapperTPU.add_lora_embedding(wrapper, y.clone(), x, lora_b_stacked)
-        
+
+        actual = PunicaWrapperTPU.add_lora_embedding(wrapper, y.clone(), x,
+                                                     lora_b_stacked)
+
         expected = y.clone()
         for i in range(num_tokens):
             lora_idx = idxs[i].item()
@@ -61,9 +72,12 @@ def test_add_lora_embedding():
 
 
 def test_add_lora_logits():
+
     class DummyWrapper:
+
         def __init__(self, idxs):
             self.idxs = idxs
+
         def _get_sampler_indices(self, x):
             return self.idxs
 
@@ -74,21 +88,37 @@ def test_add_lora_logits():
 
     with torchax.default_env(), jax.default_device(jax.devices("tpu")[0]):
         x = torch.rand(num_tokens, hidden_size, device='jax')
-        lora_a_stacked = torch.rand(max_loras, 1, max_lora_rank, hidden_size, device='jax')
-        lora_b_stacked = torch.rand(max_loras, 1, hidden_size, max_lora_rank, device='jax')
+        lora_a_stacked = torch.rand(max_loras,
+                                    1,
+                                    max_lora_rank,
+                                    hidden_size,
+                                    device='jax')
+        lora_b_stacked = torch.rand(max_loras,
+                                    1,
+                                    hidden_size,
+                                    max_lora_rank,
+                                    device='jax')
         y = torch.zeros(num_tokens, hidden_size, device='jax')
-        idxs = torch.randint(0, max_loras, (num_tokens,), device='jax', dtype=torch.int32)
+        idxs = torch.randint(0,
+                             max_loras, (num_tokens, ),
+                             device='jax',
+                             dtype=torch.int32)
 
         wrapper = DummyWrapper(idxs)
-        
-        actual = PunicaWrapperTPU.add_lora_logits(wrapper, y.clone(), x, lora_a_stacked, lora_b_stacked, scale=1.0)
-        
+
+        actual = PunicaWrapperTPU.add_lora_logits(wrapper,
+                                                  y.clone(),
+                                                  x,
+                                                  lora_a_stacked,
+                                                  lora_b_stacked,
+                                                  scale=1.0)
+
         expected = y.clone()
         for i in range(num_tokens):
             lora_idx = idxs[i].item()
             lora_a = lora_a_stacked[lora_idx, 0]
             lora_b = lora_b_stacked[lora_idx, 0]
-            
+
             buffer = torch.matmul(lora_a, x[i])
             expected[i] += torch.matmul(lora_b, buffer)
 

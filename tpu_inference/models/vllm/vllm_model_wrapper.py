@@ -33,7 +33,6 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.ir import enable_torch_wrap
 from vllm.lora.layers import BaseLayerWithLoRA
-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -52,6 +51,8 @@ from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
+from tpu_inference.lora.lora_manager import (TPULRUCacheWorkerLoRAManager,
+                                             parse_lora_module_path_env)
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -64,8 +65,6 @@ from tpu_inference.models.vllm.experimental.vision_tower_jit import (
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
-from tpu_inference.lora.lora_manager import (TPULRUCacheWorkerLoRAManager,
-                                             parse_lora_module_path_env)
 
 logger = init_logger(__name__)
 
