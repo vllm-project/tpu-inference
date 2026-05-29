@@ -20,6 +20,8 @@ from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
 import jax
+import jax.numpy as jnp
+import jax.profiler
 import numpy as np
 import torch
 import torch.nn
@@ -55,9 +57,11 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.models.jax.utils.multi_modal_utils import \
+    MultiModalEmbeddings
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
-from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
-    maybe_apply_qwen3_vl_patches
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import (
+    is_qwen3_vl, maybe_apply_qwen3_vl_patches)
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
     maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn,
     maybe_prepare_for_jit)
@@ -66,6 +70,49 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import (
 from tpu_inference.runner.lora_utils import replace_lora_metadata
 
 logger = init_logger(__name__)
+
+
+def get_embed_multimodal_trace_name(kwargs: dict) -> str:
+    pixel_values_img = kwargs.get("pixel_values")
+    pixel_values_vid = kwargs.get("pixel_values_videos")
+
+    shapes = []
+    if pixel_values_img is not None:
+        shapes.append(
+            f"img_{pixel_values_img.shape[0]}-{pixel_values_img.shape[1]}")
+    if pixel_values_vid is not None:
+        shapes.append(
+            f"vid_{pixel_values_vid.shape[0]}-{pixel_values_vid.shape[1]}")
+    pv_shape = "_".join(shapes) if shapes else "unknown"
+
+    grid_thw_img = kwargs.get("image_grid_thw")
+    grid_thw_vid = kwargs.get("video_grid_thw")
+    grid_thw_gen = kwargs.get("grid_thw")
+
+    thw_parts = []
+
+    def format_thw(grid, prefix):
+        if grid is None:
+            return None
+        flat = grid.tolist() if hasattr(grid, "tolist") else list(grid)
+        return f"{prefix}_" + "_".join("-".join(map(str, row)) for row in flat)
+
+    thw_img_str = format_thw(grid_thw_img, "img")
+    if thw_img_str:
+        thw_parts.append(thw_img_str)
+    thw_vid_str = format_thw(grid_thw_vid, "vid")
+    if thw_vid_str:
+        thw_parts.append(thw_vid_str)
+    thw_gen_str = format_thw(grid_thw_gen, "gen")
+    if thw_gen_str:
+        thw_parts.append(thw_gen_str)
+
+    thw_str = "__".join(thw_parts)
+
+    trace_name = f"embed_multimodal_pv_{pv_shape}"
+    if thw_str:
+        trace_name += f"_thw_{thw_str}"
+    return trace_name
 
 
 class _VllmRunner(torch.nn.Module):
@@ -106,6 +153,7 @@ class VllmModelWrapper:
     rng: PRNGKey
     mesh: Mesh
     model: _VllmRunner
+    support_mm_padding: bool
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -116,6 +164,7 @@ class VllmModelWrapper:
         self.rng = rng
         self.mesh = mesh
         self.is_draft_model = is_draft_model
+        self.support_mm_padding = False
 
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
@@ -244,6 +293,9 @@ class VllmModelWrapper:
 
         self.model = _VllmRunner(vllm_model, self.vllm_config,
                                  self.is_draft_model)
+        # Only fix Qwen3 VL.
+        self.support_mm_padding = is_qwen3_vl(
+            vllm_model) and envs.VLLM_TPU_ENABLE_CPU_PADDING
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
         self._pooler: Pooler | None = self.model.pooler
@@ -455,7 +507,6 @@ class VllmModelWrapper:
                 },
                 tie_weights=False,
             )
-
             return jax_view(output_from_torch)
 
         def embed_multimodal_func_torch(params_and_buffers: Any,
@@ -463,10 +514,40 @@ class VllmModelWrapper:
             # embed_multimodal_func_jax requires kwargs to be jax.Array such that jit can work
             # Here we move_to_jax, then call (maybe jit'ed) embed_multimodal_func_jax.
             with torchax.default_env(), enable_torch_wrap(False):
-
+                trace_name = get_embed_multimodal_trace_name(kwargs)
                 kwargs = maybe_prepare_for_jit(kwargs, self.model.vllm_model)
 
-                def move(v: torch.Tensor) -> torch.Tensor:
+                if (envs.VLLM_TPU_ENABLE_FLAX_ENCODER
+                        and envs.VLLM_TPU_ENABLE_CPU_PADDING
+                        and is_qwen3_vl(self.model.vllm_model)):
+                    if "pixel_values" in kwargs:
+                        pv = kwargs["pixel_values"]
+                        num_patches = pv.shape[0]
+                        bucket_num_patches = 1 << (num_patches -
+                                                   1).bit_length()
+                        if bucket_num_patches > num_patches:
+                            logger.info(
+                                "[vision-jit-profile] Padding image pixel_values eagerly on CPU/Host: original patches=%s -> bucketed patches=%s",
+                                num_patches, bucket_num_patches)
+                            kwargs["pixel_values"] = torch.nn.functional.pad(
+                                pv,
+                                (0, 0, 0, bucket_num_patches - num_patches))
+                    if "pixel_values_videos" in kwargs:
+                        pv = kwargs["pixel_values_videos"]
+                        num_patches = pv.shape[0]
+                        bucket_num_patches = 1 << (num_patches -
+                                                   1).bit_length()
+                        if bucket_num_patches > num_patches:
+                            logger.info(
+                                "[vision-jit-profile] Padding video pixel_values eagerly on CPU/Host: original patches=%s -> bucketed patches=%s",
+                                num_patches, bucket_num_patches)
+                            kwargs[
+                                "pixel_values_videos"] = torch.nn.functional.pad(
+                                    pv, (0, 0, 0,
+                                         bucket_num_patches - num_patches))
+
+                def torch_to_jax(v: torch.Tensor) -> torch.Tensor:
+                    """Converts torch tensor to jax Array. On TPU environment this effectively does h2d."""
                     if not isinstance(v, torch.Tensor):
                         logger.warning(f"Expect torch.Tensor, got {type(v)}")
                         return v
@@ -475,12 +556,15 @@ class VllmModelWrapper:
                 # Ensure all tensors are moved into accelerator so the
                 # computation with weights can work properly.
                 call_kwargs = {
-                    k: jax.tree.map(move, v)
+                    k: jax.tree.map(torch_to_jax, v)
                     for k, v in kwargs.items()
                 }
-                return maybe_jit_embed_multimodal_func(
-                    embed_multimodal_func_jax,
-                    self.model.vllm_model)(params_and_buffers, **call_kwargs)
+                with jax.profiler.TraceAnnotation(trace_name):
+                    res = maybe_jit_embed_multimodal_func(
+                        embed_multimodal_func_jax,
+                        self.model.vllm_model)(params_and_buffers,
+                                               **call_kwargs)
+                return res
 
         return embed_multimodal_func_torch
 
@@ -496,6 +580,11 @@ class VllmModelWrapper:
             *,
             is_multimodal: jax.Array | None = None,
         ) -> jax.Array:
+            # Avoid recompilation for the Qwen3-VL multimodal path.
+            if self.support_mm_padding and mm_embeds is not None:
+                mm_embeds = pad_mm_embeds(mm_embeds, input_ids.shape[0],
+                                          is_multimodal)
+
             with torchax.default_env():
                 if mm_embeds is not None:
                     if isinstance(mm_embeds, list):
@@ -521,7 +610,9 @@ class VllmModelWrapper:
                     tie_weights=False,
                 )
 
-                return jax_view(output_from_torch)
+                res = jax_view(output_from_torch)
+
+            return res
 
         return embed_input_ids_func
 
@@ -660,3 +751,70 @@ def replace_set_lora(model):
             module.set_lora = _tpu_set_lora.__get__(module, module.__class__)
             module.reset_lora = _tpu_reset_lora.__get__(
                 module, module.__class__)
+
+
+def pad_mm_embeds(
+    mm_embeds: MultiModalEmbeddings | None,
+    target_pad_len: int,
+    is_multimodal: jax.Array | None = None,
+) -> MultiModalEmbeddings | None:
+    """Pads a list of multimodal embeddings or a single embedding to target_pad_len.
+
+    Returns a list containing a single 2D JAX Array padded to the target length.
+    """
+    if mm_embeds is None or len(mm_embeds) == 0:
+        return None
+
+    if isinstance(mm_embeds, (list, tuple)):
+        flat_list = []
+        for i, single_embed in enumerate(mm_embeds):
+            if single_embed.ndim != 2:
+                raise ValueError(
+                    f"Expected each multimodal embedding in the list/tuple to be a 2D tensor "
+                    f"(num_tokens, hidden_dim), but got tensor at index {i} with shape {single_embed.shape}."
+                )
+            flat_list.append(single_embed)
+        flattened = jnp.concatenate(flat_list, axis=0)
+    else:
+        if mm_embeds.ndim != 3:
+            raise ValueError(
+                f"Expected a single multimodal embedding tensor to be a 3D tensor "
+                f"(batch_size, num_tokens_per_item, hidden_dim), but got shape {mm_embeds.shape}."
+            )
+        flattened = mm_embeds.reshape(-1, mm_embeds.shape[-1])
+
+    # JIT-compatible Static Padding and Alignment using Prefix-Sum + Gather:
+    # 1. Truncate flattened if it exceeds target_pad_len.
+    if flattened.shape[0] > target_pad_len:
+        flattened = flattened[:target_pad_len]
+
+    # 2. Pad the flattened array statically to target_pad_len using JIT-friendly concat.
+    # We append a dummy row at the beginning to act as index 0 for non-multimodal tokens.
+    dummy_row = jnp.zeros((1, flattened.shape[1]), dtype=flattened.dtype)
+
+    # Compute remaining static padding length needed to reach target_pad_len
+    pad_size = target_pad_len - flattened.shape[0]
+    if pad_size > 0:
+        zero_padding = jnp.zeros((pad_size, flattened.shape[1]),
+                                 dtype=flattened.dtype)
+        flattened_padded = jnp.concatenate(
+            [dummy_row, flattened, zero_padding], axis=0)
+    else:
+        flattened_padded = jnp.concatenate([dummy_row, flattened], axis=0)
+
+    if is_multimodal is not None:
+        # 3. Create gather indices using cumsum.
+        # For non-multimodal tokens, it points to the dummy row (0).
+        # For multimodal tokens, it points to the corresponding offset in the flattened array.
+        gather_indices = jnp.cumsum(is_multimodal)
+
+        # 4. Statically gather matching features
+        gathered = flattened_padded[gather_indices]
+
+        # 5. Retain original values where the mask is True, else set to 0.0
+        padded = jnp.where(is_multimodal[:, None], gathered, 0.0)
+    else:
+        # If no mask is provided, fall back to standard slice assignment
+        padded = flattened_padded[1:target_pad_len + 1]
+
+    return [padded]

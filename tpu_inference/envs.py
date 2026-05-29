@@ -56,6 +56,8 @@ if TYPE_CHECKING:
     MOE_APPROX_TOPK: bool = False
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
+    VLLM_TPU_ENABLE_FLAX_ENCODER: bool = False
+    VLLM_TPU_ENABLE_CPU_PADDING: bool = False
     ENABLE_RS_KERNEL: bool = False
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
@@ -357,6 +359,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
     "VLLM_TPU_PATCH_MM_EMBEDDINGS":
     env_bool("VLLM_TPU_PATCH_MM_EMBEDDINGS", default=False),
+    "VLLM_TPU_ENABLE_FLAX_ENCODER":
+    env_bool("VLLM_TPU_ENABLE_FLAX_ENCODER", default=False),
+    "VLLM_TPU_ENABLE_CPU_PADDING":
+    env_bool("VLLM_TPU_ENABLE_CPU_PADDING", default=False),
     "DISABLE_MLA_Q_ACTIVATION_QUANTIZATION":
     env_bool("DISABLE_MLA_Q_ACTIVATION_QUANTIZATION", default=False),
     # Enable hierarchical reduce-scatter kernel for MoE

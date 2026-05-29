@@ -165,31 +165,36 @@ class CompilationManager:
                     deepstack_levels = len(deepstack_indexes)
                     mm_hidden_size = visual_dim * (1 + deepstack_levels)
 
-            sharding = NamedSharding(
+            sharding_dp = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+            # Qwen3 VL multimodal output might have no sharding config at all.
+            sharding_replicated = NamedSharding(self.runner.mesh,
+                                                PartitionSpec(None))
             input_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
-            dummy_multimodal_embeddings = self._create_dummy_tensor(
-                (num_tokens, mm_hidden_size),
-                self.runner.vllm_config.model_config.dtype,
-                sharding=sharding)
             dummy_input_ids = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, sharding=input_sharding)
             dummy_is_multimodal = self._create_dummy_tensor(
                 (num_tokens, ), jnp.bool_, sharding=input_sharding)
 
-            self._run_compilation(
-                "input_embeddings_merger",
-                self.runner.embed_input_ids_fn,
-                self.runner.state_leaves,
-                dummy_input_ids,
-                # Make _compute_deepstack_embeds happy.
-                [dummy_multimodal_embeddings],
-                call_kwargs={"is_multimodal": dummy_is_multimodal},
-                num_tokens=num_tokens,
-            )
+            for mm_sharding in (sharding_dp, sharding_replicated):
+                dummy_multimodal_embeddings = self._create_dummy_tensor(
+                    (num_tokens, mm_hidden_size),
+                    self.runner.vllm_config.model_config.dtype,
+                    sharding=mm_sharding)
+
+                self._run_compilation(
+                    "input_embeddings_merger",
+                    self.runner.embed_input_ids_fn,
+                    self.runner.state_leaves,
+                    dummy_input_ids,
+                    # Make _compute_deepstack_embeds happy.
+                    [dummy_multimodal_embeddings],
+                    call_kwargs={"is_multimodal": dummy_is_multimodal},
+                    num_tokens=num_tokens,
+                )
 
             self._run_compilation(
                 "input_embeddings_merger_text_only",

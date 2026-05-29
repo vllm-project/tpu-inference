@@ -398,6 +398,79 @@ class TestMultiModalManager:
         np.testing.assert_array_equal(np.asarray(gathered_is_mm_embed_3),
                                       is_mm_embed_cpu[50:80])
 
+    def test_gather_mm_embeddings_with_padded_encoder_output(self):
+        """Tests that gather_mm_embeddings correctly slices out padding from padded encoder outputs."""
+        # 1. ===== Setup =====
+        self.runner.is_multimodal_model = True
+        req_id = "req-1"
+
+        # Mock padded encoder output (padded to 64, but original length is 56)
+        encoder_embedding = jnp.arange(64 * 128, dtype=jnp.bfloat16).reshape(
+            (64, 128))
+        self.runner.encoder_cache = {req_id: encoder_embedding}
+
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
+        # Mock request state with original length 56
+        prompt_token_len = 100
+        mm_position = PlaceholderRange(offset=10, length=56)
+        is_mm_embed_cpu = np.zeros(prompt_token_len, dtype=np.bool_)
+        is_mm_embed_cpu[mm_position.offset:mm_position.offset +
+                        mm_position.length] = True
+        req_state = CachedRequestState(
+            req_id=req_id,
+            prompt_token_ids=list(range(prompt_token_len)),
+            output_token_ids=[],
+            sampling_params=mock_sampling_params,
+            block_ids=([], ),
+            num_computed_tokens=0,
+            mm_features=[
+                MultiModalFeatureSpec(data=None,
+                                      identifier=req_id,
+                                      modality="image",
+                                      mm_position=mm_position)
+            ],
+            lora_request=None,
+            pooling_params=None,
+            generator=None,
+        )
+        self.runner.requests = {req_id: req_state}
+        self.runner.input_batch.add_request(req_state)
+
+        # 2. ===== Act =====
+        mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output.total_num_scheduled_tokens = prompt_token_len
+        mock_scheduler_output.num_scheduled_tokens = {req_id: prompt_token_len}
+
+        gathered_mm_embeds, gathered_is_mm_embed = self.runner.mm_manager.gather_mm_embeddings(
+            mock_scheduler_output,
+            target_pad_len=prompt_token_len,
+            req_ids_dp={0: [req_id]},
+            padded_num_scheduled_tokens_per_dp_rank=prompt_token_len)
+
+        # 3. ===== Assert =====
+        assert gathered_mm_embeds is not None
+        assert len(gathered_mm_embeds) == 1
+        gathered_embeds = gathered_mm_embeds[0]
+
+        # Verified that the gathered embeds have EXACTLY the unpadded length 56!
+        assert gathered_embeds.shape == (56, 128)
+
+        # The values match the unpadded part of the cached embedding
+        expected_embeds = encoder_embedding[0:56]
+        np.testing.assert_array_equal(np.asarray(gathered_embeds),
+                                      np.asarray(expected_embeds))
+
     def test_calc_mrope_positions(self):
         """Tests the calculation of M-RoPE positions for mixed prompt/completion."""
         # 1. ===== Setup =====
