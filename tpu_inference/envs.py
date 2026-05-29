@@ -60,8 +60,9 @@ if TYPE_CHECKING:
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
-    PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
+    PROFILE_SINGLE_CHIP: bool = False
+    PROFILE_SINGLE_CHIP_ALL_SC: bool = False
 
 
 def env_with_choices(
@@ -378,11 +379,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # is effectively disabled.
     "ONEHOT_MOE_PERMUTE_THRESHOLD":
     lambda: int(os.getenv("ONEHOT_MOE_PERMUTE_THRESHOLD", "0")),
-    # Profile a single device instead of all devices.
-    "PROFILE_SINGLE_DEVICE":
-    env_bool("PROFILE_SINGLE_DEVICE", default=False),
     "LORA_MODULE_PATH":
     lambda: os.getenv("LORA_MODULE_PATH", ""),
+    # When true, profile just one chip and one sparse core and one tile
+    # (unless PROFILE_SINGLE_CHIP_ALL_SC is true)
+    "PROFILE_SINGLE_CHIP":
+    env_bool("PROFILE_SINGLE_CHIP", default=False),
+    # Only has effect when PROFILE_SINGLE_CHIP is true.
+    # When true, profile all sparse cores
+    "PROFILE_SINGLE_CHIP_ALL_SC":
+    env_bool("PROFILE_SINGLE_CHIP_ALL_SC", default=False),
 }
 
 

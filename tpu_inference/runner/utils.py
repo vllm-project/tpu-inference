@@ -561,17 +561,15 @@ class PhasedBasedProfiler:
         }
         self.default_profiling_options = jax.profiler.ProfileOptions()
         self.default_profiling_options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
-        self.default_profiling_options.advanced_configuration = {
+        advanced_config = {
             "tpu_trace_mode": "TRACE_COMPUTE",
-            "tpu_num_sparse_cores_to_trace": 1,
-            "tpu_num_sparse_core_tiles_to_trace": 1,
         }
-        if envs.PROFILE_SINGLE_DEVICE:
-            self.default_profiling_options.advanced_configuration = {
-                "tpu_num_chips_to_profile_per_task": 1,
-                "tpu_num_sparse_cores_to_trace": 1,
-                "tpu_num_sparse_core_tiles_to_trace": 1,
-            }
+        if envs.PROFILE_SINGLE_CHIP:
+            advanced_config["tpu_num_chips_to_profile_per_task"] = 1
+            if not envs.PROFILE_SINGLE_CHIP_ALL_SC:
+                advanced_config["tpu_num_sparse_cores_to_trace"] = 1
+                advanced_config["tpu_num_sparse_core_tiles_to_trace"] = 1
+        self.default_profiling_options.advanced_configuration = advanced_config
 
         self.current_phase: str = ""
 

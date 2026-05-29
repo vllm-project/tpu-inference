@@ -491,12 +491,13 @@ class TPUWorker(WorkerBase):
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
-            if envs.PROFILE_SINGLE_DEVICE:
-                options.advanced_configuration = {
-                    "tpu_num_chips_to_profile_per_task": 1,
-                    "tpu_num_sparse_cores_to_trace": 1,
-                    "tpu_num_sparse_core_tiles_to_trace": 1,
-                }
+            advanced_config = {}
+            if envs.PROFILE_SINGLE_CHIP:
+                advanced_config["tpu_num_chips_to_profile_per_task"] = 1
+                if not envs.PROFILE_SINGLE_CHIP_ALL_SC:
+                    advanced_config["tpu_num_sparse_cores_to_trace"] = 1
+                    advanced_config["tpu_num_sparse_core_tiles_to_trace"] = 1
+            options.advanced_configuration = advanced_config
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
         else:
