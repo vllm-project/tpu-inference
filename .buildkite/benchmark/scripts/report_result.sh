@@ -375,3 +375,10 @@ else
     echo "Warning: $RESULT_FILE not found. No results to display."
   fi
 fi
+
+if [[ "${MLCOMPASS_EXPORT_ENABLED:-false}" == "true" ]] then
+  echo "--- Reporting to MLCompass"
+  python3 "$(dirname "${BASH_SOURCE[0]}")"/mlcompass_export.py --result_file=$RESULT_FILE
+else
+  echo "--- Reporting to MLCompass (skipped)"
+fi
