@@ -21,7 +21,7 @@ steps:
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-R1_UnitTest" "not enough HBM"
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:deepseek-ai/DeepSeek-R1:UnitTest" "not enough HBM"
         else
           .buildkite/scripts/run_in_docker.sh \
             bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m "gs://tpu-commons-ci/deepseek/r1"
@@ -69,7 +69,7 @@ steps:
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-R1_Accuracy" "not enough HBM"
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:deepseek-ai/DeepSeek-R1:Accuracy/Correctness" "not enough HBM"
         else
           .buildkite/scripts/run_in_docker.sh \
             bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/deepseek/r1" -n 14042 -l 4
@@ -100,7 +100,7 @@ steps:
       MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-R1_Benchmark" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}:deepseek-ai/DeepSeek-R1:Benchmark" "unverified"
   - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance benchmark result for deepseek-ai/DeepSeek-R1"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_deepseek-ai_DeepSeek-R1_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_deepseek-ai_DeepSeek-R1_Benchmark"
