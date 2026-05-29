@@ -50,9 +50,9 @@ add_kernel_microbenchmarks() {
 # add_kernel_microbenchmarks
 
 # for test
-TARGET_FOLDERS=("models1")
-# TARGET_FOLDERS=("quantization" "parallelism" "models" "features" "rl")
-# add_kernel_microbenchmarks
+# TARGET_FOLDERS=("models1")
+TARGET_FOLDERS=("quantization" "parallelism" "models" "features" "rl")
+add_kernel_microbenchmarks
 
 # case "${MODEL_IMPL_TYPE}" in
 #   # "auto")
@@ -104,12 +104,12 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
       subject_name="${subject_name%"${subject_name##*[![:space:]]}"}"
 
       case "$folder_path" in
-        "models1")
+        "models")
           model_list+=("$subject_name")
           ;;
-        # "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "rl")
-        #   feature_list+=("${subject_name}")
-        #   ;;
+        "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "rl")
+          feature_list+=("${subject_name}")
+          ;;
       esac
     fi
 
