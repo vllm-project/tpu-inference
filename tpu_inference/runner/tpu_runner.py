@@ -57,8 +57,10 @@ from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisName,
                                                   ShardingConfigManager)
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
-from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
-                                                      gather_logprobs, sample)
+from tpu_inference.layers.jax.sample.sampling import (
+    PromptLogprobsAsyncData, PromptLogprobsReqSnap,
+    _jax_logprobs_copy_to_host_async, compute_and_gather_logprobs,
+    compute_prompt_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -178,25 +180,6 @@ class AsyncPreResults:
 
 
 @dataclass
-class PromptLogprobsReqSnap:
-    """Per-request state snapshotted at step N for use in get_output()."""
-    req_id: str
-    req_state: CachedRequestState  # Stable request state reference.
-    req_offset: int  # Absolute row index into the full-batch logprobs tensor.
-    start_idx: int  # Number of computed tokens.
-    num_logits: int  # Number of rows to copy from the TPU tensor to the CPU accumulator.
-    is_last_chunk: bool
-    num_k: int  # Number of top logprobs to retain for this request.
-
-
-@dataclass
-class PromptLogprobsAsyncData:
-    """Holds async-copied prompt logprob tensors + per-request snapshots for get_output()."""
-    tensors: LogprobsTensors  # result of _jax_logprobs_copy_to_host_async (pending transfer)
-    req_snaps: List[PromptLogprobsReqSnap]
-
-
-@dataclass
 class ExecuteModelState:
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -273,18 +256,6 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
                              0)
     positions = positions - pos_subtract
     return seq_lens, positions
-
-
-def _jax_logprobs_copy_to_host_async(
-        logprobs_tensors: LogprobsTensors) -> LogprobsTensors:
-    """Initiate non-blocking TPU-to-host copies for all logprobs arrays."""
-    return LogprobsTensors(
-        logprob_token_ids=jax.copy_to_host_async(
-            logprobs_tensors.logprob_token_ids),
-        logprobs=jax.copy_to_host_async(logprobs_tensors.logprobs),
-        selected_token_ranks=jax.copy_to_host_async(
-            logprobs_tensors.selected_token_ranks),
-    )
 
 
 def _jax_logprobs_materialize(
@@ -1211,14 +1182,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             if tpu_sampling_metadata.logprobs:
                 logits = processed_logits if self.model_config.logprobs_mode == "processed_logprobs" else logits
-                logprobs = self._compute_and_gather_logprobs(
+                logprobs = compute_and_gather_logprobs(
                     logits, next_tokens, self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
             else:
                 logprobs = None
 
-            prompt_logprobs_async = self._compute_prompt_logprobs(
-                full_logits, input_ids, scheduler_output, req_ids_dp)
+            prompt_logprobs_async = compute_prompt_logprobs(
+                full_logits,
+                input_ids,
+                self.input_batch.num_prompt_logprobs,
+                self.requests,
+                scheduler_output,
+                req_ids_dp,
+                self.dp_size,
+            )
 
         num_reqs = self.input_batch.num_reqs
 
@@ -1438,78 +1416,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 array, indices_to_select)
 
         return ret
-
-    @staticmethod
-    @jax.jit(static_argnames=("max_logprobs", ))
-    def _compute_and_gather_logprobs(logits, next_tokens, max_logprobs):
-        logprobs = compute_logprobs(logits)
-        return gather_logprobs(logprobs, next_tokens, max_logprobs)
-
-    def _compute_prompt_logprobs(
-        self,
-        full_logits: Optional[jax.Array],
-        input_ids: Optional[jax.Array],
-        scheduler_output: "VllmSchedulerOutput",
-        req_ids_dp: Optional[Dict],
-    ) -> Optional["PromptLogprobsAsyncData"]:
-        """Dispatch prompt logprob computation and snapshot per-request state.
-        Returns a PromptLogprobsAsyncData holding the async-copied tensors and
-        all per-request state needed to slice them in get_output() — by which
-        time req_state.num_computed_tokens will have been updated for the next
-        step, so we must snapshot it now.
-        """
-        if (not self.input_batch.num_prompt_logprobs or full_logits is None
-                or input_ids is None):
-            return None
-
-        max_k = max(self.input_batch.num_prompt_logprobs.values())
-
-        # Shift input_ids by one position to build gather targets:
-        # target[i] = input_ids[i+1], the token whose logprob we want at pos i.
-        # The rolled-off last element and any cross-request boundary positions
-        # are never used (we only access num_logits positions per request).
-        prompt_target_ids = jnp.roll(input_ids, -1, axis=0)
-
-        # Gather compact [total_padded_tokens, max_k+1] tensors on TPU and
-        # start async transfer to host (overlaps with next step's execute_model).
-        prompt_lp_tensors = self._compute_and_gather_logprobs(
-            full_logits.astype(jnp.float32), prompt_target_ids, max_k)
-        prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
-
-        # Snapshot all mutable per-request state before update_states(N+1) runs.
-        padded_tokens_per_dp = full_logits.shape[0] // self.dp_size
-        req_snaps: List[PromptLogprobsReqSnap] = []
-        for dp_rank, req_id_list in req_ids_dp.items():
-            dp_token_offset = dp_rank * padded_tokens_per_dp
-            local_token_offset = 0
-            for req_id in req_id_list:
-                num_scheduled = scheduler_output.num_scheduled_tokens[req_id]
-                if req_id in self.input_batch.num_prompt_logprobs:
-                    num_k = self.input_batch.num_prompt_logprobs[req_id]
-                    req_state = self.requests[req_id]
-                    start_idx = req_state.num_computed_tokens
-                    num_remaining = req_state.num_prompt_tokens - (start_idx +
-                                                                   1)
-                    if num_scheduled <= num_remaining:
-                        num_logits = num_scheduled
-                        is_last_chunk = False
-                    else:
-                        num_logits = num_remaining
-                        is_last_chunk = True
-                    req_snaps.append(
-                        PromptLogprobsReqSnap(
-                            req_id=req_id,
-                            req_state=req_state,
-                            req_offset=dp_token_offset + local_token_offset,
-                            start_idx=start_idx,
-                            num_logits=num_logits,
-                            is_last_chunk=is_last_chunk,
-                            num_k=num_k,
-                        ))
-                local_token_offset += num_scheduled
-
-        return PromptLogprobsAsyncData(tensors=prompt_lp_tensors,
-                                       req_snaps=req_snaps)
 
     def _get_prompt_logprobs_dict(
         self,
