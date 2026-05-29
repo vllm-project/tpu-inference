@@ -516,7 +516,7 @@ class VllmModelWrapper:
                         "call_kwargs": {
                             "is_multimodal":
                             torch_view(is_multimodal)
-                            if is_multimodal is not None else False,
+                            if is_multimodal is not None else torch.tensor(False),
                         },
                     },
                     tie_weights=False,

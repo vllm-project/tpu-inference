@@ -73,7 +73,7 @@ case "${MODEL_IMPL_TYPE}" in
     TARGET_FOLDERS=("quantization" "parallelism" "features")
     ;;
   "vllm")
-    TARGET_FOLDERS=("quantization" "parallelism" "models" "features")
+    TARGET_FOLDERS=("models")
     ;;
 esac
 
