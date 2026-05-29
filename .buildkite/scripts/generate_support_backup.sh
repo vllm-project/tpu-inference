@@ -104,7 +104,7 @@ if [[ -f "${DEFAULT_FEATURES_FILE}" ]]; then
             default_feature_names+=("$feature_name")
             # Set metadata so we know which CSV to put it in later
             echo "Setting category for '$feature_name': $category"
-            buildkite-agent meta-data set "${CI_TPU_VERSION}${feature_name}_category" "$category"
+            buildkite-agent meta-data set "${TPU_METADATA_PREFIX}${feature_name}_category" "$category"
         else
             # Fallback if no category found
             default_feature_names+=("$line")
@@ -175,6 +175,51 @@ process_models() {
                 echo "$row" >> "$category_csv"
             done
         done
+    done
+}
+
+process_models1() {
+    for model in "${model_list[@]:-}"; do
+        if [[ -z "$model" ]]; then continue; fi
+        # Get category (default: text-only)
+        local category
+        category=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}_category" --default "text-only")
+        # Use the TPU_DIR prefix for the CSV path
+        local category_csv="${TPU_DIR}/model_support_matrix.csv"
+        # Initialize CSV if not exists
+        if [ ! -f "$category_csv" ]; then
+            echo "Model,Type,Machine Type,Framework,UnitTest,Accuracy/Correctness,Benchmark" > "$category_csv"
+            model_csv_files+=("$category_csv")
+        fi
+        # Build Row
+        local row="\"$model\""
+        for stage in "${MODEL_STAGES[@]}"; do
+            local result
+            if [ "$stage" == "Type" ]; then
+                if [ "$category" == "multimodal" ]; then
+                    result="Multimodal"
+                elif [ "$category" == "embedding" ]; then
+                    result="Embedding"
+                elif [ "$category" == "diffusion" ]; then
+                    result="Diffusion"
+                else 
+                    result="Text"
+                fi
+            elif [ "$stage" == "Machine Type" ]; then
+                result="Multimodal"
+            elif [ "$stage" == "Framework" ]; then
+                result="Multimodal"
+            else
+                result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${model}:${stage}" --default "❓ Untested")
+            fi
+            row="$row,$result"
+
+            if [ "$stage" != "Type" ] && [ "${result}" != "✅ Passing" ] && [ "${result}" != "⚪ N/A" ] && [ "${result}" != "❓ Untested" ] && [ "${result}" != "not enough HBM" ]; then
+
+                ANY_FAILED=true
+            fi
+        done
+        echo "$row" >> "$category_csv"
     done
 }
 
@@ -271,6 +316,85 @@ process_features() {
                 echo "$row" >> "$category_csv"
             done
         done
+    done
+}
+
+process_features1() {
+    local mode="$1"
+    shift # Shift $1 so $@ now contains only the feature list
+
+    for feature in "$@"; do
+        if [[ -z "$feature" ]]; then continue; fi
+
+        # Get Category (default: feature support matrix)
+        local category
+        category=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${feature}_category" --default "feature support matrix")
+
+        local category_filename=${category// /_}
+        # Use the TPU_DIR prefix for the CSV path
+        local category_csv="${TPU_DIR}/${category_filename}.csv"
+
+        # Determine which stages array and header to use
+        local stages_to_use=("${FEATURE_STAGES[@]}")
+        local header="Feature,CorrectnessTest,PerformanceTest"
+        local is_quantization_matrix=false
+
+        if [ "$category" == "quantization support matrix" ]; then
+            is_quantization_matrix=true
+            stages_to_use=("${FEATURE_STAGES_QUANTIZATION[@]}")
+            header="Quantization dtype,Quantization methods,Recommended TPU Generations,CorrectnessTest,PerformanceTest"
+        elif [ "$category" == "kernel support matrix microbenchmarks" ]; then
+            stages_to_use=("${FEATURE_STAGES_MICROBENCHMARKS[@]}")
+            header="kernels,CorrectnessTest,PerformanceTest"
+        elif [ "$category" == "parallelism support matrix" ]; then
+            stages_to_use=("${PARALLELISM_STAGES[@]}")
+            header="Feature,Single-Host CorrectnessTest,Single-Host PerformanceTest,Multi-Host CorrectnessTest,Multi-Host PerformanceTest"
+        fi
+
+        if [ ! -f "$category_csv" ]; then
+            echo "$header" > "$category_csv"
+            feature_csv_files+=("$category_csv")
+        fi
+
+        # Build Row
+        local row="\"$feature\""
+        local stage_index=0
+        for stage in "${stages_to_use[@]}"; do
+            local result
+            if [ "$is_quantization_matrix" = true ] && [ "$stage" == "RecommendedTPUGenerations" ]; then
+                # If it's the quantization matrix, hardcode the TPU generation
+                result="$(get_tpu_generation "$feature")"
+            elif [ "$is_quantization_matrix" = true ] && [ "$stage" == "QuantizationMethods" ]; then
+                # If it's the quantization matrix, hardcode the quantization methods
+                result="$(get_quantization_method "$feature")"
+
+            elif [[ "$mode" == "DEFAULT" ]]; then
+                result="✅ Passing"
+            else
+                result=$(buildkite-agent meta-data get "${TPU_METADATA_PREFIX}${feature}:${stage}" --default "❓ Untested")
+                # Format any remaining custom strings from upstream configs
+                local result_lower
+                result_lower="$(echo "$result" | tr '[:upper:]' '[:lower:]')"
+                if [[ "$result_lower" == "beta" ]]; then
+                    result="⚠️ Beta"
+                elif [[ "$result_lower" == "experimental" ]]; then
+                    result="🧪 Experimental"
+                elif [[ "$result_lower" == "planned" ]]; then
+                    result="📝 Planned"
+                elif [[ "$result_lower" == "unplanned" ]]; then
+                    result="⛔️ Unplanned"
+                fi
+            fi
+            row="$row,$result"
+
+            # Check for failure (exclude the hardcoded TPU generation column and Quantization Methods column)
+            if [ "$stage" != "QuantizationMethods" ] && [ "$stage" != "RecommendedTPUGenerations" ] && [[ "${result}" != "✅ Passing" && "${result}" != "⚪ N/A" && "${result}" != "❓ Untested" && "${result}" != "⚠️ Beta" && "${result}" != "🧪 Experimental" && "${result}" != "📝 Planned" && "${result}" != "⛔️ Unplanned" ]]; then
+                ANY_FAILED=true
+            fi
+
+            stage_index=$((stage_index + 1))
+        done
+        echo "$row" >> "$category_csv"
     done
 }
 
