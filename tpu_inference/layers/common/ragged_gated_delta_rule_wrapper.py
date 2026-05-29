@@ -20,9 +20,9 @@ import jax
 import jax.numpy as jnp
 
 from tpu_inference.kernels.gdn import triangle_solver
-from tpu_inference.kernels.gdn.fused_gdn_kernel_wrapper import \
-    ragged_gated_delta_rule as fused_impl
-from tpu_inference.kernels.gdn.recurrent_scan_v2 import recurrent_scan
+from tpu_inference.kernels.gdn.v2.gdn_decode_kernel import \
+    ragged_gated_delta_rule_decode_only
+from tpu_inference.kernels.gdn.v2.recurrent_scan_v2 import recurrent_scan
 from tpu_inference.layers.common import \
     ragged_gated_delta_rule_chunked as jax_impl
 
@@ -39,9 +39,7 @@ class RaggedGatedDeltaRuleImpl(enum.Enum):
     REF = 'ref'
     CHUNKED_JAX_PD = 'chunked_jax_pd'
     CHUNKED_KERNEL_PD = 'chunked_kernel_pd'
-    CHUNKED_KERNEL_P_JAX_D = 'chunked_kernel_p_jax_d'
     CHUNKED_KERNEL_P_RECURRENT_KERNEL_D = 'chunked_kernel_p_recurrent_kernel_d'
-    RECURRENT_KERNEL_PD = 'recurrent_kernel_pd'
 
     @property
     def prefill_impl(self) -> str:
@@ -50,8 +48,6 @@ class RaggedGatedDeltaRuleImpl(enum.Enum):
                 RaggedGatedDeltaRuleImpl.CHUNKED_JAX_PD,
         ):
             return 'jax'
-        elif self == RaggedGatedDeltaRuleImpl.RECURRENT_KERNEL_PD:
-            return 'fused'
         else:
             return 'recurrent_scan_v2'
 
@@ -60,7 +56,6 @@ class RaggedGatedDeltaRuleImpl(enum.Enum):
         if self in (
                 RaggedGatedDeltaRuleImpl.REF,
                 RaggedGatedDeltaRuleImpl.CHUNKED_JAX_PD,
-                RaggedGatedDeltaRuleImpl.CHUNKED_KERNEL_P_JAX_D,
         ):
             return 'jax'
         else:
@@ -110,51 +105,50 @@ def ragged_gated_delta_rule_wrapper(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Applies the gated delta rule over ragged seq lengths using various implementations.
 
-  This function separates mixed QKV, handles repeating for multi-query attention
-  if needed, and routes to either the decode-only or mixed-prefill branch
-  depending on sequence lengths and config.
+    This function separates mixed QKV, handles repeating for multi-query attention
+    if needed, and routes to either the decode-only or mixed-prefill branch
+    depending on sequence lengths and config.
 
-  Args:
-    config: Configuration for ragged gated delta rule.
-    mixed_qkv: Mixed query, key, value tensor.
-    b: b tensor (for beta).
-    a: a tensor (for g).
-    recurrent_state: Recurrent state tensor of shape `(num_blocks, n_v, d_k,
-      d_v)`. `num_blocks` is always equal or larger than `max_seqs + 1`. The
-      first block is a null_block and only used for padded / invalid tokens.
-    A_log: A_log tensor.
-    dt_bias: dt_bias tensor.
-    query_start_loc: Start locations of sequences.
-    state_indices: Indices mapping sequences to recurrent state slots.
-    distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
-      mixed_end)`.
-    has_initial_state: Boolean tensor of shape `(max_reqs,)`. ``True`` when the
-      request has prior recurrent state to use (chunked-prefill continuation or
-      prefix-cache hit). ``False`` for brand-new prefills, in which case the
-      gathered recurrent state is treated as zeros — matching GPU's
-      `initial_state[~has_initial_state, ...] = 0` in
-      `gdn_linear_attn._forward_core`.
-    chunk_size: Chunk size for padding.
-    triangle_solver_impl: Which triangle solver implementation to use.
-    n_kq: Number of key/query heads.
-    n_v: Number of value heads.
-    d_k: Key/query dimension.
-    d_v: Value dimension.
+    Args:
+      config: Configuration for ragged gated delta rule.
+      mixed_qkv: Mixed query, key, value tensor.
+      b: b tensor (for beta).
+      a: a tensor (for g).
+      recurrent_state: Recurrent state tensor of shape `(num_blocks, n_v, d_k,
+        d_v)`. `num_blocks` is always equal or larger than `max_seqs + 1`. The
+        first block is a null_block and only used for padded / invalid tokens.
+      A_log: A_log tensor.
+      dt_bias: dt_bias tensor.
+      query_start_loc: Start locations of sequences.
+      state_indices: Indices mapping sequences to recurrent state slots.
+      distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
+        mixed_end)`.
+      has_initial_state: Boolean tensor of shape `(max_reqs,)`. ``True`` when the
+        request has prior recurrent state to use (chunked-prefill continuation or
+        prefix-cache hit). ``False`` for brand-new prefills, in which case the
+        gathered recurrent state is treated as zeros — matching GPU's
+        `initial_state[~has_initial_state, ...] = 0` in
+        `gdn_linear_attn._forward_core`.
+      chunk_size: Chunk size for padding.
+      triangle_solver_impl: Which triangle solver implementation to use.
+      n_kq: Number of key/query heads.
+      n_v: Number of value heads.
+      d_k: Key/query dimension.
+      d_v: Value dimension.
 
-  Returns:
-    A tuple containing:
-      - updated_recurrent_state: Updated recurrent state tensor of shape
-        `(num_blocks, n_v, d_k, d_v)`.
-      - output: Output tensor.
-  """
+    Returns:
+      A tuple containing:
+        - updated_recurrent_state: Updated recurrent state tensor of shape
+          `(num_blocks, n_v, d_k, d_v)`.
+        - output: Output tensor.
+    """
     is_decode_only = distribution[0] == distribution[2]
 
     def decode_only_branch(_):
         impl = config.decode_impl
         if impl == 'fused':
-            qkv_in = jax.nn.silu(mixed_qkv)
-            new_state, output = fused_impl(
-                mixed_qkv=qkv_in,
+            new_state, output = ragged_gated_delta_rule_decode_only(
+                mixed_qkv=mixed_qkv,
                 b=b,
                 a=a,
                 recurrent_state=recurrent_state,
@@ -168,6 +162,7 @@ def ragged_gated_delta_rule_wrapper(
                 n_v=n_v,
                 d_k=d_k,
                 d_v=d_v,
+                apply_silu=True,
             )
             return new_state, output
         elif impl == 'jax':
@@ -260,24 +255,7 @@ def ragged_gated_delta_rule_wrapper(
                 use_qk_norm_in_gdn=config.use_qk_norm_in_gdn,
                 has_initial_state=has_initial_state,
             )
-        elif impl == 'fused':
-            qkv_in = jax.nn.silu(mixed_qkv)
-            return fused_impl(
-                mixed_qkv=qkv_in,
-                b=b,
-                a=a,
-                recurrent_state=recurrent_state,
-                A_log=A_log,
-                dt_bias=dt_bias,
-                query_start_loc=query_start_loc,
-                state_indices=state_indices,
-                distribution=distribution,
-                has_initial_state=has_initial_state,
-                n_kq=n_kq,
-                n_v=n_v,
-                d_k=d_k,
-                d_v=d_v,
-            )
+
         else:
             raise ValueError(f'Unknown prefill_impl: {impl}')
 

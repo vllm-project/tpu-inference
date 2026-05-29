@@ -309,6 +309,11 @@ class TestKVCacheManager:
         mock_hf_text_config = MagicMock()
         mock_hf_text_config.kv_lora_rank = 400
         mock_hf_text_config.qk_rope_head_dim = 40
+        # kv_cache_manager calls compute_kv_share_map(),
+        # which reads these attributes. MagicMock auto-creates them as
+        # Mocks otherwise (truthy, not int) and breaks the `> 0` check.
+        mock_hf_text_config.num_kv_shared_layers = 0
+        mock_hf_text_config.layer_types = []
         self.runner.model_config.hf_text_config = mock_hf_text_config
 
         num_kv_heads = 16
@@ -414,6 +419,65 @@ class TestKVCacheManager:
                 f"layer.{i}: head_size={spec.head_size} "
                 f"(expected base fallback {expected_head_size})")
 
+    def test_get_kv_cache_spec_registers_kv_share_redirects(self):
+        # JAX-path KV-share: when num_kv_shared_layers > 0, shared layers
+        # must NOT get a kv_cache_spec entry (no slot allocated) and must
+        # be registered in shared_kv_cache_layers with the correct
+        # {shared_idx: source_idx} mapping derived from layer_types.
+        model_config = self.runner.vllm_config.model_config
+        parallel_config = self.runner.vllm_config.parallel_config
+        num_layers = model_config.get_num_layers(parallel_config)
+        # Need at least 4 layers for a meaningful 2-shared test
+        # (2 non-shared + 2 shared).
+        assert num_layers >= 4, (
+            f"setup_runner_fixture must yield num_layers >= 4 for this "
+            f"test; got {num_layers}")
+        num_shared = 2
+
+        mock_hf_text_config = MagicMock()
+        # compute_kv_share_map reads text_config.num_hidden_layers directly;
+        # set it to match the runner's num_layers so the helper derives
+        # first_shared = num_layers - num_shared correctly. Without this
+        # MagicMock auto-creates num_hidden_layers as a Mock, which
+        # silently produces an empty redirect map.
+        mock_hf_text_config.num_hidden_layers = num_layers
+        mock_hf_text_config.num_kv_shared_layers = num_shared
+        # Alternating full/sliding so each shared layer has a same-type
+        # predecessor in the non-shared range.
+        layer_types = [
+            "full_attention" if i % 2 == 0 else "sliding_attention"
+            for i in range(num_layers)
+        ]
+        mock_hf_text_config.layer_types = layer_types
+        # E2B-style: head-shape attrs are None, runner falls back to
+        # model_config base values.
+        mock_hf_text_config.num_global_key_value_heads = None
+        mock_hf_text_config.global_head_dim = None
+        mock_hf_text_config.num_key_value_heads = None
+        mock_hf_text_config.head_dim = None
+        self.runner.model_config.hf_text_config = mock_hf_text_config
+
+        self.runner.vllm_config.compilation_config.static_forward_context = {}
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        # Non-shared layers have specs; shared layers do not.
+        first_shared = num_layers - num_shared
+        assert len(kv_cache_spec) == first_shared
+        for i in range(first_shared):
+            assert f"layer.{i}" in kv_cache_spec
+        for i in range(first_shared, num_layers):
+            assert f"layer.{i}" not in kv_cache_spec
+
+        # Each shared layer redirects to the last preceding same-type layer.
+        shared = self.runner.kv_cache_manager.shared_kv_cache_layers
+        expected = {}
+        prev_types = layer_types[:first_shared]
+        for i in range(first_shared, num_layers):
+            src = (len(prev_types) - 1 -
+                   prev_types[::-1].index(layer_types[i]))
+            expected[f"layer.{i}"] = f"layer.{src}"
+        assert shared == expected, f"got {shared}, expected {expected}"
+
     def test_get_kv_cache_spec_without_compilation_cfg_mla(self):
         self.runner.kv_cache_manager.use_mla = True
         model_config = self.runner.vllm_config.model_config
@@ -423,6 +487,11 @@ class TestKVCacheManager:
         mock_hf_text_config = MagicMock()
         mock_hf_text_config.kv_lora_rank = 400
         mock_hf_text_config.qk_rope_head_dim = 40
+        # kv_cache_manager calls compute_kv_share_map(),
+        # which reads these attributes. MagicMock auto-creates them as
+        # Mocks otherwise (truthy, not int) and breaks the `> 0` check.
+        mock_hf_text_config.num_kv_shared_layers = 0
+        mock_hf_text_config.layer_types = []
         self.runner.model_config.hf_text_config = mock_hf_text_config
         expected_head_size = 640  # 640 = align(512, 128) + alignto(40, 128)
 
@@ -496,6 +565,49 @@ class TestKVCacheManager:
             assert self.runner.layer_name_to_kvcache_index[
                 f'layer.{i + 10}'] == i
 
+    def test_initialize_kv_cache_capped_by_override(self):
+        # create a kv cache config with 1 layer full attention.
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = 8
+        head_size = 128
+        num_blocks = 100
+        kv_packing = 2  #bf16
+        full_attn_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+        )
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=['layer.0'],
+                             kv_cache_spec=full_attn_spec),
+        ]
+        page_size_bytes = full_attn_spec.page_size_bytes
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=num_blocks * page_size_bytes,
+                shared_by=['layer.0'],
+            )
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        # Set num_gpu_blocks_override to a smaller value!
+        override_blocks = 50
+        self.runner.cache_config.num_gpu_blocks_override = override_blocks
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        # Assert that the allocated KV cache has size equal to override_blocks, not num_blocks!
+        assert len(self.runner.kv_caches) == 1
+        assert self.runner.kv_caches[0].shape == (override_blocks, block_size,
+                                                  num_kv_heads * 2 //
+                                                  kv_packing, kv_packing,
+                                                  head_size)
+
     def test_get_kv_cache_spec_with_eagle3(self):
         # tests we create kv cache spec for eagle3 draft model
         self.runner.vllm_config.compilation_config.static_forward_context = {}
@@ -538,6 +650,11 @@ class TestKVCacheManager:
         mock_hf_text_config = MagicMock()
         mock_hf_text_config.kv_lora_rank = 400
         mock_hf_text_config.qk_rope_head_dim = 40
+        # kv_cache_manager calls compute_kv_share_map(),
+        # which reads these attributes. MagicMock auto-creates them as
+        # Mocks otherwise (truthy, not int) and breaks the `> 0` check.
+        mock_hf_text_config.num_kv_shared_layers = 0
+        mock_hf_text_config.layer_types = []
         self.runner.model_config.hf_text_config = mock_hf_text_config
         mock_draft_model_config.hf_config = mock_hf_config
         mock_speculative_config.draft_model_config = mock_draft_model_config

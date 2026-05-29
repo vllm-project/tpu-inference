@@ -31,6 +31,7 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 
@@ -165,6 +166,27 @@ def setup_environment():
              test_utils.get_spmd_mesh(2)])
 def test_quant_override(mesh):
     """VllmNvfp4Config.override_quantization_method detects NVFP4."""
+    # 1. New style: quant_library + quant_algo (ModelOpt)
+    result = VllmNvfp4Config.override_quantization_method(
+        {
+            "quant_library": "MODELOPT",
+            "quant_algo": "NVFP4"
+        },
+        user_quant=None,
+    )
+    assert result == NVFP4
+
+    # 2. Case insensitivity check
+    result = VllmNvfp4Config.override_quantization_method(
+        {
+            "quant_library": "modelopt",
+            "quant_algo": "nvfp4"
+        },
+        user_quant=None,
+    )
+    assert result == NVFP4
+
+    # 3. Old style: quant_method (fallback to super)
     result = VllmNvfp4Config.override_quantization_method(
         {
             "quant_method": "modelopt",
@@ -174,12 +196,19 @@ def test_quant_override(mesh):
     )
     assert result == NVFP4
 
-    # Non-NVFP4 should return None.
+    # 4. Non-NVFP4 should return None (or whatever super returns).
     result = VllmNvfp4Config.override_quantization_method(
         {
-            "quant_method": "modelopt",
+            "quant_library": "MODELOPT",
             "quant_algo": "FP8"
         },
+        user_quant=None,
+    )
+    assert result is None
+
+    # 5. hf_quant_cfg=None should return None (fallback to super).
+    result = VllmNvfp4Config.override_quantization_method(
+        None,
         user_quant=None,
     )
     assert result is None
@@ -296,14 +325,17 @@ def test_column_parallel_linear(bias, num_devices):
 # ----------------------------------------------------------------
 # Test 4: MoE layer
 # ----------------------------------------------------------------
-@pytest.mark.parametrize("num_devices", [1])
+@pytest.mark.parametrize("num_devices", [1, 2])
 @pytest.mark.parametrize("num_tokens", [8])
 @pytest.mark.parametrize("intermediate_size", [256])
 @pytest.mark.parametrize("hidden_size", [128])
 @pytest.mark.parametrize("num_experts", [4])
 @pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("has_bias", [False, True])
+@pytest.mark.parametrize("activation",
+                         [MoEActivation.SILU, MoEActivation.SWIGLUOAI])
 def test_fused_moe(num_devices, num_tokens, intermediate_size, hidden_size,
-                   num_experts, topk):
+                   num_experts, topk, has_bias, activation):
     mesh = test_utils.get_spmd_mesh(num_devices)
     torch.manual_seed(42)
     dtype = torch.bfloat16
@@ -341,8 +373,9 @@ def test_fused_moe(num_devices, num_tokens, intermediate_size, hidden_size,
             tp_size=1,
             dp_size=1,
             quant_config=config,
-            has_bias=False,
+            has_bias=has_bias,
         )
+        moe_layer.activation = activation
 
     # Quantize w1 and w2 per-expert to NVFP4.
     group_size = NVFP4_GROUP_SIZE
@@ -361,8 +394,17 @@ def test_fused_moe(num_devices, num_tokens, intermediate_size, hidden_size,
         moe_layer.w2_weight_scale.data[e] = w2_scale
         moe_layer.w2_weight_scale_2.data[e] = w2_gs.item()
 
+    if has_bias:
+        moe_layer.w13_bias.data = torch.randn(
+            (num_experts, 2 * intermediate_size), dtype=dtype) / 10
+        moe_layer.w2_bias.data = torch.randn(
+            (num_experts, hidden_size), dtype=dtype) / 10
+
+    w1_bias = moe_layer.w13_bias.data if has_bias else None
+    w2_bias = moe_layer.w2_bias.data if has_bias else None
+
     # Reference MoE computation.
-    expected = test_utils.ref_moe(a, score, w1, w2, None, None, topk,
+    expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias, topk,
                                   moe_layer.renormalize,
                                   moe_layer.activation.value)
 

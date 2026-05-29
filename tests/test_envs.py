@@ -235,12 +235,14 @@ def test_string_env_vars_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("PREFILL_SLICES", raising=False)
     monkeypatch.delenv("DECODE_SLICES", raising=False)
     monkeypatch.delenv("REQUANTIZE_WEIGHT_DTYPE", raising=False)
+    monkeypatch.delenv("AGGREGATED_STATS_DIR", raising=False)
     monkeypatch.delenv("MOE_REQUANTIZE_WEIGHT_DTYPE", raising=False)
 
     assert envs.JAX_PLATFORMS == ""
     assert envs.PREFILL_SLICES == ""
     assert envs.DECODE_SLICES == ""
     assert envs.PHASED_PROFILING_DIR == ""
+    assert envs.AGGREGATED_STATS_DIR == ""
     assert envs.REQUANTIZE_WEIGHT_DTYPE == "float8_e4m3fn"
     assert envs.MOE_REQUANTIZE_WEIGHT_DTYPE == ""
 

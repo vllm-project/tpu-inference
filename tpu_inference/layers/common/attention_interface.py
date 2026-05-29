@@ -72,7 +72,7 @@ def sharded_flash_attention(
             P("data", "model", None, None),  # k
             P("data", "model", None, None),  # v
             P("data", "model", None, None),  # attention_bias
-            P(),  # segment_ids
+            P("data", None),  # segment_ids (B matches q's B, so shard 'data')
         )
         out_specs = P("data", "model", None, None)
 
@@ -92,7 +92,7 @@ def sharded_flash_attention(
             P("data", "model", None, None),  # q
             P("data", "model", None, None),  # k
             P("data", "model", None, None),  # v
-            P(),  # segment_ids
+            P("data", None),  # segment_ids (B matches q's B, so shard 'data')
         )
         out_specs = P("data", "model", None, None)
 
@@ -385,9 +385,9 @@ def sharded_ragged_paged_attention(
         in_specs += (P(ShardingAxisName.ATTN_HEAD), )
         args += (attention_sink, )
 
-    # KV-share (update_kv_cache=False) is only supported by the non-hd64
-    # kernel. Fail loud if a caller tries to use it on the hd64 path so
-    # the bug surfaces immediately rather than silently writing to cache.
+    # update_kv_cache=False (KV-share) is supported by the v3 default RPA
+    # kernel and by the experimental batched RPA kernel. The hd64 path
+    # doesn't accept it; fail loud rather than silently ignoring.
     if use_hd64 and not update_kv_cache:
         raise NotImplementedError(
             "update_kv_cache=False (KV-share) is not supported on the "
@@ -401,10 +401,9 @@ def sharded_ragged_paged_attention(
             k_scale=k_scale,
             v_scale=v_scale,
         )
-        # update_kv_cache is only supported by the non-hd64 path; the
-        # guard above rejects update_kv_cache=False on hd64. The default
-        # True is a no-op and we don't forward it to the hd64 signature
-        # (which doesn't accept it).
+        # update_kv_cache is supported by both the v3 default and batched
+        # RPA kernels; only the hd64 path doesn't accept it. Default True
+        # is a no-op so we don't forward it to the hd64 signature.
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
         return func(*args, **kwargs)

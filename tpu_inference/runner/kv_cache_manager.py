@@ -35,6 +35,7 @@ from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.kv_share import compute_kv_share_map
 from tpu_inference.offload.utils import get_kv_connector_cache_layout
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
@@ -80,6 +81,7 @@ class KVCacheManager:
         # mamba state with `attn_metadata.mamba_state_indices` (in
         # `[0, max_num_reqs]`) so it stays in-bounds for the smaller arrays.
         self._mamba_num_blocks: int | None = None
+        self.actual_mamba_num_blocks: int | None = None
 
     def _create_attention_spec(
             self,
@@ -451,7 +453,23 @@ class KVCacheManager:
             base_num_kv_heads = model_config.get_total_num_kv_heads()
             base_head_size = model_config.get_head_size()
 
+            # KV-share (JAX path): vllm-side models declare KV-share via
+            # per-Attention `kv_sharing_target_layer_name`; the JAX-side
+            # models have no equivalent runtime declaration. Derive the
+            # same mapping from the HF text_config attributes. Returns {}
+            # for models that don't use KV-share, so this is a no-op for
+            # the common case.
+            kv_share_map = compute_kv_share_map(text_config)
+
             for i in range(model_config.get_num_layers(parallel_config)):
+                # If this layer is KV-shared, register the redirect and skip
+                # spec creation (so no slot is allocated). The forward-time
+                # remap at line ~835 picks the source layer's slot.
+                if i in kv_share_map:
+                    self.shared_kv_cache_layers[
+                        f"layer.{i}"] = f"layer.{kv_share_map[i]}"
+                    continue
+
                 if self.use_mla:
                     kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
                         block_size, 1, mla_head_size)
@@ -629,6 +647,7 @@ class KVCacheManager:
                 vocab_size=self.runner.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
                 num_speculative_tokens=num_speculative_tokens,
+                dp_size=self.runner.dp_size,
             )
             self.runner.input_batch = new_input_batch
             self.runner.persistent_batch_manager.input_batch = new_input_batch
@@ -739,6 +758,11 @@ class KVCacheManager:
             # num_blocks must be a multiple of the sharding divisor
             num_blocks = (num_blocks // divisor) * divisor
 
+            if self.runner.cache_config.num_gpu_blocks_override is not None:
+                num_blocks = min(
+                    num_blocks,
+                    self.runner.cache_config.num_gpu_blocks_override)
+
             # When compact-mamba sizing succeeded (set by
             # `_maybe_set_compact_mamba_num_blocks_override`), mamba layers
             # allocate `_mamba_num_blocks` (= max_num_reqs + 1) slots while
@@ -748,6 +772,8 @@ class KVCacheManager:
             mamba_num_blocks = (self._mamba_num_blocks
                                 if self._mamba_num_blocks is not None else
                                 num_blocks)
+            if self.actual_mamba_num_blocks is None:
+                self.actual_mamba_num_blocks = mamba_num_blocks
 
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
                 layer_spec = layer_name_to_spec[layer_name]
@@ -810,6 +836,7 @@ class KVCacheManager:
                                 text_config.qk_rope_head_dim
                         else:
                             head_size = layer_spec.head_size
+
                         kv_cache = create_kv_caches(
                             num_blocks=num_blocks,
                             block_size=layer_spec.block_size,

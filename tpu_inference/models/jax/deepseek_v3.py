@@ -47,7 +47,7 @@ from tpu_inference.layers.jax.base import _init_fn as init_fn
 from tpu_inference.layers.jax.base import create_param, sharded_initializer
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import JaxEinsum, JaxLmHead
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
                                                 select_moe_backend)
@@ -1391,17 +1391,14 @@ class DeepseekV3ForCausalLM(JaxModule, LoadableWithIterator):
         if self.model.is_last_rank:
             vocab_size = model_config.get_vocab_size()
             hidden_size = model_config.hf_config.hidden_size
-            self.lm_head = JaxEinsum(
-                einsum_str="TD,DV->TV",
-                kernel_shape=(hidden_size, vocab_size),
+            self.lm_head = JaxLmHead(
+                hidden_size=hidden_size,
+                vocab_size=vocab_size,
                 param_dtype=model_config.dtype,
                 dtype=model_config.dtype,
                 rngs=rng,
                 kernel_init=nnx.with_partitioning(
                     init_fn, (None, ShardingAxisName.MLP_TENSOR)),
-                # Same as https://github.com/vllm-project/tpu-inference/issues/1684
-                # DS-V3 doesn't quantize lm_head.
-                quant_config=None,
                 prefix="lm_head",
             )
         else:
