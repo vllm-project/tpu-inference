@@ -144,8 +144,16 @@ process_models() {
                     elif [ "$stage" == "Framework" ]; then
                         result="${framework}"
                     else
-                        local meta_key="${CI_TPU_VERSION}_${framework}_${model}:${stage}"
+                        local safe_model
+                        safe_model=$(echo "$model" | tr -s '/:.' '_')
+
+                        local safe_stage
+                        safe_stage=$(echo "$stage" | tr -s '/:.' '_')
+                        
+                        local meta_key="${CI_TPU_VERSION}_${framework}_${safe_model}_${safe_stage}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
+                        # local meta_key="${CI_TPU_VERSION}_${framework}_${model}:${stage}"
+                        # result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
                     fi
                     
                     row="$row,$result"
@@ -227,7 +235,14 @@ process_features() {
                     elif [[ "$mode" == "DEFAULT" ]]; then
                         result="✅ Passing"
                     else
-                        local meta_key="${CI_TPU_VERSION}_${framework}_${feature}:${stage}"
+                        local safe_feature
+                        safe_feature=$(echo "$feature" | tr -s '/:.' '_')
+
+                        local safe_stage
+                        safe_stage=$(echo "$stage" | tr -s '/:.' '_')
+
+                        local meta_key="${CI_TPU_VERSION}_${framework}_${safe_feature}_${safe_stage}"
+
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
                         # Format any remaining custom strings from upstream configs
                         local result_lower

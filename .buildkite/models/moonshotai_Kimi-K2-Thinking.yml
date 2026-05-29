@@ -43,7 +43,7 @@ steps:
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2-Thinking_Accuracy" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2-Thinking_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record integration test result for moonshotai/Kimi-K2-Thinking"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_moonshotai_Kimi-K2-Thinking_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_moonshotai_Kimi-K2-Thinking_Accuracy"

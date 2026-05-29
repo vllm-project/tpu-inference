@@ -64,8 +64,19 @@ case $OUTCOME in
 esac
 
 # Save the results using the hardware-specific prefix.
+SAFE_TARGET=$(echo "$CI_TARGET" | tr -s '/:.' '_')
+SAFE_STAGE=$(echo "$CI_STAGE" | tr -s '/:.' '_')
+SAFE_META_KEY="${CI_TPU_VERSION}_${MODEL_IMPL_TYPE}_${SAFE_TARGET}_${SAFE_STAGE}"
+
+echo "--- [DEBUG] Saving Metadata ---"
+echo "[DEBUG] Category Key   : ${CI_TPU_VERSION}${CI_TARGET}_category"
+echo "[DEBUG] Category Value : ${CI_CATEGORY}"
+echo "[DEBUG] Result Key     : ${SAFE_META_KEY}"
+echo "[DEBUG] Result Message : ${message}"
+
 buildkite-agent meta-data set "${CI_TPU_VERSION}${CI_TARGET}_category" "${CI_CATEGORY}"
-buildkite-agent meta-data set "${CI_TPU_VERSION}_${MODEL_IMPL_TYPE}_${CI_TARGET}:${CI_STAGE}" "${message}"
+buildkite-agent meta-data set "${SAFE_META_KEY}" "${message}"
+# buildkite-agent meta-data set "${CI_TPU_VERSION}_${MODEL_IMPL_TYPE}_${CI_TARGET}:${CI_STAGE}" "${message}"
 
 if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "unverified" ] && [ "${OUTCOME}" != "not enough HBM" ] && [ "${OUTCOME}" != "transformers version too low" ]; then
     exit 1

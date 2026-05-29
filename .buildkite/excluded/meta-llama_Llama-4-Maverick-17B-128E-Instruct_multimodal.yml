@@ -43,7 +43,7 @@ steps:
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy" "unverified"
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
