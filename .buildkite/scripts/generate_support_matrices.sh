@@ -66,16 +66,16 @@ get_quantization_method() {
 declare -a model_csv_files=()
 declare -a feature_csv_files=()
 declare -a default_feature_names=()
-declare -a ACTIVE_CONFIGS=()
+declare -a ACTIVE_TPU_CONFIGS=()
 FRAMEWORKS=("flax_nnx" "vllm")
 
 
 if [[ "$RUN_V6" == "true" ]]; then
-    ACTIVE_CONFIGS+=("tpu6e")
+    ACTIVE_TPU_CONFIGS+=("tpu6e")
 fi
 
 if [[ "$RUN_V7" == "true" ]]; then
-    ACTIVE_CONFIGS+=("tpu7x")
+    ACTIVE_TPU_CONFIGS+=("tpu7x")
 fi
 
 # Determine sub-directory based on TPU_VERSION
@@ -131,19 +131,19 @@ process_models() {
     for framework in "${FRAMEWORKS[@]}"; do
         
         # Second-level loop: Machine type configuration
-        for config in "${ACTIVE_CONFIGS[@]}"; do
-            # Parse in order: display name (v6e), Metadata prefix (v6)
-            IFS=":" read -r prefix <<< "$config"
+        for config in "${ACTIVE_TPU_CONFIGS[@]}"; do
+            # Parse in order: display name (v6e), Metadata CI_TPU_VERSION (v6)
+            IFS=":" read -r CI_TPU_VERSION <<< "$config"
 
             # Third-level loop: Model
             for model in "${model_list[@]:-}"; do
                 if [[ -z "$model" ]]; then continue; fi
                 # Get the category (default: text-only)
                 local category
-                category=$(buildkite-agent meta-data get "${prefix}${model}_category" --default "text-only")
+                category=$(buildkite-agent meta-data get "${CI_TPU_VERSION}${model}_category" --default "text-only")
                 
                 local row="\"$model\""
-                echo "[DEBUG] prefix: ${prefix}"
+                echo "[DEBUG] CI_TPU_VERSION: ${CI_TPU_VERSION}"
                 for stage in "${MODEL_STAGES[@]}"; do
                     local result
                     if [ "$stage" == "Type" ]; then
@@ -153,11 +153,11 @@ process_models() {
                         else result="Text"
                         fi
                     elif [ "$stage" == "Machine Type" ]; then
-                        result="${prefix}"
+                        result="${CI_TPU_VERSION}"
                     elif [ "$stage" == "Framework" ]; then
                         result="${framework}"
                     else
-                        local meta_key="${prefix}_${framework}:${model}:${stage}"
+                        local meta_key="${CI_TPU_VERSION}_${framework}:${model}:${stage}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
                     fi
                     
@@ -225,6 +225,101 @@ process_models1() {
 
 # Process Features (Split by Category)
 process_features() {
+    local mode="$1"
+    shift # Shift $1 so $@ now contains only the feature list
+
+    # First-level loop: Framework
+    for framework in "${FRAMEWORKS[@]}"; do
+        
+        # Second-level loop: Machine type configuration 
+        for config in "${ACTIVE_TPU_CONFIGS[@]:-${ACTIVE_CONFIGS[@]}}"; do
+            IFS=":" read -r prefix <<< "$config"
+
+            # Third-level loop: Features
+            for feature in "$@"; do
+                if [[ -z "$feature" ]]; then continue; fi
+
+                # Get Category (default: feature support matrix)
+                local category
+                category=$(buildkite-agent meta-data get "${prefix}${feature}_category" --default "feature support matrix")
+
+                local category_filename=${category// /_}
+                local category_csv="${TPU_DIR}/${category_filename}.csv"
+
+                # Determine which stages array and header to use
+                local stages_to_use=("${FEATURE_STAGES[@]}")
+                local header="Feature,Machine Type,Framework,CorrectnessTest,PerformanceTest"
+                local is_quantization_matrix=false
+
+                if [ "$category" == "quantization support matrix" ]; then
+                    is_quantization_matrix=true
+                    stages_to_use=("${FEATURE_STAGES_QUANTIZATION[@]}")
+                    header="Quantization dtype,Machine Type,Framework,Quantization methods,Recommended TPU Generations,CorrectnessTest,PerformanceTest"
+                elif [ "$category" == "kernel support matrix microbenchmarks" ]; then
+                    stages_to_use=("${FEATURE_STAGES_MICROBENCHMARKS[@]}")
+                    header="kernels,Machine Type,Framework,CorrectnessTest,PerformanceTest"
+                elif [ "$category" == "parallelism support matrix" ]; then
+                    stages_to_use=("${PARALLELISM_STAGES[@]}")
+                    header="Feature,Machine Type,Framework,Single-Host CorrectnessTest,Single-Host PerformanceTest,Multi-Host CorrectnessTest,Multi-Host PerformanceTest"
+                fi
+
+                if [ ! -f "$category_csv" ]; then
+                    echo "$header" > "$category_csv"
+                    feature_csv_files+=("$category_csv")
+                fi
+
+                # Build Row
+                local row="\"$feature\""
+                local stage_index=0
+                for stage in "${stages_to_use[@]}"; do
+                    local result
+                    
+                    if [ "$is_quantization_matrix" = true ] && [ "$stage" == "RecommendedTPUGenerations" ]; then
+                        result="$(get_tpu_generation "$feature")"
+                    elif [ "$is_quantization_matrix" = true ] && [ "$stage" == "QuantizationMethods" ]; then
+                        result="$(get_quantization_method "$feature")"
+                    elif [ "$stage" == "Machine Type" ]; then
+                        result="${CI_TPU_VERSION}"
+                    elif [ "$stage" == "Framework" ]; then
+                        result="${framework}"
+                    elif [[ "$mode" == "DEFAULT" ]]; then
+                        result="✅ Passing"
+                    else
+                        local meta_key="${CI_TPU_VERSION}_${framework}:${feature}:${stage}"
+                        result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
+                        # Format any remaining custom strings from upstream configs
+                        local result_lower
+                        result_lower="$(echo "$result" | tr '[:upper:]' '[:lower:]')"
+                        if [[ "$result_lower" == "beta" ]]; then
+                            result="⚠️ Beta"
+                        elif [[ "$result_lower" == "experimental" ]]; then
+                            result="🧪 Experimental"
+                        elif [[ "$result_lower" == "planned" ]]; then
+                            result="📝 Planned"
+                        elif [[ "$result_lower" == "unplanned" ]]; then
+                            result="⛔️ Unplanned"
+                        fi
+                    fi
+                    row="$row,$result"
+
+                    # Check for failure (exclude the descriptive structural columns)
+                    if [ "$stage" != "QuantizationMethods" ] && \
+                       [ "$stage" != "RecommendedTPUGenerations" ] && \
+                       [ "$stage" != "Machine Type" ] && \
+                       [ "$stage" != "Framework" ] && \
+                       [[ "${result}" != "✅ Passing" && "${result}" != "⚪ N/A" && "${result}" != "❓ Untested" && "${result}" != "⚠️ Beta" && "${result}" != "🧪 Experimental" && "${result}" != "📝 Planned" && "${result}" != "⛔️ Unplanned" ]]; then
+                        ANY_FAILED=true
+                    fi
+
+                    stage_index=$((stage_index + 1))
+                done
+                echo "$row" >> "$category_csv"
+            done
+        done
+    done
+}
+
+process_features1() {
     local mode="$1"
     shift # Shift $1 so $@ now contains only the feature list
 
@@ -313,8 +408,99 @@ process_kernel_matrix_to_pivot() {
         return
     fi
 
+    # Define Headers for Display (Added Machine Type and Framework)
+    local header="Kernel microbenchmark,Machine Type,Framework,W16 A16 (Corr),W16 A16 (Perf),W8 A8 (Corr),W8 A8 (Perf),W8 A16 (Corr),W8 A16 (Perf),W4 A4 (Corr),W4 A4 (Perf),W4 A8 (Corr),W4 A8 (Perf),W4 A16 (Corr),W4 A16 (Perf)"
+    echo "$header" > "$output_file"
+
+    # Define the quantization order to match the header
+    local quant_cols_list="w16a16 w8a8 w8a16 w4a4 w4a8 w4a16"
+
+    # Awk Script for Pivoting (Data Rows)
+    awk -v AWK_QUANT_COLS="$quant_cols_list" '
+        BEGIN { 
+            FS=","; OFS=",";
+            split(AWK_QUANT_COLS, q_order, " ");
+        }
+        
+        NR > 1 {
+            # Map the new 5-column structure from process_features():
+            # $1: Kernel, $2: Machine Type, $3: Framework, $4: Correctness, $5: Performance
+            
+            raw_kernel = $1;
+            gsub(/"/, "", raw_kernel);
+            machine_type = $2;
+            framework = $3;
+            
+            if (match(raw_kernel, /-(w[0-9]+a[0-9]+)$/)) {
+                quant_type = substr(raw_kernel, RSTART + 1, RLENGTH - 1);
+                base_kernel_key = substr(raw_kernel, 1, RSTART - 1);
+            } else {
+                 base_kernel_key = raw_kernel;
+                 quant_type = "w16a16";
+            }
+
+            # Create a composite key to group by Kernel + Machine Type + Framework
+            composite_key = base_kernel_key SUBSEP machine_type SUBSEP framework;
+
+            # Store Correctness ($4) and Performance ($5) based on the composite key
+            matrix[composite_key, quant_type] = $4 OFS $5;
+
+            # Track unique composite keys to preserve insertion order
+            if (! (composite_key in seen_keys)) {
+                seen_keys[composite_key] = 1;
+                key_list[num_keys++] = composite_key;
+            }
+        }
+        END {
+            for (i=0; i<num_keys; i++) {
+                composite_key = key_list[i];
+                split(composite_key, parts, SUBSEP);
+                k = parts[1];
+                m_type = parts[2];
+                fw = parts[3];
+                
+                out_name = k;
+                if (out_name == "generic ragged paged attention v3") {
+                    out_name = "\"generic ragged paged<br>attention v3*\"";
+                } else if (out_name == "mla") {
+                    out_name = "\"mla*\"";
+                } else if (out_name == "ragged paged attention v3 head_dim 64") {
+                    out_name = "\"ragged paged attention v3<br>head_dim 64*\"";
+                } else {
+                    out_name = "\"" out_name "\"";
+                }
+
+                # Construct the starting row with the new axes
+                row = out_name OFS m_type OFS fw;
+                
+                for (j=1; j<=6; j++) {
+                    q = q_order[j];
+                    # Use formatted N/A if data is missing for this specific combo
+                    data = (matrix[composite_key, q] == "") ? "❓ Untested,❓ Untested" : matrix[composite_key, q];
+                    row = row OFS data;
+                }
+                print row >> "'"$output_file"'";
+            }
+        }
+    ' "$input_csv"
+
+    # Upload the newly created pivot table
+    echo "--- Uploading Pivoted Kernel Matrix: $output_file ---"
+    cat "$output_file"
+    buildkite-agent artifact upload "$output_file"
+}
+
+process_kernel_matrix_to_pivot1() {
+    local input_csv="${TPU_DIR}/kernel_support_matrix_microbenchmarks.csv"
+    local output_file="${TPU_DIR}/kernel_support_matrix-microbenchmarks.csv"
+
+    if [ ! -f "$input_csv" ]; then
+        echo "Warning: Input CSV $input_csv not found. Skipping pivot."
+        return
+    fi
+
     # Define Headers for Display
-    local header="Kernel,W16 A16 (Corr),W16 A16 (Perf),W8 A8 (Corr),W8 A8 (Perf),W8 A16 (Corr),W8 A16 (Perf),W4 A4 (Corr),W4 A4 (Perf),W4 A8 (Corr),W4 A8 (Perf),W4 A16 (Corr),W4 A16 (Perf)"
+    local header="Kernel microbenchmark,W16 A16 (Corr),W16 A16 (Perf),W8 A8 (Corr),W8 A8 (Perf),W8 A16 (Corr),W8 A16 (Perf),W4 A4 (Corr),W4 A4 (Perf),W4 A8 (Corr),W4 A8 (Perf),W4 A16 (Corr),W4 A16 (Perf)"
     echo "$header" > "$output_file"
 
     # Define the quantization order to match the header

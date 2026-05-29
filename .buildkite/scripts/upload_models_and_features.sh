@@ -169,30 +169,30 @@ else
   exit 0
 fi
 
-if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
-  echo "--- Uploading TPU v7x Pipeline Group"
-  # Export v7x specific variables
-  export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
-  export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-  export TPU_VERSION="tpu7x"
-  export TENSOR_PARALLEL_SIZE_SINGLE=2
-  export TENSOR_PARALLEL_SIZE_MULTI=8
-  buildkite-agent meta-data set "run_v7_matrix" "true"
+# if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
+#   echo "--- Uploading TPU v7x Pipeline Group"
+#   # Export v7x specific variables
+#   export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
+#   export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
+#   export TPU_VERSION="tpu7x"
+#   export TENSOR_PARALLEL_SIZE_SINGLE=2
+#   export TENSOR_PARALLEL_SIZE_MULTI=8
+#   buildkite-agent meta-data set "run_v7_matrix" "true"
 
-  # Loop through each model implementation type
-  for IMPL_TYPE in "${FRAMEWORKS[@]}"; do
-    export MODEL_IMPL_TYPE="${IMPL_TYPE}"
-    echo "Uploading v7x pipeline group for: ${MODEL_IMPL_TYPE}"
-    {
-      echo "priority: ${JOB_PRIORITY:-1}"
-      echo "steps:"
-      echo "  - group: \"TPU v7x nightly Tests (${MODEL_IMPL_TYPE})\""
-      echo "    key: \"v7x-group-${MODEL_IMPL_TYPE}\""
-      echo "    steps:"
-      printf "%s\n" "${pipeline_v7x_fragments[@]}" | sed 's/^/      /'
-    } | buildkite-agent pipeline upload
-  done
-else
-  echo "--- No .yml files found, nothing to upload."
-  exit 0
-fi
+#   # Loop through each model implementation type
+#   for IMPL_TYPE in "${FRAMEWORKS[@]}"; do
+#     export MODEL_IMPL_TYPE="${IMPL_TYPE}"
+#     echo "Uploading v7x pipeline group for: ${MODEL_IMPL_TYPE}"
+#     {
+#       echo "priority: ${JOB_PRIORITY:-1}"
+#       echo "steps:"
+#       echo "  - group: \"TPU v7x nightly Tests (${MODEL_IMPL_TYPE})\""
+#       echo "    key: \"v7x-group-${MODEL_IMPL_TYPE}\""
+#       echo "    steps:"
+#       printf "%s\n" "${pipeline_v7x_fragments[@]}" | sed 's/^/      /'
+#     } | buildkite-agent pipeline upload
+#   done
+# else
+#   echo "--- No .yml files found, nothing to upload."
+#   exit 0
+# fi
