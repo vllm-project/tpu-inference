@@ -25,7 +25,8 @@ import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.jax.sample.sampling import sample
+from tpu_inference.layers.jax.sample.sampling import (
+    compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -801,11 +802,41 @@ class CompilationManager:
                                                   token_ids_sharding)
             self._run_compilation(
                 f"worker{self.runner.rank} gather_logprobs",
-                self.runner._compute_and_gather_logprobs,
+                compute_and_gather_logprobs,
                 logits,
                 token_ids,
                 self.runner.model_config.max_logprobs,
                 num_reqs=num_reqs,
+            )
+
+        logger.info(
+            "Compiling compute_and_gather_prompt_logprobs with different input shapes."
+        )
+        MAX_PRECOMPILE_PROMPT_TOKENS = 1024
+        for num_tokens in self.runner.num_tokens_paddings:
+            if num_tokens > MAX_PRECOMPILE_PROMPT_TOKENS:
+                logger.info(
+                    f"Skipping precompilation of compute_and_gather_prompt_logprobs for {num_tokens=}, "
+                    f"as it exceeds the {MAX_PRECOMPILE_PROMPT_TOKENS=} limit to prevent HBM exhaustion."
+                )
+                continue
+            logits_sharding = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(ShardingAxisName.MLP_DATA,
+                              ShardingAxisName.MLP_TENSOR))
+            token_ids_sharding = NamedSharding(self.runner.mesh,
+                                               PartitionSpec())
+            logits = self._create_dummy_tensor((num_tokens, hsize),
+                                               jnp.float32, logits_sharding)
+            token_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
+                                                  token_ids_sharding)
+            self._run_compilation(
+                f"worker{self.runner.rank} compute_and_gather_prompt_logprobs",
+                compute_and_gather_prompt_logprobs,
+                logits,
+                token_ids,
+                self.runner.model_config.max_logprobs,
+                num_tokens=num_tokens,
             )
 
         self._gather_logprobs_precompiled = True
