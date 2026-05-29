@@ -13,7 +13,7 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for PP (single-host)"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Correctness tests for PP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_PP_CorrectnessTest_Single_Host"
     soft_fail: true
     agents:
@@ -22,7 +22,7 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
-  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for PP (single-host)"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record correctness test result for PP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_PP_CorrectnessTest_Single_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_PP_CorrectnessTest_Single_Host"
     env:
@@ -36,7 +36,7 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_PP_CorrectnessTest_Single_Host
 
-  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for PP (single-host)"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Performance tests for PP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_PP_PerformanceTest_Single_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_PP_CorrectnessTest_Single_Host"
     soft_fail: true
@@ -46,7 +46,7 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
-  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for PP (single-host)"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance test result for PP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_PP_PerformanceTest_Single_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_PP_PerformanceTest_Single_Host"
     env:
@@ -60,7 +60,7 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_PP_PerformanceTest_Single_Host
 
-  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for PP (multi-host)"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Correctness tests for PP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_PP_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
@@ -69,7 +69,7 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
-  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for PP (multi-host)"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record correctness test result for PP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_PP_CorrectnessTest_Multi_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_PP_CorrectnessTest_Multi_Host"
     env:
@@ -82,7 +82,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_PP_CorrectnessTest_Multi_Host
-  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for PP (multi-host)"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Performance tests for PP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_PP_PerformanceTest_Multi_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_PP_CorrectnessTest_Multi_Host"
     soft_fail: true
@@ -92,7 +92,7 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
-  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for PP (multi-host)"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record performance test result for PP (multi-host)"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_PP_PerformanceTest_Multi_Host"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_PP_PerformanceTest_Multi_Host"
     env:

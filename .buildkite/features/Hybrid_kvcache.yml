@@ -18,7 +18,7 @@
 # with full + sliding window attn) to save HBM memory for kv cache and be able
 # to accomodate more requests. 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for hybrid kv cache allocation"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Correctness tests for hybrid kv cache allocation"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_hybrid_kvcache_CorrectnessTest"
     soft_fail: true
     agents:
@@ -28,7 +28,7 @@ steps:
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_hybrid_kvcache.py::test_hybrid_kv_cache \
           /workspace/tpu_inference/tests/e2e/test_hybrid_kvcache.py::test_hybrid_kv_cache_correctness
-  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for hybrid kv cache allocation"
+  - label: "${TPU_VERSION:-tpu6e} (${MODEL_IMPL_TYPE:-vllm}) Record correctness test result for hybrid kv cache allocation"
     key: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_record_hybrid_kvcache_CorrectnessTest"
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_hybrid_kvcache_CorrectnessTest"
     env:

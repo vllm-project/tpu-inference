@@ -23,10 +23,10 @@ fi
 STEP_KEY="$1"
 
 # Determine the prefix based on hardware version to prevent data collisions.
-TPU_METADATA_PREFIX="v6"
-if echo "${CI_TPU_VERSION}" | grep -qi "tpu7x"; then
-  TPU_METADATA_PREFIX="v7"
-fi
+# TPU_METADATA_PREFIX="v6"
+# if echo "${CI_TPU_VERSION}" | grep -qi "tpu7x"; then
+#   TPU_METADATA_PREFIX="v7"
+# fi
 
 echo "--- Checking ${STEP_KEY} Outcome (Hardware: ${CI_TPU_VERSION:-v6})"
 
@@ -61,8 +61,8 @@ case $OUTCOME in
 esac
 
 # Save the results using the hardware-specific prefix.
-buildkite-agent meta-data set "${TPU_METADATA_PREFIX}${CI_TARGET}_category" "${CI_CATEGORY}"
-buildkite-agent meta-data set "${TPU_METADATA_PREFIX}_${MODEL_IMPL_TYPE}:${CI_TARGET}:${CI_STAGE}" "${message}"
+buildkite-agent meta-data set "${CI_TPU_VERSION}${CI_TARGET}_category" "${CI_CATEGORY}"
+buildkite-agent meta-data set "${CI_TPU_VERSION}_${MODEL_IMPL_TYPE}:${CI_TARGET}:${CI_STAGE}" "${message}"
 
 if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "unverified" ] && [ "${OUTCOME}" != "not enough HBM" ]; then
     exit 1

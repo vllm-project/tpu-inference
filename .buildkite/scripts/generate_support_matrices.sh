@@ -71,11 +71,11 @@ FRAMEWORKS=("flax_nnx" "vllm")
 
 
 if [[ "$RUN_V6" == "true" ]]; then
-    ACTIVE_CONFIGS+=("v6")
+    ACTIVE_CONFIGS+=("tpu6e")
 fi
 
 if [[ "$RUN_V7" == "true" ]]; then
-    ACTIVE_CONFIGS+=("v7")
+    ACTIVE_CONFIGS+=("tpu7x")
 fi
 
 # Determine sub-directory based on TPU_VERSION
@@ -153,13 +153,7 @@ process_models() {
                         else result="Text"
                         fi
                     elif [ "$stage" == "Machine Type" ]; then
-                        if [ "$prefix" == "v6" ]; then
-                            result="v6e"
-                        elif [ "$prefix" == "v7" ]; then
-                            result="v7x"
-                        else
-                            result="unknown"
-                        fi
+                        result="${prefix}"
                     elif [ "$stage" == "Framework" ]; then
                         result="${framework}"
                     else

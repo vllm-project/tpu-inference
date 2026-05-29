@@ -183,7 +183,7 @@ def get_interactive_input():
             f"\n{BOLD}[Step 3/4]{RESET} {DIM}Group Name: (Not required for this category){RESET}"
         )
 
-    # --- STEP 4: Host Scale (Now matches model script style) ---
+    # --- STEP 4: Host Scale ---
     print(
         f"\n{BOLD}[Step 4/4]{RESET} {CYAN}Specify the host scale for running tests:{RESET}"
     )
