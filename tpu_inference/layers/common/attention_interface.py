@@ -554,6 +554,9 @@ def mla_attention(
         num_queries_per_block = (
             batched_decode_tuned_params.num_queries_per_block, 16, 16)
         decode_batch_size = batched_decode_tuned_params.decode_batch_size
+        logger.info(
+            f"Using MLA tuned block sizes for batched decode: {batched_decode_tuned_params} for input shapes: {batched_decode_tuning_key}"
+        )
 
         out, new_cache = mla_ragged_paged_attention(
             q,
