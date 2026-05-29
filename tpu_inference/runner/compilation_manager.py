@@ -25,7 +25,8 @@ import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.jax.sample.sampling import sample
+from tpu_inference.layers.jax.sample.sampling import (
+    compute_and_gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -801,7 +802,7 @@ class CompilationManager:
                                                   token_ids_sharding)
             self._run_compilation(
                 f"worker{self.runner.rank} gather_logprobs",
-                self.runner._compute_and_gather_logprobs,
+                compute_and_gather_logprobs,
                 logits,
                 token_ids,
                 self.runner.model_config.max_logprobs,

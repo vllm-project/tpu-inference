@@ -172,7 +172,6 @@ def compute_prompt_logprobs(
     dp_size: int,
 ) -> Optional[PromptLogprobsAsyncData]:
     """Dispatches prompt logprob computation on TPU and snapshots per-request state.
-
     Returns PromptLogprobsAsyncData containing the async-copied tensors and
     the snapshotted state needed to safely slice them in get_output().
     """
