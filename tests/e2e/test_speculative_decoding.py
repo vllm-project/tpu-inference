@@ -95,6 +95,7 @@ def _test_correctness_helper(
     speculative_config: dict,
     max_num_seqs: int = 4,
     async_scheduling: bool = False,
+    enable_dp_attention: bool = False,
     extra_kwargs: dict | None = None,
 ):
     '''
@@ -114,6 +115,18 @@ def _test_correctness_helper(
             },
             "async_scheduling": async_scheduling,
         }
+        if enable_dp_attention:
+            os.environ["NEW_MODEL_DESIGN"] = "1"
+            kwargs["additional_config"] = {
+                "sharding": {
+                    "sharding_strategy": {
+                        "enable_dp_attention": True,
+                        "attn_dp_size": _get_tensor_parallel_size()
+                    }
+                }
+            }
+        else:
+            os.environ["NEW_MODEL_DESIGN"] = "0"
         if extra_kwargs:
             kwargs.update(extra_kwargs)
 
@@ -141,6 +154,9 @@ def _test_correctness_helper(
                 print(f"spec_output: {spec_output.outputs[0].text}")
 
         assert misses == 0
+        print(
+            f"All {matches} outputs match between reference LLM and speculative LLM."
+        )
         del spec_llm
 
         # Waiting for TPUs to be released.
@@ -196,6 +212,7 @@ def _test_performance_helper(
     max_num_seqs: int = 1,
     async_scheduling: bool = False,
     model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
+    enable_dp_attention: bool = False,
     extra_kwargs: dict | None = None,
 ):
     '''
@@ -217,6 +234,18 @@ def _test_performance_helper(
             "disable_log_stats": False,
             "async_scheduling": async_scheduling,
         }
+        if enable_dp_attention:
+            os.environ["NEW_MODEL_DESIGN"] = "1"
+            kwargs["additional_config"] = {
+                "sharding": {
+                    "sharding_strategy": {
+                        "enable_dp_attention": True,
+                        "attn_dp_size": _get_tensor_parallel_size()
+                    }
+                }
+            }
+        else:
+            os.environ["NEW_MODEL_DESIGN"] = "0"
         if extra_kwargs:
             kwargs.update(extra_kwargs)
 
@@ -290,11 +319,19 @@ def test_ngram_performance_random(
                              min_acceptance_rate=0.85)
 
 
-@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    "async_scheduling, enable_dp_attention",
+    [
+        (False, False),
+        (True, False),
+        (False, True),
+    ],
+)
 def test_eagle3_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     async_scheduling: bool,
+    enable_dp_attention: bool,
 ):
     '''
     Compare the outputs of a original LLM and a speculative LLM
@@ -315,16 +352,25 @@ def test_eagle3_correctness(
             "draft_tensor_parallel_size": 1
         },
         max_num_seqs=10,
-        async_scheduling=async_scheduling)
+        async_scheduling=async_scheduling,
+        enable_dp_attention=enable_dp_attention)
 
 
-@pytest.mark.parametrize("max_num_seqs", [1, 20])
-@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    "max_num_seqs,async_scheduling, enable_dp_attention",
+    [
+        (1, False, False),
+        (20, False, False),
+        (20, True, False),
+        (20, False, True),
+    ],
+)
 def test_eagle3_performance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     max_num_seqs: int,
     async_scheduling: bool,
+    enable_dp_attention: bool,
 ):
     '''
     Test that speculative decoding provides significant performance improvement.
@@ -345,12 +391,13 @@ def test_eagle3_performance(
         min_acceptance_rate=0.75,
         max_num_seqs=max_num_seqs,
         async_scheduling=async_scheduling,
+        enable_dp_attention=enable_dp_attention,
         model_name='meta-llama/Llama-3.1-8B-Instruct')
 
 
 @pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
                     reason="MTP is only supported with vllm model impl.")
-@pytest.mark.parametrize("async_scheduling", [False])
+@pytest.mark.parametrize("async_scheduling", [False, True])
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -389,8 +436,14 @@ def test_mtp_correctness(
 
 @pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
                     reason="MTP is only supported with vllm model impl.")
-@pytest.mark.parametrize("max_num_seqs", [1, 20])
-@pytest.mark.parametrize("async_scheduling", [False])
+@pytest.mark.parametrize(
+    "max_num_seqs,async_scheduling",
+    [
+        (1, False),
+        (20, False),
+        (20, True),
+    ],
+)
 def test_mtp_performance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,

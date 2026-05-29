@@ -527,7 +527,7 @@ def _verify_lora_linear_layer(linear, lora_linear):
         # if len(devices) != 1, `reorder_concatenated_tensor_for_sharding` function may reorder the out_features dimension of the weight matrix.
         # So the below check will fail.
         if len(_get_devices()) == 1:
-            assert torch.equal(linear.weight.data,
+            assert torch.equal(linear.weight.data.t(),
                                lora_linear.weight.to('cpu'))
 
 

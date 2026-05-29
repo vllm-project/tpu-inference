@@ -566,25 +566,12 @@ class TestTPUJaxRunnerDPInputsLightweight:
         assert np.array_equal(attention_metadata.input_positions,
                               expected_positions)
 
-        # 3. Verify query_start_loc content
-        query_start_loc = attention_metadata.query_start_loc_cpu
-        max_num_reqs_per_dp = self.runner.max_num_reqs // 2
-        expected_query_start = np.zeros(self.runner.max_num_reqs + 2,
-                                        dtype=np.int32)
-        # DP rank 0: cumsum([2]) = [2] at positions [1:2] → [0, 2, 1, 1, 1]
-        expected_query_start[1] = 2  # req1 has 2 tokens
-        expected_query_start[2:max_num_reqs_per_dp + 1] = 1
-        # DP rank 1: cumsum([3]) = [3] at positions [6:7] → [0, 3, 1, 1, 1]
-        expected_query_start[max_num_reqs_per_dp + 2] = 3  # req2 has 3 tokens
-        expected_query_start[max_num_reqs_per_dp + 3:] = 1
-        assert np.array_equal(query_start_loc, expected_query_start)
-
-        # 4. Verify request_distribution content
+        # 3. Verify request_distribution content
         expected_distribution = np.array([[0, 0, 1], [0, 0, 1]]).flatten()
         np.testing.assert_array_equal(attention_metadata.request_distribution,
                                       expected_distribution)
 
-        # 5. Verify logits_indices content
+        # 4. Verify logits_indices content
         assert len(logits_indices) == 8  # padded_num_reqs
         expected_logits = np.full(8, -1, dtype=np.int32)
         expected_logits[0] = 1  # req1 last token position (2-1)
@@ -592,7 +579,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
             4] = 2  # req2 last token position (3-1) at DP rank 1 offset (4*1)
         assert np.array_equal(logits_indices, expected_logits)
 
-        # 6. Verify logits_indices_selector
+        # 5. Verify logits_indices_selector
         assert len(logits_indices_selector) == 2
         assert np.array_equal(logits_indices_selector, np.array([0, 4]))
 
@@ -679,26 +666,12 @@ class TestTPUJaxRunnerDPInputsLightweight:
         assert np.array_equal(attention_metadata.input_positions,
                               expected_positions)
 
-        # 3. Verify query_start_loc
-        query_start_loc = attention_metadata.query_start_loc_cpu
-        max_num_reqs_per_dp = self.runner.max_num_reqs // 2  # 4
-        expected_query_start = np.zeros(self.runner.max_num_reqs + 2,
-                                        dtype=np.int32)
-        # Rank 0: req1 (3 tokens), req2 (2 tokens)
-        expected_query_start[1] = 3  # req1 has 3 tokens
-        expected_query_start[2] = 5  # cumulative: 3 + 2 = 5
-        expected_query_start[3:max_num_reqs_per_dp + 1] = 1  # padding
-        # Rank 1: empty (all zeros)
-        expected_query_start[max_num_reqs_per_dp +
-                             1:] = 0  # Empty rank sets to 0
-        assert np.array_equal(query_start_loc, expected_query_start)
-
-        # 4. Verify request_distribution
+        # 3. Verify request_distribution
         expected_distribution = np.array([[0, 0, 2], [0, 0, 0]]).flatten()
         np.testing.assert_array_equal(attention_metadata.request_distribution,
                                       expected_distribution)
 
-        # 5. Verify logits_indices
+        # 4. Verify logits_indices
         assert len(
             logits_indices) == 8  # padded_num_reqs (8 in this case, not 16)
         # Rank 0: req1 ends at pos 2, req2 ends at pos 4
@@ -708,7 +681,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         expected_logits[1] = 4  # req2 ends at position 4 (5-1)
         assert np.array_equal(logits_indices, expected_logits)
 
-        # 6. Verify logits_indices_selector
+        # 5. Verify logits_indices_selector
         assert len(logits_indices_selector) == 2
         expected_selector = np.array([0, 1])
         np.testing.assert_array_equal(logits_indices_selector,
@@ -857,7 +830,6 @@ class TestTPUJaxRunnerDPInputsLightweight:
         req_ids_dp = {0: ["req1", "req2"], 1: ["req3"]}
         scheduled_tokens_per_dp_rank = {0: [3, 2], 1: [4]}
         padded_num_scheduled_tokens_per_dp_rank = 8
-        num_draft_tokens_per_dp_rank = {0: np.array([0, 0], dtype=np.int32)}
         dp_size = 2
 
         # Setup _pre_async_results with placeholder mapping
@@ -870,11 +842,10 @@ class TestTPUJaxRunnerDPInputsLightweight:
         # Call the method
         result = self.runner._prepare_async_token_substitution_indices(
             req_ids_dp, scheduled_tokens_per_dp_rank,
-            padded_num_scheduled_tokens_per_dp_rank,
-            num_draft_tokens_per_dp_rank, dp_size)
+            padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
         (token_in_tpu_cur_input_indices_dp,
-         token_in_tpu_pre_next_tokens_indices_dp, _, _) = result
+         token_in_tpu_pre_next_tokens_indices_dp) = result
 
         # Verify DP rank 0
         # req1: token_offset=0, acc_cur_len starts at 0, after 3 tokens: 3, so last token at 2
@@ -901,7 +872,6 @@ class TestTPUJaxRunnerDPInputsLightweight:
         req_ids_dp = {0: ["req1", "req2"], 1: ["req3"]}
         scheduled_tokens_per_dp_rank = {0: [3, 2], 1: [4]}
         padded_num_scheduled_tokens_per_dp_rank = 8
-        num_draft_tokens_per_dp_rank = {0: np.array([0, 0], dtype=np.int32)}
         dp_size = 2
 
         # No placeholders
@@ -910,11 +880,10 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         result = self.runner._prepare_async_token_substitution_indices(
             req_ids_dp, scheduled_tokens_per_dp_rank,
-            padded_num_scheduled_tokens_per_dp_rank,
-            num_draft_tokens_per_dp_rank, dp_size)
+            padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
         (token_in_tpu_cur_input_indices_dp,
-         token_in_tpu_pre_next_tokens_indices_dp, _, _) = result
+         token_in_tpu_pre_next_tokens_indices_dp) = result
 
         # All lists should be empty since no placeholders
         assert token_in_tpu_cur_input_indices_dp[0] == []
@@ -1053,12 +1022,6 @@ class TestTPUJaxRunnerDPInputsLightweight:
             1: []
         }, {
             0: [0],
-            1: []
-        }, {
-            0: [],
-            1: []
-        }, {
-            0: [],
             1: []
         }))
         self.runner._prepare_async_token_substitution_indices = mock_prepare_async
@@ -1267,6 +1230,7 @@ class TestSamplingMetadataPassthrough:
         runner.dp_size = 2
         runner.max_num_reqs = 8
         runner.max_num_blocks_per_req = 8
+        runner.speculative_config = None
         runner.input_batch.num_reqs = 2
         runner.input_batch.req_ids = ["req1", "req2"]
         runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1}
