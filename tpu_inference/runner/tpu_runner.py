@@ -1421,13 +1421,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         data: "PromptLogprobsAsyncData",
     ) -> Dict[str, Any]:
-        """CPU-side: materialize async tensors and slice per-request prompt logprobs.
-        In the async scheduling path this is called from get_output(), so the
-        TPU→host transfer overlaps with the next step's execute_model(). Mutable
-        per-request state (num_computed_tokens, num_k) was snapshotted in
-        _compute_prompt_logprobs before update_states(N+1) could overwrite it.
-        The in_progress_prompt_logprobs_cpu buffer is pre-allocated at request
-        creation time so its reference remains valid regardless of call order.
+        """Materializes TPU arrays on CPU and slices per-request prompt logprobs.
+        Uses snapshotted request metadata (start_idx, num_logits) to safely slice
+        async-copied tensors, which overlap with the execution of the next step.
         """
         token_ids_np = np.asarray(
             jax.device_get(data.tensors.logprob_token_ids))

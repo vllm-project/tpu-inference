@@ -171,12 +171,10 @@ def compute_prompt_logprobs(
     req_ids_dp: Optional[Dict[int, List[str]]],
     dp_size: int,
 ) -> Optional[PromptLogprobsAsyncData]:
-    """Dispatch prompt logprob computation and snapshot per-request state.
+    """Dispatches prompt logprob computation on TPU and snapshots per-request state.
 
-    Returns a PromptLogprobsAsyncData holding the async-copied tensors and
-    all per-request state needed to slice them in get_output() — by which
-    time req_state.num_computed_tokens will have been updated for the next
-    step, so we must snapshot it now.
+    Returns PromptLogprobsAsyncData containing the async-copied tensors and
+    the snapshotted state needed to safely slice them in get_output().
     """
     if (not num_prompt_logprobs or full_logits is None or input_ids is None):
         return None
