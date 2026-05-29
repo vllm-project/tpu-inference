@@ -24,8 +24,9 @@ Commands:
     query_run_status    Show timing info for a run (--case_set_id ID --run_id ID)
     query_min_latency   Show best latency per TuningKey (--case_set_id ID --run_id ID [--show FIELD ...])
     query_case_latency  Query latency for tuning cases with optional field filters
-                        (--case_set_id ID --run_id ID [--filter_key FIELD=VALUE ...])
-                        FIELD can be any key in tuning_key or tunable_params.
+                        (--case_set_id ID --run_id ID [--filter_key FIELD=VALUE ...] [--show FIELD ...] [--show_all])
+                        FIELD can be any key in tuning_key or tunable_params. show_all includes unsuccessful cases;
+                        By default only successful cases are shown.
 """
 
 import argparse

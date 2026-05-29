@@ -346,13 +346,13 @@ max_num_tokens  actual_num_q_heads  actual_lkv_dim  actual_r_dim  decode_batch_s
 
 ```
 query_case_latency  Query latency for tuning cases with optional field filters
-                        (--case_set_id ID --run_id ID [--filter-key FIELD=VALUE ...] [--show FIELD ...] [--show_all])
+                        (--case_set_id ID --run_id ID [--filter_key FIELD=VALUE ...] [--show FIELD ...] [--show_all])
 ```
 
 FIELD can be any key in tuning_key or tunable_params. --show option behaves the same as above. --show_all includes all cases, even ones where tuning failed.
 
 ```
-inspect|cs=mla_tuning_0|run=4> query_case_latency --filter-key max_num_tokens=4 --show max_num_tokens --show actual_num_q_heads --show actual_lkv_dim  --show actual_r_dim  --show decode_batch_size  --show num_kv_pages_per_block --show latency_us --show_all
+inspect|cs=mla_tuning_0|run=4> query_case_latency --filter_key max_num_tokens=4 --show max_num_tokens --show actual_num_q_heads --show actual_lkv_dim  --show actual_r_dim  --show decode_batch_size  --show num_kv_pages_per_block --show latency_us --show_all
 max_num_tokens  actual_num_q_heads  actual_lkv_dim  actual_r_dim  decode_batch_size  num_kv_pages_per_block  latency_us
 --------------  ------------------  --------------  ------------  -----------------  ----------------------  ----------
 4               128                 512             64            16                 1                       2078  
