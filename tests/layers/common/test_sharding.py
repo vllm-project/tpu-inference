@@ -78,6 +78,52 @@ class TestShardingConfigManager(unittest.TestCase):
         self.assertEqual(manager.expert_size, 1)
         self.assertEqual(manager.total_dp_size, 32)  # 1 * 8 * 4
 
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", True)
+    def test_sharding_config_manager_with_explicit_dp_attention(self):
+        vllm_config = MagicMock()
+        vllm_config.parallel_config.tensor_parallel_size = 16
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.model_config.use_mla = True
+        vllm_config.speculative_config = None
+        vllm_config.lora_config = None
+
+        vllm_config.additional_config = {
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": True,
+                    "attention_data_parallelism": 2,
+                    "attention_data_expert_parallelism": 1,
+                }
+            }
+        }
+
+        manager = ShardingConfigManager.from_vllm_config(vllm_config)
+
+        self.assertEqual(manager.tp_size, 8)
+        self.assertEqual(manager.attn_dp_size, 2)
+        self.assertEqual(manager.attn_dp_expert_size, 1)
+        self.assertEqual(manager.expert_size, 1)
+        self.assertEqual(manager.total_dp_size, 2)
+
+    def test_sharding_config_manager_explicit_dp_attention_requires_divisibility(self):
+        vllm_config = MagicMock()
+        vllm_config.parallel_config.tensor_parallel_size = 16
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.model_config.use_mla = True
+        vllm_config.speculative_config = None
+        vllm_config.lora_config = None
+        vllm_config.additional_config = {
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": True,
+                    "attention_data_parallelism": 3,
+                }
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "must be divisible"):
+            ShardingConfigManager.from_vllm_config(vllm_config)
+
     def test_sharding_config_manager_explicit_tp(self):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 1

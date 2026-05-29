@@ -180,6 +180,25 @@ class TestTPUModelRunnerMeshInit:
 
             assert runner_instance.mesh == mock_mesh
 
+    def test_multi_slice_mesh_splits_attention_dp_when_model_dp_is_one(
+        self, runner_instance, mock_vllm_config
+    ):
+        """Multi-host meshes can split attention DP instead of vLLM DP."""
+        mock_vllm_config.sharding_config.model_dp_size = 1
+        mock_vllm_config.sharding_config.attn_dp_size = 2
+        mock_vllm_config.sharding_config.attn_dp_expert_size = 1
+        mock_vllm_config.sharding_config.expert_size = 1
+        mock_vllm_config.sharding_config.tp_size = 8
+
+        with patch('tpu_inference.runner.tpu_runner.mesh_utils') as mock_mesh_utils:
+            mock_mesh_utils.create_hybrid_device_mesh.return_value = Mock()
+
+            runner_instance._create_multi_slice_mesh(2)
+
+            call_args = mock_mesh_utils.create_hybrid_device_mesh.call_args
+            assert call_args[1]['mesh_shape'] == (1, 1, 1, 1, 8)
+            assert call_args[1]['dcn_mesh_shape'] == (1, 2, 1, 1, 1)
+
     @pytest.mark.parametrize("num_slices,expected_dp_inner", [
         (1, 4),
         (2, 2),

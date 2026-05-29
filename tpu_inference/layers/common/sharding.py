@@ -162,6 +162,10 @@ class ShardingConfigManager:
 
         enable_dp_attention = sharding_strategy.get("enable_dp_attention",
                                                     False)
+        explicit_attn_dp = sharding_strategy.get("attention_data_parallelism",
+                                                 None)
+        explicit_attn_dp_expert = sharding_strategy.get(
+            "attention_data_expert_parallelism", None)
         if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
             # The user has explicitly set the tensor parallelism in the sharding config.
             tensor_parallelism = ss_tensor_parallelsim
@@ -170,31 +174,44 @@ class ShardingConfigManager:
 
         if enable_dp_attention:
             # Replicate attention layer when num_kv_heads < TP
-            num_kv_heads = 1 if vllm_config.model_config.use_mla else vllm_config.model_config.get_total_num_kv_heads(
-            )
-            cache_dtype = vllm_config.cache_config.cache_dtype
-            if cache_dtype == 'auto':
-                cache_dtype = vllm_config.model_config.dtype
-            kv_dtype = utils.get_jax_dtype_from_str_dtype(
-                cache_dtype) or jnp.bfloat16
-            packing = 4 // jnp.dtype(kv_dtype).itemsize
+            if explicit_attn_dp is None:
+                num_kv_heads = 1 if vllm_config.model_config.use_mla else vllm_config.model_config.get_total_num_kv_heads(
+                )
+                cache_dtype = vllm_config.cache_config.cache_dtype
+                if cache_dtype == 'auto':
+                    cache_dtype = vllm_config.model_config.dtype
+                kv_dtype = utils.get_jax_dtype_from_str_dtype(
+                    cache_dtype) or jnp.bfloat16
+                packing = 4 // jnp.dtype(kv_dtype).itemsize
 
-            # The default head dim is 128 but 64 is also supported as a special case.
-            if vllm_config.model_config.get_head_size() == 64:
-                packing *= 2
+                # The default head dim is 128 but 64 is also supported as a special case.
+                if vllm_config.model_config.get_head_size() == 64:
+                    packing *= 2
 
-            # When num_kv_heads * 2 / packing < TP, tensor parallelism would
-            # duplicate KV heads across devices, wasting kv cache memory.
-            # Use attention DP instead to reduce per-device num_kv_heads and
-            # eliminate this waste.
+                # When num_kv_heads * 2 / packing < TP, tensor parallelism would
+                # duplicate KV heads across devices, wasting kv cache memory.
+                # Use attention DP instead to reduce per-device num_kv_heads and
+                # eliminate this waste.
 
-            num_kv_heads_per_device_in_kv_cache = max(1, (num_kv_heads * 2) /
-                                                      packing)
-            attn_dp = max(
-                int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
-                1)
+                num_kv_heads_per_device_in_kv_cache = max(
+                    1, (num_kv_heads * 2) / packing)
+                attn_dp = max(
+                    int(tensor_parallelism //
+                        num_kv_heads_per_device_in_kv_cache), 1)
+            else:
+                attn_dp = int(explicit_attn_dp)
+                if attn_dp < 1:
+                    raise ValueError(
+                        "attention_data_parallelism must be >= 1")
+                if tensor_parallelism % attn_dp != 0:
+                    raise ValueError(
+                        f"tensor_parallelism ({tensor_parallelism}) must be "
+                        f"divisible by attention_data_parallelism ({attn_dp})"
+                    )
             tensor_parallelism = tensor_parallelism // attn_dp
-            attn_dp_expert = expert_parallelism
+            attn_dp_expert = (int(explicit_attn_dp_expert)
+                              if explicit_attn_dp_expert is not None else
+                              expert_parallelism)
             expert_parallelism = 1
         else:
             attn_dp = 1

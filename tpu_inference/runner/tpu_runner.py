@@ -344,17 +344,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
-        dp_inner = sharding_strategy.model_dp_size // num_slices
-
-        # Splits data parallelism across multiple slices.
-        ici_mesh_shape = (
-            dp_inner,
+        global_mesh_shape = (
+            sharding_strategy.model_dp_size,
             sharding_strategy.attn_dp_size,
             sharding_strategy.attn_dp_expert_size,
             sharding_strategy.expert_size,
             sharding_strategy.tp_size,
         )
-        dcn_mesh_shape = (num_slices, 1, 1, 1, 1)
+        ici_mesh_shape = list(global_mesh_shape)
+        dcn_mesh_shape = [1] * len(global_mesh_shape)
+
+        for axis, axis_size in enumerate(ici_mesh_shape):
+            if axis_size >= num_slices and axis_size % num_slices == 0:
+                ici_mesh_shape[axis] = axis_size // num_slices
+                dcn_mesh_shape[axis] = num_slices
+                break
+        else:
+            raise ValueError(
+                f"Cannot split mesh shape {global_mesh_shape} across "
+                f"{num_slices} slices")
+
+        ici_mesh_shape = tuple(ici_mesh_shape)
+        dcn_mesh_shape = tuple(dcn_mesh_shape)
 
         # Attempt to create a physically optimized hybrid mesh (ICI + DCN).
         # Fall back to a logical reshape for non-power-of-two device counts
@@ -371,8 +382,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 "Hybrid physical mesh creation failed. Falling back to logical reshape. "
                 "ICI shape: %s, DCN shape: %s, Error: %s", ici_mesh_shape,
                 dcn_mesh_shape, e)
-            return np.array(self.devices).reshape(
-                tuple(i * d for i, d in zip(ici_mesh_shape, dcn_mesh_shape)))
+            return np.array(self.devices).reshape(global_mesh_shape)
 
     def _create_2d_mesh(self) -> jax.sharding.Mesh:
 
