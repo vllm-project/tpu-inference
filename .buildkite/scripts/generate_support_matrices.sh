@@ -148,10 +148,10 @@ process_models() {
                         result="${framework}"
                     else
                         local safe_model_name
-                        safe_model_name=$(echo "$model" | tr -s '/:.[[:space:]]' '_')
+                        safe_model_name=$(echo "$model" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
 
                         local safe_stage_name
-                        safe_stage_name=$(echo "$stage" | tr -s '/:.[[:space:]]' '_')
+                        safe_stage_name=$(echo "$stage" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
                         
                         local meta_key="${CI_TPU_VERSION}_${framework}_${safe_model_name}_${safe_stage_name}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
@@ -194,8 +194,9 @@ process_features() {
 
                 # Get Category (default: feature support matrix)
                 local safe_feature
-                safe_feature=$(echo "$feature" | tr -s '/:.[[:space:]]' '_')
+                safe_feature=$(echo "$feature" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
                 local category_key="${CI_TPU_VERSION}_${safe_feature}_category"
+                echo "[DEBUG] Looking for Category Key: ${category_key}"
                 local category
                 category=$(buildkite-agent meta-data get "${category_key}" --default "feature support matrix")
 
@@ -242,10 +243,10 @@ process_features() {
                         result="✅ Passing"
                     else
                         local safe_feature
-                        safe_feature=$(echo "$feature" | tr -s '/:.[[:space:]]' '_')
+                        safe_feature=$(echo "$feature" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
 
                         local safe_stage
-                        safe_stage=$(echo "$stage" | tr -s '/:.[[:space:]]' '_')
+                        safe_stage=$(echo "$stage" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
 
                         local meta_key="${CI_TPU_VERSION}_${framework}_${safe_feature}_${safe_stage}"
 
