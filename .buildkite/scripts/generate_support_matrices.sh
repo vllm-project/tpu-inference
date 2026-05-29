@@ -147,13 +147,13 @@ process_models() {
                     elif [ "$stage" == "Framework" ]; then
                         result="${framework}"
                     else
-                        local safe_model
-                        safe_model=$(echo "$model" | tr -s '/:.' '_')
+                        local safe_model_name
+                        safe_model_name=$(echo "$model" | tr -s '/:.[[:space:]]' '_')
 
-                        local safe_stage
-                        safe_stage=$(echo "$stage" | tr -s '/:.' '_')
+                        local safe_stage_name
+                        safe_stage_name=$(echo "$stage" | tr -s '/:.[[:space:]]' '_')
                         
-                        local meta_key="${CI_TPU_VERSION}_${framework}_${safe_model}_${safe_stage}"
+                        local meta_key="${CI_TPU_VERSION}_${framework}_${safe_model_name}_${safe_stage_name}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
                         # local meta_key="${CI_TPU_VERSION}_${framework}_${model}:${stage}"
                         # result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
@@ -242,10 +242,10 @@ process_features() {
                         result="✅ Passing"
                     else
                         local safe_feature
-                        safe_feature=$(echo "$feature" | tr -s '/:.' '_')
+                        safe_feature=$(echo "$feature" | tr -s '/:.[[:space:]]' '_')
 
                         local safe_stage
-                        safe_stage=$(echo "$stage" | tr -s '/:.' '_')
+                        safe_stage=$(echo "$stage" | tr -s '/:.[[:space:]]' '_')
 
                         local meta_key="${CI_TPU_VERSION}_${framework}_${safe_feature}_${safe_stage}"
 
