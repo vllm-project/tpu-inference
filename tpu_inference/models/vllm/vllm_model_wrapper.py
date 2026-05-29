@@ -153,7 +153,6 @@ class VllmModelWrapper:
     rng: PRNGKey
     mesh: Mesh
     model: _VllmRunner
-    support_mm_padding: bool
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -164,7 +163,6 @@ class VllmModelWrapper:
         self.rng = rng
         self.mesh = mesh
         self.is_draft_model = is_draft_model
-        self.support_mm_padding = False
 
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
@@ -293,9 +291,6 @@ class VllmModelWrapper:
 
         self.model = _VllmRunner(vllm_model, self.vllm_config,
                                  self.is_draft_model)
-        # Only fix Qwen3 VL.
-        self.support_mm_padding = is_qwen3_vl(
-            vllm_model) and envs.VLLM_TPU_ENABLE_CPU_PADDING
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
         self._pooler: Pooler | None = self.model.pooler
@@ -581,7 +576,7 @@ class VllmModelWrapper:
             is_multimodal: jax.Array | None = None,
         ) -> jax.Array:
             # Avoid recompilation for the Qwen3-VL multimodal path.
-            if self.support_mm_padding and mm_embeds is not None:
+            if is_qwen3_vl(self.model.vllm_model) and mm_embeds is not None:
                 mm_embeds = pad_mm_embeds(mm_embeds, input_ids.shape[0],
                                           is_multimodal)
 
