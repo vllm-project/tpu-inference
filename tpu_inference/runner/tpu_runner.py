@@ -1426,7 +1426,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return ret
 
-
     @jax.jit(static_argnums=(0, ))
     def _extract_draft_token_ids(self, input_ids, logits_indices,
                                  target_logits_indices):
@@ -1445,8 +1444,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA))(
                 input_ids, logits_indices, target_logits_indices)
 
-        return ret
-    
+        return ret   
 
     def _get_prompt_logprobs_dict(
         self,
