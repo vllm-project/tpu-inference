@@ -279,6 +279,7 @@ class TestComputePromptLogprobs:
             scheduler_output=mock_scheduler_output,
             req_ids_dp=req_ids_dp,
             dp_size=dp_size,
+            max_logprobs=2,
         )
 
         assert res is not None
