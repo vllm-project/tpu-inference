@@ -126,12 +126,11 @@ def gdn_attention_core_tpu(
     logger.info_once(f"GDN Attention Config: {config}")
 
     padded_num_reqs_per_dp = attn_metadata.padded_num_reqs // dp_size
-    padded_num_tokens_per_dp = attn_metadata.input_positions.shape[0] // dp_size
 
-    # Slice the state indices to the padded token count to prevent index overflow and
-    # parallel HBM scatter write conflicts in the decode JAX kernel.
+    # Slice the state indices to the padded_num_reqs, which is the actual number
+    # of requests padded to the bucket.
     state_indices_sliced = truncate_sharded_tensor(state_indices,
-                                                   padded_num_tokens_per_dp,
+                                                   padded_num_reqs_per_dp,
                                                    dp_size)
     query_start_loc_sliced = truncate_sharded_tensor(
         attn_metadata.query_start_loc, padded_num_reqs_per_dp + 1, dp_size)

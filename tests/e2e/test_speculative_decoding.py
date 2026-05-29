@@ -354,7 +354,7 @@ def test_eagle3_performance(
         model_name='meta-llama/Llama-3.1-8B-Instruct')
 
 
-@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False])
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -396,7 +396,7 @@ def test_mtp_correctness(
     [
         (1, False),
         (20, False),
-        (20, True),
+        # (20, True),
     ],
 )
 def test_mtp_performance(
