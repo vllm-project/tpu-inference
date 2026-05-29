@@ -162,6 +162,17 @@ def compute_and_gather_logprobs(
     return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
 
+@jax.jit(static_argnames=("max_logprobs", ))
+def compute_and_gather_prompt_logprobs(
+    logits: jax.Array,
+    input_ids: jax.Array,
+    max_logprobs: int,
+) -> LogprobsTensors:
+    """Compute logprobs from full logits and gather the requested top-k for prompt tokens."""
+    prompt_target_ids = jnp.roll(input_ids, -1, axis=0)
+    return compute_and_gather_logprobs(logits, prompt_target_ids, max_logprobs)
+
+
 def compute_prompt_logprobs(
     full_logits: Optional[jax.Array],
     input_ids: Optional[jax.Array],
@@ -170,6 +181,7 @@ def compute_prompt_logprobs(
     scheduler_output: "VllmSchedulerOutput",
     req_ids_dp: Optional[Dict[int, List[str]]],
     dp_size: int,
+    max_logprobs: int,
 ) -> Optional[PromptLogprobsAsyncData]:
     """Dispatches prompt logprob computation on TPU and snapshots per-request state.
     Returns PromptLogprobsAsyncData containing the async-copied tensors and
@@ -178,18 +190,12 @@ def compute_prompt_logprobs(
     if (not num_prompt_logprobs or full_logits is None or input_ids is None):
         return None
 
-    max_k = max(num_prompt_logprobs.values())
-
-    # Shift input_ids by one position to build gather targets:
-    # target[i] = input_ids[i+1], the token whose logprob we want at pos i.
-    # The rolled-off last element and any cross-request boundary positions
-    # are never used (we only access num_logits positions per request).
-    prompt_target_ids = jnp.roll(input_ids, -1, axis=0)
-
-    # Gather compact [total_padded_tokens, max_k+1] tensors on TPU and
+    # Gather compact [total_padded_tokens, max_logprobs+1] tensors on TPU and
     # start async transfer to host (overlaps with next step's execute_model).
-    prompt_lp_tensors = compute_and_gather_logprobs(
-        full_logits.astype(jnp.float32), prompt_target_ids, max_k)
+    # We use the statically precompiled max_logprobs instead of the dynamic user max_k
+    # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
+    prompt_lp_tensors = compute_and_gather_prompt_logprobs(
+        full_logits, input_ids, max_logprobs)
     prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
 
     # Snapshot all mutable per-request state before update_states(N+1) runs.

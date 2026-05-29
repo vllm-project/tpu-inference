@@ -1178,6 +1178,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             )
 
         logits = logits.astype(jnp.float32)
+        if full_logits is not None:
+            full_logits = full_logits.astype(jnp.float32)
         with self.maybe_forbid_compile:
 
             if tpu_sampling_metadata.logprobs:
@@ -1196,6 +1198,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 scheduler_output,
                 req_ids_dp,
                 self.dp_size,
+                max_logprobs=self.model_config.max_logprobs,
             )
 
         num_reqs = self.input_batch.num_reqs
