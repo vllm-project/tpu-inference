@@ -64,8 +64,8 @@ case $OUTCOME in
 esac
 
 # Save the results using the hardware-specific prefix.
-SAFE_TARGET=$(echo "$SAFE_TARGET" | sed 's/^_//;s/_$//')
-SAFE_STAGE=$(echo "$SAFE_STAGE" | sed 's/^_//;s/_$//')
+SAFE_TARGET=$(echo "$CI_TARGET" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
+SAFE_STAGE=$(echo "$CI_STAGE" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
 SAFE_META_KEY="${CI_TPU_VERSION}_${MODEL_IMPL_TYPE}_${SAFE_TARGET}_${SAFE_STAGE}"
 
 echo "--- [DEBUG] Saving Metadata ---"
