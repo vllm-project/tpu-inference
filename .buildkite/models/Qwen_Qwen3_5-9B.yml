@@ -26,6 +26,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3_5-9B_UnitTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "Qwen/Qwen3.5-9B"
       CI_STAGE: "UnitTest"
       CI_CATEGORY: "multimodal"
@@ -53,6 +54,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3_5-9B_Accuracy_Correctness"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "Qwen/Qwen3.5-9B"
       CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "multimodal"
@@ -80,6 +82,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_Qwen_Qwen3_5-9B_Benchmark"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "Qwen/Qwen3.5-9B"
       CI_STAGE: "Benchmark"
       CI_CATEGORY: "multimodal"

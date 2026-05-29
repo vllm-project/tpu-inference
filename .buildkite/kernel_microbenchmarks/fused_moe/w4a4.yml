@@ -26,6 +26,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_fused_moe-w4a4_CorrectnessTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "fused moe-w4a4"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "kernel support matrix microbenchmarks"
@@ -49,6 +50,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_fused_moe-w4a4_PerformanceTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "fused moe-w4a4"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "kernel support matrix microbenchmarks"

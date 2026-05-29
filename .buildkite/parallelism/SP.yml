@@ -27,6 +27,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_SP_CorrectnessTest_Single_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "SP"
       CI_STAGE: "Single-Host CorrectnessTest"
       CI_CATEGORY: "parallelism support matrix"
@@ -50,6 +51,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_SP_PerformanceTest_Single_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "SP"
       CI_STAGE: "Single-Host PerformanceTest"
       CI_CATEGORY: "parallelism support matrix"
@@ -72,6 +74,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_SP_CorrectnessTest_Multi_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "SP"
       CI_STAGE: "Multi-Host CorrectnessTest"
       CI_CATEGORY: "parallelism support matrix"
@@ -94,6 +97,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_SP_PerformanceTest_Multi_Host"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "SP"
       CI_STAGE: "Multi-Host PerformanceTest"
       CI_CATEGORY: "parallelism support matrix"

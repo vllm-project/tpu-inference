@@ -27,6 +27,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-3_1-8B-Instruct_UnitTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "meta-llama/Llama-3.1-8B-Instruct"
       CI_STAGE: "UnitTest"
       CI_CATEGORY: "text-only"
@@ -54,6 +55,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-3_1-8B-Instruct_Accuracy_Correctness"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "meta-llama/Llama-3.1-8B-Instruct"
       CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "text-only"
@@ -87,6 +89,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-3_1-8B-Instruct_Benchmark"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "meta-llama/Llama-3.1-8B-Instruct"
       CI_STAGE: "Benchmark"
       CI_CATEGORY: "text-only"

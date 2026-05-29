@@ -32,7 +32,8 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_group_sampling_prefix_cache_CorrectnessTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      CI_TARGET: "Group sampling prefix cache"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
+      CI_TARGET: "group sampling prefix cache"
       CI_STAGE: "CorrectnessTest"
       CI_CATEGORY: "rl support matrix"
     agents:
@@ -58,7 +59,8 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_group_sampling_prefix_cache_PerformanceTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      CI_TARGET: "Group sampling prefix cache"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
+      CI_TARGET: "group sampling prefix cache"
       CI_STAGE: "PerformanceTest"
       CI_CATEGORY: "rl support matrix"
     agents:

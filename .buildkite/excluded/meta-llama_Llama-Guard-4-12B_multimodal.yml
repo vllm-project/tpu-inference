@@ -38,6 +38,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-Guard-4-12B_multimodal_UnitTest"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "meta-llama/Llama-Guard-4-12B/multimodal"
       CI_STAGE: "UnitTest"
       CI_CATEGORY: "multimodal"
@@ -65,6 +66,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-Guard-4-12B_multimodal_Accuracy_Correctness"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "meta-llama/Llama-Guard-4-12B/multimodal"
       CI_STAGE: "Accuracy/Correctness"
       CI_CATEGORY: "multimodal"
@@ -91,6 +93,7 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_${MODEL_IMPL_TYPE:-vllm}_meta-llama_Llama-Guard-4-12B_multimodal_Benchmark"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TARGET: "meta-llama/Llama-Guard-4-12B/multimodal"
       CI_STAGE: "Benchmark"
       CI_CATEGORY: "multimodal"
