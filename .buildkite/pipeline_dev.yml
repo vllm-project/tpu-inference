@@ -21,7 +21,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash -c '
-          cd /root/tpu_inference &&
+          cd /workspace &&
           python3 -c "import vllm, jax; print(\"vllm\", vllm.__version__, \"jax\", jax.__version__)" &&
           python3 examples/offline_inference.py \
             --model Qwen/Qwen3-0.6B \
