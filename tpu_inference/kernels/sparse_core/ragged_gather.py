@@ -254,6 +254,15 @@ def ragged_gather(x: jax.Array, indices: jax.Array, start: jax.Array,
         # Sparse core is not available. Fallback to regular gather.
         return x[indices]
 
+    # Heuristic threshold on whether to fallback for small inputs.
+    # For small {input + output}, both likely fit in TC VMEM, so a TC-based
+    # gather is faster than going through SC (no data movement to/from HBM).
+    # Mirrors the same gate in ragged_gather_reduce.
+    dtype_bytes = jax.dtypes.itemsize_bits(dtype) // 8
+    if (jnp.size(x) * dtype_bytes * 2
+            < pltpu.get_tpu_info().vmem_capacity_bytes * 0.6):
+        return x[indices]
+
     hidden_size = x.shape[-1]
     out_size = indices.size
 
