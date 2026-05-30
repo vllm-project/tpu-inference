@@ -113,7 +113,8 @@ def main_kernel(
         out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
         for col_vmem_start in range(0, col_size, num_lanes):
-            col_hbm_start = pl.multiple_of(col_tile_start + col_vmem_start, num_lanes)
+            col_hbm_start = pl.multiple_of(col_tile_start + col_vmem_start,
+                                           num_lanes)
             for row_vmem in range(num_simd_lanes):
                 row_hbm = indices[row_vmem] // packing
                 # Since we have changed layout from (8, 128) to (1, 128), continuous
