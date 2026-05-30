@@ -145,6 +145,11 @@ def ragged_gated_delta_rule_wrapper(
     is_decode_only = distribution[0] == distribution[2]
 
     def decode_only_branch(_):
+        num_tokens = mixed_qkv.shape[0]
+        pad_size = max(0, num_tokens - state_indices.shape[0])
+        padded_state_indices = jnp.pad(state_indices, (0, pad_size),
+                                       mode='constant',
+                                       constant_values=0)
         impl = config.decode_impl
         if impl == 'fused':
             new_state, output = ragged_gated_delta_rule_decode_only(
@@ -155,7 +160,7 @@ def ragged_gated_delta_rule_wrapper(
                 A_log=A_log,
                 dt_bias=dt_bias,
                 query_start_loc=query_start_loc,
-                state_indices=state_indices,
+                state_indices=padded_state_indices,
                 distribution=distribution,
                 has_initial_state=has_initial_state,
                 n_kq=n_kq,
@@ -192,7 +197,7 @@ def ragged_gated_delta_rule_wrapper(
                 A_log=A_log,
                 dt_bias=dt_bias,
                 query_start_loc=query_start_loc,
-                state_indices=state_indices,
+                state_indices=padded_state_indices,
                 distribution=distribution,
                 use_qk_norm_in_gdn=config.use_qk_norm_in_gdn,
             )
