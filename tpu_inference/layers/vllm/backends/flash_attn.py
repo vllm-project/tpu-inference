@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional, Tuple
+import functools
 
 import jax
 import jax.numpy as jnp
@@ -11,13 +12,16 @@ from torchax.ops.mappings import t2j
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl,
-                                       AttentionLayer, AttentionType)
+                                       AttentionLayer, AttentionType,
+                                       AttentionMetadataBuilder,
+                                       CommonAttentionMetadata)
 from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
                                                  register_backend)
 
 from tpu_inference import utils
-from tpu_inference.layers.common.attention_interface import attention
+from tpu_inference.layers.common.attention_interface import attention, sharded_flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.kernels.flash_attention.kernel import SegmentIds, BlockSizes
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
@@ -29,6 +33,33 @@ logger = init_logger(__name__)
 TPU_HEAD_SIZE_ALIGNMENT = 128
 
 
+class PallasAttentionMetadataBuilder(AttentionMetadataBuilder[AttentionMetadata]):
+
+    def __init__(
+        self,
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> AttentionMetadata:
+        # Return a dummy metadata shell. The actual metadata is built dynamically
+        # by GKE Model Runner's JAX compilation pipeline before execution.
+        return AttentionMetadata(
+            seq_lens=jnp.array([]),
+            block_tables=None,
+            query_start_loc=jnp.array([]),
+            request_distribution=jnp.array([]),
+        )
+
+
 @register_backend(AttentionBackendEnum.FLASH_ATTN)
 class PallasAttentionBackend(AttentionBackend):
 
@@ -37,8 +68,19 @@ class PallasAttentionBackend(AttentionBackend):
         return "FLASH_ATTN"
 
     @staticmethod
+    def get_builder_cls() -> type["PallasAttentionMetadataBuilder"]:
+        return PallasAttentionMetadataBuilder
+
+    @staticmethod
     def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
         return PallasAttentionBackendImpl
+
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        return attn_type in {
+            AttentionType.DECODER,
+            AttentionType.ENCODER_ONLY,
+        }
 
     @staticmethod
     def get_kv_cache_shape(
@@ -130,11 +172,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.to_jax_dtype(kv_cache_dtype)
 
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "PallasAttentionBackendImpl")
+        if attn_type not in (AttentionType.DECODER, AttentionType.ENCODER_ONLY):
+            raise NotImplementedError("Encoder self-attention (for encoder-decoder) and "
+                                       "encoder/decoder cross-attention "
+                                       "are not implemented for "
+                                       "PallasAttentionBackendImpl")
+        self.attn_type = attn_type
 
         self.sinks = sinks
         if self.sinks is not None:
@@ -166,52 +209,70 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 "fused output quantization is not yet supported for "
                 "PallasAttentionBackendImpl")
 
-        if kv_cache.numel():
-            raise RuntimeError(
-                "KV cache from vLLM Attention layer should be empty but has "
-                "the size of %s.", kv_cache.numel())
-
-        del kv_cache  # Use kv_cache from vllm wrapper context values instead.
-
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
-        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
-            layer.layer_name]
-        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
-
         mesh = vllm_model_wrapper_context.mesh
 
-        query, key, value = jax_view(query), jax_view(key), jax_view(value)
-        q_scale = k_scale = v_scale = None
-        if self.kv_cache_quantized_dtype:
-            key, value = quantize_kv(self.kv_cache_quantized_dtype, key, value,
-                                     layer._k_scale_float,
-                                     layer._v_scale_float)
-            # TODO(kyuyeunk): Enable w8a8 when VREG spill issue is resolved.
-            # q_scale = layer._q_scale_float
-            k_scale = layer._k_scale_float
-            v_scale = layer._v_scale_float
+        # 1. Common JAX View Conversion
+        q_jax = jax_view(query)
+        k_jax = jax_view(key)
+        v_jax = jax_view(value)
 
-        sinks = jax_view(self.sinks)
+        if self.attn_type == AttentionType.ENCODER_ONLY:
+            # --- EncoderOnly Attention Flow (No Cache) ---
+            outputs = _jax_encoder_only_attn_func(
+                q_jax,
+                k_jax,
+                v_jax,
+                attn_metadata,
+                mesh,
+                self.scale,
+                self.head_size,
+                self.num_heads,
+                self.num_kv_heads,
+            )
+        else:
+            # --- Decoder Attention Flow (Paged KV Cache) ---
+            if kv_cache.numel():
+                raise RuntimeError(
+                    "KV cache from vLLM Attention layer should be empty but has "
+                    "the size of %s.", kv_cache.numel())
+            del kv_cache
 
-        new_kv_cache, outputs = _jax_attn_func(
-            kv_cache,
-            query,
-            key,
-            value,
-            sinks,
-            attn_metadata,
-            mesh,
-            self.scale,
-            self.head_size,
-            self.num_heads,
-            self.num_kv_heads,
-            q_scale,
-            k_scale,
-            v_scale,
-            self.sliding_window,
-        )
-        vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
+            kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
+                layer.layer_name]
+            kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
 
+            q_scale = k_scale = v_scale = None
+            if self.kv_cache_quantized_dtype:
+                # Quantize K and V views
+                k_jax, v_jax = quantize_kv(self.kv_cache_quantized_dtype, k_jax, v_jax,
+                                         layer._k_scale_float,
+                                         layer._v_scale_float)
+                k_scale = layer._k_scale_float
+                v_scale = layer._v_scale_float
+
+            sinks = jax_view(self.sinks)
+
+            new_kv_cache, outputs = _jax_attn_func(
+                kv_cache,
+                q_jax,
+                k_jax,
+                v_jax,
+                sinks,
+                attn_metadata,
+                mesh,
+                self.scale,
+                self.head_size,
+                self.num_heads,
+                self.num_kv_heads,
+                q_scale,
+                k_scale,
+                v_scale,
+                self.sliding_window,
+            )
+            vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
+
+        # 2. Common Output Copy Back and Return
         out_torch = torch_view(outputs)
         if output is not None:
             output.copy_(out_torch)
@@ -280,3 +341,119 @@ def _jax_attn_func(
     outputs = outputs.reshape(q_len, num_heads * head_size)
 
     return new_kv_cache, outputs
+
+
+def _ceiling_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def _align_to(x: int, a: int) -> int:
+    return _ceiling_div(x, a) * a
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "mesh",
+        "scale",
+        "head_size",
+        "num_heads",
+        "num_kv_heads",
+    ),
+)
+def _jax_encoder_only_attn_func(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    attention_metadata: AttentionMetadata,
+    mesh: Mesh,
+    scale: float,
+    head_size: int,
+    num_heads: int,
+    num_kv_heads: int,
+) -> jax.Array:
+    # shape information, applied for O, Q, K, V.
+    # T: tokens, H: number of head, D: hidden dim 
+    # vLLM layer: T, (H * D)
+    # kernel layer: B, H, T, D (where B=1)
+
+    # Get shapes from input tensors
+    q_len = q.shape[0]
+    k_len = k.shape[0]
+    assert k.shape == v.shape
+
+    assert q_len == k_len, "For encoder_only, token lengths should be the same"
+
+    # Convert the shapes from vLLM's convention to what the attention function expects
+    q_thd = q.reshape(q_len, num_heads, head_size)
+    k_thd = k.reshape(k_len, num_kv_heads, head_size)
+    v_thd = v.reshape(k_len, num_kv_heads, head_size)
+
+    # Swap axes to head-first per kernel limit: [num_heads, num_tokens, head_dim]
+    q_htd = q_thd.swapaxes(0, 1)
+    k_htd = k_thd.swapaxes(0, 1)
+    v_htd = v_thd.swapaxes(0, 1)
+
+    def pad_token(t: jax.Array, size) -> jax.Array:
+        return jnp.pad(t, ((0, 0), (0, size), (0, 0)), constant_values=0)
+
+    block_sizes = BlockSizes.get_default(1, num_heads, q_len, k_len, head_size)
+    block_q = block_sizes.block_q
+    block_kv = block_sizes.block_k
+
+    padded_len_q = _align_to(q_len, block_q)
+    padded_len_kv = _align_to(k_len, block_kv)
+
+    q_pad_htd = pad_token(q_htd, padded_len_q - q_len)
+    k_pad_htd = pad_token(k_htd, padded_len_kv - k_len)
+    v_pad_htd = pad_token(v_htd, padded_len_kv - k_len)
+
+    q_bhtd = jnp.expand_dims(q_pad_htd, axis=0)
+    k_bhtd = jnp.expand_dims(k_pad_htd, axis=0)
+    v_bhtd = jnp.expand_dims(v_pad_htd, axis=0)
+
+    def build_segment_ids() -> SegmentIds:
+        max_num_seqs = attention_metadata.seq_lens.shape[0]
+        zero_2_max_num_seqs = jnp.arange(max_num_seqs + 1, dtype=jnp.int32)
+        seq_lens_concat_zero = jnp.concatenate([
+            attention_metadata.seq_lens,
+            jnp.array([0], dtype=attention_metadata.seq_lens.dtype),
+        ])
+        qkv_segment_ids = jnp.repeat(
+            zero_2_max_num_seqs,
+            seq_lens_concat_zero,
+            total_repeat_length=q_len,
+        )
+
+        def build_padded_segment(size: int) -> jax.Array:
+            padding_segment_id = max_num_seqs
+            result = jnp.pad(
+                qkv_segment_ids,
+                (0, size),
+                constant_values=padding_segment_id,
+            )
+            result = jnp.expand_dims(result, axis=0)
+            return result
+
+        segment_ids = SegmentIds(
+            q=build_padded_segment(padded_len_q - q_len),
+            kv=build_padded_segment(padded_len_kv - k_len),
+        )
+        return segment_ids
+
+    kernel = sharded_flash_attention(
+        mesh=mesh,
+        causal=False,
+        sm_scale=scale,
+    )
+    output_bhtd = kernel(
+        q_bhtd,
+        k_bhtd,
+        v_bhtd,
+        build_segment_ids(),
+    )
+    output_htd = jnp.squeeze(output_bhtd, axis=0)
+
+    # Unpad and transpose back to vLLM's shape convention
+    output = output_htd[:, :q_len, :].swapaxes(0, 1)
+    return output.reshape(q_len, num_heads * head_size).astype(q.dtype)
