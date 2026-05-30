@@ -849,7 +849,7 @@ class PhasedBasedProfiler:
         "final_logits_indices",
     ],
     meta_fields=[],
-    drop_fields=["draft_lengths_cpu", "req_indices_dp"],
+    drop_fields=["draft_lengths_cpu", "req_indices_dp", "req_ids_dp"],
 )
 @dataclass
 class SpecDecodeMetadata:
@@ -861,6 +861,7 @@ class SpecDecodeMetadata:
 
     draft_lengths_cpu: Any = field(init=False, default=None)
     req_indices_dp: dict = field(init=False, default_factory=dict)
+    req_ids_dp: dict = field(init=False, default_factory=dict)
 
 
 def host_extract_sampled_tokens(
