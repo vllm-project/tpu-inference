@@ -376,6 +376,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # is effectively disabled.
     "ONEHOT_MOE_PERMUTE_THRESHOLD":
     lambda: int(os.getenv("ONEHOT_MOE_PERMUTE_THRESHOLD", "0")),
+    "MLA_KV_PACKING_SIZE":
+    lambda: int(os.getenv("MLA_KV_PACKING_SIZE", "32")),
 }
 
 
