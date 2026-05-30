@@ -302,6 +302,11 @@ for model_name in $model_list; do
         fi
     fi
 
+    if [ -n "$EXTRA_SERVE_ARGS" ]; then
+        eval "extra_args_array=($EXTRA_SERVE_ARGS)"
+        current_serve_args+=("${extra_args_array[@]}")
+    fi
+
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
     (vllm serve "$model_name" --no-enable-prefix-caching --gpu-memory-utilization=0.95 --max-model-len $max_model_len --max-num-seqs $max_num_seqs --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
