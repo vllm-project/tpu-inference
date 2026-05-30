@@ -577,6 +577,7 @@ def main(args: argparse.Namespace):
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 output_len=args.mmmu_pro_output_len,
+                chat_template_system_prompt=args.chat_template_system_prompt,
             ),
             "random":
             lambda: RandomDataset(random_seed=args.seed,

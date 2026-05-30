@@ -650,10 +650,7 @@ class MMMUProDataset(BenchmarkDataset):
 
     OPTION_LETTERS = "ABCDEFGHIJ"
 
-    PROMPT_FOOTER = (
-        "Try to reason about the question step by step. Don't give a final"
-        " answer without reasoning. Output the final answer in the format"
-        " 'Final Answer: (X)' where X is the correct letter choice. Answer:")
+    PROMPT_FOOTER = "Answer:"
 
     QUERY_TEMPLATE_VISION = """{options_text}
 
@@ -699,12 +696,17 @@ class MMMUProDataset(BenchmarkDataset):
 
             answer = row.get("answer", "A")
 
-            # Collect images (image_1 through image_7).
+            # Collect images.
+            # MMMU-Pro 'vision' subset uses 'image' key.
+            # 'standard' subset uses 'image_1' through 'image_7'.
             images = []
-            for i in range(1, 8):
-                img = row.get(f"image_{i}")
-                if img is not None:
-                    images.append(img)
+            if "image" in row and row["image"] is not None:
+                images.append(row["image"])
+            else:
+                for i in range(1, 8):
+                    img = row.get(f"image_{i}")
+                    if img is not None:
+                        images.append(img)
 
             if self.subset == "vision":
                 question_text = self.QUERY_TEMPLATE_VISION.format(
@@ -743,6 +745,7 @@ class MMMUProDataset(BenchmarkDataset):
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
         output_len: Optional[int] = None,
+        chat_template_system_prompt: Optional[str] = None,
         **kwargs,
     ) -> list:
         samples: list = []
@@ -753,12 +756,20 @@ class MMMUProDataset(BenchmarkDataset):
             mm_content = self._images_to_mm_content(images or [])
 
             # Build message content: images first, then question text.
-            content: list = mm_content
-            content.append({"type": "text", "text": question_text})
-            messages = [{
+            user_content: list = mm_content
+            user_content.append({"type": "text", "text": question_text})
+
+            messages = []
+            if chat_template_system_prompt is not None:
+                messages.append({
+                    "role": "system",
+                    "content": chat_template_system_prompt
+                })
+
+            messages.append({
                 "role": "user",
-                "content": content,
-            }]
+                "content": user_content,
+            })
 
             new_output_len = output_len if output_len is not None else 16
 
