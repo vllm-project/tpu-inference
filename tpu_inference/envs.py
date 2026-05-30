@@ -383,6 +383,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("PROFILE_SINGLE_DEVICE", default=False),
     "LORA_MODULE_PATH":
     lambda: os.getenv("LORA_MODULE_PATH", ""),
+    "MLA_KV_PACKING_SIZE":
+    lambda: int(os.getenv("MLA_KV_PACKING_SIZE", "32")),
 }
 
 
