@@ -670,11 +670,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         _ = torch_view(dummy_jax).to('cpu', non_blocking=False)
                 logger.debug("Universal StepPooler pre-warming successful.")
 
+            self.state = model.state
+
+            if self.drafter is not None:
+                logger.info("Loading drafter model...")
+                self.drafter.load_model(self.state)
+
         self.model_fn = model.model_fn
         self.compute_logits_fn = model.compute_logits_fn
         self.pooler_fn = model.pooler_fn
         self.combine_hidden_states_fn = model.combine_hidden_states_fn
-        self.state = model.state
         # For the flax_nnx path, `model_fn` (== `run_model`) accepts a flat
         # tuple of array leaves and reconstructs the nnx.State inside the
         # jit. Pre-flatten here so subsequent dispatches skip the per-call
@@ -687,10 +692,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.embed_multimodal_fn = model.multimodal_fns.embed_multimodal_fn
         self.embed_input_ids_fn = model.multimodal_fns.embed_input_ids_fn
         self.get_mrope_input_positions_fn = model.multimodal_fns.get_mrope_input_positions_fn
-
-        if self.drafter is not None:
-            logger.info("Loading drafter model...")
-            self.drafter.load_model(self.state)
 
         rng_key = nnx.Rngs(jax.random.key(self.model_config.seed)).params()
         self.rng_params_for_sampling = device_array(self.mesh,
