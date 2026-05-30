@@ -95,15 +95,21 @@ class BufferedRefWrapper(BufferedRef):
     def get_slot_vmem(self, slot):
         return self.vmem_ref.at[slot]
 
+    def is_lower_oob(self, row) -> jax.Array:
+        return row < 0
+
+    def is_upper_oob(self, row) -> jax.Array:
+        num_tiles = self.metadata_ref.num_tiles[...]
+        last_row = num_tiles * self.cfgs.tile_size
+        return row >= last_row
+
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class QKVBufferedRef(BufferedRefWrapper):
 
     def copy_in(self, b_start, slot, sem):
-        num_tiles = self.metadata_ref.num_tiles[...]
-        last_b_start = (num_tiles - 1) * self.cfgs.tile_size
-        is_no_op = jnp.where(b_start > last_b_start, True, False)
+        is_no_op = self.is_upper_oob(b_start)
 
         packing = self.cfgs.act_packing
         packed_dma_size = jnp.where(is_no_op, 0,
@@ -135,9 +141,7 @@ class QKVBufferedRef(BufferedRefWrapper):
 class BBufferedRef(BufferedRefWrapper):
 
     def copy_in(self, b_start, slot, sem):
-        num_tiles = self.metadata_ref.num_tiles[...]
-        last_b_start = (num_tiles - 1) * self.cfgs.tile_size
-        is_no_op = jnp.where(b_start > last_b_start, True, False)
+        is_no_op = self.is_upper_oob(b_start)
 
         packing = self.cfgs.act_packing
         packed_dma_size = jnp.where(is_no_op, 0,
@@ -169,9 +173,7 @@ class BBufferedRef(BufferedRefWrapper):
 class ABufferedRef(BufferedRefWrapper):
 
     def copy_in(self, b_start, slot, sem):
-        num_tiles = self.metadata_ref.num_tiles[...]
-        last_b_start = (num_tiles - 1) * self.cfgs.tile_size
-        is_no_op = jnp.where(b_start > last_b_start, True, False)
+        is_no_op = self.is_upper_oob(b_start)
 
         packing = self.cfgs.act_packing
         packed_dma_size = jnp.where(is_no_op, 0,
@@ -217,7 +219,7 @@ class OutBufferedRef(BufferedRefWrapper):
         ).start(1)
 
     def wait_out(self, b_start, slot, sem):
-        is_no_op = jnp.where(b_start < 0, True, False)
+        is_no_op = self.is_lower_oob(b_start)
         dma_size = jnp.where(is_no_op, 0, self.cfgs.tile_size)
 
         pltpu.make_async_copy(
@@ -257,9 +259,7 @@ class ActivationBufferedRefs(BufferedRef):
 class ConvStateBufferedRef(BufferedRefWrapper):
 
     def copy_in(self, b_start, slot, sem):
-        num_tiles = self.metadata_ref.num_tiles[...]
-        last_b_start = (num_tiles - 1) * self.cfgs.tile_size
-        is_no_op = jnp.where(b_start > last_b_start, True, False)
+        is_no_op = self.is_upper_oob(b_start)
 
         b_start = jnp.where(is_no_op, 0, b_start)
 
@@ -304,7 +304,7 @@ class ConvStateBufferedRef(BufferedRefWrapper):
             ).start()
 
     def wait_out(self, b_start, slot, sem):
-        is_no_op = jnp.where(b_start < 0, True, False)
+        is_no_op = self.is_lower_oob(b_start)
         b_start = jnp.where(is_no_op, 0, b_start)
 
         all_writes = 0
@@ -325,10 +325,7 @@ class ConvStateBufferedRef(BufferedRefWrapper):
 class RecurrentStateBufferedRef(BufferedRefWrapper):
 
     def copy_in(self, b_start, slot, sem):
-        num_tiles = self.metadata_ref.num_tiles[...]
-        last_b_start = (num_tiles - 1) * self.cfgs.tile_size
-        is_no_op = jnp.where(b_start > last_b_start, True, False)
-
+        is_no_op = self.is_upper_oob(b_start)
         b_start = jnp.where(is_no_op, 0, b_start)
 
         for idx in range(self.cfgs.tile_size):
@@ -374,7 +371,7 @@ class RecurrentStateBufferedRef(BufferedRefWrapper):
             ).start()
 
     def wait_out(self, b_start, slot, sem):
-        is_no_op = jnp.where(b_start < 0, True, False)
+        is_no_op = self.is_lower_oob(b_start)
         b_start = jnp.where(is_no_op, 0, b_start)
 
         all_writes = 0

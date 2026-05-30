@@ -22,11 +22,12 @@ def causal_conv1d(
     metadata_ref: ref_classes.MetadataRef,
     b_start: jax.Array,
     lhs: jax.Array,
-    states_ref: jax.Array,
+    states: jax.Array,
     conv_weights_ref: ref_classes.ConvWeightsRef,
     cfgs: configs.GDNConfigs,
-):
+) -> tuple[jax.Array, jax.Array]:
     out_list = []
+    new_conv_state_list = []
     for idx in range(cfgs.tile_size):
         b_idx = b_start + idx
 
@@ -35,6 +36,7 @@ def causal_conv1d(
         has_initial_state = metadata_ref.s_idx_has_initial_state[s_idx]
 
         out = jnp.zeros((1, cfgs.dim_size), jnp.float32)
+        new_conv_state = []
 
         end_idx = idx + cfgs.prev_kernel_size
         start_idx = 1 + end_idx - cfgs.kernel_size
@@ -42,18 +44,20 @@ def causal_conv1d(
             lhs_curr = lhs[start_idx + k]
 
             if k < cfgs.prev_kernel_size:
-                conv_state = states_ref[idx, k]
+                conv_state = states[idx, k]
                 conv_state = jnp.where(has_initial_state, conv_state, 0)
                 lhs_curr = jnp.where(k < sz_from_old, conv_state, lhs_curr)
 
             if k > 0:
-                states_ref[idx, k - 1] = lhs_curr
+                new_conv_state.append(lhs_curr)
 
             rhs = conv_weights_ref.weight[k]
             out += lhs_curr * rhs
 
         if (bias_ref := conv_weights_ref.bias) is not None:
             out += bias_ref[...].reshape(1, -1)
+
+        new_conv_state_list.append(jnp.stack(new_conv_state, axis=0))
         out_list.append(out)
 
-    return jnp.stack(out_list, axis=0)
+    return jnp.stack(out_list, axis=0), jnp.stack(new_conv_state_list, axis=0)

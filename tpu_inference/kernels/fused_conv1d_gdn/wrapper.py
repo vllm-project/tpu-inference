@@ -72,31 +72,43 @@ def inner_kernel(
     qkv_in_compact = jnp.concat([prev_qkv_scratch, qkv_in_compact], axis=0)
     prev_qkv_scratch_ref[...] = qkv_in_compact[-cfgs.prev_kernel_size:]
 
-    qkv_out_compact = conv1d.causal_conv1d(
+    conv_state = conv_state_slot_ref[...]
+    conv_state = conv_state.astype(jnp.float32)
+    conv_state = conv_state.reshape(cfgs.tile_size, cfgs.prev_kernel_size, 1,
+                                    -1)
+
+    qkv_out_compact, conv_state_out = conv1d.causal_conv1d(
         metadata_ref=metadata_ref,
         b_start=b_start,
         lhs=qkv_in_compact,
-        states_ref=conv_state_slot_ref,
+        states=conv_state,
         conv_weights_ref=weights_ref.conv,
         cfgs=cfgs,
-    ).astype(cfgs.dtypes.compute)
+    )
+
+    # Store conv state output to vmem.
+    conv_state_slot_ref[...] = conv_state_out
 
     # Apply activation function.
     qkv_out_compact = jax.nn.silu(qkv_out_compact)
 
     # Step 2: GDN.
-    gdn.recurrent_gdn(
+    out, new_recurrent_state = gdn.recurrent_gdn(
         metadata_ref=metadata_ref,
         b_start=b_start,
-        qkv=qkv_out_compact,
+        qkv=qkv_out_compact.astype(cfgs.dtypes.compute),
         b=b_slot_ref[...].reshape(cfgs.tile_size, 1, 1, -1),
         a=a_slot_ref[...].reshape(cfgs.tile_size, 1, 1, -1),
+        recurrent_states=recurrent_slot_ref[...],
         prev_recurrent_state_ref=prev_recurrent_state_scratch_ref,
-        out_ref=out_slot_ref,
-        recurrent_states_ref=recurrent_slot_ref,
         gdn_weights_ref=weights_ref.gdn,
         cfgs=cfgs,
     )
+
+    # Store output and recurrent to vmem.
+    out_slot_ref[...] = out.astype(cfgs.act_dtype)
+    recurrent_slot_ref[...] = new_recurrent_state.astype(
+        cfgs.dtypes.recurrent_state)
 
     # Start DMA write for current tile.
     act_buffered_ref.copy_out(b_start, slot, send_sem)
@@ -328,7 +340,8 @@ def fused_conv1d_gdn(
     act_dtype = qkv.dtype
     assert a.dtype == b.dtype == qkv.dtype == act_dtype
 
-    tile_size = 4
+    tile_size = 8
+    tile_size = min(tile_size, batch_size)
     cfgs = configs.GDNConfigs(
         batch_size=batch_size,
         kernel_size=kernel_size,
@@ -367,7 +380,9 @@ def fused_conv1d_gdn(
     conv_state_dtype = conv_state.dtype
     conv_state_in = conv_state.astype(jnp.float32)
     conv_state_in = conv_state_in.reshape(-1, kernel_size - 1, 1, dim)
-    conv_weight = conv_weight.swapaxes(0, 2)
+    conv_weight = conv_weight.swapaxes(0, 2).astype(jnp.float32)
+    conv_bias = conv_bias.astype(
+        jnp.float32) if conv_bias is not None else None
 
     # Step 4: Metadata preprocessing. Will be executed multiple times per-layer
     # but will be CSEed by compiler.
