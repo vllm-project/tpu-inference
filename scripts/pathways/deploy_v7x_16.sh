@@ -44,10 +44,15 @@ gcloud auth configure-docker us-east5-docker.pkg.dev --quiet
 
 docker pull "${BASE_COLOCATED_IMAGE}"
 
+# Capture the base image's ENTRYPOINT/CMD as JSON so we can restore them in
+# `docker commit` — commit captures the *container's* config (which we override
+# with --entrypoint sleep below to keep the container alive for exec), NOT the
+# base image's. Without these --change flags the patched image would just run
+# `sleep infinity` and the colocated_python gRPC server would never start.
+BASE_ENTRYPOINT_JSON=$(docker image inspect "${BASE_COLOCATED_IMAGE}" --format '{{json .Config.Entrypoint}}')
+BASE_CMD_JSON=$(docker image inspect "${BASE_COLOCATED_IMAGE}" --format '{{json .Config.Cmd}}')
+
 PATCH_CONTAINER="colocated-python-patch-$$"
-# Override the entrypoint so we can exec into a long-running container.
-# `docker commit` preserves the original image's ENTRYPOINT/CMD, so the
-# resulting patched image still launches the colocated_python gRPC server.
 docker run -d --name "${PATCH_CONTAINER}" --entrypoint sleep "${BASE_COLOCATED_IMAGE}" infinity
 trap 'docker rm -f "${PATCH_CONTAINER}" >/dev/null 2>&1 || true' EXIT
 
@@ -61,7 +66,10 @@ docker exec "${PATCH_CONTAINER}" bash -c '
   pip install --no-deps -e /workspace/tpu-inference
 '
 
-docker commit "${PATCH_CONTAINER}" "${PATCHED_COLOCATED_IMAGE}"
+docker commit \
+  --change="ENTRYPOINT ${BASE_ENTRYPOINT_JSON}" \
+  --change="CMD ${BASE_CMD_JSON}" \
+  "${PATCH_CONTAINER}" "${PATCHED_COLOCATED_IMAGE}"
 docker push "${PATCHED_COLOCATED_IMAGE}"
 docker rm -f "${PATCH_CONTAINER}" >/dev/null 2>&1 || true
 trap - EXIT
