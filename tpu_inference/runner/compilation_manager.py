@@ -393,8 +393,15 @@ class CompilationManager:
             # (donate_argnums=(0, 1)) so a fresh pair must be created per call.
             seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
                                                  jnp.int32, dp_sharding)
-            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32,
-                                                  dp_sharding)
+            if self.runner.uses_mrope:
+                mrope_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+                positions = self._create_dummy_tensor(
+                    (3, num_tokens), jnp.int32, mrope_sharding)
+            else:
+                positions = self._create_dummy_tensor((num_tokens, ),
+                                                      jnp.int32, dp_sharding)
             num_rejected_tokens = self._create_dummy_tensor(
                 (self.runner.max_num_reqs, ), jnp.int32, replicated_sharding)
             seq_lens_subtract_indices = self._create_dummy_tensor(

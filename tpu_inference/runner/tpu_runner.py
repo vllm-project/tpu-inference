@@ -1675,7 +1675,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         seq_lens_subtract_indices = np.full(self.max_num_reqs,
                                             -1,
                                             dtype=np.int32)
-        positions_subtract_indices = np.full(positions.size,
+        positions_subtract_indices = np.full(positions.shape[-1],
                                              -1,
                                              dtype=np.int32)
 

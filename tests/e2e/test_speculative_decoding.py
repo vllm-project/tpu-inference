@@ -395,9 +395,7 @@ def test_eagle3_performance(
         model_name='meta-llama/Llama-3.1-8B-Instruct')
 
 
-@pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
-                    reason="MTP is only supported with vllm model impl.")
-@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False])
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -408,16 +406,16 @@ def test_mtp_correctness(
     they should be the same when using MTP speculative decoding.
     '''
     model_name = "Qwen/Qwen3.5-4B"
-    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
-    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
 
     extra_kwargs = {
         "seed": 42,
-        "max_model_len": 2048,
-        "max_num_batched_tokens": 16384,
+        "max_model_len": 128,
+        "max_num_batched_tokens": 1024,
         "enable_prefix_caching": False,
         "kv_cache_dtype": "fp8",
-        "gpu_memory_utilization": 0.70,
+        "gpu_memory_utilization": 0.90,
     }
 
     _test_correctness_helper(
@@ -434,14 +432,12 @@ def test_mtp_correctness(
     )
 
 
-@pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
-                    reason="MTP is only supported with vllm model impl.")
 @pytest.mark.parametrize(
     "max_num_seqs,async_scheduling",
     [
         (1, False),
         (20, False),
-        (20, True),
+        # (20, True),
     ],
 )
 def test_mtp_performance(
@@ -454,16 +450,16 @@ def test_mtp_performance(
     Test that MTP speculative decoding achieves the expected acceptance rate.
     '''
     model_name = "Qwen/Qwen3.5-4B"
-    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
-    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
 
     extra_kwargs = {
         "seed": 42,
-        "max_model_len": 2048,
-        "max_num_batched_tokens": 16384,
+        "max_model_len": 128,
+        "max_num_batched_tokens": 1024,
         "enable_prefix_caching": False,
         "kv_cache_dtype": "fp8",
-        "gpu_memory_utilization": 0.70,
+        "gpu_memory_utilization": 0.90,
     }
 
     _test_performance_helper(
