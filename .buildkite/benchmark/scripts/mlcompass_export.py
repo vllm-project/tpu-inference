@@ -3,13 +3,7 @@ import os
 import sys
 import time
 import uuid
-import google.auth
 from google.cloud import bigquery
-
-credentials, project_id = google.auth.default()
-print(project_id)
-print(credentials)
-print(credentials.service_account_email)
 
 # sys.argv[0] is always the script name itself
 print(f"Script name: {sys.argv[0]}")
@@ -19,6 +13,10 @@ print(f"Script name: {sys.argv[0]}")
 # Capture the rest of the arguments
 if len(sys.argv) > 1:
     print(f"Arguments passed: {sys.argv[1:]}")
+
+print('os.environ listing:')
+for key, value in os.environ.items():
+    print(f"{key}={value}")
 
 row_id = uuid.uuid4().hex
 
@@ -36,7 +34,7 @@ row = {
     },
     'env_commit_map': json.dumps({}),
     'mlcompass_tracking_id': os.getenv('MLCOMPASS_TRACKING_ID', row_id),
-    'mlcopmass_execution_mode': os.getenv('MLCOPMASS_EXECUTION_MODE', 'oneshot'),
+    'mlcompass_execution_mode': os.getenv('MLCOMPASS_EXECUTION_MODE', 'oneshot'),
 }
 print(json.dumps(row, indent=2))
 

@@ -378,16 +378,6 @@ fi
 
 if [[ "${MLCOMPASS_EXPORT_ENABLED:-false}" == "true" ]] then
   echo "--- Reporting to MLCompass"
-  # Run this command inside the environment where the Python code runs
-  echo curl account
-  curl "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email" -H "Metadata-Flavor: Google"
-  echo project_id
-  gcloud projects describe cloud-ullm-inference-ci-cd --format="value(projectNumber)"
-  echo serive-accounts
-  gcloud iam service-accounts list --project=cloud-ullm-inference-ci-cd
-  echo describe-account # To add a newline after the output
-  gcloud auth describe $(gcloud config get-value account)
-  echo
   python3 "$(dirname "${BASH_SOURCE[0]}")"/mlcompass_export.py result_file=$RESULT_FILE
 else
   echo "--- Reporting to MLCompass (skipped)"
