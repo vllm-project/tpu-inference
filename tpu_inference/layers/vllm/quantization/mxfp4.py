@@ -30,9 +30,14 @@ from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
-from vllm.model_executor.layers.quantization.mxfp4 import (Mxfp4Backend,
-                                                           Mxfp4Config,
-                                                           Mxfp4MoEMethod)
+try:
+    from vllm.model_executor.layers.quantization.mxfp4 import (
+        Mxfp4Backend, Mxfp4Config, Mxfp4MoEMethod)
+except ImportError:
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import \
+        Mxfp4MoeBackend as Mxfp4Backend
+    from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
+    Mxfp4MoEMethod = FusedMoEMethodBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
