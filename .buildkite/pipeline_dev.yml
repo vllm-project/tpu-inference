@@ -119,13 +119,13 @@ steps:
       - .buildkite/scripts/run_disagg.sh
 
   # -----------------------------------------------------------------
+  # -----------------------------------------------------------------
   # Demo 4: Ray-based multi-host inference
   # Mirrors test_26 in pipeline_jax.yml.
   # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
   # Requires a 16-chip queue (tpu_v7x_16_queue).
   # -----------------------------------------------------------------
   - label: "tpu7x [demo] Ray-based multi-host"
-    key: tpu7x_demo_multihost
     env:
       TPU_VERSION: "tpu7x"
     agents:
@@ -146,3 +146,20 @@ steps:
             -X POST \
             -H 'Content-Type: application/json' \
             -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"
+
+  # -----------------------------------------------------------------
+  # Verification Step: Multimodal Similarity Fix
+  # Reproduces the flaky similarity check on tpu7x (TP=2).
+  # -----------------------------------------------------------------
+  - label: "tpu7x [verification] multimodal similarity fix"
+    key: tpu7x_multimodal_fix
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+      MODEL_IMPL_TYPE: "vllm"
+    agents:
+      queue: tpu_v7x_2_queue
+    commands:
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py
+
