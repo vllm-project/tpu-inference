@@ -155,13 +155,9 @@ class TestMultiModalManager:
 
         # Verify the pixel values tensor passed to the mock
         passed_pixel_values = kwargs_arg['pixel_values']
+        assert isinstance(passed_pixel_values, torch.Tensor)
         assert passed_pixel_values.shape == (1, 3, 224, 224)
-
-        # Convert dummy_pixel_values the same way the actual code does
-        expected_pixel_values = dummy_pixel_values.to(
-            torch.float32).numpy().astype(jnp.bfloat16)
-        np.testing.assert_array_equal(passed_pixel_values[0],
-                                      expected_pixel_values)
+        assert torch.equal(passed_pixel_values[0], dummy_pixel_values)
 
     def test_execute_mm_encoder_multiple_images(self):
         import torch
@@ -263,13 +259,10 @@ class TestMultiModalManager:
         assert "pixel_values" in kwargs_arg
 
         passed_pixel_values = kwargs_arg['pixel_values']
+        assert isinstance(passed_pixel_values, torch.Tensor)
         assert passed_pixel_values.shape == (2, 3, 224, 224)
-
-        # Convert both dummy tensors the same way the actual code does
-        expected_px_1 = px_1.to(torch.float32).numpy().astype(jnp.bfloat16)
-        expected_px_2 = px_2.to(torch.float32).numpy().astype(jnp.bfloat16)
-        np.testing.assert_array_equal(passed_pixel_values[0], expected_px_1)
-        np.testing.assert_array_equal(passed_pixel_values[1], expected_px_2)
+        assert torch.equal(passed_pixel_values[0], px_1)
+        assert torch.equal(passed_pixel_values[1], px_2)
 
     def test_gather_mm_embeddings_chunked_prefill(self):
         """Tests _gather_mm_embeddings with chunked prefill scenarios."""
