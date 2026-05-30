@@ -38,10 +38,13 @@ row = {
     'mlcompass_tracking_id': os.getenv('MLCOMPASS_TRACKING_ID', row_id),
     'mlcopmass_execution_mode': os.getenv('MLCOPMASS_EXECUTION_MODE', 'oneshot'),
 }
+print(json.dumps(row, indent=2))
 
 client = bigquery.Client(project='google.com:ml-compass-benchmarks')
 table_ref = client.dataset('benchmarks_dataset').table('benchmarks_dev')
 table_obj = client.get_table(table_ref)
-client.insert_rows(table_obj, [row])
+errors = client.insert_rows(table_obj, [row])
+if errors:
+    raise RuntimeError(f'Failed to insert row into MLCompass table: {str(errors)}')
 
 print('MLCompass export file called')
