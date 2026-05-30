@@ -246,7 +246,6 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
     """Subtract the previous step's rejected-token counts from `seq_lens` and
     `positions`.
     """
-    assert positions.ndim == 1, "2d positions not supported by _subtract_num_rejected_tokens_fn yet."
     seq_valid = seq_lens_subtract_indices >= 0
     seq_subtract = jnp.where(seq_valid,
                              num_rejected_tokens[seq_lens_subtract_indices], 0)
@@ -256,6 +255,8 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
     pos_subtract = jnp.where(pos_valid,
                              num_rejected_tokens[positions_subtract_indices],
                              0)
+    if positions.ndim == 2:
+        pos_subtract = jnp.expand_dims(pos_subtract, axis=0)
     positions = positions - pos_subtract
     return seq_lens, positions
 
@@ -1712,7 +1713,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 for j in range(scheduled_tokens_cur_rank[i]):
                     positions_subtract_indices[
                         base_offset + j + rank *
-                        (positions.size // self.dp_size)] = idx
+                        (positions.shape[-1] // self.dp_size)] = idx
 
         seq_lens_subtract_indices, positions_subtract_indices = device_array(
             self.mesh, (seq_lens_subtract_indices, positions_subtract_indices))
