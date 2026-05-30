@@ -15,7 +15,7 @@
 import math
 from functools import partial
 from itertools import islice
-from typing import (Iterable, List, Literal, NamedTuple, Optional, Tuple,
+from typing import (Any, Iterable, List, Literal, NamedTuple, Optional, Tuple,
                     TypedDict, Union)
 
 import jax
@@ -65,6 +65,19 @@ def _sync_module_param_sharding(module: nnx.Module) -> None:
             if out_sharding is not None and getattr(param, "sharding",
                                                     None) is None:
                 param.set_metadata("sharding", out_sharding)
+
+
+def _safe_convert_torch_to_jax(v: Any) -> Any:
+    """Recursively convert PyTorch tensors (including bfloat16) to JAX arrays safely."""
+    if isinstance(v, list):
+        return [_safe_convert_torch_to_jax(item) for item in v]
+    if isinstance(v, torch.Tensor):
+        if v.dtype == torch.bfloat16:
+            # Cast to float32 first since NumPy does not natively support bfloat16
+            return jnp.asarray(v.detach().cpu().to(
+                torch.float32).numpy()).astype(jnp.bfloat16)
+        return jnp.asarray(v.detach().cpu().numpy())
+    return v
 
 
 class _Qwen3VLConfigAdapter:
@@ -1524,6 +1537,7 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
             return None
 
         if pixel_values is not None:
+            pixel_values = _safe_convert_torch_to_jax(pixel_values)
             pixel_values = reshape_mm_tensor(pixel_values, "pixel values")
 
             if not isinstance(pixel_values, jax.Array):

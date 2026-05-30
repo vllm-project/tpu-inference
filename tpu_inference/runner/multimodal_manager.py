@@ -17,14 +17,13 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 import numpy as np
-import torch
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference.models.jax.utils.multi_modal_utils import (
-    flatten_embeddings, normalize_mm_grid_thw, sanity_check_mm_encoder_outputs)
+    flatten_embeddings, sanity_check_mm_encoder_outputs)
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -137,25 +136,6 @@ class MultiModalManager:
         for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
             batched_mm_inputs = mm_kwargs_group
-            # Convert torch tensors to numpy arrays that JAX can handle.
-            for key in ("pixel_values", "pixel_values_videos"):
-                if key in batched_mm_inputs and isinstance(
-                        batched_mm_inputs[key], list):
-                    batched_mm_inputs[key] = torch.cat(batched_mm_inputs[key],
-                                                       dim=0)
-
-            image_grid_thw = normalize_mm_grid_thw(
-                batched_mm_inputs.pop("image_grid_thw", None))
-            video_grid_thw = normalize_mm_grid_thw(
-                batched_mm_inputs.pop("video_grid_thw", None))
-
-            for key, value in batched_mm_inputs.items():
-                if isinstance(value, torch.Tensor):
-                    if value.dtype == torch.bfloat16:
-                        batched_mm_inputs[key] = value.to(
-                            torch.float32).numpy().astype(jnp.bfloat16)
-                    else:
-                        batched_mm_inputs[key] = value.numpy()
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
             # 1. A tensor of shape (num_items, feature_size, hidden_size)
@@ -164,10 +144,7 @@ class MultiModalManager:
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
             curr_group_outputs = self.runner.embed_multimodal_fn(
-                self.runner.state_leaves,
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                **batched_mm_inputs)
+                self.runner.state_leaves, **batched_mm_inputs)
             deepstack_group_outputs = None
             if isinstance(curr_group_outputs, dict):
                 deepstack_group_outputs = curr_group_outputs.get("deepstack")
@@ -236,10 +213,6 @@ class MultiModalManager:
                 - deepstack_embeds: Optional list of per-layer DeepStack
                     embeddings padded to target_pad_len.
         """
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        assert (
-            target_pad_len >= total_num_scheduled_tokens
-        ), f"{target_pad_len=} should >= {total_num_scheduled_tokens=} for output is_mm_embedded"
 
         mm_embeds: list[jax.Array] = []
         is_mm_embed_cpu = np.zeros((target_pad_len, ), dtype=np.bool_)
