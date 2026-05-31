@@ -5,15 +5,8 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
-# H100 POC — pull vllm/vllm-openai from Docker Hub, serve Qwen on 8x H100, query.
-# Bypasses run_in_docker.sh (which is hardcoded to the CI Artifact Registry).
+# H100 POC — pull vllm/vllm-openai from Docker Hub, serve Qwen, query.
 
 steps:
   - label: "h100 [poc] vllm/vllm-openai — serve Qwen2.5-7B + query"
@@ -23,16 +16,14 @@ steps:
     commands:
       - |
         set -e
-        IMG=vllm/vllm-openai:latest-cu129-ubuntu2404
-        CONT=vllm-bk-poc
-        docker rm -f $CONT 2>/dev/null || true
+        docker rm -f vllm-bk-poc 2>/dev/null || true
         echo "=== pull ==="
-        docker pull $IMG
+        docker pull vllm/vllm-openai:latest-cu129-ubuntu2404
         echo "=== run ==="
-        docker run -d --name $CONT \
+        docker run -d --name vllm-bk-poc \
           --gpus all --ipc=host --shm-size=32g \
           -p 8000:8000 \
-          $IMG \
+          vllm/vllm-openai:latest-cu129-ubuntu2404 \
           Qwen/Qwen2.5-7B-Instruct \
           --seed 42 \
           --tensor-parallel-size 8 \
@@ -40,18 +31,18 @@ steps:
           --no-enable-prefix-caching
         echo "=== wait for server (up to 20 min) ==="
         UP=0
-        for i in $(seq 1 120); do
+        for i in $$(seq 1 120); do
           if curl -sf http://localhost:8000/v1/models >/dev/null 2>&1; then
-            echo "[ready @ ${i}0s]"
+            echo "[ready @ $${i}0s]"
             UP=1
             break
           fi
           sleep 10
         done
-        if [ "$UP" -ne 1 ]; then
+        if [ "$$UP" -ne 1 ]; then
           echo "=== server never came up — last 80 log lines ==="
-          docker logs --tail 80 $CONT || true
-          docker rm -f $CONT 2>/dev/null || true
+          docker logs --tail 80 vllm-bk-poc || true
+          docker rm -f vllm-bk-poc 2>/dev/null || true
           exit 1
         fi
         echo "=== query ==="
@@ -60,4 +51,4 @@ steps:
           -d '{"model":"Qwen/Qwen2.5-7B-Instruct","messages":[{"role":"user","content":"What is the capital of France?"}],"max_tokens":50}' \
           | python3 -m json.tool
         echo "=== cleanup ==="
-        docker rm -f $CONT 2>/dev/null || true
+        docker rm -f vllm-bk-poc 2>/dev/null || true
