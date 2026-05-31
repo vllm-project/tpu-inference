@@ -149,7 +149,7 @@ def test_get_kv_cache_shape_with_mesh_mla(mesh: Mesh, ):
 
     # Expected shape calculation for MLA:
     # kv_packing = 32 (envs.MLA_KV_PACKING_SIZE)
-    
+
     # shape[0] = total_num_pages = 64
     # shape[1] = align_to(page_size, kv_packing) // kv_packing = 4
     # shape[2] = kv_packing = 32
