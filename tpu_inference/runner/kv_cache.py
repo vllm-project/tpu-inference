@@ -20,7 +20,8 @@ import numpy as np
 from jax._src import dtypes
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-import tpu_inference.kernels.mla.v1.kernel as mla
+import tpu_inference.envs as envs
+import tpu_inference.kernels.mla.v2.kernel as mla
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import utils
@@ -68,7 +69,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
         get_kv_cache_shape_fn = mla.get_kv_cache_shape
         shape = list(
             get_kv_cache_shape_fn(total_num_pages, block_size, actual_head_dim,
-                                  kv_dtype))
+                                  kv_dtype, envs.MLA_KV_PACKING_SIZE))
     else:
         assert actual_num_kv_heads % model_cnt == 0
         get_kv_cache_shape_fn = (
