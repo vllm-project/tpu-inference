@@ -476,7 +476,6 @@ class Gemma4MultiTokenPredictor(JaxModule):
         hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
         layer_name_to_kv_cache: Optional[dict] = None,
-        spec_step_idx: int = 0,
     ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
         inputs_embeds = self.embed_input_ids(input_ids)
 
@@ -484,7 +483,7 @@ class Gemma4MultiTokenPredictor(JaxModule):
         hidden_states = self.pre_projection(combined)
 
         for i, layer in enumerate(self.layers):
-            layer_name = f"layer.{i}"
+            layer_name = f"draft_layer.{i}"
             if layer_name_to_kv_cache and layer_name in layer_name_to_kv_cache:
                 cache_idx = layer_name_to_kv_cache[layer_name]
             else:
@@ -621,7 +620,6 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
         attention_metadata: AttentionMetadata,
         layer_name_to_kvcache_index: Optional[Sequence[Tuple[str,
                                                              int]]] = None,
-        spec_step_idx: int = 0,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
                Optional[jax.Array]]:
@@ -634,7 +632,6 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
             hidden_states,
             attention_metadata,
             layer_name_to_kv_cache=layer_name_to_kv_cache,
-            spec_step_idx=spec_step_idx,
         )
 
         return kv_caches, draft_hidden_states, [backbone_hidden_states], None
