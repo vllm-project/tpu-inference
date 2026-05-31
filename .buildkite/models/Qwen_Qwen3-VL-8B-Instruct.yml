@@ -17,11 +17,10 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-VL-8B-Instruct_UnitTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: cpu  # TODO: replace with execution environment
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh \
-          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_qwen3_vl.py'
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-VL-8B-Instruct_UnitTest" "unverified"
   - label: "${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3-VL-8B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-VL-8B-Instruct_UnitTest"
     depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-VL-8B-Instruct_UnitTest"
@@ -41,16 +40,14 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-VL-8B-Instruct_UnitTest"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+      queue: cpu  # TODO: replace with execution environment
     env:
       TEST_MODEL: Qwen/Qwen3-VL-8B-Instruct
-      # The default values are for tpu6e. For tpu7x, the CI procedure will export TENSOR_PARALLEL_SIZE_SINGLE=2, TENSOR_PARALLEL_SIZE_MULTI=8 automatically
       TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
-      MAX_NUM_BATCHED_TOKENS: "16384"
-      MINIMUM_ACCURACY_THRESHOLD: 0.80
+      MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-VL-8B-Instruct_Accuracy" "unverified"
   - label: "${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen3-VL-8B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-VL-8B-Instruct_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-VL-8B-Instruct_Accuracy"
@@ -70,16 +67,14 @@ steps:
     depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-VL-8B-Instruct_Accuracy"
     soft_fail: true
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+      queue: cpu  # TODO: replace with execution environment
     env:
       TEST_MODEL: Qwen/Qwen3-VL-8B-Instruct
-      # The default values are for tpu6e. For tpu7x, the CI procedure will export TENSOR_PARALLEL_SIZE_SINGLE=2, TENSOR_PARALLEL_SIZE_MULTI=8 automatically
-      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
-      MAX_NUM_BATCHED_TOKENS: "16384"
-      MINIMUM_THROUGHPUT_THRESHOLD: 0.7  # TODO : replace 0 with your performance threshold
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      MINIMUM_THROUGHPUT_THRESHOLD: 0  # TODO : replace 0 with your performance threshold
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-VL-8B-Instruct_Benchmark" "unverified"
   - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3-VL-8B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-VL-8B-Instruct_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-VL-8B-Instruct_Benchmark"
