@@ -135,7 +135,6 @@ class MultiModalManager:
         deepstack_outputs = None
         for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
-            batched_mm_inputs = mm_kwargs_group
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
             # 1. A tensor of shape (num_items, feature_size, hidden_size)
@@ -144,7 +143,7 @@ class MultiModalManager:
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
             curr_group_outputs = self.runner.embed_multimodal_fn(
-                self.runner.state_leaves, **batched_mm_inputs)
+                self.runner.state_leaves, **mm_kwargs_group)
             deepstack_group_outputs = None
             if isinstance(curr_group_outputs, dict):
                 deepstack_group_outputs = curr_group_outputs.get("deepstack")
