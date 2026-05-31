@@ -9,7 +9,7 @@
 # H100 POC — pull vllm/vllm-openai from Docker Hub, serve Qwen, query.
 
 steps:
-  - label: "h100 [poc] vllm/vllm-openai — serve Qwen2.5-7B + query"
+  - label: "h100 [poc] vllm/vllm-openai — serve Qwen2.5-14B + query"
     key: h100_poc_vllm_openai
     agents:
       queue: h100_8_queue
@@ -24,7 +24,7 @@ steps:
           --gpus all --ipc=host --shm-size=32g \
           -p 8000:8000 \
           vllm/vllm-openai:latest-cu129-ubuntu2404 \
-          Qwen/Qwen2.5-7B-Instruct \
+          Qwen/Qwen2.5-14B-Instruct \
           --seed 42 \
           --tensor-parallel-size 8 \
           --max-model-len 1024 \
@@ -48,7 +48,7 @@ steps:
         echo "=== query ==="
         curl -s http://localhost:8000/v1/chat/completions \
           -H "Content-Type: application/json" \
-          -d '{"model":"Qwen/Qwen2.5-7B-Instruct","messages":[{"role":"user","content":"What is the capital of France?"}],"max_tokens":50}' \
+          -d '{"model":"Qwen/Qwen2.5-14B-Instruct","messages":[{"role":"user","content":"What is the capital of France?"}],"max_tokens":50}' \
           | python3 -m json.tool
         echo "=== cleanup ==="
         docker rm -f vllm-bk-poc 2>/dev/null || true
