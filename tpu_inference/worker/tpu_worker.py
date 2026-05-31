@@ -508,10 +508,11 @@ class TPUWorker(WorkerBase):
     def profile(self,
                 is_start: bool = True,
                 profile_prefix: str | None = None):
+        print("tpu worker profile")
         if is_start:
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
-            options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
+            # options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
             if envs.PROFILE_SINGLE_DEVICE:
                 options.advanced_configuration = {
                     "tpu_num_chips_to_profile_per_task": 1,

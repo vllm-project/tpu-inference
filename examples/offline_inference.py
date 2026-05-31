@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
 import json
 import os
 
@@ -51,8 +52,13 @@ def main(args: dict):
     if chat_template_kwargs != {}:
         use_chat_template = True
 
-    # Create an LLM
-    llm = LLM(**args)
+    # Create an LLM via EngineArgs.from_cli_args so any explicit mutations to
+    # `args["profiler_config"]` (set in __main__) propagate into the engine.
+    # `LLM(**args)` would drop the nested ProfilerConfig and the
+    # `if profiler_config.profiler == "torch":` block below would never fire.
+    # Mirrors the pattern in examples/tpu_profiling.py.
+    engine_args = EngineArgs.from_cli_args(argparse.Namespace(**args))
+    llm = LLM.from_engine_args(engine_args)
 
     # Create a sampling params object
     sampling_params = llm.get_default_sampling_params()
@@ -107,6 +113,7 @@ def main(args: dict):
 
     profiler_config = llm.llm_engine.vllm_config.profiler_config
     if profiler_config.profiler == "torch":
+        logger.info("Starting torch profiler...")
         llm.start_profile()
 
     if use_chat_template:
@@ -141,7 +148,22 @@ if __name__ == "__main__":
     os.environ.setdefault('SKIP_JAX_PRECOMPILE', '1')
 
     parser = create_parser()
-    args: dict = vars(parser.parse_args())
+    ns = parser.parse_args()
+
+    # Enable the torch profiler with a GCS destination.  vLLM's ProfilerConfig
+    # (vllm/config/profiler.py) requires BOTH `profiler="torch"` AND
+    # `torch_profiler_dir` to be set — setting the env var alone does not flip
+    # `profiler`, so the start_profile() block in main() would never fire.
+    # Mirrors examples/tpu_profiling.py.  The dir is overridable via env var.
+    # gs:// URIs are passed through unchanged (ProfilerConfig has a
+    # `_is_uri_path` guard that skips `os.path.abspath`).
+    ns.profiler_config.profiler = "torch"
+    ns.profiler_config.torch_profiler_dir = os.environ.get(
+        "VLLM_TORCH_PROFILER_DIR", "gs://wenxindong-vm/trace/cp/may30/4")
+    logger.info("Profiler traces will be written to %s",
+                ns.profiler_config.torch_profiler_dir)
+
+    args: dict = vars(ns)
 
     if not disagg_utils.is_disagg_enabled():
         main(args)

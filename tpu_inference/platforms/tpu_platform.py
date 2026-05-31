@@ -298,6 +298,14 @@ class TpuPlatform(Platform):
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
 
+        # Colocated-python DP on Pathways: replaces SPMD DP / DPScheduler with
+        # one independent vLLM EngineCore per Pathways host, orchestrated by
+        # the single controller via jax.experimental.colocated_python. See
+        # tpu_inference/core/colocated_dp_engine.py.
+        from tpu_inference.core.colocated_dp_engine import \
+            update_vllm_config_for_colocated_dp
+        update_vllm_config_for_colocated_dp(vllm_config)
+
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: TPU still sets block_size in check_and_update_config.

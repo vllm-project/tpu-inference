@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     TPU_NAME: str | None = None
     TPU_WORKER_ID: str | None = None
     TPU_MULTIHOST_BACKEND: str = ""
+    TPU_COLOCATED_DP: bool = False
     TPU_MULTIPROCESS_DP: bool = False
     PREFILL_SLICES: str = ""
     DECODE_SLICES: str = ""
@@ -207,6 +208,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Backend for multi-host communication on TPU
     "TPU_MULTIHOST_BACKEND":
     env_with_choices("TPU_MULTIHOST_BACKEND", "", ["ray"]),
+    # Use colocated-python data parallelism: a single controller process holds
+    # `data_parallel_size` vLLM EngineCore instances, each running as a
+    # `jax.experimental.colocated_python` class instance on a different
+    # colocated CPU host (one per Pathways host of TPU chips). Each shard runs
+    # an independent step loop — no SPMD lock-step. Supports both offline
+    # (LLM.generate()) and online (vllm serve). Requires Pathways
+    # (JAX_PLATFORMS=proxy / VLLM_TPU_USING_PATHWAYS=1).
+    "TPU_COLOCATED_DP":
+    env_bool("TPU_COLOCATED_DP", default=False),
     # Use vLLM-native multi-process data parallelism (one engine process per
     # DP rank, single load-balanced API endpoint) instead of tpu-inference's
     # single-process SPMD data parallelism. Each DP rank is pinned to a

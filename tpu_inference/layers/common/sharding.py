@@ -154,10 +154,17 @@ class ShardingConfigManager:
 
     def __init__(self,
                  sharding_strategy: ShardingStrategy,
-                 device_indexes: Optional[List] = None):
+                 device_indexes: Optional[List] = None,
+                 colocated_dp_size: int = 1):
 
         self.sharding_strategy: ShardingStrategy = sharding_strategy
         self.device_indexes: Optional[List[int]] = device_indexes
+        # When colocated-python DP is active, the per-shard strategy has
+        # data_parallelism=1 (each shard is a single-rank engine), but the
+        # controller's `ColocatedDPEngineCore` still needs to know how many
+        # shards to create. Stashed here because parallel_config.data_parallel_size
+        # gets overridden to 1 below to suppress vLLM-native DP / DPScheduler.
+        self.colocated_dp_size: int = colocated_dp_size
         self._total_devices: int = int(
             math.prod(asdict(sharding_strategy).values()))
         if device_indexes:
@@ -198,6 +205,31 @@ class ShardingConfigManager:
                 "TPU_MULTIPROCESS_DP is enabled: supported for online serving "
                 "only. The offline LLM().generate() API will hang. "
                 "Use `vllm serve` instead.")
+
+        # Colocated-python DP: a single controller holds `data_parallelism`
+        # vLLM EngineCore instances, each running on a colocated CPU host. Each
+        # shard is a single-rank engine — so we collapse data_parallelism to 1
+        # for the per-engine sharding strategy. The original DP size is stashed
+        # below on the ShardingConfigManager so the controller can read it.
+        colocated_dp = (envs.TPU_COLOCATED_DP and data_parallelism > 1
+                        and vllm_envs.VLLM_TPU_USING_PATHWAYS)
+        if (envs.TPU_COLOCATED_DP and data_parallelism > 1
+                and not colocated_dp):
+            raise ValueError(
+                "TPU_COLOCATED_DP requires Pathways "
+                "(JAX_PLATFORMS=proxy / VLLM_TPU_USING_PATHWAYS=1). "
+                "For non-Pathways multi-process DP use TPU_MULTIPROCESS_DP.")
+        if envs.TPU_COLOCATED_DP and envs.TPU_MULTIPROCESS_DP:
+            raise ValueError(
+                "TPU_COLOCATED_DP and TPU_MULTIPROCESS_DP are mutually "
+                "exclusive — pick one.")
+        colocated_dp_size = data_parallelism if colocated_dp else 1
+        if colocated_dp:
+            data_parallelism = 1
+            logger.info(
+                "TPU_COLOCATED_DP is enabled: running %d independent vLLM "
+                "engines on colocated CPU hosts (one per Pathways host); "
+                "each engine is single-rank.", colocated_dp_size)
         expert_parallelism = sharding_strategy.get("expert_parallelism", 1)
         sequence_parallelism = sharding_strategy.get("sequence_parallelism", 1)
         device_indexes = sharding_strategy.get("device_indexes", None)
@@ -287,7 +319,8 @@ class ShardingConfigManager:
             vllm_config.parallel_config.data_parallel_size_local = 1
 
         cls.validate(vllm_config, sharding_strategy)
-        return cls(sharding_strategy, device_indexes)
+        return cls(sharding_strategy, device_indexes,
+                   colocated_dp_size=colocated_dp_size)
 
     @classmethod
     def validate(cls, vllm_config, sharding_strategy):

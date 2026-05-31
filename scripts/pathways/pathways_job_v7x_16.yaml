@@ -59,7 +59,7 @@ spec:
                   # Environment variables
                   export VLLM_ENABLE_V1_MULTIPROCESSING=0
                   export HF_TOKEN=${HF_TOKEN}
-                  # export PHASED_PROFILING_DIR=gs://wenxindong-cloud-tpu-inference-test/profiling/
+                  # export PHASED_PROFILING_DIR=gs://wenxindong-cloud-tpu-inference-test/profiling/may30/1
                   export VLLM_ENGINE_READY_TIMEOUT_S=7200
                   export MODEL_IMPL_TYPE=vllm
                   export NEW_MODEL_DESIGN=1
@@ -70,7 +70,7 @@ spec:
                   # Launch vllm serve via Pathways
                   JAX_PLATFORMS=proxy,cpu \
                   JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 \
-                  python /workspace/tpu_inference/examples/offline_inference.py  --data-parallel-size 2 --tensor-parallel-size 8 
+                  python /workspace/tpu_inference/examples/offline_inference.py  --data-parallel-size 2 --tensor-parallel-size 8 --load-format dummy --no-async-scheduling
                   # python /workspace/tpu_inference/examples/offline_inference.py --model Qwen/Qwen3-235B-A22B --tensor-parallel-size 8 --load-format dummy --additional_config='{"sharding":{"sharding_strategy": {"enable_dp_attention":1}}}' --data-parallel-size 2
                   # vllm serve Qwen/Qwen3-30B-A3B \
                   #   --tensor-parallel-size 2 \

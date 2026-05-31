@@ -293,7 +293,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         rank: int = 0,
         is_first_rank: bool = True,
         is_last_rank: bool = True,
+        cpu_only: bool = False,
     ):
+        # `cpu_only=True` is used by the colocated-DP sidecar (see
+        # tpu_inference/core/colocated_dp_engine.py). In that mode the runner
+        # is instantiated on a colocated CPU host that has NO TPU device
+        # access — `jax.devices()` returns only CPU devices there. We
+        # therefore skip every TPU-touching init step (mesh built over real
+        # TPU chips, model compile, KV cache allocation, compilation /
+        # spec-decode / structured-decode / kv_cache managers) and keep only
+        # the CPU-side prep state (input_batch, persistent_batch_manager,
+        # device_buffer, positions_cpu, paddings, etc.).
+        #
+        # The CPU runner's `_prepare_inputs` runs the same numpy work as the
+        # full runner and emits CPU JAX arrays (on a degenerate 1-device CPU
+        # mesh — every NamedSharding is effectively "replicated on this
+        # one host"). The boundary then ships those CPU arrays to the
+        # controller's full runner, which `device_put`s them onto its TPU
+        # mesh and runs `model_fn` / sampling.
+        self.cpu_only = cpu_only
+        logger.info(f"Initializing TPUModelRunner | cpu_only={cpu_only} ")
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         # TODO(jevinjiang): override block size based on RPA v3.
@@ -316,7 +335,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.is_last_rank = is_last_rank
 
         self._init_random()
-        self._init_mesh()
+        if self.cpu_only:
+            self._init_cpu_mesh()
+        else:
+            self._init_mesh()
         self._init_phased_profiling()
         self._init_aggregated_stats_logging()
         self._init_mm()
@@ -324,12 +346,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._init_speculative_decoding()
 
         # Delegate functions to specific manager classes.
-        self.compilation_manager = CompilationManager(self)
-        if self.is_last_rank:
-            self.speculative_decoding_manager = SpeculativeDecodingManager(
-                self)
-            self.structured_decoding_manager = StructuredDecodingManager(self)
-        self.kv_cache_manager = KVCacheManager(self)
+        # TPU-touching managers are skipped under cpu_only — the sidecar
+        # never compiles model_fn, allocates KV cache, or drives spec /
+        # structured decoding.
+        if not self.cpu_only:
+            self.compilation_manager = CompilationManager(self)
+            if self.is_last_rank:
+                self.speculative_decoding_manager = SpeculativeDecodingManager(
+                    self)
+                self.structured_decoding_manager = StructuredDecodingManager(
+                    self)
+            self.kv_cache_manager = KVCacheManager(self)
+        else:
+            self.compilation_manager = None  # type: ignore[assignment]
+            self.kv_cache_manager = None     # type: ignore[assignment]
         self.mm_manager = MultiModalManager(self)
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests, self.input_batch, self.encoder_cache,
@@ -369,6 +399,55 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh = self._create_2d_mesh()
 
         logger.info(f"Init mesh | mesh={self.mesh}")
+
+    def _init_cpu_mesh(self) -> None:
+        """Build a CPU mesh whose SHAPE matches the controller's TPU mesh
+        for this rank — used in `cpu_only` mode on the colocated-DP sidecar.
+
+        The caller passes `self.devices` = colocated CPU devices for this
+        rank's TPU chips (obtained from
+        `colocated_python.colocated_cpu_devices(rank_tpu_devices)`).  There
+        is one CPU device per TPU device, AND the rank's per-rank
+        sharding_config (data_parallel_size collapsed to 1) makes the
+        mesh shape exactly match the TPU mesh shape.
+
+        Why a multi-device CPU mesh (not a degenerate 1-device one): with
+        matched shapes, every `_prepare_inputs` output JAX array is sharded
+        across CPU devices in the same axis layout as the TPU side.  The
+        controller can then `jax.device_put(cpu_arr, tpu_sharding)` and
+        JAX performs a direct per-device CPU→TPU copy on the colocated
+        host — no allgather, no reshape, no re-sharding RPC.
+        """
+        sharding_config = self.vllm_config.sharding_config
+        if envs.NEW_MODEL_DESIGN:
+            mesh_shape = (
+                sharding_config.model_dp_size,
+                sharding_config.attn_dp_size,
+                sharding_config.attn_dp_expert_size,
+                sharding_config.expert_size,
+                sharding_config.tp_size,
+                sharding_config.decode_cp_size,
+            )
+            axis_names = MESH_AXIS_NAMES
+        else:
+            mesh_shape = (
+                sharding_config.model_dp_size,
+                sharding_config.tp_size,
+            )
+            axis_names = MESH_AXIS_NAMES_2D
+        expected = int(np.prod(mesh_shape))
+        if len(self.devices) < expected:
+            raise ValueError(
+                f"_init_cpu_mesh: expected {expected} CPU devices for mesh "
+                f"shape {mesh_shape}, got {len(self.devices)}. The caller "
+                f"should pass `colocated_python.colocated_cpu_devices(...)` "
+                f"with one CPU device per TPU device in this rank's group.")
+        devs = list(self.devices)[:expected]
+        devices_array = np.array(devs).reshape(mesh_shape)
+        self.mesh = jax.sharding.Mesh(devices_array, axis_names)
+        logger.info(
+            f"Init CPU mesh (sidecar) | shape={mesh_shape} | n_devs={expected}"
+            f" | first_dev={devs[0]} | mesh={self.mesh}")
 
     def _create_new_model_mesh(self) -> jax.sharding.Mesh:
         num_slices = envs.NUM_SLICES
@@ -786,6 +865,209 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def capture_model(self) -> None:
         self.compilation_manager.capture_model()
+
+    @time_function
+    def _dispatch_tpu_sample(
+        self,
+        input_ids: jax.Array,
+        input_positions: jax.Array,
+        attn_metadata: Any,
+        sampling_metadata: Any,
+        logits_indices: jax.Array,
+    ) -> Tuple[jax.Array, Optional[Any]]:
+        """v3 controller-side: PURE TPU dispatch. Returns TPU-resident
+        JAX arrays.
+
+        Runs model_fn + compute_logits + sample (+ optional logprobs).
+        Does NOT device_get / materialize — returns the JAX arrays so the
+        caller (`RankExecutor.execute_with_cpu_prep`) can `jax.device_put`
+        them directly onto the sidecar's CPU sharding for a native
+        cross-host transfer. No cloudpickle, no `np.asarray` round-trip.
+
+        Returns ``(next_tokens, logprobs_or_None)`` where both are
+        ``jax.Array`` on TPU when materialized lazily.
+
+        That's the entire boundary payload for this step — no per-request
+        state needs to round-trip.
+        """
+        inputs_embeds = None
+        lora_metadata = None
+        intermediate_tensors = None
+
+        with jax.set_mesh(self.mesh), self.maybe_forbid_compile:
+            with set_forward_context(None, self.vllm_config):
+                (self.kv_caches, hidden_states, aux_hidden_states,
+                 expert_indices) = self.model_fn(
+                     self.state_leaves,
+                     self.kv_caches,
+                     input_ids,
+                     attn_metadata,
+                     inputs_embeds,
+                     input_positions,
+                     tuple(self.layer_name_to_kvcache_index.items()),
+                     lora_metadata,
+                     intermediate_tensors,
+                     self.is_first_rank,
+                     self.is_last_rank,
+                 )
+
+            hidden_states = self._select_from_array_fn(
+                hidden_states, logits_indices)
+            logits = self.compute_logits_fn(
+                self.state_leaves,
+                hidden_states,
+                lora_metadata,
+            )
+
+            # Sample.
+            if sampling_metadata.do_sampling:
+                self.rng_params_for_sampling, step_rng = jax.random.split(
+                    self.rng_params_for_sampling)
+            else:
+                step_rng = self.rng_params_for_sampling
+            logits = logits.astype(jnp.float32)
+            next_tokens, processed_logits = sample(
+                step_rng, self.mesh, logits, sampling_metadata)
+
+            # Optional logprobs (MVP scope rarely uses them).
+            if sampling_metadata.logprobs:
+                lp_logits = (processed_logits
+                             if self.model_config.logprobs_mode
+                             == "processed_logprobs" else logits)
+                logprobs = self._compute_and_gather_logprobs(
+                    lp_logits, next_tokens, self.model_config.max_logprobs)
+                logprobs = _jax_logprobs_copy_to_host_async(logprobs)
+            else:
+                logprobs = None
+
+        # Materialize to CPU. These device_gets are what the boundary will
+        # carry: small numpy arrays.
+        # Return TPU-resident JAX arrays — caller (RankExecutor on the
+        # controller) does the cross-host transfer with a single
+        # `jax.device_put` onto the sidecar's CPU sharding. This avoids
+        # the device_get → numpy → cloudpickle → bytes round-trip; the
+        # JAX array flows as a native pytree leaf across the colocated
+        # boundary, no pickling.
+        return next_tokens, logprobs
+
+    def _postprocess_tpu_sample(
+        self,
+        next_tokens: Any,
+        logprobs: Any,
+        scheduler_output: Any,
+        padded_num_reqs: int,
+        logits_indices_selector: Optional[List[int]] = None,
+    ) -> ModelRunnerOutput:
+        """v3 sidecar-side: PURE CPU postprocessing.
+
+        `next_tokens` and `logprobs` arrive as `jax.Array` (sharded on the
+        sidecar's local CPU mesh — the controller did a direct per-device
+        `jax.device_put` from TPU to that sharding). We materialize to
+        numpy only here, at the point we actually need to index it.
+
+        Uses `self.input_batch` and `self.requests` directly (the sidecar's
+        source of truth), so no sync of req_ids / req_id_to_index /
+        requests is needed from the controller. Mirrors
+        `_sample_from_logits`'s CPU half. MVP scope: no spec decode, no
+        async scheduling, no MoE expert tracking, no kv-connector output.
+        """
+        # Single device_get (per-device since the array's already on local
+        # CPU sharding) — replaces the cloudpickle round-trip the old
+        # `tpu_output` dict required.
+        next_tokens = np.asarray(next_tokens)
+        if logprobs is not None:
+            # logprobs may be a LogprobsLists materializer result already,
+            # or a jax.Array; handle both.
+            if isinstance(logprobs, jax.Array):
+                logprobs = _jax_logprobs_materialize(logprobs, None)
+
+        num_reqs = self.input_batch.num_reqs
+
+        request_seq_lens: list = []
+        discard_sampled_tokens_req_indices: list = []
+        for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
+            assert req_id is not None
+            req_state = self.requests[req_id]
+            seq_len = (req_state.num_computed_tokens +
+                       scheduler_output.num_scheduled_tokens[req_id])
+            if seq_len >= req_state.num_tokens:
+                request_seq_lens.append((i, req_state, seq_len))
+            else:
+                discard_sampled_tokens_req_indices.append(i)
+
+        req_ids = list(self.input_batch.req_ids[:num_reqs])
+        prompt_logprobs_dict = {rid: None for rid in req_ids}
+
+        # Extract valid sampled tokens — mirrors host_extract_sampled_tokens
+        # for the no-spec-decode path.
+        if logits_indices_selector is not None:
+            next_tokens = next_tokens[logits_indices_selector]
+        selected_token_ids = np.expand_dims(next_tokens[:num_reqs], 1)
+        valid_sampled_token_ids = selected_token_ids.tolist()
+        for i in discard_sampled_tokens_req_indices:
+            valid_sampled_token_ids[i].clear()
+
+        # Post-step writes: append sampled tokens to input_batch.token_ids_cpu
+        # so the next _prepare_inputs picks them up.
+        for req_idx, req_state, _ in request_seq_lens:
+            sampled_ids = valid_sampled_token_ids[req_idx]
+            if not sampled_ids:
+                continue
+            start_idx = int(self.input_batch.num_tokens_no_spec[req_idx])
+            end_idx = start_idx + len(sampled_ids)
+            if end_idx > self.max_model_len:
+                continue
+            self.input_batch.token_ids_cpu[req_idx,
+                                           start_idx:end_idx] = sampled_ids
+            self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+            self.input_batch.num_tokens[req_idx] = end_idx
+            req_state.output_token_ids.extend(sampled_ids)
+
+        return ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=valid_sampled_token_ids,
+            logprobs=logprobs,
+            prompt_logprobs_dict=prompt_logprobs_dict,
+            pooler_output=[],
+            kv_connector_output=None,
+        )
+
+    @time_function
+    def _execute_with_prepared_inputs(
+        self,
+        input_ids: jax.Array,
+        input_positions: jax.Array,
+        attn_metadata: Any,
+        sampling_metadata: Any,
+        logits_indices: jax.Array,
+        scheduler_output: Optional[Any] = None,
+        spec_decode_metadata: Optional[Any] = None,
+        logits_indices_selector: Optional[List[int]] = None,
+        padded_num_reqs: int = -1,
+        req_ids_dp: Optional[Dict[int, List[str]]] = None,
+        padded_num_scheduled_tokens_per_dp_rank: int = 0,
+    ) -> Dict[str, Any]:
+        """Thin wrapper for `_dispatch_tpu_sample`.
+
+        Now returns a CPU dict (not ModelRunnerOutput). The sidecar's
+        `_postprocess_tpu_sample` builds ModelRunnerOutput from this +
+        its own input_batch/requests. The controller never reads
+        per-request CPU state — it's purely a TPU dispatcher.
+
+        Extra kwargs are accepted for call-site compat but ignored in MVP
+        scope (no spec decode / async scheduling / MoE / kv-connector).
+        """
+        del (scheduler_output, spec_decode_metadata, logits_indices_selector,
+             padded_num_reqs, req_ids_dp,
+             padded_num_scheduled_tokens_per_dp_rank)
+        return self._dispatch_tpu_sample(
+            input_ids=input_ids,
+            input_positions=input_positions,
+            attn_metadata=attn_metadata,
+            sampling_metadata=sampling_metadata,
+            logits_indices=logits_indices,
+        )
 
     @time_function
     def execute_model(
