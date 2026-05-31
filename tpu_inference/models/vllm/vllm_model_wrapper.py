@@ -277,6 +277,22 @@ class VllmModelWrapper:
 
     def jit_step_func(self):
 
+        compiler_options = {
+            "xla_tpu_all_gather_collective_matmul_mode":
+            "post_spmd_conservative",
+            "xla_tpu_reduce_scatter_collective_matmul_mode":
+            "post_spmd_conservative",
+            "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
+        }
+        if envs.SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_SIZE_MB > 0:
+            threshold_bytes = str(envs.SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_SIZE_MB * 1024 * 1024)
+            compiler_options[
+                "xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes"] = (
+                    threshold_bytes)
+            compiler_options[
+                "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
+                    threshold_bytes)
+
         @jax.jit(
             donate_argnames=("kv_caches", ),
             out_shardings=(
@@ -286,13 +302,7 @@ class VllmModelWrapper:
                 None,  # empty list
                 None,  # expert ids
             ),
-            compiler_options={
-                "xla_tpu_all_gather_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_use_minor_sharding_for_major_trivial_input": "true"
-            },
+            compiler_options=compiler_options,
             static_argnames=(
                 "layer_name_to_kvcache_index",
                 "is_first_rank",

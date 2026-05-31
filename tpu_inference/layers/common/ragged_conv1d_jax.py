@@ -201,43 +201,59 @@ def ragged_conv1d_decode_only(
     has_initial_state,
     *,
     kernel_size,
+    decode_only_dense_matmul: bool = False,
 ):
     """Apply conv1d for decode-only case (All valid reqs have seq_len=1)."""
     num_tokens = x.shape[0]
-
+    num_valid_seqs = distribution[2]
     token_idx = jnp.arange(num_tokens)
+    valid_mask = token_idx < num_valid_seqs
     req_state_indices = state_indices[token_idx]
-    gathered_state = conv_state[
-        req_state_indices]  # (num_tokens, kernel_size - 1, dim)
 
+    # Gather
+    if decode_only_dense_matmul:
+        num_blocks = conv_state.shape[0]
+        one_hot = jax.nn.one_hot(req_state_indices,
+                                 num_classes=num_blocks,
+                                 dtype=conv_state.dtype)
+        one_hot = one_hot * valid_mask[:, jnp.newaxis].astype(conv_state.dtype)
+        gathered_state = jnp.einsum("tb,bkd->tkd",
+                                    one_hot,
+                                    conv_state,
+                                    precision=lax.Precision.HIGHEST) # (num_tokens, kernel_size - 1, dim)
+    else:
+        gathered_state = conv_state[req_state_indices]  # (num_tokens, kernel_size - 1, dim)
+
+    # Convolution
     # Concat old state and new token to form (num_tokens, kernel_size, dim)
     lhs = jnp.concatenate([gathered_state, x[:, jnp.newaxis, :]], axis=1)
-
     out = jnp.einsum(
         "nkd,dk->nd",
         lhs,
         conv_weight[:, 0, :],
         precision=lax.Precision.HIGHEST,
     )
-
     if conv_bias is not None:
         out = out + conv_bias
 
-    num_valid_seqs = distribution[2]
+    # Scatter update
+    new_state_extracted = lhs[:, 1:, :] # (T, K-1, D)
 
-    # Drop oldest state and append new state
-    new_state_extracted = jnp.concatenate(
-        [gathered_state[:, 1:, :], x[:, jnp.newaxis, :]], axis=1)
-
-    token_idx = jnp.arange(num_tokens)
-    valid_mask = token_idx < num_valid_seqs
-    states_to_set = jnp.where(
-        valid_mask[:, jnp.newaxis, jnp.newaxis],
-        new_state_extracted,
-        gathered_state,
-    )
-
-    updated_conv_state = conv_state.at[req_state_indices].set(states_to_set)
+    if decode_only_dense_matmul:
+        slot_written = one_hot.sum(axis=0) # (B,)
+        keep = (1.0 - slot_written)[:, jnp.newaxis, jnp.newaxis] # (B, 1, 1)
+        delta = jnp.einsum("tb,tkd->bkd",
+                           one_hot,
+                           new_state_extracted,
+                           precision=lax.Precision.HIGHEST) # (B, K-1, D)
+        updated_conv_state = conv_state * keep + delta
+    else:
+        states_to_set = jnp.where(
+            valid_mask[:, jnp.newaxis, jnp.newaxis],
+            new_state_extracted,
+            gathered_state,
+        )
+        updated_conv_state = conv_state.at[req_state_indices].set(states_to_set)
 
     out = jnp.where(valid_mask[:, jnp.newaxis], out, 0.0)
 
@@ -245,7 +261,7 @@ def ragged_conv1d_decode_only(
 
 
 # Donate conv_state to avoid "copy" op by XLA
-@jax.jit(donate_argnames=("conv_state", ), static_argnames=("kernel_size", ))
+@jax.jit(donate_argnames=("conv_state", ), static_argnames=("kernel_size", "decode_only_dense_matmul"))
 @jax.named_scope("ragged_conv1d_jax")
 def ragged_conv1d(
     x: jax.Array,
@@ -258,6 +274,7 @@ def ragged_conv1d(
     has_initial_state: jax.Array,
     *,
     kernel_size: int,
+    decode_only_dense_matmul: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Applies 1D convolution over ragged sequences and updates state.
 
@@ -283,6 +300,8 @@ def ragged_conv1d(
         from a prior request, silently corrupting the first ``kernel_size - 1``
         outputs of every new request.
       kernel_size: The size of the convolution kernel.
+      decode_only_dense_matmul: Whether to use one-hot dense matmul for 
+        gather/scatter in decode-only mode.
 
     Returns:
       A tuple containing:
@@ -308,6 +327,7 @@ def ragged_conv1d(
             distribution,
             has_initial_state,
             kernel_size=kernel_size,
+            decode_only_dense_matmul=decode_only_dense_matmul,
         )
 
     def mixed_prefill_branch(_):

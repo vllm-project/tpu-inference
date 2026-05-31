@@ -63,6 +63,8 @@ if TYPE_CHECKING:
     LORA_MODULE_PATH: str = ""
     PROFILE_SINGLE_CHIP: bool = False
     PROFILE_SINGLE_CHIP_ALL_SC: bool = False
+    SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_SIZE_MB: int = 0
+    RAGGED_CONV1D_DECODE_DENSE_MATMUL: bool = False
 
 
 def env_with_choices(
@@ -389,6 +391,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # When true, profile all sparse cores
     "PROFILE_SINGLE_CHIP_ALL_SC":
     env_bool("PROFILE_SINGLE_CHIP_ALL_SC", default=False),
+    # When > 0, set XLA's SparseCore-offload minimum size threshold (MB) for
+    # all-reduce and all-gather. All reduce and all gather smaller than this stay on the
+    # TC. Default 0 (off) to always offload.
+    "SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_SIZE_MB":
+    lambda: int(os.getenv("SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_SIZE_MB", "0")),
+    # When true, replace gather/scatter in ragged conv1d decode only with dense
+    # matmul ops. It avoids the overhead of relaying out from HBM<>VMEM friendly layout
+    # to gather/scatter friendly layout.
+    "RAGGED_CONV1D_DECODE_DENSE_MATMUL":
+    env_bool("RAGGED_CONV1D_DECODE_DENSE_MATMUL", default=False),
 }
 
 

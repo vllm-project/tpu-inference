@@ -25,6 +25,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.layers.common.ragged_gated_delta_rule_wrapper as ragged_gated_delta_rule_wrapper
+from tpu_inference import envs
 from tpu_inference.layers.common.ragged_conv1d_jax import \
     ragged_conv1d as ragged_conv1d_jax
 from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
@@ -133,6 +134,7 @@ def run_jax_gdn_attention_local(
         distribution,
         has_initial_state,
         kernel_size=kernel_size,
+        decode_only_dense_matmul=envs.RAGGED_CONV1D_DECODE_DENSE_MATMUL,
     )
 
     if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
