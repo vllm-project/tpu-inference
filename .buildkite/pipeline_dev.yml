@@ -25,11 +25,11 @@ steps:
         set -e
         IMG=vllm/vllm-openai:latest-cu129-ubuntu2404
         CONT=vllm-bk-poc
-        sudo docker rm -f $CONT 2>/dev/null || true
+        docker rm -f $CONT 2>/dev/null || true
         echo "=== pull ==="
-        sudo docker pull $IMG
+        docker pull $IMG
         echo "=== run ==="
-        sudo docker run -d --name $CONT \
+        docker run -d --name $CONT \
           --gpus all --ipc=host --shm-size=32g \
           -p 8000:8000 \
           $IMG \
@@ -50,8 +50,8 @@ steps:
         done
         if [ "$UP" -ne 1 ]; then
           echo "=== server never came up — last 80 log lines ==="
-          sudo docker logs --tail 80 $CONT || true
-          sudo docker rm -f $CONT 2>/dev/null || true
+          docker logs --tail 80 $CONT || true
+          docker rm -f $CONT 2>/dev/null || true
           exit 1
         fi
         echo "=== query ==="
@@ -60,4 +60,4 @@ steps:
           -d '{"model":"Qwen/Qwen2.5-7B-Instruct","messages":[{"role":"user","content":"What is the capital of France?"}],"max_tokens":50}' \
           | python3 -m json.tool
         echo "=== cleanup ==="
-        sudo docker rm -f $CONT 2>/dev/null || true
+        docker rm -f $CONT 2>/dev/null || true
