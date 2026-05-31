@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -320,7 +321,7 @@ class TestMultiModalManager:
         mock_scheduler_output_1.total_num_scheduled_tokens = 20
         mock_scheduler_output_1.num_scheduled_tokens = {req_id: 20}
 
-        gathered_mm_embeds_1, gathered_is_mm_embed_1 = self.runner.mm_manager.gather_mm_embeddings(
+        gathered_mm_embeds_1, gathered_is_mm_embed_1, deepstack_embeds_1 = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output_1,
             target_pad_len=mock_scheduler_output_1.total_num_scheduled_tokens,
             req_ids_dp={0: [req_id]},
@@ -331,6 +332,7 @@ class TestMultiModalManager:
         assert isinstance(gathered_mm_embeds_1, list)
         assert len(gathered_mm_embeds_1) == 1
         assert gathered_is_mm_embed_1 is not None
+        assert deepstack_embeds_1 is None
 
         expected_embeds_1 = encoder_embedding[0:10]
         gathered_embeds_1 = gathered_mm_embeds_1[0]
@@ -348,7 +350,7 @@ class TestMultiModalManager:
         mock_scheduler_output_2.total_num_scheduled_tokens = 30
         mock_scheduler_output_2.num_scheduled_tokens = {req_id: 30}
 
-        gathered_mm_embeds_2, gathered_is_mm_embed_2 = self.runner.mm_manager.gather_mm_embeddings(
+        gathered_mm_embeds_2, gathered_is_mm_embed_2, deepstack_embeds_2 = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output_2,
             target_pad_len=mock_scheduler_output_2.total_num_scheduled_tokens,
             req_ids_dp={0: [req_id]},
@@ -359,6 +361,7 @@ class TestMultiModalManager:
         assert isinstance(gathered_mm_embeds_2, list)
         assert len(gathered_mm_embeds_2) == 1
         assert gathered_is_mm_embed_2 is not None
+        assert deepstack_embeds_2 is None
 
         expected_embeds_2 = encoder_embedding[10:40]
         gathered_embeds_2 = gathered_mm_embeds_2[0]
@@ -376,7 +379,7 @@ class TestMultiModalManager:
         mock_scheduler_output_3.total_num_scheduled_tokens = 30
         mock_scheduler_output_3.num_scheduled_tokens = {req_id: 30}
 
-        gathered_mm_embeds_3, gathered_is_mm_embed_3 = self.runner.mm_manager.gather_mm_embeddings(
+        gathered_mm_embeds_3, gathered_is_mm_embed_3, deepstack_embeds_3 = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output_3,
             target_pad_len=mock_scheduler_output_3.total_num_scheduled_tokens,
             req_ids_dp={0: [req_id]},
@@ -388,6 +391,7 @@ class TestMultiModalManager:
         assert len(gathered_mm_embeds_3) == 1
         assert gathered_is_mm_embed_3 is not None
 
+        assert deepstack_embeds_3 is None
         expected_embeds_3 = encoder_embedding[40:56]
         gathered_embeds_3 = gathered_mm_embeds_3[0]
 
@@ -397,6 +401,86 @@ class TestMultiModalManager:
         assert gathered_is_mm_embed_3.shape == (30, )
         np.testing.assert_array_equal(np.asarray(gathered_is_mm_embed_3),
                                       is_mm_embed_cpu[50:80])
+
+    def test_gather_mm_embeddings_deepstack_uses_embed_indices(self):
+        req_id = "req-1"
+        encoder_embedding = jnp.arange(2 * 4, dtype=jnp.float32).reshape(
+            (2, 4))
+        deepstack_embedding = [encoder_embedding + 100]
+        self.runner.encoder_cache = {req_id: encoder_embedding}
+        self.runner.deepstack_cache = {req_id: deepstack_embedding}
+
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
+        @dataclass
+        class DummyPlaceholderRange:
+            offset: int
+            length: int
+            is_embed: np.ndarray
+
+            def get_embeds_indices_in_range(self, start: int, end: int):
+                start = int(start)
+                end = int(end)
+                embed_start = int(self.is_embed[:start].sum())
+                embed_end = embed_start + int(self.is_embed[start:end].sum())
+                return embed_start, embed_end
+
+        pos_info = DummyPlaceholderRange(
+            offset=0,
+            length=4,
+            is_embed=np.array([True, False, True, False], dtype=np.bool_),
+        )
+
+        req_state = CachedRequestState(
+            req_id=req_id,
+            prompt_token_ids=list(range(4)),
+            output_token_ids=[],
+            sampling_params=mock_sampling_params,
+            block_ids=([], ),
+            num_computed_tokens=0,
+            mm_features=[
+                MultiModalFeatureSpec(data=None,
+                                      identifier=req_id,
+                                      modality="image",
+                                      mm_position=pos_info)
+            ],
+            lora_request=None,
+            pooling_params=None,
+            generator=None,
+        )
+        self.runner.requests = {req_id: req_state}
+        self.runner.input_batch.add_request(req_state)
+
+        mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output.num_scheduled_tokens = {req_id: 4}
+        mock_scheduler_output.total_num_scheduled_tokens = 4
+
+        mm_embeds, is_mm_embed, deepstack_embeds = self.runner.mm_manager.gather_mm_embeddings(
+            mock_scheduler_output,
+            target_pad_len=4,
+            req_ids_dp={0: [req_id]},
+            padded_num_scheduled_tokens_per_dp_rank=4,
+        )
+        assert len(mm_embeds) == 1
+        np.testing.assert_array_equal(mm_embeds[0], encoder_embedding)
+        np.testing.assert_array_equal(
+            is_mm_embed, np.array([True, False, True, False], dtype=np.bool_))
+        assert len(deepstack_embeds) == 1
+        expected_deepstack = np.concatenate(
+            [deepstack_embedding[0],
+             np.zeros((2, 4), dtype=np.float32)],
+            axis=0)
+        np.testing.assert_array_equal(deepstack_embeds[0], expected_deepstack)
 
     def test_calc_mrope_positions(self):
         """Tests the calculation of M-RoPE positions for mixed prompt/completion."""
@@ -534,13 +618,14 @@ class TestMultiModalManager:
             req_id_a: 20,
             req_id_b: 20,
         }
+        mock_scheduler_output.total_num_scheduled_tokens = 40
 
         # padded_per_rank=24 (>20); target_pad_len=48 (= 24 * 2).
         padded_per_rank = 24
         target_pad_len = padded_per_rank * 2
         req_ids_dp = {0: [req_id_a], 1: [req_id_b]}
 
-        mm_embeds, is_mm_embed = self.runner.mm_manager.gather_mm_embeddings(
+        mm_embeds, is_mm_embed, _ = self.runner.mm_manager.gather_mm_embeddings(
             mock_scheduler_output,
             target_pad_len=target_pad_len,
             req_ids_dp=req_ids_dp,
