@@ -405,31 +405,38 @@ def inner_kernel(
                 end_n = min(rhs_tile_n, start_n + mxu_size)
                 col_size = end_n - start_n
 
-                acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
-                                  dtype=acc_ref.dtype)
-                for b_id in range(cfgs.num_quant_blocks_per_tile_k):
-                    k_start = b_id * rhs_qbs
-                    k_end = k_start + rhs_qbs
-
-                    block_acc = jnp.matmul(
-                        tiled_lhs[:, k_start:k_end],
-                        tiled_rhs[k_start:k_end, start_n:end_n],
+                if cfgs.rhs_cfgs.should_dequantize_before_matmul:
+                    acc_n = jnp.matmul(
+                        tiled_lhs,
+                        tiled_rhs[:, start_n:end_n],
                         preferred_element_type=jnp.float32,
                     ).astype(acc_ref.dtype)
+                else:
+                    acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
+                                      dtype=acc_ref.dtype)
+                    for b_id in range(cfgs.num_quant_blocks_per_tile_k):
+                        k_start = b_id * rhs_qbs
+                        k_end = k_start + rhs_qbs
 
-                    if (cfgs.rhs_cfgs.has_scale and
-                            not cfgs.rhs_cfgs.should_dequantize_before_matmul):
-                        tiled_rhs_scale = tiled_rhs_ref.get_scale()
-                        block_acc *= tiled_rhs_scale[b_id, :,
-                                                     start_n:end_n].astype(
-                                                         acc_ref.dtype)
+                        block_acc = jnp.matmul(
+                            tiled_lhs[:, k_start:k_end],
+                            tiled_rhs[k_start:k_end, start_n:end_n],
+                            preferred_element_type=jnp.float32,
+                        ).astype(acc_ref.dtype)
 
-                    acc_n += block_acc
+                        if cfgs.rhs_cfgs.has_scale:
+                            tiled_rhs_scale = tiled_rhs_ref.get_scale()
+                            block_acc *= tiled_rhs_scale[
+                                b_id, :, start_n:end_n].astype(
+                                    acc_ref.dtype)
+
+                        acc_n += block_acc
                 acc_list.append(acc_n)
         else:
             # Quantized matmul path.
             lhs_q_dtype = cfgs.lhs_cfgs.quant_dtype
-            q_block_size = cfgs.lhs_cfgs.quant_block_size
+            lhs_qbs = cfgs.lhs_cfgs.quant_block_size
+            rhs_qbs = cfgs.rhs_cfgs.quant_block_size
 
             if jnp.issubdtype(lhs_q_dtype, jnp.floating):
                 dtype_max = float(jnp.finfo(lhs_q_dtype).max)
@@ -445,6 +452,11 @@ def inner_kernel(
             # inner loop which can be used to pipeline subsequent VPU or VST ops with
             # MXU ops for the next [tile_m, mxu_size].
             mxu_size = pltpu.get_tpu_info().mxu_column_size
+            # Sub-matmuls run at min(lhs_qbs, rhs_qbs) so each rhs scale is
+            # applied to its own partial sum. When rhs_qbs >= lhs_qbs the inner
+            # loop collapses to a single iteration.
+            inner_step = min(lhs_qbs,
+                             rhs_qbs) if rhs_qbs is not None else lhs_qbs
 
             for start_n in range(0, rhs_tile_n, mxu_size):
                 end_n = min(rhs_tile_n, start_n + mxu_size)
@@ -452,11 +464,10 @@ def inner_kernel(
 
                 acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
                                   dtype=acc_ref.dtype)
-                for start_k in range(0, cfgs.tiles.tile_k, q_block_size):
-                    end_k = min(cfgs.tiles.tile_k, start_k + q_block_size)
+                for start_k in range(0, cfgs.tiles.tile_k, lhs_qbs):
+                    end_k = min(cfgs.tiles.tile_k, start_k + lhs_qbs)
 
                     block_lhs = tiled_lhs[:, start_k:end_k]
-                    block_rhs = tiled_rhs[start_k:end_k, start_n:end_n]
 
                     # Perform lhs quantization. Note that for every block_lhs,
                     # same computation will be performed tiles_n//mxu_size times.
@@ -474,34 +485,44 @@ def inner_kernel(
                     # Convert lhs into quantized dtype.
                     block_lhs_q = (block_lhs *
                                    block_scale_inv).astype(lhs_q_dtype)
-                    # Some mixed precision matmuls are not supported. In that case,
-                    # convert rhs into the same dtype as lhs. We generally expect that
-                    # this will be an upcast, e.g. int4 -> fp8 or int8.
-                    if not pltpu.get_tpu_info().is_matmul_supported(
-                            lhs_q_dtype, block_rhs.dtype):
-                        block_rhs = block_rhs.astype(lhs_q_dtype)
 
-                    block_acc = jnp.matmul(
-                        block_lhs_q,
-                        block_rhs,
-                        preferred_element_type=preferred_element_type,
-                    ).astype(acc_ref.dtype)
+                    for sub_start in range(start_k, end_k, inner_step):
+                        sub_end = min(end_k, sub_start + inner_step)
+                        sub_lhs_q = block_lhs_q[:, sub_start -
+                                                start_k:sub_end - start_k]
+                        sub_rhs = tiled_rhs[sub_start:sub_end, start_n:end_n]
 
-                    block_acc *= block_scale.astype(acc_ref.dtype)
+                        # Some mixed precision matmuls are not supported. In
+                        # that case, convert rhs into the same dtype as lhs.
+                        # We generally expect that this will be an upcast,
+                        # e.g. int4 -> fp8 or int8.
+                        if not pltpu.get_tpu_info().is_matmul_supported(
+                                lhs_q_dtype, sub_rhs.dtype):
+                            sub_rhs = sub_rhs.astype(lhs_q_dtype)
 
-                    # Apply rhs subchannel scale per quant block if it was
-                    # not dequantized earlier.
-                    if cfgs.rhs_cfgs.has_scale:
-                        assert not cfgs.rhs_cfgs.should_dequantize_before_matmul, (
-                            "If rhs is dequantized before matmul, quantized matmul path "
-                            "should not be taken.")
-                        b_id = start_k // cfgs.rhs_cfgs.quant_block_size
-                        rhs_scale_slice = tiled_rhs_ref.get_scale()
-                        block_acc *= rhs_scale_slice[b_id, :,
-                                                     start_n:end_n].astype(
-                                                         acc_ref.dtype)
+                        sub_acc = jnp.matmul(
+                            sub_lhs_q,
+                            sub_rhs,
+                            preferred_element_type=preferred_element_type,
+                        ).astype(acc_ref.dtype)
 
-                    acc_n += block_acc
+                        sub_acc *= block_scale.astype(acc_ref.dtype)
+
+                        # Apply rhs subchannel scale per quant block if it was
+                        # not dequantized earlier.
+                        if cfgs.rhs_cfgs.has_scale:
+                            assert (not cfgs.rhs_cfgs.
+                                    should_dequantize_before_matmul), (
+                                        "If rhs is dequantized before matmul,"
+                                        " quantized matmul path should not be"
+                                        " taken.")
+                            b_id = sub_start // rhs_qbs
+                            rhs_scale_slice = tiled_rhs_ref.get_scale()
+                            sub_acc *= rhs_scale_slice[b_id, :,
+                                                       start_n:end_n].astype(
+                                                           acc_ref.dtype)
+
+                        acc_n += sub_acc
                 acc_list.append(acc_n)
         acc = jnp.concatenate(acc_list, axis=1)
 
