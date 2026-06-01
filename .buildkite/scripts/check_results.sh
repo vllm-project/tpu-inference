@@ -39,12 +39,17 @@ for KEY in "$@"; do
 done
 
 if [ "${ANY_FAILED}" = "true" ] ; then
+    # Strip everything outside a conservative charset before interpolating the
+    # caller-supplied label into YAML. Prevents YAML / shell injection if a
+    # pipeline file passes an attacker-controlled string. Use a fixed command
+    # body instead of echoing the label.
+    SAFE_LABEL=$(printf '%s' "${FAILURE_LABEL}" | tr -cd '[:alnum:] _.:/-')
     cat <<- YAML | buildkite-agent pipeline upload
 steps:
-   - label: "${FAILURE_LABEL}"
+   - label: "${SAFE_LABEL}"
      agents:
        queue: cpu
-     command: echo "${FAILURE_LABEL}"
+     command: 'echo "test failure recorded"'
 YAML
     exit 1
 else

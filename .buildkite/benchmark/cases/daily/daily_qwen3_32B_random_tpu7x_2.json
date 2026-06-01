@@ -31,7 +31,7 @@
           "max-num-seqs": 256,
           "max-num-batched-tokens": 4096,
           "tensor-parallel-size": {
-            "v7x-8": 8
+            "v7x-2": 2
           },
           "max-model-len": 2048,
           "kv-cache-dtype": "fp8",
@@ -54,7 +54,6 @@
           "request-rate": "inf",
           "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true
-
         }
       }
     },

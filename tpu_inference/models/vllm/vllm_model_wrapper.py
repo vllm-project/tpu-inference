@@ -33,7 +33,6 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.ir import enable_torch_wrap
 from vllm.lora.layers import BaseLayerWithLoRA
-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -52,6 +51,8 @@ from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
+from tpu_inference.lora.lora_manager import (TPULRUCacheWorkerLoRAManager,
+                                             parse_lora_module_path_env)
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -70,14 +71,9 @@ logger = init_logger(__name__)
 
 class _VllmRunner(torch.nn.Module):
 
-    def __init__(self,
-                 vllm_model: torch.nn.Module,
-                 vllm_config: VllmConfig,
-                 is_draft_model: bool = False):
+    def __init__(self, vllm_model: torch.nn.Module):
         super().__init__()
         self.vllm_model = vllm_model
-        self.vllm_config = vllm_config
-        self.is_draft_model = is_draft_model
         has_pooler = is_pooling_model(vllm_model)
         self.pooler = vllm_model.pooler if has_pooler else None
 
@@ -242,8 +238,7 @@ class VllmModelWrapper:
             set_eagle3_aux_hidden_state_layers(
                 vllm_model, self.vllm_config.speculative_config)
 
-        self.model = _VllmRunner(vllm_model, self.vllm_config,
-                                 self.is_draft_model)
+        self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
         self._pooler: Pooler | None = self.model.pooler
@@ -627,8 +622,18 @@ def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
         logger.warning("Regarding multimodal models, vLLM currently "
                        "only supports adding LoRA to language model.")
 
+    # The target_modules list is used by vLLM's LoRA manager to identify
+    # which modules in the base model should have LoRA adapters attached.
+    # Overriding it here allows targeting custom module paths specified via env var on TPU.
+    env_modules = parse_lora_module_path_env()
+    if env_modules is not None and vllm_config.lora_config:
+        vllm_config.lora_config.target_modules = env_modules
+        logger.info(
+            f"Overriding vLLM Engine LoRA target_modules with LORA_MODULE_PATH: {env_modules}"
+        )
+
     # Add LoRA Manager to the Model Runner
-    lora_manager = LRUCacheWorkerLoRAManager(
+    lora_manager = TPULRUCacheWorkerLoRAManager(
         vllm_config,
         device,
         model.embedding_modules,
