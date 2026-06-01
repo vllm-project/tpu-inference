@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
     PROFILE_SINGLE_DEVICE: bool = False
+    LORA_MODULE_PATH: str = ""
 
 
 def env_with_choices(
@@ -380,6 +381,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Profile a single device instead of all devices.
     "PROFILE_SINGLE_DEVICE":
     env_bool("PROFILE_SINGLE_DEVICE", default=False),
+    "LORA_MODULE_PATH":
+    lambda: os.getenv("LORA_MODULE_PATH", ""),
 }
 
 

@@ -915,10 +915,12 @@ class TestTPUJaxRunnerDPInputsLightweight:
         # Should return input_ids unchanged
         np.testing.assert_array_equal(result, input_ids)
 
+    @patch('jax.lax.with_sharding_constraint',
+           side_effect=lambda x, *args, **kwargs: x)
     @patch('tpu_inference.runner.tpu_runner.device_array',
            side_effect=lambda mesh, tensors, **kwargs: tensors)
     def test_apply_async_token_substitution_with_padding(
-            self, mock_device_array):
+            self, mock_device_array, mock_with_sharding_constraint):
         """Test _apply_async_token_substitution with padding."""
 
         # Bind the actual method

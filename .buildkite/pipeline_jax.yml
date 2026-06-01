@@ -666,6 +666,25 @@ steps:
                 -d "{\"model\": \"$$MODEL\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}"
             '
 
+      - label: "${TPU_VERSION:-tpu6e} Test Kernel Tuner Runner"
+        key: ${TPU_VERSION:-tpu6e}_test_36
+        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+          TPU_CORES: 2
+        agents:
+          queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+        commands:
+          - |
+            if [[ "$TPU_VERSION" == "tpu7x" ]]; then
+              .buildkite/scripts/run_in_docker.sh bash -c "
+                TPU_VERSION=\${TPU_VERSION} TPU_CORES=\${TPU_CORES} python -m pytest tools/kernel/tuner/v1/tests/test_kernel_tuner_runner.py -v -rs"
+            else
+              echo "Skipping: Step only needs to run on TPU v7x."
+              exit 0
+            fi
+
       # -----------------------------------------------------------------
       # NOTIFICATION STEP
       # -----------------------------------------------------------------
@@ -709,6 +728,7 @@ steps:
           - ${TPU_VERSION:-tpu6e}_test_33
           - ${TPU_VERSION:-tpu6e}_test_34
           - ${TPU_VERSION:-tpu6e}_test_35
+          - ${TPU_VERSION:-tpu6e}_test_36
         agents:
           queue: cpu
         commands:

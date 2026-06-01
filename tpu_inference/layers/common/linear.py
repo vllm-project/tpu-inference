@@ -17,11 +17,77 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.kernels.quantized_matmul.blockwise_kernel import \
-    quantized_matmul_kernel as blockwise_quantized_matmul_kernel
+from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.quantized_matmul.util import (
-    xla_quantized_batched_matmul, xla_quantized_matmul)
+    quantize_tensor, xla_quantized_batched_matmul)
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
+
+
+def xla_quantized_matmul(
+    x: jax.Array,
+    w_q: jax.Array,
+    w_scale: jax.Array,
+    quantize_activation=True,
+) -> jax.Array:
+    """
+    Reference (pure JAX) implementation of the quantized matmul kernel below.
+
+    Args:
+        x:  Activation.
+        w_q: Weight quantized array. [n_input_features, n_output_features]
+        w_s: Weight quantization scale. [n_output_features]
+        mesh: Mesh to shard on.
+        weight_sharding: PartitionSpec for the weight tensor.
+
+    Returns:
+        Output of the quantized matmul.
+    """
+    skip_scale = False
+    if w_scale is not None and w_scale.ndim == 2:
+        skip_scale = True
+        in_features, out_features = w_q.shape
+        in_blocks, out_blocks = w_scale.shape
+        block_size_in = in_features // in_blocks
+        block_size_out = out_features // out_blocks
+
+        w_q_reshaped = w_q.reshape(in_blocks, block_size_in, out_blocks,
+                                   block_size_out)
+        w_q = (w_q_reshaped.astype(jnp.float32) *
+               w_scale[:, jnp.newaxis, :, jnp.newaxis]).reshape(
+                   in_features, out_features).astype(x.dtype)
+
+        # in this case, we don't want to quantize the activations
+        quantize_activation = False
+        logger.info_once(
+            "Skipping activation quantization due to weight requantization being disabled."
+        )
+
+    if quantize_activation:
+        acc_dtype = jnp.float32
+        if quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer):
+            acc_dtype = jnp.int32
+
+        x_q, x_scale = quantize_tensor(x, w_q.dtype)
+        out = jax.lax.dot_general(
+            x_q,
+            w_q,
+            dimension_numbers=(((1, ), (0, )), ((), ())),
+            preferred_element_type=acc_dtype,
+        ).astype(jnp.float32)
+        out *= x_scale
+    else:
+        out = jax.lax.dot_general(
+            x,
+            w_q,
+            dimension_numbers=(((1, ), (0, )), ((), ())),
+            preferred_element_type=jnp.float32,
+        )
+    if not skip_scale:
+        out *= jnp.expand_dims(w_scale, 0)
+    return out.astype(x.dtype)
 
 
 def _get_x_q_dtype(w_q_dtype: jnp.dtype) -> jnp.dtype:
@@ -49,7 +115,7 @@ def sharded_quantized_matmul(x: jax.Array,
 
     Args:
         x:  Activation.
-        w_q: Weight quantized array. [n_output_features, n_input_features]
+        w_q: Weight quantized array. [n_input_features, n_output_features]
         w_s: Weight quantization scale. [n_output_features] for xla quantized matmul, [n_blocks, 1, n_output_features] for quantized matmul kernel
         weight_sharding: PartitionSpec or NamedSharding for the weight tensor.
         mesh: (Optional) Mesh to shard on. If None, mesh from current context is used, similar to jax.shard_map().
@@ -68,19 +134,22 @@ def sharded_quantized_matmul(x: jax.Array,
 
     # NOTE (jacobplatin/kyuyeunk) there have been numeric issues (concerning) NaNs
     # with the kernel and thus we disable it for now.
-    out_axis, in_axis = weight_spec
+    in_axis, out_axis = weight_spec
     x_sharding = P(ShardingAxisName.ATTN_DATA, in_axis)
-    enable_quantized_matmul_kernel = len(w_s.shape) == 3
+    enable_quantized_matmul_kernel = w_s is not None and (len(
+        w_s.shape) == 3 or len(w_s.shape) == 4)
     if enable_quantized_matmul_kernel:
-        num_blocks, _, __ = w_s.shape
-        scale_sharding = P(
-            in_axis if num_blocks > 1 else None,
-            None,
-            out_axis,
-        )
+        if w_s.ndim == 4:
+            _, num_blocks, __, ___ = w_s.shape
+            scale_sharding = P(None, in_axis if num_blocks > 1 else None, None,
+                               out_axis)
+        else:
+            num_blocks, _, __ = w_s.shape
+            scale_sharding = P(in_axis if num_blocks > 1 else None, None,
+                               out_axis)
     else:
         # 2D-Blockwise case (e.g. from skipped re-quantization)
-        if len(w_s.shape) == 2:
+        if w_s is not None and len(w_s.shape) == 2:
             scale_sharding = weight_spec
         else:
             # 1D (channelwise) case
@@ -95,14 +164,17 @@ def sharded_quantized_matmul(x: jax.Array,
 
     def wrapper(x, w_q, w_s):
         if enable_quantized_matmul_kernel:
-            k_dim = x.shape[1]
-            sharded_num_blocks, _, __ = w_s.shape
-            block_size = k_dim // sharded_num_blocks
-            output = blockwise_quantized_matmul_kernel(x,
-                                                       w_q,
-                                                       w_s,
-                                                       x_q_dtype=x_q_dtype,
-                                                       block_size=block_size)
+            output = gmm_v2(
+                lhs=x,
+                rhs=jnp.expand_dims(w_q, 0),
+                group_sizes=jnp.array([x.shape[0]], dtype=jnp.int32),
+                rhs_scale=w_s if w_s.ndim == 4 else jnp.expand_dims(w_s, 0),
+                rhs_bias=None,
+                group_offset=jnp.array([0], dtype=jnp.int32),
+                zero_initialize=False,
+                preferred_element_type=x.dtype,
+                maybe_quantize_lhs=True,
+            )
         else:
             output = xla_quantized_matmul(x, w_q, w_s)
         if in_axis:
