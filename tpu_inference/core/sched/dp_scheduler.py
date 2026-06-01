@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tpu_inference import envs
@@ -850,6 +851,7 @@ class DPScheduler(SchedulerInterface):
         combined_prefix_cache_stats = PrefixCacheStats()
         combined_connector_prefix_cache_stats: Optional[
             PrefixCacheStats] = None
+        combined_spec_decoding_stats: Optional[SpecDecodingStats] = None
         has_any_stats = False
 
         for rank_stats in rank_stats_list:
@@ -886,6 +888,21 @@ class DPScheduler(SchedulerInterface):
                 combined_connector_prefix_cache_stats.hits += (
                     rank_stats.connector_prefix_cache_stats.hits)
 
+            # Combine spec decoding stats.
+            rank_spec = rank_stats.spec_decoding_stats
+            if rank_spec is not None:
+                if combined_spec_decoding_stats is None:
+                    combined_spec_decoding_stats = SpecDecodingStats.new(
+                        rank_spec.num_spec_tokens)
+                combined_spec_decoding_stats.num_drafts += rank_spec.num_drafts
+                combined_spec_decoding_stats.num_draft_tokens += (
+                    rank_spec.num_draft_tokens)
+                combined_spec_decoding_stats.num_accepted_tokens += (
+                    rank_spec.num_accepted_tokens)
+                for i, v in enumerate(rank_spec.num_accepted_tokens_per_pos):
+                    combined_spec_decoding_stats.num_accepted_tokens_per_pos[
+                        i] += v
+
         if not has_any_stats:
             return None
 
@@ -900,6 +917,7 @@ class DPScheduler(SchedulerInterface):
             kv_cache_usage=avg_kv_cache_usage,
             prefix_cache_stats=combined_prefix_cache_stats,
             connector_prefix_cache_stats=combined_connector_prefix_cache_stats,
+            spec_decoding_stats=combined_spec_decoding_stats,
         )
 
     def get_grammar_bitmask(

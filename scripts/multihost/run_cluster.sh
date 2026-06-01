@@ -78,6 +78,16 @@ if [ "${NODE_TYPE}" != "--head" ] && [ "${NODE_TYPE}" != "--worker" ]; then
     exit 1
 fi
 
+# Validate HEAD_NODE_ADDRESS as a hostname / IP-like token before splicing it
+# into the Ray --address string. A typo or stray character would otherwise
+# either silently produce a broken --address=...:6379 or be interpreted by the
+# shell inside the container's `bash -c "${RAY_START_CMD}"`.
+if [[ ! "${HEAD_NODE_ADDRESS}" =~ ^[A-Za-z0-9.:-]+$ ]]; then
+    echo "Error: HEAD_NODE_ADDRESS contains unexpected characters: '${HEAD_NODE_ADDRESS}'" >&2
+    echo "Expected a hostname or IP (alphanumerics, '.', ':', '-')." >&2
+    exit 1
+fi
+
 # Set up Docker authentication for Google Container Registry.
 # Modify the hostname to accomodate your specific docker region.
 gcloud auth configure-docker us-east5-docker.pkg.dev
