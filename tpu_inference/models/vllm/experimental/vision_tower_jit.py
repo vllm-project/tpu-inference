@@ -31,6 +31,7 @@ from vllm.model_executor.models.qwen3_omni_moe_thinker import \
 
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import is_qwen3_vl
 from tpu_inference.utils import to_jax_dtype
 
 logger = init_logger(__name__)
@@ -59,8 +60,6 @@ def is_jittable_architecture(vllm_model) -> bool:
 
 def has_jittable_vision(vllm_model) -> bool:
     """Check if the model has any JIT-compiled vision component (either whole or submodule)."""
-    from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
-        is_qwen3_vl
     return is_jittable_architecture(vllm_model) or is_qwen3_vl(vllm_model)
 
 
@@ -207,7 +206,7 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
 
     It's also doing experiment on pixel padding.
     """
-    if envs.VLLM_TPU_ENABLE_CPU_PADDING:
+    if envs.VLLM_TPU_ENABLE_CPU_PADDING and is_qwen3_vl(vllm_model):
         if "pixel_values" in kwargs:
             pv = kwargs["pixel_values"]
             num_patches = pv.shape[0]
@@ -228,6 +227,7 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
                     num_patches, bucket_num_patches)
                 kwargs["pixel_values_videos"] = torch.nn.functional.pad(
                     pv, (0, 0, 0, bucket_num_patches - num_patches))
+        return kwargs
 
     if not has_jittable_vision(vllm_model):
         return kwargs

@@ -65,8 +65,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen3_vl import \
     Qwen3_VisionTransformer as JaxVisionTransformer
 from tpu_inference.models.jax.qwen3_vl import copy_weights_to_jax_vision_tower
-from tpu_inference.models.vllm.experimental.vision_tower_jit import \
-    maybe_precompile_vision_encoder_fn
+
 from tpu_inference.utils import t2j, to_torch_dtype
 
 logger = init_logger(__name__)
@@ -484,8 +483,6 @@ def apply_qwen3_vl_patches(vllm_model):
                 for t in vllm_model.deepstack_input_embeds
             ]
 
-    vllm_model.precompile_vision_encoder = precompile_vision_encoder.__get__(
-        vllm_model, vllm_model.__class__)
 
 
 def is_qwen3_vl(vllm_model) -> bool:
@@ -493,15 +490,7 @@ def is_qwen3_vl(vllm_model) -> bool:
     return isinstance(vllm_model, Qwen3VLForConditionalGeneration)
 
 
-def maybe_apply_qwen3_vl_patches(
-    vllm_model: nn.Module,
-    wrapper: Optional[Any] = None,
-    params: Optional[Any] = None,
-) -> None:
+def maybe_apply_qwen3_vl_patches(vllm_model: nn.Module) -> None:
     if not is_qwen3_vl(vllm_model):
         return
     apply_qwen3_vl_patches(vllm_model)
-    if wrapper is not None:
-        vllm_model._wrapper = wrapper
-    if params is not None:
-        vllm_model._params = params
