@@ -65,10 +65,6 @@ steps:
       USE_V7X8_QUEUE: "True"
     commands:
       - |
-        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_UnitTest" "not enough HBM"
-        else
-          .buildkite/scripts/run_in_docker.sh \
-            bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh \
-              -m "gs://tpu-commons-ci/moonshootai/kimi/2.6" -t 2750
-        fi
+        .buildkite/scripts/run_in_docker.sh \
+          bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh \
+            -m "gs://tpu-commons-ci/moonshootai/kimi/2.6" -t 2750
