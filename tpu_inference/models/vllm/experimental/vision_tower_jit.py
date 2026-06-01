@@ -15,7 +15,7 @@
 # Utilities to support JIT compilation of VisionTower.
 
 import math
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -31,7 +31,6 @@ from vllm.model_executor.models.qwen3_omni_moe_thinker import \
 
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
-from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import is_qwen3_vl
 from tpu_inference.utils import to_jax_dtype
 
 logger = init_logger(__name__)
@@ -60,7 +59,7 @@ def is_jittable_architecture(vllm_model) -> bool:
 
 def has_jittable_vision(vllm_model) -> bool:
     """Check if the model has any JIT-compiled vision component (either whole or submodule)."""
-    return is_jittable_architecture(vllm_model) or is_qwen3_vl(vllm_model)
+    return is_jittable_architecture(vllm_model)
 
 
 def get_vision_config(hf_config: Any) -> Any:
@@ -131,8 +130,12 @@ class GridTHW(tuple):
 
 
 def maybe_precompile_vision_encoder_fn(
-        params: Any, embed_multimodal_fn: Optional[Callable], vllm_model,
-        vllm_config: VllmConfig) -> Optional[Callable]:
+    params: Any,
+    embed_multimodal_fn: Optional[Callable],
+    vllm_model,
+    vllm_config: VllmConfig,
+    precompile_num_of_images: Tuple[int] = tuple([1])
+) -> Optional[Callable]:
     """Return a precompile function for jittable vision encoders, or None.
 
     The returned function accepts a single argument (run_compilation_fn) and
@@ -142,7 +145,6 @@ def maybe_precompile_vision_encoder_fn(
     """
     if embed_multimodal_fn is None:
         return None
-
     if not has_jittable_vision(vllm_model):
         return None
 
@@ -163,12 +165,8 @@ def maybe_precompile_vision_encoder_fn(
 
     jax_dtype = to_jax_dtype(vllm_config.model_config.dtype)
 
-    image_counts = [
-        2**i for i in range(int(math.log2(MAX_IMAGE_WARMUP_POW2)) + 1)
-    ] if getattr(envs, "VLLM_TPU_ENABLE_QWEN3_JAX_VISION", True) else [1]
-
     def precompile_fn(run_compilation_fn: Callable) -> None:
-        for num_images in image_counts:
+        for num_images in precompile_num_of_images:
             for num_patches in num_patches_paddings:
                 # For multi-image precompilation, distribute patches across images
                 patches_per_image = max(16, num_patches // num_images)
@@ -203,7 +201,7 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
 
     It's also doing experiment on pixel padding.
     """
-    if envs.VLLM_TPU_ENABLE_CPU_PADDING and is_qwen3_vl(vllm_model):
+    if envs.VLLM_TPU_ENABLE_CPU_PADDING:
         if "pixel_values" in kwargs:
             pv = kwargs["pixel_values"]
             num_patches = pv.shape[0]

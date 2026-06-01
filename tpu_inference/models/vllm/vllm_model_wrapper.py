@@ -62,10 +62,10 @@ from tpu_inference.models.jax.utils.multi_modal_utils import \
 from tpu_inference.models.vllm.experimental.model_patcher import (
     apply_model_specific_patches, patch_mm_model)
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import (
-    is_qwen3_vl, maybe_apply_qwen3_vl_patches)
+    is_qwen3_vl, maybe_apply_qwen3_vl_patches,
+    maybe_precompile_vision_encoder_fn)
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
-    maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn,
-    maybe_prepare_for_jit)
+    maybe_jit_embed_multimodal_func, maybe_prepare_for_jit)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata

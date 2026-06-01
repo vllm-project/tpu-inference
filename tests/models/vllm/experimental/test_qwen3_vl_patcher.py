@@ -636,3 +636,64 @@ def test_maybe_apply_qwen3_vl_patches_deepstack_input_embeds():
             assert jax_array.sharding.mesh == mesh
     finally:
         envs.VLLM_TPU_ENABLE_FLAX_ENCODER = original_val
+
+
+def test_maybe_apply_qwen3_vl_patches_precompile_vision_encoder():
+    mock_vllm_config = MockVllmConfig()
+
+    class MockSchedulerConfig:
+        max_num_batched_tokens = 2048
+
+    mock_vllm_config.scheduler_config = MockSchedulerConfig()
+
+    # Define a Mock Qwen3-VL model inheriting from torch.nn.Module to avoid initialization crashes
+    class MockQwen3VL(torch.nn.Module):
+
+        def __init__(self):
+            super().__init__()
+            self.use_deepstack = True
+
+            class MockTextConfig:
+                rms_norm_eps = 1e-6
+
+            class MockConfig:
+                text_config = MockTextConfig()
+                vision_config = mock_vllm_config.model_config.hf_config.vision_config
+
+            self.config = MockConfig()
+            self.deepstack_input_embeds = [
+                torch.ones((2, 4), dtype=torch.bfloat16)
+            ]
+            self.visual = torch.nn.Linear(2, 2)
+
+    mock_model = MockQwen3VL()
+
+    with patch(
+            "tpu_inference.models.vllm.experimental.qwen3_vl_patcher.is_qwen3_vl",
+            return_value=True):
+        maybe_apply_qwen3_vl_patches(mock_model)
+
+        # Verify that the precompile_vision_encoder method is patched on the model
+        assert hasattr(mock_model, "precompile_vision_encoder")
+        assert callable(mock_model.precompile_vision_encoder)
+
+        # Explicitly verify it is a bound method and its __self__ is the model instance
+        import types
+        assert isinstance(mock_model.precompile_vision_encoder,
+                          types.MethodType)
+        assert mock_model.precompile_vision_encoder.__self__ is mock_model
+
+        # Test precompile execution when wrapper and params are bound
+        class MockWrapper:
+            vllm_config = mock_vllm_config
+
+            def wrap_embed_multimodal_func(self):
+                return lambda *args, **kwargs: None
+
+        mock_model._wrapper = MockWrapper()
+        mock_model._params = {"dummy": None}
+
+        # Call precompile_vision_encoder and make sure it runs without throwing exceptions
+        run_compilation_fn = MagicMock()
+        mock_model.precompile_vision_encoder(run_compilation_fn)
+        assert run_compilation_fn.called

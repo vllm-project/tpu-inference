@@ -42,6 +42,9 @@ making sure they go through standard function arguments:
    model's cache just-in-time for the execution, and proceed with the original forward pass.
 """
 
+import math
+from typing import Callable
+
 import jax
 import torch
 import torch.nn as nn
@@ -63,9 +66,13 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen3_vl import \
     Qwen3_VisionTransformer as JaxVisionTransformer
 from tpu_inference.models.jax.qwen3_vl import copy_weights_to_jax_vision_tower
+from tpu_inference.models.vllm.experimental.vision_tower_jit import \
+    maybe_precompile_vision_encoder_fn
 from tpu_inference.utils import t2j, to_torch_dtype
 
 logger = init_logger(__name__)
+
+MAX_IMAGE_WARMUP_POW2 = 32
 
 
 class DummySubmodule(nn.Module):
@@ -361,6 +368,31 @@ def _patched_merge_multimodal_embeddings(
                        inputs_embeds)
 
 
+# 9. Patch precompile_vision_encoder method on vllm_model
+def precompile_vision_encoder(self, run_compilation_fn: Callable) -> None:
+    """Precompiles the vision encoder. """
+    precompile_num_of_images = tuple(
+        2**i for i in range(int(math.log2(MAX_IMAGE_WARMUP_POW2)) + 1))
+    wrapper = getattr(self, "_wrapper", None)
+    params = getattr(self, "_params", None)
+    if wrapper is None or params is None:
+        logger.warning(
+            "Wrapper or Params not bound to Qwen3-VL model yet. Skipping precompilation."
+        )
+        return
+
+    embed_multimodal_fn = wrapper.wrap_embed_multimodal_func()
+    precompile_fn = maybe_precompile_vision_encoder_fn(
+        params,
+        embed_multimodal_fn,
+        self,
+        wrapper.vllm_config,
+        precompile_num_of_images=precompile_num_of_images)
+    logger.info("Starting to precompile Qwen3 VL vision encoder.")
+    if precompile_fn is not None:
+        precompile_fn(run_compilation_fn)
+
+
 def apply_qwen3_vl_patches(vllm_model):
     """Apply Qwen3-VL specific patches for stateless Deepstack support."""
     if not getattr(vllm_model, "use_deepstack", False):
@@ -451,6 +483,9 @@ def apply_qwen3_vl_patches(vllm_model):
                 t.to(device=target_device)
                 for t in vllm_model.deepstack_input_embeds
             ]
+
+    vllm_model.precompile_vision_encoder = precompile_vision_encoder.__get__(
+        vllm_model, vllm_model.__class__)
 
 
 def is_qwen3_vl(vllm_model) -> bool:
