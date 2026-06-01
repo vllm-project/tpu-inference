@@ -29,6 +29,7 @@ from vllm.model_executor.models.qwen3_5 import \
 from vllm.model_executor.models.qwen3_omni_moe_thinker import \
     Qwen3OmniMoeThinkerForConditionalGeneration
 
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
 
@@ -39,6 +40,8 @@ JITTABLE_ARCHS = {
     Qwen3_5MoeForConditionalGeneration,
     Qwen3OmniMoeThinkerForConditionalGeneration,
 }
+
+MAX_IMAGE_WARMUP_POW2 = 8
 
 
 def is_jittable_architecture(vllm_model) -> bool:
@@ -152,36 +155,43 @@ def maybe_precompile_vision_encoder_fn(
     patch_input_dim = (vc.in_channels * vc.temporal_patch_size *
                        vc.patch_size * vc.patch_size)
     spatial_merge_unit = vc.spatial_merge_size**2
-    max_patches = (vllm_config.scheduler_config.max_num_batched_tokens //
+    max_patches = (vllm_config.scheduler_config.max_num_batched_tokens *
                    spatial_merge_unit)
+    max_patches = min(max_patches, 8192) # around 8192 / 280 = 29 images max
     min_shift = 4  # 1 << 4 = 16 patches minimum
     max_shift = max(min_shift, (max(max_patches, 1) - 1).bit_length())
     num_patches_paddings = [1 << i for i in range(min_shift, max_shift + 1)]
 
     jax_dtype = to_jax_dtype(vllm_config.model_config.dtype)
 
+    image_counts = [
+        2**i for i in range(int(math.log2(MAX_IMAGE_WARMUP_POW2)) + 1)
+    ] if getattr(envs, "VLLM_TPU_ENABLE_QWEN3_JAX_VISION", True) else [1]
+
     def precompile_fn(run_compilation_fn: Callable) -> None:
-        for num_patches in num_patches_paddings:
-            # Split num_patches into (h, w) by distributing bits evenly.
-            # For any power-of-2 num_patches = 2^k: h=2^(k//2), w=2^(k-k//2).
-            k = int(round(math.log2(num_patches)))
-            h = 1 << (k // 2)
-            w = 1 << (k - k // 2)
+        for num_images in image_counts:
+            for num_patches in num_patches_paddings:
+                # For multi-image precompilation, distribute patches across images
+                patches_per_image = max(16, num_patches // num_images)
+                k = int(round(math.log2(patches_per_image)))
+                h = 1 << (k // 2)
+                w = 1 << (k - k // 2)
 
-            dummy_pixel_values = jnp.ones((num_patches, patch_input_dim),
-                                          dtype=jax_dtype)
-            dummy_image_grid_thw = GridTHW([(1, h, w)])
+                dummy_pixel_values = jnp.ones(
+                    (patches_per_image * num_images, patch_input_dim),
+                    dtype=jax_dtype)
+                dummy_image_grid_thw = GridTHW([(1, h, w)] * num_images)
 
-            run_compilation_fn(
-                f"vllm embed_multimodal {dummy_image_grid_thw}",
-                embed_multimodal_fn,
-                params,
-                call_kwargs={
-                    "pixel_values": dummy_pixel_values,
-                    "image_grid_thw": dummy_image_grid_thw,
-                },
-                num_patches=num_patches,
-            )
+                run_compilation_fn(
+                    f"vllm embed_multimodal {dummy_image_grid_thw}",
+                    embed_multimodal_fn,
+                    params,
+                    call_kwargs={
+                        "pixel_values": dummy_pixel_values,
+                        "image_grid_thw": dummy_image_grid_thw,
+                    },
+                    num_patches=patches_per_image * num_images,
+                )
 
     return precompile_fn
 

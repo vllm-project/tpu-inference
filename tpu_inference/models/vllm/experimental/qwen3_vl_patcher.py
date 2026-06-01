@@ -1,3 +1,4 @@
+# ruff: noqa: F722
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,20 +42,98 @@ making sure they go through standard function arguments:
    model's cache just-in-time for the execution, and proceed with the original forward pass.
 """
 
+import jax
 import torch
 import torch.nn as nn
 import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
 import vllm.model_executor.models.utils as vllm_utils
-from torchax.interop import jax_view, torch_view
+from flax import nnx
+from jax.sharding import get_mesh
+from jaxtyping import Float
+from torchax.interop import call_jax, jax_view, torch_view
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 
+from tpu_inference import envs
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.qwen3_vl import \
+    Qwen3_VisionTransformer as JaxVisionTransformer
+from tpu_inference.models.jax.qwen3_vl import copy_weights_to_jax_vision_tower
+from tpu_inference.utils import to_torch_dtype
 
 logger = init_logger(__name__)
+
+
+class DummySubmodule(nn.Module):
+    """Dummy PyTorch module to satisfy stateless functional_call queries for unused parameters.
+
+    This is specifically required during CompilationManager precompilation (e.g. in
+    _precompile_backbone_text_only) when PyTorch's stateless functional_call attempts
+    to swap model parameters using global params_and_buffers before running.
+    """
+
+    def __getattr__(self, name: str):
+        # Raise AttributeError for leaf-level parameters and buffers so PyTorch's
+        # hasattr check returns False and allows standard missing parameter mapping.
+        if name in ("weight", "bias", "cos_sin_cache", "inv_freq",
+                    "num_batches_tracked") or "cache" in name or name.endswith(
+                        ("_mean", "_var")):
+            raise AttributeError(f"DummySubmodule has no attribute '{name}'")
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return DummySubmodule()
+
+
+class TorchAXJaxVisionTowerBridge(nn.Module):
+    """Wraps a JAX Vision Transformer into a PyTorch nn.Module using TorchAX interop."""
+
+    def __init__(self, jax_model: JaxVisionTransformer):
+        super().__init__()
+        self.jax_model = jax_model
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return to_torch_dtype(self.jax_model.dtype)
+
+    @property
+    def device(self) -> torch.device:
+        return torch.device("jax")
+
+    @property
+    def spatial_merge_size(self) -> int:
+        return self.jax_model.config.spatial_merge_size
+
+    @property
+    def out_hidden_size(self) -> int:
+        return self.jax_model.config.out_hidden_size
+
+    def forward(
+        self, pixel_values: Float[torch.Tensor,
+                                  "padded_patch_len flat_patch_dim"],
+        grid_thw: list[list[int]]
+    ) -> Float[torch.Tensor, "padded_token_len out_hidden_size"]:
+        # Ensure inputs are pre-padded to the correct power-of-two bucket size eagerly
+        num_patches = pixel_values.shape[0]
+        bucket_num_patches = 1 << (num_patches - 1).bit_length()
+        if bucket_num_patches != num_patches:
+            raise ValueError(
+                f"pixel_values is not pre-padded! Expected shape to be a power of 2 ({bucket_num_patches}), got: {num_patches}"
+            )
+
+        # 3. Pass already padded pixel_values to JAX
+        grid_thw_tuple = tuple(tuple(x) for x in grid_thw)
+        return call_jax(self.jax_model, pixel_values, grid_thw_tuple)
+
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return DummySubmodule()
 
 
 def _patched_set_deepstack(vllm_model, deepstack_input_embeds):
@@ -260,6 +339,28 @@ def _patched_flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
     return torch.cat(tuple(_patched_flatten_embeddings(t) for t in embeddings))
 
 
+def _patched_merge_multimodal_embeddings(
+    inputs_embeds: torch.Tensor,
+    multimodal_embeddings: NestedTensors,
+    is_multimodal: torch.Tensor,
+) -> torch.Tensor:
+    """Patched version of `_merge_multimodal_embeddings` to prevent JAX recompilation.
+
+    Since multimodal_embeddings has already been padded and aligned on Host/CPU side
+    to match the is_multimodal mask positions, this JIT-compiled implementation performs
+    an extremely fast element-wise torch.where to select features, yielding maximum TPU performance.
+    """
+    if len(multimodal_embeddings) == 0:
+        return inputs_embeds
+
+    mm_embeds_flat = _patched_flatten_embeddings(multimodal_embeddings)
+    input_dtype = inputs_embeds.dtype
+
+    condition = is_multimodal.unsqueeze(-1)
+    return torch.where(condition, mm_embeds_flat.to(dtype=input_dtype),
+                       inputs_embeds)
+
+
 def apply_qwen3_vl_patches(vllm_model):
     """Apply Qwen3-VL specific patches for stateless Deepstack support."""
     if not getattr(vllm_model, "use_deepstack", False):
@@ -293,8 +394,41 @@ def apply_qwen3_vl_patches(vllm_model):
     # 5. Patch _flatten_embeddings in vllm utils to handle negative indexes correctly in torchax
     vllm_utils._flatten_embeddings = _patched_flatten_embeddings
 
-    # 6. Force HAS_TRITON to False to prevent JAX/Triton active driver crash on TPU
+    # 6. Patch _merge_multimodal_embeddings to prevent shape-dependent recompilations
+    vllm_utils._merge_multimodal_embeddings = _patched_merge_multimodal_embeddings
+    qwen3_vl_mod._merge_multimodal_embeddings = _patched_merge_multimodal_embeddings
+
+    # 7. Force HAS_TRITON to False to prevent JAX/Triton active driver crash on TPU
     qwen3_vl_mod.HAS_TRITON = False
+
+    # 8. Replace the PyTorch visual tower with the TorchAX-wrapped JAX Vision Transformer
+    if envs.VLLM_TPU_ENABLE_FLAX_ENCODER:
+        vllm_config = get_current_vllm_config()
+        mesh = get_mesh()
+        rngs = nnx.Rngs(params=jax.random.PRNGKey(0))
+
+        logger.info(
+            "Replacing Qwen3-VL PyTorch Visual Tower with optimized JAX Vision Transformer..."
+        )
+        with jax.set_mesh(mesh):
+            jax_visual = JaxVisionTransformer(
+                vllm_config=vllm_config,
+                rngs=rngs,
+                mesh=mesh,
+                norm_eps=getattr(vllm_model.config.text_config, "rms_norm_eps",
+                                 1e-6))
+
+        # Align weights safely via dedicated helper
+        copy_weights_to_jax_vision_tower(vllm_model.visual, jax_visual)
+
+        # Wrap JAX model in TorchAX interop bridge
+        vllm_model.visual = TorchAXJaxVisionTowerBridge(jax_visual)
+        logger.info(
+            "Successfully patched Qwen3-VL with TorchAXJaxVisionTowerBridge.")
+    else:
+        logger.info(
+            "Skipping optimized JAX Vision Transformer replacement since VLLM_TPU_ENABLE_FLAX_ENCODER is disabled."
+        )
 
 
 def is_qwen3_vl(vllm_model) -> bool:
@@ -311,11 +445,23 @@ def maybe_apply_qwen3_vl_patches(vllm_model: nn.Module) -> None:
             # (via Torchax/JAX) to resolve device mismatch during the forward pass.
             # This is required because the ModelForEmbedding adapter can cause
             # the standard weight loader to skip these non-parameter buffers.
-            target_device = next(vllm_model.parameters()).device
-            logger.info(
-                f"Patching Qwen3-VL deepstack buffers to device: {target_device}"
-            )
-            vllm_model.deepstack_input_embeds = [
-                t.to(device=target_device)
-                for t in vllm_model.deepstack_input_embeds
-            ]
+            if envs.VLLM_TPU_ENABLE_FLAX_ENCODER:
+                import jax
+                from jax.sharding import NamedSharding, PartitionSpec, get_mesh
+
+                from tpu_inference.utils import t2j
+                mesh = get_mesh()
+                sharding = NamedSharding(mesh, PartitionSpec())
+                vllm_model.deepstack_input_embeds = [
+                    torch_view(jax.device_put(t2j(t.detach()), sharding))
+                    for t in vllm_model.deepstack_input_embeds
+                ]
+            else:
+                target_device = next(vllm_model.parameters()).device
+                logger.info(
+                    f"Patching Qwen3-VL deepstack buffers to device: {target_device}"
+                )
+                vllm_model.deepstack_input_embeds = [
+                    t.to(device=target_device)
+                    for t in vllm_model.deepstack_input_embeds
+                ]
