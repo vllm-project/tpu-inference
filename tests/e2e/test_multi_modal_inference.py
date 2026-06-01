@@ -36,11 +36,6 @@ def _cleanup_tpu_zombies():
         subprocess.run(["pkill", "-9", "-f", "vllm"],
                        stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL)
-        # Clear JAX libtpu shared memory lockfiles
-        subprocess.run("rm -f /tmp/libtpu*",
-                       shell=True,
-                       stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
