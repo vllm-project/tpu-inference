@@ -281,6 +281,7 @@ class TestSpeculativeDecodingManager:
                 cu_num_scheduled_tokens[-1])
 
         req_indices_dp = {0: list(range(num_reqs))}
+        req_ids_dp = {0: [str(i) for i in range(num_reqs)]}
 
         # Act
         with patch(
@@ -290,6 +291,7 @@ class TestSpeculativeDecodingManager:
                 num_draft_tokens_dp=num_draft_tokens_padded,
                 dp_size=1,
                 req_indices_dp=req_indices_dp,
+                req_ids_dp=req_ids_dp,
                 query_start_loc=query_start_loc,
                 padded_num_reqs_per_dp_rank=padded_num_reqs,
                 padded_logits_length_dp_rank=padded_logits_length,

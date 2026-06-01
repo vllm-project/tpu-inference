@@ -334,7 +334,8 @@ class CompilationManager:
         indices_sharding = NamedSharding(self.runner.mesh, PartitionSpec(None))
 
         def _compile_one(input_padding: int, input_sharding: NamedSharding,
-                         next_tokens_size: int) -> None:
+                         next_tokens_size: int,
+                         next_tokens_sharding: NamedSharding) -> None:
             padded_token_in_tpu_cur_input_indices = np.zeros((input_padding, ),
                                                              dtype=np.int32)
             padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
@@ -349,7 +350,7 @@ class CompilationManager:
             input_ids = self._create_dummy_tensor((input_padding, ), jnp.int32,
                                                   input_sharding)
             next_tokens = self._create_dummy_tensor(
-                (next_tokens_size, ), jnp.int32, sharding=replicated_sharding)
+                (next_tokens_size, ), jnp.int32, sharding=next_tokens_sharding)
             placeholder_num = device_array(self.runner.mesh,
                                            np.array([1], dtype=np.int32))
             self._run_compilation(
@@ -370,14 +371,16 @@ class CompilationManager:
             spec_next_tokens_size = self.runner.max_num_reqs * (
                 num_spec_tokens + 1)
             for num_tokens in self.runner.num_tokens_paddings:
-                _compile_one(num_tokens, dp_sharding, spec_next_tokens_size)
+                _compile_one(num_tokens, dp_sharding, spec_next_tokens_size,
+                             dp_sharding)
             for num_logits in self.runner.num_logits_paddings:
                 _compile_one(num_logits, replicated_sharding,
-                             spec_next_tokens_size)
+                             spec_next_tokens_size, dp_sharding)
         else:
             for num_tokens in self.runner.num_tokens_paddings:
                 for num_reqs in self.runner.num_reqs_paddings:
-                    _compile_one(num_tokens, dp_sharding, num_reqs)
+                    _compile_one(num_tokens, dp_sharding, num_reqs,
+                                 replicated_sharding)
 
     def _precompile_subtract_num_rejected_tokens(self) -> None:
         from tpu_inference.runner.tpu_runner import \
@@ -403,7 +406,7 @@ class CompilationManager:
                 positions = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
             num_rejected_tokens = self._create_dummy_tensor(
-                (self.runner.max_num_reqs, ), jnp.int32, replicated_sharding)
+                (self.runner.max_num_reqs, ), jnp.int32, dp_sharding)
             seq_lens_subtract_indices = self._create_dummy_tensor(
                 (self.runner.max_num_reqs, ), jnp.int32, replicated_sharding)
             positions_subtract_indices = self._create_dummy_tensor(
@@ -427,16 +430,17 @@ class CompilationManager:
         num_spec_tokens = (
             self.runner.speculative_config.num_speculative_tokens)
         max_num_reqs = self.runner.max_num_reqs
-        replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
+        data_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
         last_sampled_tokens = device_array(self.runner.mesh,
                                            jnp.ones((max_num_reqs, ),
                                                     dtype=jnp.int32),
-                                           sharding=replicated_sharding)
+                                           sharding=data_sharding)
         draft_tokens = device_array(self.runner.mesh,
                                     jnp.ones((max_num_reqs, num_spec_tokens),
                                              dtype=jnp.int32),
-                                    sharding=replicated_sharding)
+                                    sharding=data_sharding)
         self._run_compilation(
             f"worker{self.runner.rank} "
             "concat_last_sampled_tokens_and_draft_tokens",

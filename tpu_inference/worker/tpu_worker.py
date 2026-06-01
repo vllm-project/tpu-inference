@@ -309,19 +309,32 @@ class TPUWorker(WorkerBase):
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
-        with set_current_vllm_config(self.vllm_config):
-            temp_file = tempfile.mkstemp()[1]
-            init_distributed_environment(
-                world_size=1,
-                rank=0,
-                local_rank=0,
-                distributed_init_method=f"file://{temp_file}",
-                backend="gloo",
-            )
-            ensure_model_parallel_initialized(
-                tensor_model_parallel_size=1,
-                pipeline_model_parallel_size=1,
-            )
+        #
+        # For MoE under MPMD, vllm keeps parallel_config.data_parallel_size = N
+        # inside each spawned engine (so DPEngineCoreProc can coordinate across
+        # DP ranks). Without this guard, init_distributed_environment would see
+        # data_parallel_size > 1 and override our file:// init into a cross-DP
+        # gloo PG of size DP*TP, but only DP processes exist — TP=N is internal
+        # JAX sharding — so the gloo TCPStore blocks forever waiting for the
+        # missing TP-partner ranks. Force a singleton view for this init only.
+        saved_dp_size = self.parallel_config.data_parallel_size
+        self.parallel_config.data_parallel_size = 1
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                temp_file = tempfile.mkstemp()[1]
+                init_distributed_environment(
+                    world_size=1,
+                    rank=0,
+                    local_rank=0,
+                    distributed_init_method=f"file://{temp_file}",
+                    backend="gloo",
+                )
+                ensure_model_parallel_initialized(
+                    tensor_model_parallel_size=1,
+                    pipeline_model_parallel_size=1,
+                )
+        finally:
+            self.parallel_config.data_parallel_size = saved_dp_size
 
         jax_parallel_state.init_pp_distributed_environment(
             self.pp_config.ip,
@@ -483,6 +496,14 @@ class TPUWorker(WorkerBase):
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
+
+    def execute_dummy_batch(self) -> None:
+        # DPEngineCoreProc (used for MoE) invokes this when this rank is idle
+        # while other DP ranks have work, to keep ranks in lockstep across any
+        # cross-DP collective inside the model step. In MPMD on TPU, JAX has
+        # data_parallelism=1 inside each process, so the model step contains
+        # no cross-DP collective and no sync work is required here.
+        return
 
     def profile(self,
                 is_start: bool = True,
