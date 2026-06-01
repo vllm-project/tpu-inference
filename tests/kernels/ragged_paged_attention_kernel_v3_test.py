@@ -19,6 +19,7 @@ from absl.testing import absltest, parameterized
 from jax._src import dtypes
 from jax._src import test_util as jtu
 
+from tpu_inference.kernels.ragged_paged_attention import rpa_wxd
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
     ragged_paged_attention, ref_ragged_paged_attention)
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
@@ -735,6 +736,192 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         mask = ~np.isnan(cache_before)
         np.testing.assert_array_equal(
             np.asarray(cache_after_1)[mask], cache_before[mask])
+
+
+    # ------------------------------------------------------------------
+    # Performance comparison: rpa_wxd (the from-scratch teaching kernel,
+    # equal-length causal prefill, full-KV-in-VMEM, no flash) vs the
+    # production v3 ragged_paged_attention kernel. Modeled on
+    # gmm_test.test_gmm_wxd_vs_gmm_v2_performance: profile both together
+    # under a single jax.profiler.trace and report wall-clock.
+    # ------------------------------------------------------------------
+
+    def _make_shared_prefill_inputs(
+        self,
+        batch,
+        seq,
+        num_q_heads,
+        num_kv_heads,
+        head_dim,
+        page_size,
+        num_pages,
+        dtype,
+    ):
+        """Build inputs for BOTH kernels from the same underlying q/k/v so
+        their outputs are directly comparable.
+
+        Returns:
+          (wxd_q, wxd_k, wxd_v): rpa_wxd inputs, layout [batch, heads, seq, d].
+          v3_args: the positional arg tuple for `ragged_paged_attention`.
+          total_tokens: number of valid (unpadded) query tokens = batch * seq.
+
+        The workload is equal-length causal prefill: every sequence has
+        q_len == kv_len == seq. With no "past" (kv_len == q_len) the v3 kernel
+        attends purely to the input k,v (round-tripped through the cache), which
+        is exactly what rpa_wxd computes -- so the two must agree.
+        """
+        rng = np.random.default_rng(0)
+        # Token-major base arrays, shared by both kernels.
+        base_q = rng.random((batch, seq, num_q_heads, head_dim), np.float32)
+        base_k = rng.random((batch, seq, num_kv_heads, head_dim), np.float32)
+        base_v = rng.random((batch, seq, num_kv_heads, head_dim), np.float32)
+
+        # ---- rpa_wxd inputs: [batch, heads, seq, head_dim] ----
+        wxd_q = jnp.asarray(base_q.transpose(0, 2, 1, 3)).astype(dtype)
+        wxd_k = jnp.asarray(base_k.transpose(0, 2, 1, 3)).astype(dtype)
+        wxd_v = jnp.asarray(base_v.transpose(0, 2, 1, 3)).astype(dtype)
+
+        # ---- v3 inputs (ragged + paged) ----
+        total_tokens = batch * seq
+        max_num_batched_tokens = align_to(total_tokens, 128)
+        max_num_seq = align_to(batch, 8)
+        pages_per_seq = cdiv(seq, page_size)
+        kv_packing = get_dtype_packing(dtype)
+        padded_head_dim = align_to(head_dim, 128)
+        num_kv_heads_x2 = align_to(num_kv_heads * 2, kv_packing)
+
+        def _flat_pad(base, heads):
+            x = jnp.asarray(base.reshape(total_tokens, heads,
+                                         head_dim)).astype(dtype)
+            return jnp.pad(x, ((0, max_num_batched_tokens - total_tokens),
+                               (0, 0), (0, 0)))
+
+        q = _flat_pad(base_q, num_q_heads)
+        k = _flat_pad(base_k, num_kv_heads)
+        v = _flat_pad(base_v, num_kv_heads)
+
+        # Paged KV cache: with kv_len == q_len there is no past, so the kernel
+        # overwrites these slots with the input k,v. Initial content is therefore
+        # irrelevant; valid slots = 0, padding pages = NaN to surface OOB reads.
+        page_cnt = 0
+        page_indices_list = []
+        kv_pages_list = []
+        for _ in range(batch):
+            npages = cdiv(seq, page_size)
+            kv = jnp.zeros((npages, page_size, num_kv_heads_x2 // kv_packing,
+                            kv_packing, padded_head_dim),
+                           dtype=dtype)
+            indices = page_cnt + jnp.arange(npages, dtype=jnp.int32)
+            indices = jnp.pad(indices, ((0, pages_per_seq - npages), ))
+            page_indices_list.append(indices)
+            page_cnt += npages
+            kv_pages_list.append(kv)
+
+        kv_cache = jnp.concatenate(kv_pages_list, axis=0)
+        kv_cache = jnp.pad(
+            kv_cache,
+            ((0, num_pages - kv_cache.shape[0]), (0, 0), (0, 0), (0, 0),
+             (0, 0)),
+            constant_values=jnp.nan,
+        )
+        page_indices = jnp.stack(page_indices_list, axis=0)
+        page_indices = jnp.pad(
+            page_indices, ((0, max_num_seq - page_indices.shape[0]), (0, 0)))
+        page_indices = page_indices.reshape(-1)
+
+        cu_q_lens = jnp.arange(batch + 1, dtype=jnp.int32) * seq
+        cu_q_lens = jnp.pad(cu_q_lens,
+                            (0, max_num_seq + 1 - cu_q_lens.shape[0]))
+        kv_lens = jnp.full((batch, ), seq, dtype=jnp.int32)
+        kv_lens = jnp.pad(kv_lens, (0, max_num_seq - kv_lens.shape[0]))
+        distribution = jnp.array([0, 0, batch], dtype=jnp.int32)
+
+        v3_args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens,
+                   distribution)
+        return (wxd_q, wxd_k, wxd_v), v3_args, total_tokens
+
+
+    def test_rpa_wxd_vs_v3_performance(self):
+        """Profile rpa_wxd and v3 together and compare wall-clock time."""
+        import functools
+        import os
+        import time
+
+        if not jtu.is_device_tpu_at_least(version=4):
+            self.skipTest("Expect TPUv4+")
+
+        batch, seq, num_heads, head_dim = 4, 512, 8, 128
+        page_size, num_pages = 16, 256
+        dtype = jnp.bfloat16
+        scale = 1.0 / float(head_dim)**0.5
+        warmup, n = 5, 5
+
+        (wxd_q, wxd_k, wxd_v), v3_args, total_tokens = (
+            self._make_shared_prefill_inputs(batch, seq, num_heads, num_heads,
+                                             head_dim, page_size, num_pages,
+                                             dtype))
+
+        # v3 donates (input_output_aliases) its q/k/v/kv_cache buffers, so each
+        # call consumes them. Pre-build a pool of fresh copies (one per call,
+        # allocated OUTSIDE the timed region) so repeated runs don't reuse a
+        # donated buffer. rpa_wxd does not donate, so it can reuse its inputs.
+        def _copy_v3_args():
+            q, k, v, kvc, kv_lens, pi, cu, dist = v3_args
+            return (jnp.copy(q), jnp.copy(k), jnp.copy(v), jnp.copy(kvc),
+                    kv_lens, pi, cu, dist)
+
+        v3_pool = [_copy_v3_args() for _ in range(1 + warmup + n)]
+        jax.block_until_ready(v3_pool)
+        v3_iter = iter(v3_pool)
+
+        # Compare compiled executables, not eager dispatch overhead (eager
+        # re-lowers the Pallas/Mosaic call on every invocation). rpa_wxd.attention
+        # is already @jax.jit-decorated; v3 is not, so wrap it here.
+        v3_jit = jax.jit(
+            functools.partial(
+                ragged_paged_attention,
+                use_causal_mask=True,
+                sm_scale=scale,  # v3 default is 1.0; rpa_wxd uses 1/sqrt(d)
+                m_block_sizes=(128, 256, 32, 128),
+            ))
+
+        def run_wxd():
+            return rpa_wxd.attention(wxd_q, wxd_k, wxd_v)
+
+        def run_v3():
+            return v3_jit(*next(v3_iter))[0]
+
+        # Sanity: both kernels should agree on the valid tokens.
+        out_wxd = jax.block_until_ready(run_wxd())
+        out_v3 = jax.block_until_ready(run_v3())
+        # wxd: [batch, heads, seq, d] -> token-major [total_tokens, heads, d].
+        wxd_cmp = jnp.transpose(out_wxd, (0, 2, 1, 3)).reshape(
+            total_tokens, num_heads, head_dim)
+        v3_cmp = out_v3[:total_tokens]
+        self.assertArraysAllClose(wxd_cmp, v3_cmp, atol=0.2, rtol=0.2)
+
+        for _ in range(warmup):
+            jax.block_until_ready(run_wxd())
+            jax.block_until_ready(run_v3())
+
+        # Point RPA_TRACE_DIR at a GCS bucket (gs://...) to view in xprof.
+        trace_dir = os.environ.get("RPA_TRACE_DIR", "gs://wenxindong-vm/traces/rpa")
+        timings = {"rpa_v3": [], "rpa_wxd": []}
+        with jax.profiler.trace(trace_dir):
+            for _ in range(n):
+                with jax.profiler.TraceAnnotation("rpa_v3"):
+                    t0 = time.perf_counter()
+                    jax.block_until_ready(run_v3())
+                    timings["rpa_v3"].append(time.perf_counter() - t0)
+                with jax.profiler.TraceAnnotation("rpa_wxd"):
+                    t0 = time.perf_counter()
+                    jax.block_until_ready(run_wxd())
+                    timings["rpa_wxd"].append(time.perf_counter() - t0)
+
+        for name, ts in timings.items():
+            avg_ms = 1000.0 * sum(ts) / len(ts)
+            print(f"[perf] {name}: avg {avg_ms:.3f} ms over {n} runs")
+        print(f"[perf] trace written to {trace_dir}")
 
 
 if __name__ == "__main__":
