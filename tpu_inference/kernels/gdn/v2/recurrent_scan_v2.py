@@ -15,13 +15,12 @@
 import functools
 
 import jax
+import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
-import jax.numpy as jnp
 
 from tpu_inference.kernels.gdn.v2 import \
     compute_schedule_v2 as compute_schedule_table_v2
-
 
 # def invert_triangular_matrix(A, block_size=None):
 #   """Inverts a unit lower triangular matrix A using Neumann doubling.
@@ -532,7 +531,6 @@ def inner_kernel(
             # TODO: this transpose can be eliminated
             a_raw_processed = a_raw_chunk[:, :n_v].T
             b_raw_processed = b_raw_chunk[:, :n_v].T
-
 
             a_raw_processed = a_raw_processed.astype(jnp.float32)
             b_raw_processed = b_raw_processed.astype(jnp.float32)
@@ -1278,9 +1276,9 @@ def recurrent_scan(
     tpu_info = pltpu.get_tpu_info()
     sublanesize = 4 // mixed_qkv.itemsize * tpu_info.num_sublanes
 
-    # Default the scoped VMEM ceiling. This value could be tuned for different state cache numerics and chunk sizes. 
-    # if vmem_limit_bytes is None:
-    #     vmem_limit_bytes = int(tpu_info.vmem_capacity_bytes * 0.8)
+    # Default the scoped VMEM ceiling. This value could be tuned for different state cache numerics and chunk sizes.
+    if vmem_limit_bytes is None:
+        vmem_limit_bytes = tpu_info.vmem_capacity_bytes
 
     # Pad token dimension so invalid pipeline steps DMA into a safe sink area.
     # Sink offset must be aligned to sublanesize for Mosaic tile compatibility.
@@ -1356,7 +1354,7 @@ def recurrent_scan(
             detect_races=True) if race_detect_enable else False),
         compiler_params=pltpu.CompilerParams(
             disable_bounds_checks=True,
-            # vmem_limit_bytes=vmem_limit_bytes,
+            vmem_limit_bytes=vmem_limit_bytes,
         ),
     )(
         mixed_qkv,
