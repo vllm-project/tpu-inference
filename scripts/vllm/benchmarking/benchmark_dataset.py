@@ -756,7 +756,7 @@ class MMMUProDataset(BenchmarkDataset):
             mm_content = self._images_to_mm_content(images or [])
 
             # Build message content: images first, then question text.
-            user_content: list = mm_content
+            user_content: list = list(mm_content)
             user_content.append({"type": "text", "text": question_text})
 
             messages = []
@@ -770,6 +770,32 @@ class MMMUProDataset(BenchmarkDataset):
                 "role": "user",
                 "content": user_content,
             })
+
+            # Debug: Print the first request's messages to verify system prompt and image presence
+            if len(samples) == 0:
+                debug_messages = []
+                for m in messages:
+                    debug_content = []
+                    content_list = m["content"] if isinstance(
+                        m["content"], list) else [{
+                            "type": "text",
+                            "text": m["content"]
+                        }]
+                    for c in content_list:
+                        if c["type"] == "image_url":
+                            debug_content.append({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,..."
+                                }
+                            })
+                        else:
+                            debug_content.append(c)
+                    debug_messages.append({
+                        "role": m["role"],
+                        "content": debug_content
+                    })
+                print(f"DEBUG: First request messages: {debug_messages}")
 
             new_output_len = output_len if output_len is not None else 16
 

@@ -20,8 +20,8 @@ import torch
 from einops import rearrange
 from torchax.interop import jax_view, torch_view
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
-    QwenGatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn_linear_attn import \
+    GatedDeltaNetAttention as QwenGatedDeltaNetAttention
 
 from tpu_inference import envs
 from tpu_inference.layers.common.gdn_attention import (GdnAttentionConfig,
