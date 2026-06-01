@@ -201,6 +201,55 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         return self._model_runner_output
 
 
+class AsyncContinueDecodeOutput(AsyncTPUModelRunnerOutput):
+
+    def __init__(self,
+                 runner,
+                 generated_tokens,
+                 final_state,
+                 expert_indices,
+                 scheduler_output,
+                 attn_metadata,
+                 max_decode_steps,
+                 min_remaining,
+                 static_max_decode_steps,
+                 logits_indices_selector,
+                 kv_connector_output: Optional[KVConnectorOutput] = None):
+        self._model_runner_output = None
+        self._next_tokens = generated_tokens  # For readiness check
+        self._runner = runner
+        self._generated_tokens = generated_tokens
+        self._final_state = final_state
+        self._expert_indices = expert_indices
+        self._scheduler_output = scheduler_output
+        self._attn_metadata = attn_metadata
+        self._max_decode_steps = max_decode_steps
+        self._min_remaining = min_remaining
+        self._static_max_decode_steps = static_max_decode_steps
+        self._logits_indices_selector = logits_indices_selector
+        self._kv_connector_output = kv_connector_output
+        self._resolved_output = None
+
+    def get_output(self) -> ModelRunnerOutput:
+        if self._resolved_output is not None:
+            return self._resolved_output
+
+        self._resolved_output = self._runner._resolve_continue_decode_results(
+            generated_tokens=self._generated_tokens,
+            all_expert_indices=self._expert_indices,
+            step_counter=self._final_state.step_counter,
+            scheduler_output=self._scheduler_output,
+            attn_metadata=self._attn_metadata,
+            max_decode_steps=self._max_decode_steps,
+            min_remaining=self._min_remaining,
+            static_max_decode_steps=self._static_max_decode_steps,
+            logits_indices_selector=self._logits_indices_selector,
+            kv_connector_output=self._kv_connector_output,
+        )
+        self._model_runner_output = self._resolved_output
+        return self._resolved_output
+
+
 @dataclass
 class AsyncPreResults:
     req_ids: list[str]
@@ -514,6 +563,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_cache_dtype = to_torch_dtype(cache_dtype)
 
         self._pre_async_results: AsyncPreResults | None = None
+        self._pre_continue_decode_async_output: AsyncContinueDecodeOutput | None = None
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
         self.execute_model_state: ExecuteModelState | None = None
         self._continue_decode_output = None
@@ -1158,6 +1208,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
     ) -> JaxIntermediateTensors | ModelRunnerOutput | None:
+        if self.scheduler_config.async_scheduling and self._pre_continue_decode_async_output is not None:
+            self._pre_continue_decode_async_output.get_output()
+            self._pre_continue_decode_async_output = None
+
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -1421,11 +1475,56 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.kv_caches = final_kv_caches
 
+        if self.scheduler_config.async_scheduling:
+            async_output = AsyncContinueDecodeOutput(
+                runner=self,
+                generated_tokens=generated_tokens,
+                final_state=final_state,
+                expert_indices=all_expert_indices,
+                scheduler_output=scheduler_output,
+                attn_metadata=attn_metadata,
+                max_decode_steps=max_decode_steps,
+                min_remaining=min_remaining,
+                static_max_decode_steps=self.static_max_decode_steps,
+                logits_indices_selector=logits_indices_selector,
+            )
+            self._continue_decode_output = async_output
+            self._pre_continue_decode_async_output = async_output
+            return None
+
+        output = self._resolve_continue_decode_results(
+            generated_tokens=generated_tokens,
+            all_expert_indices=all_expert_indices,
+            step_counter=final_state.step_counter,
+            scheduler_output=scheduler_output,
+            attn_metadata=attn_metadata,
+            max_decode_steps=max_decode_steps,
+            min_remaining=min_remaining,
+            static_max_decode_steps=self.static_max_decode_steps,
+            logits_indices_selector=logits_indices_selector,
+            kv_connector_output=kv_connector_output,
+        )
+        self._continue_decode_output = output
+        return None
+
+    def _resolve_continue_decode_results(
+        self,
+        generated_tokens: jax.Array,
+        all_expert_indices: Optional[jax.Array],
+        step_counter: jax.Array,
+        scheduler_output: "VllmSchedulerOutput",
+        attn_metadata: AttentionMetadata,
+        max_decode_steps: int,
+        min_remaining: int,
+        static_max_decode_steps: int,
+        logits_indices_selector: Optional[List[int]],
+        kv_connector_output: Optional[KVConnectorOutput] = None,
+    ) -> ModelRunnerOutput:
         # continue_decode now returns fixed-size stacked buffers plus the
         # number of steps actually executed (early EOS exit can stop before
         # the cap). This is the single, end-of-run host transfer.
         generated_tokens_cpu, all_expert_indices_cpu, actual_steps = jax.device_get(
-            (generated_tokens, all_expert_indices, final_state.step_counter))
+            (generated_tokens, all_expert_indices, step_counter))
         actual_steps = int(actual_steps)
         generated_tokens_cpu = np.asarray(generated_tokens_cpu)[:actual_steps]
         if all_expert_indices_cpu is not None:
@@ -1467,10 +1566,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             actual_len = len(valid_tokens)
             sampled_token_ids.append(valid_tokens)
 
-            # 2. Update scheduler_output directly to the true trimmed length
+            # Update scheduler_output directly to the true trimmed length
             scheduler_output.num_scheduled_tokens[req_id] = actual_len
 
-            # 3. Extract exact valid expert indices for this request
+            # Extract exact valid expert indices for this request
             if all_expert_indices_cpu is not None:
                 # Slice to (actual_len, layers, top_k)
                 req_experts = all_expert_indices_cpu[:actual_len, :,
@@ -1499,7 +1598,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     "seq_lens_cpu") and attn_metadata.seq_lens_cpu is not None:
                 attn_metadata.seq_lens_cpu[req_idx] += len(valid_tokens)
 
-        # 4. Concatenate along the token dimension (axis 1)
+        # Concatenate along the token dimension (axis 1)
         expert_indices_cpu = None
         if expert_indices_list:
             expert_indices_cpu = np.concatenate(expert_indices_list, axis=1)
@@ -1518,7 +1617,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             termination_reason = "eos_hit"
         elif actual_steps == max_decode_steps:
             reasons = []
-            if max_decode_steps == self.static_max_decode_steps:
+            if max_decode_steps == static_max_decode_steps:
                 reasons.append("max_decode_steps_limit")
             if max_decode_steps == min_remaining or min_remaining <= 0:
                 reasons.append("kv_cache_limit")
@@ -1542,8 +1641,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if routed_experts is not None:
             output.routed_experts = routed_experts
 
-        self._continue_decode_output = output
-        return None
+        return output
 
     def _sample_from_logits(
         self,

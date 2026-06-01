@@ -24,7 +24,8 @@ from vllm.config.multimodal import BaseDummyOptions
 
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
-from tpu_inference.runner.tpu_runner import TPUModelRunner
+from tpu_inference.runner.tpu_runner import (AsyncContinueDecodeOutput,
+                                             TPUModelRunner)
 
 
 class TestTPUJaxRunner:
@@ -75,6 +76,7 @@ class TestTPUJaxRunner:
 
             self.runner = TPUModelRunner(vllm_config,
                                          devices=self.mock_devices)
+            self.runner.scheduler_config.async_scheduling = False
 
     def test_get_supported_tasks_runner(self):
         """Test get_supported_tasks for generate runner type."""
@@ -203,6 +205,8 @@ class TestTPUJaxRunner:
             self, mock_device_get, mock_continue_decode):
         """_execute_continue_decode() should retrieve and format MoE expert indices correctly."""
         runner = MagicMock()
+        runner._resolve_continue_decode_results = TPUModelRunner._resolve_continue_decode_results.__get__(
+            runner)
         runner.max_num_reqs = 8
         runner.max_model_len = 512
         runner.dp_size = 1
@@ -214,6 +218,7 @@ class TestTPUJaxRunner:
         runner.input_batch.num_tokens_no_spec = [10, 20]
         runner.input_batch.token_ids_cpu = np.zeros((8, 512), dtype=np.int32)
         runner.requests = {"req1": MagicMock(), "req2": MagicMock()}
+        runner.scheduler_config.async_scheduling = False
         runner._get_min_remaining_slots.return_value = 30
         runner.vllm_config.additional_config = {"max_decode_steps": 5}
         runner.static_max_decode_steps = 5
@@ -275,7 +280,6 @@ class TestTPUJaxRunner:
             None)
 
         # Execute target method
-        from tpu_inference.runner.tpu_runner import TPUModelRunner
         TPUModelRunner._execute_continue_decode(runner, scheduler_output)
 
         mock_continue_decode.assert_called_once()
@@ -311,6 +315,8 @@ class TestTPUJaxRunner:
                                               mock_continue_decode):
         """_execute_continue_decode() should compute steps, slice/trim generated tokens, and update cpu state."""
         runner = MagicMock()
+        runner._resolve_continue_decode_results = TPUModelRunner._resolve_continue_decode_results.__get__(
+            runner)
         runner.max_num_reqs = 8
         runner.max_model_len = 512
         runner.dp_size = 1
@@ -331,6 +337,7 @@ class TestTPUJaxRunner:
             "req2": req_mock2,
             "req3": req_mock3
         }
+        runner.scheduler_config.async_scheduling = False
 
         # Setup remaining slots to check capping logic
         # req1 has 15 slots left, req2 has 5 slots left, req3 has 20 slots left.
@@ -408,7 +415,6 @@ class TestTPUJaxRunner:
             None)
 
         # Execute target method
-        from tpu_inference.runner.tpu_runner import TPUModelRunner
         TPUModelRunner._execute_continue_decode(runner, scheduler_output)
 
         # 1. Verify step capping logic: max_decode_steps = min(10, 5) = 5.
@@ -465,6 +471,8 @@ class TestTPUJaxRunner:
                                              mock_continue_decode):
         """_execute_continue_decode() should realign generated tokens correctly when dp_size > 1."""
         runner = MagicMock()
+        runner._resolve_continue_decode_results = TPUModelRunner._resolve_continue_decode_results.__get__(
+            runner)
         runner.max_num_reqs = 8
         runner.max_model_len = 512
         runner.dp_size = 2
@@ -487,6 +495,7 @@ class TestTPUJaxRunner:
             "req2": req_mock2,
             "req3": req_mock3
         }
+        runner.scheduler_config.async_scheduling = False
 
         runner._get_min_remaining_slots.return_value = 5
         runner.vllm_config.additional_config = {"max_decode_steps": 10}
@@ -565,7 +574,6 @@ class TestTPUJaxRunner:
             None)
 
         # Execute target method
-        from tpu_inference.runner.tpu_runner import TPUModelRunner
         TPUModelRunner._execute_continue_decode(runner, scheduler_output)
 
         # Verify generated tokens are trimmed at EOS and placed in output
@@ -597,6 +605,163 @@ class TestTPUJaxRunner:
         assert req_mock1.output_token_ids == [1, 2, 3, 101, 102, 999]
         assert req_mock2.output_token_ids == [4, 201, 202, 203, 204, 999]
         assert req_mock3.output_token_ids == [5, 6, 301, 302, 303, 304, 305]
+
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
+           side_effect=lambda mesh, tensors, **kwargs: tensors)
+    def test_execute_model_resolve_async_scheduling_sync_continue_decode(
+            self, mock_sampling_metadata, mock_device_array):
+        """Test that _execute_model synchronizes previous results when async_scheduling is enabled."""
+        # 1. ===== Setup =====
+        scheduler_output = MagicMock()
+        scheduler_output.total_num_scheduled_tokens = 10
+
+        self.runner.scheduler_config.async_scheduling = True
+
+        # Mock AsyncContinueDecodeOutput
+        mock_async_output = MagicMock(spec=AsyncContinueDecodeOutput)
+        self.runner._pre_continue_decode_async_output = mock_async_output
+
+        # Mock persistent_batch_manager.update_states
+        self.runner.persistent_batch_manager = MagicMock()
+
+        # Mock input_batch
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.request_distribution = [0]
+        self.runner.input_batch.num_reqs = 1
+
+        self.runner.get_mrope_input_positions_fn = MagicMock()
+        self.runner.state_leaves = MagicMock()
+        self.runner.kv_caches = MagicMock()
+        self.runner.is_first_rank = True
+
+        # Mock _prepare_inputs to avoid running its full logic
+        mock_prepare_inputs_out = (
+            np.zeros(10, dtype=np.int32),  # input_ids
+            np.zeros(10, dtype=np.int32),  # positions
+            MagicMock(),  # attention_metadata
+            MagicMock(),  # sampling_metadata
+            np.zeros(10, dtype=np.int32),  # logits_indices
+            None,  # spec_decode_metadata
+            None,  # logits_indices_selector
+            10,  # padded_num_reqs
+            {
+                0: ["req1"]
+            },  # req_ids_dp
+            8,  # padded_num_scheduled_tokens_per_dp_rank
+        )
+        self.runner._prepare_inputs = MagicMock(
+            return_value=mock_prepare_inputs_out)
+
+        # Mock model_fn and compute_logits_fn
+        self.runner.model_fn = MagicMock(return_value=(None, MagicMock(), None,
+                                                       None))
+        self.runner.compute_logits_fn = MagicMock(return_value=MagicMock())
+        self.runner._select_from_array_fn = MagicMock(
+            side_effect=lambda x, y: x)
+        self.runner.is_last_rank = True
+        self.runner.is_pooling_model = False
+
+        # Execute the method
+        self.runner._execute_model(scheduler_output)
+
+        # Verify get_output() was called on the mock_async_output
+        mock_async_output.get_output.assert_called_once()
+
+        # Verify _pre_continue_decode_async_output was cleared
+        assert self.runner._pre_continue_decode_async_output is None
+
+    @patch('tpu_inference.runner.tpu_runner.continue_decode')
+    @patch('jax.device_get')
+    def test_execute_continue_decode_async(self, mock_device_get,
+                                           mock_continue_decode):
+        """_execute_continue_decode() should return None and set async output when async_scheduling is enabled."""
+        runner = MagicMock()
+        runner._resolve_continue_decode_results = TPUModelRunner._resolve_continue_decode_results.__get__(
+            runner)
+        runner.max_num_reqs = 8
+        runner.max_model_len = 512
+        runner.dp_size = 1
+        runner.vllm_config.parallel_config.data_parallel_size = 1
+        runner.vllm_config.parallel_config.is_moe_model = False
+        runner.input_batch.num_reqs = 3
+        runner.input_batch.req_ids = ["req1", "req2", "req3"]
+        runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1, "req3": 2}
+        runner.input_batch.token_ids_cpu = np.zeros((8, 512), dtype=np.int32)
+
+        runner.requests = {
+            "req1": MagicMock(),
+            "req2": MagicMock(),
+            "req3": MagicMock()
+        }
+
+        runner._get_min_remaining_slots.return_value = 5
+        runner.vllm_config.additional_config = {"max_decode_steps": 10}
+        runner.model_config.get_vocab_size.return_value = 1000
+        runner.eos_token_id = 999
+        runner.pad_token_id = 0
+        runner.layer_name_to_kvcache_index = {}
+
+        # Enable async scheduling
+        runner.scheduler_config.async_scheduling = True
+        runner._pre_async_results = None
+        runner._continue_decode_output = None
+
+        # Mock continue_decode output
+        mock_generated_tokens = MagicMock()
+        mock_final_state = MagicMock()
+        mock_continue_decode.return_value = (
+            mock_generated_tokens,
+            MagicMock(),  # kv_caches
+            mock_final_state,  # final_state
+            MagicMock(),  # final_rng
+            None  # all_expert_indices
+        )
+
+        # Setup scheduler output
+        scheduler_output = MagicMock()
+        scheduler_output.num_scheduled_tokens = {
+            "req1": 1,
+            "req2": 1,
+            "req3": 1
+        }
+
+        mock_seq_lens_cpu = np.array([10, 20, 30, 0, 0, 0, 0, 0])
+        runner.input_batch.num_tokens = mock_seq_lens_cpu.copy()
+        runner.input_batch.num_tokens_no_spec = mock_seq_lens_cpu.copy()
+
+        attn_metadata = MagicMock()
+        attn_metadata.seq_lens_cpu = mock_seq_lens_cpu
+        runner._prepare_inputs.return_value = (
+            np.zeros(8, dtype=np.int32),  # input_ids
+            None,
+            attn_metadata,
+            None,
+            np.array([0, 1, 2, -1, -1, -1, -1, -1], dtype=np.int32),
+            None,
+            [0, 1, 2],  # logits_indices_selector
+            None,
+            None,
+            None)
+
+        # Execute target method
+        result = TPUModelRunner._execute_continue_decode(
+            runner, scheduler_output)
+
+        # Verify it returns None
+        assert result is None
+
+        # Verify continue_decode was called (TPU launch happened)
+        mock_continue_decode.assert_called_once()
+
+        # Verify device_get was NOT called (no host sync)
+        mock_device_get.assert_not_called()
+
+        # Verify async output was set
+        assert runner._continue_decode_output is not None
+        assert isinstance(runner._continue_decode_output,
+                          AsyncContinueDecodeOutput)
+        assert runner._pre_continue_decode_async_output is runner._continue_decode_output
 
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
