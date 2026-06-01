@@ -64,7 +64,8 @@ trap 'echo "--- Tearing down server (pid=${SERVER_PID}) ---"; kill "${SERVER_PID
 
 echo "--- Waiting for server /health (server pid=${SERVER_PID}) ---"
 # 397B + cold JAX compilation can take 30+ min on first run.
-# 180 * 30s = 90 min max wait.
+# 180 * 30s = 90 min max wait. Every 10 polls (~5 min) we tail the server
+# log into stdout so progress is visible in Buildkite.
 HEALTHY=0
 for i in $(seq 1 180); do
   if curl -sf "http://localhost:${PORT}/health" > /dev/null 2>&1; then
@@ -77,6 +78,10 @@ for i in $(seq 1 180); do
     tail -n 200 "${SERVER_LOG}"
     exit 1
   fi
+  if [ $((i % 10)) -eq 0 ]; then
+    echo "--- still waiting (${i}/180, ~$((i * 30))s elapsed); last 30 server log lines ---"
+    tail -n 30 "${SERVER_LOG}" 2>/dev/null || echo "(server log not yet readable)"
+  fi
   sleep 30
 done
 
@@ -87,12 +92,16 @@ if [ "${HEALTHY}" -ne 1 ]; then
 fi
 
 echo "--- Running lm_eval mmlu_pro --limit 50 ---"
+# --output_path is required by lm-eval whenever --log_samples is set.
+LM_EVAL_OUTPUT=/tmp/lm_eval_results
+mkdir -p "${LM_EVAL_OUTPUT}"
 set +e
 lm_eval --model local-chat-completions \
   --model_args '{"model": "Qwen/Qwen3.5-397B-A17B-FP8", "base_url": "http://localhost:8000/v1/chat/completions", "enable_thinking": false, "num_concurrent": 500}' \
   --tasks mmlu_pro \
   --apply_chat_template \
   --log_samples \
+  --output_path "${LM_EVAL_OUTPUT}" \
   --gen_kwargs '{"chat_template_kwargs": {"enable_thinking": false}}' \
   --limit 50 \
   --seed 42
