@@ -110,22 +110,54 @@ class Eagle3Proposer:
         # Reuse the target model's embedding if the draft model doesn't have its own or if they are identical, to save memory.
         # TODO(ranlihao): Unify the weight loading process for jax and torchax path.
         if draft_model_impl == "flax_nnx":
-            draft_embed_tokens = getattr(self.state.model, 'embed_tokens',
-                                         None)
-            if draft_embed_tokens is None or ~jnp.any(
-                    draft_embed_tokens.embedding):
-                logger.info(
-                    "Draft model does not have embedding. Setting draft model's embed_tokens to target model's embed"
-                )
-                self.state.model.embed_tokens = target_model.model.embed
-            elif jnp.array_equal(draft_embed_tokens.embedding,
-                                 target_model.model.embed.embedding):
-                logger.info(
-                    "Draft model's embed_tokens is identical to target model's embed. Sharing the embedding."
-                )
-                self.state.model.embed_tokens = target_model.model.embed
+            from tpu_inference.models.jax.utils.weight_utils import get_param
+
+            # 1. Resolve draft embed param in self.state
+            draft_embed_param = None
+            for path in [
+                    "model.embed_tokens.weight", "model.embed.embedding",
+                    "model.embed_tokens.embedding"
+            ]:
+                try:
+                    draft_embed_param = get_param(self.state, path)
+                    logger.info(f"Resolved draft model embedding path: {path}")
+                    break
+                except ValueError:
+                    continue
+
+            # 2. Resolve target embed param in target_model (which is already the target state)
+            target_embed_param = None
+            for path in [
+                    "model.embed_tokens.weight", "model.embed.embedding",
+                    "model.embed_tokens.embedding"
+            ]:
+                try:
+                    target_embed_param = get_param(target_model, path)
+                    logger.info(
+                        f"Resolved target model embedding path: {path}")
+                    break
+                except ValueError:
+                    continue
+
+            # 3. Check and share embedding values directly in the State trees
+            if draft_embed_param is not None and target_embed_param is not None:
+                if not jnp.any(draft_embed_param.value):
+                    logger.info(
+                        "Draft model does not have embedding. Setting draft model's embed_tokens to target model's embed"
+                    )
+                    draft_embed_param.value = target_embed_param.value
+                elif jnp.array_equal(draft_embed_param.value,
+                                     target_embed_param.value):
+                    logger.info(
+                        "Draft model's embed_tokens is identical to target model's embed. Sharing the embedding."
+                    )
+                    draft_embed_param.value = target_embed_param.value
+                else:
+                    logger.info("Draft model has its own embed_tokens.")
             else:
-                logger.info("Draft model has its own embed_tokens.")
+                logger.warning(
+                    "Failed to locate draft or target embedding parameter in State objects."
+                )
 
         # The embed_tokens assignment above may have mutated `self.state`;
         # re-derive `state_leaves` so the dispatch-side view matches.
@@ -214,12 +246,15 @@ class Eagle3Proposer:
                     query_start_loc, new_block_tables)
 
         data_spec = PartitionSpec(ShardingAxisName.ATTN_DATA)
+        positions_spec = (PartitionSpec(None, ShardingAxisName.ATTN_DATA)
+                          if positions.ndim == 2 else data_spec)
         (positions, clamped_positions, new_seq_lens, query_start_loc,
          new_block_tables) = jax.shard_map(
              _sharded_update_inputs_for_loop_speculation,
              mesh=self.mesh,
-             in_specs=(data_spec, data_spec, data_spec),
-             out_specs=(data_spec, data_spec, data_spec, data_spec, data_spec),
+             in_specs=(positions_spec, data_spec, data_spec),
+             out_specs=(positions_spec, positions_spec, data_spec, data_spec,
+                        data_spec),
          )(positions, seq_lens, block_tables)
         return positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables
 
