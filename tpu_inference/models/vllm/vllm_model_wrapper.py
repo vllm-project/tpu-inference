@@ -16,6 +16,7 @@ import copy
 import time
 from collections.abc import Sequence
 from contextlib import contextmanager, nullcontext
+from functools import partial
 from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
@@ -378,6 +379,23 @@ class VllmModelWrapper:
 
     def jit_step_func(self):
 
+        compiler_options = {
+            "xla_tpu_all_gather_collective_matmul_mode":
+            "post_spmd_conservative",
+            "xla_tpu_reduce_scatter_collective_matmul_mode":
+            "post_spmd_conservative",
+            "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
+        }
+        sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
+        if sc_offload_bytes > 0:
+            threshold_bytes = str(sc_offload_bytes)
+            compiler_options[
+                "xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes"] = (
+                    threshold_bytes)
+            compiler_options[
+                "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
+                    threshold_bytes)
+
         def step_fun_impl(
             params_and_buffers,  # This has been wrapped into torchax TorchValue
             kv_caches: List[jax.Array],
@@ -500,8 +518,8 @@ class VllmModelWrapper:
             static_argnames=("layer_name_to_kvcache_index", "spec_step_idx"),
         )
 
-        step_fun_no_options = jax.jit(
-            step_fun_impl,
+        step_fun_jit = partial(
+            jax.jit,
             donate_argnames=("kv_caches", ),
             out_shardings=(
                 None,  # kv_caches - keep original sharding
@@ -517,37 +535,10 @@ class VllmModelWrapper:
             ),
         )
 
-        compiler_options = {
-            "xla_tpu_all_gather_collective_matmul_mode":
-            "post_spmd_conservative",
-            "xla_tpu_reduce_scatter_collective_matmul_mode":
-            "post_spmd_conservative",
-            "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
-        }
-        sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
-        if sc_offload_bytes > 0:
-            threshold_bytes = str(sc_offload_bytes)
-            compiler_options[
-                "xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes"] = (
-                    threshold_bytes)
-            compiler_options[
-                "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
-                    threshold_bytes)
-        step_fun_with_options = jax.jit(
+        step_fun_no_options = step_fun_jit(step_fun_impl)
+
+        step_fun_with_options = step_fun_jit(
             step_fun_impl,
-            donate_argnames=("kv_caches", ),
-            out_shardings=(
-                None,  # kv_caches - keep original sharding
-                NamedSharding(self.mesh,
-                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
-                None,  # empty list
-                None,  # expert ids
-            ),
-            static_argnames=(
-                "layer_name_to_kvcache_index",
-                "is_first_rank",
-                "is_last_rank",
-            ),
             compiler_options=compiler_options,
         )
 

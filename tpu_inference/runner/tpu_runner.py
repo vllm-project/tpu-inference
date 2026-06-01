@@ -52,6 +52,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
+from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
@@ -511,6 +512,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         """Generative model or pooling model select different computations."""
         self.enable_continue_decode = self.vllm_config.additional_config.get(
             "enable_continue_decode", False)
+        self.static_max_decode_steps = self.vllm_config.additional_config.get(
+            "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
         self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
         self.pad_token_id = runner_utils.get_pad_token_id(self.model_config)
 
@@ -1316,22 +1319,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return None
 
     def _get_min_remaining_slots(self) -> int:
-        # Iterate over all KV cache groups (e.g., for hybrid cache configurations)
-        # and conservatively calculate the minimum remaining token capacity.
-        min_blocks = None
-        for block_table in self.input_batch.block_table:
-            num_blocks = block_table.num_blocks_per_row[:self.input_batch.
-                                                        num_reqs]
-            if min_blocks is None:
-                min_blocks = num_blocks
-            else:
-                min_blocks = np.minimum(min_blocks, num_blocks)
-
-        if min_blocks is None or len(min_blocks) == 0:
-            return 0
-
+        # Conservatively calculate the minimum remaining token capacity based on max_model_len.
         num_tokens = self.input_batch.num_tokens[:self.input_batch.num_reqs]
-        remaining_slots = min_blocks * self.block_size - num_tokens
+        remaining_slots = self.max_model_len - num_tokens
+        if len(remaining_slots) == 0:
+            return 0
         return int(np.min(remaining_slots))
 
     def _execute_continue_decode(
@@ -1367,32 +1359,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         from tpu_inference.layers.jax.sample.sampling import sample
 
-        user_max_decode_steps = self.vllm_config.additional_config.get(
-            "max_decode_steps", 10)
         min_remaining = self._get_min_remaining_slots()
 
         # Limit max_decode_steps to not cross block boundaries
-        max_decode_steps = min(user_max_decode_steps, min_remaining)
-
+        max_decode_steps = min(self.static_max_decode_steps, min_remaining)
         if max_decode_steps <= 0:
             max_decode_steps = 1
-
         max_decode_steps_arr = jnp.array(max_decode_steps, dtype=jnp.int32)
 
         lora_metadata = self.lora_utils.extract_lora_metadata()
 
-        # max_decode_steps is a Python int (static loop bound). The loop is a
-        # single jax.jit'd, kv-cache-donating fused while_loop: in-place KV
-        # update keeps peak HBM flat, and the data-dependent EOS early-exit
-        # stays on-device (no per-step host sync). `sample` and self.mesh are
-        # stable objects passed straight through so the jit cache persists;
-        # per-call sampling data goes via `sampling_metadata`.
-        #
-        # Mirror the non-continue path's wrappers so anything inside model_fn
-        # / sampling that reads vllm.forward_context.get_forward_context()
-        # during tracing (attention layers, MoE config, etc.) sees the right
-        # state, and so any registered KV connector still gets its publish
-        # hook around the model run.
+        # Run continue-decode as a single JIT'd on-device loop (JAX while_loop with
+        # donated KV cache) to avoid host syncs. EOS early-exit happens on-device.
+        # Mirror standard path wrappers to preserve forward context and KV hooks.
         with self.maybe_forbid_compile, \
              set_forward_context(None, self.vllm_config), \
              self.maybe_get_kv_connector_output(
@@ -1408,7 +1387,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 init_state=init_state,
                 kv_caches=self.kv_caches,
                 max_decode_steps=max_decode_steps_arr,
-                static_max_decode_steps=user_max_decode_steps,
+                static_max_decode_steps=self.static_max_decode_steps,
                 eos_token_id=self.eos_token_id,
                 padding_token_id=self.pad_token_id,
                 rng=self.rng_params_for_sampling,
@@ -1509,7 +1488,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             termination_reason = "eos_hit"
         elif actual_steps == max_decode_steps:
             reasons = []
-            if max_decode_steps == user_max_decode_steps:
+            if max_decode_steps == self.static_max_decode_steps:
                 reasons.append("max_decode_steps_limit")
             if max_decode_steps == min_remaining or min_remaining <= 0:
                 reasons.append("kv_cache_limit")

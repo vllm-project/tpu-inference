@@ -216,6 +216,7 @@ class TestTPUJaxRunner:
         runner.requests = {"req1": MagicMock(), "req2": MagicMock()}
         runner._get_min_remaining_slots.return_value = 30
         runner.vllm_config.additional_config = {"max_decode_steps": 5}
+        runner.static_max_decode_steps = 5
         runner.model_config.get_vocab_size.return_value = 1000
         runner.model_config.hf_config = MagicMock(eos_token_id=999,
                                                   pad_token_id=0)
@@ -321,6 +322,7 @@ class TestTPUJaxRunner:
         # min_remaining = 5. max_decode_steps should be capped at min(10, 5) = 5.
         runner._get_min_remaining_slots.return_value = 5
         runner.vllm_config.additional_config = {"max_decode_steps": 10}
+        runner.static_max_decode_steps = 10
 
         runner.model_config.get_vocab_size.return_value = 1000
         runner.model_config.hf_config = MagicMock(eos_token_id=999,
@@ -473,6 +475,7 @@ class TestTPUJaxRunner:
 
         runner._get_min_remaining_slots.return_value = 5
         runner.vllm_config.additional_config = {"max_decode_steps": 10}
+        runner.static_max_decode_steps = 10
 
         runner.model_config.get_vocab_size.return_value = 1000
         runner.model_config.hf_config = MagicMock(eos_token_id=999,

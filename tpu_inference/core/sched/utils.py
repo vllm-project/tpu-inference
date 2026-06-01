@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+DEFAULT_MAX_DECODE_STEPS = 10
+
 
 def patch_vllm_scheduler_for_continue_decode():
     # Monkeypatch vLLM Scheduler to support continue decode multi-step scheduling
@@ -41,7 +43,8 @@ def patch_vllm_scheduler_for_continue_decode():
             original_init(scheduler_self, vllm_config, *args, **kwargs)
             additional_config = getattr(vllm_config, "additional_config", {})
             if additional_config.get("enable_continue_decode", False):
-                max_decode_steps = additional_config.get("max_decode_steps", 1)
+                max_decode_steps = additional_config.get(
+                    "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
                 # We need max_decode_steps - 1 lookahead tokens to ensure we have enough blocks.
                 scheduler_self.num_lookahead_tokens = max(
                     scheduler_self.num_lookahead_tokens, max_decode_steps - 1)

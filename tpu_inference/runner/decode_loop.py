@@ -153,22 +153,6 @@ def _decode_core(
     is_first_rank,
     is_last_rank,
 ):
-    """Fused decode loop, jitted with kv_caches donated.
-
-    Donating kv_caches lets XLA alias the (very large) KV-cache buffer into
-    the while_loop carry and update it in place across iterations -- the same
-    in-place behaviour the per-step jitted model_fn relied on. Without this
-    the eagerly-executed while_loop keeps both the input and the carried KV
-    cache live and OOMs on tight-HBM configs.
-
-    model_fn / compute_logits_fn / sample_fn and the mesh are static args:
-    they are stable objects on the runner, so the compile cache is keyed only
-    by config + array shapes (recompiles when max_decode_steps etc. change,
-    matching the prior static-bounds design). Loop-invariant attention fields
-    and per-step keys are passed as traced (non-donated) args; the token /
-    expert accumulation buffers are created inside this program so they fuse
-    into the loop rather than costing separate dispatches.
-    """
 
     def _run_one_step(step_idx, ct, am, pos, sl, kvc):
         step_rng = step_rngs[step_idx]
