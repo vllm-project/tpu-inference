@@ -1,0 +1,75 @@
+2026-06-01:00:34:10 INFO     [config.evaluate_config:307] Using default fewshot_as_multiturn=True.
+Traceback (most recent call last):
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/bin/lm_eval", line 10, in <module>
+    sys.exit(cli_evaluate())
+             ^^^^^^^^^^^^^^
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/__main__.py", line 10, in cli_evaluate
+    parser.execute(args)
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/_cli/harness.py", line 60, in execute
+    args.func(args)
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/_cli/run.py", line 377, in _execute
+    task_manager = cfg.process_tasks(cfg.metadata)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/config/evaluate_config.py", line 414, in process_tasks
+    raise ValueError(f"Tasks not found: {missing}")
+ValueError: Tasks not found: aime26
+2026-06-01:00:34:22 INFO     [config.evaluate_config:307] Using default fewshot_as_multiturn=True.
+Traceback (most recent call last):
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/bin/lm_eval", line 10, in <module>
+    sys.exit(cli_evaluate())
+             ^^^^^^^^^^^^^^
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/__main__.py", line 10, in cli_evaluate
+    parser.execute(args)
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/_cli/harness.py", line 60, in execute
+    args.func(args)
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/_cli/run.py", line 377, in _execute
+    task_manager = cfg.process_tasks(cfg.metadata)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/config/evaluate_config.py", line 414, in process_tasks
+    raise ValueError(f"Tasks not found: {missing}")
+ValueError: Tasks not found: aime26
+2026-06-01:00:34:34 INFO     [config.evaluate_config:307] Using default fewshot_as_multiturn=True.
+Traceback (most recent call last):
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/bin/lm_eval", line 10, in <module>
+    sys.exit(cli_evaluate())
+             ^^^^^^^^^^^^^^
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/__main__.py", line 10, in cli_evaluate
+    parser.execute(args)
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/_cli/harness.py", line 60, in execute
+    args.func(args)
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/_cli/run.py", line 377, in _execute
+    task_manager = cfg.process_tasks(cfg.metadata)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/config/evaluate_config.py", line 414, in process_tasks
+    raise ValueError(f"Tasks not found: {missing}")
+ValueError: Tasks not found: aime26
+2026-06-01:00:34:47 INFO     [config.evaluate_config:307] Using default fewshot_as_multiturn=True.
+Traceback (most recent call last):
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/bin/lm_eval", line 10, in <module>
+    sys.exit(cli_evaluate())
+             ^^^^^^^^^^^^^^
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/__main__.py", line 10, in cli_evaluate
+    parser.execute(args)
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/_cli/harness.py", line 60, in execute
+    args.func(args)
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/_cli/run.py", line 377, in _execute
+    task_manager = cfg.process_tasks(cfg.metadata)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/config/evaluate_config.py", line 414, in process_tasks
+    raise ValueError(f"Tasks not found: {missing}")
+ValueError: Tasks not found: aime26
+2026-06-01:00:38:10 INFO     [config.evaluate_config:307] Using default fewshot_as_multiturn=True.
+Traceback (most recent call last):
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/bin/lm_eval", line 10, in <module>
+    sys.exit(cli_evaluate())
+             ^^^^^^^^^^^^^^
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/__main__.py", line 10, in cli_evaluate
+    parser.execute(args)
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/_cli/harness.py", line 60, in execute
+    args.func(args)
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/_cli/run.py", line 377, in _execute
+    task_manager = cfg.process_tasks(cfg.metadata)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/kunjanp-dev-disk-2/vllm_env/lib/python3.12/site-packages/lm_eval/config/evaluate_config.py", line 414, in process_tasks
+    raise ValueError(f"Tasks not found: {missing}")
+ValueError: Tasks not found: aime26

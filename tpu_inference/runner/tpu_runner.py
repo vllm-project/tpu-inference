@@ -1638,7 +1638,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             """Compute schedule for a single DP rank."""
             decode_tokens = local_distribution[0]
             num_valid_seqs = local_distribution[2]
-
+            print(
+                f"[TPU-RUNNER] local_query_start_loc.shape={local_query_start_loc.shape} "
+                f"local_distribution.shape={local_distribution.shape} "
+                f"(num_tokens={max_tokens} sublanesize={num_sublanes} "
+                f"qkv_dtype={qkv_dtype} query_start_loc.shape={query_start_loc.shape})",
+                flush=True,
+            )
             return compute_schedule_table_v2.make_gdn_schedule_arrays(
                 safe_max_blocks,
                 qkv_dtype,
@@ -1651,6 +1657,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 chunk_size=chunk_size,
                 BT=chunk_size,
             )
+
+        print(
+            "[TPU-RUNNER] Starting shard_map for GDN schedule computation...",
+            flush=True)
+        print(
+            f"[TPU-RUNNER] query_start_loc.shape={query_start_loc.shape} "
+            f"request_distribution.shape={request_distribution.shape}",
+            flush=True)
+        print(f"[TPU-RUNNER] max_tokens={max_tokens} chunk_size={chunk_size} ",
+              flush=True)
+        print(
+            f"[TPU-RUNNER] safe_max_blocks={safe_max_blocks} max_num_seqs_per_rank={self.scheduler_config.max_num_seqs}",
+            flush=True)
 
         # Use shard_map to run on each DP rank
         mapped_fn = jax.shard_map(
