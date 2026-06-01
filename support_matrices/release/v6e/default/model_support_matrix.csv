@@ -1,4 +1,5 @@
 Model,Type,UnitTest,Accuracy/Correctness,Benchmark
+"Qwen/Qwen3-Embedding-8B",Embedding,✅ Passing,✅ Passing,❓ Untested
 "Qwen/Qwen2.5-VL-7B-Instruct",Multimodal,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-Omni-30B-A3B-Instruct",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "Qwen/Qwen3-VL-8B-Instruct",Multimodal,❓ Untested,❓ Untested,❓ Untested
@@ -13,7 +14,7 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "Qwen/Qwen3-Coder-480B-A35B-Instruct",Text,not enough HBM,not enough HBM,not enough HBM
 "Qwen/Qwen3.5-397B-A17B",Text,not enough HBM,not enough HBM,not enough HBM
 "deepseek-ai/DeepSeek-Math-V2",Text,❓ Untested,❓ Untested,❓ Untested
-"deepseek-ai/DeepSeek-R1",Text,not enough HBM,❓ Untested,❓ Untested
+"deepseek-ai/DeepSeek-R1",Text,not enough HBM,not enough HBM,❓ Untested
 "deepseek-ai/DeepSeek-V3.1",Text,❓ Untested,❓ Untested,❓ Untested
 "deepseek-ai/DeepSeek-V3.2",Text,❓ Untested,❓ Untested,❓ Untested
 "deepseek-ai/DeepSeek-V3.2-Speciale",Text,❓ Untested,❓ Untested,❓ Untested
