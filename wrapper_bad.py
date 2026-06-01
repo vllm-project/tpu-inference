@@ -299,21 +299,19 @@ def get_default_block_sizes(
         pages_per_seq,
     )
     is_8bit = utils.get_dtype_packing(kv_dtype) == 4
-    if (actual_num_q_heads in (32, 16) and actual_num_kv_heads in (4, 2)
-            and is_8bit):
+    # Qwen32b
+    if actual_num_q_heads == 32 and actual_num_kv_heads == 4 and is_8bit:
         return configs.BlockSizes(
             bq_sz=1,
             bkv_sz=512,
             batch_size=10,
-            n_buffer=3,
+            n_buffer=2,
         ), configs.BlockSizes(
             bq_sz=256,
             bkv_sz=512,
             batch_size=2,
-            n_buffer=3,
+            n_buffer=2,
         )
-
-
     # Qwen-coder
     if actual_num_q_heads == 12 and actual_num_kv_heads == 1 and is_8bit:
         return configs.BlockSizes(
@@ -449,9 +447,9 @@ def ragged_paged_attention(
         use_causal_mask=use_causal_mask,
     )
     if out_dtype is None:
-        out_dtype = jnp.float32 if queries.dtype == jnp.float32 else jnp.bfloat16
+        out_dtype = queries.dtype
     if mask_value is None:
-        mask_value = -1e10  # (was jnp.finfo(out_dtype).min)
+        mask_value = jnp.finfo(out_dtype).min
     if vmem_limit_bytes is None:
         vmem_limit_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
 

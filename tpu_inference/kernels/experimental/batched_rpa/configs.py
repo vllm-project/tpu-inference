@@ -78,7 +78,7 @@ class ServingConfigs:
 
     @property
     def int_ty(self) -> jnp.dtype:
-        if utils.get_dtype_packing(self.dtype_q) == 1:
+        if utils.get_dtype_packing(self.serve.dtype_q) == 1:
             return jnp.int32
 
         match pltpu.get_tpu_info().generation:
@@ -267,12 +267,11 @@ class RPAConfig:
 
     @property
     def lm_scratch_shape(self):
-        num_lanes = pltpu.get_tpu_info().num_lanes
         return (
             self.block.batch_size,
             self.model.num_kv_heads,
-            self.block.bq_sz * self.model.num_q_heads_per_kv_head,
-            num_lanes,
+            self.block.bq_sz * self.aligned_num_q_heads_per_kv_head,
+            self.aligned_head_dim,
         )
 
     @property
@@ -280,6 +279,6 @@ class RPAConfig:
         return (
             self.block.batch_size,
             self.model.num_kv_heads,
-            self.block.bq_sz * self.model.num_q_heads_per_kv_head,
-            self.model.head_dim,
+            self.block.bq_sz * self.aligned_num_q_heads_per_kv_head,
+            self.aligned_head_dim,
         )
