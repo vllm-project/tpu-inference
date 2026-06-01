@@ -313,7 +313,6 @@ def get_default_block_sizes(
             n_buffer=3,
         )
 
-
     # Qwen-coder
     if actual_num_q_heads == 12 and actual_num_kv_heads == 1 and is_8bit:
         return configs.BlockSizes(
