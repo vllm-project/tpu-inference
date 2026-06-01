@@ -44,7 +44,6 @@ making sure they go through standard function arguments:
 
 import math
 from typing import Any, Callable, Optional
-
 import jax
 import torch
 import torch.nn as nn
@@ -141,6 +140,9 @@ class TorchAXJaxVisionTowerBridge(nn.Module):
             return super().__getattr__(name)
         except AttributeError:
             return DummySubmodule()
+
+
+
 
 
 def _patched_set_deepstack(vllm_model, deepstack_input_embeds):
@@ -391,8 +393,6 @@ def precompile_vision_encoder(self, run_compilation_fn: Callable) -> None:
     logger.info("Starting to precompile Qwen3 VL vision encoder.")
     if precompile_fn is not None:
         precompile_fn(run_compilation_fn)
-
-
 def apply_qwen3_vl_patches(vllm_model):
     """Apply Qwen3-VL specific patches for stateless Deepstack support."""
     if not getattr(vllm_model, "use_deepstack", False):

@@ -659,7 +659,6 @@ def copy_weights_to_jax_vision_tower(
                     t_val = transform_fn(t_val)
 
             j_val = jnp.array(t_val)
-
             # Deduce sharding specs and assign safely
             sharding_spec = jax_param.get_metadata().get("sharding", ())
             if isinstance(sharding_spec, NamedSharding):

@@ -167,6 +167,10 @@ def maybe_precompile_vision_encoder_fn(
 
     jax_dtype = to_jax_dtype(vllm_config.model_config.dtype)
 
+    image_counts = [
+        2**i for i in range(int(math.log2(MAX_IMAGE_WARMUP_POW2)) + 1)
+    ] if getattr(envs, "VLLM_TPU_ENABLE_QWEN3_JAX_VISION", True) else [1]
+
     def precompile_fn(run_compilation_fn: Callable) -> None:
         for num_images in precompile_num_of_images:
             for num_patches in num_patches_paddings:
