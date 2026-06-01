@@ -32,6 +32,9 @@ def patch_vllm_scheduler_for_continue_decode():
             diff = len(res_token_ids) - 1
             if diff > 0:
                 request.num_computed_tokens += diff
+                if scheduler_self.scheduler_config.async_scheduling and hasattr(
+                        request, "num_output_placeholders"):
+                    request.num_output_placeholders += diff
 
             return res_token_ids, stopped
 
