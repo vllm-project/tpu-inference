@@ -23,3 +23,5 @@ pkill -f "toy_proxy_server" || true
 sleep 5
 pkill -9 -f "vllm" || true
 pkill -9 -f "toy_proxy_server" || true
+fuser -k -9 /dev/vfio/* || true
+fuser -k -9 /dev/accel* || true
