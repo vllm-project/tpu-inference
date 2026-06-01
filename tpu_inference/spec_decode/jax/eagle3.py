@@ -246,12 +246,15 @@ class Eagle3Proposer:
                     query_start_loc, new_block_tables)
 
         data_spec = PartitionSpec(ShardingAxisName.ATTN_DATA)
+        positions_spec = (PartitionSpec(None, ShardingAxisName.ATTN_DATA)
+                          if positions.ndim == 2 else data_spec)
         (positions, clamped_positions, new_seq_lens, query_start_loc,
          new_block_tables) = jax.shard_map(
              _sharded_update_inputs_for_loop_speculation,
              mesh=self.mesh,
-             in_specs=(data_spec, data_spec, data_spec),
-             out_specs=(data_spec, data_spec, data_spec, data_spec, data_spec),
+             in_specs=(positions_spec, data_spec, data_spec),
+             out_specs=(positions_spec, positions_spec, data_spec, data_spec,
+                        data_spec),
          )(positions, seq_lens, block_tables)
         return positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables
 
