@@ -144,6 +144,13 @@ def general_device_put(tensor: jax.Array,
         if multihost_backend != "ray" or (isinstance(t, jax.Array)
                                           and not t.is_fully_addressable):
             if layout is not None:
+                # Normalize input to layout=<null> before placement so that
+                # jit__device_put_reshard always sees a consistent input spec.
+                # Without this, a compilation cached for layout={explicit} input
+                # (e.g. from model init) fails with INVALID_ARGUMENT when given
+                # layout=<null> input (e.g. after checkpoint loading).
+                if isinstance(t, jax.Array):
+                    t = jax.device_put(t, t.sharding)
                 return jax.device_put(t, Format(layout, sharding))
             else:
                 return jax.device_put(t, sharding)
@@ -161,6 +168,7 @@ def general_device_put(tensor: jax.Array,
         if layout is not None:
             dst_mesh = sharding.mesh
             with jax.set_mesh(dst_mesh):
+                global_array = jax.device_put(global_array, global_array.sharding)
                 global_array = jax.device_put(global_array,
                                               Format(layout, sharding))
         return global_array
