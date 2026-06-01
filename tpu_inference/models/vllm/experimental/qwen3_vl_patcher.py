@@ -48,7 +48,7 @@ import torch.nn as nn
 import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
 import vllm.model_executor.models.utils as vllm_utils
 from flax import nnx
-from jax.sharding import get_mesh
+from jax.sharding import NamedSharding, PartitionSpec, get_mesh
 from jaxtyping import Float
 from torchax.interop import call_jax, jax_view, torch_view
 from vllm.config import get_current_vllm_config
@@ -63,7 +63,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.qwen3_vl import \
     Qwen3_VisionTransformer as JaxVisionTransformer
 from tpu_inference.models.jax.qwen3_vl import copy_weights_to_jax_vision_tower
-from tpu_inference.utils import to_torch_dtype
+from tpu_inference.utils import t2j, to_torch_dtype
 
 logger = init_logger(__name__)
 
@@ -430,6 +430,28 @@ def apply_qwen3_vl_patches(vllm_model):
             "Skipping optimized JAX Vision Transformer replacement since VLLM_TPU_ENABLE_FLAX_ENCODER is disabled."
         )
 
+    if hasattr(vllm_model, "deepstack_input_embeds"):
+        # Force the deepstack placeholder buffers to the correct TPU device
+        # (via Torchax/JAX) to resolve device mismatch during the forward pass.
+        # This is required because the ModelForEmbedding adapter can cause
+        # the standard weight loader to skip these non-parameter buffers.
+        if envs.VLLM_TPU_ENABLE_FLAX_ENCODER:
+            mesh = get_mesh()
+            sharding = NamedSharding(mesh, PartitionSpec())
+            vllm_model.deepstack_input_embeds = [
+                torch_view(jax.device_put(t2j(t.detach()), sharding))
+                for t in vllm_model.deepstack_input_embeds
+            ]
+        else:
+            target_device = next(vllm_model.parameters()).device
+            logger.info(
+                f"Patching Qwen3-VL deepstack buffers to device: {target_device}"
+            )
+            vllm_model.deepstack_input_embeds = [
+                t.to(device=target_device)
+                for t in vllm_model.deepstack_input_embeds
+            ]
+
 
 def is_qwen3_vl(vllm_model) -> bool:
     """Check if the given vLLM model is of architecture Qwen3VLForConditionalGeneration."""
@@ -437,31 +459,6 @@ def is_qwen3_vl(vllm_model) -> bool:
 
 
 def maybe_apply_qwen3_vl_patches(vllm_model: nn.Module) -> None:
-    if is_qwen3_vl(vllm_model):
-        apply_qwen3_vl_patches(vllm_model)
-
-        if hasattr(vllm_model, "deepstack_input_embeds"):
-            # Force the deepstack placeholder buffers to the correct TPU device
-            # (via Torchax/JAX) to resolve device mismatch during the forward pass.
-            # This is required because the ModelForEmbedding adapter can cause
-            # the standard weight loader to skip these non-parameter buffers.
-            if envs.VLLM_TPU_ENABLE_FLAX_ENCODER:
-                import jax
-                from jax.sharding import NamedSharding, PartitionSpec, get_mesh
-
-                from tpu_inference.utils import t2j
-                mesh = get_mesh()
-                sharding = NamedSharding(mesh, PartitionSpec())
-                vllm_model.deepstack_input_embeds = [
-                    torch_view(jax.device_put(t2j(t.detach()), sharding))
-                    for t in vllm_model.deepstack_input_embeds
-                ]
-            else:
-                target_device = next(vllm_model.parameters()).device
-                logger.info(
-                    f"Patching Qwen3-VL deepstack buffers to device: {target_device}"
-                )
-                vllm_model.deepstack_input_embeds = [
-                    t.to(device=target_device)
-                    for t in vllm_model.deepstack_input_embeds
-                ]
+    if not is_qwen3_vl(vllm_model):
+        return
+    apply_qwen3_vl_patches(vllm_model)

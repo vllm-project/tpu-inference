@@ -14,6 +14,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import time
 from functools import partial
 from typing import Callable, Optional
 
@@ -533,10 +534,24 @@ class Qwen3_VisionTransformer(nnx.Module):
     ) -> Float[Array, "padded_token_len out_hidden_size_cat"]:
         window_index, rotary_pos_emb, pos_embeds, cu_seqlens = self.compute_aux_arrays(
             grid_thw)
-
-        hidden_states = self.encode_padded_jit(x_padded, window_index,
-                                               rotary_pos_emb, pos_embeds,
-                                               cu_seqlens)
+        trace_name = (
+            f"encode_padded_jit"
+            f"-x_padded_{'_'.join(map(str, x_padded.shape))}"
+            f"-window_index_{'_'.join(map(str, window_index.shape))}"
+            f"-rotary_pos_emb_{'_'.join(map(str, rotary_pos_emb.shape))}"
+            f"-pos_embeds_{'_'.join(map(str, pos_embeds.shape))}"
+            f"-cu_seqlens_{'_'.join(map(str, cu_seqlens.shape))}")
+        start_time = time.time()
+        jax.debug.print(f"[vision-jit-profile] Entering {trace_name}")
+        with jax.profiler.TraceAnnotation(trace_name):
+            hidden_states = self.encode_padded_jit(x_padded, window_index,
+                                                   rotary_pos_emb, pos_embeds,
+                                                   cu_seqlens)
+            hidden_states.block_until_ready()
+        end_time = time.time()
+        jax.debug.print(
+            f"[vision-jit-profile] Exiting {trace_name}, time spend: {end_time - start_time}"
+        )
         return hidden_states
 
 

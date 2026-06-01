@@ -31,6 +31,7 @@ from vllm.model_executor.models.qwen3_omni_moe_thinker import \
 
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import is_qwen3_vl
 from tpu_inference.utils import to_jax_dtype
 
 logger = init_logger(__name__)
@@ -41,7 +42,7 @@ JITTABLE_ARCHS = {
     Qwen3OmniMoeThinkerForConditionalGeneration,
 }
 
-MAX_IMAGE_WARMUP_POW2 = 8
+MAX_IMAGE_WARMUP_POW2 = 32
 
 
 def is_jittable_architecture(vllm_model) -> bool:
@@ -59,8 +60,6 @@ def is_jittable_architecture(vllm_model) -> bool:
 
 def has_jittable_vision(vllm_model) -> bool:
     """Check if the model has any JIT-compiled vision component (either whole or submodule)."""
-    from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
-        is_qwen3_vl
     return is_jittable_architecture(vllm_model) or is_qwen3_vl(vllm_model)
 
 
@@ -157,7 +156,7 @@ def maybe_precompile_vision_encoder_fn(
     spatial_merge_unit = vc.spatial_merge_size**2
     max_patches = (vllm_config.scheduler_config.max_num_batched_tokens *
                    spatial_merge_unit)
-    max_patches = min(max_patches, 8192) # around 8192 / 280 = 29 images max
+    max_patches = min(max_patches, 16384)
     min_shift = 4  # 1 << 4 = 16 patches minimum
     max_shift = max(min_shift, (max(max_patches, 1) - 1).bit_length())
     num_patches_paddings = [1 << i for i in range(min_shift, max_shift + 1)]
@@ -197,11 +196,36 @@ def maybe_precompile_vision_encoder_fn(
 
 
 def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
-    """Convert certain kwargs to JIT-friendly formats, if needed.
+    """Converts certain kwargs to JIT-friendly formats, if needed.
     
     Specifically, convert "image_grid_thw", "video_grid_thw", and "grid_thw" to
     GridTHW instances, which are tuple subclasses that can be hashed in jax.jit.
+
+    It's also doing experiment on pixel padding.
     """
+    if envs.VLLM_TPU_ENABLE_CPU_PADDING and is_qwen3_vl(vllm_model):
+        if "pixel_values" in kwargs:
+            pv = kwargs["pixel_values"]
+            num_patches = pv.shape[0]
+            bucket_num_patches = 1 << (num_patches - 1).bit_length()
+            if bucket_num_patches > num_patches:
+                logger.info(
+                    "[vision-jit-profile] Padding image pixel_values eagerly on CPU/Host: original patches=%s -> bucketed patches=%s",
+                    num_patches, bucket_num_patches)
+                kwargs["pixel_values"] = torch.nn.functional.pad(
+                    pv, (0, 0, 0, bucket_num_patches - num_patches))
+        if "pixel_values_videos" in kwargs:
+            pv = kwargs["pixel_values_videos"]
+            num_patches = pv.shape[0]
+            bucket_num_patches = 1 << (num_patches - 1).bit_length()
+            if bucket_num_patches > num_patches:
+                logger.info(
+                    "[vision-jit-profile] Padding video pixel_values eagerly on CPU/Host: original patches=%s -> bucketed patches=%s",
+                    num_patches, bucket_num_patches)
+                kwargs["pixel_values_videos"] = torch.nn.functional.pad(
+                    pv, (0, 0, 0, bucket_num_patches - num_patches))
+        return kwargs
+
     if not has_jittable_vision(vllm_model):
         return kwargs
 

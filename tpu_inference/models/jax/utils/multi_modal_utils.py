@@ -289,10 +289,16 @@ def merge_multimodal_embeddings(
     )
 
 
-def flatten_pad_mm_embeds(mm_embeds: list[jax.Array] | None,
-                          target_pad_len: int) -> jax.Array | None:
+def flatten_pad_mm_embeds(
+        mm_embeds: list[jax.Array] | None,
+        target_pad_len: int,
+        is_multimodal: jax.Array | None = None) -> jax.Array | None:
     if mm_embeds is None or len(mm_embeds) == 0:
         return None
+
+    if is_multimodal is not None:
+        return _flatten_pad_mm_embeds_with_mask(mm_embeds, target_pad_len,
+                                                is_multimodal)
 
     flattened_embeds = flatten_embeddings(mm_embeds)
 
@@ -304,3 +310,68 @@ def flatten_pad_mm_embeds(mm_embeds: list[jax.Array] | None,
     flattened_embeds = jnp.concatenate([flattened_embeds, padding], axis=0)
 
     return flattened_embeds
+
+
+def _flatten_pad_mm_embeds_with_mask(
+        mm_embeds: MultiModalEmbeddings | None, target_pad_len: int,
+        is_multimodal: jax.Array) -> MultiModalEmbeddings | None:
+    """Pads a list of multimodal embeddings or a single embedding to target_pad_len.
+
+    Returns a list containing a single 2D JAX Array padded to the target length.
+    """
+    if mm_embeds is None or len(mm_embeds) == 0:
+        return None
+
+    if isinstance(mm_embeds, (list, tuple)):
+        flat_list = []
+        for i, single_embed in enumerate(mm_embeds):
+            if single_embed.ndim != 2:
+                raise ValueError(
+                    f"Expected each multimodal embedding in the list/tuple to be a 2D tensor "
+                    f"(num_tokens, hidden_dim), but got tensor at index {i} with shape {single_embed.shape}."
+                )
+            flat_list.append(single_embed)
+        flattened = jnp.concatenate(flat_list, axis=0)
+    else:
+        if mm_embeds.ndim != 3:
+            raise ValueError(
+                f"Expected a single multimodal embedding tensor to be a 3D tensor "
+                f"(batch_size, num_tokens_per_item, hidden_dim), but got shape {mm_embeds.shape}."
+            )
+        flattened = mm_embeds.reshape(-1, mm_embeds.shape[-1])
+
+    # JIT-compatible Static Padding and Alignment using Prefix-Sum + Gather:
+    # 1. Truncate flattened if it exceeds target_pad_len.
+    if flattened.shape[0] > target_pad_len:
+        flattened = flattened[:target_pad_len]
+
+    # 2. Pad the flattened array statically to target_pad_len using JIT-friendly concat.
+    # We append a dummy row at the beginning to act as index 0 for non-multimodal tokens.
+    dummy_row = jnp.zeros((1, flattened.shape[1]), dtype=flattened.dtype)
+
+    # Compute remaining static padding length needed to reach target_pad_len
+    pad_size = target_pad_len - flattened.shape[0]
+    if pad_size > 0:
+        zero_padding = jnp.zeros((pad_size, flattened.shape[1]),
+                                 dtype=flattened.dtype)
+        flattened_padded = jnp.concatenate(
+            [dummy_row, flattened, zero_padding], axis=0)
+    else:
+        flattened_padded = jnp.concatenate([dummy_row, flattened], axis=0)
+
+    if is_multimodal is not None:
+        # 3. Create gather indices using cumsum.
+        # For non-multimodal tokens, it points to the dummy row (0).
+        # For multimodal tokens, it points to the corresponding offset in the flattened array.
+        gather_indices = jnp.cumsum(is_multimodal)
+
+        # 4. Statically gather matching features
+        gathered = flattened_padded[gather_indices]
+
+        # 5. Retain original values where the mask is True, else set to 0.0
+        padded = jnp.where(is_multimodal[:, None], gathered, 0.0)
+    else:
+        # If no mask is provided, fall back to standard slice assignment
+        padded = flattened_padded[1:target_pad_len + 1]
+
+    return [padded]
