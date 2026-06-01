@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Dev pipeline for OOT perf regression bisect (PR #2706 candidate, commit 66bc13c3).
-# Runs only the failing nightly perf test on tpu6e.
+# Dev pipeline for OOT perf regression bisect (66bc13c3 PR#2706).
+# Runs the perf test 10x in parallel via matrix to characterize flakiness.
 
 steps:
   - label: ":docker: Build and Push Base Image (tpu6e)"
@@ -25,13 +25,15 @@ steps:
     commands:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
-  - label: "tpu6e Performance tests for Out-of-tree model support (bisect)"
+  - label: "tpu6e OOT perf (66bc13c3 PR#2706, run {{matrix}})"
     key: tpu6e_oot_perf_bisect
     depends_on: tpu6e_build_docker
+    soft_fail: true
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu6e"
     agents:
       queue: tpu_v6e_queue
+    matrix: ["1","2","3","4","5","6","7","8","9","10"]
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_flax_nnx_vs_vllm_performance
