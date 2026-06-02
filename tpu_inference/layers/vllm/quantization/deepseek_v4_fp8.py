@@ -27,8 +27,7 @@ from tpu_inference.layers.common.quant_methods import DSV4_FP8
 from tpu_inference.layers.jax.attention.attention import Attention
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
-from tpu_inference.layers.vllm.quantization.fp8 import (VllmFp8Config,
-                                                        VllmFp8LinearMethod,
+from tpu_inference.layers.vllm.quantization.fp8 import (VllmFp8LinearMethod,
                                                         VllmFp8MoEMethod)
 from tpu_inference.layers.vllm.quantization.mxfp4 import VllmMxfp4MoEMethod
 from tpu_inference.layers.vllm.quantization.unquantized import (
@@ -39,8 +38,7 @@ logger = init_logger(__name__)
 
 
 @register_quantization_config(DSV4_FP8)
-class VllmDeepseekV4Fp8Config(DeepseekV4FP8Config, VllmFp8Config,
-                              VllmQuantConfig):
+class VllmDeepseekV4Fp8Config(DeepseekV4FP8Config, VllmQuantConfig):
     """TPU quantization config for "deepseek_v4_fp8" format.
     Registered under "deepseek_v4_fp8".
     Dispatches MoE quant methods based on the checkpoint's expert_dtype:
