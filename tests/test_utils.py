@@ -262,3 +262,26 @@ def poison_tpu_memory():
         ],
         compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
     )(jnp.zeros((1, ), dtype=jnp.float32))
+
+
+def test_make_optimized_mesh_missing_coords():
+    """Tests fallback to sorting by process_index and id in make_optimized_mesh when coords is missing."""
+    from tpu_inference.utils import make_optimized_mesh
+
+    class MockDeviceNoCoords:
+
+        def __init__(self, id, process_index, device_kind="TPU v7"):
+            self.id = id
+            self.process_index = process_index
+            self.device_kind = device_kind
+
+    devices = [
+        MockDeviceNoCoords(id=1, process_index=1),
+        MockDeviceNoCoords(id=0, process_index=0),
+    ]
+
+    mesh = make_optimized_mesh([2], ["axis"], devices=devices)
+
+    ordered_devices = mesh.devices.flatten()
+    assert ordered_devices[0].process_index == 0
+    assert ordered_devices[1].process_index == 1
