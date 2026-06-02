@@ -54,4 +54,4 @@ class VllmFusedMoE(FusedMoE):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super().forward(hidden_states, router_logits)
+        return super().forward(hidden_states, router_logits, input_ids)

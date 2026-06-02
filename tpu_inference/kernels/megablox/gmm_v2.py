@@ -39,6 +39,17 @@ def swigluoai(gate: jax.Array,
     return (up + 1.0) * glu
 
 
+def silu_and_mul_with_clamp(gate: jax.Array,
+                            up: jax.Array,
+                            limit: float = 10.0) -> jax.Array:
+    """Activation used in some models DeepSeek V4."""
+    # The limit value is from DSV4's config.
+    # TODO: pass limit from model config, instead of hardcoding here.
+    gate = jnp.clip(gate, max=limit)
+    up = jnp.clip(up, min=-limit, max=limit)
+    return jax.nn.silu(gate) * up
+
+
 def apply_act_fn(acc: jax.Array, fuse_act: str | None):
     """Applies a fused activation function to the accumulator.
 
@@ -69,6 +80,8 @@ def apply_act_fn(acc: jax.Array, fuse_act: str | None):
             return jax.nn.gelu(acc_gate) * acc_up
         case "swigluoai":
             return swigluoai(acc_gate, acc_up)
+        case "silu_and_mul_with_clamp":
+            return silu_and_mul_with_clamp(acc_gate, acc_up)
         case _:
             raise NotImplementedError(
                 f"Unsupported activation function: {fuse_act}")
