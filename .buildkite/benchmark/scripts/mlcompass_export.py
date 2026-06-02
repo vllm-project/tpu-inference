@@ -18,6 +18,7 @@ import os
 import re
 import time
 import uuid
+
 from google.cloud import bigquery
 
 
