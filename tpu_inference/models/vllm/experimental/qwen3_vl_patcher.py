@@ -43,7 +43,7 @@ making sure they go through standard function arguments:
 """
 
 import math
-from typing import Callable
+from typing import Callable, Dict, Optional, Any
 
 import jax
 import torch
@@ -493,7 +493,15 @@ def is_qwen3_vl(vllm_model) -> bool:
     return isinstance(vllm_model, Qwen3VLForConditionalGeneration)
 
 
-def maybe_apply_qwen3_vl_patches(vllm_model: nn.Module) -> None:
+def maybe_apply_qwen3_vl_patches(
+    vllm_model: nn.Module,
+    wrapper: Optional[Any] = None,
+    params: Optional[Any] = None,
+) -> None:
     if not is_qwen3_vl(vllm_model):
         return
     apply_qwen3_vl_patches(vllm_model)
+    if wrapper is not None:
+        vllm_model._wrapper = wrapper
+    if params is not None:
+        vllm_model._params = params

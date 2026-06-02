@@ -222,7 +222,6 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
                     num_patches, bucket_num_patches)
                 kwargs["pixel_values_videos"] = torch.nn.functional.pad(
                     pv, (0, 0, 0, bucket_num_patches - num_patches))
-        return kwargs
 
     if not has_jittable_vision(vllm_model):
         return kwargs

@@ -627,9 +627,6 @@ def copy_weights_to_jax_vision_tower(
             import torchax
             with torchax.default_env():
                 t_val = t_param.detach().to(torch.float32).cpu().numpy()
-            if transform_fn is not None:
-                t_val = transform_fn(t_val)
-            j_val = jnp.array(t_val)
 
             # Traverse JAX state dict to find target JAX Param
             keys = j_name.split(".")
@@ -639,6 +636,26 @@ def copy_weights_to_jax_vision_tower(
                     jax_param = jax_param[int(key)]
                 else:
                     jax_param = jax_param[key]
+
+            target_shape = jax_param[...].shape if isinstance(jax_param, nnx.Variable) else jax_param.shape
+
+            # Dynamically detect if the weight has already been transposed by the TPU weight loader
+            if transform_fn is not None:
+                if len(t_val.shape) == 2 and len(target_shape) == 2:
+                    in_dim, out_dim = target_shape
+                    A, B = t_val.shape
+                    is_jax_layout = (out_dim % B == 0) and (in_dim % A == 0)
+                    is_torch_layout = (out_dim % A == 0) and (in_dim % B == 0)
+                    
+                    if is_jax_layout and not is_torch_layout:
+                        # Already in JAX layout [in, out] due to TPU weight loader, skip transpose
+                        logger.info(f"Bypassing transposition for '{t_name}' since it is already in JAX layout {t_val.shape}")
+                    else:
+                        t_val = transform_fn(t_val)
+                else:
+                    t_val = transform_fn(t_val)
+
+            j_val = jnp.array(t_val)
 
             # Deduce sharding specs and assign safely
             sharding_spec = jax_param.get_metadata().get("sharding", ())

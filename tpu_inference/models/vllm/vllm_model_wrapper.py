@@ -325,7 +325,11 @@ class VllmModelWrapper:
                 REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES,
             )
 
-        # NOTE: Apply Qwen3-VL model specific patches
+        maybe_apply_qwen3_vl_patches(
+            self.model.vllm_model,
+            wrapper=self,
+            params=params_and_buffers,
+        )
         apply_model_specific_patches(self.model.vllm_model)
 
         loading_end = time.time()
