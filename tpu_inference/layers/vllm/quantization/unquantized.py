@@ -418,6 +418,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
 
         del w13_weight, w2_weight, w13_bias, w2_bias
 
+        jax.block_until_ready(weights)
+
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
