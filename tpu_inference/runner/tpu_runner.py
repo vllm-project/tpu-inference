@@ -294,13 +294,14 @@ def _jax_logprobs_materialize(
     selected_token_ranks = np.asarray(
         jax.device_get(logprobs_tensors.selected_token_ranks))
 
-    if spec_decode_metadata is not None:
+    if (spec_decode_metadata is not None
+            and np.sum(spec_decode_metadata.draft_lengths_cpu) > 0):
         assert runner is not None
         vocab_size = runner.input_batch.vocab_size
         dp_size = runner.dp_size
         num_reqs = runner.input_batch.num_reqs
 
-        padded_tokens_length = spec_decode_metadata.final_logits_indices.shape[
+        padded_tokens_length = spec_decode_metadata.target_logits_indices.shape[
             0]
         assert padded_tokens_length % dp_size == 0
         padded_tokens_length = padded_tokens_length // dp_size
