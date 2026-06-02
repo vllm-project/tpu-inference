@@ -141,7 +141,12 @@ class Eagle3Proposer:
 
             # 3. Check and share embedding values directly in the State trees
             if draft_embed_param is not None and target_embed_param is not None:
-                if not jnp.any(draft_embed_param.value):
+                if draft_embed_param.value.shape != target_embed_param.value.shape:
+                    logger.warning(
+                        "Shape mismatch for draft vs target embedding: "
+                        f"draft {draft_embed_param.value.shape} vs target {target_embed_param.value.shape}. "
+                        "Skipping sharing.")
+                elif not jnp.any(draft_embed_param.value):
                     logger.info(
                         "Draft model does not have embedding. Setting draft model's embed_tokens to target model's embed"
                     )
