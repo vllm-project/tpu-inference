@@ -905,8 +905,8 @@ def host_extract_sampled_tokens(
         valid_sampled_token_ids = runner.rejection_sampler.parse_output(
             next_tokens, runner.input_batch.vocab_size,
             spec_decode_metadata.draft_lengths_cpu, num_reqs,
-            spec_decode_metadata.target_logits_indices.shape[0], runner.dp_size,
-            spec_decode_metadata.req_indices_dp)
+            spec_decode_metadata.target_logits_indices.shape[0],
+            runner.dp_size, spec_decode_metadata.req_indices_dp)
     # Mask out the sampled tokens that should not be sampled.
     for i in discard_sampled_tokens_req_indices:
         valid_sampled_token_ids[i].clear()

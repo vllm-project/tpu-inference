@@ -171,12 +171,6 @@ class Eagle3Proposer:
         else:
             self.state_leaves = self.state
 
-        if hasattr(self.model, "embed_tokens"):
-            embed_val = self.model.embed_tokens.embedding.value
-            logger.info(
-                f"EAGLE3_DEBUG: draft embed norm = {jnp.linalg.norm(embed_val)}"
-            )
-
     def _prepare_input_ids(
             self, query_start_loc: jax.Array, target_token_ids: jax.Array,
             next_token_ids: jax.Array,

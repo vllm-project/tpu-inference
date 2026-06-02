@@ -154,7 +154,8 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                 self._logprobs_tensors,
                 self.logits_indices_selector,
                 spec_decode_metadata=self._spec_decode_metadata,
-                runner=self._runner)
+                runner=self._runner,
+                num_reqs=self._num_reqs)
 
         if self._prompt_logprobs_async_data is not None:
             self._model_runner_output.prompt_logprobs_dict = (
@@ -176,6 +177,22 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                     _padded_num_scheduled_tokens_per_dp_rank,
                 )
                 self._model_runner_output.routed_experts = routed_experts
+
+        # Diagnostic logging for speculative logprobs mismatch
+        logprobs_obj = self._model_runner_output.logprobs
+        logprobs_str = "None"
+        if logprobs_obj is not None:
+            logprobs_str = (
+                f"LogprobsLists(cu={logprobs_obj.cu_num_generated_tokens}, "
+                f"tokens_shape={logprobs_obj.logprob_token_ids.shape if hasattr(logprobs_obj.logprob_token_ids, 'shape') else len(logprobs_obj.logprob_token_ids)}, "
+                f"probs_shape={logprobs_obj.logprobs.shape if hasattr(logprobs_obj.logprobs, 'shape') else len(logprobs_obj.logprobs)})"
+            )
+        print(
+            f"[LOGPROBS_DEBUG_RUNNER] get_output: "
+            f"req_ids={self._model_runner_output.req_ids}, "
+            f"sampled_token_ids={self._model_runner_output.sampled_token_ids}, "
+            f"logprobs={logprobs_str}",
+            flush=True)
 
         return self._model_runner_output
 
@@ -286,7 +303,8 @@ def _jax_logprobs_materialize(
         logits_indices_selector: Optional[List[int]] = None,
         cu_num_generated_tokens: Optional[Any] = None,
         spec_decode_metadata: Optional[SpecDecodeMetadata] = None,
-        runner: Optional[Any] = None) -> LogprobsLists:
+        runner: Optional[Any] = None,
+        num_reqs: Optional[int] = None) -> LogprobsLists:
     """Materializes logprobs from JAX arrays into NumPy-backed LogprobsLists."""
     log_token_ids = np.asarray(
         jax.device_get(logprobs_tensors.logprob_token_ids))
@@ -299,7 +317,7 @@ def _jax_logprobs_materialize(
         assert runner is not None
         vocab_size = runner.input_batch.vocab_size
         dp_size = runner.dp_size
-        num_reqs = runner.input_batch.num_reqs
+        num_reqs = runner.input_batch.num_reqs if num_reqs is None else num_reqs
 
         padded_tokens_length = spec_decode_metadata.target_logits_indices.shape[
             0]
@@ -376,9 +394,6 @@ def _jax_logprobs_materialize(
                 req_logprob_token_ids[req_idx] = valid_token_ids
                 req_logprobs[req_idx] = valid_logprobs
                 req_sampled_token_ranks[req_idx] = valid_ranks
-                logger.info(f"LOGPROBS_DEBUG: req_idx={req_idx}, "
-                            f"len(valid_token_ids)={len(valid_token_ids)}, "
-                            f"len(valid_logprobs)={len(valid_logprobs)}")
 
         # Flatten the collected lists back to 2D/1D arrays
         flat_token_ids = []
@@ -418,7 +433,7 @@ def _jax_logprobs_materialize(
                 logits_indices_selector]
 
         if cu_num_generated_tokens is None and runner is not None:
-            num_reqs = runner.input_batch.num_reqs
+            num_reqs = runner.input_batch.num_reqs if num_reqs is None else num_reqs
             cu_num_generated_tokens = list(range(num_reqs + 1))
 
     return LogprobsLists(
@@ -1610,7 +1625,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logprobs,
                 logits_indices_selector,
                 spec_decode_metadata=spec_decode_metadata,
-                runner=self)
+                runner=self,
+                num_reqs=num_reqs)
         else:
             logprobs_lists = None
 
