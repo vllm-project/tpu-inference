@@ -100,6 +100,17 @@ class VllmMLAAttention(MLAAttention):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         with torchax.default_env():
+            # tpu-inference's linear methods store layer.weight in [in_features,
+            # out_features] layout. Upstream MLA's process_weights_after_loading reads
+            # kv_b_proj.weight assuming [out_features, in_features] vLLM layout.
+            from vllm.model_executor.layers.linear import \
+                UnquantizedLinearMethod
+            if isinstance(self.kv_b_proj.quant_method,
+                          UnquantizedLinearMethod):
+                self.kv_b_proj.weight = Parameter(
+                    self.kv_b_proj.weight.transpose(0, 1).contiguous(),
+                    requires_grad=False,
+                )
             super().process_weights_after_loading(act_dtype)
 
             # NOTE: vLLM dequantizes kv_b_proj weights which causes more memory
