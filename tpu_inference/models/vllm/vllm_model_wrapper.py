@@ -508,10 +508,8 @@ class VllmModelWrapper:
                         "call_method": "embed_input_ids",
                         "call_args": call_args,
                         "call_kwargs": {
-                            "is_multimodal":
-                            torch_view(is_multimodal)
-                            if is_multimodal is not None else False,
-                        },
+                            "is_multimodal": torch_view(is_multimodal)
+                        } if is_multimodal is not None else {},
                     },
                     tie_weights=False,
                 )
