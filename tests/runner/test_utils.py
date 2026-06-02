@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import io
 import logging
+import os
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open, patch
@@ -490,7 +491,10 @@ def profiler_fixture(tmp_path):
          patch("builtins.open", mock_open()) as mock_file, \
          patch(f"{target_module}.datetime") as mock_datetime, \
          patch(f"{target_module}.InferencePhase", InferencePhase), \
-         patch(f"{target_module}.determine_phase_from_batch_composition_stats") as mock_determine_phase:
+         patch(f"{target_module}.determine_phase_from_batch_composition_stats") as mock_determine_phase, \
+         patch.object(PhasedBasedProfiler, "_resolve_canonical_dst_ts",
+                      return_value="2024_01_01_12_00_00"), \
+         patch.object(PhasedBasedProfiler, "_merge_profile_directories"):
 
         mock_now = MagicMock()
         mock_now.strftime.return_value = "2024_01_01_12_00_00"
@@ -506,42 +510,6 @@ def profiler_fixture(tmp_path):
             "mock_file": mock_file,
             "mock_determine_phase": mock_determine_phase,
         }
-
-
-def test_phased_profiler_initializes_aggregated_stats_logger(tmp_path):
-    """Tests that PhasedBasedProfiler initializes AggregatedStatsLogger."""
-    with patch("tpu_inference.runner.utils.envs.ENABLE_AGGREGATED_STATS_LOGGER", True), \
-         patch("tpu_inference.runner.utils.AggregatedStatsLogger") as mock_logger_cls:
-        # Test with worker_rank = 0
-        PhasedBasedProfiler(profile_dir=str(tmp_path),
-                            worker_rank=0,
-                            flush_interval=50)
-        mock_logger_cls.assert_called_once_with(str(tmp_path), 50)
-
-        # Test with worker_rank != 0
-        mock_logger_cls.reset_mock()
-        PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=1)
-        mock_logger_cls.assert_not_called()
-
-    with patch("tpu_inference.runner.utils.envs.ENABLE_AGGREGATED_STATS_LOGGER", False), \
-         patch("tpu_inference.runner.utils.AggregatedStatsLogger") as mock_logger_cls:
-        # Test with aggregated logging disabled
-        PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=0)
-        mock_logger_cls.assert_not_called()
-
-
-def test_phased_profiler_step_calls_aggregated_stats_logger(profiler_fixture):
-    """Tests that profiler.step() calls aggregated_stats_logger.log()."""
-    profiler = profiler_fixture["profiler"]
-    profiler.aggregated_stats_logger = MagicMock()
-    stats = {
-        "batch_id": 1,
-        "tokens": 100,
-        "num_reqs": 2,
-        "total_num_scheduled_tokens": 100
-    }
-    profiler.step(stats)
-    profiler.aggregated_stats_logger.log.assert_called_once_with(stats)
 
 
 def test_phased_profiler_full_cycle(profiler_fixture):
@@ -747,35 +715,132 @@ def test_phased_profiler_skips_decode_only_steps_based_on_kv_len(
     assert profiler.current_phase == ""
 
 
-def test_merge_multihost_profile_directories(tmp_path):
-    """Tests that multi-host profile directories with different timestamps are consolidated correctly."""
-    profiler = PhasedBasedProfiler(profile_dir=str(tmp_path))
+def _stage_dp_rank_capture(rank_dir, ts_name, filename, content):
+    """Helper: simulate JAX writing one xplane file under dp_rank_N/plugins/profile/<ts>/."""
+    ts_dir = rank_dir / "plugins" / "profile" / ts_name
+    ts_dir.mkdir(parents=True)
+    (ts_dir / filename).write_text(content)
+    return ts_dir
+
+
+def test_resolve_canonical_dst_ts_rank_zero_writes_marker(tmp_path):
+    """Rank 0 picks the canonical ts and writes a marker keyed by ppid."""
+    profiler = PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=0)
     phase_dir = tmp_path / "prefill_heavy"
-    profiler.profile_dir_with_phase_suffix = str(phase_dir)
+    phase_dir.mkdir()
 
-    profile_path = phase_dir / "plugins" / "profile"
-    dir_early = profile_path / "2026_05_06_04_47_36"
-    dir_late = profile_path / "2026_05_06_04_47_38"
+    ts = profiler._resolve_canonical_dst_ts(str(phase_dir))
 
-    # Create the nested timestamped directories
-    dir_early.mkdir(parents=True, exist_ok=True)
-    dir_late.mkdir(parents=True, exist_ok=True)
+    marker = phase_dir / f".canonical_ts_{os.getppid()}"
+    assert marker.exists()
+    assert marker.read_text().strip() == ts
 
-    # Create dummy host files inside each directory
-    file_early = dir_early / "node-1-0.xplane.pb"
-    file_late = dir_late / "node-0-0.xplane.pb"
-    file_early.write_text("dummy_trace_data_1")
-    file_late.write_text("dummy_trace_data_0")
 
-    # Execute consolidation merge
-    profiler._merge_multihost_profile_directories()
+def test_resolve_canonical_dst_ts_non_zero_rank_reads_marker(tmp_path):
+    """Non-zero rank reads whatever rank 0 already published."""
+    phase_dir = tmp_path / "prefill_heavy"
+    phase_dir.mkdir()
+    marker = phase_dir / f".canonical_ts_{os.getppid()}"
+    marker.write_text("2026_05_06_04_47_36")
 
-    # Verify that the trailing directory is deleted and all files are merged into the earliest directory
-    assert dir_early.exists()
-    assert not dir_late.exists()
-    assert (dir_early / "node-1-0.xplane.pb").exists()
-    assert (dir_early / "node-0-0.xplane.pb").exists()
-    assert (dir_early /
-            "node-1-0.xplane.pb").read_text() == "dummy_trace_data_1"
-    assert (dir_early /
-            "node-0-0.xplane.pb").read_text() == "dummy_trace_data_0"
+    profiler = PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=2)
+    ts = profiler._resolve_canonical_dst_ts(str(phase_dir))
+
+    assert ts == "2026_05_06_04_47_36"
+
+
+def test_resolve_canonical_dst_ts_non_zero_rank_falls_back_on_timeout(
+        tmp_path):
+    """When rank 0 never publishes, a non-zero rank falls back to own ts."""
+    phase_dir = tmp_path / "prefill_heavy"
+    phase_dir.mkdir()
+
+    profiler = PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=1)
+    # Speed the test up by shrinking the timeout.
+    profiler._CANONICAL_TS_POLL_TIMEOUT_S = 0.1
+    profiler._CANONICAL_TS_POLL_INTERVAL_S = 0.02
+
+    ts = profiler._resolve_canonical_dst_ts(str(phase_dir))
+
+    # Format check: looks like a strftime("%Y_%m_%d_%H_%M_%S") string.
+    import datetime as _dt
+    _dt.datetime.strptime(ts, "%Y_%m_%d_%H_%M_%S")
+
+
+def test_merge_profile_directories_single_rank(tmp_path):
+    """Single rank, non-MPMD: capture moves from sandbox to <phase>/plugins/
+    profile/<canonical_ts>/ with original filename preserved."""
+    profiler = PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=0)
+    phase_dir = tmp_path / "prefill_heavy"
+    rank_dir = phase_dir / "dp_rank_0"
+    rank_dir.mkdir(parents=True)
+    profiler.profile_dir_with_phase_suffix = str(rank_dir)
+    profiler._canonical_dst_ts = "2026_05_06_04_47_36"
+    _stage_dp_rank_capture(rank_dir, "2026_05_06_04_47_36_jax",
+                           "t1v-n-host-w-0.xplane.pb", "data_0")
+
+    profiler._merge_profile_directories()
+
+    dst = phase_dir / "plugins" / "profile" / "2026_05_06_04_47_36"
+    assert (dst / "t1v-n-host-w-0.xplane.pb").read_text() == "data_0"
+    # Sandbox plugins/ subtree cleaned up; dp_rank_0/ itself remains for stats.
+    assert not (rank_dir / "plugins").exists()
+    assert rank_dir.exists()
+
+
+def test_merge_profile_directories_mpmd(tmp_path, monkeypatch):
+    """MPMD: 4 ranks captured to their own sandboxes with identical
+    filenames; each moves to the SAME canonical ts dir with dp{N}_ prefix."""
+    monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
+    phase_dir = tmp_path / "prefill_heavy"
+
+    canonical_ts = "2026_05_06_04_47_36"
+    for rank in range(4):
+        profiler = PhasedBasedProfiler(profile_dir=str(tmp_path),
+                                       worker_rank=rank)
+        rank_dir = phase_dir / f"dp_rank_{rank}"
+        rank_dir.mkdir(parents=True)
+        profiler.profile_dir_with_phase_suffix = str(rank_dir)
+        profiler._canonical_dst_ts = canonical_ts
+        # Each rank's stop_trace lands in its own jax ts dir, identical filenames.
+        _stage_dp_rank_capture(rank_dir, f"jax_ts_{rank}",
+                               "t1v-n-host-w-0.xplane.pb",
+                               f"rank_{rank}_xplane")
+        # Add the trace file in the same staged ts dir.
+        (rank_dir / "plugins" / "profile" / f"jax_ts_{rank}" /
+         "t1v-n-host-w-0.trace.json.gz").write_text(f"rank_{rank}_trace")
+        profiler._merge_profile_directories()
+
+    dst = phase_dir / "plugins" / "profile" / canonical_ts
+    assert dst.exists()
+    for rank in range(4):
+        assert (dst / f"dp{rank}_t1v-n-host-w-0.xplane.pb"
+                ).read_text() == f"rank_{rank}_xplane"
+        assert (dst / f"dp{rank}_t1v-n-host-w-0.trace.json.gz"
+                ).read_text() == f"rank_{rank}_trace"
+        assert not (phase_dir / f"dp_rank_{rank}" / "plugins").exists()
+
+
+def test_merge_profile_directories_ignores_stale_prior_run_data(tmp_path):
+    """Stale ts dirs from prior runs in <phase>/plugins/profile/ stay put;
+    the new run lands in its own canonical ts dir and never reads stale dirs."""
+    phase_dir = tmp_path / "prefill_heavy"
+    # Prior run leftover.
+    stale = phase_dir / "plugins" / "profile" / "2025_01_01_00_00_00"
+    stale.mkdir(parents=True)
+    (stale / "old_data.xplane.pb").write_text("OLD")
+
+    profiler = PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=0)
+    rank_dir = phase_dir / "dp_rank_0"
+    rank_dir.mkdir()
+    profiler.profile_dir_with_phase_suffix = str(rank_dir)
+    profiler._canonical_dst_ts = "2026_05_06_04_47_36"
+    _stage_dp_rank_capture(rank_dir, "jax_ts", "new.xplane.pb", "NEW")
+
+    profiler._merge_profile_directories()
+
+    # Stale data untouched.
+    assert (stale / "old_data.xplane.pb").read_text() == "OLD"
+    # New data lands in its own canonical dir.
+    new_dst = phase_dir / "plugins" / "profile" / "2026_05_06_04_47_36"
+    assert (new_dst / "new.xplane.pb").read_text() == "NEW"

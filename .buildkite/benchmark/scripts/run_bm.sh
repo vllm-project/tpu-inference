@@ -107,16 +107,13 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-if [[ "${BUILDKITE:-false}" == "true" ]]; then
-  # TODO: Re-enable and check for compatible versions if running accuracy or lm-eval tasks.
-  # pip install evaluate==0.4.5 || true
-  # pip install rouge-score==0.1.2 || true
-  # # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
-  # pip install "lm-eval[api,math]>=0.4.9.2" || true
-
+if [ "${BUILDKITE:-false}" == "true" ]; then
+  ENV_CONTEXT="Buildkite environment"
   # Set umask so that any newly created files/directories have 777/666 permissions by default.
   # This ensures that the host user can delete artifacts created by the docker root user.
   umask 000
+else
+  ENV_CONTEXT="Local environment"
 fi
 
 if ! command -v gcloud &> /dev/null; then
@@ -154,6 +151,7 @@ mkdir -p "$VLLM_TORCH_PROFILER_DIR"
 PYTHON_PARSER="$SCRIPT_DIR/parser_case.py"
 # Evaluate the Python output to set variables in the current shell context
 eval "$(python3 "$PYTHON_PARSER" "$CASE_FILE" "$TARGET_CASE_NAME")"
+printf "[DEBUG] Check export %s %s %s" "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" "$MAX_MODEL_LEN \n"
 
 VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
 BM_LOG="$LOG_FOLDER/bm_log.txt"
@@ -161,8 +159,13 @@ BEST_BM_LOG="$LOG_FOLDER/best_bm_log.txt"
 printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
 printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
 printf "[INFO] %-25s = %s\n" "ARTIFACT_FOLDER" "$ARTIFACT_FOLDER"
+printf "[DEBUG] ls=%s\n\n" "$(ls "$ARTIFACT_FOLDER/../")" || true
 
-echo "model: $MODEL"
+printf "[DEBUG] model: %s\n" "$MODEL"
+printf "[DEBUG] dataset: %s\n" "${DATASET:-}"
+printf "[DEBUG] lm_eval pre-cmd: %s\n" "${LM_EVAL_CMD:-}"
+printf "[DEBUG] tp size: %s\n" "${TENSOR_PARALLEL_SIZE:-}"
+printf "[DEBUG] CLIENT_CMD_ENVS: %s\n" "${CLIENT_CMD_ENVS[*]:-}"
 
 # Helper function to check if a value is in an array
 contains_element () {
@@ -171,6 +174,100 @@ contains_element () {
   for e; do [[ "$e" == "$match" ]] && return 0; done
   return 1
 }
+
+# ---------------------------------------------------------
+# DECODE_ONLY Mode Configuration Validation & Dataset Injection
+# ---------------------------------------------------------
+if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
+    echo "====================================================================="
+    echo "[INFO] DECODE_ONLY mode activated. Validating configuration..."
+    
+    # Extract configurations from SERVER_CMD
+    MAX_NUM_SEQS=""
+    PREFIX_CACHING_ENABLED="false"
+    for i in "${!SERVER_CMD[@]}"; do
+        arg="${SERVER_CMD[$i]}"
+        if [[ "$arg" == "--max-num-seqs" ]]; then
+            MAX_NUM_SEQS="${SERVER_CMD[i+1]}"
+        elif [[ "$arg" == --max-num-seqs=* ]]; then
+            MAX_NUM_SEQS="${arg#*=}"
+        elif [[ "$arg" == "--enable-prefix-caching" ]]; then
+            PREFIX_CACHING_ENABLED="true"
+        fi
+    done
+
+    # Read DECODE_INPUT_LEN directly from the environment variable
+    DECODE_INPUT_LEN="${INPUT_LEN:-}"
+
+    # Extract configurations from CLIENT_CMD for dataset validations
+    DATASET_NAME_VALID="false"
+    HAS_DATASET_PATH="false"
+    for i in "${!CLIENT_CMD[@]}"; do
+        arg="${CLIENT_CMD[$i]}"
+        if [[ "$arg" == "--dataset-name" && "${CLIENT_CMD[i+1]}" == "custom" ]]; then
+            DATASET_NAME_VALID="true"
+        elif [[ "$arg" == "--dataset-name=custom" ]]; then
+            DATASET_NAME_VALID="true"
+        elif [[ "$arg" == "--dataset-path" || "$arg" == --dataset-path=* ]]; then
+            HAS_DATASET_PATH="true"
+        fi
+    done
+
+    # Assertions
+    if [[ -z "$MAX_NUM_SEQS" ]]; then
+        echo "[ERROR] DECODE_ONLY validation failed: Missing '--max-num-seqs' in SERVER_CMD."
+        echo "Reason: The exact cache boundary must be defined to prevent Cache Eviction during generation."
+        exit 1
+    fi
+
+    if [[ "$PREFIX_CACHING_ENABLED" == "false" ]]; then
+        echo "[ERROR] DECODE_ONLY validation failed: Missing '--enable-prefix-caching' in SERVER_CMD."
+        echo "Reason: Without prefix caching, the KV Cache seeded during warmup will be ignored, and vLLM will recompute the prefill for every request. This defeats the purpose of Decode-Only testing."
+        echo "Fix: Add '\"enable-prefix-caching\": true' to server_command_options.args in your JSON."
+        exit 1
+    fi
+
+    if [[ -z "$DECODE_INPUT_LEN" ]]; then
+        echo "[ERROR] DECODE_ONLY validation failed: Missing 'INPUT_LEN' in the environment variables."
+        echo "Reason: The dataset generator needs to know the exact token length to construct the prompt_token_ids array."
+        echo "Fix: Add 'INPUT_LEN' to the 'env' section of your case JSON."
+        exit 1
+    fi
+
+    if [[ "$DATASET_NAME_VALID" == "false" ]]; then
+        echo "[ERROR] DECODE_ONLY validation failed: Missing '--dataset-name custom' in CLIENT_CMD."
+        echo "Reason: vLLM can only read the generated JSONL with prompt_token_ids if the custom parser is enforced."
+        exit 1
+    fi
+
+    if [[ "$HAS_DATASET_PATH" == "true" ]]; then
+        echo "[ERROR] DECODE_ONLY validation failed: Found '--dataset-path' in CLIENT_CMD."
+        echo "Reason: DECODE_ONLY dynamically generates and injects its own dataset file. Providing one will cause a conflict."
+        exit 1
+    fi
+
+    # Generate decode-only mode dataset and Inject
+    echo "[INFO] Validation passed. Generating dataset..."
+
+    DECODE_DATASET_PATH="/tmp/decode_only_dataset.jsonl"
+    
+    python3 "$SCRIPT_DIR/generate_decode_only_bm_dataset.py" \
+        --input-len "$DECODE_INPUT_LEN" \
+        --num-distinct "$MAX_NUM_SEQS" \
+        --output-file "$DECODE_DATASET_PATH"
+        
+    CLIENT_CMD+=( "--dataset-path" "$DECODE_DATASET_PATH" )
+    
+    # Disable shuffle here to strictly preserve the round-robin order to guarantee that every request
+    # in a concurrent batch is completely distinct.
+    if ! contains_element "--disable-shuffle" "${CLIENT_CMD[@]}"; then
+        CLIENT_CMD+=( "--disable-shuffle" )
+    fi
+    
+    DATASET="decode_only_override"
+    echo "[INFO] Interception complete. Dataset path and shuffle disabled."
+    echo "====================================================================="
+fi
 
 # Download Datasets
 DATASET_DIR="$ARTIFACT_FOLDER/dataset"
@@ -222,9 +319,9 @@ fi
 
 if [ "$COMMAND_TYPE" = "lm_eval" ]; then
   {
-    ".buildkite/benchmark/lm_eval/$DATASET/run.sh"
+    ".buildkite/benchmark/lm_eval/$DATASET/run.sh" "$LOG_FOLDER"
     printf "AccuracyMetrics: "
-    tr -d '\n' < "/workspace/${DATASET}_accuracy.json"
+    tr -d '\n' < "${LOG_FOLDER}/${DATASET}_accuracy.json"
     echo ""
   } >> "$BM_LOG"
   echo "Finished running $DATASET benchmark."
@@ -321,6 +418,55 @@ if [[ "$SERVER_STARTED" == "false" ]]; then
     exit 1
 fi
 
+# ---------------------------------------------------------
+# DECODE_ONLY Warmup Execution (Cache Seeding)
+# ---------------------------------------------------------
+if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
+    echo "====================================================================="
+    echo "[INFO] DECODE_ONLY: Executing Warmup Phase"
+    echo "====================================================================="
+    echo "Warming up HBM Cache with exactly $MAX_NUM_SEQS distinct requests to prevent Cache Eviction..."
+    
+    # Copy the array for safe modification
+    WARMUP_CMD=("${CLIENT_CMD[@]}")
+    
+    found_prompts=false
+    
+    # In-place modification of existing flags
+    for i in "${!WARMUP_CMD[@]}"; do
+        arg="${WARMUP_CMD[$i]}"
+        if [[ "$arg" == "--num-prompts" ]]; then
+            WARMUP_CMD[i+1]="$MAX_NUM_SEQS"
+            found_prompts=true
+        elif [[ "$arg" == --num-prompts=* ]]; then
+            WARMUP_CMD[i]="--num-prompts=$MAX_NUM_SEQS"
+            found_prompts=true
+        fi
+    done
+    
+    # Append the flags if they were not found in the original command
+    if [[ "$found_prompts" == false ]]; then
+        WARMUP_CMD+=( "--num-prompts" "$MAX_NUM_SEQS" )
+    fi
+    
+    echo "[DEBUG] WARMUP_CMD: ${CLIENT_CMD_ENVS[*]} ${WARMUP_CMD[*]}"
+    set +e
+    env "${CLIENT_CMD_ENVS[@]}" "${WARMUP_CMD[@]}" > "$LOG_FOLDER/warmup_log.txt" 2>&1
+    warmup_exit_code=$?
+    set -e
+    
+    if [[ "$warmup_exit_code" -ne 0 ]]; then
+        echo "[ERROR] Warmup phase failed with exit code $warmup_exit_code!"
+        echo "--- Dumping Warmup Log ---"
+        cat "$LOG_FOLDER/warmup_log.txt"
+        exit 1
+    fi
+    
+    echo "[INFO] Warmup Phase Completed Successfully. Cache is strictly seeded."
+    echo "[INFO] Proceeding to Decode-Only concurrency stress testing."
+    echo "====================================================================="
+fi
+
 # Set Default
 EXPECTED_ETEL=${EXPECTED_ETEL:-3600000}
 NUM_PROMPTS=${NUM_PROMPTS:-1000}
@@ -394,11 +540,6 @@ run_benchmark(){
   echo "$throughput $p99_e2el"
 }
 
-if [ "${BUILDKITE:-false}" == "true" ]; then
-  ENV_CONTEXT="Buildkite environment"
-else
-  ENV_CONTEXT="Local environment"
-fi
 printf "[DEBUG] Checking folder structure (Environment: %s)...\n" "$ENV_CONTEXT"
 printf "[DEBUG] pwd=%s\n\nls $ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls "$ARTIFACT_FOLDER")" || true
 printf "[DEBUG] ls $ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls "$ARTIFACT_FOLDER"/temp_logs)" || true

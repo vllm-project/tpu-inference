@@ -51,14 +51,14 @@ class VllmQuantLinearConfig(QuantLinearConfig):
                                               ShardingAxisName.MLP_TENSOR)
 
         self.n_shards = get_mesh_shape_product(self.mesh,
-                                               self.weight_sharding[0])
+                                               self.weight_sharding[1])
 
         if isinstance(layer, RowParallelLinear):
-            self.weight_sharding = P(None, ShardingAxisName.ATTN_HEAD)
+            self.weight_sharding = P(ShardingAxisName.ATTN_HEAD, None)
             if self.enable_sp:
                 self.output_sharding = P(ShardingAxisName.MLP_TENSOR, None)
         elif isinstance(layer, ColumnParallelLinear):
-            self.weight_sharding = P(ShardingAxisName.ATTN_HEAD, None)
+            self.weight_sharding = P(None, ShardingAxisName.ATTN_HEAD)
 
             if self.enable_sp:
                 self.input_sharding = P(ShardingAxisName.MLP_TENSOR, None)
@@ -86,9 +86,9 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         else:
             self.num_proj = 1
 
-        self.bias_sharding = P(self.weight_sharding[0])
+        self.bias_sharding = P(self.weight_sharding[1])
         self.n_shards = get_mesh_shape_product(self.mesh,
-                                               self.weight_sharding[0])
+                                               self.weight_sharding[1])
 
     def get_input_sharding(self, x: torchax.tensor.Tensor):
         if not self.enable_sp:

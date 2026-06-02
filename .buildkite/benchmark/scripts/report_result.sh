@@ -253,7 +253,7 @@ fi
 )
 
 # Database Reporting Logic (ON CONFLICT (RecordId) DO UPDATE SET)
-if [[ -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANCE_ID:-}" ]]; then
+if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANCE_ID:-}" ]]; then
   if [ "$EXIT_CODE" -ne 0 ]; then
     echo "--- run_bm.sh failed with exit code $EXIT_CODE. Skipping DB reporting."
     exit 0

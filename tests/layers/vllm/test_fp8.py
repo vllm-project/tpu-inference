@@ -431,9 +431,9 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
 
     a = torch.randn((num_tokens, hidden_size), dtype=dtype) / 10
     w1 = torch.randn(
-        (num_experts, 2 * intermediate_size, hidden_size), dtype=dtype) / 10
+        (num_experts, 2 * intermediate_size, hidden_size), dtype=dtype) / 100
     w2 = torch.randn(
-        (num_experts, hidden_size, intermediate_size), dtype=dtype) / 10
+        (num_experts, hidden_size, intermediate_size), dtype=dtype) / 100
     score = torch.randn((num_tokens, num_experts), dtype=dtype)
 
     engine_args = EngineArgs(model=MODELS[0],
@@ -536,8 +536,8 @@ def test_blockwise_quant(requant_block_size, requant_weight_dtype):
     quant_method.process_weights_after_loading(linear_layer)
     weight_jax = jax_view(linear_layer.weight)
     weight_scale_jax = jax_view(linear_layer.weight_scale)
-    assert weight_jax.shape == (5120, 4096)
-    assert weight_scale_jax.shape == (4096 // requant_block_size, 1, 5120)
+    assert weight_jax.shape == (4096, 5120)
+    assert weight_scale_jax.shape == (1, 4096 // requant_block_size, 1, 5120)
     assert weight_jax.dtype == requant_weight_dtype
 
     # TODO: Check output similarity between quantized and unquantized ones.

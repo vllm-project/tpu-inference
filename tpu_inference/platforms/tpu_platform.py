@@ -110,6 +110,7 @@ class TpuPlatform(Platform):
         "USE_JAX_PROFILER_SERVER",
         "JAX_PROFILER_SERVER_PORT",
         "ENABLE_RS_KERNEL",
+        "MOE_ALL_GATHER_ACTIVATION_DTYPE",
     ]
 
     @classmethod
@@ -246,16 +247,6 @@ class TpuPlatform(Platform):
             if envs.USE_BATCHED_RPA_KERNEL and cache_config.block_size < 256:
                 cache_config.block_size = 256
 
-        if cache_config and envs.TPU_MAMBA_SSM_CACHE_DTYPE:
-            override = envs.TPU_MAMBA_SSM_CACHE_DTYPE
-            current = cache_config.mamba_ssm_cache_dtype
-            if current != override:
-                logger.info(
-                    "TPU_MAMBA_SSM_CACHE_DTYPE=%s overriding "
-                    "cache_config.mamba_ssm_cache_dtype (was %r)", override,
-                    current)
-                cache_config.mamba_ssm_cache_dtype = override
-
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
@@ -287,10 +278,12 @@ class TpuPlatform(Platform):
 
         if scheduler_config.is_multimodal_model and not \
             scheduler_config.disable_chunked_mm_input:
-            logger.warning("TPU does not support running Multimodal models"
-                           " without setting `--disable_chunked_mm_input`. "
-                           "Forcing --disable_chunked_mm_input.")
-            scheduler_config.disable_chunked_mm_input = True
+            logger.warning(
+                "TPU does not support running Multimodal models"
+                " without setting `--disable_chunked_mm_input`. "
+                "If you are serving a multimodal model, please explicitly add the "
+                "`--disable-chunked-mm-input` flag to your server command to avoid execution failures."
+            )
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:

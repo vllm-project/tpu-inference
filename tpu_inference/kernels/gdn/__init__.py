@@ -13,6 +13,6 @@
 # limitations under the License.
 """Fused GDN (Gated Delta Networks) TPU kernels."""
 
-from tpu_inference.kernels.gdn.fused_gdn_kernel_wrapper import fused_gdn
+from tpu_inference.kernels.gdn.v1.fused_gdn_kernel_wrapper import fused_gdn
 
 __all__ = ["fused_gdn"]

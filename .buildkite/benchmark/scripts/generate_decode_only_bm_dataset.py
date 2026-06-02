@@ -63,7 +63,13 @@ def main():
     with open(args.output_file, "w") as f:
         for i in range(args.num_prompts):
             prompt_ids = distinct_prompts[i % args.num_distinct]
-            json_record = {"prompt_token_ids": prompt_ids}
+            # vLLM's dataset parser strictly requires a 'prompt' key to pass schema validation
+            # 'prompt_token_ids' will override it.
+            json_record = {
+                "prompt":
+                f"decode_only_dummy_bypass_seq_{i % args.num_distinct}",
+                "prompt_token_ids": prompt_ids
+            }
             f.write(json.dumps(json_record) + "\n")
 
     print(

@@ -31,7 +31,7 @@ from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
+from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear, JaxLmHead
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
@@ -397,12 +397,11 @@ class Qwen2ForCausalLM(JaxModule, LoadableWithIterator):
             hidden_size = getattr(
                 model_config.hf_config, 'hidden_size',
                 model_config.hf_config.text_config.hidden_size)
-            self.lm_head = JaxEinsum(
-                einsum_str="TD,DV->TV",
-                kernel_shape=(hidden_size, vocab_size),
+            self.lm_head = JaxLmHead(
+                hidden_size=hidden_size,
+                vocab_size=vocab_size,
                 dtype=model_config.dtype,
                 rngs=rng,
-                quant_config=vllm_config.quant_config,
                 prefix="lm_head",
             )
 
