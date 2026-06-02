@@ -417,6 +417,10 @@ def _jax_logprobs_materialize(
             selected_token_ranks = selected_token_ranks[
                 logits_indices_selector]
 
+        if cu_num_generated_tokens is None and runner is not None:
+            num_reqs = runner.input_batch.num_reqs
+            cu_num_generated_tokens = list(range(num_reqs + 1))
+
     return LogprobsLists(
         logprob_token_ids=np.array(log_token_ids.tolist()),
         logprobs=np.array(logprobs_arr.tolist()),
