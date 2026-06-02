@@ -335,17 +335,18 @@ def _jax_logprobs_materialize(
                 per_rank_output_size]
 
             padded_num_seqs_per_rank = bonus_token_ids.shape[0]
+            padded_tokens_per_seq = padded_tokens_length // padded_num_seqs_per_rank
             cur_rank_num_draft_tokens = spec_decode_metadata.draft_lengths_cpu[
                 rank * padded_num_seqs_per_rank:(rank + 1) *
                 padded_num_seqs_per_rank]
 
-            start_idx = 0
             req_indices = spec_decode_metadata.req_indices_dp[rank]
             for i, req_idx in enumerate(req_indices):
                 if req_idx >= num_reqs:
                     continue
 
                 seq_length = int(cur_rank_num_draft_tokens[i])
+                start_idx = i * padded_tokens_per_seq
                 end_idx = start_idx + seq_length
 
                 # Get draft logprobs for this sequence
@@ -375,8 +376,6 @@ def _jax_logprobs_materialize(
                 req_logprob_token_ids[req_idx] = valid_token_ids
                 req_logprobs[req_idx] = valid_logprobs
                 req_sampled_token_ranks[req_idx] = valid_ranks
-
-                start_idx = end_idx
 
         # Flatten the collected lists back to 2D/1D arrays
         flat_token_ids = []
