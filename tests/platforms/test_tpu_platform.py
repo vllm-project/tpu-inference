@@ -180,7 +180,7 @@ class TestTpuPlatform:
         assert vllm_config.compilation_config.mode == CompilationMode.DYNAMO_TRACE_ONCE
         assert vllm_config.compilation_config.backend == "openxla"
         assert vllm_config.parallel_config.distributed_executor_backend == "uni"
-        assert vllm_config.scheduler_config.disable_chunked_mm_input is True
+        assert vllm_config.scheduler_config.disable_chunked_mm_input is False
 
         mock_sharding.from_vllm_config.assert_called_once_with(vllm_config)
         assert vllm_config.sharding_config == mock_sharding.from_vllm_config.return_value

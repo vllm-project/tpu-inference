@@ -140,10 +140,12 @@ for folder in "${SPEC_DIRS[@]}"; do
         while IFS= read -r t_val; do
             [[ -z "$t_val" ]] && continue
             
-            # Global Uniqueness: CI_TARGETS must not be used by other files
-            if [[ -n "${CI_TARGETS[$t_val]:-}" && "${CI_TARGETS[$t_val]}" != "$file" ]]; then
+            # Global Uniqueness: CI_TARGETS must not be used by other files.
+            # Quote associative-array subscripts so user-supplied YAML values
+            # (CI_TARGET) cannot trigger arithmetic / brace expansion.
+            if [[ -n "${CI_TARGETS["$t_val"]:-}" && "${CI_TARGETS["$t_val"]}" != "$file" ]]; then
                 echo "+++ ❌ Error: Global duplicate 'CI_TARGET: $t_val' detected!"
-                echo "Conflict: $file and ${CI_TARGETS[$t_val]}"
+                echo "Conflict: $file and ${CI_TARGETS["$t_val"]}"
                 echo "💡 Tip: 'CI_TARGET' is a unique identifier for support matrices and cannot be shared across files."
                 echo ""
                 ERRORS_FOUND=1

@@ -42,12 +42,19 @@ making sure they go through standard function arguments:
 """
 
 import torch
+import torch.nn as nn
+import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
+import vllm.model_executor.models.utils as vllm_utils
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
+from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def _patched_set_deepstack(vllm_model, deepstack_input_embeds):
@@ -102,6 +109,8 @@ def _patched_get_deepstack(vllm_model, orig_get_deepstack, num_tokens: int):
     # If the cache is empty (e.g., during eager initialization), we fetch the raw vLLM
     # PyTorch tensors and convert them to Torchax tensors to ensure JIT compatibility.
     orig_output = orig_get_deepstack(num_tokens)
+    if orig_output is None:
+        return None
     converted = {
         k: _convert_to_torchax_tensor(v)
         for k, v in orig_output.items()
@@ -200,6 +209,47 @@ def _patched_forward(vllm_model,
                         **kwargs)
 
 
+def _patched_flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
+    """Patched version of vLLM's `_flatten_embeddings` to prevent JAX/Torchax ZeroDivisionError.
+
+    Why this patch is necessary:
+    At model warmup/precompilation or during empty multimodal inputs, the sequence dimension
+    can evaluate to 0 (e.g., shape `(num_tokens,)` where `num_tokens=0`, yielding a 1D or empty
+    dimension tensor).
+    
+    When `_flatten_embeddings` calls standard PyTorch `embeddings.flatten(0, -2)` to flatten
+    all but the last dimension, `torchax.Tensor.flatten` fails to map the negative `end_dim=-2`
+    to a positive index (it only maps `end_dim=-1`). This leaves `end_dim=-2` unresolved.
+
+    Under JAX/Torchax tracing:
+    - `end_dim + 1` becomes `-1`.
+    - `self._elem.shape[end_dim + 1 :]` resolves to `shape[-1:]` -> `(0,)` for a 1D or 0-size tensor.
+    - The resulting target shape becomes `(-1, 0)`.
+    - During shape resolution, JAX calculates the product of non-negative dimensions (`0`),
+      and checks `arr.size % math.prod(other_sizes) != 0`, which evaluates to `0 % 0` and
+      raises `ZeroDivisionError: integer modulo by zero`.
+
+    By pre-converting negative `start_dim` and `end_dim` to positive index equivalents based
+    on the tensor's `ndim` before calling `.flatten`, we pass positive arguments to Torchax.
+    This allows it to compute the target shape correctly without producing 0-size dimensions,
+    preventing the JAX compiler from crashing at startup.
+    """
+    if isinstance(embeddings, torch.Tensor):
+        if embeddings.ndim < 2:
+            return embeddings
+        if embeddings.numel() == 0 or 0 in embeddings.shape:
+            return embeddings.view(0, embeddings.shape[-1])
+        ndim = embeddings.ndim
+        start_dim = 0
+        end_dim = -2
+        if start_dim < 0:
+            start_dim += ndim
+        if end_dim < 0:
+            end_dim += ndim
+        return embeddings.flatten(start_dim, end_dim)
+    return torch.cat(tuple(_patched_flatten_embeddings(t) for t in embeddings))
+
+
 def apply_qwen3_vl_patches(vllm_model):
     """Apply Qwen3-VL specific patches for stateless Deepstack support."""
     if not getattr(vllm_model, "use_deepstack", False):
@@ -230,12 +280,32 @@ def apply_qwen3_vl_patches(vllm_model):
     vllm_model.forward = lambda *args, **kwargs: _patched_forward(
         vllm_model, orig_forward, *args, **kwargs)
 
+    # 5. Patch _flatten_embeddings in vllm utils to handle negative indexes correctly in torchax
+    vllm_utils._flatten_embeddings = _patched_flatten_embeddings
+
+    # 6. Force HAS_TRITON to False to prevent JAX/Triton active driver crash on TPU
+    qwen3_vl_mod.HAS_TRITON = False
+
 
 def is_qwen3_vl(vllm_model) -> bool:
     """Check if the given vLLM model is of architecture Qwen3VLForConditionalGeneration."""
     return isinstance(vllm_model, Qwen3VLForConditionalGeneration)
 
 
-def maybe_apply_qwen3_vl_patches(vllm_model):
+def maybe_apply_qwen3_vl_patches(vllm_model: nn.Module) -> None:
     if is_qwen3_vl(vllm_model):
         apply_qwen3_vl_patches(vllm_model)
+
+        if hasattr(vllm_model, "deepstack_input_embeds"):
+            # Force the deepstack placeholder buffers to the correct TPU device
+            # (via Torchax/JAX) to resolve device mismatch during the forward pass.
+            # This is required because the ModelForEmbedding adapter can cause
+            # the standard weight loader to skip these non-parameter buffers.
+            target_device = next(vllm_model.parameters()).device
+            logger.info(
+                f"Patching Qwen3-VL deepstack buffers to device: {target_device}"
+            )
+            vllm_model.deepstack_input_embeds = [
+                t.to(device=target_device)
+                for t in vllm_model.deepstack_input_embeds
+            ]

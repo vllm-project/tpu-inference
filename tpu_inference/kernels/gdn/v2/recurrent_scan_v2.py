@@ -19,7 +19,7 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.gdn import \
+from tpu_inference.kernels.gdn.v2 import \
     compute_schedule_v2 as compute_schedule_table_v2
 
 

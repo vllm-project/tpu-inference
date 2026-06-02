@@ -24,23 +24,19 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import \
     CompressedTensorsMoEMethod
-from vllm.model_executor.layers.quantization.utils.quant_utils import \
-    unpack_quantized_values_into_int32
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.scalar_type import scalar_types
 
 import tpu_inference.envs as envs
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
-    shard_moe_weights)
-from tpu_inference.layers.common.quantization import dequantize_tensor
-from tpu_inference.layers.common.sharding import ShardingAxisName
+    FusedMoEWeights, process_quantized_moe_weights, shard_moe_weights_to_tpu)
+from tpu_inference.layers.common.quantization import u32_unpack_i4
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product, t2j, to_jax_dtype
+from tpu_inference.utils import t2j, to_jax_dtype
 
 logger = init_logger(__name__)
 
@@ -204,15 +200,12 @@ class VllmCompressedTensorsW4A8MoEMethod(CompressedTensorsMoEMethod,
         # layer.w13_weight_scale: [num_experts, 2*moe_intermediate_size, 1]
         # layer.w2_weight: [num_experts, hidden_size, moe_intermediate_size]
         # layer.w2_weight_scale: [num_experts, hidden_size, 1]
-        w13_weight = t2j(
-            unpack_quantized_values_into_int32(layer.w13_weight_packed,
-                                               self.wtype,
-                                               packed_dim=2))
+        # Unpack uint4 weights to int32 (values 0-15)
+        # Transfer packed weights directly to TPU
+        w13_weight_packed = t2j(layer.w13_weight_packed.view(torch.int32))
         w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
-        w2_weight = t2j(
-            unpack_quantized_values_into_int32(layer.w2_weight_packed,
-                                               self.wtype,
-                                               packed_dim=2))
+
+        w2_weight_packed = t2j(layer.w2_weight_packed.view(torch.int32))
         w2_weight_scale = t2j(layer.w2_weight_scale, use_dlpack=False)
 
         if self.moe.has_bias:
@@ -221,91 +214,64 @@ class VllmCompressedTensorsW4A8MoEMethod(CompressedTensorsMoEMethod,
         else:
             w13_bias = w2_bias = None
 
-        @jax.jit
-        def process_uint4_moe_weights(
-            w13_weight_uint4: jax.Array,
-            w13_weight_scale: jax.Array,
-            w13_bias: jax.Array | None,
-            w2_weight_uint4: jax.Array,
-            w2_weight_scale: jax.Array,
-            w2_bias: jax.Array | None,
+        # Create FusedMoEWeights with packed weights
+        weights = FusedMoEWeights(
+            w13_weight=w13_weight_packed,
+            w13_weight_scale=w13_weight_scale,
+            w13_bias=w13_bias,
+            w2_weight=w2_weight_packed,
+            w2_weight_scale=w2_weight_scale,
+            w2_bias=w2_bias,
+        )
+
+        # Shard packed weights to TPU before unpacking to avoid OOM
+        weights = shard_moe_weights_to_tpu(weights, self.mesh)
+
+        desired_quant_dtype = to_jax_dtype(
+            envs.MOE_REQUANTIZE_WEIGHT_DTYPE
+        ) if envs.MOE_REQUANTIZE_WEIGHT_DTYPE else None
+        requant_block_size = int(envs.MOE_REQUANTIZE_BLOCK_SIZE
+                                 ) if envs.MOE_REQUANTIZE_BLOCK_SIZE else None
+
+        activation_str = "swigluoai" if layer.activation == MoEActivation.SWIGLUOAI else ""
+
+        @jax.jit(static_argnames=("desired_quant_dtype", "requant_block_size"))
+        def unpack_and_process(
+            weights: FusedMoEWeights,
+            desired_quant_dtype: jnp.dtype | None,
+            requant_block_size: int | None,
         ) -> FusedMoEWeights:
-            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
-            w13_reorder_size = get_mesh_shape_product(
-                self.mesh, ShardingAxisName.MLP_TENSOR)
 
-            w13_weight_int4 = (w13_weight_uint4 - 8).astype(jnp.int4)
-            w2_weight_int4 = (w2_weight_uint4 - 8).astype(jnp.int4)
+            w13_unpacked = u32_unpack_i4(weights.w13_weight)
+            w2_unpacked = u32_unpack_i4(weights.w2_weight)
 
-            if envs.MOE_REQUANTIZE_BLOCK_SIZE:
-                logger.info_once(
-                    "Requantizing MOE weights to %s with block size %s",
-                    envs.MOE_REQUANTIZE_WEIGHT_DTYPE,
-                    envs.MOE_REQUANTIZE_BLOCK_SIZE)
-                desired_quant_dtype = to_jax_dtype(
-                    envs.MOE_REQUANTIZE_WEIGHT_DTYPE)
-                requant_block_size = int(
-                    envs.MOE_REQUANTIZE_BLOCK_SIZE
-                ) if envs.MOE_REQUANTIZE_BLOCK_SIZE else None
-
-                assert w13_weight_scale.shape[2] * self.group_size == w13_weight_int4.shape[2], \
-                    f"Expected w13_weight_scale.shape[2] * {self.group_size} == {w13_weight_int4.shape[2]}, got {w13_weight_scale.shape[2]}"
-                assert w2_weight_scale.shape[2] * self.group_size == w2_weight_int4.shape[2], \
-                    f"Expected w2_weight_scale.shape[2] * {self.group_size} == {w2_weight_int4.shape[2]}, got {w2_weight_scale.shape[2]}"
-
-                w13_weight_fp32 = dequantize_tensor(
-                    w13_weight_int4,
-                    w13_weight_scale,
-                    axis=2,
-                    out_dtype=jnp.float32,
-                    block_size=(self.group_size, ))
-                w2_weight_fp32 = dequantize_tensor(
-                    w2_weight_int4,
-                    w2_weight_scale,
-                    axis=2,
-                    out_dtype=jnp.float32,
-                    block_size=(self.group_size, ))
-
-                weights = quantize_moe_weights(
-                    FusedMoEWeights(
-                        w13_weight=w13_weight_fp32,
-                        w13_weight_scale=None,
-                        w13_bias=w13_bias,
-                        w2_weight=w2_weight_fp32,
-                        w2_weight_scale=None,
-                        w2_bias=w2_bias,
-                    ),
-                    desired_quant_dtype,
-                    requant_block_size,
-                    w13_interleave=w13_interleave,
-                )
-            else:
-                weights = FusedMoEWeights(
-                    w13_weight=w13_weight_int4,
-                    w13_weight_scale=w13_weight_scale,
-                    w13_bias=w13_bias,
-                    w2_weight=w2_weight_int4,
-                    w2_weight_scale=w2_weight_scale,
-                    w2_bias=w2_bias,
-                )
-
-            return process_moe_weights(
-                weights=weights,
-                moe_backend=self.moe_backend,
-                w13_reorder_size=w13_reorder_size,
-                w13_interleave=w13_interleave,
+            weights_unpacked = FusedMoEWeights(
+                w13_weight=w13_unpacked,
+                w13_weight_scale=weights.w13_weight_scale,
+                w13_bias=weights.w13_bias,
+                w2_weight=w2_unpacked,
+                w2_weight_scale=weights.w2_weight_scale,
+                w2_bias=weights.w2_bias,
             )
 
-        weights = process_uint4_moe_weights(
-            w13_weight,
-            w13_weight_scale,
-            w13_bias,
-            w2_weight,
-            w2_weight_scale,
-            w2_bias,
+            return process_quantized_moe_weights(
+                weights=weights_unpacked,
+                moe_backend=self.moe_backend,
+                mesh=self.mesh,
+                activation=activation_str,
+                weight_block_size=(1, self.group_size),
+                desired_quant_dtype=desired_quant_dtype,
+                requant_block_size=requant_block_size,
+            )
+
+        # Use the new fast requantization logic with TPU-side unpacking
+        weights = unpack_and_process(
+            weights,
+            desired_quant_dtype,
+            requant_block_size,
         )
-        weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
+
+        weights = torch_view(weights)
 
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)

@@ -28,7 +28,7 @@ from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.linear_weights import \
     shard_linear_weights
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_fp8_moe_weights)
+    FusedMoEWeights, process_quantized_moe_weights)
 from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.utils import cpu_mesh, cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
@@ -99,7 +99,7 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
             # 3D weight (matches kernel_shape).
             self.kernel_shape = layer.kernel_shape
         else:
-            self.kernel_shape = (out_features, in_features)
+            self.kernel_shape = (in_features, out_features)
 
         self.in_features = in_features
 
@@ -183,8 +183,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             # 3D weight (matches kernel_shape).
             self.kernel_shape = layer.kernel_shape
         else:
-            self.kernel_shape = (math.prod(self.out_features),
-                                 self.in_features)
+            self.kernel_shape = (self.in_features,
+                                 math.prod(self.out_features))
 
     def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
                            **extra_weight_attrs):
@@ -225,7 +225,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         layer.weight = nnx.Param(
             kernel_init(rngs.params(), self.kernel_shape, param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
-                                  permute_dims=(0, 1),
+                                  permute_dims=(1, 0),
                                   param_name=layer.prefix + ".weight"),
             eager_sharding=False)
         layer.weight.set_metadata('sharding', self.weight_sharding)
@@ -236,13 +236,13 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         layer.weight_scale_inv = nnx.Param(
             kernel_init(
                 rngs.params(),
-                [(out_features + block_n - 1) // block_n,
-                 (self.in_features + block_k - 1) // block_k],
+                [(self.in_features + block_k - 1) // block_k,
+                 (out_features + block_n - 1) // block_n],
                 layer.dtype,
             ),
             weight_loader=partial(
                 load_nnx_param_from_reshaped_torch,
-                permute_dims=(0, 1),
+                permute_dims=(1, 0),
                 param_name=layer.prefix + ".weight_scale_inv",
             ),
             eager_sharding=False)
@@ -289,17 +289,12 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 output_sizes=tuple(self.linear_config.output_sizes),
                 requant_weight_dtype=self.linear_config.requant_weight_dtype,
                 fuse_matmuls=self.linear_config.fuse_matmuls,
-                n_shards=self.linear_config.n_shards)
+                n_shards=self.linear_config.n_shards,
+                enable_kernel=self.linear_config.enable_quantized_matmul_kernel
+            )
             delattr(layer, 'weight')
             delattr(layer, 'weight_scale_inv')
             delattr(layer, 'bias')
-
-            if self.linear_config.enable_quantized_matmul_kernel:
-                # The quantized_matmul_kernel expects weight scales shaped (n_out_features, 1, n_blocks) for blockwisze quantization.
-                weights.weight_scale = jnp.expand_dims(
-                    jnp.transpose(weights.weight_scale),
-                    axis=1,
-                )
 
         # Put onto the device.
         weights = shard_linear_weights(
@@ -523,23 +518,28 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 w13_weight = jnp.concatenate([w_gate, w_up], axis=1)
                 w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=1)
 
-                # TODO (jacobplatin): we should support bias
-                input_weights = FusedMoEWeights(
-                    w13_weight=w13_weight,
-                    w13_weight_scale=w13_weight_scale,
-                    w13_bias=None,
-                    w2_weight=w2_weight,
-                    w2_weight_scale=w2_weight_scale,
-                    w2_bias=None)
+            weight_block_size = None
+            if self.weight_block_size is not None:
+                weight_block_size = tuple(self.weight_block_size)
 
-                weights = process_fp8_moe_weights(
-                    input_weights,
-                    moe_backend=layer.moe_backend,
-                    mesh=layer.mesh,
-                    activation=layer.activation,
-                    # Source block size should be inferred from scale shape
-                    weight_block_size=None,
-                )
+            # TODO (jacobplatin): we should support bias
+            input_weights = FusedMoEWeights(w13_weight=w13_weight,
+                                            w13_weight_scale=w13_weight_scale,
+                                            w13_bias=None,
+                                            w2_weight=w2_weight,
+                                            w2_weight_scale=w2_weight_scale,
+                                            w2_bias=None)
+
+            # Shard MoE weights to TPU before requantization so that
+            # process_quantized_moe_weights runs on TPU instead of CPU.
+            weights = process_quantized_moe_weights(
+                input_weights,
+                moe_backend=layer.moe_backend,
+                mesh=layer.mesh,
+                activation=layer.activation,
+                weight_block_size=weight_block_size,
+                source_mesh=cpu_mesh(),
+            )
 
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF

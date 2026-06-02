@@ -35,7 +35,7 @@ from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import JaxLmHead
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -794,12 +794,11 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
                 hidden_size = getattr(
                     model_config.hf_config, 'hidden_size',
                     model_config.hf_config.text_config.hidden_size)
-                self.lm_head = JaxEinsum(
-                    einsum_str="TD,DV->TV",
-                    kernel_shape=(hidden_size, vocab_size),
+                self.lm_head = JaxLmHead(
+                    hidden_size=hidden_size,
+                    vocab_size=vocab_size,
                     dtype=model_config.dtype,
                     rngs=self.rng,
-                    quant_config=vllm_config.quant_config,
                 )
             else:
                 self.lm_head = PPMissingLayer()

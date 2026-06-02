@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import jax.numpy as jnp
-from jax._src import dtypes
 from jax.experimental.pallas import tpu as pltpu
 
 
@@ -39,8 +38,8 @@ def validate_gdn_inputs(
         q: ``[T, H_qk, K]``.
         k: ``[T, H_qk, K]``.
         v: ``[T, H_v, V]``.
-        g: ``[T, H_v, K]`` float32.
-        initial_state: ``[num_states, H_v, K, V]`` float32.
+        g: ``[T, H_v, K]``.
+        initial_state: ``[num_states, H_v, K, V]``.
         state_indices: ``[max_num_req]`` int32.
         b: ``[T, H_v, num_lanes]`` or ``None``.
         use_gate_in_kernel: Whether gate transformation is applied inside kernel.
@@ -56,7 +55,7 @@ def validate_gdn_inputs(
     dtype = q.dtype
     num_states = initial_state.shape[0]
     num_lanes = pltpu.get_tpu_info().num_lanes
-    packing = 32 // dtypes.itemsize_bits(dtype)
+    packing = 32 // (dtype.itemsize * 8)
 
     # Shape checks
     if k.shape != (T, H_qk, K):
@@ -87,12 +86,7 @@ def validate_gdn_inputs(
     if k.dtype != dtype or v.dtype != dtype:
         raise ValueError(f"q/k/v must share the same dtype, got q={dtype}, "
                          f"k={k.dtype}, v={v.dtype}")
-    if g.dtype != jnp.float32:
-        raise ValueError(f"g must be float32, got {g.dtype}")
-    if initial_state.dtype not in (jnp.float32, jnp.bfloat16, jnp.float16):
-        raise ValueError(
-            f"initial_state must be float32, bfloat16, or float16, "
-            f"got {initial_state.dtype}")
+
     if state_indices.dtype != jnp.int32:
         raise ValueError(
             f"state_indices must be int32, got {state_indices.dtype}")

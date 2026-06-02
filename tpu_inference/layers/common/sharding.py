@@ -19,12 +19,16 @@ from typing import TYPE_CHECKING, List, Optional
 
 import jax.numpy as jnp
 import numpy as np
+import vllm.envs as vllm_envs
 from jax.sharding import Mesh
 
 from tpu_inference import envs, utils
+from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
 
 MESH_AXIS_NAMES = ("data", "attn_dp", "attn_dp_expert", "expert", "model",
                    "dcp")
@@ -171,14 +175,35 @@ class ShardingConfigManager:
         ss_tensor_parallelsim = sharding_strategy.get("tensor_parallelism",
                                                       None)
         data_parallelism = parallel_config.data_parallel_size
+        enable_dp_attention = sharding_strategy.get("enable_dp_attention",
+                                                    False)
+        # vLLM-native multi-process data parallelism: one engine process per
+        # DP rank, fronted by a single load-balanced API endpoint.
+        #
+        # It is not used (we fall back to single-process SPMD DP) when:
+        #  - attention DP is enabled
+        #  - running on Pathways
+        multiprocess_dp = (envs.TPU_MULTIPROCESS_DP and data_parallelism > 1
+                           and not enable_dp_attention
+                           and not vllm_envs.VLLM_TPU_USING_PATHWAYS)
+        if (envs.TPU_MULTIPROCESS_DP and data_parallelism > 1
+                and not multiprocess_dp):
+            raise ValueError(
+                "TPU_MULTIPROCESS_DP is set but is not supported with "
+                "attention DP (enable_dp_attention) or on Pathways. "
+                "Please disable TPU_MULTIPROCESS_DP.")
+        if multiprocess_dp:
+            data_parallelism = 1
+            logger.warning(
+                "TPU_MULTIPROCESS_DP is enabled: supported for online serving "
+                "only. The offline LLM().generate() API will hang. "
+                "Use `vllm serve` instead.")
         expert_parallelism = sharding_strategy.get("expert_parallelism", 1)
         sequence_parallelism = sharding_strategy.get("sequence_parallelism", 1)
         device_indexes = sharding_strategy.get("device_indexes", None)
 
         decode_context_parallelism = parallel_config.decode_context_parallel_size
 
-        enable_dp_attention = sharding_strategy.get("enable_dp_attention",
-                                                    False)
         if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
             # The user has explicitly set the tensor parallelism in the sharding config.
             tensor_parallelism = ss_tensor_parallelsim
@@ -214,10 +239,16 @@ class ShardingConfigManager:
 
             num_kv_heads_per_device_in_kv_cache = max(1, (num_kv_heads * 2) /
                                                       packing)
-            attn_dp = max(
-                int(tensor_parallelism // num_kv_heads_per_device_in_kv_cache),
-                1)
-            tensor_parallelism = tensor_parallelism // attn_dp
+            attn_dp_size = sharding_strategy.get("attn_dp_size", None)
+            if attn_dp_size is None:
+                attn_dp = max(
+                    int(tensor_parallelism //
+                        num_kv_heads_per_device_in_kv_cache), 1)
+                tensor_parallelism = tensor_parallelism // attn_dp
+            else:
+                attn_dp = attn_dp_size
+                assert tensor_parallelism % attn_dp_size == 0
+                tensor_parallelism = tensor_parallelism // attn_dp
 
             # If Attention DP is active or TP perfectly saturates the KV heads limit,
             # prioritize TP for KV heads and shift all expert parallelism to attn_dp_expert.
@@ -249,7 +280,8 @@ class ShardingConfigManager:
             decode_context_parallelism=decode_context_parallelism)
 
         # Must override here to avoid vLLM spinning up multiple DP engines.
-        if vllm_config.parallel_config.data_parallel_size > 1:
+        if (not multiprocess_dp
+                and vllm_config.parallel_config.data_parallel_size > 1):
             vllm_config.parallel_config.data_parallel_size = 1
             vllm_config.parallel_config.data_parallel_rank = 0
             vllm_config.parallel_config.data_parallel_size_local = 1
@@ -261,11 +293,6 @@ class ShardingConfigManager:
     def validate(cls, vllm_config, sharding_strategy):
         total_dp_size = sharding_strategy.data_parallelism * sharding_strategy.attention_data_parallelism * sharding_strategy.attention_data_expert_parallelism
         if total_dp_size > 1:
-            if vllm_config.speculative_config is not None:
-                raise ValueError(
-                    f"Speculative decoding is not supported with data parallelism "
-                    f"(DP size: {total_dp_size}). Please disable speculative decoding or "
-                    f"set data parallelism to 1.")
             if vllm_config.lora_config is not None:
                 raise ValueError(
                     f"LoRA is not supported with data parallelism "

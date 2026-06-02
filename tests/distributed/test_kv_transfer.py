@@ -20,7 +20,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from absl.testing import absltest, parameterized
-from jax._src import compilation_cache as cc
 from jax._src import test_util as jtu
 
 from tpu_inference.distributed.kv_transfer import (copy_to_host,
@@ -88,7 +87,6 @@ class KVTransferTest(jtu.JaxTestCase):
 
     def tearDown(self):
         super().tearDown()
-        cc.reset_cache()
         jax.clear_caches()
 
         # Force Python GC
