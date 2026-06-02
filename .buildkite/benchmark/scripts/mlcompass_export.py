@@ -28,18 +28,15 @@ def get_env_commit_map() -> dict[str, dict[str, str]]:
 
 def read_metrics_file(file_path: str) -> dict[str, float]:
     metrics_dict: dict[str, float] = {}
-    
     with open(file_path, 'r') as file:
         for line in file:
             # Strip whitespace from the beginning and end of the line
             line = line.strip()
-            
             # Skip empty lines and ensure the line contains '='
             if line and '=' in line:
                 key, value = line.split('=', 1)
                 # Strip extra spaces from key/value and convert value to float
                 metrics_dict[key.strip()] = float(value.strip())
-                
     return metrics_dict
 
 
@@ -90,6 +87,7 @@ def export(metrics: dict[str, float]) -> None:
         raise RuntimeError(
             f'Failed to insert row into MLCompass table: {str(errors)}')
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Export datapoint to MLCompass")
@@ -101,6 +99,7 @@ def main() -> None:
     args = parser.parse_args()
     metrics = read_metrics_file(args.result_file)
     export(metrics)
+
 
 if __name__ == "__main__":
     main()
