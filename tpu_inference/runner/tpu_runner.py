@@ -123,6 +123,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                  spec_decode_metadata: Optional[SpecDecodeMetadata] = None,
                  scheduler_output: Optional["VllmSchedulerOutput"] = None,
                  req_ids_dp: Optional[Dict] = None,
+                 padded_num_scheduled_tokens_per_dp_rank: int = 0,
                  runner=None):
         self._model_runner_output = model_runner_output
         self._next_tokens = next_tokens
@@ -136,6 +137,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._spec_decode_metadata = spec_decode_metadata
         self._scheduler_output = scheduler_output
         self._req_ids_dp = req_ids_dp
+        self._padded_num_scheduled_tokens_per_dp_rank = padded_num_scheduled_tokens_per_dp_rank
         self._runner = runner
 
     def get_output(self) -> ModelRunnerOutput:
@@ -167,6 +169,8 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                     expert_indices_cpu=expert_indices_cpu,
                     req_ids=self._model_runner_output.req_ids,
                     req_ids_dp=self._req_ids_dp,
+                    padded_num_scheduled_tokens_per_dp_rank=self.
+                    _padded_num_scheduled_tokens_per_dp_rank,
                 )
                 self._model_runner_output.routed_experts = routed_experts
 
@@ -213,6 +217,7 @@ class ExecuteModelState:
     # Prompt logprobs fields: populated only when any request has prompt_logprobs set.
     full_logits: Optional[jax.Array] = None
     req_ids_dp: Optional[Dict] = None
+    padded_num_scheduled_tokens_per_dp_rank: int = 0
 
 
 @jax.jit(donate_argnums=(0, 1, 2))
@@ -302,33 +307,14 @@ def _reconstruct_routed_experts(
     scheduler_output: "VllmSchedulerOutput",
     expert_indices_cpu: np.ndarray,
     req_ids: List[str],
-    req_ids_dp: Optional[Dict] = None,
-) -> Tuple[Dict[str, np.ndarray], RoutedExpertsLists]:
+    req_ids_dp: Dict,
+    padded_num_scheduled_tokens_per_dp_rank: int,
+) -> RoutedExpertsLists:
     """Reconstructs physical slot mappings and performs DP-rank reordering for MoE routed expert indices."""
     num_layers, _, top_k = expert_indices_cpu.shape
     block_size = runner.block_size
     total_active_tokens = scheduler_output.total_num_scheduled_tokens
     dp_size = runner.dp_size
-
-    if dp_size > 1:
-        num_scheduled_tokens_per_dp_rank = {
-            dp_rank: 0
-            for dp_rank in range(dp_size)
-        }
-        for req_id in req_ids:
-            dp_rank = scheduler_output.assigned_dp_rank[req_id]
-            num_scheduled_tokens_per_dp_rank[
-                dp_rank] += scheduler_output.num_scheduled_tokens[req_id]
-
-        max_num_scheduled_tokens_across_dp = max(
-            num_scheduled_tokens_per_dp_rank.values())
-        padded_num_scheduled_tokens_per_dp_rank = runner_utils.get_padded_token_len(
-            runner.num_tokens_paddings_per_dp,
-            max_num_scheduled_tokens_across_dp)
-    else:
-        padded_num_scheduled_tokens_per_dp_rank = total_active_tokens
-
-    req_ids_dp_local = req_ids_dp if req_ids_dp is not None else {0: req_ids}
 
     # 1. Compute global start offsets of every request in input batch order
     global_start_offsets = {}
@@ -343,13 +329,13 @@ def _reconstruct_routed_experts(
     global_slots = np.zeros(total_active_tokens, dtype=np.int32)
 
     for dp_rank in range(dp_size):
-        if dp_rank not in req_ids_dp_local:
+        if dp_rank not in req_ids_dp:
             continue
 
         token_offset = padded_num_scheduled_tokens_per_dp_rank * dp_rank
         current_dp_offset = token_offset
 
-        for req_id in req_ids_dp_local[dp_rank]:
+        for req_id in req_ids_dp[dp_rank]:
             n = scheduler_output.num_scheduled_tokens[req_id]
             dp_start = current_dp_offset
             dp_end = dp_start + n
@@ -932,7 +918,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         (scheduler_output, attn_metadata, sampling_metadata, input_ids,
          hidden_states, logits, aux_hidden_states, spec_decode_metadata,
          kv_connector_output, logits_indices_selector, padded_num_reqs,
-         expert_indices, full_hidden_states, full_logits, req_ids_dp) = (
+         expert_indices, full_hidden_states, full_logits, req_ids_dp,
+         padded_num_scheduled_tokens_per_dp_rank) = (
              self.execute_model_state.scheduler_output,
              self.execute_model_state.attn_metadata,
              self.execute_model_state.sampling_metadata,
@@ -948,6 +935,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              self.execute_model_state.full_hidden_states,
              self.execute_model_state.full_logits,
              self.execute_model_state.req_ids_dp,
+             self.execute_model_state.padded_num_scheduled_tokens_per_dp_rank,
          )
         self.execute_model_state = None
 
@@ -966,7 +954,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             scheduler_output, attn_metadata, sampling_metadata, input_ids,
             hidden_states, logits, aux_hidden_states, spec_decode_metadata,
             kv_connector_output, logits_indices_selector, padded_num_reqs,
-            expert_indices, full_hidden_states, full_logits, req_ids_dp)
+            expert_indices, full_hidden_states, full_logits, req_ids_dp,
+            padded_num_scheduled_tokens_per_dp_rank)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -1241,6 +1230,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             full_hidden_states=full_hidden_states,
             full_logits=full_logits,
             req_ids_dp=req_ids_dp,
+            padded_num_scheduled_tokens_per_dp_rank=
+            padded_num_scheduled_tokens_per_dp_rank,
         )
         return None
 
@@ -1261,6 +1252,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         full_hidden_states: Optional[jax.Array] = None,
         full_logits: Optional[jax.Array] = None,
         req_ids_dp: Optional[Dict] = None,
+        padded_num_scheduled_tokens_per_dp_rank: int = 0,
     ) -> ModelRunnerOutput | AsyncTPUModelRunnerOutput:
         if padded_num_reqs is None:
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
@@ -1457,6 +1449,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 spec_decode_metadata=spec_decode_metadata,
                 scheduler_output=scheduler_output,
                 req_ids_dp=req_ids_dp,
+                padded_num_scheduled_tokens_per_dp_rank=
+                padded_num_scheduled_tokens_per_dp_rank,
                 runner=self)
             return async_model_runner_output
 
@@ -1511,6 +1505,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 expert_indices_cpu=expert_indices_cpu,
                 req_ids=self.input_batch.req_ids[:num_reqs],
                 req_ids_dp=req_ids_dp,
+                padded_num_scheduled_tokens_per_dp_rank=
+                padded_num_scheduled_tokens_per_dp_rank,
             )
             model_runner_output.routed_experts = routed_experts
 
