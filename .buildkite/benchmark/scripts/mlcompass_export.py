@@ -66,6 +66,8 @@ def export(metrics: dict[str, float]) -> None:
         'github_commit': env_commit_map['tpu-inference']['commit'],
         'commit_branch_name': env_commit_map['tpu-inference']['branch'],
     }
+    mlcompass_tracking_id = os.getenv('MLCOMPASS_TRACKING_ID', row_id)
+    mlcompass_execution_mode = os.getenv('MLCOMPASS_EXECUTION_MODE', 'oneshot')
 
     row = {
         'entry_id': row_id,
@@ -77,8 +79,8 @@ def export(metrics: dict[str, float]) -> None:
         'exc_timestamp_millis': int(time.time() * 1000),
         'client_info': client_info,
         'env_commit_map': json.dumps(env_commit_map),
-        'mlcompass_tracking_id': os.getenv('MLCOMPASS_TRACKING_ID', row_id),
-        'mlcompass_execution_mode': os.getenv('MLCOMPASS_EXECUTION_MODE', 'oneshot'),
+        'mlcompass_tracking_id': mlcompass_tracking_id,
+        'mlcompass_execution_mode': mlcompass_execution_mode,
     }
 
     client = bigquery.Client(project='google.com:ml-compass-benchmarks')
