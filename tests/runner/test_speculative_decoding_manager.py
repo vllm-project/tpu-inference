@@ -235,7 +235,7 @@ class TestSpeculativeDecodingManager:
                 8,
                 [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208],
                 [3, 4, 7, 8, 10, 0, 0, 0],
-                [0, 1, 2, 5, 6, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                [0, 1, 2, 5, 6, 9]),
             (
                 # High speculative tokens case
                 [5, 3, 4, 2, 1],
@@ -246,10 +246,7 @@ class TestSpeculativeDecodingManager:
                     21, 24, 25
                 ],
                 [5, 9, 14, 17, 19, 0, 0, 0],
-                [
-                    0, 1, 2, 3, 4, 6, 7, 8, 10, 11, 12, 13, 15, 16, 18, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-                ]),
+                [0, 1, 2, 3, 4, 6, 7, 8, 10, 11, 12, 13, 15, 16, 18]),
         ])
     def test_get_spec_decode_metadata_parametrized(
             self, num_draft_tokens, cu_num_scheduled_tokens, padded_num_reqs,
@@ -317,10 +314,11 @@ class TestSpeculativeDecodingManager:
         assert np.asarray(metadata.bonus_logits_indices).tolist(
         ) == expected_bonus_logits_indices
 
-        # target_logits_indices - pad to same length as final_logits_indices and compare as Python lists
+        # target_logits_indices - pad to (padded_len - padded_num_reqs) and compare as Python lists
         expected_padded_target_logits_indices = expected_target_logits_indices + [
             0
-        ] * (padded_len - len(expected_target_logits_indices))
+        ] * ((padded_len - padded_num_reqs) -
+             len(expected_target_logits_indices))
         assert np.asarray(metadata.target_logits_indices).tolist(
         ) == expected_padded_target_logits_indices
 
