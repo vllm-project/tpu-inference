@@ -229,6 +229,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 self.head_size,
                 self.num_heads,
                 self.num_kv_heads,
+                self.sliding_window,
             )
         else:
             # --- Decoder Attention Flow (Paged KV Cache) ---
@@ -359,6 +360,7 @@ def _align_to(x: int, a: int) -> int:
         "head_size",
         "num_heads",
         "num_kv_heads",
+        "sliding_window",
     ),
 )
 def _jax_encoder_only_attn_func(
@@ -371,6 +373,7 @@ def _jax_encoder_only_attn_func(
     head_size: int,
     num_heads: int,
     num_kv_heads: int,
+    sliding_window: int | None = None,
 ) -> jax.Array:
     # shape information, applied for O, Q, K, V.
     # T: tokens, H: number of head, D: hidden dim 
@@ -441,17 +444,40 @@ def _jax_encoder_only_attn_func(
         )
         return segment_ids
 
-    kernel = sharded_flash_attention(
-        mesh=mesh,
-        causal=False,
-        sm_scale=scale,
-    )
-    output_bhtd = kernel(
-        q_bhtd,
-        k_bhtd,
-        v_bhtd,
-        build_segment_ids(),
-    )
+    if sliding_window is not None:
+        row_ids = jnp.arange(padded_len_q)[:, None]
+        col_ids = jnp.arange(padded_len_kv)[None, :]
+        mask = jnp.abs(row_ids - col_ids) <= sliding_window
+        ab = jnp.where(mask, 0.0, -1e4).astype(q_bhtd.dtype)
+        ab = jnp.expand_dims(ab, axis=(0, 1))
+        ab = jnp.tile(ab, (1, num_heads, 1, 1))
+
+        kernel = sharded_flash_attention(
+            mesh=mesh,
+            causal=False,
+            sm_scale=scale,
+            use_attention_bias=True,
+        )
+        output_bhtd = kernel(
+            q_bhtd,
+            k_bhtd,
+            v_bhtd,
+            ab,
+            build_segment_ids(),
+        )
+    else:
+        kernel = sharded_flash_attention(
+            mesh=mesh,
+            causal=False,
+            sm_scale=scale,
+            use_attention_bias=False,
+        )
+        output_bhtd = kernel(
+            q_bhtd,
+            k_bhtd,
+            v_bhtd,
+            build_segment_ids(),
+        )
     output_htd = jnp.squeeze(output_bhtd, axis=0)
 
     # Unpad and transpose back to vLLM's shape convention
