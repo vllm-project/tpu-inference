@@ -42,7 +42,7 @@ fi
 # 1. Start Server in the background
 # We use OOM-safe parameters verified on TPU VM
 # We increase max_pixels so the model can read text inside MMMU-Pro images
-# We set max_num_batched_tokens to 8192 to allow processing high-res images without chunking
+# We set max_num_batched_tokens to 8192 to satisfy Qwen 2.5 VL multimodal requirements
 vllm serve "$MODEL_NAME" \
   --tensor-parallel-size "$TP_SIZE" \
   --max-model-len 16384 \

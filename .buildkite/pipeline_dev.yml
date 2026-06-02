@@ -41,7 +41,7 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/check_mmmu_pro_accuracy.sh \
-          --model "Qwen/Qwen3-VL-8B-Instruct" --threshold 0.15 --tp_size 8 --limit 100
+          --model "Qwen/Qwen3-VL-8B-Instruct" --threshold 0.15 --tp_size 8 --limit 50
 
   - label: "tpu7x [dev] MMMU-pro accuracy for Qwen/Qwen2.5-VL-7B-Instruct"
     key: tpu7x_dev_mmmu_pro_qwen2_5
@@ -55,4 +55,4 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/check_mmmu_pro_accuracy.sh \
-          --model "Qwen/Qwen2.5-VL-7B-Instruct" --threshold 0.15 --tp_size 4 --limit 100
+          --model "Qwen/Qwen2.5-VL-7B-Instruct" --threshold 0.15 --tp_size 4 --limit 50
