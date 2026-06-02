@@ -870,31 +870,34 @@ class CompilationManager:
             self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
         for num_tokens in self.runner.num_tokens_paddings:
             for num_logits in self.runner.num_logits_paddings:
-                if self._should_skip_padding_combination(num_tokens,
-                                                         num_logits,
-                                                         only_equal=False):
-                    continue
-                input_ids = self._create_dummy_tensor(
-                    (num_tokens, ),
-                    jnp.int32,
-                    sharding=data_parallel_attn_sharding)
-                final_logits_indices = self._create_dummy_tensor(
-                    (num_logits, ),
-                    jnp.int32,
-                    sharding=data_parallel_attn_sharding)
-                target_logits_indices = self._create_dummy_tensor(
-                    (num_logits, ),
-                    jnp.int32,
-                    sharding=data_parallel_attn_sharding)
-                self._run_compilation(
-                    f"worker{self.runner.rank} extract_draft_token_ids",
-                    self.runner._extract_draft_token_ids,
-                    input_ids,
-                    final_logits_indices,
-                    target_logits_indices,
-                    num_tokens=num_tokens,
-                    num_logits=num_logits,
-                )
+                for num_reqs in self.runner.num_reqs_paddings:
+                    if num_reqs > num_logits:
+                        continue
+                    if self._should_skip_padding_combination(num_tokens,
+                                                             num_logits,
+                                                             only_equal=False):
+                        continue
+                    input_ids = self._create_dummy_tensor(
+                        (num_tokens, ),
+                        jnp.int32,
+                        sharding=data_parallel_attn_sharding)
+                    final_logits_indices = self._create_dummy_tensor(
+                        (num_logits, ),
+                        jnp.int32,
+                        sharding=data_parallel_attn_sharding)
+                    target_logits_indices = self._create_dummy_tensor(
+                        (num_logits - num_reqs, ),
+                        jnp.int32,
+                        sharding=data_parallel_attn_sharding)
+                    self._run_compilation(
+                        f"worker{self.runner.rank} extract_draft_token_ids",
+                        self.runner._extract_draft_token_ids,
+                        input_ids,
+                        final_logits_indices,
+                        target_logits_indices,
+                        num_tokens=num_tokens,
+                        num_logits=num_logits,
+                    )
 
     def _precompile_extract_last_sampled_tokens(self) -> None:
         logger.info(
@@ -914,6 +917,8 @@ class CompilationManager:
         # bonus_tokens (num_reqs)].
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
+                if num_reqs > num_logits:
+                    continue
                 sampled_token_ids = self._create_dummy_tensor(
                     (num_logits + num_reqs, ),
                     jnp.int32,
@@ -924,7 +929,7 @@ class CompilationManager:
                         jnp.int32,
                         sharding=data_parallel_attn_sharding),
                     target_logits_indices=self._create_dummy_tensor(
-                        (num_logits, ),
+                        (num_logits - num_reqs, ),
                         jnp.int32,
                         sharding=data_parallel_attn_sharding),
                     bonus_logits_indices=self._create_dummy_tensor(
@@ -954,14 +959,16 @@ class CompilationManager:
         vocab_size = self.runner.vocab_size
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
+                if num_reqs > num_logits:
+                    continue
                 sharding = NamedSharding(
                     self.runner.mesh,
                     PartitionSpec(ShardingAxisName.MLP_DATA,
                                   ShardingAxisName.MLP_TENSOR))
                 target_probs = self._create_dummy_tensor(
-                    (num_logits, vocab_size), jnp.float32, sharding)
-                draft_token_ids = self._create_dummy_tensor((num_logits, ),
-                                                            jnp.int32)
+                    (num_logits - num_reqs, vocab_size), jnp.float32, sharding)
+                draft_token_ids = self._create_dummy_tensor(
+                    (num_logits - num_reqs, ), jnp.int32)
                 num_draft_tokens = self._create_dummy_tensor((num_reqs, ),
                                                              jnp.int32)
                 bonus_token_ids = self._create_dummy_tensor((num_reqs, ),

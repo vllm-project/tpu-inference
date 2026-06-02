@@ -294,7 +294,9 @@ class SpeculativeDecodingManager:
             out_logits_indices.append(
                 _pad(logits_indices, padded_logits_length_dp_rank))
             out_target_logits_indices.append(
-                _pad(target_logits_indices, padded_logits_length_dp_rank))
+                _pad(
+                    target_logits_indices, padded_logits_length_dp_rank -
+                    padded_num_reqs_per_dp_rank))
             out_bonus_logits_indices.append(
                 _pad(bonus_logits_indices, padded_num_reqs_per_dp_rank))
             out_draft_lengths.append(

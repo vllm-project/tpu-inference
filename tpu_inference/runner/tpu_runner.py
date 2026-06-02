@@ -151,7 +151,10 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         if self._logprobs_tensors is not None:
             # Use materialize to ensure logprobs are ready on host when we return async results
             self._model_runner_output.logprobs = _jax_logprobs_materialize(
-                self._logprobs_tensors, self.logits_indices_selector)
+                self._logprobs_tensors,
+                self.logits_indices_selector,
+                spec_decode_metadata=self._spec_decode_metadata,
+                runner=self._runner)
 
         if self._prompt_logprobs_async_data is not None:
             self._model_runner_output.prompt_logprobs_dict = (
@@ -281,7 +284,9 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
 def _jax_logprobs_materialize(
         logprobs_tensors: LogprobsTensors,
         logits_indices_selector: Optional[List[int]] = None,
-        cu_num_generated_tokens: Optional[Any] = None) -> LogprobsLists:
+        cu_num_generated_tokens: Optional[Any] = None,
+        spec_decode_metadata: Optional[SpecDecodeMetadata] = None,
+        runner: Optional[Any] = None) -> LogprobsLists:
     """Materializes logprobs from JAX arrays into NumPy-backed LogprobsLists."""
     log_token_ids = np.asarray(
         jax.device_get(logprobs_tensors.logprob_token_ids))
@@ -289,10 +294,125 @@ def _jax_logprobs_materialize(
     selected_token_ranks = np.asarray(
         jax.device_get(logprobs_tensors.selected_token_ranks))
 
-    if logits_indices_selector is not None:
-        log_token_ids = log_token_ids[logits_indices_selector]
-        logprobs_arr = logprobs_arr[logits_indices_selector]
-        selected_token_ranks = selected_token_ranks[logits_indices_selector]
+    if spec_decode_metadata is not None:
+        assert runner is not None
+        vocab_size = runner.input_batch.vocab_size
+        dp_size = runner.dp_size
+        num_reqs = runner.input_batch.num_reqs
+
+        padded_tokens_length = spec_decode_metadata.final_logits_indices.shape[
+            0]
+        assert padded_tokens_length % dp_size == 0
+        padded_tokens_length = padded_tokens_length // dp_size
+
+        per_rank_output_size = log_token_ids.shape[0] // dp_size
+
+        # Lists to collect filtered outputs per request (in original request ordering)
+        req_logprob_token_ids = [[] for _ in range(num_reqs)]
+        req_logprobs = [[] for _ in range(num_reqs)]
+        req_sampled_token_ranks = [[] for _ in range(num_reqs)]
+
+        for rank in range(dp_size):
+            rank_offset = rank * per_rank_output_size
+
+            # Slice main and bonus logprobs for this rank
+            main_token_ids = log_token_ids[rank_offset:rank_offset +
+                                           padded_tokens_length]
+            main_logprobs = logprobs_arr[rank_offset:rank_offset +
+                                         padded_tokens_length]
+            main_ranks = selected_token_ranks[rank_offset:rank_offset +
+                                              padded_tokens_length]
+
+            bonus_token_ids = log_token_ids[rank_offset +
+                                            padded_tokens_length:rank_offset +
+                                            per_rank_output_size]
+            bonus_logprobs = logprobs_arr[rank_offset +
+                                          padded_tokens_length:rank_offset +
+                                          per_rank_output_size]
+            bonus_ranks = selected_token_ranks[
+                rank_offset + padded_tokens_length:rank_offset +
+                per_rank_output_size]
+
+            padded_num_seqs_per_rank = bonus_token_ids.shape[0]
+            cur_rank_num_draft_tokens = spec_decode_metadata.draft_lengths_cpu[
+                rank * padded_num_seqs_per_rank:(rank + 1) *
+                padded_num_seqs_per_rank]
+
+            start_idx = 0
+            req_indices = spec_decode_metadata.req_indices_dp[rank]
+            for i, req_idx in enumerate(req_indices):
+                if req_idx >= num_reqs:
+                    continue
+
+                seq_length = int(cur_rank_num_draft_tokens[i])
+                end_idx = start_idx + seq_length
+
+                # Get draft logprobs for this sequence
+                seq_main_token_ids = main_token_ids[start_idx:end_idx]
+                seq_main_logprobs = main_logprobs[start_idx:end_idx]
+                seq_main_ranks = main_ranks[start_idx:end_idx]
+
+                # Identify accepted draft positions (where gathered token ID is not placeholder)
+                valid_mask = (seq_main_token_ids[:, 0] != INVALID_TOKEN_ID) & (
+                    seq_main_token_ids[:, 0] < vocab_size)
+
+                valid_token_ids = seq_main_token_ids[valid_mask]
+                valid_logprobs = seq_main_logprobs[valid_mask]
+                valid_ranks = seq_main_ranks[valid_mask]
+
+                # Check bonus token
+                bonus_token = bonus_token_ids[i, 0]
+                if bonus_token != INVALID_TOKEN_ID and bonus_token < vocab_size:
+                    # Add bonus token logprobs
+                    valid_token_ids = np.concatenate(
+                        [valid_token_ids, [bonus_token_ids[i]]], axis=0)
+                    valid_logprobs = np.concatenate(
+                        [valid_logprobs, [bonus_logprobs[i]]], axis=0)
+                    valid_ranks = np.concatenate(
+                        [valid_ranks, [bonus_ranks[i]]], axis=0)
+
+                req_logprob_token_ids[req_idx] = valid_token_ids
+                req_logprobs[req_idx] = valid_logprobs
+                req_sampled_token_ranks[req_idx] = valid_ranks
+
+                start_idx = end_idx
+
+        # Flatten the collected lists back to 2D/1D arrays
+        flat_token_ids = []
+        flat_logprobs = []
+        flat_ranks = []
+
+        cu_num_generated_tokens = [0]
+        current_cu = 0
+
+        for r in range(num_reqs):
+            num_gen = len(req_logprob_token_ids[r])
+            current_cu += num_gen
+            cu_num_generated_tokens.append(current_cu)
+
+            if num_gen > 0:
+                flat_token_ids.append(req_logprob_token_ids[r])
+                flat_logprobs.append(req_logprobs[r])
+                flat_ranks.append(req_sampled_token_ranks[r])
+
+        if flat_token_ids:
+            log_token_ids = np.concatenate(flat_token_ids, axis=0)
+            logprobs_arr = np.concatenate(flat_logprobs, axis=0)
+            selected_token_ranks = np.concatenate(flat_ranks, axis=0)
+        else:
+            log_token_ids = np.empty((0, log_token_ids.shape[1]),
+                                     dtype=log_token_ids.dtype)
+            logprobs_arr = np.empty((0, logprobs_arr.shape[1]),
+                                    dtype=logprobs_arr.dtype)
+            selected_token_ranks = np.empty((0, ),
+                                            dtype=selected_token_ranks.dtype)
+
+    else:
+        if logits_indices_selector is not None:
+            log_token_ids = log_token_ids[logits_indices_selector]
+            logprobs_arr = logprobs_arr[logits_indices_selector]
+            selected_token_ranks = selected_token_ranks[
+                logits_indices_selector]
 
     return LogprobsLists(
         logprob_token_ids=np.array(log_token_ids.tolist()),
@@ -1480,7 +1600,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if logprobs is not None:
             # Use materialize to ensure logprobs are ready on host when we return async results
             logprobs_lists = _jax_logprobs_materialize(
-                logprobs, logits_indices_selector)
+                logprobs,
+                logits_indices_selector,
+                spec_decode_metadata=spec_decode_metadata,
+                runner=self)
         else:
             logprobs_lists = None
 
