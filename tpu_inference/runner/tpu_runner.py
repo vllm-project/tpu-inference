@@ -1987,16 +1987,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 cur_rank_req_idxs = req_indices_dp[dp_rank]
                 cur_rank_num_draft_tokens = num_draft_tokens[cur_rank_req_idxs]
 
-                num_sampled_tokens = cur_rank_num_draft_tokens + 1
-                total_sampled_tokens = np.sum(num_sampled_tokens)
+                total_active_draft_tokens = np.sum(cur_rank_num_draft_tokens)
+                required_logits_length = (padded_num_reqs_per_dp_rank +
+                                          total_active_draft_tokens)
                 if padded_logits_length is None:
                     padded_logits_length = runner_utils.get_padded_token_len(
-                        self.num_logits_paddings, total_sampled_tokens)
+                        self.num_logits_paddings, required_logits_length)
                 else:
                     padded_logits_length = max(
                         padded_logits_length,
                         runner_utils.get_padded_token_len(
-                            self.num_logits_paddings, total_sampled_tokens))
+                            self.num_logits_paddings, required_logits_length))
 
             assert padded_logits_length is not None
             logits_indices_shape = (padded_logits_length * dp_size, )
