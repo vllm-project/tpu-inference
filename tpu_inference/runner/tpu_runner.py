@@ -161,14 +161,13 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                 jax.device_get(self._expert_indices))
 
             if self._scheduler_output is not None:
-                routed_experts_dict, routed_experts = _reconstruct_routed_experts(
+                routed_experts = _reconstruct_routed_experts(
                     runner=self._runner,
                     scheduler_output=self._scheduler_output,
                     expert_indices_cpu=expert_indices_cpu,
                     req_ids=self._model_runner_output.req_ids,
                     req_ids_dp=self._req_ids_dp,
                 )
-                self._model_runner_output.routed_experts_dict = routed_experts_dict
                 self._model_runner_output.routed_experts = routed_experts
 
         return self._model_runner_output
@@ -390,39 +389,10 @@ def _reconstruct_routed_experts(
     expert_indices_reordered = expert_indices_cpu[:, indices_map, :].transpose(
         1, 0, 2)
 
-    # 4. Slice the reordered array to update request history buffers
-    routed_experts_dict = {}
-    for req_id in req_ids:
-        req_state = runner.requests[req_id]
-        n = scheduler_output.num_scheduled_tokens[req_id]
-        global_start = global_start_offsets[req_id]
-        global_end = global_start + n
-
-        step_experts = expert_indices_reordered[global_start:global_end, :, :]
-
-        # Maintain old history buffer
-        if not hasattr(req_state, "_routed_experts_buf"):
-            _, layers, top_k = step_experts.shape
-            req_state._routed_experts_buf = np.zeros(
-                (runner.max_model_len, layers, top_k),
-                dtype=step_experts.dtype)
-            req_state._routed_experts_len = 0
-
-        offset = req_state._routed_experts_len
-        allowed = min(n, runner.max_model_len - offset)
-        if allowed > 0:
-            req_state._routed_experts_buf[offset:offset +
-                                          allowed] = (step_experts[:allowed])
-            req_state._routed_experts_len += allowed
-
-        routed_experts_dict[
-            req_id] = req_state._routed_experts_buf[:req_state.
-                                                    _routed_experts_len]
-
     routed_experts = RoutedExpertsLists(routing_data=expert_indices_reordered,
                                         slot_mapping=global_slots)
 
-    return routed_experts_dict, routed_experts
+    return routed_experts
 
 
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
@@ -1535,14 +1505,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.model_config.enable_return_routed_experts and expert_indices is not None:
             expert_indices_cpu = np.asarray(jax.device_get(expert_indices))
 
-            routed_experts_dict, routed_experts = _reconstruct_routed_experts(
+            routed_experts = _reconstruct_routed_experts(
                 runner=self,
                 scheduler_output=scheduler_output,
                 expert_indices_cpu=expert_indices_cpu,
                 req_ids=self.input_batch.req_ids[:num_reqs],
                 req_ids_dp=req_ids_dp,
             )
-            model_runner_output.routed_experts_dict = routed_experts_dict
             model_runner_output.routed_experts = routed_experts
 
         return model_runner_output
