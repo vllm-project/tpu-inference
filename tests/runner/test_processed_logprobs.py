@@ -58,7 +58,9 @@ class TestProcessedLogprobs:
         prompt = "Explain quantum physics in one short sentence:"
 
         # High temperature distributes probability more evenly
-        sp_high_temp = SamplingParams(temperature=2.0, max_tokens=1, logprobs=5)
+        sp_high_temp = SamplingParams(temperature=2.0,
+                                      max_tokens=1,
+                                      logprobs=5)
         out_high = llm.generate([prompt], sp_high_temp)[0].outputs[0]
 
         # Low temperature pushes the highest probability closer to 1 (logprob closer to 0)
