@@ -376,6 +376,9 @@ def _jax_logprobs_materialize(
                 req_logprob_token_ids[req_idx] = valid_token_ids
                 req_logprobs[req_idx] = valid_logprobs
                 req_sampled_token_ranks[req_idx] = valid_ranks
+                logger.info(f"LOGPROBS_DEBUG: req_idx={req_idx}, "
+                            f"len(valid_token_ids)={len(valid_token_ids)}, "
+                            f"len(valid_logprobs)={len(valid_logprobs)}")
 
         # Flatten the collected lists back to 2D/1D arrays
         flat_token_ids = []

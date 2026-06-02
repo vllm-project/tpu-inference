@@ -277,6 +277,10 @@ class RejectionSampler:
 
                 # reorders per-rank outputs back to the original batch ordering
                 outputs[req_idx] = seq_tokens.tolist()
+                print(
+                    f"TOKENS_DEBUG: req_idx={req_idx}, "
+                    f"len(seq_tokens)={len(seq_tokens)}",
+                    flush=True)
 
         return outputs
 

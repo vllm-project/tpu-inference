@@ -186,6 +186,14 @@ def _test_correctness_helper(
                        **kwargs)
         spec_outputs = spec_llm.generate(test_prompts, sampling_config)
 
+        if sampling_config.logprobs is not None:
+            for spec_output in spec_outputs:
+                completion = spec_output.outputs[0]
+                assert completion.logprobs is not None, "Logprobs should not be None"
+                assert len(completion.logprobs) == len(completion.token_ids), (
+                    f"Length mismatch: len(logprobs)={len(completion.logprobs)} vs "
+                    f"len(token_ids)={len(completion.token_ids)}")
+
         matches = 0
         misses = 0
         for ref_output, spec_output in zip(ref_outputs, spec_outputs):
