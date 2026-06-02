@@ -435,23 +435,24 @@ class VllmModelWrapper:
             params_and_buffers: Any,
             **kwargs,
         ) -> Any:
-            call_kwargs = {
-                k: jax.tree.map(torch_view, v)
-                for k, v in kwargs.items()
-            }
+            with torchax.default_env():
+                call_kwargs = {
+                    k: jax.tree.map(torch_view, v)
+                    for k, v in kwargs.items()
+                }
 
-            output_from_torch = torch.func.functional_call(
-                self.model,
-                torch_view(params_and_buffers),
-                kwargs={
-                    "call_method": "embed_multimodal",
-                    "call_args": (),
-                    "call_kwargs": call_kwargs,
-                },
-                tie_weights=False,
-            )
+                output_from_torch = torch.func.functional_call(
+                    self.model,
+                    torch_view(params_and_buffers),
+                    kwargs={
+                        "call_method": "embed_multimodal",
+                        "call_args": (),
+                        "call_kwargs": call_kwargs,
+                    },
+                    tie_weights=False,
+                )
 
-            return jax_view(output_from_torch)
+                return jax_view(output_from_torch)
 
         def embed_multimodal_func_torch(params_and_buffers: Any,
                                         **kwargs) -> Any:
