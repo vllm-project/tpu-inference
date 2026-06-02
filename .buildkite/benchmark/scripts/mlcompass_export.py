@@ -9,12 +9,12 @@ from google.cloud import bigquery
 
 
 def get_env_commit_map() -> dict[str, dict[str, str]]:
-  code_hash = os.getenv('CODE_HASH')
-  match = re.match('^([0-9a-fA-F]+)-([0-9a-fA-F]+)-$', code_hash)
-  if not match:
-      raise RuntimeError(f'CODE_HASH value error: "{code_hash}"')
-  return {
-        'vllm' : {
+    code_hash = os.getenv('CODE_HASH')
+    match = re.match('^([0-9a-fA-F]+)-([0-9a-fA-F]+)-$', code_hash)
+    if not match:
+        raise RuntimeError(f'CODE_HASH value error: "{code_hash}"')
+    return {
+        'vllm': {
             'repo': 'vllm-project/vllm',
             'commit': match[1],
             'branch': 'main',
@@ -49,7 +49,8 @@ def get_links() -> dict[str, str]:
     build_number = os.getenv('BUILDKITE_BUILD_NUMBER')
     job_id = os.getenv('BUILDKITE_JOB_ID')
     if build_number and job_id:
-        result['buildkite'] = f'https://buildkite.com/organizations/tpu-commons/pipelines/tpu-inference-benchmark/builds/{build_number}/jobs/{job_id}/log'
+        result[
+            'buildkite'] = f'https://buildkite.com/organizations/tpu-commons/pipelines/tpu-inference-benchmark/builds/{build_number}/jobs/{job_id}/log'
     return result
 
 
@@ -61,6 +62,10 @@ def export(metrics: dict[str, float]) -> None:
         raise RuntimeError('MLCOMPASS_TEST_NAME env var is not found.')
 
     env_commit_map = get_env_commit_map()
+    client_info = {
+        'github_commit': env_commit_map['tpu-inference']['commit'],
+        'commit_branch_name': env_commit_map['tpu-inference']['branch'],
+    }
 
     row = {
         'entry_id': row_id,
@@ -70,10 +75,7 @@ def export(metrics: dict[str, float]) -> None:
         'metrics': json.dumps(metrics),
         'link_map': json.dumps(get_links()),
         'exc_timestamp_millis': int(time.time() * 1000),
-        'client_info': {
-            'github_commit': env_commit_map['tpu-inference']['commit'],
-            'commit_branch_name': env_commit_map['tpu-inference']['branch'],
-        },
+        'client_info': client_info,
         'env_commit_map': json.dumps(env_commit_map),
         'mlcompass_tracking_id': os.getenv('MLCOMPASS_TRACKING_ID', row_id),
         'mlcompass_execution_mode': os.getenv('MLCOMPASS_EXECUTION_MODE', 'oneshot'),
@@ -84,10 +86,12 @@ def export(metrics: dict[str, float]) -> None:
     table_obj = client.get_table(table_ref)
     errors = client.insert_rows(table_obj, [row])
     if errors:
-        raise RuntimeError(f'Failed to insert row into MLCompass table: {str(errors)}')
+        raise RuntimeError(
+            f'Failed to insert row into MLCompass table: {str(errors)}')
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export datapoint to MLCompass")
+    parser = argparse.ArgumentParser(
+        description="Export datapoint to MLCompass")
     parser.add_argument(
         "--result_file",
         type=str,
