@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numpy as np
 import pytest
 from vllm import LLM, SamplingParams
 
@@ -104,3 +105,42 @@ class TestMoEExpertIds:
         # Verify that routed_experts is None
         assert output.routed_experts is None, (
             "MoE models must not populate routed_experts when disabled")
+
+    def test_moe_expert_ids_batch_isolation(self, llm_enabled: LLM):
+        """Verifies that the returned expert IDs for batched requests
+        match their reference runs when executed in isolation.
+        """
+        prompt_a = "The capital of France is"
+        prompt_b = "Explain quantum computing in simple terms:"
+        sampling_params = SamplingParams(temperature=0, max_tokens=10)
+
+        # 1. Run Request A isolated
+        outputs_a = llm_enabled.generate([prompt_a], sampling_params)
+        routed_experts_a = outputs_a[0].outputs[0].routed_experts
+        assert routed_experts_a is not None
+
+        # 2. Run Request B isolated
+        outputs_b = llm_enabled.generate([prompt_b], sampling_params)
+        routed_experts_b = outputs_b[0].outputs[0].routed_experts
+        assert routed_experts_b is not None
+
+        # 3. Run Request A & B together in a batch
+        outputs_batched = llm_enabled.generate([prompt_a, prompt_b],
+                                               sampling_params)
+
+        # Verify batched outputs match their isolated runs
+        routed_experts_batched_a = outputs_batched[0].outputs[0].routed_experts
+        routed_experts_batched_b = outputs_batched[1].outputs[0].routed_experts
+
+        assert routed_experts_batched_a is not None
+        assert routed_experts_batched_b is not None
+
+        # Verify shapes are matching
+        assert routed_experts_batched_a.shape == routed_experts_a.shape
+        assert routed_experts_batched_b.shape == routed_experts_b.shape
+
+        # Verify values are identical (batch isolation test)
+        np.testing.assert_array_equal(routed_experts_batched_a,
+                                      routed_experts_a)
+        np.testing.assert_array_equal(routed_experts_batched_b,
+                                      routed_experts_b)
