@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 import jax
@@ -35,7 +38,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extract_last_sampled_tokens)
-from tpu_inference.utils import device_array, to_jax_dtype
+from tpu_inference.utils import device_array, time_function, to_jax_dtype
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -62,6 +65,29 @@ class CompilationManager:
                                   -1)
                 jax.config.update("jax_persistent_cache_min_compile_time_secs",
                                   -1)
+        # Thread pool for parallel XLA compilation. NUM_PRECOMPILE_WORKERS=1
+        # disables the pool and runs compilations sequentially in the main
+        # thread.
+        num_workers = envs.NUM_PRECOMPILE_WORKERS
+        self._prev_stack_size: Optional[int] = None
+        if num_workers == 1:
+            self._compile_executor = None
+        else:
+            # Pool threads default to the system thread stack size (~8MB on
+            # Linux), much smaller than the main thread. XLA lowering overflows
+            # that stack on large graphs. Bump the default stack size.
+            try:
+                self._prev_stack_size = threading.stack_size()
+                threading.stack_size(64 * 1024 * 1024)
+            except (RuntimeError, ValueError):
+                self._prev_stack_size = None
+            logger.info(
+                "Parallel AOT compilation enabled (NUM_PRECOMPILE_WORKERS=%d).",
+                num_workers)
+            self._compile_executor = ThreadPoolExecutor(
+                max_workers=num_workers, thread_name_prefix="aot_compilation")
+        self._compile_futures: list[Future] = []
+        self._warmup_tasks: list = []
 
     def _create_dummy_tensor(self,
                              shape: Tuple[int, ...],
@@ -96,55 +122,148 @@ class CompilationManager:
                          fn: Callable,
                          *args,
                          call_kwargs=dict(),
+                         warmup_handler: Optional[Callable] = None,
+                         aot: bool = True,
                          **kwargs) -> None:
-        logger.info(f"Precompile {name} --> {kwargs}")
-        start = time.perf_counter()
-        result = fn(*args, **call_kwargs)
-        jax.tree.map(lambda r: r.block_until_ready(), result)
-        end = time.perf_counter()
-        logger.info("Compilation finished in %.2f [secs].", end - start)
+        log_name = f"{name} --> {kwargs}"
+        logger.info(f"Precompile {log_name}")
+        # Unwrap functools.partial so the underlying jit's static_argnums are
+        # respected.
+        while isinstance(fn, functools.partial):
+            args = fn.args + args
+            call_kwargs = {**fn.keywords, **call_kwargs}
+            fn = fn.func
+        self._warmup_tasks.append(
+            (name, fn, args, call_kwargs, warmup_handler))
+        if not aot or not hasattr(fn, 'lower'):
+            # Skip AOT when the caller opts out, or when fn is unjitted.
+            # The warmup pass will run fn() and populate the inner-jit caches.
+            reason = "aot=False" if not aot else "not a jit"
+            logger.info(
+                "AOT lower skipped for %s (%s); will compile in warmup.", name,
+                reason)
+            return
+        try:
+            lowered = fn.lower(*args, **call_kwargs)
+        except Exception as e:
+            # AOT lower not supported here (e.g. a jit whose body contains a
+            # nested jit with compiler_options). Fall back to warmup-only — the
+            # warmup pass will trigger inline compile.
+            logger.info(
+                "AOT lower skipped for %s (%r); will compile in warmup.", name,
+                e)
+            return
 
+        # Compilation is thread-safe
+        def _compile(lowered, name, mesh):
+            with jax.set_mesh(mesh):
+                start = time.perf_counter()
+                compiled = lowered.compile()
+                elapsed = time.perf_counter() - start
+                logger.info("Compilation of %s finished in %.2f [secs].", name,
+                            elapsed)
+                return compiled
+
+        if self._compile_executor is None:
+            _compile(lowered, log_name, self.runner.mesh)
+        else:
+            future = self._compile_executor.submit(_compile, lowered, log_name,
+                                                   self.runner.mesh)
+            self._compile_futures.append(future)
+
+    def _flush_compilations(self) -> None:
+        """Wait for all currently-pending background compilations and run their
+        warmups.
+        """
+        futures, self._compile_futures = self._compile_futures, []
+        tasks, self._warmup_tasks = self._warmup_tasks, []
+
+        for fut in futures:
+            try:
+                fut.result()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Compilation failed: {e}\n"
+                    "Hint: if you are seeing memory errors or stack overflows "
+                    "during parallel precompilation, try lowering "
+                    "NUM_PRECOMPILE_WORKERS (e.g. NUM_PRECOMPILE_WORKERS=1 "
+                    "runs all compilations sequentially in the main thread)."
+                ) from e
+
+        warmup_start = time.perf_counter()
+        for name, fn, args, call_kwargs, warmup_handler in tasks:
+            if warmup_handler is not None:
+                out = warmup_handler(fn, args, call_kwargs)
+            else:
+                out = fn(*args, **call_kwargs)
+            jax.tree.map(lambda r: r.block_until_ready(), out)
+        warmup_elapsed = time.perf_counter() - warmup_start
+        if tasks:
+            logger.info(
+                "Warm-up call pass finished in %.2f [secs] over %d tasks.",
+                warmup_elapsed, len(tasks))
+
+    @time_function
     def capture_model(self) -> None:
         if envs.SKIP_JAX_PRECOMPILE or self.runner.model_config.enforce_eager:
             return
         logger.info("Precompile all the subgraphs with possible input shapes.")
         compilation_start_time = time.perf_counter()
 
-        with self.runner.maybe_setup_dummy_loras(
-                self.runner.lora_config), jax.set_mesh(self.runner.mesh):
-            self._precompile_backbone_text_only()
-            if self.runner.is_multimodal_model:
-                if self.runner.precompile_vision_encoder_fn is not None:
-                    self.runner.precompile_vision_encoder_fn(
-                        self._run_compilation, )
-                self._precompile_input_embeddings_merger()
-                self._precompile_backbone_with_inputs_embeds()
-            if self.runner.scheduler_config.async_scheduling:
-                self._precompile_substitute_placeholder_token()
+        try:
+            with self.runner.maybe_setup_dummy_loras(
+                    self.runner.lora_config), jax.set_mesh(self.runner.mesh):
+                self._precompile_backbone_text_only()
+                if self.runner.is_multimodal_model:
+                    if self.runner.precompile_vision_encoder_fn is not None:
+                        self.runner.precompile_vision_encoder_fn(
+                            self._run_compilation, )
+                    self._precompile_input_embeddings_merger()
+                    self._precompile_backbone_with_inputs_embeds()
+                if self.runner.scheduler_config.async_scheduling:
+                    self._precompile_substitute_placeholder_token()
+                    if self.runner.speculative_config:
+                        self._precompile_subtract_num_rejected_tokens()
+                        self._precompile_concat_last_sampled_tokens_and_draft_tokens(
+                        )
+                self._flush_compilations()
+                if not self.runner.is_last_rank:
+                    return
+                self._precompile_select_from_array()
+                if not self.runner.is_pooling_model:
+                    self._precompile_compute_logits()
+                else:
+                    self._precompile_compute_pooling()
+                self._flush_compilations()
+                # Skip sampling if already precompiled before KV cache allocation
+                if not self._sampling_precompiled:
+                    self._precompile_sampling()
+                self._precompile_disagg_utils()
+                # Skip gather_logprobs if already precompiled before KV cache allocation
+                if not self._gather_logprobs_precompiled:
+                    self._precompile_gather_logprobs()
+                self._precompile_structured_decoding()
                 if self.runner.speculative_config:
-                    self._precompile_subtract_num_rejected_tokens()
-                    self._precompile_concat_last_sampled_tokens_and_draft_tokens(
-                    )
-            if not self.runner.is_last_rank:
-                return
-            self._precompile_select_from_array()
-            if not self.runner.is_pooling_model:
-                self._precompile_compute_logits()
-            else:
-                self._precompile_compute_pooling()
-            # Skip sampling if already precompiled before KV cache allocation
-            if not self._sampling_precompiled:
-                self._precompile_sampling()
-            self._precompile_disagg_utils()
-            # Skip gather_logprobs if already precompiled before KV cache allocation
-            if not self._gather_logprobs_precompiled:
-                self._precompile_gather_logprobs()
-            self._precompile_structured_decoding()
-            if self.runner.speculative_config:
-                self._precompile_speculative_decoding()
-
+                    self._precompile_speculative_decoding()
+                self._flush_compilations()
+        finally:
+            self._finalize_compilation()
         elapsed = time.perf_counter() - compilation_start_time
         self.runner.vllm_config.compilation_config.compilation_time += elapsed
+
+    def _finalize_compilation(self) -> None:
+        """Shut down the precompile pool and restore the thread stack default
+        so the bumped stack size doesn't leak to threads spawned later by the
+        engine."""
+        if self._compile_executor is not None:
+            self._compile_executor.shutdown(wait=True)
+            self._compile_executor = None
+        if self._prev_stack_size is not None:
+            try:
+                threading.stack_size(self._prev_stack_size)
+            except (RuntimeError, ValueError):
+                pass
+            self._prev_stack_size = None
 
     def _precompile_input_embeddings_merger(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
@@ -284,26 +403,22 @@ class CompilationManager:
                 for name in kv_cache_group.layer_names
             }
 
-        def model_fn_wrapper(
-            state_leaves,
-            kv_caches,
-            input_ids,
-            attention_metadata,
-            positions,
-            inputs_embeds,
-            layer_name_to_kvcache_index,
-            lora_metadata,
-            intermediate_tensors,
-            is_first_rank,
-            is_last_rank,
-        ):
-            kv_caches, hidden_states, *_ = self.runner.model_fn(
-                state_leaves, kv_caches, input_ids, attention_metadata,
-                inputs_embeds, positions, layer_name_to_kvcache_index,
-                lora_metadata, intermediate_tensors, is_first_rank,
-                is_last_rank)
-            self.runner.kv_caches = kv_caches
-            return hidden_states
+        def model_fn_warmup(_fn, _args, _call_kwargs):
+            out = self.runner.model_fn(
+                self.runner.state_leaves,
+                self.runner.kv_caches,
+                input_ids,
+                attention_metadata,
+                inputs_embeds,
+                positions,
+                tuple(self.runner.layer_name_to_kvcache_index.items()),
+                lora_metadata,
+                intermediate_tensors,
+                is_first_rank,
+                is_last_rank,
+            )
+            self.runner.kv_caches = out[0]
+            return out
 
         with self.runner.maybe_select_dummy_loras(
                 self.runner.lora_config, np.array([num_tokens],
@@ -311,13 +426,13 @@ class CompilationManager:
             lora_metadata = self.runner.lora_utils.extract_lora_metadata()
             self._run_compilation(
                 name,
-                model_fn_wrapper,
+                self.runner.model_fn,
                 self.runner.state_leaves,
                 self.runner.kv_caches,
                 input_ids,
                 attention_metadata,
-                positions,
                 inputs_embeds,
+                positions,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
                 lora_metadata,
                 intermediate_tensors,
@@ -325,6 +440,7 @@ class CompilationManager:
                 is_last_rank,
                 num_tokens=num_tokens,
                 num_reqs=num_reqs,
+                warmup_handler=model_fn_warmup,
             )
 
     def _precompile_substitute_placeholder_token(self) -> None:
@@ -619,11 +735,22 @@ class CompilationManager:
 
                 self._run_compilation(
                     f"select_from_array [{name}]",
-                    self.runner._select_from_array_fn, input_tensor,
-                    indices_to_select, **{
+                    self.runner._select_from_array_fn,
+                    self.runner,
+                    input_tensor,
+                    indices_to_select,
+                    **{
                         "array_size": array_size,
                         "index_size": indices_count
-                    })
+                    },
+                    warmup_handler=self._skip_self_arg_warmup_handler)
+
+    def _skip_self_arg_warmup_handler(self, fn, args, call_kwargs):
+        """Warmup handler for methods compiled with an explicit `self` as the
+        first positional arg.  At warm-up time the object is already bound, so
+        we drop args[0] and forward the rest.
+        """
+        return fn(*args[1:], **call_kwargs)
 
     def _precompile_select_from_array(self) -> None:
         logger.info("Compiling select_from_array with different input shapes.")
@@ -767,6 +894,7 @@ class CompilationManager:
                         sampling_metadata,
                         num_reqs=num_reqs,
                         do_sampling=do_sampling,
+                        logprobs=logprobs,
                     )
 
         self._sampling_precompiled = True
@@ -1323,9 +1451,11 @@ class CompilationManager:
             self._run_compilation(
                 "structured_decode",
                 self.runner.structured_decoding_manager.structured_decode_fn,
+                self.runner.structured_decoding_manager,
                 dummy_require_struct_decoding,
                 dummy_grammar_bitmask,
                 dummy_logits,
                 arange,
                 num_reqs=num_reqs,
+                warmup_handler=self._skip_self_arg_warmup_handler,
             )
