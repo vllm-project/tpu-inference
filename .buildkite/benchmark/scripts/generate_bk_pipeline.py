@@ -136,6 +136,21 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
 
     # Specific Rules for `vllm_bench_serve`
     if client_cmd_type == "vllm_bench_serve":
+        # Ensure percentile-metrics is present and contains 'e2el'
+        percentile_metrics = client_args.get("percentile-metrics")
+        if not percentile_metrics:
+            errors.append(
+                f"Validation Error: {file_path} is missing 'percentile-metrics' in client_command_options. "
+                f"It must be defined and include 'e2el'.")
+        else:
+            # Check if 'e2el' is in the comma-separated string
+            metrics_list = [m.strip() for m in percentile_metrics.split(",")]
+            if "e2el" not in metrics_list:
+                errors.append(
+                    f"Validation Error: {file_path} has 'percentile-metrics' set to '{percentile_metrics}' "
+                    f"but it must include 'e2el' for proper benchmark reporting."
+                )
+
         # Model consistency check to ensure client/server are aligned
         server_model = server_args.get("model")
         client_model = client_args.get("model")
@@ -324,7 +339,10 @@ def main():
     }
 
     print(
-        yaml.dump(grouped_pipeline, sort_keys=False, default_flow_style=False))
+        yaml.dump(grouped_pipeline,
+                  sort_keys=False,
+                  default_flow_style=False,
+                  width=float('inf')))
 
 
 if __name__ == "__main__":
