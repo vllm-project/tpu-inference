@@ -178,22 +178,6 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                 )
                 self._model_runner_output.routed_experts = routed_experts
 
-        # Diagnostic logging for speculative logprobs mismatch
-        logprobs_obj = self._model_runner_output.logprobs
-        logprobs_str = "None"
-        if logprobs_obj is not None:
-            logprobs_str = (
-                f"LogprobsLists(cu={logprobs_obj.cu_num_generated_tokens}, "
-                f"tokens_shape={logprobs_obj.logprob_token_ids.shape if hasattr(logprobs_obj.logprob_token_ids, 'shape') else len(logprobs_obj.logprob_token_ids)}, "
-                f"probs_shape={logprobs_obj.logprobs.shape if hasattr(logprobs_obj.logprobs, 'shape') else len(logprobs_obj.logprobs)})"
-            )
-        print(
-            f"[LOGPROBS_DEBUG_RUNNER] get_output: "
-            f"req_ids={self._model_runner_output.req_ids}, "
-            f"sampled_token_ids={self._model_runner_output.sampled_token_ids}, "
-            f"logprobs={logprobs_str}",
-            flush=True)
-
         return self._model_runner_output
 
 
@@ -272,6 +256,7 @@ def _substitute_placeholder_token(
     new_token_values = next_tokens[token_in_tpu_pre_next_tokens_indices]
     original_values = input_ids[token_in_tpu_cur_input_indices]
     update_values = jnp.where(mask, new_token_values, original_values)
+
     return input_ids.at[token_in_tpu_cur_input_indices].set(update_values)
 
 
@@ -353,18 +338,17 @@ def _jax_logprobs_materialize(
                 per_rank_output_size]
 
             padded_num_seqs_per_rank = bonus_token_ids.shape[0]
-            padded_tokens_per_seq = padded_tokens_length // padded_num_seqs_per_rank
             cur_rank_num_draft_tokens = spec_decode_metadata.draft_lengths_cpu[
                 rank * padded_num_seqs_per_rank:(rank + 1) *
                 padded_num_seqs_per_rank]
 
+            start_idx = 0
             req_indices = spec_decode_metadata.req_indices_dp[rank]
             for i, req_idx in enumerate(req_indices):
                 if req_idx >= num_reqs:
                     continue
 
                 seq_length = int(cur_rank_num_draft_tokens[i])
-                start_idx = i * padded_tokens_per_seq
                 end_idx = start_idx + seq_length
 
                 # Get draft logprobs for this sequence
@@ -394,6 +378,7 @@ def _jax_logprobs_materialize(
                 req_logprob_token_ids[req_idx] = valid_token_ids
                 req_logprobs[req_idx] = valid_logprobs
                 req_sampled_token_ranks[req_idx] = valid_ranks
+                start_idx = end_idx
 
         # Flatten the collected lists back to 2D/1D arrays
         flat_token_ids = []
@@ -2323,6 +2308,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     all_token_indices_to_substitute)
                 token_in_tpu_pre_next_tokens_indices = np.array(
                     all_pre_next_tokens_indices)
+
                 input_ids = self._apply_async_token_substitution(
                     input_ids, next_tokens, token_in_tpu_cur_input_indices,
                     token_in_tpu_pre_next_tokens_indices)

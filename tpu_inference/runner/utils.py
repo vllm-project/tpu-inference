@@ -893,8 +893,7 @@ def host_extract_sampled_tokens(
         discard_sampled_tokens_req_indices: list, num_reqs: int):
     """host retrieve the sampled tokens for the current step."""
     next_tokens = sampled_output
-    if (spec_decode_metadata is None
-            or np.sum(spec_decode_metadata.draft_lengths_cpu) == 0):
+    if spec_decode_metadata is None:
         next_tokens = np.asarray(jax.device_get(next_tokens))
         # Map tokens back to the pre-dp shuffling order
         if logits_indices_selector is not None:

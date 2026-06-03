@@ -245,18 +245,17 @@ class RejectionSampler:
                                               padded_tokens_length]  # [num_tokens]
             bonus_tokens = output_token_ids_np[padded_tokens_length:]
             padded_num_seqs_per_rank = bonus_tokens.size
-            padded_tokens_per_seq = padded_tokens_length // padded_num_seqs_per_rank
             cur_rank_num_draft_tokens = num_draft_tokens_cpu[
                 rank * padded_num_seqs_per_rank:(rank + 1) *
                 padded_num_seqs_per_rank]
 
             # Reconstruct per-sequence outputs
 
+            start_idx = 0
             req_indices = req_indices_dp[rank]
             for i, req_idx in enumerate(req_indices):
 
                 seq_length = int(cur_rank_num_draft_tokens[i])
-                start_idx = i * padded_tokens_per_seq
                 end_idx = start_idx + seq_length
 
                 # Get main tokens for this sequence
@@ -277,6 +276,7 @@ class RejectionSampler:
 
                 # reorders per-rank outputs back to the original batch ordering
                 outputs[req_idx] = seq_tokens.tolist()
+                start_idx = end_idx
 
         return outputs
 

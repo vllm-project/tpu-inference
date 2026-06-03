@@ -424,6 +424,7 @@ def eagle3_baseline():
     "async_scheduling, enable_dp_attention",
     [
         (False, False),
+        (False, True),
         (True, False),
         (True, True),
     ],

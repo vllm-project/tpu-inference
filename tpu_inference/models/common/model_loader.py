@@ -440,7 +440,7 @@ def get_flax_model(
                                       is_multimodal=is_multimodal)
 
     # For models that want to work with EAGLE-3 speculative decoding
-    @jax.jit(out_shardings=(logits_sharding))
+    @jax.jit(out_shardings=(hidden_states_sharding))
     def combine_hidden_states(state_leaves, hidden_states):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
