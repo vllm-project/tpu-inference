@@ -49,7 +49,6 @@ def llm():
         model=MODEL_NAME,
         max_model_len=MAX_MODEL_LEN,
         max_num_seqs=MAX_NUM_SEQS,
-        enable_prefix_caching=True,
     )
     yield engine
     del engine
