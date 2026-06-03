@@ -74,6 +74,11 @@ class VllmDeepseekV4Fp8Config(DeepseekV4FP8Config, VllmQuantConfig):
                     return VllmUnquantizedFusedMoEMethod(layer.moe_config)
 
                 if self.expert_dtype == "fp4":
+                    if self.moe_quant_algo == "NVFP4":
+                        # TODO: support NVFP4.
+                        return NotImplementedError(
+                            "NVFP4 is not supported yet.")
+
                     moe_config = self.get_moe_config(layer)
                     return VllmMxfp4MoEMethod(moe_config, self.mesh)
                 else:

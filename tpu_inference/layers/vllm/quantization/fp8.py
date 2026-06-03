@@ -152,6 +152,7 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
 
         weight_scale_inv = layer.weight_scale_inv
         # Float8_e8m0fnu (ue8m0) scales cannot be converted via numpy in t2j.
+        # TODO: consider get rid of the f32 conversion, to optimize the HBM usage.
         if weight_scale_inv.dtype == torch.float8_e8m0fnu:
             weight_scale_inv = weight_scale_inv.to(torch.float32)
         weight_scale = t2j(weight_scale_inv, use_dlpack=False)
