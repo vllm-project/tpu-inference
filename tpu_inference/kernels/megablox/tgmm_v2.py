@@ -31,6 +31,7 @@ TileTgmmFn = Callable[
         int,
         jnp.dtype,
         jnp.dtype,
+        int,
     ],
     gmm_v2.TileSizes,
 ]
@@ -45,6 +46,21 @@ def get_scope_name(cfgs: gmm_v2.GmmConfigs) -> str:
   )
 
 
+def get_cost_estimate(cfgs: gmm_v2.GmmConfigs) -> pl.CostEstimate:
+  dims = cfgs.dims
+  flops = 2 * dims.size_m * dims.size_k * dims.size_n
+  lhs_bytes = dims.size_m * dims.size_k * cfgs.lhs_cfgs.dtype.itemsize
+  rhs_bytes = dims.size_m * dims.size_n * cfgs.rhs_cfgs.dtype.itemsize
+  out_bytes = (
+      dims.size_group * dims.size_k * dims.size_n * cfgs.out_dtype.itemsize
+  )
+  return pl.CostEstimate(
+      flops=flops,
+      bytes_accessed=lhs_bytes + rhs_bytes + out_bytes,
+      transcendentals=0,
+  )
+
+
 def calculate_tgmm_tiling(
     dims: gmm_v2.Dimensions,
     lhs_cfgs: gmm_v2.InputConfigs,
@@ -52,6 +68,7 @@ def calculate_tgmm_tiling(
     vmem_limit_bytes: int,
     out_dtype: jnp.dtype,
     acc_dtype: jnp.dtype,
+    target_zero_ref_bytes: int,
 ) -> gmm_v2.TileSizes:
   """Calculate optimal tile sizes for TGMM kernel."""
   # In tgmm, we calculate lhs.T @ dout which doesn't require quantization.
@@ -88,6 +105,10 @@ def calculate_tgmm_tiling(
         tile_k * tile_n * (acc_bytes + num_buffers * out_bytes)
         + (num_buffers + 1) * (tile_m * tile_k * lhs_bytes)
         + num_buffers * (tile_m * tile_n * rhs_bytes)
+        # Reserve VMEM for zero_ref. Use the upper bound target_zero_ref_bytes
+        # since the actual zero_ref size depends on out_dtype/size_k and is
+        # always <= this value.
+        + target_zero_ref_bytes
     )
     return budget <= vmem_limit_bytes
 
@@ -153,6 +174,7 @@ def make_tgmm_configs(
     vmem_limit_bytes: int | None,
     out_dtype: jnp.dtype,
     acc_dtype: jnp.dtype | None,
+    target_zero_ref_bytes: int,
 ):
   """Fills the GMM config for the TGMM kernel."""
   assert out_dtype, "out_dtype cannot be None"
@@ -207,7 +229,8 @@ def make_tgmm_configs(
     tiles = tile_info
   else:
     tiles = tile_info(
-        dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, out_dtype, acc_dtype
+        dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, out_dtype, acc_dtype,
+        target_zero_ref_bytes,
     )
 
   return gmm_v2.GmmConfigs(
@@ -227,7 +250,9 @@ def make_tgmm_configs(
 
 def tgmm_inner_kernel(
     tiled_lhs_ref: jax.Array,
+    # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
     tiled_rhs_ref: jax.Array,
+    # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
     *rest,
     cfgs: gmm_v2.GmmConfigs,
 ):
@@ -238,8 +263,8 @@ def tgmm_inner_kernel(
   and accumulation across different group-major tiles.
 
   Args:
-    tiled_lhs_ref: Reference to the tiled LHS data [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k].
-    tiled_rhs_ref: Reference to the tiled RHS data [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n].
+    tiled_lhs_ref: Reference to the tiled LHS data.
+    tiled_rhs_ref: Reference to the tiled RHS data.
     tiled_out_ref: Reference to the tiled output buffer [None, tile_k, tile_n].
     acc_ref: Scratch memory for accumulation [tile_k, tile_n].
     metadata_ref: Contains metadata like group offsets and group IDs.
@@ -331,12 +356,19 @@ def tgmm_inner_kernel(
       new_group,
       lambda: lax.cond(
           group_is_changing,
+          # gm_id is the only one in its group =>
+          # group_size + local_offset ≤ tile_m.
           matmul_new_group_and_changing,
+          # matmul_new_group: first gm_id of a multi-gm group =>
+          # group spans ≥ 2 gm_ids.
           matmul_new_group,
       ),
       lambda: lax.cond(
           group_is_changing,
+          # matmul_group_changing: last gm_id of a multi-gm group.
           matmul_group_changing,
+          # matmul: middle gm_id => group spans ≥ 3 gm_ids =>
+          # group_size + local_offset > 2*tile_m.
           matmul,
       ),
   )
@@ -410,6 +442,68 @@ def generate_tgmm_block_specs(
   return tuple(in_specs), out_block_spec
 
 
+def zero_out_start(
+    lhs_group_sizes_ref,  # int32[size_lhs_group]
+    group_offset_ref,  # int32[1]
+    out_ref,  # [num_actual_groups, k, n]
+    zero_ref,  # [tile_zero_k, num_lanes]
+    semaphore_ref,  # [1]
+):
+  """If group_sizes[i]==0, kick off async DMAs to zero out drhs[i]."""
+  num_actual_groups, aligned_k, aligned_n = out_ref.shape
+  tile_zero_k = zero_ref.shape[0]
+  zero_ref = zero_ref.reshape(1, tile_zero_k, -1)
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  assert aligned_n % num_lanes == 0
+
+  zero_ref[...] = jnp.zeros_like(zero_ref)
+
+  def fill_zero(local_group_id, should_copy):
+    should_copy_int = should_copy.astype(int)
+    for i in range(pl.cdiv(aligned_k, tile_zero_k)):
+      size_k_to_copy = min(tile_zero_k, aligned_k - i * tile_zero_k)
+      for j in range(aligned_n // num_lanes):
+        src = zero_ref.at[pl.ds(0, should_copy_int), pl.ds(0, size_k_to_copy)]
+        dst = out_ref.at[
+            pl.ds(local_group_id, should_copy_int),
+            pl.ds(i * tile_zero_k, size_k_to_copy),
+            pl.ds(j * num_lanes, num_lanes),
+        ]
+        pltpu.make_async_copy(
+            src_ref=src,
+            dst_ref=dst,
+            sem=semaphore_ref.at[0],
+        ).start(priority=1)
+    return 1
+
+  num_groups_to_zero = 0
+  group_offset = group_offset_ref[0]
+  for local_group_id in range(num_actual_groups):
+    global_group_id = local_group_id + group_offset
+    should_copy = lhs_group_sizes_ref[global_group_id] == 0
+    num_groups_to_zero += should_copy.astype(int)
+    fill_zero(local_group_id, should_copy)
+
+  return num_groups_to_zero
+
+
+def zero_out_end(
+    num_groups_to_zero,
+    out_ref,  # [num_actual_groups, k, n]
+    semaphore_ref,  # [1]
+):
+  """Drain the DMAs started by zero_out_start."""
+  dst = out_ref.at[
+      pl.ds(0, num_groups_to_zero),
+  ]
+  src = dst
+  pltpu.make_async_copy(
+      src_ref=src,
+      dst_ref=dst,
+      sem=semaphore_ref.at[0],
+  ).wait()
+
+
 def tgmm_kernel_main(
     lhs_group_sizes_ref,  # int32[size_lhs_group]
     group_offset_ref,  # int32[1]
@@ -431,10 +525,19 @@ def tgmm_kernel_main(
     cfgs: GmmConfigs object containing kernel configurations.
   """
   if cfgs.rhs_cfgs.has_scale:
-    rhs_scale_ref, out_ref, acc_ref, metadata_ref = rest
+    rhs_scale_ref, out_ref, acc_ref, metadata_ref, zero_ref, semaphore_ref = rest
   else:
     rhs_scale_ref = None
-    out_ref, acc_ref, metadata_ref = rest
+    print(f"xw32 line517 {len(rest)=}, {rest}")
+    out_ref, acc_ref, metadata_ref, zero_ref, semaphore_ref = rest
+
+  num_groups_to_zero = zero_out_start(
+      lhs_group_sizes_ref,
+      group_offset_ref,
+      out_ref,
+      zero_ref,
+      semaphore_ref,
+  )
 
   num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
   num_n = pl.cdiv(cfgs.dims.size_n, cfgs.tiles.tile_n)
@@ -443,7 +546,6 @@ def tgmm_kernel_main(
       group_offset_ref,
       metadata_ref,
       cfgs=cfgs,
-      process_empty_groups=True,
   )
 
   in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
@@ -461,6 +563,11 @@ def tgmm_kernel_main(
   scratches = [acc_ref, metadata_ref]
 
   pipeline_fn(*pipeline_in_args, out_ref, scratches=scratches)
+  zero_out_end(
+      num_groups_to_zero,
+      out_ref,
+      semaphore_ref,
+  )
 
 
 def validate_tgmm_inputs(
@@ -548,6 +655,12 @@ def tgmm_v2(
   if vmem_limit_bytes is None:
     vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
 
+  # Target VMEM size for the zero-init scratch buffer (zero_ref). The actual
+  # allocation may be smaller after capping by size_k and rounding down to a
+  # sublane multiple, so this also serves as an upper bound used by
+  # calculate_tgmm_tiling when reserving VMEM for zero_ref.
+  target_zero_ref_bytes = 2 * 1024 * 1024
+
   cfgs = make_tgmm_configs(
       lhs,
       rhs,
@@ -558,14 +671,19 @@ def tgmm_v2(
       vmem_limit_bytes=vmem_limit_bytes,
       out_dtype=preferred_element_type,
       acc_dtype=acc_dtype,
+      target_zero_ref_bytes=target_zero_ref_bytes,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
   
   num_lanes = pltpu.get_tpu_info().num_lanes
   aligned_n = gmm_v2.align_to(dims.size_n, num_lanes)
+  # Pad K up to a tile_k multiple so (a) every k-tile written by the matmul
+  # stays in-bounds, and (b) the zero-init path can slice in sublane-aligned
+  # chunks. tile_k is num_lanes-aligned, which is also sublane-tile-aligned.
+  aligned_k = gmm_v2.align_to(dims.size_k, tiles.tile_k)
   out_init = jax.ShapeDtypeStruct(
-      (num_actual_groups, dims.size_k, aligned_n), cfgs.out_dtype
+      (num_actual_groups, aligned_k, aligned_n), cfgs.out_dtype
   )
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   scratch_shapes = [
@@ -576,6 +694,18 @@ def tgmm_v2(
           gm_id_to_group_id=pltpu.SMEM((max_num_gm,), jnp.int32),
           gm_id_to_m_offset=pltpu.SMEM((max_num_gm + 1,), jnp.int32),
       ),
+  ]
+
+  # Prepare zero initializing the drhs[i, :, :] where the group_size[i] is 0.
+  out_bytes = jnp.dtype(cfgs.out_dtype).itemsize
+  tile_zero_k = target_zero_ref_bytes // num_lanes // out_bytes
+  tile_zero_k = min(tile_zero_k, dims.size_k)
+  size_out_sublane = pltpu.get_tpu_info().get_sublane_tiling(cfgs.out_dtype)
+  tile_zero_k = (tile_zero_k // size_out_sublane) * size_out_sublane
+  assert tile_zero_k > 0
+  scratch_shapes += [
+      pltpu.VMEM((tile_zero_k, num_lanes), cfgs.out_dtype),
+      pltpu.SemaphoreType.DMA((1,)),
   ]
 
   in_specs = [
@@ -605,7 +735,8 @@ def tgmm_v2(
           disable_bounds_checks=True,
       ),
       name=get_scope_name(cfgs),
+      cost_estimate=get_cost_estimate(cfgs),
       # the metadata here is for profiling, debugging, and cost modeling.
       # It does not affect the kernel's computation.
       metadata=gmm_v2.get_metadata(cfgs),
-  )(*call_args)[:, :, : dims.size_n]
+  )(*call_args)[:, :dims.size_k, : dims.size_n]
