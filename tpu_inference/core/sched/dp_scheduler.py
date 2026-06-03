@@ -40,7 +40,8 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
+from vllm.v1.outputs import (DraftTokenIds, LogprobsLists, ModelRunnerOutput,
+                             RoutedExpertsLists)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -1069,16 +1070,17 @@ class DPScheduler(SchedulerInterface):
 
         outputs = []
 
-        expert_indices = getattr(g, "expert_indices", None)
-        req_id_to_token_range = {}
-        if expert_indices is not None:
+        routed_experts = getattr(g, "routed_experts", None)
+        req_id_to_routed_experts_range = {}
+        if routed_experts is not None:
             current_token_offset = 0
-            for req_id, num_tokens_scheduled in scheduler_output.num_scheduled_tokens.items(
-            ):
+            for req_id in g.req_ids:
+                num_tokens_scheduled = scheduler_output.num_scheduled_tokens[
+                    req_id]
                 start_idx = current_token_offset
                 end_idx = start_idx + num_tokens_scheduled
                 current_token_offset = end_idx
-                req_id_to_token_range[req_id] = (start_idx, end_idx)
+                req_id_to_routed_experts_range[req_id] = (start_idx, end_idx)
 
         for rank in range(self.dp_size):
             req_ids = scheduler_output.req_ids_per_rank.get(rank, [])
@@ -1108,20 +1110,26 @@ class DPScheduler(SchedulerInterface):
                 kv_connector_output=g.kv_connector_output,
             )
 
-            if expert_indices is not None:
-                rank_expert_indices = []
+            if routed_experts is not None:
+                rank_routing_data = []
+                rank_slot_mapping = []
                 for rid in req_ids:
-                    if rid in req_id_to_token_range:
-                        start_idx, end_idx = req_id_to_token_range[rid]
-                        rank_expert_indices.append(
-                            expert_indices[:, start_idx:end_idx, :])
-                if rank_expert_indices:
-                    rank_model_runner_output.expert_indices = np.concatenate(
-                        rank_expert_indices, axis=1)
+                    if rid in req_id_to_routed_experts_range:
+                        start_idx, end_idx = req_id_to_routed_experts_range[
+                            rid]
+                        rank_routing_data.append(routed_experts.routing_data[
+                            start_idx:end_idx, :, :])
+                        rank_slot_mapping.append(
+                            routed_experts.slot_mapping[start_idx:end_idx])
+
+                if rank_routing_data:
+                    rank_model_runner_output.routed_experts = RoutedExpertsLists(
+                        routing_data=np.concatenate(rank_routing_data, axis=0),
+                        slot_mapping=np.concatenate(rank_slot_mapping, axis=0))
                 else:
-                    rank_model_runner_output.expert_indices = None
+                    rank_model_runner_output.routed_experts = None
             else:
-                rank_model_runner_output.expert_indices = None
+                rank_model_runner_output.routed_experts = None
 
             outputs.append(rank_model_runner_output)
 
