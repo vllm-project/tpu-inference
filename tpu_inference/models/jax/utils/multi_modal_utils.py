@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -289,28 +289,9 @@ def merge_multimodal_embeddings(
     )
 
 
-def flatten_pad_mm_embeds(
-    mm_embeds: Union[list[jax.Array], Tuple[list[jax.Array], list[jax.Array]]]
-    | None, target_pad_len: int
-) -> Union[jax.Array, Tuple[jax.Array, list[jax.Array]]] | None:
-    if mm_embeds is None:
-        return None
-
-    if isinstance(mm_embeds, tuple):
-        actual_mm, deepstack_list = mm_embeds
-        if actual_mm is None or len(actual_mm) == 0:
-            actual_flat = None
-        else:
-            flattened_embeds = flatten_embeddings(actual_mm)
-            padding = jnp.zeros(
-                (target_pad_len - flattened_embeds.shape[0],
-                 flattened_embeds.shape[1]),
-                dtype=flattened_embeds.dtype,
-            )
-            actual_flat = jnp.concatenate([flattened_embeds, padding], axis=0)
-        return (actual_flat, deepstack_list)
-
-    if len(mm_embeds) == 0:
+def flatten_pad_mm_embeds(mm_embeds: list[jax.Array] | None,
+                          target_pad_len: int) -> jax.Array | None:
+    if mm_embeds is None or len(mm_embeds) == 0:
         return None
 
     flattened_embeds = flatten_embeddings(mm_embeds)

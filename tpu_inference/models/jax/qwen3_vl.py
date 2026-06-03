@@ -1516,18 +1516,20 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
     def embed_input_ids(
         self,
         input_ids: jax.Array,
-        multimodal_embeddings: Optional[Union[jax.Array,
-                                              Tuple[jax.Array,
-                                                    List[jax.Array]]]] = None,
+        multimodal_embeddings: Optional[jax.Array] = None,
         *,
         is_multimodal: jax.Array | None = None,
     ) -> jax.Array:
         """Compute input embeddings and merge multimodal embeddings if present."""
-        if isinstance(multimodal_embeddings, tuple):
-            mm_embeds_actual, deepstack_embeds = multimodal_embeddings
-        else:
-            mm_embeds_actual = multimodal_embeddings
-            deepstack_embeds = None
+        mm_embeds_actual = multimodal_embeddings
+        deepstack_embeds = None
+
+        if multimodal_embeddings is not None:
+            text_config = getattr(self.config, "text_config", self.config)
+            hidden_size = text_config.hidden_size
+            if multimodal_embeddings.shape[-1] > hidden_size:
+                mm_embeds_actual = multimodal_embeddings[..., :hidden_size]
+                deepstack_embeds = multimodal_embeddings[..., hidden_size:]
 
         inputs_embeds = self.get_input_embeddings(
             input_ids,
@@ -1536,8 +1538,7 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
         )
 
         if deepstack_embeds is not None:
-            inputs_embeds = jnp.concatenate([inputs_embeds] +
-                                            list(deepstack_embeds),
+            inputs_embeds = jnp.concatenate([inputs_embeds, deepstack_embeds],
                                             axis=-1)
 
         return inputs_embeds

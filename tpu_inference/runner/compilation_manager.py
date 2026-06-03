@@ -155,7 +155,6 @@ class CompilationManager:
             # Identify multimodal embedding size and if deepstack is used
             mm_hidden_size = hidden_size
             vision_config = getattr(hf_conf, "vision_config", None)
-            has_deepstack = False
             deepstack_levels = 0
 
             if vision_config:
@@ -164,9 +163,10 @@ class CompilationManager:
                                             "deepstack_visual_indexes", None)
                 if visual_dim is not None:
                     if deepstack_indexes is not None:
-                        has_deepstack = True
                         deepstack_levels = len(deepstack_indexes)
-                    mm_hidden_size = visual_dim
+                        mm_hidden_size = visual_dim * (1 + deepstack_levels)
+                    else:
+                        mm_hidden_size = visual_dim
 
             sharding = NamedSharding(
                 self.runner.mesh,
@@ -183,16 +183,7 @@ class CompilationManager:
             dummy_is_multimodal = self._create_dummy_tensor(
                 (num_tokens, ), jnp.bool_, sharding=input_sharding)
 
-            if has_deepstack:
-                dummy_ds = [
-                    self._create_dummy_tensor(
-                        (num_tokens, mm_hidden_size),
-                        self.runner.vllm_config.model_config.dtype,
-                        sharding=sharding) for _ in range(deepstack_levels)
-                ]
-                mm_embeds_arg = ([dummy_multimodal_embeddings], dummy_ds)
-            else:
-                mm_embeds_arg = [dummy_multimodal_embeddings]
+            mm_embeds_arg = [dummy_multimodal_embeddings]
 
             self._run_compilation(
                 "input_embeddings_merger",

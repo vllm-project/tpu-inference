@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, Tuple, Union
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -22,8 +22,8 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
-from tpu_inference.models.jax.utils.multi_modal_utils import (
-    flatten_embeddings, sanity_check_mm_encoder_outputs)
+from tpu_inference.models.jax.utils.multi_modal_utils import \
+    sanity_check_mm_encoder_outputs
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -187,8 +187,7 @@ class MultiModalManager:
         target_pad_len: int,
         req_ids_dp: dict[int, list[str]],
         padded_num_scheduled_tokens_per_dp_rank: int,
-    ) -> tuple[Union[list[jax.Array], Tuple[list[jax.Array], list[jax.Array]]]
-               | None, jax.Array | None]:
+    ) -> tuple[list[jax.Array] | None, jax.Array | None]:
         """Gather multimodal embeddings, mask, and optional DeepStack outputs.
 
         Args:
@@ -204,7 +203,7 @@ class MultiModalManager:
         Returns:
             A tuple containing:
                 - mm_embeds: A list of JAX arrays containing the unpadded multimodal
-                    embeddings (or a tuple of actual mm embeds and deepstack embeds),
+                    embeddings (with DeepStack concatenated if present),
                     or None if there are no multimodal embeddings.
                 - is_mm_embed: A boolean JAX array mask of length target_pad_len.
                     Within each DP rank's slot, True positions appear in the same
@@ -214,9 +213,6 @@ class MultiModalManager:
 
         mm_embeds: list[jax.Array] = []
         is_mm_embed_cpu = np.zeros((target_pad_len, ), dtype=np.bool_)
-        deepstack_layers: list[list[jax.Array]] | None = None
-        deepstack_dim = None
-        deepstack_dtype = None
 
         # Pack per DP rank into its dedicated slot. Within a rank, advance
         # req_start_idx by num_scheduled_tokens as before; the global position
@@ -276,23 +272,20 @@ class MultiModalManager:
                     else:
                         mm_embeds_item = encoder_output[start_idx:end_idx]
 
-                    mm_embeds.append(mm_embeds_item)
-
                     if deepstack_output is not None:
-                        if deepstack_layers is None:
-                            deepstack_dim = deepstack_output[0].shape[1]
-                            deepstack_dtype = deepstack_output[0].dtype
-                            deepstack_layers = [
-                                [] for _ in range(len(deepstack_output))
-                            ]
-                        for layer_idx, layer_embeds in enumerate(
-                                deepstack_output):
+                        items_to_concat = [mm_embeds_item]
+                        for layer_embeds in deepstack_output:
                             if is_embed is not None:
                                 layer_item = layer_embeds[
                                     curr_embeds_start:curr_embeds_end]
                             else:
                                 layer_item = layer_embeds[start_idx:end_idx]
-                            deepstack_layers[layer_idx].append(layer_item)
+                            items_to_concat.append(layer_item)
+                        combined_item = jnp.concatenate(items_to_concat,
+                                                        axis=-1)
+                        mm_embeds.append(combined_item)
+                    else:
+                        mm_embeds.append(mm_embeds_item)
 
                     req_start_pos = (rank_token_offset + req_start_idx +
                                      start_pos - num_computed_tokens)
@@ -318,23 +311,4 @@ class MultiModalManager:
         is_mm_embed = jnp.array(is_mm_embed_cpu, dtype=jnp.bool_)
         assert target_pad_len == is_mm_embed.shape[0]
 
-        deepstack_embeds = None
-        if deepstack_layers is not None:
-            deepstack_embeds = []
-            for layer_items in deepstack_layers:
-                if layer_items:
-                    layer_flat = flatten_embeddings(layer_items)
-                else:
-                    layer_flat = jnp.zeros((0, deepstack_dim),
-                                           dtype=deepstack_dtype)
-                layer_padding = jnp.zeros(
-                    (target_pad_len - layer_flat.shape[0],
-                     layer_flat.shape[1]),
-                    dtype=layer_flat.dtype)
-                deepstack_embeds.append(
-                    jnp.concatenate([layer_flat, layer_padding], axis=0))
-
-        if deepstack_embeds is not None:
-            return (mm_embeds, deepstack_embeds), is_mm_embed
-        else:
-            return mm_embeds, is_mm_embed
+        return mm_embeds, is_mm_embed
