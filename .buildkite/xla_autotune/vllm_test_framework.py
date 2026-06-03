@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """vllm serve + benchmark_serving runner for the XLA autotune sweep."""
 
 from __future__ import annotations
@@ -40,7 +39,8 @@ class ModelSpec:
 
 # Production model registry.  Add an entry here to onboard a new model.
 MODELS: Dict[str, ModelSpec] = {
-    "Qwen/Qwen3.5-397B-A17B-FP8": ModelSpec(
+    "Qwen/Qwen3.5-397B-A17B-FP8":
+    ModelSpec(
         serve_args=[
             "--tensor-parallel-size=8",
             "--max-model-len=9216",
@@ -64,11 +64,15 @@ MODELS: Dict[str, ModelSpec] = {
             "USE_MOE_EP_KERNEL": "0",
             "ATTN_BUCKETIZED_NUM_REQS": "true",
             "ATTN_CUSTOM_NUM_REQS_BUCKETS": "8,16,32,64",
-            "RAGGED_GATED_DELTA_RULE_IMPL": "chunked_kernel_p_recurrent_kernel_d",
+            "RAGGED_GATED_DELTA_RULE_IMPL":
+            "chunked_kernel_p_recurrent_kernel_d",
             "NEW_MODEL_DESIGN": "1",
         },
         benchmark_shapes=[
-            {"random-input-len": 8192, "random-output-len": 1024},
+            {
+                "random-input-len": 8192,
+                "random-output-len": 1024
+            },
         ],
     ),
 }
@@ -98,8 +102,7 @@ class VLLMTestParam:
     extra_libtpu_init_args: List[str] = field(default_factory=list)
     benchmark_script_path: str = DEFAULT_BENCHMARK_SCRIPT
     benchmark_args: Dict[str, Any] = field(
-        default_factory=lambda: dict(DEFAULT_BENCHMARK_ARGS)
-    )
+        default_factory=lambda: dict(DEFAULT_BENCHMARK_ARGS))
     # Warmup passes per shape (discarded).  The (warmup_runs + 1)th pass is
     # the measured result; vLLM's first-batch latency reflects compile / cache
     # transients, not steady-state throughput.
@@ -120,10 +123,8 @@ class VLLMTestFramework:
 
     def __init__(self, param: VLLMTestParam, dry_run: bool = False):
         if param.model_name not in MODELS:
-            raise KeyError(
-                f"unknown model {param.model_name!r}; "
-                f"known: {sorted(MODELS)}"
-            )
+            raise KeyError(f"unknown model {param.model_name!r}; "
+                           f"known: {sorted(MODELS)}")
         self.param = param
         self.spec = MODELS[param.model_name]
         self.dry_run = dry_run
@@ -140,7 +141,8 @@ class VLLMTestFramework:
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(message)s",
             handlers=[
-                logging.FileHandler(os.path.join(self.exp_dir, "framework_main.log")),
+                logging.FileHandler(
+                    os.path.join(self.exp_dir, "framework_main.log")),
                 logging.StreamHandler(),
             ],
         )
@@ -163,7 +165,8 @@ class VLLMTestFramework:
         # The GCS-backed JAX compile cache keys on the byte-exact
         # LIBTPU_INIT_ARGS string; the autotuner owns every byte that
         # lands here so cache reuse is predictable.
-        self.env["LIBTPU_INIT_ARGS"] = " ".join(self.param.extra_libtpu_init_args)
+        self.env["LIBTPU_INIT_ARGS"] = " ".join(
+            self.param.extra_libtpu_init_args)
         # Each trial legitimately re-lowers HLO when its flag set changes;
         # vLLM's recompilation guard would otherwise abort the run.
         self.env["VLLM_XLA_CHECK_RECOMPILATION"] = "0"
@@ -185,8 +188,11 @@ class VLLMTestFramework:
 
     def _start_server(self) -> None:
         cmd = [
-            "vllm", "serve", self.param.model_name,
-            "--port", str(self.param.port),
+            "vllm",
+            "serve",
+            self.param.model_name,
+            "--port",
+            str(self.param.port),
             *self.spec.serve_args,
         ]
         with open(os.path.join(self.exp_dir, "vllm_server.cmd"), "w") as f:
@@ -199,9 +205,13 @@ class VLLMTestFramework:
         log_path = os.path.join(self.exp_dir, "vllm_server.log")
         self.log.info("Starting vllm serve...")
         self._server = subprocess.Popen(
-            cmd, env=self.env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            preexec_fn=os.setsid, text=True, errors="replace",
+            cmd,
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid,
+            text=True,
+            errors="replace",
         )
 
         def tail() -> None:
@@ -221,7 +231,8 @@ class VLLMTestFramework:
                     f"vllm serve exited during startup (rc={self._server.poll()})"
                 )
             try:
-                with socket.create_connection(("127.0.0.1", self.param.port), timeout=1):
+                with socket.create_connection(("127.0.0.1", self.param.port),
+                                              timeout=1):
                     self.log.info("Server ready (%ds)", int(time.time() - t0))
                     return
             except OSError:
@@ -261,7 +272,9 @@ class VLLMTestFramework:
 
             self.log.info(
                 "Shape input=%s output=%s — %d warmup + 1 measured",
-                input_len, output_len, passes - 1,
+                input_len,
+                output_len,
+                passes - 1,
             )
 
             for i in range(passes):
@@ -312,16 +325,22 @@ class VLLMTestFramework:
 
         with open(log_path, "a") as log_f:
             proc = subprocess.Popen(
-                cmd, env=self.env,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, errors="replace",
+                cmd,
+                env=self.env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
             )
             try:
                 for line in iter(proc.stdout.readline, ""):
-                    log_f.write(line); log_f.flush()
-                    sys.stdout.write(line); sys.stdout.flush()
+                    log_f.write(line)
+                    log_f.flush()
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
             except KeyboardInterrupt:
-                proc.terminate(); proc.wait()
+                proc.terminate()
+                proc.wait()
                 return 130
             proc.wait()
 
@@ -333,17 +352,19 @@ class VLLMTestFramework:
             self.log.error("[%s] FAILED rc=%d", name, proc.returncode)
         return proc.returncode
 
-    def _record_measured(
-        self, path: str, name: str, result: TrialResult, warmup: int
-    ) -> None:
+    def _record_measured(self, path: str, name: str, result: TrialResult,
+                         warmup: int) -> None:
         with open(path) as f:
             data = json.load(f)
         data["warmup_runs"] = warmup
         result.metrics[name] = data
         self.log.info("--- %s ---", name)
         for k in (
-            "request_throughput", "output_throughput", "total_token_throughput",
-            "mean_ttft_ms", "mean_tpot_ms",
+                "request_throughput",
+                "output_throughput",
+                "total_token_throughput",
+                "mean_ttft_ms",
+                "mean_tpot_ms",
         ):
             v = data.get(k)
             s = f"{v:.2f}" if isinstance(v, (int, float)) else str(v)

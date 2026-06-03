@@ -97,6 +97,8 @@ set -e
 # Stop the watcher and sweep up anything written after its last tick.
 kill "${WATCH_PID}" 2>/dev/null || true
 wait "${WATCH_PID}" 2>/dev/null || true
-( cd "${BUILD_ROOT}" && buildkite-agent artifact upload "${SHARD_DIR}/**/*" || true )
+if cd "${BUILD_ROOT}"; then
+    buildkite-agent artifact upload "${SHARD_DIR}/**/*" || true
+fi
 
 exit "${RC}"

@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """OFAT autotuner for XLA / libtpu flags.
 
 For each shard (1-based ``--slice-index`` of ``--slice-count``):
@@ -43,7 +42,7 @@ from vllm_test_framework import VLLMTestFramework, VLLMTestParam  # noqa: E402
 @dataclasses.dataclass
 class Trial:
     trial_id: str
-    kind: str            # "baseline" | "candidate"
+    kind: str  # "baseline" | "candidate"
     flag: Optional[str]  # None for baseline
 
 
@@ -65,7 +64,10 @@ def plan(
     """Baselines + the candidate slice with the first ``skip_candidates``
     dropped.  Baselines always run fresh; trial indices stay stable across
     runs (e.g. ``skip_candidates=12`` resumes at ``cand_013``)."""
-    trials = [Trial(f"baseline_{i+1:02d}", "baseline", None) for i in range(baseline_runs)]
+    trials = [
+        Trial(f"baseline_{i+1:02d}", "baseline", None)
+        for i in range(baseline_runs)
+    ]
     for i, flag in enumerate(candidates):
         if i < skip_candidates:
             continue
@@ -75,7 +77,10 @@ def plan(
 
 def load_lines(path: str) -> List[str]:
     with open(path) as f:
-        return [ln.strip() for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
+        return [
+            ln.strip() for ln in f
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
 
 
 def apply_overrides(param: VLLMTestParam, overrides: Dict[str, Any]) -> None:
@@ -161,8 +166,16 @@ def _write_tag(exp_dir: str, rec: Dict[str, Any]) -> None:
     err = rec["error"].splitlines()[0] if rec["error"] else ""
     with open(os.path.join(exp_dir, "_tag.txt"), "w") as f:
         for k in (
-            "trial_id", "kind", "flag", "model", "target_metric", "target_value",
-            "success", "duration_sec", "started_utc", "finished_utc",
+                "trial_id",
+                "kind",
+                "flag",
+                "model",
+                "target_metric",
+                "target_value",
+                "success",
+                "duration_sec",
+                "started_utc",
+                "finished_utc",
         ):
             f.write(f"{k}: {rec.get(k)}\n")
         f.write(f"error: {err}\n")
@@ -172,40 +185,47 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--flag-list-file", required=True)
     ap.add_argument("--model", required=True)
-    ap.add_argument("--benchmark-args-json", default=None,
+    ap.add_argument("--benchmark-args-json",
+                    default=None,
                     help="Optional JSON file of VLLMTestParam overrides.")
     ap.add_argument("--target-metric", default="total_token_throughput")
     ap.add_argument("--slice-index", type=int, default=1)
     ap.add_argument("--slice-count", type=int, default=1)
     ap.add_argument("--baseline-runs", type=int, default=2)
-    ap.add_argument("--skip-candidates", type=int, default=0,
+    ap.add_argument("--skip-candidates",
+                    type=int,
+                    default=0,
                     help="Drop the first N candidate trials from this shard's "
-                         "slice (for resume).  Baselines always run fresh; "
-                         "trial indices stay stable.")
+                    "slice (for resume).  Baselines always run fresh; "
+                    "trial indices stay stable.")
     ap.add_argument("--artifact-dir", required=True)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     flags = load_lines(args.flag_list_file)
     sliced = slice_flags(flags, args.slice_index, args.slice_count)
-    overrides = json.load(open(args.benchmark_args_json)) if args.benchmark_args_json else {}
+    overrides = json.load(open(
+        args.benchmark_args_json)) if args.benchmark_args_json else {}
     trials = plan(sliced, args.baseline_runs, args.skip_candidates)
 
     os.makedirs(args.artifact_dir, exist_ok=True)
     with open(os.path.join(args.artifact_dir, "manifest.json"), "w") as f:
-        json.dump({
-            "model": args.model,
-            "scheduler": "ofat",
-            "slice_index": args.slice_index,
-            "slice_count": args.slice_count,
-            "total_flags": len(flags),
-            "sliced_flags": sliced,
-            "baseline_runs": args.baseline_runs,
-            "skip_candidates": args.skip_candidates,
-            "target_metric": args.target_metric,
-            "trial_count": len(trials),
-            "started_utc": datetime.utcnow().isoformat(),
-        }, f, indent=2)
+        json.dump(
+            {
+                "model": args.model,
+                "scheduler": "ofat",
+                "slice_index": args.slice_index,
+                "slice_count": args.slice_count,
+                "total_flags": len(flags),
+                "sliced_flags": sliced,
+                "baseline_runs": args.baseline_runs,
+                "skip_candidates": args.skip_candidates,
+                "target_metric": args.target_metric,
+                "trial_count": len(trials),
+                "started_utc": datetime.utcnow().isoformat(),
+            },
+            f,
+            indent=2)
 
     print(
         f"[autotune] shard {args.slice_index}/{args.slice_count}: "
@@ -215,11 +235,17 @@ def main() -> int:
     )
 
     failures = 0
-    with open(os.path.join(args.artifact_dir, "summary.jsonl"), "w") as summary_fp:
+    with open(os.path.join(args.artifact_dir, "summary.jsonl"),
+              "w") as summary_fp:
         for trial in trials:
             rec = run_trial(
-                trial, args.model, overrides, args.artifact_dir,
-                args.target_metric, args.dry_run, summary_fp,
+                trial,
+                args.model,
+                overrides,
+                args.artifact_dir,
+                args.target_metric,
+                args.dry_run,
+                summary_fp,
             )
             failures += 0 if rec["success"] else 1
 
