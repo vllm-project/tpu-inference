@@ -495,7 +495,7 @@ def fused_moe_func(
     onehot_moe_permute_threshold: int = 0,
     scatter_results: bool = False,
     hash_based_topk_indices: jax.Array | None = None,
-    e_score_correction_bias: jax.Array | None = None,
+    expert_score_correction_bias: jax.Array | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -539,10 +539,9 @@ def fused_moe_func(
             k=topk,
             recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
     else:
-        if e_score_correction_bias is not None:
-            _, topk_indices = jax.lax.top_k(topk_weights +
-                                            e_score_correction_bias[None, :],
-                                            k=topk)
+        if expert_score_correction_bias is not None:
+            _, topk_indices = jax.lax.top_k(
+                topk_weights + expert_score_correction_bias[None, :], k=topk)
             topk_weights = jnp.take_along_axis(topk_weights,
                                                topk_indices,
                                                axis=-1)

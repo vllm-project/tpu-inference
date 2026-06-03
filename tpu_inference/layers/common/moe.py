@@ -86,8 +86,10 @@ def moe_apply(
     with jax.named_scope(layer._get_name()):
         activation = layer.activation if isinstance(
             layer.activation, str) else layer.activation.value
-        if activation == "silu" and getattr(layer, "swiglu_limit", 0) > 0:
-            activation = "silu_and_mul_with_clamp"
+        if activation == "silu":
+            swiglu_limit = getattr(layer, "swiglu_limit", None)
+            if swiglu_limit is not None and swiglu_limit > 0:
+                activation = "silu_and_mul_with_clamp"
         match moe_backend:
             case MoEBackend.FUSED_MOE:
                 subc_quant_w1_sz = None
@@ -157,7 +159,7 @@ def moe_apply(
                     scatter_results=scatter_results,
                     hash_based_topk_indices=extra_backend_kwargs.get(
                         "hash_based_topk_indices", None),
-                    e_score_correction_bias=extra_backend_kwargs.get(
+                    expert_score_correction_bias=extra_backend_kwargs.get(
                         "e_score_correction_bias", None),
                 )
             case MoEBackend.DENSE_MAT:
