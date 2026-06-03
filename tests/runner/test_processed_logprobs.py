@@ -14,30 +14,10 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from vllm import LLM, SamplingParams
-
-# Monkeypatch torch.accelerator.empty_cache to avoid RuntimeError during shutdown when using JAX allocator
-try:
-    import torch
-    if hasattr(torch, "accelerator") and hasattr(torch.accelerator,
-                                                 "empty_cache"):
-        _orig_empty_cache = torch.accelerator.empty_cache
-
-        def _safe_empty_cache(*args, **kwargs):
-            try:
-                _orig_empty_cache(*args, **kwargs)
-            except RuntimeError as e:
-                # Suppress the allocator assertion error: "Allocator for jax is not a DeviceAllocator"
-                err_msg = str(e).lower()
-                if "device_allocator" in err_msg or "jax" in err_msg:
-                    pass
-                else:
-                    raise
-
-        torch.accelerator.empty_cache = _safe_empty_cache
-except Exception:
-    pass
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -45,12 +25,15 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 @pytest.fixture(scope="module")
 def llm():
     """Initializes LLM instance with processed_logprobs mode enabled."""
-    return LLM(
+    engine = LLM(
         model=MODEL_NAME,
         max_model_len=1024,
         max_num_seqs=4,
         logprobs_mode="processed_logprobs",
     )
+    yield engine
+    del engine
+    time.sleep(5)
 
 
 class TestProcessedLogprobs:
