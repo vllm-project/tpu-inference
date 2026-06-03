@@ -23,7 +23,6 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
-from tpu_inference import envs
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     sanity_check_mm_encoder_outputs
@@ -63,7 +62,9 @@ class MultiModalManager:
         if not comp_config.cudagraph_mm_encoder:
             return
         else:
-            assert envs.MODEL_IMPL_TYPE == "vllm", \
+            from tpu_inference.models.vllm.vllm_model_wrapper import \
+                VllmModelWrapper
+            assert isinstance(self.runner.model, VllmModelWrapper), \
                 ("cudagraph_mm_encoder is only supported for vLLM models,"
                 " flax_nnx implementation is already JIT-friendly.")
 
@@ -323,6 +324,7 @@ class MultiModalManager:
 
         if not mm_embeds:
             return None, None
+
         is_mm_embed = jnp.array(is_mm_embed_cpu, dtype=jnp.bool_)
         assert target_pad_len == is_mm_embed.shape[0]
 
