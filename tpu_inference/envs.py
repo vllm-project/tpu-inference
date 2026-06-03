@@ -56,6 +56,10 @@ if TYPE_CHECKING:
     MOE_APPROX_TOPK: bool = False
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
+    TPU_GEMMA4_JIT_VISION: bool = False
+    TPU_GEMMA4_JIT_VISION_MODE: str = "free"
+    DISABLE_EMBED_MM_JIT: bool = False
+    VISION_PRECOMPILE_BATCH_BUCKETS: list[int] = []
     ENABLE_RS_KERNEL: bool = False
     NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
@@ -365,6 +369,36 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
     "VLLM_TPU_PATCH_MM_EMBEDDINGS":
     env_bool("VLLM_TPU_PATCH_MM_EMBEDDINGS", default=False),
+    "TPU_GEMMA4_JIT_VISION":
+    env_bool("TPU_GEMMA4_JIT_VISION", default=False),
+    # When TPU_GEMMA4_JIT_VISION=1, picks between two implementations of
+    # the JIT-friendly Gemma4 vision path:
+    #   "free"   — (default) rebind vision_tower / embed_vision params
+    #              in-place to sharded torchax tensors, then decorate a
+    #              closure-based free function with
+    #              torchax.interop.jax_jit. Skips the JittableModule
+    #              param-binding workaround.
+    #   "bundle" — wrap a synthetic Gemma4VisionBundle nn.Module with
+    #              torchax.interop.JittableModule (legacy path, kept
+    #              for A/B verification).
+    "TPU_GEMMA4_JIT_VISION_MODE":
+    lambda: os.getenv("TPU_GEMMA4_JIT_VISION_MODE", "free"),
+    # When set to 1, suppresses the jax.jit wrap on embed_multimodal in
+    # :func:`maybe_jit_embed_multimodal_func`. The embed_multimodal then
+    # runs eager (per-op torchax dispatch). Generic A/B benchmarking toggle
+    # — useful e.g. to capture the pre-fix eager baseline for Qwen3-VL.
+    "DISABLE_EMBED_MM_JIT":
+    env_bool("DISABLE_EMBED_MM_JIT", default=False),
+    # Vision-encoder precompile batch-count buckets (comma-separated). Each
+    # value N causes precompile to prime the embed_multimodal jit cache
+    # with grid_thw=((1,h,w),)*N and pixel_values of (N*num_patches, ...).
+    # If empty (default), powers-of-two up to max_num_seqs (plus the exact
+    # max_num_seqs value) are used. Set to "1" to restore the pre-fix
+    # single-image-only behaviour. See
+    # :func:`maybe_precompile_vision_encoder_fn` for why multi-image
+    # buckets are needed to avoid steady-state recompiles.
+    "VISION_PRECOMPILE_BATCH_BUCKETS":
+    env_int_list("VISION_PRECOMPILE_BATCH_BUCKETS"),
     "DISABLE_MLA_Q_ACTIVATION_QUANTIZATION":
     env_bool("DISABLE_MLA_Q_ACTIVATION_QUANTIZATION", default=False),
     # Enable hierarchical reduce-scatter kernel for MoE
