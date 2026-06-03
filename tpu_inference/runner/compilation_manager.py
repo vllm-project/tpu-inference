@@ -214,22 +214,29 @@ class CompilationManager:
             with self.runner.maybe_setup_dummy_loras(
                     self.runner.lora_config), jax.set_mesh(self.runner.mesh):
                 self._precompile_backbone_text_only()
+                self._flush_compilations()
                 if self.runner.is_multimodal_model:
                     if self.runner.precompile_vision_encoder_fn is not None:
                         self.runner.precompile_vision_encoder_fn(
                             self._run_compilation, )
                     self._precompile_input_embeddings_merger()
+                    self._flush_compilations()
                     self._precompile_backbone_with_inputs_embeds()
+                    self._flush_compilations()
                 if self.runner.scheduler_config.async_scheduling:
                     self._precompile_substitute_placeholder_token()
+                    self._flush_compilations()
                     if self.runner.speculative_config:
                         self._precompile_subtract_num_rejected_tokens()
+                        self._flush_compilations()
                         self._precompile_concat_last_sampled_tokens_and_draft_tokens(
                         )
-                self._flush_compilations()
+                        self._flush_compilations()
+                
                 if not self.runner.is_last_rank:
                     return
                 self._precompile_select_from_array()
+                self._flush_compilations()
                 if not self.runner.is_pooling_model:
                     self._precompile_compute_logits()
                 else:
@@ -238,14 +245,18 @@ class CompilationManager:
                 # Skip sampling if already precompiled before KV cache allocation
                 if not self._sampling_precompiled:
                     self._precompile_sampling()
+                    self._flush_compilations()
                 self._precompile_disagg_utils()
+                self._flush_compilations()
                 # Skip gather_logprobs if already precompiled before KV cache allocation
                 if not self._gather_logprobs_precompiled:
                     self._precompile_gather_logprobs()
+                    self._flush_compilations()
                 self._precompile_structured_decoding()
+                self._flush_compilations()
                 if self.runner.speculative_config:
                     self._precompile_speculative_decoding()
-                self._flush_compilations()
+                    self._flush_compilations()
         finally:
             self._finalize_compilation()
         elapsed = time.perf_counter() - compilation_start_time
