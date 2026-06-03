@@ -43,7 +43,7 @@ making sure they go through standard function arguments:
 """
 
 import math
-from typing import Callable, Dict, Optional, Any
+from typing import Any, Callable, Optional
 
 import jax
 import torch

@@ -637,7 +637,8 @@ def copy_weights_to_jax_vision_tower(
                 else:
                     jax_param = jax_param[key]
 
-            target_shape = jax_param[...].shape if isinstance(jax_param, nnx.Variable) else jax_param.shape
+            target_shape = jax_param[...].shape if isinstance(
+                jax_param, nnx.Variable) else jax_param.shape
 
             # Dynamically detect if the weight has already been transposed by the TPU weight loader
             if transform_fn is not None:
@@ -646,10 +647,12 @@ def copy_weights_to_jax_vision_tower(
                     A, B = t_val.shape
                     is_jax_layout = (out_dim % B == 0) and (in_dim % A == 0)
                     is_torch_layout = (out_dim % A == 0) and (in_dim % B == 0)
-                    
+
                     if is_jax_layout and not is_torch_layout:
                         # Already in JAX layout [in, out] due to TPU weight loader, skip transpose
-                        logger.info(f"Bypassing transposition for '{t_name}' since it is already in JAX layout {t_val.shape}")
+                        logger.info(
+                            f"Bypassing transposition for '{t_name}' since it is already in JAX layout {t_val.shape}"
+                        )
                     else:
                         t_val = transform_fn(t_val)
                 else:

@@ -59,7 +59,9 @@ def is_jittable_architecture(vllm_model) -> bool:
 
 def has_jittable_vision(vllm_model) -> bool:
     """Check if the model has any JIT-compiled vision component (either whole or submodule)."""
-    return is_jittable_architecture(vllm_model)
+    from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
+        is_qwen3_vl
+    return is_jittable_architecture(vllm_model) or is_qwen3_vl(vllm_model)
 
 
 def get_vision_config(hf_config: Any) -> Any:
