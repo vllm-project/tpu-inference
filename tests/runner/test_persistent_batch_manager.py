@@ -64,7 +64,6 @@ def _create_manager(req_ids, num_scheduled_tokens_map):
         requests={},
         input_batch=input_batch,
         encoder_cache={},
-        deepstack_cache=None,
         uses_mrope=False,
         model_config=MagicMock(),
         is_last_rank=True,
@@ -160,15 +159,12 @@ class TestPersistentBatchManager(unittest.TestCase):
         encoder_cache = MagicMock()
         model_config = MagicMock()
 
-        manager = PersistentBatchManager(
-            requests=requests,
-            input_batch=input_batch,
-            encoder_cache=encoder_cache,
-            deepstack_cache=None,
-            uses_mrope=False,
-            model_config=model_config,
-            is_last_rank=False,
-        )
+        manager = PersistentBatchManager(requests,
+                                         input_batch,
+                                         encoder_cache,
+                                         False,
+                                         model_config,
+                                         is_last_rank=False)
 
         scheduler_output = MagicMock()
         req_data = MagicMock()
