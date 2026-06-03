@@ -156,22 +156,17 @@ class CompilationManager:
             mm_hidden_size = hidden_size
             vision_config = getattr(hf_conf, "vision_config", None)
             has_deepstack = False
+            deepstack_levels = 0
 
             if vision_config:
                 visual_dim = getattr(vision_config, "out_hidden_size", None)
+                deepstack_indexes = getattr(vision_config,
+                                            "deepstack_visual_indexes", None)
                 if visual_dim is not None:
-                    deepstack_indexes = getattr(vision_config,
-                                                "deepstack_visual_indexes",
-                                                None)
                     if deepstack_indexes is not None:
-                        if hasattr(self.runner.model,
-                                   "deepstack_visual_indexes"):
-                            has_deepstack = True
-                            mm_hidden_size = visual_dim
-                        else:
-                            deepstack_levels = len(deepstack_indexes)
-                            mm_hidden_size = visual_dim * (1 +
-                                                           deepstack_levels)
+                        has_deepstack = True
+                        deepstack_levels = len(deepstack_indexes)
+                    mm_hidden_size = visual_dim
 
             sharding = NamedSharding(
                 self.runner.mesh,
@@ -193,7 +188,7 @@ class CompilationManager:
                     self._create_dummy_tensor(
                         (num_tokens, mm_hidden_size),
                         self.runner.vllm_config.model_config.dtype,
-                        sharding=sharding) for _ in range(3)
+                        sharding=sharding) for _ in range(deepstack_levels)
                 ]
                 mm_embeds_arg = ([dummy_multimodal_embeddings], dummy_ds)
             else:
@@ -340,8 +335,8 @@ class CompilationManager:
                 intermediate_tensors,
                 is_first_rank,
                 is_last_rank,
-                num_reqs=num_reqs,
                 num_tokens=num_tokens,
+                num_reqs=num_reqs,
             )
 
     def _precompile_substitute_placeholder_token(self) -> None:
@@ -528,20 +523,13 @@ class CompilationManager:
 
         if vision_config:
             visual_dim = getattr(vision_config, "out_hidden_size", None)
-            if visual_dim is not None:
-                deepstack_indexes = getattr(vision_config,
-                                            "deepstack_visual_indexes", None)
-                if deepstack_indexes is not None:
-                    if hasattr(self.runner.model, "deepstack_visual_indexes"):
-                        deepstack_levels = len(deepstack_indexes)
-                        embeds_hidden_size = hidden_size * (1 +
-                                                            deepstack_levels)
-                    elif self.runner.model is not None and "VllmModelWrapper" in self.runner.model.__class__.__name__:
-                        deepstack_levels = len(deepstack_indexes)
-                        embeds_hidden_size = visual_dim * (1 +
-                                                           deepstack_levels)
-                    else:
-                        embeds_hidden_size = visual_dim
+            deepstack_indexes = getattr(vision_config,
+                                        "deepstack_visual_indexes", None)
+
+            # If both exist, we apply the deepstack concat logic
+            if visual_dim is not None and deepstack_indexes is not None:
+                deepstack_levels = len(deepstack_indexes)
+                embeds_hidden_size = visual_dim * (1 + deepstack_levels)
 
         # Compile for both standard (4k) and Deepstack (16k) dimensions if they differ
         hidden_sizes_to_compile = [hidden_size]
