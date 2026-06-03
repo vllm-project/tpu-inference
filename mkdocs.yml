@@ -68,7 +68,9 @@ nav:
   - 'Recipes (External)':
     - 'v7x (Ironwood)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM
     - 'v6e (Trillium)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM
-  - 'Profiling' : profiling.md
+  - Reference:
+    - 'Environment Variables': reference/environment_variables.md
+    - 'Profiling': reference/profiling.md
 plugins:
   - search
   - same-dir
