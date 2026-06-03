@@ -363,6 +363,35 @@ def _jax_logprobs_materialize(
     )
 
 
+def _reconstruct_slots_for_request(
+    req_state: CachedRequestState,
+    num_tokens: int,
+    block_size: int,
+) -> np.ndarray:
+    """Reconstructs physical slot mappings for a request using vectorized NumPy."""
+    start_pos = req_state.num_computed_tokens
+    block_ids = req_state.block_ids[0] if req_state.block_ids else []
+
+    if num_tokens <= 0:
+        return np.array([], dtype=np.int32)
+
+    pos = np.arange(start_pos, start_pos + num_tokens, dtype=np.int32)
+    block_idx = pos // block_size
+
+    if block_ids:
+        # Pad block_ids with 0s up to the max required index to avoid IndexError
+        block_ids_arr = np.zeros(max(len(block_ids),
+                                     int(block_idx[-1]) + 1),
+                                 dtype=np.int32)
+        block_ids_arr[:len(block_ids)] = block_ids
+        block_id = block_ids_arr[block_idx]
+        slots_arr = block_id * block_size + (pos % block_size)
+    else:
+        slots_arr = np.zeros_like(pos, dtype=np.int32)
+
+    return slots_arr
+
+
 def _reconstruct_routed_experts(
     runner,
     scheduler_output: "VllmSchedulerOutput",
@@ -412,25 +441,10 @@ def _reconstruct_routed_experts(
 
             # Reconstruct slots for this request using vectorized NumPy
             req_state = runner.requests[req_id]
-            start_pos = req_state.num_computed_tokens
-            block_ids = req_state.block_ids[0] if req_state.block_ids else []
-
             if n > 0:
-                pos = np.arange(start_pos, start_pos + n, dtype=np.int32)
-                block_idx = pos // block_size
-
-                if block_ids:
-                    # Pad block_ids with 0s up to the max required index to avoid IndexError
-                    block_ids_arr = np.zeros(max(len(block_ids),
-                                                 int(block_idx[-1]) + 1),
-                                             dtype=np.int32)
-                    block_ids_arr[:len(block_ids)] = block_ids
-                    block_id = block_ids_arr[block_idx]
-                    slots_arr = block_id * block_size + (pos % block_size)
-                else:
-                    slots_arr = np.zeros_like(pos, dtype=np.int32)
-
-                global_slots[global_start:global_end] = slots_arr
+                global_slots[
+                    global_start:global_end] = _reconstruct_slots_for_request(
+                        req_state, n, block_size)
 
     # 3. Perform global rank reordering and transpose in a single fancy indexing sweep!
     expert_indices_reordered = expert_indices_cpu[:, indices_map, :].transpose(
@@ -1433,6 +1447,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         sampled_token_ids = []
         expert_indices_list = []
+        expert_slots_list = []
         num_eos_hits = 0
 
         for req_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
@@ -1463,6 +1478,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # Transpose to (layers, actual_len, top_k) and collect
                 expert_indices_list.append(req_experts.transpose(1, 0, 2))
 
+                # Reconstruct slots for this request
+                if req_state is not None and actual_len > 0:
+                    slots_arr = _reconstruct_slots_for_request(
+                        req_state, actual_len, self.block_size)
+                    expert_slots_list.append(slots_arr)
+
             if req_state is not None:
                 start_idx = self.input_batch.num_tokens_no_spec[req_idx]
                 end_idx = start_idx + len(valid_tokens)
@@ -1482,6 +1503,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         expert_indices_cpu = None
         if expert_indices_list:
             expert_indices_cpu = np.concatenate(expert_indices_list, axis=1)
+
+        routed_experts = None
+        if expert_indices_cpu is not None and expert_slots_list:
+            routing_data = expert_indices_cpu.transpose(1, 0, 2)
+            slot_mapping = np.concatenate(expert_slots_list, axis=0)
+            routed_experts = RoutedExpertsLists(
+                routing_data=routing_data,
+                slot_mapping=slot_mapping,
+            )
 
         termination_reason = "unknown"
         if actual_steps < max_decode_steps:
@@ -1509,8 +1539,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             kv_connector_output=kv_connector_output,
         )
 
-        if expert_indices_cpu is not None:
-            output.expert_indices = expert_indices_cpu
+        if routed_experts is not None:
+            output.routed_experts = routed_experts
 
         self._continue_decode_output = output
         return None

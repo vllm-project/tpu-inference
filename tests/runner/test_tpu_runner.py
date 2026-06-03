@@ -199,7 +199,7 @@ class TestTPUJaxRunner:
 
     @patch('tpu_inference.runner.tpu_runner.continue_decode')
     @patch('jax.device_get')
-    def test_execute_continue_decode_with_expert_indices(
+    def test_execute_continue_decode_with_routed_experts(
             self, mock_device_get, mock_continue_decode):
         """_execute_continue_decode() should retrieve and format MoE expert indices correctly."""
         runner = MagicMock()
@@ -223,6 +223,11 @@ class TestTPUJaxRunner:
         runner.eos_token_id = 999
         runner.pad_token_id = 0
         runner.layer_name_to_kvcache_index = {}
+        runner.block_size = 16
+        runner.requests["req1"].num_computed_tokens = 0
+        runner.requests["req1"].block_ids = [[10]]
+        runner.requests["req2"].num_computed_tokens = 0
+        runner.requests["req2"].block_ids = [[20]]
 
         # Mock continue_decode output
         # Unpacks: generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices
@@ -278,13 +283,23 @@ class TestTPUJaxRunner:
         assert mock_continue_decode.call_args.kwargs[
             "static_max_decode_steps"] == 5
 
-        # Verify expert indices are formatted correctly: (num_layers, num_reqs * actual_steps, top_k)
-        # actual_steps = 5, num_reqs = 2, layers = 3, top_k = 2
-        # Output should be (3, 10, 2)
+        # Verify routed experts are formatted correctly:
+        # routing_data: (num_reqs * actual_steps, num_layers, top_k) -> (10, 3, 2)
+        # slot_mapping: (num_reqs * actual_steps,) -> (10,)
         output_runner_output = runner._continue_decode_output
         assert output_runner_output is not None
-        assert output_runner_output.expert_indices is not None
-        assert output_runner_output.expert_indices.shape == (3, 10, 2)
+        assert output_runner_output.routed_experts is not None
+        assert output_runner_output.routed_experts.routing_data.shape == (10,
+                                                                          3, 2)
+        assert output_runner_output.routed_experts.slot_mapping.shape == (10, )
+        # req1 slots: block 10 * 16 + [0..4] = [160..164]
+        # req2 slots: block 20 * 16 + [0..4] = [320..324]
+        expected_slots = np.concatenate([
+            np.arange(160, 165, dtype=np.int32),
+            np.arange(320, 325, dtype=np.int32)
+        ])
+        np.testing.assert_array_equal(
+            output_runner_output.routed_experts.slot_mapping, expected_slots)
 
         # Verify scheduler_output.num_scheduled_tokens is mutated to actual_steps = 5
         assert scheduler_output.num_scheduled_tokens["req1"] == 5
