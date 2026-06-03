@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
     PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
+    SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
 
 
 def env_with_choices(
@@ -385,6 +386,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("LORA_MODULE_PATH", ""),
     "MLA_KV_PACKING_SIZE":
     lambda: int(os.getenv("MLA_KV_PACKING_SIZE", "32")),
+    # When set to a value, override XLA SparseCore offload minimum size (in Bytes) for all-reduce
+    # and all-gather. When set to 0, use default XLA offload threshold. When set to auto,
+    # use VMEM size as the threshold.
+    "SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES":
+    lambda: os.getenv("SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES", "auto"),
 }
 
 

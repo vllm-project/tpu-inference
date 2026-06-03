@@ -68,6 +68,27 @@ from tpu_inference.runner.lora_utils import replace_lora_metadata
 logger = init_logger(__name__)
 
 
+def _get_sc_allreduce_allgather_offload_min_size_bytes() -> int:
+    """Returns the SparseCore all-reduce/all-gather offload minimum size in bytes.
+
+    Returns 0 if we use default XLA offload threshold.
+    """
+    sc_threshold_val = envs.SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES
+    sc_threshold_bytes = 0
+    if sc_threshold_val == "auto":
+        from tpu_inference.tpu_info import get_tpu_vmem_size_bytes
+        sc_threshold_bytes = get_tpu_vmem_size_bytes()
+    else:
+        try:
+            sc_threshold_bytes = int(sc_threshold_val)
+        except ValueError:
+            logger.warning(
+                f"Invalid value for SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: "
+                f"'{sc_threshold_val}'. Defaulting to 0 (always offload).")
+            sc_threshold_bytes = 0
+    return sc_threshold_bytes
+
+
 class _VllmRunner(torch.nn.Module):
 
     def __init__(self, vllm_model: torch.nn.Module):
@@ -270,6 +291,24 @@ class VllmModelWrapper:
 
     def jit_step_func(self):
 
+        compiler_options = {
+            "xla_tpu_all_gather_collective_matmul_mode":
+            "post_spmd_conservative",
+            "xla_tpu_reduce_scatter_collective_matmul_mode":
+            "post_spmd_conservative",
+            "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
+        }
+
+        sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
+        if sc_offload_bytes > 0:
+            threshold_bytes = str(sc_offload_bytes)
+            compiler_options[
+                "xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes"] = (
+                    threshold_bytes)
+            compiler_options[
+                "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
+                    threshold_bytes)
+
         @jax.jit(
             donate_argnames=("kv_caches", ),
             out_shardings=(
@@ -279,13 +318,7 @@ class VllmModelWrapper:
                 None,  # empty list
                 None,  # expert ids
             ),
-            compiler_options={
-                "xla_tpu_all_gather_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_use_minor_sharding_for_major_trivial_input": "true"
-            },
+            compiler_options=compiler_options,
             static_argnames=(
                 "layer_name_to_kvcache_index",
                 "is_first_rank",
