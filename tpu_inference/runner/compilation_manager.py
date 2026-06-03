@@ -163,17 +163,15 @@ class CompilationManager:
                     deepstack_indexes = getattr(vision_config,
                                                 "deepstack_visual_indexes",
                                                 None)
-                    model_module = self.runner.model.__class__.__module__ if self.runner.model is not None else ""
                     if deepstack_indexes is not None:
-                        if "qwen3_vl" in model_module:
+                        if hasattr(self.runner.model,
+                                   "deepstack_visual_indexes"):
                             has_deepstack = True
-
-                        if "vllm" in model_module:
+                            mm_hidden_size = visual_dim
+                        else:
                             deepstack_levels = len(deepstack_indexes)
                             mm_hidden_size = visual_dim * (1 +
                                                            deepstack_levels)
-                        else:
-                            mm_hidden_size = visual_dim
 
             sharding = NamedSharding(
                 self.runner.mesh,
@@ -220,32 +218,6 @@ class CompilationManager:
                 call_kwargs={"is_multimodal": None},
                 num_tokens=num_tokens,
             )
-
-    def _create_dummy_deepstack_embeds(
-            self, num_tokens: int) -> Optional[list[jax.Array]]:
-        hf_config = self.runner.vllm_config.model_config.hf_config
-        vision_config = getattr(hf_config, "vision_config", None)
-        if vision_config is None:
-            return None
-
-        deepstack_visual_indexes = getattr(vision_config,
-                                           "deepstack_visual_indexes", ())
-        if not deepstack_visual_indexes:
-            return None
-
-        hidden_size = getattr(
-            vision_config,
-            "out_hidden_size",
-            self.runner.vllm_config.model_config.get_hidden_size(),
-        )
-        sharding = NamedSharding(self.runner.mesh, PartitionSpec())
-        return [
-            self._create_dummy_tensor(
-                (num_tokens, hidden_size),
-                self.runner.vllm_config.model_config.dtype,
-                sharding=sharding,
-            ) for _ in range(len(deepstack_visual_indexes))
-        ]
 
     def _precompile_backbone_helper(self,
                                     name,
@@ -341,13 +313,12 @@ class CompilationManager:
             intermediate_tensors,
             is_first_rank,
             is_last_rank,
-            deepstack_embeds,
         ):
             kv_caches, hidden_states, *_ = self.runner.model_fn(
                 state_leaves, kv_caches, input_ids, attention_metadata,
                 inputs_embeds, positions, layer_name_to_kvcache_index,
                 lora_metadata, intermediate_tensors, is_first_rank,
-                is_last_rank, deepstack_embeds)
+                is_last_rank)
             self.runner.kv_caches = kv_caches
             return hidden_states
 
@@ -369,35 +340,9 @@ class CompilationManager:
                 intermediate_tensors,
                 is_first_rank,
                 is_last_rank,
-                None,
                 num_reqs=num_reqs,
                 num_tokens=num_tokens,
             )
-
-            dummy_deepstack_embeds = None
-            if inputs_embeds is not None:
-                dummy_deepstack_embeds = self._create_dummy_deepstack_embeds(
-                    num_tokens)
-
-            if dummy_deepstack_embeds is not None:
-                self._run_compilation(
-                    f"{name} with deepstack",
-                    model_fn_wrapper,
-                    self.runner.state_leaves,
-                    self.runner.kv_caches,
-                    input_ids,
-                    attention_metadata,
-                    positions,
-                    inputs_embeds,
-                    tuple(self.runner.layer_name_to_kvcache_index.items()),
-                    lora_metadata,
-                    intermediate_tensors,
-                    is_first_rank,
-                    is_last_rank,
-                    dummy_deepstack_embeds,
-                    num_tokens=num_tokens,
-                    num_reqs=num_reqs,
-                )
 
     def _precompile_substitute_placeholder_token(self) -> None:
         dp_sharding = NamedSharding(
@@ -586,16 +531,15 @@ class CompilationManager:
             if visual_dim is not None:
                 deepstack_indexes = getattr(vision_config,
                                             "deepstack_visual_indexes", None)
-                model_module = self.runner.model.__class__.__module__ if self.runner.model is not None else ""
                 if deepstack_indexes is not None:
-                    if "vllm" in model_module:
-                        deepstack_levels = len(deepstack_indexes)
-                        embeds_hidden_size = visual_dim * (1 +
-                                                           deepstack_levels)
-                    elif "qwen3_vl" in model_module:
+                    if hasattr(self.runner.model, "deepstack_visual_indexes"):
                         deepstack_levels = len(deepstack_indexes)
                         embeds_hidden_size = hidden_size * (1 +
                                                             deepstack_levels)
+                    elif self.runner.model is not None and "VllmModelWrapper" in self.runner.model.__class__.__name__:
+                        deepstack_levels = len(deepstack_indexes)
+                        embeds_hidden_size = visual_dim * (1 +
+                                                           deepstack_levels)
                     else:
                         embeds_hidden_size = visual_dim
 

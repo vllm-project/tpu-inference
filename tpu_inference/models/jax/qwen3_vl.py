@@ -1447,6 +1447,7 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
             rng=rng,
             mesh=mesh,
         )
+        self.deepstack_visual_indexes = self.language_model.deepstack_visual_indexes
         model_config = vllm_config.model_config
         if not config.tie_word_embeddings:
             vocab_size = model_config.get_vocab_size()
