@@ -592,7 +592,9 @@ class VllmModelWrapper:
     def jit_combine_hidden_states_func(self):
 
         @jax.jit(out_shardings=(NamedSharding(
-            self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))))
+            self.mesh,
+            PartitionSpec(ShardingAxisName.MLP_DATA,
+                          ShardingAxisName.MLP_TENSOR))))
         def combine_hidden_states_func(params_and_buffers: Any,
                                        hidden_states: jax.Array) -> jax.Array:
             with torchax.default_env(), set_vllm_model_wrapper_context(

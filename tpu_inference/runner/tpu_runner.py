@@ -84,7 +84,9 @@ from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.spec_decode.jax.utils import (
-    concat_last_sampled_tokens_and_draft_tokens, extract_last_sampled_tokens)
+    concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
+    extract_last_sampled_tokens, filter_speculative_logprobs,
+    process_and_extend_logits)
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function, to_jax_dtype, to_torch_dtype)
 
@@ -297,6 +299,11 @@ def _jax_logprobs_materialize(
     selected_token_ranks = np.asarray(
         jax.device_get(logprobs_tensors.selected_token_ranks))
 
+    # For speculative decoding, we need to filter and reorganize the materialized
+    # logprobs. The raw logprobs contain info for all proposed draft tokens (including
+    # rejected ones) and bonus tokens. We filter them to only keep the accepted
+    # draft tokens and the actual bonus token for each request, and flatten them
+    # back to match the output format.
     if (spec_decode_metadata is not None
             and np.sum(spec_decode_metadata.draft_lengths_cpu) > 0):
         assert runner is not None
@@ -304,111 +311,20 @@ def _jax_logprobs_materialize(
         dp_size = runner.dp_size
         num_reqs = runner.input_batch.num_reqs if num_reqs is None else num_reqs
 
-        padded_tokens_length = spec_decode_metadata.target_logits_indices.shape[
-            0]
-        assert padded_tokens_length % dp_size == 0
-        padded_tokens_length = padded_tokens_length // dp_size
-
-        per_rank_output_size = log_token_ids.shape[0] // dp_size
-
-        # Lists to collect filtered outputs per request (in original request ordering)
-        req_logprob_token_ids = [[] for _ in range(num_reqs)]
-        req_logprobs = [[] for _ in range(num_reqs)]
-        req_sampled_token_ranks = [[] for _ in range(num_reqs)]
-
-        for rank in range(dp_size):
-            rank_offset = rank * per_rank_output_size
-
-            # Slice main and bonus logprobs for this rank
-            main_token_ids = log_token_ids[rank_offset:rank_offset +
-                                           padded_tokens_length]
-            main_logprobs = logprobs_arr[rank_offset:rank_offset +
-                                         padded_tokens_length]
-            main_ranks = selected_token_ranks[rank_offset:rank_offset +
-                                              padded_tokens_length]
-
-            bonus_token_ids = log_token_ids[rank_offset +
-                                            padded_tokens_length:rank_offset +
-                                            per_rank_output_size]
-            bonus_logprobs = logprobs_arr[rank_offset +
-                                          padded_tokens_length:rank_offset +
-                                          per_rank_output_size]
-            bonus_ranks = selected_token_ranks[
-                rank_offset + padded_tokens_length:rank_offset +
-                per_rank_output_size]
-
-            padded_num_seqs_per_rank = bonus_token_ids.shape[0]
-            cur_rank_num_draft_tokens = spec_decode_metadata.draft_lengths_cpu[
-                rank * padded_num_seqs_per_rank:(rank + 1) *
-                padded_num_seqs_per_rank]
-
-            start_idx = 0
-            req_indices = spec_decode_metadata.req_indices_dp[rank]
-            for i, req_idx in enumerate(req_indices):
-                if req_idx >= num_reqs:
-                    continue
-
-                seq_length = int(cur_rank_num_draft_tokens[i])
-                end_idx = start_idx + seq_length
-
-                # Get draft logprobs for this sequence
-                seq_main_token_ids = main_token_ids[start_idx:end_idx]
-                seq_main_logprobs = main_logprobs[start_idx:end_idx]
-                seq_main_ranks = main_ranks[start_idx:end_idx]
-
-                # Identify accepted draft positions (where gathered token ID is not placeholder)
-                valid_mask = (seq_main_token_ids[:, 0] != INVALID_TOKEN_ID) & (
-                    seq_main_token_ids[:, 0] < vocab_size)
-
-                valid_token_ids = seq_main_token_ids[valid_mask]
-                valid_logprobs = seq_main_logprobs[valid_mask]
-                valid_ranks = seq_main_ranks[valid_mask]
-
-                # Check bonus token
-                bonus_token = bonus_token_ids[i, 0]
-                if bonus_token != INVALID_TOKEN_ID and bonus_token < vocab_size:
-                    # Add bonus token logprobs
-                    valid_token_ids = np.concatenate(
-                        [valid_token_ids, [bonus_token_ids[i]]], axis=0)
-                    valid_logprobs = np.concatenate(
-                        [valid_logprobs, [bonus_logprobs[i]]], axis=0)
-                    valid_ranks = np.concatenate(
-                        [valid_ranks, [bonus_ranks[i]]], axis=0)
-
-                req_logprob_token_ids[req_idx] = valid_token_ids
-                req_logprobs[req_idx] = valid_logprobs
-                req_sampled_token_ranks[req_idx] = valid_ranks
-                start_idx = end_idx
-
-        # Flatten the collected lists back to 2D/1D arrays
-        flat_token_ids = []
-        flat_logprobs = []
-        flat_ranks = []
-
-        cu_num_generated_tokens = [0]
-        current_cu = 0
-
-        for r in range(num_reqs):
-            num_gen = len(req_logprob_token_ids[r])
-            current_cu += num_gen
-            cu_num_generated_tokens.append(current_cu)
-
-            if num_gen > 0:
-                flat_token_ids.append(req_logprob_token_ids[r])
-                flat_logprobs.append(req_logprobs[r])
-                flat_ranks.append(req_sampled_token_ranks[r])
-
-        if flat_token_ids:
-            log_token_ids = np.concatenate(flat_token_ids, axis=0)
-            logprobs_arr = np.concatenate(flat_logprobs, axis=0)
-            selected_token_ranks = np.concatenate(flat_ranks, axis=0)
-        else:
-            log_token_ids = np.empty((0, log_token_ids.shape[1]),
-                                     dtype=log_token_ids.dtype)
-            logprobs_arr = np.empty((0, logprobs_arr.shape[1]),
-                                    dtype=logprobs_arr.dtype)
-            selected_token_ranks = np.empty((0, ),
-                                            dtype=selected_token_ranks.dtype)
+        (
+            log_token_ids,
+            logprobs_arr,
+            selected_token_ranks,
+            cu_num_generated_tokens,
+        ) = filter_speculative_logprobs(
+            log_token_ids,
+            logprobs_arr,
+            selected_token_ranks,
+            spec_decode_metadata,
+            vocab_size,
+            dp_size,
+            num_reqs,
+        )
 
     else:
         if logits_indices_selector is not None:
@@ -1391,6 +1307,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             step_rng = self.rng_params_for_sampling
 
+        processed_bonus_logits = None
         if spec_decode_metadata is None:
             logits = logits.astype(jnp.float32)
             with self.maybe_forbid_compile:
@@ -1408,7 +1325,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 rejection_rng = step_rng
             bonus_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.bonus_logits_indices)
-            bonus_token_ids, _ = sample(
+            bonus_token_ids, processed_bonus_logits = sample(
                 bonus_rng,
                 self.mesh,
                 bonus_logits,
@@ -1434,11 +1351,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if full_logits is not None:
             full_logits = full_logits.astype(jnp.float32)
         with self.maybe_forbid_compile:
-
             if tpu_sampling_metadata.logprobs:
-                logits = processed_logits if self.model_config.logprobs_mode == "processed_logprobs" else logits
+                if spec_decode_metadata is not None:
+                    with jax.set_mesh(self.mesh):
+                        if (self.model_config.logprobs_mode
+                                == "processed_logprobs"
+                                and tpu_sampling_metadata.do_sampling):
+                            extended_logits = process_and_extend_logits(
+                                self.mesh, target_logits,
+                                processed_bonus_logits, spec_decode_metadata,
+                                tpu_sampling_metadata)
+                        else:
+                            extended_logits = extend_logits_simple(
+                                target_logits, bonus_logits, self.mesh)
+
+                        logprobs_logits = extended_logits
+                else:
+                    logprobs_logits = (processed_logits
+                                       if self.model_config.logprobs_mode
+                                       == "processed_logprobs" else logits)
                 logprobs = compute_and_gather_logprobs(
-                    logits, next_tokens, self.model_config.max_logprobs)
+                    logprobs_logits, next_tokens,
+                    self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
             else:
                 logprobs = None
@@ -1995,17 +1929,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 cur_rank_req_idxs = req_indices_dp[dp_rank]
                 cur_rank_num_draft_tokens = num_draft_tokens[cur_rank_req_idxs]
 
-                total_active_draft_tokens = np.sum(cur_rank_num_draft_tokens)
-                required_logits_length = (padded_num_reqs_per_dp_rank +
-                                          total_active_draft_tokens)
+                num_sampled_tokens = cur_rank_num_draft_tokens + 1
+                total_sampled_tokens = np.sum(num_sampled_tokens)
                 if padded_logits_length is None:
                     padded_logits_length = runner_utils.get_padded_token_len(
-                        self.num_logits_paddings, required_logits_length)
+                        self.num_logits_paddings, total_sampled_tokens)
                 else:
                     padded_logits_length = max(
                         padded_logits_length,
                         runner_utils.get_padded_token_len(
-                            self.num_logits_paddings, required_logits_length))
+                            self.num_logits_paddings, total_sampled_tokens))
 
             assert padded_logits_length is not None
             logits_indices_shape = (padded_logits_length * dp_size, )
