@@ -58,6 +58,13 @@ logger = init_logger(__name__)
 DEFAULT_KV_CACHE_LAYOUT = "NHD"
 
 
+def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
+    return isinstance(attn_module, DeepseekV4IndexerCache) or isinstance(
+        attn_module, DeepseekV4SWACache) or isinstance(
+            attn_module, DeepseekV4MLAAttention) or isinstance(
+                attn_module, CompressorStateCache)
+
+
 class KVCacheManager:
 
     def __init__(self, runner: "TPUModelRunner"):
@@ -584,12 +591,7 @@ class KVCacheManager:
                         kv_cache_spec[layer_name] = spec
                     continue
 
-                cache_for_ds_v4 = isinstance(
-                    attn_module, DeepseekV4IndexerCache) or isinstance(
-                        attn_module, DeepseekV4SWACache) or isinstance(
-                            attn_module, DeepseekV4MLAAttention) or isinstance(
-                                attn_module, CompressorStateCache)
-                if cache_for_ds_v4:
+                if is_cache_for_ds_v4(attn_module):
                     spec = attn_module.get_kv_cache_spec(
                         self.runner.vllm_config)
                     assert spec is not None

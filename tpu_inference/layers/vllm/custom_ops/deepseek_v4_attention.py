@@ -44,7 +44,6 @@ from tpu_inference.logger import init_logger
 logger = init_logger(__name__)
 
 
-# TODO: implement VllmDeepseekV4MLAAttention.
 class VllmDeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
     def __init__(
@@ -85,10 +84,12 @@ class VllmDeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             positions: torch.Tensor,
             output: torch.Tensor,  # [T, num_heads, head_dim]
     ) -> None:
+        logger.error(
+            "DeepseekV4MLA.forward is not implemented, just a pass-through for now"
+        )
         return q
 
 
-# TODO: Implement VllmDeepseekV4MLA.
 class VllmDeepseekV4MLA(DeepseekV4MLA):
 
     def __init__(
@@ -137,6 +138,9 @@ class VllmDeepseekV4MLA(DeepseekV4MLA):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        logger.error(
+            "VllmDeepseekV4MLA.forward is not implemented, just a pass-through for now"
+        )
         return hidden_states
 
 

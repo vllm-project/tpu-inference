@@ -17,6 +17,10 @@ import vllm.model_executor.kernels.mhc as mhc_kernels
 from vllm.model_executor.layers.mhc import (HCHeadOp, MHCFusedPostPreOp,
                                             MHCPostOp, MHCPreOp)
 
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 @MHCPreOp.register_oot
 class VllmMHCPreOp(MHCPreOp):
@@ -82,7 +86,6 @@ class VllmHCHeadOp(HCHeadOp):
     def enabled(cls) -> bool:
         return True
 
-    # TODO: implement the VllmHCHeadOp.
     def forward_tpu(
         self,
         hidden_states: torch.Tensor,
@@ -92,6 +95,9 @@ class VllmHCHeadOp(HCHeadOp):
         rms_norm_eps: float,
         hc_eps: float,
     ) -> torch.Tensor:
+        logger.error(
+            "VllmHCHeadOp.forward_tpu is not implemented, just a pass-through for now"
+        )
         hc_mult, hidden_size = hidden_states.shape[-2:]
         outer_shape = hidden_states.shape[:-2]
         return hidden_states[..., 0, :].reshape(*outer_shape, hidden_size)
