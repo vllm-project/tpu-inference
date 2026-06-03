@@ -56,9 +56,8 @@ from tpu_inference.lora.lora_manager import (TPULRUCacheWorkerLoRAManager,
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
-from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
-    maybe_apply_qwen3_vl_patches
+from tpu_inference.models.vllm.experimental.model_patcher import (
+    apply_model_specific_patches, patch_mm_model)
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
     maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn,
     maybe_prepare_for_jit)
@@ -67,6 +66,27 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import (
 from tpu_inference.runner.lora_utils import replace_lora_metadata
 
 logger = init_logger(__name__)
+
+
+def _get_sc_allreduce_allgather_offload_min_size_bytes() -> int:
+    """Returns the SparseCore all-reduce/all-gather offload minimum size in bytes.
+
+    Returns 0 if we use default XLA offload threshold.
+    """
+    sc_threshold_val = envs.SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES
+    sc_threshold_bytes = 0
+    if sc_threshold_val == "auto":
+        from tpu_inference.tpu_info import get_tpu_vmem_size_bytes
+        sc_threshold_bytes = get_tpu_vmem_size_bytes()
+    else:
+        try:
+            sc_threshold_bytes = int(sc_threshold_val)
+        except ValueError:
+            logger.warning(
+                f"Invalid value for SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: "
+                f"'{sc_threshold_val}'. Defaulting to 0 (always offload).")
+            sc_threshold_bytes = 0
+    return sc_threshold_bytes
 
 
 class _VllmRunner(torch.nn.Module):
@@ -257,7 +277,7 @@ class VllmModelWrapper:
             )
 
         # NOTE: Apply Qwen3-VL model specific patches
-        maybe_apply_qwen3_vl_patches(self.model.vllm_model)
+        apply_model_specific_patches(self.model.vllm_model)
 
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
@@ -271,6 +291,24 @@ class VllmModelWrapper:
 
     def jit_step_func(self):
 
+        compiler_options = {
+            "xla_tpu_all_gather_collective_matmul_mode":
+            "post_spmd_conservative",
+            "xla_tpu_reduce_scatter_collective_matmul_mode":
+            "post_spmd_conservative",
+            "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
+        }
+
+        sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
+        if sc_offload_bytes > 0:
+            threshold_bytes = str(sc_offload_bytes)
+            compiler_options[
+                "xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes"] = (
+                    threshold_bytes)
+            compiler_options[
+                "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
+                    threshold_bytes)
+
         @jax.jit(
             donate_argnames=("kv_caches", ),
             out_shardings=(
@@ -280,13 +318,7 @@ class VllmModelWrapper:
                 None,  # empty list
                 None,  # expert ids
             ),
-            compiler_options={
-                "xla_tpu_all_gather_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_use_minor_sharding_for_major_trivial_input": "true"
-            },
+            compiler_options=compiler_options,
             static_argnames=(
                 "layer_name_to_kvcache_index",
                 "is_first_rank",
@@ -474,6 +506,7 @@ class VllmModelWrapper:
                     k: jax.tree.map(move, v)
                     for k, v in kwargs.items()
                 }
+
                 return maybe_jit_embed_multimodal_func(
                     embed_multimodal_func_jax,
                     self.model.vllm_model)(params_and_buffers, **call_kwargs)

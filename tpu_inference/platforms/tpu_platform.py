@@ -110,6 +110,7 @@ class TpuPlatform(Platform):
         "USE_JAX_PROFILER_SERVER",
         "JAX_PROFILER_SERVER_PORT",
         "ENABLE_RS_KERNEL",
+        "MOE_ALL_GATHER_ACTIVATION_DTYPE",
     ]
 
     @classmethod
