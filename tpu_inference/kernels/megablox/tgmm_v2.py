@@ -163,7 +163,10 @@ def make_tgmm_configs(
   size_m, size_k = lhs.shape
   _, size_n = rhs.shape
   if rhs_scale is not None:
-    assert rhs_scale.shape == (1, 1, size_n), f"expecting rhs_scale.shape to be (1, 1, size_n) but got {rhs_scale.shape}"
+    assert rhs_scale.shape == (1, 1, size_n), (
+        f"expecting rhs_scale.shape to be (1, 1, size_n) but got"
+        f" {rhs_scale.shape}"
+    )
   # size_lhs_sublane is used in tgmm_inner_kernel to set the
   # (m/size_lhs_sublane, size_lhs_sublane, ...) reshape tile used on the m-axis
   # for both 'tiled_lhs_ref' and 'tiled_rhs_ref'.

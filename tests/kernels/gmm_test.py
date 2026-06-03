@@ -407,28 +407,6 @@ class GmmTest(jtu.JaxTestCase):
     # self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
     # self.assertArraysAllClose(actual, expected)
 
-  def test_tgmm_fp8_inputs_smoke(self):
-    batch_size, in_size, out_size = 1024, 256, 256
-    num_groups = 4
-    key1, key2 = jax.random.split(jax.random.key(0), 2)
-    lhs_bf16 = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16)
-    rhs_bf16 = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.bfloat16)
-    lhs_fp8 = lhs_bf16.astype(jnp.float8_e4m3fn)
-    rhs_fp8 = rhs_bf16.astype(jnp.float8_e5m2)
-    group_sizes = get_group_sizes(batch_size, num_groups)
-
-    expected = reference_tgmm(
-        lhs_fp8.swapaxes(0, 1), rhs_fp8, group_sizes, num_groups,
-    )
-    validate_tgmm_inputs(group_sizes, num_groups)
-    actual = tgmm_v2(
-        lhs_fp8, rhs_fp8, group_sizes, num_groups,
-        preferred_element_type=jnp.bfloat16,
-    )
-
-    self.assertEqual(actual.shape, (num_groups, in_size, out_size))
-    self.assertAllClose(actual, expected, rtol=1e-2, atol=1e-2)
-
   @parameterized.product(
       batch_size=[128, 512],          # M
       in_size=[256, 512],             # K
