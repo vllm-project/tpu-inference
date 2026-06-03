@@ -24,7 +24,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
 from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
 
 from tpu_inference.layers.common.quant_methods import DSV4_FP8
-from tpu_inference.layers.jax.attention.attention import Attention
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.fp8 import (VllmFp8LinearMethod,
@@ -81,9 +80,5 @@ class VllmDeepseekV4Fp8Config(DeepseekV4FP8Config, VllmQuantConfig):
                     layer.moe_config = self.get_moe_config(layer)
                     return VllmFp8MoEMethod(self, layer, self.mesh)
 
-            case Attention():
-                logger.warning_once("FP8KVCacheMethod is not implemented. "
-                                    "Skipping quantization for this layer.")
-                return None
             case _:
                 return None
