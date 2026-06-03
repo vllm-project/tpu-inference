@@ -12,23 +12,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Tests for Async Logprobs with Lazy Materialization.
+#
+# Correctness tests verify that:
+#   1. Requesting logprobs works seamlessly, exercising the async background copy
+#      and lazy materialization pipeline.
+#   2. Materialized logprobs are valid (non-positive values) and correctly formatted.
+
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
 from vllm import LLM, SamplingParams
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MAX_MODEL_LEN = 1024
+MAX_NUM_SEQS = 32
+MAX_TOKENS_DEFAULT = 32
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def llm():
     """Create a shared LLM instance to test async logprobs."""
+    os.environ.setdefault("SKIP_JAX_PRECOMPILE", "0")
     engine = LLM(
         model=MODEL_NAME,
-        max_model_len=1024,
-        max_num_seqs=4,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_seqs=MAX_NUM_SEQS,
     )
     yield engine
     del engine

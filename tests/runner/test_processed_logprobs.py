@@ -12,23 +12,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Tests for Processed Logprobs.
+#
+# Correctness tests verify that:
+#   1. Processed logprobs (post temperature/top-k/top-p scaling) are returned
+#      successfully, and all returned logprobs are valid (non-positive values).
+#   2. Returned logprobs correctly reflect and scale with the temperature parameter.
+
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
 from vllm import LLM, SamplingParams
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MAX_MODEL_LEN = 1024
+MAX_NUM_SEQS = 32
+MAX_TOKENS_DEFAULT = 32
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def llm():
     """Initializes LLM instance with processed_logprobs mode enabled."""
+    os.environ.setdefault("SKIP_JAX_PRECOMPILE", "0")
     engine = LLM(
         model=MODEL_NAME,
-        max_model_len=1024,
-        max_num_seqs=4,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_seqs=MAX_NUM_SEQS,
         logprobs_mode="processed_logprobs",
     )
     yield engine
