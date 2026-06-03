@@ -4,6 +4,7 @@ This reference documents the custom environment variables introduced by the `tpu
 
 ## Scope / Path Definitions
 Environment variables are scoped to specific model execution pathways:
+
 * **Shared**: Applies to both native JAX/Flax model implementations (`MODEL_IMPL_TYPE="flax_nnx"`) and PyTorch/vLLM models run via `torchax` (`MODEL_IMPL_TYPE="vllm"`).
 * **JAX/Flax**: Applies only to native JAX/Flax model definitions.
 * **PyTorch/vLLM (torchax)**: Applies only to PyTorch models run via `torchax` JIT compilation.
