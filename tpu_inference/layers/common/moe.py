@@ -79,6 +79,9 @@ def moe_apply(
     mesh: Mesh,
     extra_backend_kwargs: dict,
 ) -> jax.Array:
+    extra_backend_kwargs = dict(
+        extra_backend_kwargs) if extra_backend_kwargs else {}
+    scatter_results = extra_backend_kwargs.pop("scatter_results", False)
 
     with jax.named_scope(layer._get_name()):
         activation = layer.activation if isinstance(
@@ -147,6 +150,9 @@ def moe_apply(
                     scoring_fn=layer.scoring_func,
                     all_gather_fp8=all_gather_fp8,
                     enable_rs_kernel=envs.ENABLE_RS_KERNEL,
+                    onehot_moe_permute_threshold=envs.
+                    ONEHOT_MOE_PERMUTE_THRESHOLD,
+                    scatter_results=scatter_results,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

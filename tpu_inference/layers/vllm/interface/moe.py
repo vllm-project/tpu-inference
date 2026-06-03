@@ -20,7 +20,9 @@ from tpu_inference import envs
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import \
     FusedMoEWeights
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -98,6 +100,14 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
             except AssertionError:
                 pass
 
+    mesh = quant_method_instance.mesh
+    attn_dp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA)
+    dp_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_DATA)
+    is_dp = (attn_dp_size // dp_size) > 1
+
+    extra_kwargs = dict(quant_method_instance.extra_backend_kwargs)
+    extra_kwargs["scatter_results"] = is_dp
+
     return torch_view(
         moe_apply(
             layer=layer,
@@ -106,5 +116,5 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
             weights=weights,
             moe_backend=quant_method_instance.moe_backend,
             mesh=quant_method_instance.mesh,
-            extra_backend_kwargs=quant_method_instance.extra_backend_kwargs,
+            extra_backend_kwargs=extra_kwargs,
         ))

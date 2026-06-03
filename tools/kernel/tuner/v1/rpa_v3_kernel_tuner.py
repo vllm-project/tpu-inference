@@ -263,9 +263,9 @@ class RpaV3KernelTuner(KernelTunerBase):
 
     def generate_inputs(self, tuning_key: TuningKey):
         # Generate some mock inputs for the kernel based on the tuning key.
-        if self._TUNING_KEY and tuning_key == self._TUNING_KEY:
-            return self._KERNEL_INPUTS_CACHE
-        self._TUNING_KEY = tuning_key
+        if self._tuning_key and tuning_key == self._tuning_key:
+            return self._kernel_inputs_cache
+        self._tuning_key = tuning_key
 
         cu_q_lens, kv_lens, decode_end = get_decode_heavy_example(
             self.max_num_tokens,
@@ -337,7 +337,7 @@ class RpaV3KernelTuner(KernelTunerBase):
             [decode_end, actual_num_seqs, actual_num_seqs], dtype=jnp.int32)
         logger.info(f"[Debug] {distribution=}")
 
-        self._KERNEL_INPUTS_CACHE = {
+        self._kernel_inputs_cache = {
             "cu_q_lens": cu_q_lens,
             "kv_lens": kv_lens,
             "decode_end": decode_end,
@@ -348,7 +348,7 @@ class RpaV3KernelTuner(KernelTunerBase):
             "page_indices": page_indices,
             "distribution": distribution,
         }
-        return self._KERNEL_INPUTS_CACHE
+        return self._kernel_inputs_cache
 
     def run(self,
             tuning_key: TuningKey,
