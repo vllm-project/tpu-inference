@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import TYPE_CHECKING
 
 import jax
@@ -33,6 +34,60 @@ class MultiModalManager:
 
     def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
+        # Per-budget JIT manager for the vision encoder, enabled via
+        # vLLM's compilation_config.cudagraph_mm_encoder (same flag the GPU
+        # EncoderCudaGraphManager uses), when the model implements the
+        # SupportsEncoderCudaGraph protocol. Lazy-init on first scheduled MM
+        # batch (the runner's params_and_buffers aren't fully bound until
+        # after weights load).
+        self._mm_encoder_jit_manager = None
+        self._mm_encoder_jit_init_attempted = False
+
+    def _maybe_init_mm_encoder_jit_manager(self):
+        """Lazy-init the per-budget JIT manager. No-op unless
+        ``compilation_config.cudagraph_mm_encoder`` is set and the model
+        implements the SupportsEncoderCudaGraph protocol. Runs at most once
+        per process. Mirrors the GPU runner's setup gate."""
+        if self._mm_encoder_jit_init_attempted:
+            return
+        self._mm_encoder_jit_init_attempted = True
+
+        comp_config = self.runner.vllm_config.compilation_config
+        if not comp_config.cudagraph_mm_encoder:
+            return
+
+        vllm_model = getattr(getattr(self.runner.model, "model", None),
+                             "vllm_model", None)
+        if vllm_model is None:
+            return
+        from vllm.model_executor.models.interfaces import \
+            supports_encoder_cudagraph
+        if not supports_encoder_cudagraph(vllm_model):
+            return
+
+        from tpu_inference.logger import init_logger
+        from tpu_inference.runner.mm_encoder_jit_manager import \
+            MMEncoderJITManager
+        _log = init_logger(__name__)
+        try:
+            self._mm_encoder_jit_manager = MMEncoderJITManager(
+                vllm_config=self.runner.vllm_config,
+                vllm_runner=self.runner.model.model,  # _VllmRunner
+                vllm_model=vllm_model,
+                params_and_buffers=self.runner.state_leaves,
+            )
+            _log.warning(
+                "[mm_encoder_jit] manager initialized — budgets=%s "
+                "max_batch_size=%d",
+                self._mm_encoder_jit_manager.token_budgets,
+                self._mm_encoder_jit_manager.max_batch_size)
+        except Exception as e:
+            import traceback
+            _log.error(
+                "[mm_encoder_jit] manager init FAILED — falling back to "
+                "embed_multimodal_fn: %s: %s\n%s",
+                type(e).__name__, e, traceback.format_exc())
+            self._mm_encoder_jit_manager = None
 
     def calc_mrope_positions(
         self,
@@ -131,8 +186,9 @@ class MultiModalManager:
         # in the same batch while still being able to benefit from batching
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
+        self._maybe_init_mm_encoder_jit_manager()
         encoder_outputs = []
-        for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
+        for modality, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -141,8 +197,13 @@ class MultiModalManager:
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            curr_group_outputs = self.runner.embed_multimodal_fn(
-                self.runner.state_leaves, **mm_kwargs_group)
+            if (self._mm_encoder_jit_manager is not None and
+                    self._mm_encoder_jit_manager.supports_modality(modality)):
+                curr_group_outputs = self._mm_encoder_jit_manager.execute(
+                    mm_kwargs_group)
+            else:
+                curr_group_outputs = self.runner.embed_multimodal_fn(
+                    self.runner.state_leaves, **mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -266,6 +327,29 @@ class MultiModalManager:
 
         if not mm_embeds:
             return None, None
+
+        # OPT1: bucket-pad mm_embeds + is_mm_embed_cpu so the downstream
+        # bool-indexed scatter inside vllm's `_merge_multimodal_embeddings`
+        # sees a stable shape signature across batches. Without this, each
+        # unique num_mm forces an XLA scatter recompile (~14s on TPU at
+        # hidden=5376). Flips the last `pad_n` False positions to True;
+        # those land in the tail padding region that the LM ignores.
+        if os.environ.get("TPU_OPT1_PAD_MM"):
+            BUCKET = int(os.environ.get("TPU_OPT1_BUCKET", "256"))
+            num_mm = int(sum(int(x.shape[0]) for x in mm_embeds))
+            K = ((num_mm + BUCKET - 1) // BUCKET) * BUCKET
+            pad_n = K - num_mm
+            if pad_n > 0:
+                false_idx = np.where(~is_mm_embed_cpu)[0]
+                n_to_flip = min(pad_n, len(false_idx))
+                if n_to_flip > 0:
+                    flip_positions = false_idx[-n_to_flip:]
+                    is_mm_embed_cpu[flip_positions] = True
+                    H = int(mm_embeds[0].shape[-1])
+                    zero_pad = jnp.zeros((n_to_flip, H),
+                                         dtype=mm_embeds[0].dtype)
+                    mm_embeds.append(zero_pad)
+
         is_mm_embed = jnp.array(is_mm_embed_cpu, dtype=jnp.bool_)
         assert target_pad_len == is_mm_embed.shape[0]
 

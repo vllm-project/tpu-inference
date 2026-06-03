@@ -121,13 +121,14 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         vllm_runner: torch.nn.Module,
         vllm_model: Any,
         params_and_buffers: Any,
-        token_budget_override: int = 0,
-        max_batch_size_override: int = 0,
     ):
         """
         Args:
-          vllm_config: The vllm config object (budget knobs come from
-              ``compilation_config.encoder_cudagraph_*``).
+          vllm_config: The vllm config object. Budget knobs are read by the
+              inherited ``EncoderCudaGraphManager.__init__`` from
+              ``compilation_config.encoder_cudagraph_token_budgets`` /
+              ``encoder_cudagraph_max_vision_items_per_batch`` /
+              ``encoder_cudagraph_max_frames_per_batch`` (same as GPU).
           vllm_runner: The torchax-wrapped ``_VllmRunner`` (provides
               ``forward(call_method=..., call_args=...)``-style dispatch
               required by ``torch.func.functional_call``).
@@ -136,9 +137,6 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
               ``SupportsEncoderCudaGraph``.
           params_and_buffers: The model's loaded weights as a pytree of
               JAX arrays. Bound into ``functional_call`` per request.
-          token_budget_override / max_batch_size_override: 0 to keep the
-              upstream-derived values. Non-zero forces a single budget /
-              fixed batch size (env-driven A/B knobs).
         """
         from tpu_inference.utils import to_jax_dtype
 
@@ -167,22 +165,6 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         # metadata-cache path (the adapter would delegate, but referencing
         # the model directly is clearer).
         self.vllm_model = vllm_model
-
-        # Local single-budget / fixed-batch overrides (env-driven A/B). 0
-        # keeps the upstream-derived values from super().__init__.
-        if token_budget_override > 0:
-            self.token_budgets = [token_budget_override]
-        if max_batch_size_override > 0:
-            self.max_batch_size = max_batch_size_override
-        # Re-assert the parent's invariant (max_batch_size <= min budget) so
-        # per_item_output >= 1 in the capture grid.
-        min_tb = min(self.token_budgets)
-        if self.max_batch_size > min_tb:
-            logger.warning(
-                "[mm_encoder_jit] capping max_batch_size %d -> %d to "
-                "keep per_item_output >= 1 for smallest budget %d",
-                self.max_batch_size, min_tb, min_tb)
-            self.max_batch_size = min_tb
 
         # Capture templates per budget — shape signature reference for
         # host-side padding. The values inside templates are dummy; only
