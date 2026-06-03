@@ -56,9 +56,8 @@ from tpu_inference.lora.lora_manager import (TPULRUCacheWorkerLoRAManager,
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
-from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
-    maybe_apply_qwen3_vl_patches
+from tpu_inference.models.vllm.experimental.model_patcher import (
+    apply_model_specific_patches, patch_mm_model)
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
     maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn,
     maybe_prepare_for_jit)
@@ -257,7 +256,7 @@ class VllmModelWrapper:
             )
 
         # NOTE: Apply Qwen3-VL model specific patches
-        maybe_apply_qwen3_vl_patches(self.model.vllm_model)
+        apply_model_specific_patches(self.model.vllm_model)
 
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
@@ -473,6 +472,7 @@ class VllmModelWrapper:
                     k: jax.tree.map(move, v)
                     for k, v in kwargs.items()
                 }
+
                 return maybe_jit_embed_multimodal_func(
                     embed_multimodal_func_jax,
                     self.model.vllm_model)(params_and_buffers, **call_kwargs)

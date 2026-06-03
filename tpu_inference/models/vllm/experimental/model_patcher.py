@@ -30,6 +30,10 @@ from torchax.interop import JittableModule, torch_view
 
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
+from tpu_inference.models.vllm.experimental.qwen3_omni_patcher import \
+    maybe_apply_qwen3_omni_patches
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
+    maybe_apply_qwen3_vl_patches
 
 if TYPE_CHECKING:
     from tpu_inference.models.vllm.vllm_model_wrapper import _VllmRunner
@@ -201,3 +205,10 @@ def patch_mm_model(
         logger.info("Jit module %s", module_key)
 
     return model, params_and_buffers
+
+
+def apply_model_specific_patches(vllm_model) -> None:
+    """A consolidated entrypoint to apply model-specific JIT patches.
+    """
+    maybe_apply_qwen3_vl_patches(vllm_model)
+    maybe_apply_qwen3_omni_patches(vllm_model)
