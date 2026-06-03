@@ -28,18 +28,21 @@ device-bound methods, inheriting everything algorithmic:
       template shape, then call the once-built ``jax.jit`` closure. The XLA
       cache hits on the per-budget shape signature regardless of the actual
       ``image_grid_thw`` values.
-    * ``execute`` — run the inherited ``_execute_local`` inside one
-      ``torchax.default_env()`` (plain-torch prep falls through untouched;
-      the encoder output flows as torchax tensors through
-      ``postprocess_encoder_output`` / ``scatter_output_slices``) and bridge
-      the per-item outputs back to ``jax.Array`` at the boundary.
+    * ``execute`` — run the inherited ``_execute_local`` in plain-torch
+      context (NO outer torchax env): item selection and replay-buffer prep
+      stay as normal torch (they index model Parameters), while the per-budget
+      JIT and the eager fallback each enter the torchax env locally and emit
+      ``jax.Array``. The encoder outputs flow as jax arrays end-to-end, so the
+      result is already the ``list[jax.Array]`` the caller expects.
 
-The inherited ``_execute_local`` calls ``model.encoder_eager_forward`` for
-the oversize-item fallback. On TPU the model's own weights are meta/empty —
-the real params live in ``params_and_buffers`` — so we pass a thin
-``_TorchaxEncoderModelAdapter`` as the ``model`` to the parent: it bridges
-``encoder_eager_forward`` through ``functional_call`` and delegates every
-other protocol method to the real vLLM model.
+The inherited ``_execute_local`` calls ``model.encoder_eager_forward`` and
+``model.postprocess_encoder_output``. On TPU the model's own weights are
+meta/empty — the real params live in ``params_and_buffers`` — so we pass a
+thin ``_TorchaxEncoderModelAdapter`` as the ``model`` to the parent: it
+bridges ``encoder_eager_forward`` through ``functional_call`` (returning a
+``jax.Array``), provides a jax-array ``postprocess_encoder_output`` that
+scatters per-item slices, and delegates every other protocol method to the
+real vLLM model.
 
 The JIT closure is built once at init (the v7 cache-share lesson — see
 ``round2_bench/perf_report.html`` §6.6 for the per-call PjitFunction trap
@@ -87,25 +90,46 @@ class _TorchaxEncoderModelAdapter:
         self._runner = vllm_runner
         self._params = params_and_buffers
 
-    def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
-        # Bridge plain-torch mm_kwargs -> torchax, dispatch the model's
-        # eager vision forward via functional_call (binds the real TPU
-        # weights), return a torchax tensor. The caller (inherited
-        # _execute_local) slices/clones it under the active torchax env.
-        torchax_kwargs = {
-            k: jax.tree.map(_torchax_view_if_torch, v)
-            for k, v in mm_kwargs.items()
-        }
-        return torch.func.functional_call(
-            self._runner,
-            torch_view(self._params),
-            kwargs={
-                "call_method": "encoder_eager_forward",
-                "call_args": (torchax_kwargs, ),
-                "call_kwargs": {},
-            },
-            tie_weights=False,
-        )
+    def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> jax.Array:
+        # Bridge plain-torch mm_kwargs -> torchax, dispatch the model's eager
+        # vision forward via functional_call (binds the real TPU weights),
+        # and return a jax.Array. The torchax env is entered locally here so
+        # the inherited _execute_local can stay in plain-torch context (its
+        # replay-buffer prep indexes model Parameters, which must NOT run
+        # under the torchax dispatch).
+        with torchax.default_env():
+            torchax_kwargs = {
+                k: jax.tree.map(_torchax_view_if_torch, v)
+                for k, v in mm_kwargs.items()
+            }
+            out_torch = torch.func.functional_call(
+                self._runner,
+                torch_view(self._params),
+                kwargs={
+                    "call_method": "encoder_eager_forward",
+                    "call_args": (torchax_kwargs, ),
+                    "call_kwargs": {},
+                },
+                tie_weights=False,
+            )
+            return jax_view(out_torch)
+
+    def postprocess_encoder_output(self,
+                                   output: jax.Array,
+                                   indices: list[int],
+                                   per_item_out_tokens: list[int],
+                                   dest,
+                                   clone: bool = False,
+                                   batch_mm_kwargs=None) -> None:
+        # jax-array analog of the model's default postprocess (which calls
+        # scatter_output_slices + torch .clone()). The encoder output is a
+        # jax.Array here, so slice per item and scatter; jax arrays are
+        # immutable, so ``clone`` is a no-op.
+        offset = 0
+        for idx in indices:
+            n = per_item_out_tokens[idx]
+            dest[idx] = output[offset:offset + n]
+            offset += n
 
     def __getattr__(self, name: str) -> Any:
         # Delegate all non-overridden protocol methods to the real model.
@@ -188,11 +212,11 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         # on this instance and accumulates per-shape entries from here).
         self._jit_forward = jax.jit(self._build_forward_closure())
 
-        # Per-shape JAX-side metadata cache used when
+        # Per-shape plain-torch metadata cache used when
         # ``USE_ENCODER_METADATA_CACHE=1``. Maps cache_key -> {key:
-        # jax.Array} for all keys EXCEPT pixel_values. See
-        # _prepare_padded_jax for the cache_key construction.
-        self._cache_metadata_jax: dict[Any, dict] = {}
+        # torch.Tensor} for all keys EXCEPT pixel_values. See
+        # _prepare_padded_torch for the cache_key construction.
+        self._cache_metadata_torch: dict[Any, dict] = {}
 
     # ----- JIT forward closure -----
 
@@ -270,21 +294,25 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
             padded[key] = buf
         return padded
 
-    def _prepare_padded_jax(
+    def _prepare_padded_torch(
         self,
         mm_kwargs: dict[str, Any],
         token_budget: int,
-    ) -> dict[str, jax.Array]:
-        """Build the full padded, jax-converted buffer dict for one batch.
+    ) -> dict[str, torch.Tensor]:
+        """Build the full padded (plain-torch) buffer dict for one batch.
+
+        Runs entirely OUTSIDE the torchax env: the model's
+        ``prepare_encoder_cudagraph_replay_buffers`` indexes model
+        Parameters (``fast_pos_embed_interpolate``), which must dispatch as
+        normal torch, not through torchax. The t2j conversion to jax happens
+        later, inside ``_run_budget_graph``'s env block.
 
         Optional metadata cache (``USE_ENCODER_METADATA_CACHE=1``): skip the
-        expensive ``prepare_encoder_cudagraph_replay_buffers`` call
-        (fast_pos_embed_interpolate + rot_pos_emb host CPU work) when we have
-        seen this (budget, grid_thw) before. Only the (h,w)-derived METADATA
-        tensors are cached; ``pixel_values`` always comes fresh from the real
-        call to avoid the stale-input bug from earlier probe versions.
-
-        Must be called inside an active ``torchax.default_env()``.
+        expensive replay-buffer prep (fast_pos_embed_interpolate + rot_pos_emb
+        host CPU work) when we have seen this (budget, grid_thw) before. Only
+        the (h,w)-derived METADATA tensors are cached; ``pixel_values`` always
+        comes fresh from the real call to avoid the stale-input bug from
+        earlier probe versions.
         """
         use_cache = os.environ.get("USE_ENCODER_METADATA_CACHE", "0") == "1"
         _grid = self.vllm_model._get_grid_thw_by_modality(mm_kwargs)
@@ -295,8 +323,8 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
                          tuple(g) if isinstance(g, list) else g
                          for g in _grid))
 
-        if use_cache and cache_key in self._cache_metadata_jax:
-            cached_jax = self._cache_metadata_jax[cache_key]
+        if use_cache and cache_key in self._cache_metadata_torch:
+            cached = self._cache_metadata_torch[cache_key]
             # Build (fresh pixel_values) + (cached metadata).
             fresh_pv = self.vllm_model._get_pixel_values_by_modality(mm_kwargs)
             tmpl_pv = self.budget_templates[token_budget].get("pixel_values")
@@ -307,26 +335,19 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
                 pv_padded = buf
             else:
                 pv_padded = fresh_pv
-            padded_jax = dict(cached_jax)
-            padded_jax["pixel_values"] = jax.tree.map(_t2j_if_tensor,
-                                                      pv_padded)
-            return padded_jax
+            return {**cached, "pixel_values": pv_padded}
 
         replay = self.model.prepare_encoder_cudagraph_replay_buffers(
             mm_kwargs, self.max_batch_size, self.max_frames_per_batch)
         padded_torch = self._pad_to_template(replay.values, token_budget)
-        padded_jax = {
-            k: jax.tree.map(_t2j_if_tensor, v)
-            for k, v in padded_torch.items()
-        }
         if use_cache:
             # Cache ONLY metadata; pixel_values is replaced by a fresh
             # extraction next time.
-            self._cache_metadata_jax[cache_key] = {
+            self._cache_metadata_torch[cache_key] = {
                 k: v
-                for k, v in padded_jax.items() if k != "pixel_values"
+                for k, v in padded_torch.items() if k != "pixel_values"
             }
-        return padded_jax
+        return padded_torch
 
     # ----- Overrides of the CUDA-graph device hooks -----
 
@@ -356,16 +377,15 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         self,
         mm_kwargs: dict[str, Any],
         token_budget: int,
-    ) -> torch.Tensor | None:
+    ) -> jax.Array | None:
         """XLA-cache analog of CUDA-graph replay.
 
-        Host-pads the replay buffers to the budget template shape and calls
-        the once-built ``jax.jit`` closure. Returns the encoder output as a
-        **torchax tensor** so the inherited ``_execute_local`` can slice and
-        clone it through ``postprocess_encoder_output`` under the active
-        torchax env. The jax bridge happens at the ``execute`` boundary.
-
-        Must be called inside an active ``torchax.default_env()``.
+        Host-pads the replay buffers to the budget template shape (plain
+        torch, outside the env) and calls the once-built ``jax.jit`` closure
+        inside a local ``torchax.default_env()``. Returns the encoder output
+        as a **jax.Array**, which the inherited ``_execute_local`` slices via
+        the adapter's jax-friendly ``postprocess_encoder_output`` — no outer
+        torchax env required.
         """
         from vllm.ir import enable_torch_wrap
 
@@ -376,29 +396,35 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
             self.graph_misses += num_items
             return None
 
-        padded_jax = self._prepare_padded_jax(mm_kwargs, token_budget)
-        with enable_torch_wrap(False):
+        # Prep in plain torch (touches model Parameters) — OUTSIDE the env.
+        padded_torch = self._prepare_padded_torch(mm_kwargs, token_budget)
+        # Convert + JIT — INSIDE the env (the closure bridges torchax<->jax).
+        with torchax.default_env(), enable_torch_wrap(False):
+            padded_jax = {
+                k: jax.tree.map(_t2j_if_tensor, v)
+                for k, v in padded_torch.items()
+            }
             out_jax = self._jit_forward(self.params_and_buffers, padded_jax)
         self.graph_hits += num_items
-        return torch_view(out_jax)
+        return out_jax
 
     def execute(self, mm_kwargs: dict[str, Any]) -> list[jax.Array]:
         """Run the encoder on one MM batch and return per-item outputs.
 
-        Reuses the inherited greedy bin-packing ``_execute_local`` wholesale,
-        running it inside one ``torchax.default_env()``: plain-torch prep
-        (item selection, replay-buffer prep, host padding) falls through
-        untouched, while the encoder output flows as torchax tensors through
-        ``postprocess_encoder_output`` / ``scatter_output_slices``. Outputs
-        are bridged to ``jax.Array`` at the boundary so the caller behaves
-        like ``runner.embed_multimodal_fn(...)``.
+        Reuses the inherited greedy bin-packing ``_execute_local`` wholesale.
+        It runs in plain-torch context (no outer torchax env): item
+        selection and replay-buffer prep stay as normal torch (they index
+        model Parameters), while the per-budget JIT forward and the eager
+        fallback each enter the torchax env locally and return ``jax.Array``.
+        The encoder outputs flow as jax arrays through the adapter's
+        ``postprocess_encoder_output`` / ``scatter_output_slices``, so the
+        result is already a ``list[jax.Array]`` — matching what the caller
+        expects from ``runner.embed_multimodal_fn(...)``.
         """
         assert not self.use_dp, (
             "[mm_encoder_jit] data-parallel encoder path uses torch "
             "collectives and is unsupported on the TPU manager")
-        with torchax.default_env():
-            torch_outputs = self._execute_local(mm_kwargs)
-            return [jax_view(t) for t in torch_outputs]
+        return self._execute_local(mm_kwargs)
 
 
 def _t2j_if_tensor(v):
