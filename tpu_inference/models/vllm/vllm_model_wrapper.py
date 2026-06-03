@@ -20,6 +20,7 @@ from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
 import jax
+import jax.profiler
 import numpy as np
 import torch
 import torch.nn
@@ -56,11 +57,15 @@ from tpu_inference.lora.lora_manager import (TPULRUCacheWorkerLoRAManager,
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.models.jax.utils.multi_modal_utils import \
+    flatten_pad_mm_embeds
 from tpu_inference.models.vllm.experimental.model_patcher import (
     apply_model_specific_patches, patch_mm_model)
+from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import (
+    is_qwen3_vl, maybe_apply_qwen3_vl_patches,
+    maybe_precompile_vision_encoder_fn)
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
-    maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn,
-    maybe_prepare_for_jit)
+    maybe_jit_embed_multimodal_func, maybe_prepare_for_jit)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
@@ -87,6 +92,50 @@ def _get_sc_allreduce_allgather_offload_min_size_bytes() -> int:
                 f"'{sc_threshold_val}'. Defaulting to 0 (always offload).")
             sc_threshold_bytes = 0
     return sc_threshold_bytes
+
+
+def _get_embed_multimodal_trace_name(function_prefix: str,
+                                     kwargs: dict) -> str:
+    pixel_values_img = kwargs.get("pixel_values")
+    pixel_values_vid = kwargs.get("pixel_values_videos")
+
+    shapes = []
+    if pixel_values_img is not None:
+        shapes.append(
+            f"img_{pixel_values_img.shape[0]}-{pixel_values_img.shape[1]}")
+    if pixel_values_vid is not None:
+        shapes.append(
+            f"vid_{pixel_values_vid.shape[0]}-{pixel_values_vid.shape[1]}")
+    pv_shape = "_".join(shapes) if shapes else "unknown"
+
+    grid_thw_img = kwargs.get("image_grid_thw")
+    grid_thw_vid = kwargs.get("video_grid_thw")
+    grid_thw_gen = kwargs.get("grid_thw")
+
+    thw_parts = []
+
+    def format_thw(grid, prefix):
+        if grid is None:
+            return None
+        flat = grid.tolist() if hasattr(grid, "tolist") else list(grid)
+        return f"{prefix}_" + "_".join("-".join(map(str, row)) for row in flat)
+
+    thw_img_str = format_thw(grid_thw_img, "img")
+    if thw_img_str:
+        thw_parts.append(thw_img_str)
+    thw_vid_str = format_thw(grid_thw_vid, "vid")
+    if thw_vid_str:
+        thw_parts.append(thw_vid_str)
+    thw_gen_str = format_thw(grid_thw_gen, "gen")
+    if thw_gen_str:
+        thw_parts.append(thw_gen_str)
+
+    thw_str = "__".join(thw_parts)
+
+    trace_name = f"{function_prefix}{pv_shape}"
+    if thw_str:
+        trace_name += f"_thw_{thw_str}"
+    return trace_name
 
 
 class _VllmRunner(torch.nn.Module):
@@ -276,7 +325,11 @@ class VllmModelWrapper:
                 REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES,
             )
 
-        # NOTE: Apply Qwen3-VL model specific patches
+        maybe_apply_qwen3_vl_patches(
+            self.model.vllm_model,
+            wrapper=self,
+            params=params_and_buffers,
+        )
         apply_model_specific_patches(self.model.vllm_model)
 
         loading_end = time.time()
@@ -482,7 +535,6 @@ class VllmModelWrapper:
                 },
                 tie_weights=False,
             )
-
             return jax_view(output_from_torch)
 
         def embed_multimodal_func_torch(params_and_buffers: Any,
@@ -490,10 +542,12 @@ class VllmModelWrapper:
             # embed_multimodal_func_jax requires kwargs to be jax.Array such that jit can work
             # Here we move_to_jax, then call (maybe jit'ed) embed_multimodal_func_jax.
             with torchax.default_env(), enable_torch_wrap(False):
-
+                trace_name = _get_embed_multimodal_trace_name(
+                    "embed_multimodal_func_torch_", kwargs)
                 kwargs = maybe_prepare_for_jit(kwargs, self.model.vllm_model)
 
-                def move(v: torch.Tensor) -> torch.Tensor:
+                def torch_to_jax(v: torch.Tensor) -> torch.Tensor:
+                    """Converts torch tensor to jax Array. On TPU environment this effectively does h2d."""
                     if not isinstance(v, torch.Tensor):
                         logger.warning(f"Expect torch.Tensor, got {type(v)}")
                         return v
@@ -502,13 +556,15 @@ class VllmModelWrapper:
                 # Ensure all tensors are moved into accelerator so the
                 # computation with weights can work properly.
                 call_kwargs = {
-                    k: jax.tree.map(move, v)
+                    k: jax.tree.map(torch_to_jax, v)
                     for k, v in kwargs.items()
                 }
-
-                return maybe_jit_embed_multimodal_func(
-                    embed_multimodal_func_jax,
-                    self.model.vllm_model)(params_and_buffers, **call_kwargs)
+                with jax.profiler.TraceAnnotation(trace_name):
+                    res = maybe_jit_embed_multimodal_func(
+                        embed_multimodal_func_jax,
+                        self.model.vllm_model)(params_and_buffers,
+                                               **call_kwargs)
+                return res
 
         return embed_multimodal_func_torch
 
@@ -524,6 +580,12 @@ class VllmModelWrapper:
             *,
             is_multimodal: jax.Array | None = None,
         ) -> jax.Array:
+            # Avoid recompilation for the Qwen3-VL multimodal path.
+            if is_qwen3_vl(self.model.vllm_model) and mm_embeds is not None:
+                mm_embeds = flatten_pad_mm_embeds(mm_embeds,
+                                                  input_ids.shape[0],
+                                                  is_multimodal)
+
             with torchax.default_env():
                 if mm_embeds is not None:
                     if isinstance(mm_embeds, list):
@@ -547,7 +609,9 @@ class VllmModelWrapper:
                     tie_weights=False,
                 )
 
-                return jax_view(output_from_torch)
+                res = jax_view(output_from_torch)
+
+            return res
 
         return embed_input_ids_func
 
