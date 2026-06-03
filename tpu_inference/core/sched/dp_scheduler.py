@@ -68,6 +68,7 @@ class SchedulerCommand(Enum):
     GET_REQUEST_COUNTS = "get_request_counts"
     GET_TOKEN_COUNT = "get_token_count"
     GET_PENDING_PREFILL_TOKENS = "get_pending_prefill_tokens"
+    GET_MIN_REMAINING_OUTPUT = "get_min_remaining_output"
     PROBE_COMPUTED_BLOCKS = "probe_computed_blocks"
     RESET_ENCODER_CACHE = "reset_encoder_cache"
     SET_PAUSE_STATE = "set_pause_state"
@@ -252,6 +253,19 @@ def _scheduler_worker_process(
                     for req in scheduler.waiting:
                         pending += req.num_prompt_tokens
                     _send_result(pending)
+
+                case SchedulerCommand.GET_MIN_REMAINING_OUTPUT:
+                    # Smallest (max_tokens - len(output_token_ids)) across
+                    # this rank's running reqs. Used as an admission
+                    # tiebreaker: lower = a running req closer to its
+                    # max_tokens, so this rank will likely free a slot
+                    # soonest.
+                    if not scheduler.running:
+                        _send_result(2**31 - 1)
+                    else:
+                        _send_result(
+                            min(r.max_tokens - len(r.output_token_ids)
+                                for r in scheduler.running))
 
                 case SchedulerCommand.PROBE_COMPUTED_BLOCKS:
                     # Probe for cached blocks without recording prefix cache stats.
@@ -598,12 +612,70 @@ class DPScheduler(SchedulerInterface):
 
         return pending
 
+    def _get_rank_inflight_reqs(self) -> Dict[int, int]:
+        """Per-rank count of in-flight requests (running + waiting)."""
+        for rank in range(self.dp_size):
+            self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
+
+        inflight: Dict[int, int] = {}
+        for rank in range(self.dp_size):
+            running, waiting = self._get_result(
+                rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            inflight[rank] = running + waiting
+
+        return inflight
+
+    def _get_rank_min_remaining_output(self) -> Dict[int, int]:
+        """Per-rank min (max_tokens - len(output_token_ids)) across running
+        reqs. Lower = a running req closer to its max_tokens, so this rank
+        will likely free a slot soonest. Used as an admission tiebreaker."""
+        for rank in range(self.dp_size):
+            self._send_command(rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+        result: Dict[int, int] = {}
+        for rank in range(self.dp_size):
+            result[rank] = self._get_result(
+                rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+        return result
+
+    def _get_rank_routing_state(
+            self) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, int]]:
+        """Per-rank (pending_prefill_tokens, inflight_reqs,
+        min_remaining_output) collected in a single round-trip.
+
+        Send all comments first and collect all results after to
+        allow pipelinening across ranks, minimizing the overhead."""
+        for rank in range(self.dp_size):
+            self._send_command(rank,
+                               SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
+            self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            self._send_command(rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+
+        pending: Dict[int, int] = {}
+        inflight: Dict[int, int] = {}
+        min_remaining: Dict[int, int] = {}
+        for rank in range(self.dp_size):
+            pending[rank] = self._get_result(
+                rank, SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
+            running, waiting = self._get_result(
+                rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            inflight[rank] = running + waiting
+            min_remaining[rank] = self._get_result(
+                rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+        return pending, inflight, min_remaining
+
     def _find_best_rank_for_request(self, request: Request) -> int:
         """Find the best DP rank for a new request based on load balancing.
 
         Two-tier strategy:
         1. Prefix cache hit: assign to rank with best cache hit.
-        2. Otherwise: pick rank with the fewest pending prefill tokens.
+        2. Otherwise:
+           - Primary key: fewest pending prefill tokens (keeps prefill
+             balanced across ranks).
+           - Secondary key: fewest in-flight reqs (balances decode load
+             across ranks under DP lockstep once prefills finish).
+           - Tertiary key: rank whose running req is closest to its
+             max_tokens (smallest remaining output tokens), which is
+             most likely to free a slot soon.
         """
         # First, try to find a rank with prefix cache hit.
         if self.vllm_config.cache_config.enable_prefix_caching:
@@ -623,8 +695,9 @@ class DPScheduler(SchedulerInterface):
             if best_cache_tokens > 0:
                 return best_cache_rank
 
-        pending = self._get_rank_pending_prefill_tokens()
-        return min(pending, key=pending.get)
+        pending, inflight, min_remaining = self._get_rank_routing_state()
+        return min(range(self.dp_size),
+                   key=lambda r: (pending[r], inflight[r], min_remaining[r]))
 
     def add_request(self, request: Request) -> None:
         """
