@@ -1489,7 +1489,8 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
         if do_language_embed_multimodal:
             inputs_embeds = self.language_model.embed_tokens(input_ids)
         else:
-            embed_shape = (*input_ids.shape, self.config.hidden_size)
+            text_config = getattr(self.config, "text_config", self.config)
+            embed_shape = (*input_ids.shape, text_config.hidden_size)
             inputs_embeds = jnp.zeros(
                 embed_shape, dtype=self.vllm_config.model_config.dtype)
 
@@ -1514,16 +1515,31 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
     def embed_input_ids(
         self,
         input_ids: jax.Array,
-        multimodal_embeddings: Optional[jax.Array] = None,
+        multimodal_embeddings: Optional[Union[jax.Array,
+                                              Tuple[jax.Array,
+                                                    List[jax.Array]]]] = None,
         *,
         is_multimodal: jax.Array | None = None,
     ) -> jax.Array:
         """Compute input embeddings and merge multimodal embeddings if present."""
-        return self.get_input_embeddings(
+        if isinstance(multimodal_embeddings, tuple):
+            mm_embeds_actual, deepstack_embeds = multimodal_embeddings
+        else:
+            mm_embeds_actual = multimodal_embeddings
+            deepstack_embeds = None
+
+        inputs_embeds = self.get_input_embeddings(
             input_ids,
-            multimodal_embeddings,
+            mm_embeds_actual,
             is_multimodal=is_multimodal,
         )
+
+        if deepstack_embeds is not None:
+            inputs_embeds = jnp.concatenate([inputs_embeds] +
+                                            list(deepstack_embeds),
+                                            axis=-1)
+
+        return inputs_embeds
 
     def _parse_and_validate_image_input(
             self, image_grid_thw: Tuple[Tuple[int, int, int], ...],
@@ -1655,10 +1671,22 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
         _intermediate_tensors=None,
         _is_first_rank: bool = True,
         _is_last_rank: bool = True,
-        deepstack_embeds: Optional[Union[List[jax.Array], Tuple[jax.Array,
-                                                                ...]]] = None,
+        *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
                Optional[jax.Array]]:
+
+        if inputs_embeds is not None:
+            text_config = getattr(self.config, "text_config", self.config)
+            expected_concat_dim = 4 * text_config.hidden_size
+            if inputs_embeds.shape[-1] == expected_concat_dim:
+                inputs_embeds, ds0, ds1, ds2 = jnp.split(inputs_embeds,
+                                                         4,
+                                                         axis=-1)
+                deepstack_embeds = [ds0, ds1, ds2]
+            else:
+                deepstack_embeds = None
+        else:
+            deepstack_embeds = None
         visual_pos_mask = None
 
         if deepstack_embeds is not None and input_ids is not None:

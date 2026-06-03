@@ -152,9 +152,10 @@ class CompilationManager:
             )
             hf_conf = self.runner.vllm_config.model_config.hf_config
 
-            # Identify multimodal embedding size
+            # Identify multimodal embedding size and if deepstack is used
             mm_hidden_size = hidden_size
             vision_config = getattr(hf_conf, "vision_config", None)
+            has_deepstack = False
 
             if vision_config:
                 visual_dim = getattr(vision_config, "out_hidden_size", None)
@@ -162,14 +163,17 @@ class CompilationManager:
                     deepstack_indexes = getattr(vision_config,
                                                 "deepstack_visual_indexes",
                                                 None)
-                    # Concatenation logic is only used in patched PyTorch (TorchAX) path.
-                    # Native JAX model passes DeepStack features statelessly.
                     model_module = self.runner.model.__class__.__module__ if self.runner.model is not None else ""
-                    if deepstack_indexes is not None and "vllm" in model_module:
-                        deepstack_levels = len(deepstack_indexes)
-                        mm_hidden_size = visual_dim * (1 + deepstack_levels)
-                    else:
-                        mm_hidden_size = visual_dim
+                    if deepstack_indexes is not None:
+                        if "qwen3_vl" in model_module:
+                            has_deepstack = True
+
+                        if "vllm" in model_module:
+                            deepstack_levels = len(deepstack_indexes)
+                            mm_hidden_size = visual_dim * (1 +
+                                                           deepstack_levels)
+                        else:
+                            mm_hidden_size = visual_dim
 
             sharding = NamedSharding(
                 self.runner.mesh,
@@ -186,13 +190,23 @@ class CompilationManager:
             dummy_is_multimodal = self._create_dummy_tensor(
                 (num_tokens, ), jnp.bool_, sharding=input_sharding)
 
+            if has_deepstack:
+                dummy_ds = [
+                    self._create_dummy_tensor(
+                        (num_tokens, mm_hidden_size),
+                        self.runner.vllm_config.model_config.dtype,
+                        sharding=sharding) for _ in range(3)
+                ]
+                mm_embeds_arg = ([dummy_multimodal_embeddings], dummy_ds)
+            else:
+                mm_embeds_arg = [dummy_multimodal_embeddings]
+
             self._run_compilation(
                 "input_embeddings_merger",
                 self.runner.embed_input_ids_fn,
                 self.runner.state_leaves,
                 dummy_input_ids,
-                # Make _compute_deepstack_embeds happy.
-                [dummy_multimodal_embeddings],
+                mm_embeds_arg,
                 call_kwargs={"is_multimodal": dummy_is_multimodal},
                 num_tokens=num_tokens,
             )
@@ -572,14 +586,18 @@ class CompilationManager:
             if visual_dim is not None:
                 deepstack_indexes = getattr(vision_config,
                                             "deepstack_visual_indexes", None)
-                # Concatenation logic is only used in patched PyTorch (TorchAX) path.
-                # Native JAX model passes DeepStack features statelessly.
                 model_module = self.runner.model.__class__.__module__ if self.runner.model is not None else ""
-                if deepstack_indexes is not None and "vllm" in model_module:
-                    deepstack_levels = len(deepstack_indexes)
-                    embeds_hidden_size = visual_dim * (1 + deepstack_levels)
-                else:
-                    embeds_hidden_size = visual_dim
+                if deepstack_indexes is not None:
+                    if "vllm" in model_module:
+                        deepstack_levels = len(deepstack_indexes)
+                        embeds_hidden_size = visual_dim * (1 +
+                                                           deepstack_levels)
+                    elif "qwen3_vl" in model_module:
+                        deepstack_levels = len(deepstack_indexes)
+                        embeds_hidden_size = hidden_size * (1 +
+                                                            deepstack_levels)
+                    else:
+                        embeds_hidden_size = visual_dim
 
         # Compile for both standard (4k) and Deepstack (16k) dimensions if they differ
         hidden_sizes_to_compile = [hidden_size]
