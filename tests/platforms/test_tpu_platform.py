@@ -27,16 +27,12 @@ class TestTpuPlatform:
 
     @pytest.fixture(autouse=True)
     def _restore_multiprocess_dp_env(self):
-        # _resolve_multiprocess_dp writes os.environ directly; restore the
-        # flag and its resolved marker so values do not leak into other tests.
-        keys = ("TPU_MULTIPROCESS_DP", TpuPlatform._RESOLVED_MARKER_ENV)
-        saved = {k: os.environ.get(k) for k in keys}
+        saved = os.environ.get("TPU_MULTIPROCESS_DP")
         yield
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+        if saved is None:
+            os.environ.pop("TPU_MULTIPROCESS_DP", None)
+        else:
+            os.environ["TPU_MULTIPROCESS_DP"] = saved
 
     @pytest.fixture
     def vllm_config(self):
@@ -462,38 +458,40 @@ class TestTpuPlatform:
 
         assert os.environ["TPU_MULTIPROCESS_DP"] == preset
 
-    def test_resolve_multiprocess_dp_marker_skips_rederivation(
+    def test_resolve_multiprocess_dp_explicit_online_worker_ok(
             self, monkeypatch):
-        # A spawned worker (rank no longer -1, inherited "1") must trust the
-        # value even though its own context now looks offline -> no raise.
+        # An online API-server worker has _api_process_rank >= 0 (not -1) but
+        # inherits the explicit "1"; it must NOT be misread as offline and must
+        # not raise.
         monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
-        monkeypatch.setenv(TpuPlatform._RESOLVED_MARKER_ENV, "1")
+        monkeypatch.setattr(
+            "tpu_inference.platforms.tpu_platform.vllm_envs."
+            "VLLM_TPU_USING_PATHWAYS", False)
         vllm_config = self._dp_config(data_parallel_size=2,
                                       enable_dp_attention=False,
-                                      api_process_rank=0)
+                                      api_process_rank=2)
 
         TpuPlatform._resolve_multiprocess_dp(vllm_config)  # must not raise
 
         assert os.environ["TPU_MULTIPROCESS_DP"] == "1"
 
     @pytest.mark.parametrize(
-        "api_rank,dp_attn,pathways",
+        "dp_attn,pathways",
         [
-            (0, False, False),  # offline LLM()
-            (-1, True, False),  # attention DP
-            (-1, False, True),  # Pathways
+            (True, False),  # attention DP
+            (False, True),  # Pathways
         ])
     def test_resolve_multiprocess_dp_explicit_incompatible_raises(
-            self, monkeypatch, api_rank, dp_attn, pathways):
-        # An explicit TPU_MULTIPROCESS_DP=1 in an unsupported configuration
-        # must fail loudly rather than hang or be silently downgraded.
+            self, monkeypatch, dp_attn, pathways):
+        # An explicit TPU_MULTIPROCESS_DP=1 with attention DP or on Pathways
+        # must fail loudly rather than be silently downgraded.
         monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
         monkeypatch.setattr(
             "tpu_inference.platforms.tpu_platform.vllm_envs."
             "VLLM_TPU_USING_PATHWAYS", pathways)
         vllm_config = self._dp_config(data_parallel_size=2,
                                       enable_dp_attention=dp_attn,
-                                      api_process_rank=api_rank)
+                                      api_process_rank=-1)
 
         with pytest.raises(ValueError, match="TPU_MULTIPROCESS_DP=1"):
             TpuPlatform._resolve_multiprocess_dp(vllm_config)

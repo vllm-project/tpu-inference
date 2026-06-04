@@ -204,19 +204,22 @@ class TpuPlatform(Platform):
         enable_dp_attention = vllm_config.additional_config.get(
             "sharding", {}).get("sharding_strategy",
                                 {}).get("enable_dp_attention", False)
-        online_serving = getattr(pc, "_api_process_rank", 0) == -1
-        incompatible = enable_dp_attention or vllm_envs.VLLM_TPU_USING_PATHWAYS or not online_serving
+        incompatible = enable_dp_attention or vllm_envs.VLLM_TPU_USING_PATHWAYS
 
         requested = envs.TPU_MULTIPROCESS_DP
         if requested is not None:
             if requested and incompatible:
                 raise ValueError(
                     "TPU_MULTIPROCESS_DP=1 is not supported with attention DP "
-                    "(enable_dp_attention), on Pathways, or offline serving. Set "
+                    "(enable_dp_attention) or on Pathways. Set "
                     "TPU_MULTIPROCESS_DP=0 to use single-process SPMD DP.")
             return
 
-        os.environ["TPU_MULTIPROCESS_DP"] = ("1" if not incompatible else "0")
+        # Unset: only the `vllm serve` launcher (which sets _api_process_rank to
+        # -1) auto-enables it; offline LLM() (rank 0) falls back to SPMD.
+        online_serving = getattr(pc, "_api_process_rank", 0) == -1
+        os.environ["TPU_MULTIPROCESS_DP"] = ("1" if online_serving
+                                             and not incompatible else "0")
         logger.info("Resolved TPU_MULTIPROCESS_DP=%s",
                     os.environ["TPU_MULTIPROCESS_DP"])
 
