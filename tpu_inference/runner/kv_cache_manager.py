@@ -24,7 +24,11 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mla import MLAAttention
+from vllm.models.deepseek_v4.attention import (DeepseekV4IndexerCache,
+                                               DeepseekV4MLAAttention)
+from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.attention.backends.utils import (get_kv_cache_layout,
                                               set_kv_cache_layout)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -52,6 +56,13 @@ logger = init_logger(__name__)
 # default layout (order) used by kv cache manager
 # N=num_blocks, H=num_heads and D=head_size
 DEFAULT_KV_CACHE_LAYOUT = "NHD"
+
+
+def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
+    return isinstance(attn_module, DeepseekV4IndexerCache) or isinstance(
+        attn_module, DeepseekV4SWACache) or isinstance(
+            attn_module, DeepseekV4MLAAttention) or isinstance(
+                attn_module, CompressorStateCache)
 
 
 class KVCacheManager:
@@ -440,12 +451,17 @@ class KVCacheManager:
                               getattr(model_config, "hf_config", None))
         if self.use_mla:
             # Individually pad the RopE and latents
-            qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
-            padded_kv_lora_rank = common_utils.align_to(
-                text_config.kv_lora_rank, 128)
-            padded_qk_rope_head_dim = common_utils.align_to(
-                qk_rope_head_dim, 128)
-            mla_head_size = padded_kv_lora_rank + padded_qk_rope_head_dim
+            if "DeepseekV4ForCausalLM" in (
+                    self.runner.vllm_config.model_config.architectures):
+                mla_head_size = common_utils.align_to(text_config.head_dim,
+                                                      128)
+            else:
+                qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
+                padded_kv_lora_rank = common_utils.align_to(
+                    text_config.kv_lora_rank, 128)
+                padded_qk_rope_head_dim = common_utils.align_to(
+                    qk_rope_head_dim, 128)
+                mla_head_size = padded_kv_lora_rank + padded_qk_rope_head_dim
 
         if len(self.runner.vllm_config.compilation_config.
                static_forward_context) == 0:
@@ -531,7 +547,8 @@ class KVCacheManager:
         else:
             # Else propagate attention modules from compilation config.
             layers = get_layers_from_vllm_config(
-                self.runner.vllm_config, (Attention, MLAAttention, MambaBase))
+                self.runner.vllm_config,
+                (Attention, MLAAttention, MambaBase, AttentionLayerBase))
 
             has_attention = any(
                 isinstance(attn_module, (Attention))
@@ -557,7 +574,8 @@ class KVCacheManager:
             # throw exception for non-matched dimension between kv_cache
             # and actual dims. Disable sliding window for workaround.
             head_size_set = {
-                common_utils.get_padded_head_dim(attn_module.head_size)
+                common_utils.get_padded_head_dim(
+                    getattr(attn_module, "head_size", 0))
                 for attn_module in layers.values()
                 if not isinstance(attn_module, MambaBase)
             }
@@ -571,6 +589,15 @@ class KVCacheManager:
                         self.runner.vllm_config)
                     if spec is not None:
                         kv_cache_spec[layer_name] = spec
+                    continue
+
+                if is_cache_for_ds_v4(attn_module):
+                    spec = attn_module.get_kv_cache_spec(
+                        self.runner.vllm_config)
+                    assert spec is not None
+                    head_size = common_utils.align_to(spec.head_size, 128)
+                    kv_cache_spec[layer_name] = self._create_attention_spec(
+                        spec.block_size, 1, head_size)
                     continue
 
                 if disable_sliding_window:
@@ -824,18 +851,9 @@ class KVCacheManager:
                     # We should only init a new kv cache for the first layer in shared_by
                     # if duplicate_shared_layers is False.  Otherwise, if duplicate_shared_layers
                     # is True, we should init a new kv cache for each layer in shared_by
-                    model_config = self.runner.model_config
-                    text_config = getattr(
-                        model_config, "hf_text_config",
-                        getattr(model_config, "hf_config", None))
                     if j == 0 or duplicate_shared_layers:
                         # NOTE: we'll multiply the num_kv_heads by 2 in the function
-                        if self.use_mla:
-
-                            head_size = text_config.kv_lora_rank + \
-                                text_config.qk_rope_head_dim
-                        else:
-                            head_size = layer_spec.head_size
+                        head_size = layer_spec.head_size
 
                         kv_cache = create_kv_caches(
                             num_blocks=num_blocks,
