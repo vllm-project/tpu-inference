@@ -10,8 +10,8 @@
 * @vipannalla @kyuyeunk @QiliangCui
 
 # CI/CD and Build Configuration
-/.buildkite/ @jcyang43 @QiliangCui @yiw-wang @CienetStingLin
-/.github/ @jcyang43 @QiliangCui @yiw-wang @CienetStingLin
+/.buildkite/ @QiliangCui @yiw-wang @CienetStingLin
+/.github/ @QiliangCui @yiw-wang @CienetStingLin
 
 # Documentation
 /docs/ @bvrockwell @vipannalla
