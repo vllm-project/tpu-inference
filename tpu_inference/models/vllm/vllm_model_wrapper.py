@@ -276,7 +276,7 @@ class VllmModelWrapper:
                 REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES,
             )
 
-        # NOTE: Apply Qwen3-VL model specific patches
+        # NOTE: Apply model specific patches
         apply_model_specific_patches(self.model.vllm_model)
 
         loading_end = time.time()
@@ -298,7 +298,6 @@ class VllmModelWrapper:
             "post_spmd_conservative",
             "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
         }
-
         sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
         if sc_offload_bytes > 0:
             threshold_bytes = str(sc_offload_bytes)
@@ -506,7 +505,6 @@ class VllmModelWrapper:
                     k: jax.tree.map(move, v)
                     for k, v in kwargs.items()
                 }
-
                 return maybe_jit_embed_multimodal_func(
                     embed_multimodal_func_jax,
                     self.model.vllm_model)(params_and_buffers, **call_kwargs)
@@ -542,8 +540,10 @@ class VllmModelWrapper:
                         "call_method": "embed_input_ids",
                         "call_args": call_args,
                         "call_kwargs": {
-                            "is_multimodal": torch_view(is_multimodal)
-                        } if is_multimodal is not None else {},
+                            "is_multimodal":
+                            torch_view(is_multimodal)
+                            if is_multimodal is not None else False,
+                        },
                     },
                     tie_weights=False,
                 )

@@ -77,16 +77,6 @@ def _patched_set_deepstack(vllm_model, deepstack_input_embeds):
         for idx, v in enumerate(deepstack_input_embeds):
             key = f"deepstack_input_embeds_{idx}"
             vllm_model._deepstack_tensors[key] = v
-    elif torch.is_tensor(deepstack_input_embeds):
-        if deepstack_input_embeds.ndim == 3:
-            num_levels = deepstack_input_embeds.size(0)
-            for idx in range(num_levels):
-                key = f"deepstack_input_embeds_{idx}"
-                vllm_model._deepstack_tensors[key] = deepstack_input_embeds[
-                    idx]
-        else:
-            vllm_model._deepstack_tensors[
-                "deepstack_input_embeds_0"] = deepstack_input_embeds
 
 
 def _convert_to_torchax_tensor(v):
@@ -188,9 +178,16 @@ def _patched_forward(vllm_model,
                    False) and inputs_embeds.shape[-1] > vllm_model.visual_dim:
             packed_dim = inputs_embeds.shape[-1] - vllm_model.visual_dim
 
+            # Extract the raw JAX array from the torchax tensor.
+            # Slicing a JAX array and re-wrapping it prevents the creation of
+            # `torchax.view.View` objects, which Dynamo cannot handle (+ operator).
+            # This completely bypasses `.as_subclass` which raises AssertionErrors.
+            jax_inputs_embeds = jax_view(inputs_embeds)
+
             # Split combined embeddings back into text embeddings and packed vision features
-            deepstack_packed = inputs_embeds[..., vllm_model.visual_dim:]
-            inputs_embeds = inputs_embeds[..., :vllm_model.visual_dim]
+            jax_deepstack_packed = jax_inputs_embeds[...,
+                                                     vllm_model.visual_dim:]
+            jax_inputs_embeds = jax_inputs_embeds[..., :vllm_model.visual_dim]
 
             # Unpack the stacked vision features back into per-layer tensors
             deepstack_input_embeds = {}
@@ -202,11 +199,13 @@ def _patched_forward(vllm_model,
             for idx, layer_idx in enumerate(indexes):
                 start = idx * per_level_dim
                 end = (idx + 1) * per_level_dim
-                sliced = deepstack_packed[..., start:end]
-                # Convert to torchax view for JIT compatibility
-                sliced = torch_view(jax_view(sliced))
+                # Re-wrap the sliced JAX array into a standard torchax Tensor
+                sliced = torch_view(jax_deepstack_packed[..., start:end])
                 deepstack_input_embeds[
                     f"deepstack_input_embeds_{idx}"] = sliced
+
+            # Re-wrap the text embeddings back into a standard torchax Tensor
+            inputs_embeds = torch_view(jax_inputs_embeds)
 
             # Restore the unpacked features to the model's cache
             vllm_model._set_deepstack_input_embeds(deepstack_input_embeds)

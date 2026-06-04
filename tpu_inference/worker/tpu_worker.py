@@ -20,14 +20,6 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
-try:
-    from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
-except ImportError:
-    CompilationTimes = None
-    from vllm.v1.worker.worker_base import WorkerBase
-
-import torchax
-
 from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -39,6 +31,12 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.offload.metrics import TPUKVCacheStatsLogger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
+
+try:
+    from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
+except ImportError:
+    CompilationTimes = None
+    from vllm.v1.worker.worker_base import WorkerBase
 
 
 class CompatibleCompilationTimes(float):
@@ -549,11 +547,6 @@ class TPUWorker(WorkerBase):
 
     def load_model(self) -> None:
         self.model_runner.load_model()
-        # Globally enable torchax environment to avoid AssertionError during
-        # multimodal precompilation/inference where tracing context might
-        # lose local environment state. We do this after weight loading to
-        # avoid interfering with standard torch storage operations.
-        torchax.enable_globally()
 
     def compile_or_warm_up_model(self) -> Any:
         self.model_runner.capture_model()
