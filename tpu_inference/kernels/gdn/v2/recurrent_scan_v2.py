@@ -1135,80 +1135,14 @@ def recurrent_scan(
     decode_tokens = distribution[0]
     assert gdn_schedule_table is None or gdn_schedule_table.shape[
         0] > 0, "gdn_schedule_table must have non-zero length if provided"
-    if gdn_schedule_table is not None and gdn_total_blocks is not None:
-        print("Using cached GDN schedule table from tpu_runner")
-    else:
-        print("No cached GDN schedule table provided, computing locally")
+
     # Use cached GDN schedule table if provided, otherwise compute locally
     if gdn_schedule_table is not None and gdn_total_blocks is not None:
         # Use precomputed schedule table from tpu_runner
-        # gdn_total_blocks arrives as (1, 1) from shard_map slicing, squeeze to (1,)
         schedule_table = gdn_schedule_table
         total_blocks_arr = jnp.squeeze(gdn_total_blocks,
                                        axis=-1)  # (1, 1) -> (1,)
 
-        # ===== DEBUG: compare cached vs local table SHAPES (trace time) =====
-        _local_table, _local_total_blocks = (
-            compute_schedule_table_v2.compute_schedule_table_v2(
-                query_start_loc,
-                decode_tokens,
-                distribution[2],
-                num_tokens,
-                chunk_size,
-                BT,
-                alignment=sublanesize,
-            ))
-        print(
-            f"[GDN-DBG] cached_table.shape={schedule_table.shape} "
-            f"local_table.shape={_local_table.shape} "
-            f"(num_tokens={num_tokens} sublanesize={sublanesize} "
-            f"mixed_qkv.dtype={mixed_qkv.dtype} qsl={query_start_loc.shape})",
-            flush=True,
-        )
-        # Conditional per-rank content diff: compare the VALID rows (< total_blocks)
-        # of the cached table vs the locally-recomputed table element-wise, and only
-        # fire a host callback when they actually diverge. This is cheap in the
-        # common (no-divergence) case so it does not throttle throughput, but is
-        # loud the moment the cached schedule delivered to this rank is wrong.
-        _m = min(schedule_table.shape[0], _local_table.shape[0])
-        _cached_tb = total_blocks_arr[0]
-        _row_idx = jnp.arange(_m)
-        _valid_rows = (_row_idx < _cached_tb)[:, None]
-        _cell_diff = jnp.where(
-            _valid_rows,
-            schedule_table[:_m] != _local_table[:_m],
-            False,
-        )
-        _mismatch_cells = jnp.sum(_cell_diff.astype(jnp.int32))
-        # Also flag if the iteration count itself diverges.
-        _tb_mismatch = (_cached_tb != _local_total_blocks).astype(jnp.int32)
-        _any_mismatch = _mismatch_cells + _tb_mismatch
-
-        def _emit_mismatch(_):
-            jax.debug.print(
-                "[GDN-DBG-RT] MISMATCH! mismatch_cells={mm} "
-                "cached_total_blocks={c} local_total_blocks={l} "
-                "num_valid_seqs={n}",
-                mm=_mismatch_cells,
-                c=_cached_tb,
-                l=_local_total_blocks,
-                n=distribution[2],
-                # ordered=True,
-            )
-            return jnp.int32(0)
-
-        def _emit_noop(_):
-            return jnp.int32(0)
-
-        jax.lax.cond(_any_mismatch > 0,
-                     _emit_mismatch,
-                     _emit_noop,
-                     operand=None)
-        # ===== END DEBUG =====
-        print(
-            f"Recurrent scan v2: Using cached GDN schedule table with shape {schedule_table.shape} and total_blocks {total_blocks_arr[0]}"
-        )
-    # ALWAYS COMPUTE
     else:
         schedule_table, total_blocks = (
             compute_schedule_table_v2.compute_schedule_table_v2(
@@ -1271,8 +1205,8 @@ def recurrent_scan(
         input_output_aliases={1: 0},
         compiler_params=pltpu.CompilerParams(
             disable_bounds_checks=True,
-            vmem_limit_bytes=int(pltpu.get_tpu_info().vmem_capacity_bytes *
-                                 0.8),
+            # vmem_limit_bytes=int(pltpu.get_tpu_info().vmem_capacity_bytes *
+            #                      0.8),
         ),
     )(
         mixed_qkv,
