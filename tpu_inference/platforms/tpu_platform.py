@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import random
 from typing import TYPE_CHECKING, Optional, Tuple, Union
 
@@ -192,7 +193,37 @@ class TpuPlatform(Platform):
         logger.info(f"Initialized sharding configuration: {sharding_config}")
 
     @classmethod
+    def _resolve_multiprocess_dp(cls, vllm_config: VllmConfig) -> None:
+        """vLLM-native multi-process DP only works for online `vllm serve` (which
+        sets _api_process_rank to -1) with DP > 1, and not with attention DP or
+        on Pathways.
+        """
+        pc = vllm_config.parallel_config
+        if pc.data_parallel_size <= 1:
+            return
+        enable_dp_attention = vllm_config.additional_config.get(
+            "sharding", {}).get("sharding_strategy",
+                                {}).get("enable_dp_attention", False)
+        online_serving = getattr(pc, "_api_process_rank", 0) == -1
+        incompatible = enable_dp_attention or vllm_envs.VLLM_TPU_USING_PATHWAYS or not online_serving
+
+        requested = envs.TPU_MULTIPROCESS_DP
+        if requested is not None:
+            if requested and incompatible:
+                raise ValueError(
+                    "TPU_MULTIPROCESS_DP=1 is not supported with attention DP "
+                    "(enable_dp_attention), on Pathways, or offline serving. Set "
+                    "TPU_MULTIPROCESS_DP=0 to use single-process SPMD DP.")
+            return
+
+        os.environ["TPU_MULTIPROCESS_DP"] = ("1" if not incompatible else "0")
+        logger.info("Resolved TPU_MULTIPROCESS_DP=%s",
+                    os.environ["TPU_MULTIPROCESS_DP"])
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+
+        cls._resolve_multiprocess_dp(vllm_config)
 
         if vllm_envs.VLLM_TPU_USING_PATHWAYS:
             assert not vllm_envs.VLLM_ENABLE_V1_MULTIPROCESSING, (

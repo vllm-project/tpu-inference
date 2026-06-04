@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import jax.numpy as jnp
@@ -23,6 +24,19 @@ from tpu_inference.platforms.tpu_platform import TpuPlatform
 
 
 class TestTpuPlatform:
+
+    @pytest.fixture(autouse=True)
+    def _restore_multiprocess_dp_env(self):
+        # _resolve_multiprocess_dp writes os.environ directly; restore the
+        # flag and its resolved marker so values do not leak into other tests.
+        keys = ("TPU_MULTIPROCESS_DP", TpuPlatform._RESOLVED_MARKER_ENV)
+        saved = {k: os.environ.get(k) for k in keys}
+        yield
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     @pytest.fixture
     def vllm_config(self):
@@ -36,6 +50,7 @@ class TestTpuPlatform:
         vllm_config.model_config.use_mla = False
         vllm_config.scheduler_config = MagicMock(is_multimodal_model=False)
         vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.data_parallel_size = 1
         vllm_config.sharding_config = MagicMock()
         vllm_config.compilation_config = MagicMock(mode="dynamo_trace_once",
                                                    backend="openxla")
@@ -302,6 +317,7 @@ class TestTpuPlatform:
     def test_check_and_update_config_mla_checks(self):
         vllm_config = MagicMock()
         vllm_config.model_config.use_mla = True
+        vllm_config.parallel_config.data_parallel_size = 1
         vllm_config.additional_config = {}
 
         expected_msg = r"MLA models require both the NEW_MODEL_DESIGN=1 environment.*"
@@ -390,3 +406,105 @@ class TestTpuPlatform:
                                 pytest.fail(
                                     f"MLA check failed unexpectedly when VLLM_MLA_DISABLE was set: {e}"
                                 )
+
+    @staticmethod
+    def _dp_config(data_parallel_size, enable_dp_attention, api_process_rank):
+        vllm_config = MagicMock()
+        vllm_config.parallel_config.data_parallel_size = data_parallel_size
+        vllm_config.parallel_config._api_process_rank = api_process_rank
+        vllm_config.additional_config = {
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": enable_dp_attention
+                }
+            }
+        }
+        return vllm_config
+
+    @pytest.mark.parametrize(
+        "api_rank,dp_size,dp_attn,pathways,expected",
+        [
+            (-1, 2, False, False, "1"),  # online serve (rank -1), DP>1 -> on
+            (0, 2, False, False, "0"),  # offline LLM() (rank 0) -> off
+            (-1, 1, False, False, "0"),  # no DP -> off
+            (-1, 2, True, False, "0"),  # attention DP -> off
+            (-1, 2, False, True, "0"),  # Pathways -> off
+        ],
+    )
+    def test_resolve_multiprocess_dp_derives_when_unset(
+            self, monkeypatch, api_rank, dp_size, dp_attn, pathways, expected):
+        monkeypatch.delenv("TPU_MULTIPROCESS_DP", raising=False)
+        monkeypatch.setattr(
+            "tpu_inference.platforms.tpu_platform.vllm_envs."
+            "VLLM_TPU_USING_PATHWAYS", pathways)
+        vllm_config = self._dp_config(dp_size, dp_attn, api_rank)
+
+        TpuPlatform._resolve_multiprocess_dp(vllm_config)
+
+        # DP <= 1 is a no-op (left unset); otherwise it pins a concrete value.
+        assert os.environ.get("TPU_MULTIPROCESS_DP") == (expected if dp_size
+                                                         > 1 else None)
+
+    @pytest.mark.parametrize("preset", ["0", "1"])
+    def test_resolve_multiprocess_dp_preserves_explicit(
+            self, monkeypatch, preset):
+        # An explicit setting in a supported (online) context must not be
+        # overwritten.
+        monkeypatch.setenv("TPU_MULTIPROCESS_DP", preset)
+        monkeypatch.setattr(
+            "tpu_inference.platforms.tpu_platform.vllm_envs."
+            "VLLM_TPU_USING_PATHWAYS", False)
+        vllm_config = self._dp_config(data_parallel_size=2,
+                                      enable_dp_attention=False,
+                                      api_process_rank=-1)
+
+        TpuPlatform._resolve_multiprocess_dp(vllm_config)
+
+        assert os.environ["TPU_MULTIPROCESS_DP"] == preset
+
+    def test_resolve_multiprocess_dp_marker_skips_rederivation(
+            self, monkeypatch):
+        # A spawned worker (rank no longer -1, inherited "1") must trust the
+        # value even though its own context now looks offline -> no raise.
+        monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
+        monkeypatch.setenv(TpuPlatform._RESOLVED_MARKER_ENV, "1")
+        vllm_config = self._dp_config(data_parallel_size=2,
+                                      enable_dp_attention=False,
+                                      api_process_rank=0)
+
+        TpuPlatform._resolve_multiprocess_dp(vllm_config)  # must not raise
+
+        assert os.environ["TPU_MULTIPROCESS_DP"] == "1"
+
+    @pytest.mark.parametrize(
+        "api_rank,dp_attn,pathways",
+        [
+            (0, False, False),  # offline LLM()
+            (-1, True, False),  # attention DP
+            (-1, False, True),  # Pathways
+        ])
+    def test_resolve_multiprocess_dp_explicit_incompatible_raises(
+            self, monkeypatch, api_rank, dp_attn, pathways):
+        # An explicit TPU_MULTIPROCESS_DP=1 in an unsupported configuration
+        # must fail loudly rather than hang or be silently downgraded.
+        monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
+        monkeypatch.setattr(
+            "tpu_inference.platforms.tpu_platform.vllm_envs."
+            "VLLM_TPU_USING_PATHWAYS", pathways)
+        vllm_config = self._dp_config(data_parallel_size=2,
+                                      enable_dp_attention=dp_attn,
+                                      api_process_rank=api_rank)
+
+        with pytest.raises(ValueError, match="TPU_MULTIPROCESS_DP=1"):
+            TpuPlatform._resolve_multiprocess_dp(vllm_config)
+
+    def test_resolve_multiprocess_dp_explicit_incompatible_no_dp_ok(
+            self, monkeypatch):
+        # With DP <= 1 there is no multi-process DP, so an explicit opt-in in
+        # an otherwise-unsupported context is irrelevant and must not raise.
+        monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
+        vllm_config = self._dp_config(data_parallel_size=1,
+                                      enable_dp_attention=True,
+                                      api_process_rank=0)
+
+        TpuPlatform._resolve_multiprocess_dp(vllm_config)  # must not raise
