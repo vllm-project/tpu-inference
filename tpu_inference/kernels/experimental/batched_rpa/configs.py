@@ -76,7 +76,9 @@ class ServingConfigs:
 
     @property
     def page_size_mask(self) -> int:
-        assert self.page_size & (self.page_size - 1) == 0, f"Page {self.page_size} is not a power of 2."
+        assert self.page_size & (
+            self.page_size -
+            1) == 0, f"Page {self.page_size} is not a power of 2."
         return self.page_size - 1
 
     @property

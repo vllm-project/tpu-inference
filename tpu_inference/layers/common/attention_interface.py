@@ -408,6 +408,30 @@ def sharded_ragged_paged_attention(
         # is a no-op so we don't forward it to the hd64 signature.
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
+            # add the tuned block size here
+            # model_config = ModelConfigs(
+            #     num_q_heads=q.shape[1],
+            #     num_kv_heads=num_kv_heads,
+            #     head_dim=q.shape[-1],
+            #     sliding_window=kwargs["sliding_window"],
+            #     mask_value=-3.38953e+38,
+            #     sm_scale=sm_scale,
+            # )
+            # serve_config = ServingConfigs(
+            #     num_seqs=kv_lens.shape[0],
+            #     num_page_indices=page_indices.shape[0],
+            #     total_q_tokens=q.shape[0],
+            #     dtype_q=q.dtype,
+            #     dtype_kv=kv_cache.dtype,
+            #     dtype_out=q.dtype,
+            #     page_size=kv_cache.shape[1],
+            #     scale_q=q_scale,
+            #     scale_k=k_scale,
+            #     scale_v=v_scale,
+            # )
+            # kwargs["decode_block_sizes"], kwargs[
+            #     "prefill_block_sizes"] = get_tuned_params(
+            #         model_config=model_config, serve_config=serve_config)
         return func(*args, **kwargs)
 
     return jax.shard_map(
@@ -454,6 +478,19 @@ def attention(
         sm_scale = head_dim_original**-0.5
 
     md = attention_metadata
+    # sinks: jax.Array | None = None,
+    # update_kv_cache: bool = True,
+    # logger.debug(f'inputs: q = {q.shape} {q.devices()} \
+    #             k = {k.shape} {k.devices()} \
+    #             v = {v.shape} {v.devices()} \
+    #             kv_cache = {kv_cache.shape} {kv_cache.devices()} \
+    #             mesh = {mesh} \
+    #             md.seq_lens = {md.seq_lens.shape} {md.seq_lens.devices()} \
+    #             md.block_tables = {md.block_tables.shape} {md.block_tables.devices()} \
+    #             md.query_start_loc = {md.query_start_loc.shape} {md.query_start_loc.devices()} \
+    #             md.request_distribution = {md.request_distribution.shape} {md.request_distribution.devices()} \
+    #             sinks = {sinks.shape if sinks is not None else None} {sinks.devices() if sinks is not None else None} \
+    #             attention_chunk_size = {attention_chunk_size}')
 
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(

@@ -96,6 +96,8 @@ def convert_to_target_bitwidth(val, target_bitwidth: int, kv_dtype: jnp.dtype):
     curr_dtype = val.dtype
     curr_bitwidth = jax.dtypes.itemsize_bits(curr_dtype)
     assert target_bitwidth != curr_bitwidth, "No conversion is needed."
+    assert jnp.issubdtype(val.dtype,
+                          jnp.integer), "Only integer dtype is supported."
 
     # We split val into two vals (left and right) where each have half of the
     # original bitwidth.

@@ -130,7 +130,8 @@ class KernelTunerBase(ABC):
         if run_config.run_locally:
             from tools.kernel.tuner.v1.storage_management.local_db_manager import \
                 LocalDbManager
-            self.storage_manager = LocalDbManager()
+            self.storage_manager = LocalDbManager(
+                db_path=f'/tmp/kernel_tuner_runner_{run_config.case_set_desc}')
         else:
             from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
                 SpannerStorageManager
