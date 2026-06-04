@@ -1602,7 +1602,57 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return prompt_logprobs_dict
 
-    @functools.partial(jax.jit, static_argnums=(0, 3, 4))
+    def _get_precompute_gdn_fn(self, max_tokens: int, chunk_size: int):
+        """Returns a JIT-compiled shard_map fn for the given static args, cached per bucket.
+
+        Builds shard_map OUTSIDE jit so the full jit(shard_map(...)) is one
+        compiled XLA program dispatched on TPU.
+        """
+        if not hasattr(self, '_precompute_gdn_fn_cache'):
+            self._precompute_gdn_fn_cache = {}
+        key = (max_tokens, chunk_size)
+        if key not in self._precompute_gdn_fn_cache:
+            max_blocks = (max_tokens + chunk_size - 1) // chunk_size
+            max_num_seqs_per_rank = self.scheduler_config.max_num_seqs
+            safe_max_blocks = max_blocks + max_num_seqs_per_rank * 2
+            num_sublanes = pltpu.get_tpu_info().num_sublanes
+            qkv_dtype = to_jax_dtype(self.model_config.dtype)
+
+            def compute_schedule_local(
+                local_query_start_loc: jax.Array,
+                local_distribution: jax.Array,
+            ) -> tuple[jax.Array, jax.Array]:
+                decode_tokens = local_distribution[0]
+                num_valid_seqs = local_distribution[2]
+                return compute_schedule_table_v2.make_gdn_schedule_arrays(
+                    safe_max_blocks,
+                    qkv_dtype,
+                    num_sublanes,
+                    is_dummy=False,
+                    query_start_loc=local_query_start_loc,
+                    decode_tokens=decode_tokens,
+                    num_valid_seqs=num_valid_seqs,
+                    num_tokens=max_tokens,
+                    chunk_size=chunk_size,
+                    BT=chunk_size,
+                )
+
+            self._precompute_gdn_fn_cache[key] = jax.jit(
+                jax.shard_map(
+                    compute_schedule_local,
+                    mesh=self.mesh,
+                    in_specs=(
+                        PartitionSpec(ShardingAxisName.ATTN_DATA),
+                        PartitionSpec(ShardingAxisName.ATTN_DATA),
+                    ),
+                    out_specs=(
+                        PartitionSpec(ShardingAxisName.ATTN_DATA, None),
+                        PartitionSpec(ShardingAxisName.ATTN_DATA, None),
+                    ),
+                    check_vma=False,
+                ))
+        return self._precompute_gdn_fn_cache[key]
+
     def _precompute_gdn_schedule(
         self,
         query_start_loc: jax.Array,
@@ -1611,66 +1661,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         chunk_size: int,
     ) -> tuple[jax.Array, jax.Array]:
         """Precompute GDN schedule table on TPU for all DP ranks.
-        
+
         Args:
             query_start_loc: (dp_size * max_num_reqs_per_rank + dp_size,) start locations
             request_distribution: (dp_size * 3,) distribution per rank
             max_tokens: Maximum tokens across all DP ranks
             chunk_size: Chunk size for GDN computation
-            
+
         Returns:
             gdn_schedule_table: (dp_size * safe_max_blocks, cols) schedule table
             gdn_total_blocks: (dp_size, 1) total blocks per DP rank
         """
-        # Compute safe_max_blocks statically from configuration
-        max_blocks = (max_tokens + chunk_size - 1) // chunk_size
-        max_num_seqs_per_rank = self.scheduler_config.max_num_seqs
-        safe_max_blocks = max_blocks + max_num_seqs_per_rank * 2
-
-        # Dtype-aware sublane size: 4 // itemsize * num_sublanes
-        num_sublanes = pltpu.get_tpu_info().num_sublanes
-        qkv_dtype = to_jax_dtype(self.model_config.dtype)
-
-        def compute_schedule_local(
-            local_query_start_loc: jax.Array,
-            local_distribution: jax.Array,
-        ) -> tuple[jax.Array, jax.Array]:
-            """Compute schedule for a single DP rank."""
-            decode_tokens = local_distribution[0]
-            num_valid_seqs = local_distribution[2]
-            return compute_schedule_table_v2.make_gdn_schedule_arrays(
-                safe_max_blocks,
-                qkv_dtype,
-                num_sublanes,
-                is_dummy=False,
-                query_start_loc=local_query_start_loc,
-                decode_tokens=decode_tokens,
-                num_valid_seqs=num_valid_seqs,
-                num_tokens=max_tokens,
-                chunk_size=chunk_size,
-                BT=chunk_size,
-            )
-
-        # Use shard_map to run on each DP rank
-        mapped_fn = jax.shard_map(
-            compute_schedule_local,
-            mesh=self.mesh,
-            in_specs=(
-                PartitionSpec(ShardingAxisName.ATTN_DATA),  # query_start_loc
-                PartitionSpec(
-                    ShardingAxisName.ATTN_DATA),  # request_distribution
-            ),
-            out_specs=(
-                PartitionSpec(ShardingAxisName.ATTN_DATA,
-                              None),  # schedule_table
-                PartitionSpec(
-                    ShardingAxisName.ATTN_DATA,
-                    None),  # total_blocks_arr (1,1) per rank -> (dp_size, 1)
-            ),
-            check_vma=False,
-        )
-
-        return mapped_fn(query_start_loc, request_distribution)
+        fn = self._get_precompute_gdn_fn(max_tokens, chunk_size)
+        return fn(query_start_loc, request_distribution)
 
     def _prepare_input_metadata(self, scheduler_output: "VllmSchedulerOutput"):
 
