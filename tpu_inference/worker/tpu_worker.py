@@ -508,10 +508,10 @@ class TPUWorker(WorkerBase):
     def profile(self,
                 is_start: bool = True,
                 profile_prefix: str | None = None):
-        print("tpu worker profile")
         if is_start:
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
+            # Must uncomment this when working with colocated python
             # options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
             if envs.PROFILE_SINGLE_DEVICE:
                 options.advanced_configuration = {

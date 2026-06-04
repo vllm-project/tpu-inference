@@ -38,23 +38,6 @@ Per-step protocol (one driver thread):
     engine_outs = sched_shard.update_from_output(            # sidecar
         pin, sched_out, model_out)
 
-Two colocated boundary crossings per step. The objects crossing are vLLM
-msgspec / dataclass structs (`Request`, `SchedulerOutput`, `ModelRunnerOutput`,
-`EngineCoreOutputs`) — colocated_python serializes them via cloudpickle
-(see `jax.experimental.colocated_python.serialization`).
-
-Why v2 (Scheduler-only on sidecar, runner stays on controller) before v3
-(runner CPU prep also on sidecar): v3 needs a refactor of `TPUModelRunner` to
-expose a `prep` path that returns CPU JAX arrays without device_put. v2 proves
-the colocated boundary works end-to-end with the existing runner first. See
-§§11.3, 11.6 of `colocated_dp_design.md`.
-
-Empirical constraint that motivated v2 (replacing v1, where the sidecar held
-a full EngineCore including the TPU model): inside a colocated_python program
-on Pathways, `jax.devices()` returns only the colocated CPU devices — TPU
-devices are not addressable from inside.  Validated by the user's
-`examples/colocated_dp/spike_devices_inside_sidecar.py`.  Hence: model_fn
-and KV cache must live on the controller.
 """
 
 import atexit
@@ -116,13 +99,7 @@ import os as _os  # noqa: E402
 # (~ns to ship across the boundary), `_BLOB_BYTES` for vLLM data-structure
 # payloads (Request / SchedulerOutput / ModelRunnerOutput / EngineCoreOutputs).
 #
-# (Previous design used a single 16 MB blob for *every* call multiplexed
-# through a `call(method_name, args)` dispatcher — has_requests was paying the
-# same ~200 ms per-call as schedule. Eliminated.)
 #
-# Bump `_BLOB_BYTES` via the env var if you hit "blob too large" — e.g. for
-# very long prompts (Request size scales with prompt tokens) or huge batches
-# (SchedulerOutput scales with batch).
 _BLOB_HEADER_BYTES = 8
 _TINY_BYTES = 64
 _BLOB_BYTES = int(
@@ -135,7 +112,7 @@ _BLOB_BYTES = int(
 # process). Without HF auth tokens, StructuredOutputManager and any other
 # code that loads tokenizers from HuggingFace will 401. Without
 # JAX_PLATFORMS / VLLM_TPU_USING_PATHWAYS / tpu-inference toggles, the
-# sidecar may take wrong code paths.
+# sidecar may take wrong code paths. TODO(wenxindong): simply this.
 _SIDECAR_ENV_ALLOWLIST: Tuple[str, ...] = (
     # HF auth + caching
     "HF_TOKEN",
@@ -260,11 +237,11 @@ _MAX_DRAIN_OUTPUTS = 256  # number of EngineCoreOutput entries across drain
 
 
 def _extract_drained_tokens(
-        drained: List[Dict[int, EngineCoreOutputs]],
+        eco: EngineCoreOutputs,
         max_tokens: int,
         max_outputs: int,
 ) -> Optional[Tuple[List[int], List[int]]]:
-    """Strip `new_token_ids` from every EngineCoreOutput in `drained`.
+    """Strip `new_token_ids` from every EngineCoreOutput in `eco`.
 
     Returns ``(flat_tokens, offsets)`` where ``offsets[k]`` is the start
     index in `flat_tokens` for the k-th visited EngineCoreOutput (and
@@ -274,41 +251,80 @@ def _extract_drained_tokens(
     """
     flat: List[int] = []
     offsets: List[int] = [0]
-    n_outputs = 0
-    for eo_dict in drained:
-        for client_idx in sorted(eo_dict.keys()):
-            eo = eo_dict[client_idx]
-            for output in eo.outputs:
-                n_outputs += 1
-                if n_outputs > max_outputs:
-                    return None
-                tokens = output.new_token_ids or []
-                if len(flat) + len(tokens) > max_tokens:
-                    return None
-                flat.extend(tokens)
-                offsets.append(len(flat))
-                output.new_token_ids = []   # stripped; reattached on controller
+    for n_outputs, output in enumerate(eco.outputs):
+        if n_outputs >= max_outputs:
+            return None
+        tokens = output.new_token_ids or []
+        if len(flat) + len(tokens) > max_tokens:
+            return None
+        flat.extend(tokens)
+        offsets.append(len(flat))
+        output.new_token_ids = []   # stripped; reattached on controller
     return flat, offsets
 
 
 def _reattach_drained_tokens(
-        drained: List[Dict[int, EngineCoreOutputs]],
+        eco: EngineCoreOutputs,
         flat_tokens: "np.ndarray",
         offsets: List[int],
 ) -> None:
     """Inverse of `_extract_drained_tokens` — walk the same order, slice
     `flat_tokens[offsets[i]:offsets[i+1]]` back into each EngineCoreOutput's
     `new_token_ids`."""
-    i = 0
-    for eo_dict in drained:
-        for client_idx in sorted(eo_dict.keys()):
-            eo = eo_dict[client_idx]
-            for output in eo.outputs:
-                start, end = int(offsets[i]), int(offsets[i + 1])
-                if start < end:
-                    output.new_token_ids = flat_tokens[start:end].tolist()
-                # else: leave as the empty list put there by the stripper
-                i += 1
+    for i, output in enumerate(eco.outputs):
+        start, end = int(offsets[i]), int(offsets[i + 1])
+        if start < end:
+            output.new_token_ids = flat_tokens[start:end].tolist()
+        # else: leave as the empty list put there by the stripper
+
+
+# ============================================================================
+# req_id string ↔ int handle interning.
+#
+# vLLM identifies requests by string `request_id` (e.g. "chatcmpl-<uuid>" in
+# online serving). Those strings appear in every drained `EngineCoreOutput`
+# (`.request_id`) and in `EngineCoreOutputs.finished_requests`, and are the
+# dominant variable-length cost left in the cloudpickle blob after Phase 3
+# lifted `new_token_ids` out. The controller assigns each request a small int
+# handle at `add_request` time and tells the sidecar; the sidecar swaps the
+# strings for handles before packing (`_intern_drained_req_ids`), and the
+# controller swaps them back (`_restore_drained_req_ids`) before handing the
+# outputs to vLLM. Both sides tolerate a mix: a req_id missing from the map is
+# left untouched (str stays str), so a lost/raced handle degrades gracefully
+# to the old string-pickling behaviour instead of corrupting output.
+# ============================================================================
+
+
+def _intern_drained_req_ids(
+        eco: EngineCoreOutputs,
+        handle_by_id: Dict[str, int],
+) -> None:
+    """In-place: replace req_id strings with int handles to shrink the blob."""
+    for output in eco.outputs:
+        h = handle_by_id.get(output.request_id)
+        if h is not None:
+            output.request_id = h
+    if eco.finished_requests:
+        eco.finished_requests = {
+            handle_by_id.get(rid, rid)
+            for rid in eco.finished_requests
+        }
+
+
+def _restore_drained_req_ids(
+        eco: EngineCoreOutputs,
+        id_by_handle: Dict[int, str],
+) -> None:
+    """Inverse of `_intern_drained_req_ids`: int handles → req_id strings."""
+    for output in eco.outputs:
+        if isinstance(output.request_id, int):
+            output.request_id = id_by_handle.get(
+                output.request_id, output.request_id)
+    if eco.finished_requests:
+        eco.finished_requests = {
+            id_by_handle.get(x, x) if isinstance(x, int) else x
+            for x in eco.finished_requests
+        }
 
 
 def _unpack(blob: jax.Array) -> Any:
@@ -321,95 +337,26 @@ def _unpack(blob: jax.Array) -> Any:
                                  n].tobytes())
 
 
-# ============================================================================
-# v3 boundary payload: sidecar-prepared CPU arrays for controller TPU dispatch
-# ============================================================================
+def _single_client_outputs(
+        engine_outs: Dict[int, EngineCoreOutputs]) -> Optional[EngineCoreOutputs]:
+    """Collapse `scheduler.update_from_output`'s client-indexed dict to one
+    `EngineCoreOutputs`.
 
-
-from dataclasses import dataclass as _dc, field as _field  # noqa: E402
-
-
-def _to_cpu_prep(prep_tuple: Tuple, sched_out: Any,
-                 input_batch: Any,
-                 requests: Optional[Dict[str, Any]] = None) -> "CpuPrep":
-    """Convert TPUModelRunner._prepare_inputs's 10-tuple return into a
-    `CpuPrep` dataclass for boundary shipping.
-
-    Also pulls a tiny set of fields off `sched_out` that the controller's
-    `_sample_from_logits` reads — `SchedulerOutput` itself stays on the
-    sidecar, but `total_num_scheduled_tokens` and `num_scheduled_tokens`
-    must cross because they're needed by the controller's sampling path.
+    INITIAL-VERSION SIMPLIFICATION: `update_from_output` returns a dict keyed
+    by `request.client_index` to support multiple frontend clients. This
+    colocated-DP version assumes exactly one client, so the dict is always
+    empty (scheduler produced nothing) or a single `{0: ...}` entry. We carry
+    the bare `EngineCoreOutputs` through the outbox / boundary and re-wrap into
+    `{0: ...}` only at the controller's vLLM-facing `step()`. Revisit if/when
+    multi-client support is added.
     """
-    (input_ids, input_positions, attn_metadata, sampling_metadata,
-     logits_indices, spec_decode_metadata, logits_indices_selector,
-     padded_num_reqs, req_ids_dp,
-     padded_num_scheduled_tokens_per_dp_rank) = prep_tuple
-    return CpuPrep(
-        input_ids=input_ids,
-        input_positions=input_positions,
-        attn_metadata=attn_metadata,
-        sampling_metadata=sampling_metadata,
-        logits_indices=logits_indices,
-        spec_decode_metadata=spec_decode_metadata,
-        logits_indices_selector=logits_indices_selector,
-        padded_num_reqs=padded_num_reqs,
-        req_ids_dp=req_ids_dp,
-        padded_num_scheduled_tokens_per_dp_rank=(
-            padded_num_scheduled_tokens_per_dp_rank),
-        total_num_scheduled_tokens=int(sched_out.total_num_scheduled_tokens),
-        num_scheduled_tokens=dict(sched_out.num_scheduled_tokens),
-        req_id_to_index=dict(input_batch.req_id_to_index),
-        request_states={
-            rid: (int(r.num_computed_tokens), int(r.num_tokens))
-            for rid, r in (requests or {}).items()
-            if rid in input_batch.req_id_to_index
-        },
-    )
-
-
-@_dc
-class CpuPrep:
-    """Sidecar → controller per-step payload (v3 prep-on-sidecar).
-
-    Replaces the v3-collapse `SchedulerOutput` payload. Contents are the
-    OUTPUT of `TPUModelRunner._prepare_inputs` running in `cpu_only` mode on
-    the sidecar (CPU JAX arrays on a degenerate 1-device CPU mesh; everything
-    is a full replica of the global-shape array).
-
-    The controller's `execute_with_cpu_prep` re-shards each field onto its
-    TPU mesh via `jax.device_put(np.asarray(field), tpu_named_sharding)`
-    before calling `model_fn`.
-
-    Fields mirror `_prepare_inputs`'s return tuple exactly so the
-    controller-side reconstruction is mechanical.
-    """
-    input_ids: Any                          # cpu jax.Array, shape (padded_total_tokens,)
-    input_positions: Any                    # cpu jax.Array, same shape
-    attn_metadata: Any                      # AttentionMetadata or dict thereof
-    sampling_metadata: Any                  # TPUSupportedSamplingMetadata
-    logits_indices: Any                     # cpu jax.Array
-    spec_decode_metadata: Optional[Any]     # None for v3 MVP (no spec decode)
-    logits_indices_selector: Optional[list] # numpy or None
-    padded_num_reqs: int
-    req_ids_dp: Dict[int, List[str]]
-    padded_num_scheduled_tokens_per_dp_rank: int
-    # Pulled off SchedulerOutput so the controller's `_sample_from_logits`
-    # can build a stub scheduler_output without us shipping the full one.
-    total_num_scheduled_tokens: int = 0
-    num_scheduled_tokens: Dict[str, int] = _field(default_factory=dict)
-    # Snapshot of the sidecar's input_batch req-mapping so the controller's
-    # `_sample_from_logits` produces a ModelRunnerOutput with the correct
-    # req_ids / req_id_to_index. Without this the controller-side
-    # input_batch is empty (we removed `persistent_batch_manager.update_states`
-    # from there in v3), num_reqs reads as 0, sampled_token_ids comes back
-    # empty, and the sidecar's scheduler.update_from_output then KeyErrors.
-    req_id_to_index: Dict[str, int] = _field(default_factory=dict)
-    # Snapshot of (num_computed_tokens, num_tokens) per active request —
-    # the controller's `_sample_from_logits` reads `self.requests[req_id]`
-    # (tpu_runner.py:1345) to compute `request_seq_lens`. The actual
-    # CachedRequestState lives on the sidecar; we ship just the two ints
-    # and rebuild a stub on the controller before `_execute_with_prepared_inputs`.
-    request_states: Dict[str, Tuple[int, int]] = _field(default_factory=dict)
+    if not engine_outs:
+        return None
+    assert len(engine_outs) == 1, (
+        f"colocated DP assumes a single frontend client, but "
+        f"update_from_output returned {len(engine_outs)} client buckets: "
+        f"{list(engine_outs)}")
+    return next(iter(engine_outs.values()))
 
 
 # ============================================================================
@@ -456,8 +403,8 @@ class SchedulerShard:
         from vllm.v1.structured_output import StructuredOutputManager
 
         # StructuredOutputManager loads the tokenizer (via HF) inside its
-        # __init__. We don't support structured output in v2 (see design doc
-        # §11), so this is dead weight here. We still construct one because
+        # __init__. We don't support structured output yet, so this is dead weight here. 
+        # We still construct one because
         # vLLM's Scheduler requires it as a constructor arg.
         self._structured_output_manager = StructuredOutputManager(vllm_config)
         SchedCls = vllm_config.scheduler_config.get_scheduler_cls()
@@ -493,23 +440,32 @@ class SchedulerShard:
         # `jax.device_put(cpu_array, tpu_sharding)` later is a direct
         # per-device transfer with no reshape.
         from jax.experimental import colocated_python as _cp
+        # Preferred path: map this rank's TPU device ids → their colocated CPU
+        # devices, giving a CPU mesh isomorphic to the TPU mesh. This only
+        # works if `jax.devices()` inside the sidecar exposes the TPU devices.
+        # On some Pathways images it does NOT (it returns only the sidecar's
+        # local CPU devices), so the id-resolution comes back empty and
+        # `colocated_cpu_devices([])` raises IndexError. In that case fall
+        # back to `jax.local_devices()` — inside the sidecar those ARE the
+        # colocated CPU devices for this host's TPUs, which is what we want.
+        cpu_devs_for_runner = None
         if tpu_device_ids:
             tpu_id_set = set(int(i) for i in tpu_device_ids)
             tpu_devs_resolved = [d for d in jax.devices()
                                  if int(d.id) in tpu_id_set]
-            if len(tpu_devs_resolved) != len(tpu_id_set):
-                logger.warning(
-                    "SchedulerShard: resolved only %d of %d tpu_device_ids "
-                    "from jax.devices(). Falling back to local CPU device.",
-                    len(tpu_devs_resolved), len(tpu_id_set))
-                cpu_devs_for_runner = jax.local_devices()
-            else:
+            if tpu_devs_resolved and len(tpu_devs_resolved) == len(tpu_id_set):
                 cpu_devs_for_runner = list(
                     _cp.colocated_cpu_devices(tpu_devs_resolved))
-        else:
-            # Backward-compat: caller didn't pass ids → degenerate single
-            # CPU device. Works only for tp_size=1 per-rank configs.
-            cpu_devs_for_runner = jax.local_devices()
+            else:
+                logger.error(
+                    "SchedulerShard: resolved only %d of %d tpu_device_ids "
+                    "from jax.devices() (sidecar may not expose TPU devices). "
+                    "Falling back to jax.local_devices().",
+                    len(tpu_devs_resolved), len(tpu_id_set))
+        if cpu_devs_for_runner is None:
+            # No tpu_device_ids, or resolution failed.
+            # todo(wenxindong): make tpu_device_ids non-optional / resolvable.
+            cpu_devs_for_runner = list(jax.local_devices())
 
         self._cpu_runner = TPUModelRunner(
             vllm_config=vllm_config,
@@ -524,6 +480,7 @@ class SchedulerShard:
         # Block hashing happens on controller (in `preprocess_add_request`)
         # so we don't need a hasher here, but the prefix cache may need
         # NONE_HASH initialized in this process for correctness.
+        # TODO(wenxindong): v3 cleanup — unify the hashing logic and remove this
         if vllm_config.cache_config.enable_prefix_caching:
             init_none_hash(
                 get_hash_fn_by_name(
@@ -532,8 +489,13 @@ class SchedulerShard:
         # `update_from_output` writes into this queue; `drain_outputs` reads
         # from it. Lets us collapse the EngineCoreOutputs blob crossing from
         # 1-per-step to 1-per-drain (often <1-per-step under batching).
-        self._outbox: "queue.Queue[Dict[int, EngineCoreOutputs]]" = (
-            queue.Queue())
+        # Single-client simplification: store bare EngineCoreOutputs (the
+        # client dict is collapsed via `_single_client_outputs`).
+        self._outbox: "queue.Queue[EngineCoreOutputs]" = queue.Queue()
+        # req_id (str) → int handle, seeded by the controller at add_request.
+        # Used to intern req_id strings out of the drained blob. Entries are
+        # popped when their request finishes (see `step`).
+        self._handle_by_id: Dict[str, int] = {}
         # Held between `step` calls — when the controller comes back with
         # the TPU-sample dict, we pair it with the `sched_out` /
         # `padded_num_reqs` / `logits_indices_selector` that produced it
@@ -542,6 +504,9 @@ class SchedulerShard:
         self._pending_sched_out: Optional[Any] = None
         self._pending_padded_num_reqs: int = 0
         self._pending_logits_indices_selector: Optional[Any] = None
+        # Prepared model-input pytree stashed by `poll` (active cycle) for the
+        # immediately-following `prepare_step` to ship. Does not cross.
+        self._pending_prepared: Optional[Tuple[Any, Any, Any, Any]] = None
 
         logger.info("SchedulerShard ready on colocated CPU host (cpu_only "
                     "runner instantiated for v3 prep-on-sidecar)")
@@ -577,7 +542,9 @@ class SchedulerShard:
     # request lifecycle (blob in → tiny out: fire-and-forget acks)
 
     def add_request(self, blob: jax.Array) -> jax.Array:
-        request, _wave = _unpack(blob)
+        request, _wave, handle = _unpack(blob)
+        if handle is not None:
+            self._handle_by_id[request.request_id] = handle
         self._scheduler.add_request(request)
         return _pack_tiny(True, blob.sharding)
 
@@ -608,16 +575,17 @@ class SchedulerShard:
         The controller drains via `drain_outputs` separately, so the
         EngineCoreOutputs blob does NOT cross the boundary on every step."""
         scheduler_output, model_runner_output = _unpack(blob)
-        engine_outs = self._scheduler.update_from_output(
-            scheduler_output, model_runner_output)
-        if engine_outs:
-            self._outbox.put(engine_outs)
+        eco = _single_client_outputs(
+            self._scheduler.update_from_output(scheduler_output,
+                                               model_runner_output))
+        if eco is not None:
+            self._outbox.put(eco)
         return _pack_tiny(True, blob.sharding)
 
     def drain_outputs(self, pin: jax.Array) -> jax.Array:
         """Return everything queued in `_outbox` (possibly empty). One blob
         crossing per drain, instead of one per step inside update_from_output."""
-        batch: List[Dict[int, EngineCoreOutputs]] = []
+        batch: List[EngineCoreOutputs] = []
         while True:
             try:
                 batch.append(self._outbox.get_nowait())
@@ -629,106 +597,6 @@ class SchedulerShard:
     # `_cpu_runner._postprocess_tpu_sample` (called from `step()` below)
     # now does both the input_batch token-append writes AND the
     # ModelRunnerOutput construction in one pass.
-
-    # Stable meta values used on every boundary cross — `meta_fields` of
-    # registered pytrees become part of the PyTreeDef, so they MUST be
-    # the same across all calls for colocated_python's fixed-spec
-    # contract. The actual per-call values travel in the metadata blob
-    # and are restored on the controller before model_fn.
-    _BOUNDARY_PADDED_NUM_REQS = 0     # any constant works; controller overrides
-    _BOUNDARY_DO_SAMPLING = True
-    _BOUNDARY_LOGPROBS = False
-
-    def _stabilize_attn_md(self, attn_md):
-        """Force `padded_num_reqs` to the constant boundary value (the
-        actual value rides in the metadata blob)."""
-        import dataclasses
-        return dataclasses.replace(
-            attn_md, padded_num_reqs=self._BOUNDARY_PADDED_NUM_REQS)
-
-    def _stabilize_sampling_md(self, sampling_md, target_size: int):
-        """Make TPUSupportedSamplingMetadata's pytree spec invariant across
-        calls: pad/populate all data leaves to fixed shapes and force
-        meta_fields to constant values. Actual `do_sampling` / `logprobs`
-        travel in the metadata blob and are restored on the controller."""
-        import dataclasses
-        # Always-populated data leaves; zero placeholder if the original
-        # was None (greedy batches).
-        def _take_or_zero(v, dtype):
-            if isinstance(v, jax.Array):
-                return self._pad_to(v, target_size)
-            return jnp.zeros((target_size, ), dtype=dtype)
-
-        return dataclasses.replace(
-            sampling_md,
-            temperature=_take_or_zero(getattr(sampling_md, "temperature", None),
-                                       jnp.float32),
-            top_k=_take_or_zero(getattr(sampling_md, "top_k", None),
-                                 jnp.int32),
-            top_p=_take_or_zero(getattr(sampling_md, "top_p", None),
-                                 jnp.float32),
-            # cache_collision_dummy: fixed (2,) shape across all calls
-            # (MVP doesn't use logprobs so the "needs_logprobs ⇒ shape (1,)"
-            # branch never triggers).
-            _cache_collision_dummy=jnp.zeros((2, ), jnp.int32),
-            do_sampling=self._BOUNDARY_DO_SAMPLING,
-            logprobs=self._BOUNDARY_LOGPROBS,
-        )
-
-    def _idle_pytree_cache(self, sharding: NamedSharding) -> Tuple[
-            jax.Array, Any, Any, jax.Array]:
-        """Pre-allocated zero pytree returned when this step has no work.
-
-        Same pytree structure (treedef + leaf shapes/dtypes) as the
-        active-step pytree, so colocated_python's fixed-spec contract
-        holds across calls.  Cached so we don't device_put on every
-        idle call.
-        """
-        if not hasattr(self, "_idle_cache"):
-            import dataclasses
-            from tpu_inference.layers.common.attention_metadata import \
-                AttentionMetadata
-            from tpu_inference.layers.jax.sample.sampling_metadata import \
-                TPUSupportedSamplingMetadata
-            r = self._cpu_runner
-            max_n, max_t = r.max_num_reqs, r.max_num_tokens
-            dp = r.dp_size
-            max_blocks = r.max_num_blocks_per_req
-
-            def _z(shape, dtype=jnp.int32):
-                return jax.device_put(np.zeros(shape, dtype=dtype), sharding)
-
-            # AttentionMetadata: padded_num_reqs forced to boundary const,
-            # mamba_state_indices=None (active also uses None for MVP).
-            # block_tables is FLAT 1D `(max_num_reqs * max_num_blocks_per_req,)`
-            # in the active case — `_prepare_inputs` slices it out of a flat
-            # `device_buffer` via `jnp.split` (utils.py:497) and never
-            # reshapes back to 2D. Matching the flat shape avoids
-            # `RET_CHECK ... output_spec [256,16] vs tensor.shape [4096]`.
-            zero_attn = AttentionMetadata(
-                input_positions=_z((max_t, )),
-                block_tables=_z((max_n * max_blocks, )),
-                seq_lens=_z((max_n, )),
-                query_start_loc=_z((max_n + dp, )),
-                request_distribution=_z((3 * dp, )),
-                mamba_state_indices=None,
-                padded_num_reqs=self._BOUNDARY_PADDED_NUM_REQS,
-            )
-            # Sampling metadata: all leaves populated with zeros, meta
-            # fields at boundary constants — matches _stabilize_sampling_md.
-            zero_sampling = TPUSupportedSamplingMetadata(
-                temperature=_z((max_n, ), jnp.float32),
-                top_k=_z((max_n, ), jnp.int32),
-                top_p=_z((max_n, ), jnp.float32),
-                _cache_collision_dummy=_z((2, ), jnp.int32),
-                do_sampling=self._BOUNDARY_DO_SAMPLING,
-                logprobs=self._BOUNDARY_LOGPROBS,
-            )
-            self._idle_cache = (_z((max_t, )),  # input_ids
-                                zero_attn,
-                                zero_sampling,
-                                _z((max_n, )))  # logits_indices
-        return self._idle_cache
 
     def _log_pytree_shapes(self, tag: str, tree: Any) -> None:
         """One-shot shape dump of every leaf in the boundary pytree.
@@ -774,49 +642,40 @@ class SchedulerShard:
         leaf onto `target_sharding` (the controller's `cpu_sharding`,
         replicated across all the rank's CPU devices) so the executable
         sees one unified device set.
+        
+        TODO(wenxindong): pass cpu_sharding to the CPU model runner. 
         """
         return jax.tree.map(
             lambda x: jax.device_put(x, target_sharding)
             if isinstance(x, jax.Array) else x,
             tree)
 
-    def _pad_to(self, x: jax.Array, target_size: int) -> jax.Array:
-        """Zero-pad 1-D JAX array to `target_size` along axis 0. No-op if
-        already at target. Caller guarantees `x.shape[0] <= target_size`."""
-        if x.shape[0] == target_size:
-            return x
-        return jnp.pad(x, [(0, target_size - x.shape[0])])
 
-    def _pad_sampling_metadata(self, sampling_md: Any,
-                                target_size: int) -> Any:
-        """Pad TPUSupportedSamplingMetadata's per-request fields to
-        `target_size` so the pytree shape is invariant across calls."""
-        import dataclasses
-        updates = {}
-        for name in ("temperature", "top_k", "top_p"):
-            v = getattr(sampling_md, name, None)
-            if v is not None and isinstance(v, jax.Array):
-                updates[name] = self._pad_to(v, target_size)
-        return dataclasses.replace(sampling_md, **updates) if updates else sampling_md
-
-    def step(self, prev_next_tokens: jax.Array,
+    def poll(self, prev_next_tokens: jax.Array,
              has_prev: jax.Array) -> jax.Array:
-        """v3-pure combined step: update + schedule + CPU PREP + drain.
+        """Per-cycle FIXED-SPEC half of the boundary protocol.
 
-        `prev_next_tokens` arrives as a native `jax.Array` pytree leaf on
-        this sidecar's CPU sharding — no cloudpickle of its buffer. The
-        controller's `RankExecutor.execute_with_cpu_prep` did a direct
-        TPU→sidecar-CPU `jax.device_put` on the model's sample output.
+        Consumes the previous step's sampled tokens (`has_prev=1`), drains
+        finished outputs, schedules the next step, and — when there's work —
+        runs CPU input-prep, stashing the prepared arrays for a following
+        `prepare_step` call.
 
-        `has_prev` is a `uint8` scalar JAX array (0 / 1) telling us
-        whether `prev_next_tokens` carries real data this call. On the
-        very first call there's no prior step to update_from_output for,
-        so the controller passes `has_prev=0` + a zero placeholder array.
+        `prev_next_tokens` is a native `jax.Array` on this sidecar's CPU
+        sharding (the controller `device_put` the model's sample output here);
+        `has_prev` is a uint8 scalar (0 on the first/idle-reset call).
 
-        Returns the `(cpu_prep, drained)` cloudpickle blob the same way
-        as before — those are Python containers + variable-length data,
-        still need pack/unpack. Phase 2 of this refactor lifts more of
-        them out of cloudpickle.
+        Returns a FIXED-shape pytree `(tokens_jax, offsets_jax, blob)`:
+          - tokens_jax / offsets_jax: drained new_token_ids (Phase 3), padded
+            to fixed MAX sizes.
+          - blob: tiny cloudpickle dict — has_work, drained (req_ids
+            interned), tokens_stripped, n_drained_outputs, and, when
+            has_work, the (num_reqs, num_tokens) bucket sizes the controller
+            needs to build `prepare_step`'s input pins.
+
+        The output spec is INVARIANT across idle and active cycles (no model-
+        input arrays here), so colocated_python's frozen-output-spec contract
+        holds without an idle-pytree filler. `prepare_step` carries the
+        variable-shape model inputs under its own (bucket-keyed) spec.
         """
         if int(np.asarray(has_prev).item()):
             # Build ModelRunnerOutput right here on the sidecar from the
@@ -833,45 +692,55 @@ class SchedulerShard:
                 padded_num_reqs=self._pending_padded_num_reqs,
                 logits_indices_selector=self._pending_logits_indices_selector,
             )
-            engine_outs = self._scheduler.update_from_output(
-                self._pending_sched_out, mr_out)
-            if engine_outs:
-                self._outbox.put(engine_outs)
+            eco = _single_client_outputs(
+                self._scheduler.update_from_output(self._pending_sched_out,
+                                                   mr_out))
+            if eco is not None:
+                self._outbox.put(eco)
             self._pending_sched_out = None
-        # Drain outbox.
-        drained: List[Dict[int, EngineCoreOutputs]] = []
+        # Drain outbox. INVARIANT: at most one EngineCoreOutputs is queued at
+        # drain time. The two producers (the has_prev branch above and the
+        # empty-schedule branch below) never both feed a single drain: the
+        # empty-schedule branch defers to the outbox and returns idle, which
+        # makes the controller reset has_prev=0, so the next step adds no put
+        # of its own before draining the deferred one. Per rank there's a
+        # single driver thread, so no concurrent producers either.
+        drained: Optional[EngineCoreOutputs] = None
         while True:
             try:
-                drained.append(self._outbox.get_nowait())
+                eco = self._outbox.get_nowait()
             except queue.Empty:
                 break
-        # All cpu_prep/drained returns ship via `_pack_blob` on this rank's
-        # CPU sharding (same as before). We use `prev_next_tokens.sharding`
-        # — same sharding, but referenced via the JAX-array arg now that
-        # there is no blob_in.
+            assert drained is None, (
+                "outbox held >1 EngineCoreOutputs — single-per-step invariant "
+                "violated (see comment above)")
+            drained = eco
+        # Intern req_id strings → int handles to shrink the cloudpickle blob.
+        # Collect finished req_ids (still strings) FIRST so we can drop their
+        # handle-map entries after interning — bounds the map to live requests.
+        if drained is not None:
+            _finished_ids = list(drained.finished_requests or ())
+            _intern_drained_req_ids(drained, self._handle_by_id)
+            for rid in _finished_ids:
+                self._handle_by_id.pop(rid, None)
+        # Drained JAX arrays + metadata blob ship via `_pack_blob` on this
+        # rank's CPU sharding, referenced via the JAX-array arg.
         out_sharding = prev_next_tokens.sharding
 
-        # Phase 3 token buffer sizing — fixed-shape per the boundary
-        # contract.  Sized once at SchedulerShard init based on
-        # self._cpu_runner.max_num_reqs * _MAX_DRAIN_TOKENS_PER_REQ.
+        # Phase 3 token buffer sizing — fixed-shape per the boundary contract.
         max_drain_tokens = self._cpu_runner.max_num_reqs * _MAX_DRAIN_TOKENS_PER_REQ
         max_drain_offsets = _MAX_DRAIN_OUTPUTS + 1   # +1 for the leading 0
         zero_tokens_buf = np.zeros(max_drain_tokens, dtype=np.int32)
         zero_offsets_buf = np.zeros(max_drain_offsets, dtype=np.int32)
 
-        def _build_drained_jax(drained_list):
-            """Try to strip new_token_ids from drained into JAX arrays.
-
-            Returns ``(tokens_jax, offsets_jax, tokens_stripped: bool)``.
-            On overflow falls back to (zero buffers, False) and the caller
-            keeps the new_token_ids inside the cloudpickled drained list.
-            """
-            if not drained_list:
+        def _build_drained_jax(eco: Optional[EngineCoreOutputs]) -> Tuple[jax.Array, jax.Array, bool]:
+            """Strip new_token_ids from `eco` into fixed-shape JAX arrays."""
+            if eco is None:
                 return (jax.device_put(zero_tokens_buf, out_sharding),
                         jax.device_put(zero_offsets_buf, out_sharding),
                         True)  # no-op strip = succeed
             extracted = _extract_drained_tokens(
-                drained_list, max_drain_tokens, _MAX_DRAIN_OUTPUTS)
+                eco, max_drain_tokens, _MAX_DRAIN_OUTPUTS)
             if extracted is None:
                 logger.warning(
                     "drain exceeded MAX_DRAIN_TOKENS (%d) or "
@@ -889,34 +758,28 @@ class SchedulerShard:
                     jax.device_put(offsets_buf, out_sharding),
                     True)
 
-        # Helper: idle return — fixed-shape zero pytree + small metadata blob.
-        def _idle_return(drained_list):
-            ids_z, attn_z, samp_z, li_z = self._idle_pytree_cache(out_sharding)
-            tokens_jax, offsets_jax, stripped = _build_drained_jax(
-                drained_list)
+        tokens_jax, offsets_jax, stripped = _build_drained_jax(drained)
+        n_drained_outputs = (
+            len(drained.outputs) if (stripped and drained is not None) else 0)
+
+        def _ret(has_work: bool, num_reqs: int, num_tokens: int) -> jax.Array:
+            """Pack the FIXED-spec poll return. `num_reqs` / `num_tokens` are
+            the shapes `prepare_step` will emit (0 when idle); the controller
+            uses them to build prepare_step's bucket-encoding input pins."""
             blob = _pack_blob({
-                "has_work": False,
-                "drained": drained_list,
+                "has_work": has_work,
+                "drained": drained,
                 "tokens_stripped": stripped,
-                "n_drained_outputs": (
-                    sum(len(eo.outputs)
-                        for eo_dict in drained_list
-                        for eo in eo_dict.values()) if stripped else 0),
-                # Stub fields so the blob's keys are stable across calls.
-                "padded_num_reqs": 0,
-                "padded_total_num_scheduled_tokens": 0,
-                "logits_indices_selector": None,
-                "spec_decode_metadata": None,
+                "n_drained_outputs": n_drained_outputs,
+                "num_reqs": num_reqs,
+                "num_tokens": num_tokens,
             }, out_sharding)
-            out = self._canonicalize_outputs(
-                out_sharding,
-                (ids_z, attn_z, samp_z, li_z, tokens_jax, offsets_jax, blob))
-            self._log_pytree_shapes("IDLE", out)
-            return out
+            return self._canonicalize_outputs(
+                out_sharding, (tokens_jax, offsets_jax, blob))
 
         # Schedule next step + run CPU prep on this sidecar.
         if not self._scheduler.has_requests():
-            return _idle_return(drained)
+            return _ret(False, 0, 0)
         sched_out = self._scheduler.schedule()
         # input_batch updates from scheduler output (add/remove/cache state).
         # Must run even when total_num_scheduled_tokens==0 to register
@@ -926,94 +789,59 @@ class SchedulerShard:
             if hasattr(self._cpu_runner, "get_mrope_input_positions_fn")
             else None)
 
-        # Empty-schedule short-circuit: the scheduler may return a
-        # SchedulerOutput with 0 scheduled tokens (e.g. all running
-        # requests are blocked on grammar compilation, or every request
-        # finished this step). `_prepare_inputs` asserts > 0, and the
-        # controller's `_execute_model` returns EMPTY_MODEL_RUNNER_OUTPUT
-        # in this case (tpu_runner.py:959). We do the same on the sidecar:
-        # call scheduler.update_from_output(sched_out, EMPTY_) so any
-        # finished_req_ids land in EngineCoreOutputs (drained next call),
-        # and signal idle to the controller by returning cpu_prep=None.
+        # Empty-schedule short-circuit: 0 scheduled tokens (e.g. all running
+        # requests blocked on grammar compilation, or everything finished).
+        # `_prepare_inputs` asserts > 0, so flush finished outputs via
+        # update_from_output(EMPTY_) — deferred to the outbox so the next
+        # poll ships them — and report idle (no prepare_step this cycle).
         if sched_out.total_num_scheduled_tokens == 0:
             from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
-            engine_outs = self._scheduler.update_from_output(
-                sched_out, EMPTY_MODEL_RUNNER_OUTPUT)
-            if engine_outs:
-                drained.append(engine_outs)
-            # No pending TPU step — controller won't send back a model_out.
+            eco = _single_client_outputs(
+                self._scheduler.update_from_output(sched_out,
+                                                   EMPTY_MODEL_RUNNER_OUTPUT))
+            if eco is not None:
+                self._outbox.put(eco)
             self._pending_sched_out = None
-            self._pending_padded_num_reqs = 0
-            self._pending_logits_indices_selector = None
-            return _idle_return(drained)
+            self._pending_prepared = None
+            return _ret(False, 0, 0)
 
-        # CPU prep — produces CPU JAX arrays for controller's TPU dispatch.
-        prep_tuple = self._cpu_runner._prepare_inputs(sched_out)
+        # Active: run CPU prep, stash the prepared arrays for prepare_step.
         (input_ids, _input_positions_unused, attn_metadata, sampling_metadata,
-         logits_indices, spec_decode_metadata, logits_indices_selector,
-         padded_num_reqs, req_ids_dp,
-         padded_num_scheduled_tokens_per_dp_rank) = prep_tuple
-        # `_input_positions_unused` is the same as `attn_metadata.input_positions`
-        # (build_attn at tpu_runner.py:~1947 sets them identically). We
-        # ship only the one inside attn_metadata to avoid double-shipping.
-
-        # Pad all variable-length JAX arrays to MAX sizes so the boundary
-        # pytree spec is invariant across bucket choices.
-        import dataclasses
-        max_n = self._cpu_runner.max_num_reqs
-        max_t = self._cpu_runner.max_num_tokens
-        # Capture actual meta values BEFORE we stabilize them for the boundary.
-        actual_padded_num_reqs = padded_num_reqs
-        actual_do_sampling = bool(getattr(sampling_metadata, "do_sampling",
-                                           False))
-        actual_logprobs = bool(getattr(sampling_metadata, "logprobs", False))
-
-        input_ids = self._pad_to(input_ids, max_t)
-        attn_metadata = dataclasses.replace(
-            attn_metadata,
-            input_positions=self._pad_to(attn_metadata.input_positions, max_t))
-        logits_indices = self._pad_to(logits_indices, max_n)
-        # Stabilize meta_fields / fully-populate data leaves so the
-        # AttentionMetadata + TPUSupportedSamplingMetadata pytree specs
-        # are identical across all calls (active and idle).
-        attn_metadata = self._stabilize_attn_md(attn_metadata)
-        sampling_metadata = self._stabilize_sampling_md(sampling_metadata,
-                                                         max_n)
-
-        # Phase 3: pull `new_token_ids` out of drained EngineCoreOutputs
-        # into a flat fixed-shape JAX array. Falls back to keeping them
-        # in cloudpickle if the per-step buffer caps are exceeded.
-        tokens_jax, offsets_jax, stripped = _build_drained_jax(drained)
-        n_drained_outputs = (
-            sum(len(eo.outputs) for eo_dict in drained for eo in eo_dict.values())
-            if stripped else 0)
-        # Small metadata blob — only the genuinely-Python bits + drained
-        # outputs (with new_token_ids stripped if `tokens_stripped`).
-        blob = _pack_blob({
-            "has_work": True,
-            "drained": drained,
-            "tokens_stripped": stripped,
-            "n_drained_outputs": n_drained_outputs,
-            "padded_num_reqs": actual_padded_num_reqs,
-            "padded_total_num_scheduled_tokens":
-                _input_positions_unused.shape[0],  # used by controller to slice
-            "logits_indices_selector": logits_indices_selector,
-            "spec_decode_metadata": spec_decode_metadata,
-            # Restore-on-controller meta for the stabilized dataclasses
-            # (their meta_fields were forced to constants for the boundary).
-            "actual_do_sampling": actual_do_sampling,
-            "actual_logprobs": actual_logprobs,
-        }, out_sharding)
+         logits_indices, _spec_decode_metadata, logits_indices_selector,
+         padded_num_reqs, _req_ids_dp,
+         _padded_num_sched_per_dp) = self._cpu_runner._prepare_inputs(sched_out)
 
         self._pending_sched_out = sched_out
         self._pending_padded_num_reqs = padded_num_reqs
         self._pending_logits_indices_selector = logits_indices_selector
-        out = self._canonicalize_outputs(
-            out_sharding,
-            (input_ids, attn_metadata, sampling_metadata, logits_indices,
-             tokens_jax, offsets_jax, blob))
-        self._log_pytree_shapes("ACTIVE", out)
-        return out
+        self._pending_prepared = (input_ids, attn_metadata, sampling_metadata,
+                                  logits_indices)
+        # `num_reqs` / `num_tokens` are the two bucket dimensions that fully
+        # determine every prepared-input array's shape (all others are
+        # functions of these + fixed constants). The controller passes input
+        # pins of these shapes to prepare_step so colocated re-specializes per
+        # bucket with a consistent output spec.
+        return _ret(True, logits_indices.shape[0], input_ids.shape[0])
+
+    def prepare_step(self, pin_reqs: jax.Array,
+                     pin_tokens: jax.Array) -> jax.Array:
+        """Active-only DATA half: return the model inputs stashed by the
+        preceding `poll(has_work=True)`.
+
+        `pin_reqs` / `pin_tokens` are dummy arrays whose SHAPES (num_reqs /
+        num_tokens) encode the bucket. colocated_python keys its
+        specialization (and frozen output spec) on the input spec, so feeding
+        the bucket as the input shape means each bucket gets its own
+        specialization with a self-consistent output spec — no idle/active
+        collision (this is only called when poll reported work) and no
+        cross-bucket output-spec mismatch.
+        """
+        assert self._pending_prepared is not None, (
+            "prepare_step called without a preceding poll(has_work=True) — "
+            "boundary ordering invariant violated.")
+        prepared = self._pending_prepared
+        self._pending_prepared = None
+        return self._canonicalize_outputs(pin_reqs.sharding, prepared)
 
     # cache resets / lifecycle
 
@@ -1065,25 +893,23 @@ class _ShardClient:
                  max_num_reqs: int):
         self._shard = shard
         self._sharding = cpu_sharding
-        # `max_num_reqs` is the rank's runner.max_num_reqs — used to size
-        # the per-step `next_tokens` JAX array that crosses the boundary.
-        # Fixed-shape is required because colocated_python locks each
-        # method's spec from the first call.
         self._max_num_reqs = max_num_reqs
-        # Pre-place a tiny pin array on this rank's CPU sharding. Reused for
-        # every pure-query call (has_requests, schedule, drain_outputs, …) so
-        # we only pay device_put cost once per shard, not once per call.
+        # Pre-place a tiny pin array on this rank's CPU sharding. 
         self._pin = jax.device_put(np.zeros(_TINY_BYTES, dtype=np.uint8),
                                    cpu_sharding)
 
     # ---- request-lifecycle ----------------------------------------------
 
-    def add_request(self, request: Request, request_wave: int = 0) -> None:
-        # Send the Request payload; ack is tiny and we don't need to wait.
-        # block_until_ready is intentionally NOT called — colocated_python
+    def add_request(self,
+                    request: Request,
+                    request_wave: int = 0,
+                    handle: Optional[int] = None) -> None:
+        # Send the Request payload + its int handle (used to intern req_id
+        # strings out of the drained blob). ack is tiny and we don't need to
+        # wait. block_until_ready is intentionally NOT called — colocated_python
         # serializes per-thread calls on the sidecar, so order is preserved
         # for the next call on this thread.
-        self._shard.add_request(_pack_blob((request, request_wave),
+        self._shard.add_request(_pack_blob((request, request_wave, handle),
                                            self._sharding))
 
     def finish_requests(self, request_ids: List[str],
@@ -1097,70 +923,68 @@ class _ShardClient:
 
     # ---- step protocol --------------------------------------------------
 
-    def schedule(self) -> Any:
-        return _unpack(self._shard.schedule(self._pin))
+    # def schedule(self) -> Any:
+    #     return _unpack(self._shard.schedule(self._pin))
 
     def get_grammar_bitmask(self, scheduler_output: Any) -> Any:
         return _unpack(
             self._shard.get_grammar_bitmask(
                 _pack_blob(scheduler_output, self._sharding)))
 
-    def update_from_output_fire(
-            self, scheduler_output: Any,
-            model_runner_output: ModelRunnerOutput) -> None:
-        """Fire-and-forget: ship (sched_out, model_out) to the sidecar; the
-        resulting EngineCoreOutputs is enqueued on the sidecar's outbox and
-        pulled by `drain_outputs`. Returns immediately without unpacking the
-        ack — overlaps with the next loop iteration."""
-        self._shard.update_from_output(
-            _pack_blob((scheduler_output, model_runner_output),
-                       self._sharding))
-
-    def drain_outputs(self) -> List[Dict[int, EngineCoreOutputs]]:
-        """Pull whatever's accumulated in the sidecar's outbox. May be []."""
-        return _unpack(self._shard.drain_outputs(self._pin))
-
-    def step(
+    def poll(
         self,
         prev_next_tokens: jax.Array,
         has_prev: jax.Array,
-    ) -> Tuple[jax.Array, Any, Any, jax.Array, Dict[str, Any]]:
-        """v3-pure per-step boundary call.
+    ) -> Dict[str, Any]:
+        """FIXED-spec half of the boundary protocol.
 
-        Returns a pytree of:
-          - input_ids: jax.Array (max_num_tokens,) — direct leaf
-          - attn_metadata: AttentionMetadata pytree — JAX-array leaves
-            travel natively
-          - sampling_metadata: TPUSupportedSamplingMetadata pytree
-          - logits_indices: jax.Array (max_num_reqs,)
-          - metadata: dict from unpacked tiny blob — contains:
-              has_work, drained (with new_token_ids reattached from
-              the JAX leaves below), padded_num_reqs,
-              padded_total_num_scheduled_tokens, logits_indices_selector,
-              spec_decode_metadata
+        Calls the sidecar's `poll` (consume prev tokens → drain → schedule →
+        decide work) and returns the unpacked metadata dict:
+          - has_work: bool
+          - drained: Optional[EngineCoreOutputs] (new_token_ids reattached
+            from the JAX leaves; req_id strings still interned as int handles
+            — the controller restores them in `_funnel_drained`)
+          - num_reqs / num_tokens: bucket sizes for `prepare_step`'s pins
+            (0 when idle)
 
-        Phase 3: each drained EngineCoreOutput's `new_token_ids` ships
-        as a flat JAX-array leaf (`drained_tokens` / `drained_offsets`)
-        and is reattached here before the metadata dict is returned. If
-        the per-step caps overflowed the sidecar leaves them in the
-        cloudpickle (signalled by `meta["tokens_stripped"] == False`).
+        The returned pytree shape is invariant across idle/active, so no
+        idle-pytree filler is needed.
         """
-        ret = self._shard.step(prev_next_tokens, has_prev)
-        (input_ids, attn_md, sampling_md, logits_indices,
-         drained_tokens_jax, drained_offsets_jax, blob) = ret
+        (drained_tokens_jax, drained_offsets_jax,
+         blob) = self._shard.poll(prev_next_tokens, has_prev)
         meta = _unpack(blob)
         if meta.get("tokens_stripped", False):
             n_outputs = int(meta.get("n_drained_outputs", 0))
             if n_outputs > 0:
-                # device_get the two JAX arrays — small and already on
-                # this rank's CPU sharding (so it's a local materialize,
-                # not a cross-host fetch).
+                # Local materialize (arrays already on this rank's CPU
+                # sharding), not a cross-host fetch.
                 tokens_np = np.asarray(drained_tokens_jax)
                 offsets_np = np.asarray(drained_offsets_jax)
                 _reattach_drained_tokens(
                     meta["drained"], tokens_np,
                     offsets_np[:n_outputs + 1].tolist())
-        return input_ids, attn_md, sampling_md, logits_indices, meta
+        return meta
+
+    def prepare_step(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+    ) -> Tuple[jax.Array, Any, Any, jax.Array]:
+        """DATA half — call only when the preceding `poll` reported work.
+
+        Builds dummy input pins of shape `(num_reqs,)` / `(num_tokens,)` so
+        colocated_python specializes `prepare_step` per bucket (the pins'
+        SHAPES are the bucket key; their values are unused). Returns the
+        prepared model inputs `(input_ids, attn_md, sampling_md,
+        logits_indices)` as native pytree leaves.
+        """
+        pin_reqs = jax.device_put(np.zeros(num_reqs, dtype=np.int8),
+                                  self._sharding)
+        pin_tokens = jax.device_put(np.zeros(num_tokens, dtype=np.int8),
+                                    self._sharding)
+        (input_ids, attn_md, sampling_md,
+         logits_indices) = self._shard.prepare_step(pin_reqs, pin_tokens)
+        return input_ids, attn_md, sampling_md, logits_indices
 
     def first_call_state(self) -> Tuple[jax.Array, jax.Array]:
         """Initial `(prev_next_tokens, has_prev)` for the driver loop's
@@ -1281,11 +1105,7 @@ class RankExecutor:
                  all_tpu_devices: List[jax.Device], log_stats: bool,
                  sidecar_cpu_sharding: Optional[NamedSharding] = None):
         # `sidecar_cpu_sharding` is the rank's colocated-CPU NamedSharding
-        # that the sidecar uses for its CPU mesh. Used by
-        # `execute_with_cpu_prep` to `jax.device_put` next_tokens / logprobs
-        # from TPU directly to the sidecar's local CPU mesh, so they ride
-        # back to the sidecar as native JAX-array pytree leaves (no
-        # cloudpickle).
+        # that the sidecar uses for its CPU mesh.
         self.sidecar_cpu_sharding = sidecar_cpu_sharding
         # Build the controller-side config: dp=1, slice attached so
         # DisaggExecutor can scope its TPUWorker.
@@ -1302,7 +1122,7 @@ class RankExecutor:
         from tpu_inference.core.disagg_executor import DisaggExecutor
         self.engine = vLLMEngineCore(
             vllm_config=ctrl_cfg,
-            executor_class=DisaggExecutor,
+            executor_class=DisaggExecutor, # todo(wenxindong): try use vllm executor
             log_stats=log_stats,
         )
 
@@ -1373,45 +1193,6 @@ class RankExecutor:
     # Python tracing/dispatch is serialized.
     _DISPATCH_LOCK: "threading.Lock" = threading.Lock()
 
-    def execute(self, scheduler_output: Any) -> ModelRunnerOutput:
-        """Run the model on TPU for one scheduler output. Mirrors the
-        non-batch-queue path of `vLLMEngineCore.step` after the schedule call.
-
-        v3 NOTE: this path is the v3-collapse fallback — controller still does
-        prep. Used only as a safety net if cpu_prep cannot be reconstructed
-        (e.g. unsupported sched_out shape). `execute_with_cpu_prep` is the
-        preferred v3 entry point.
-        """
-        with RankExecutor._DISPATCH_LOCK:
-            future = self.engine.model_executor.execute_model(
-                scheduler_output, non_block=True)
-        model_output = future.result()              # outside lock → TPU overlap
-        if model_output is None:
-            # Sampling deferred to a second call (e.g. async scheduling /
-            # structured output). v2 doesn't wire grammar yet — pass None.
-            with RankExecutor._DISPATCH_LOCK:
-                model_output = self.engine.model_executor.sample_tokens(None)
-        # Resolve AsyncTPUModelRunnerOutput → ModelRunnerOutput.
-        from tpu_inference.runner.tpu_runner import AsyncTPUModelRunnerOutput
-        if isinstance(model_output, AsyncTPUModelRunnerOutput):
-            model_output = model_output.get_output()
-        return model_output
-
-    @staticmethod
-    def _slice_sampling_md(sampling_md: Any, target_size: int) -> Any:
-        """Counterpart to SchedulerShard._pad_sampling_metadata.
-
-        The sidecar padded `temperature` / `top_k` / `top_p` to
-        `max_num_reqs` for the boundary spec. Here we slice back down
-        to the actual bucket size before model_fn dispatch."""
-        import dataclasses
-        updates = {}
-        for name in ("temperature", "top_k", "top_p"):
-            v = getattr(sampling_md, name, None)
-            if isinstance(v, jax.Array) and v.shape[0] > target_size:
-                updates[name] = v[:target_size]
-        return dataclasses.replace(sampling_md,
-                                    **updates) if updates else sampling_md
 
     def execute_with_cpu_prep(
         self,
@@ -1419,10 +1200,6 @@ class RankExecutor:
         attn_metadata: Any,
         sampling_metadata: Any,
         logits_indices: jax.Array,
-        padded_num_reqs: int,
-        padded_total_num_scheduled_tokens: int,
-        actual_do_sampling: bool = True,
-        actual_logprobs: bool = False,
     ) -> Tuple[jax.Array, Any]:
         """v3-pure controller-side: STATELESS TPU dispatch.
 
@@ -1450,39 +1227,22 @@ class RankExecutor:
         dp_attn = NamedSharding(mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
         replicated = NamedSharding(mesh, PartitionSpec())
 
-        # Slice the variable-bucket arrays back to their actual size.
-        # block_tables / seq_lens / query_start_loc / request_distribution
-        # are already at max shape — they need no slicing.
-        # TODO: this slicing op is costly. 
-        input_ids_b = input_ids[:padded_total_num_scheduled_tokens]
-        input_positions_b = (attn_metadata.input_positions
-                             [:padded_total_num_scheduled_tokens])
-        logits_indices_b = logits_indices[:padded_num_reqs]
-        # Restore the actual meta_field values that the sidecar forced
-        # to constants for the boundary's fixed-spec contract.
-        attn_metadata = dataclasses.replace(
-            attn_metadata,
-            input_positions=input_positions_b,
-            padded_num_reqs=padded_num_reqs)
-        sampling_metadata = dataclasses.replace(
-            sampling_metadata,
-            do_sampling=actual_do_sampling,
-            logprobs=actual_logprobs)
-        sampling_metadata = self._slice_sampling_md(sampling_metadata,
-                                                     padded_num_reqs)
-
         # Direct per-device CPU→TPU transfers for every JAX leaf.
-        attn_md = jax.tree.map(
-            lambda x: jax.device_put(x, dp_attn) if isinstance(x, jax.Array)
-            else x,
-            attn_metadata)
-        sampling_md = jax.tree.map(
-            lambda x: jax.device_put(x, replicated) if isinstance(x, jax.Array)
-            else x,
-            sampling_metadata)
-        input_ids_tpu = jax.device_put(input_ids_b, dp_attn)
-        input_positions_tpu = attn_md.input_positions
-        logits_indices_tpu = jax.device_put(logits_indices_b, replicated)
+        with (
+            jax.transfer_guard_device_to_host("disallow_explicit"),
+            jax.transfer_guard_host_to_device("disallow_explicit"),
+        ):
+            attn_md = jax.tree.map(
+                lambda x: jax.device_put(x, dp_attn) if isinstance(x, jax.Array)
+                else x,
+                attn_metadata)
+            sampling_md = jax.tree.map(
+                lambda x: jax.device_put(x, replicated) if isinstance(x, jax.Array)
+                else x,
+                sampling_metadata)
+            input_ids_tpu = jax.device_put(input_ids, dp_attn)
+            input_positions_tpu = attn_md.input_positions
+            logits_indices_tpu = jax.device_put(logits_indices, replicated)
 
         # `_DISPATCH_LOCK` serializes the Python-side tracing of model_fn
         # across rank driver threads — vLLM's set_forward_context is a
@@ -1496,19 +1256,6 @@ class RankExecutor:
                 sampling_metadata=sampling_md,
                 logits_indices=logits_indices_tpu,
             )
-        # Pad next_tokens up to runner.max_num_reqs *on TPU* before the
-        # cross-host transfer. This keeps the per-step boundary shape
-        # invariant (sidecar's prev_next_tokens is always (max_num_reqs,))
-        # AND keeps the jnp.pad compile pinned to the TPU layout — if we
-        # padded on the sidecar side after device_put, the JAX jit cache
-        # would see the array first with its TPU tile layout and later
-        # with no layout (CPU), raising
-        # `INVALID_ARGUMENT: Input array layout is different for
-        # executable jit__pad`.
-        max_n = runner.max_num_reqs
-        if next_tokens_tpu.shape[0] < max_n:
-            next_tokens_tpu = jnp.pad(
-                next_tokens_tpu, (0, max_n - next_tokens_tpu.shape[0]))
 
         # Direct per-device TPU → sidecar-CPU transfer. JAX handles the
         # cross-host copy natively (per the user's spike in
@@ -1519,8 +1266,8 @@ class RankExecutor:
         assert target is not None, (
             "RankExecutor.sidecar_cpu_sharding not set — DPEngineCore.__init__ "
             "should have passed it when constructing this RankExecutor.")
-        with jax.transfer_guard_device_to_host("allow"), \
-             jax.transfer_guard_host_to_device("allow"):
+        with jax.transfer_guard_device_to_host("disallow_explicit"), \
+             jax.transfer_guard_host_to_device("disallow_explicit"):
             next_tokens_cpu = jax.device_put(next_tokens_tpu, target)
             if logprobs_tpu is not None:
                 logprobs_cpu = jax.tree.map(
@@ -1553,10 +1300,8 @@ class RankExecutor:
 def _partition_devices_by_host(
         devices: List[jax.Device]) -> Dict[int, List[jax.Device]]:
     groups: Dict[int, List[jax.Device]] = defaultdict(list)
-    # for d in devices:
-    #     groups[d.process_index].append(d)
     # split devices into contiguous groups of 8, assuming each host has 8 chips with
-    # consecutive IDs. This is more robust to changes in JAX's device ordering
+    # consecutive IDs. 
     groups = {i // 8: devices[i:i + 8] for i in range(0, len(devices), 8)}
     print(groups)
     return dict(sorted(groups.items()))
@@ -1686,24 +1431,12 @@ class DPEngineCore(vLLMEngineCore):
                                  rexec.hash_block_size,
                                  _capture_sidecar_env(),
                                  [int(d.id) for d in tpu_devs])
-            try:
-                cloudpickle.dumps(sidecar_init_args)
-            except Exception as e:
-                raise RuntimeError(
-                    f"SchedulerShard[rank={rank_idx}] init args are not "
-                    f"cloudpickle-able (colocated_python will fail when it "
-                    f"ships the initializer closure to the colocated host). "
-                    f"Root cause: {e!r}. The likely culprit is a live "
-                    f"jaxlib Device or jax.Array hiding in vllm_config or "
-                    f"kv_cache_config; strip it before constructing the "
-                    f"shard.") from e
             shard = ShardWrapper(*sidecar_init_args)
-            # max_num_reqs from the rank's runner — sets the fixed shape of
-            # `prev_next_tokens` (the JAX-array leaf that crosses each
-            # step in the controller → sidecar direction).
+
             rank_max_num_reqs = (
                 rexec.engine.model_executor.driver_worker  # type: ignore[attr-defined]
                 .model_runner.max_num_reqs)
+            # TODO("wenxindong"): remove rank_max_num_reqs
             self._sched_clients.append(
                 _ShardClient(shard, cpu_sharding, rank_max_num_reqs))
 
@@ -1726,6 +1459,13 @@ class DPEngineCore(vLLMEngineCore):
         self._owner: Dict[str, int] = {}                       # req_id → rank
         self._load: List[List[int]] = [[0, 0] for _ in range(self.dp_size)]
         self._load_lock = threading.Lock()
+        # req_id ↔ int handle, used to intern req_id strings out of the
+        # cross-boundary drained blob (see `_intern_drained_req_ids`).
+        # Assigned at add_request, freed when the request finishes.
+        self._handle_by_id: Dict[str, int] = {}
+        self._id_by_handle: Dict[int, str] = {}
+        self._next_handle: int = 0
+        self._handle_lock = threading.Lock()
         self._funnel: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._driver_threads = [
@@ -1748,37 +1488,7 @@ class DPEngineCore(vLLMEngineCore):
     # ---- per-rank driver thread (the heart of the design) ----------------
 
     def _drive_rank(self, i: int) -> None:
-        """v3 driver loop: ONE combined boundary call per step.
 
-        Per step:
-          1. ``sched_out, drained = client.step(prev_pair)`` — single boundary
-             round-trip carrying:
-              IN:  prior step's ``(sched_out, model_out)`` for update_from_output
-              OUT: next step's ``SchedulerOutput`` (or None if idle) + any
-                   ``EngineCoreOutputs`` produced since the last call.
-          2. If ``sched_out is None`` (sidecar idle) → sleep this rank's
-             driver thread briefly.
-          3. Otherwise: ``model_out = rexec.execute(sched_out)`` (TPU compute,
-             controller-local; no boundary crossing).
-          4. Funnel any drained outputs into the central queue for
-             ``DPEngineCore.step``.
-
-        Compared to v2.1 (4 crossings/step: has_requests, schedule,
-        update_from_output_fire, drain_outputs) this is 1 crossing/step,
-        carrying the same per-step data in fewer round-trips. The only OTHER
-        crossings in the entire engine are:
-          - ``add_request`` (when LLMEngine submits a new request)
-          - ``shutdown``
-        Everything else (has_requests, get_num_unfinished_requests, etc.) is
-        no longer on the per-step hot path.
-
-        TPU dispatch from the controller is the irreducible constraint
-        forcing this single round-trip: model_fn requires controller-side
-        execution because the sidecar has no TPU device access. The remaining
-        v3 follow-up (task #13) shrinks the per-step blob payload by moving
-        TPUModelRunner's CPU prep onto the sidecar — the boundary architecture
-        here will not change.
-        """
         client = self._sched_clients[i]
         rexec = self._rank_execs[i]
         # v3-pure: `prev_next_tokens` is a JAX array (shape (max_num_reqs,),
@@ -1787,73 +1497,77 @@ class DPEngineCore(vLLMEngineCore):
         # `has_prev` is a uint8 JAX scalar (0=first call, 1=subsequent).
         prev_next_tokens, has_prev = client.first_call_state()
         while not self._stop.is_set():
+            # 1) poll: fixed-spec call — consume prev tokens, drain, schedule,
+            #    decide work. Returns drained outputs + has_work + bucket sizes.
             try:
-                (input_ids, attn_md, sampling_md, logits_indices,
-                 meta) = client.step(prev_next_tokens, has_prev)
+                meta = client.poll(prev_next_tokens, has_prev)
             except Exception as e:
                 if self._stop.is_set():
                     break
-                logger.exception("rank %d step() failed: %s", i, e)
+                logger.exception("rank %d poll() failed: %s", i, e)
                 time.sleep(0.05)
                 prev_next_tokens, has_prev = client.first_call_state()
                 continue
-            self._funnel_drained(i, meta.get("drained", []))
+            self._funnel_drained(i, meta.get("drained"))
             if not meta.get("has_work", False):
-                # Sidecar idle. Reset so next step() doesn't try to
-                # update_from_output stale data; yield briefly.
+                # Sidecar idle. Reset so the next poll doesn't postprocess
+                # stale tokens; yield briefly.
                 prev_next_tokens, has_prev = client.first_call_state()
                 time.sleep(0.001)
                 continue
+            # 2) prepare_step: bucket-keyed data call — fetch the prepared
+            #    model inputs, then dispatch on TPU. The pins encode the
+            #    bucket so colocated re-specializes per bucket with a
+            #    consistent output spec.
             try:
-                # TPU dispatch — pytree leaves (input_ids, attn_md,
-                # sampling_md, logits_indices) cross natively, no
-                # cloudpickle of their buffers. Returns next_tokens /
-                # logprobs as JAX arrays already on the sidecar's CPU
-                # sharding, ready to flow back via the next step() call.
+                (input_ids, attn_md, sampling_md,
+                 logits_indices) = client.prepare_step(meta["num_reqs"],
+                                                       meta["num_tokens"])
+                # TPU dispatch — pytree leaves cross natively. Returns
+                # next_tokens as a JAX array already on the sidecar's CPU
+                # sharding, ready to flow back via the next poll() call.
                 next_tokens, _logprobs = rexec.execute_with_cpu_prep(
                     input_ids=input_ids,
                     attn_metadata=attn_md,
                     sampling_metadata=sampling_md,
                     logits_indices=logits_indices,
-                    padded_num_reqs=meta["padded_num_reqs"],
-                    padded_total_num_scheduled_tokens=meta[
-                        "padded_total_num_scheduled_tokens"],
-                    actual_do_sampling=meta.get("actual_do_sampling", True),
-                    actual_logprobs=meta.get("actual_logprobs", False),
                 )
             except Exception as e:
-                logger.exception("rank %d TPU execute_with_cpu_prep() "
-                                 "failed: %s", i, e)
+                logger.exception("rank %d prepare_step/execute failed: %s",
+                                 i, e)
                 time.sleep(0.05)
                 prev_next_tokens, has_prev = client.first_call_state()
                 continue
-            # `execute_with_cpu_prep` already padded next_tokens to
-            # max_num_reqs on the TPU side (before the cross-host
-            # transfer), so the shape contract for the sidecar's
-            # prev_next_tokens is satisfied as-is — no further pad here.
-            assert next_tokens.shape[0] == client._max_num_reqs, (
-                f"next_tokens shape {next_tokens.shape} != "
-                f"(max_num_reqs={client._max_num_reqs},) — "
-                f"RankExecutor.execute_with_cpu_prep should have padded "
-                f"on the TPU side before device_put.")
             prev_next_tokens = next_tokens
             has_prev = client._has_prev_true_cache()
 
     def _funnel_drained(
-            self, i: int, drained: List[Dict[int, EngineCoreOutputs]]) -> None:
-        """Push a batch of EngineCoreOutputs from rank ``i`` into the funnel
-        and reconcile load/ownership tracking. No boundary crossing — this
-        runs on whatever the controller already got from ``client.step``."""
-        for engine_outs in drained:
-            for o in engine_outs.values():
-                if o.finished_requests:
-                    with self._load_lock:
-                        self._load[i][0] = max(
-                            0,
-                            self._load[i][0] - len(o.finished_requests))
-                    for rid in o.finished_requests:
-                        self._owner.pop(rid, None)
-            self._funnel.put((i, engine_outs))
+            self, i: int,
+            engine_outs: Optional[EngineCoreOutputs]) -> None:
+        """Push rank ``i``'s `EngineCoreOutputs` into the funnel and reconcile
+        load/ownership tracking. No boundary crossing — this runs on whatever
+        the controller already got from ``client.poll``.
+
+        `engine_outs` is a single bare `EngineCoreOutputs` or None (single-
+        client + single-per-step simplification — the client dict and the
+        per-step list were both collapsed on the sidecar)."""
+        if engine_outs is None:
+            return
+        # Swap int handles back to req_id strings before vLLM sees them.
+        _restore_drained_req_ids(engine_outs, self._id_by_handle)
+        if engine_outs.finished_requests:
+            with self._load_lock:
+                self._load[i][0] = max(
+                    0,
+                    self._load[i][0] - len(engine_outs.finished_requests))
+            for rid in engine_outs.finished_requests:
+                self._owner.pop(rid, None)
+                # Free the handle now that the request is done.
+                with self._handle_lock:
+                    h = self._handle_by_id.pop(rid, None)
+                    if h is not None:
+                        self._id_by_handle.pop(h, None)
+        self._funnel.put((i, engine_outs))
 
     # ---- routing ---------------------------------------------------------
 
@@ -1867,11 +1581,17 @@ class DPEngineCore(vLLMEngineCore):
 
     def add_request(self, request: Request, request_wave: int = 0) -> None:
         idx = self._pick_rank()
-        self._owner[request.request_id] = idx
+        rid = request.request_id
+        self._owner[rid] = idx
+        with self._handle_lock:
+            handle = self._next_handle
+            self._next_handle += 1
+            self._handle_by_id[rid] = handle
+            self._id_by_handle[handle] = rid
         with self._load_lock:
             self._load[idx][1] += 1
         # Fire-and-forget; the blob's CPU sharding pins the call to the host.
-        self._sched_clients[idx].add_request(request, request_wave)
+        self._sched_clients[idx].add_request(request, request_wave, handle)
 
     def abort_requests(self, request_ids: List[str]) -> None:
         by_rank: Dict[int, List[str]] = defaultdict(list)
@@ -1888,7 +1608,9 @@ class DPEngineCore(vLLMEngineCore):
             _, engine_outs = self._funnel.get(timeout=1.0)
         except queue.Empty:
             return {}, False
-        return engine_outs, True
+        # Re-wrap the bare EngineCoreOutputs into the client-indexed dict vLLM
+        # expects. Single-client simplification → key is always 0.
+        return {0: engine_outs}, True
 
     def post_step(self, model_executed: bool) -> None:
         # Driver threads handle per-step post-processing inside their loop;
@@ -2053,74 +1775,6 @@ class DPEngineCore(vLLMEngineCore):
 # Old name in v1; kept so existing imports / docs don't break while we migrate.
 ColocatedDPEngineCore = DPEngineCore
 
-
-# ============================================================================
-# Workaround: pathwaysutils profile-handler mismatch
-# ============================================================================
-
-_PATHWAYS_PROFILE_PATCH_INSTALLED = False
-
-
-def _install_pathways_profile_handler_patch() -> None:
-    """Tolerate the pathwaysutils profile-request handler-count mismatch.
-
-    `pathwaysutils.profiling._start_pathways_trace_from_profile_request` calls
-    `PluginExecutable.call()` with empty `out_avals` / `out_shardings`, but the
-    Pathways runtime returns 1 result token for the profile request — yielding
-    `ValueError: Mismatch between out_handlers and num_results: 0 vs 1` and
-    aborting start_trace.
-
-    This patch swallows that ValueError when it comes from a profile-request
-    call (`prog_str` contains `"profileRequest"`), then forces a sync via the
-    token future so the trace is actually started before we return. Subsequent
-    `stop_trace()` is unaffected.
-
-    Idempotent and a no-op if pathwaysutils isn't installed.
-    """
-    global _PATHWAYS_PROFILE_PATCH_INSTALLED
-    if _PATHWAYS_PROFILE_PATCH_INSTALLED:
-        return
-    try:
-        from pathwaysutils import plugin_executable as pe
-    except Exception:
-        return  # not running under pathwaysutils — nothing to patch
-
-    orig_call = pe.PluginExecutable.call
-    if getattr(orig_call, "_tpu_inference_patched", False):
-        _PATHWAYS_PROFILE_PATCH_INSTALLED = True
-        return
-
-    def patched_call(self, in_arr=(), out_shardings=(), out_avals=(),
-                     out_committed=True):
-        try:
-            return orig_call(self, in_arr, out_shardings, out_avals,
-                             out_committed)
-        except ValueError as e:
-            # Only swallow the specific handler/result mismatch on a
-            # profile-request executable; re-raise everything else.
-            if "Mismatch between out_handlers and num_results" not in str(e):
-                raise
-            # Confirm this is the profile-request executable by inspecting
-            # the program string we compiled in.  pathwaysutils stores it
-            # only via the compiled module, so we fall back to "if no
-            # out_avals were declared at all, swallow it" — that matches the
-            # narrow shape of the bug.
-            if out_avals or out_shardings:
-                raise
-            logger.debug(
-                "Swallowed pathwaysutils handler/result mismatch on "
-                "no-out-aval call (likely a profile-request token).")
-            import concurrent.futures
-            fut = concurrent.futures.Future()
-            fut.set_result(None)
-            return ((), fut)
-
-    patched_call._tpu_inference_patched = True  # type: ignore[attr-defined]
-    pe.PluginExecutable.call = patched_call
-    _PATHWAYS_PROFILE_PATCH_INSTALLED = True
-    logger.info(
-        "Installed pathwaysutils.PluginExecutable.call patch "
-        "(profile-request handler mismatch workaround).")
 
 
 # ============================================================================
