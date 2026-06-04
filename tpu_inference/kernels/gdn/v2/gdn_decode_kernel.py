@@ -669,11 +669,22 @@ def ragged_gated_delta_rule_decode_only(
         *output* is ``(num_tokens, n_v*d_v)``.
     """
     num_tokens = mixed_qkv.shape[0]
-    key_dim = n_kq * d_k
-
-    q = mixed_qkv[..., :key_dim].reshape(num_tokens, n_kq, d_k)
-    k = mixed_qkv[..., key_dim:key_dim * 2].reshape(num_tokens, n_kq, d_k)
-    v = mixed_qkv[..., key_dim * 2:].reshape(num_tokens, n_v, d_v)
+    if mixed_qkv.ndim == 3:
+        if d_k != d_v:
+            raise ValueError("3D mixed_qkv requires d_k == d_v")
+        expected_shape = (2 * n_kq + n_v, d_k)
+        if mixed_qkv.shape[1:] != expected_shape:
+            raise ValueError(
+                f"3D mixed_qkv must be [num_tokens, {expected_shape[0]}, "
+                f"{expected_shape[1]}], got {mixed_qkv.shape}")
+        q = mixed_qkv[:, :n_kq, :]
+        k = mixed_qkv[:, n_kq:2 * n_kq, :]
+        v = mixed_qkv[:, 2 * n_kq:, :]
+    else:
+        key_dim = n_kq * d_k
+        q = mixed_qkv[..., :key_dim].reshape(num_tokens, n_kq, d_k)
+        k = mixed_qkv[..., key_dim:key_dim * 2].reshape(num_tokens, n_kq, d_k)
+        v = mixed_qkv[..., key_dim * 2:].reshape(num_tokens, n_v, d_v)
 
     g = a
     if g.shape == (num_tokens, n_v):

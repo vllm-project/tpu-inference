@@ -844,7 +844,7 @@ class TestKVCacheManager:
             assert len(mamba_states) == 2
 
             expected_num_blocks = num_blocks // len(layer_names)
-            assert mamba_states[0].shape == (expected_num_blocks, 4, 128)
+            assert mamba_states[0].shape == (expected_num_blocks, 4, 2, 64)
             assert mamba_states[1].shape == (expected_num_blocks, 8, 64, 32)
 
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i

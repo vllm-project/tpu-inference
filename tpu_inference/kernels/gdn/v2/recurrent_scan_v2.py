@@ -1079,8 +1079,9 @@ def recurrent_scan(
     """Fused recurrent scan kernel for GDN on TPU v7.
 
   Args:
-    mixed_qkv: jax.Array of shape [num_tokens, 2 * n_kq * d_k + n_v * d_v].
-      Packed Query, Key, and Value tokens.
+    mixed_qkv: jax.Array of shape [num_tokens, 2 * n_kq * d_k + n_v * d_v],
+      or [num_tokens, 2 * n_kq + n_v, d_k] when d_k == d_v. Packed Query,
+      Key, and Value tokens.
     b: jax.Array of shape [num_tokens, n_v]. Input for beta gate.
     a: jax.Array of shape [num_tokens, n_v]. Input for g gate.
     recurrent_state: jax.Array of shape [max_reqs, n_v, d_k, d_v]. Current
@@ -1112,6 +1113,16 @@ def recurrent_scan(
         has_initial_state = has_initial_state.astype(jnp.int32)
 
     num_tokens = mixed_qkv.shape[0]
+    if mixed_qkv.ndim == 3:
+        if d_k != d_v:
+            raise ValueError("3D mixed_qkv requires d_k == d_v")
+        expected_shape = (2 * n_kq + n_v, d_k)
+        if mixed_qkv.shape[1:] != expected_shape:
+            raise ValueError(
+                f"3D mixed_qkv must be [num_tokens, {expected_shape[0]}, "
+                f"{expected_shape[1]}], got {mixed_qkv.shape}")
+        mixed_qkv = mixed_qkv.reshape(num_tokens, 2 * n_kq * d_k + n_v * d_v)
+
     tpu_info = pltpu.get_tpu_info()
     sublanesize = 4 // mixed_qkv.itemsize * tpu_info.num_sublanes
 

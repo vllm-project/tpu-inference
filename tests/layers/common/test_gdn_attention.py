@@ -16,7 +16,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from absl.testing import parameterized
-
 from tpu_inference.layers.common.gdn_attention import (
     GdnAttentionConfig, RaggedGatedDeltaRuleImpl, run_jax_gdn_attention_local)
 from tpu_inference.layers.common.ragged_gated_delta_rule_chunked import \
@@ -33,7 +32,7 @@ class GDNAttentionTest(parameterized.TestCase):
             max_reqs=1,
             lengths=[8192],
             q_loc=[0, 8192],
-            distribution=[0, 0, 3],
+            distribution=[0, 0, 1],
             test_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
                 CHUNKED_JAX_PD),
@@ -105,7 +104,7 @@ class GDNAttentionTest(parameterized.TestCase):
             max_reqs=1,
             lengths=[8192],
             q_loc=[0, 8192],
-            distribution=[0, 0, 3],
+            distribution=[0, 0, 1],
             test_config=GdnAttentionConfig(
                 ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl.
                 CHUNKED_KERNEL_P_RECURRENT_KERNEL_D),
@@ -152,12 +151,9 @@ class GDNAttentionTest(parameterized.TestCase):
         b = jax.random.normal(next(rngs), (num_tokens, n_v))
         a = jax.random.normal(next(rngs), (num_tokens, n_v))
 
-        conv_state_q = jnp.zeros(
-            (num_blocks, kernel_size - 1, n_kq * kq_head_dim))
-        conv_state_k = jnp.zeros(
-            (num_blocks, kernel_size - 1, n_kq * kq_head_dim))
-        conv_state_v = jnp.zeros(
-            (num_blocks, kernel_size - 1, n_v * v_head_dim))
+        conv_head_num = 2 * n_kq + n_v
+        conv_state = jnp.zeros(
+            (num_blocks, kernel_size - 1, conv_head_num, kq_head_dim))
         recurrent_state = jnp.zeros((num_blocks, n_v, kq_head_dim, v_head_dim))
 
         conv_weight_q = jax.random.normal(next(rngs),
@@ -175,8 +171,6 @@ class GDNAttentionTest(parameterized.TestCase):
         dt_bias = jax.random.normal(jax.random.key(0), (n_v, ))
 
         mixed_qkv = jnp.concatenate([query, key, value], axis=-1)
-        conv_state = jnp.concatenate(
-            [conv_state_q, conv_state_k, conv_state_v], axis=-1)
         conv_weight = jnp.concatenate(
             [conv_weight_q, conv_weight_k, conv_weight_v], axis=0)
         conv_bias = jnp.concatenate([conv_bias_q, conv_bias_k, conv_bias_v],
@@ -299,15 +293,18 @@ class GDNAttentionTest(parameterized.TestCase):
         a = jax.random.normal(next(rngs), (num_tokens, n_v))
 
         conv_dim = (n_kq * kq_head_dim) * 2 + n_v * v_head_dim
-        conv_state_fresh = jnp.zeros((num_blocks, kernel_size - 1, conv_dim))
+        conv_head_num = conv_dim // kq_head_dim
+        conv_state_fresh = jnp.zeros(
+            (num_blocks, kernel_size - 1, conv_head_num, kq_head_dim))
         recurrent_state_fresh = jnp.zeros(
             (num_blocks, n_v, kq_head_dim, v_head_dim))
 
         # Build a "stale" pair where the slots that the two new requests
         # land on are filled with arbitrary nonzero values (simulating a
         # prior request that finished without the pool clearing the slot).
-        stale_conv = jax.random.normal(next(rngs),
-                                       (num_blocks, kernel_size - 1, conv_dim))
+        stale_conv = jax.random.normal(
+            next(rngs),
+            (num_blocks, kernel_size - 1, conv_head_num, kq_head_dim))
         stale_recurrent = jax.random.normal(
             next(rngs), (num_blocks, n_v, kq_head_dim, v_head_dim))
         # Slot 0 is the null block; leave it zero.
@@ -449,7 +446,9 @@ class GDNAttentionTest(parameterized.TestCase):
         mixed_qkv_a = mixed_qkv_full[:half]
         mixed_qkv_b = mixed_qkv_full[half:]
 
-        conv_state_zero = jnp.zeros((num_blocks, kernel_size - 1, conv_dim))
+        conv_head_num = conv_dim // kq_head_dim
+        conv_state_zero = jnp.zeros(
+            (num_blocks, kernel_size - 1, conv_head_num, kq_head_dim))
         recurrent_state_zero = jnp.zeros(
             (num_blocks, n_v, kq_head_dim, v_head_dim))
 

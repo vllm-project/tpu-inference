@@ -68,6 +68,35 @@ class RaggedGatedDeltaRuleImpl(enum.Enum):
         )
 
 
+def _split_mixed_qkv(
+    mixed_qkv: jnp.ndarray,
+    *,
+    n_kq: int,
+    n_v: int,
+    d_k: int,
+    d_v: int,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    num_tokens = mixed_qkv.shape[0]
+    if mixed_qkv.ndim == 3:
+        if d_k != d_v:
+            raise ValueError("3D mixed_qkv requires d_k == d_v")
+        expected_shape = (2 * n_kq + n_v, d_k)
+        if mixed_qkv.shape[1:] != expected_shape:
+            raise ValueError(
+                f"3D mixed_qkv must be [num_tokens, {expected_shape[0]}, "
+                f"{expected_shape[1]}], got {mixed_qkv.shape}")
+        query = mixed_qkv[:, :n_kq, :]
+        key = mixed_qkv[:, n_kq:2 * n_kq, :]
+        value = mixed_qkv[:, 2 * n_kq:, :]
+        return query, key, value
+
+    key_dim = n_kq * d_k
+    query = mixed_qkv[..., :key_dim].reshape(num_tokens, n_kq, d_k)
+    key = mixed_qkv[..., key_dim:key_dim * 2].reshape(num_tokens, n_kq, d_k)
+    value = mixed_qkv[..., key_dim * 2:].reshape(num_tokens, n_v, d_v)
+    return query, key, value
+
+
 @jax.jit(
     # because , recurrent_scan_v2 call pltpu.get_tpu_info().num_lanes
     donate_argnames=('recurrent_state', ),
@@ -172,14 +201,9 @@ def ragged_gated_delta_rule_wrapper(
             return new_state, output
         elif impl == 'jax':
             qkv_in = jax.nn.silu(mixed_qkv)
+            q_reshaped, k_reshaped, v_reshaped = _split_mixed_qkv(
+                qkv_in, n_kq=n_kq, n_v=n_v, d_k=d_k, d_v=d_v)
             num_tokens = qkv_in.shape[0]
-            key_dim = n_kq * d_k
-            query = qkv_in[..., :key_dim]
-            key = qkv_in[..., key_dim:key_dim * 2]
-            value = qkv_in[..., key_dim * 2:]
-            q_reshaped = query.reshape(num_tokens, n_kq, d_k)
-            k_reshaped = key.reshape(num_tokens, n_kq, d_k)
-            v_reshaped = value.reshape(num_tokens, n_v, d_v)
             repeat_factor = n_v // n_kq
             if repeat_factor > 1:
                 q_reshaped = jnp.repeat(q_reshaped, repeat_factor, axis=1)
@@ -209,14 +233,9 @@ def ragged_gated_delta_rule_wrapper(
         impl = config.prefill_impl
         if impl == 'jax':
             qkv_in = jax.nn.silu(mixed_qkv)
+            q_reshaped, k_reshaped, v_reshaped = _split_mixed_qkv(
+                qkv_in, n_kq=n_kq, n_v=n_v, d_k=d_k, d_v=d_v)
             num_tokens = qkv_in.shape[0]
-            key_dim = n_kq * d_k
-            query = qkv_in[..., :key_dim]
-            key = qkv_in[..., key_dim:key_dim * 2]
-            value = qkv_in[..., key_dim * 2:]
-            q_reshaped = query.reshape(num_tokens, n_kq, d_k)
-            k_reshaped = key.reshape(num_tokens, n_kq, d_k)
-            v_reshaped = value.reshape(num_tokens, n_v, d_v)
             repeat_factor = n_v // n_kq
             if repeat_factor > 1:
                 q_reshaped = jnp.repeat(q_reshaped, repeat_factor, axis=1)
