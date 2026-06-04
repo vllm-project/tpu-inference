@@ -82,12 +82,15 @@ fi
 # This script handles dataset loading and accuracy evaluation internally
 # We use a system prompt that aligns with the internal dataset's parsing logic
 # We set output length to 32 to allow for the 'Final Answer: (X)' format
+# We use --mmmu-pro-prompt-footer and --mmmu-pro-strip-reasoning to optimize Qwen accuracy
 python3 scripts/vllm/benchmarking/benchmark_serving.py \
   --backend vllm-chat \
   --model "$MODEL_NAME" \
   --dataset-name mmmu_pro \
   --num-prompts "$LIMIT" \
   --mmmu-pro-output-len 32 \
+  --mmmu-pro-prompt-footer "" \
+  --mmmu-pro-strip-reasoning \
   --run-eval \
   --chat-template-system-prompt "IMPORTANT: Directly output the final answer in the format: 'Final Answer: (X)' where X is the correct letter choice. Do not include any reasoning or explanation. Your response must start with 'Final Answer:'." \
   --endpoint /v1/chat/completions \

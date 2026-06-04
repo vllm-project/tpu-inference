@@ -650,25 +650,26 @@ class MMMUProDataset(BenchmarkDataset):
 
     OPTION_LETTERS = "ABCDEFGHIJ"
 
-    PROMPT_FOOTER = "Answer:"
-
-    QUERY_TEMPLATE_VISION = """{options_text}
-
-""" + PROMPT_FOOTER
-
-    QUERY_TEMPLATE_STANDARD = """{question}
-
-{options_text}
-
-""" + PROMPT_FOOTER
+    DEFAULT_PROMPT_FOOTER = (
+        "Try to reason about the question step by step. Don't give a final"
+        " answer without reasoning. Output the final answer in the format"
+        " 'Final Answer: (X)' where X is the correct letter choice. Answer:")
 
     def __init__(
         self,
         subset: str = "vision",
+        prompt_footer: str = DEFAULT_PROMPT_FOOTER,
+        strip_reasoning: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.subset = subset
+        self.prompt_footer = prompt_footer
+        self.strip_reasoning = strip_reasoning
+
+        self.query_template_vision = "{options_text}\n\n" + self.prompt_footer
+        self.query_template_standard = "{question}\n\n{options_text}\n\n" + self.prompt_footer
+
         self.load_data()
 
     def load_data(self) -> None:
@@ -709,12 +710,16 @@ class MMMUProDataset(BenchmarkDataset):
                         images.append(img)
 
             if self.subset == "vision":
-                question_text = self.QUERY_TEMPLATE_VISION.format(
+                question_text = self.query_template_vision.format(
                     options_text=options_text)
             else:
-                question_text = self.QUERY_TEMPLATE_STANDARD.format(
-                    question=row.get("question", ""),
-                    options_text=options_text)
+                question = row.get("question", "")
+                if self.strip_reasoning:
+                    question = question.replace(
+                        "Please reason step-by-step and then provide the answer options.",
+                        "").strip()
+                question_text = self.query_template_standard.format(
+                    question=question, options_text=options_text)
 
             mmmu_pro_data.append((question_text, answer, images))
 
