@@ -100,10 +100,15 @@ def quantize_moe_weights(
         # Use per-channel quantizaiton.
         w13_block_size = w13_weight.shape[-1]
         w2_block_size = w2_weight.shape[-1]
+    elif isinstance(block_size, tuple):
+        w13_block_size, w2_block_size = block_size
     else:
         w13_block_size = w2_block_size = block_size
 
     _, orig_hidden_size, orig_intermediate_size = w2_weight.shape
+
+    # Cap the block size for w2 at its contracting dimension size
+    w2_block_size = min(w2_block_size, orig_intermediate_size)
 
     hidden_size = align_to(orig_hidden_size, w13_block_size)
     intermediate_size = align_to(orig_intermediate_size, w2_block_size)
@@ -1082,8 +1087,17 @@ def _process_quantized_moe_weights_impl(
     if requant_block_size is None:
         w13_block_size = w13_weight.shape[-1]
         w2_block_size = w2_weight.shape[-1]
+    elif isinstance(requant_block_size, tuple):
+        w13_block_size, w2_block_size = requant_block_size
     else:
         w13_block_size = w2_block_size = requant_block_size
+
+    if requant_block_size is not None and moe_backend == MoEBackend.GMM_TP:
+        tp_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
+        max_w2_block_size = orig_intermediate_size // tp_size
+
+        # Cap the block size to avoid sharding indivisible errors
+        w2_block_size = min(w2_block_size, max_w2_block_size)
     hidden_size = align_to(orig_hidden_size, w13_block_size)
     intermediate_size = align_to(orig_intermediate_size, w2_block_size)
 
@@ -1191,6 +1205,13 @@ def process_unquantized_moe_weights(
         if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
             requant_block_size = (int(requant_block_size_from_env)
                                   if requant_block_size_from_env else None)
+            if requant_block_size is not None and moe_backend == MoEBackend.GMM_TP:
+                tp_size = get_mesh_shape_product(mesh,
+                                                 ShardingAxisName.MLP_TENSOR)
+                orig_intermediate_size = w2_weight.shape[1]
+                max_w2_block_size = orig_intermediate_size // tp_size
+                w2_block_size = min(requant_block_size, max_w2_block_size)
+                requant_block_size = (requant_block_size, w2_block_size)
         moe_logging_str = (
             "[MoE requantization]: re-quantizing MoE weights to "
             f"{desired_quant_dtype}")
