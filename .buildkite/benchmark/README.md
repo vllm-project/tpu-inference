@@ -17,10 +17,10 @@ The CI pipeline dynamically constructs its execution matrix based on the JSON co
 Developers can bypass the CI/Docker abstraction and run the benchmark directly on a local TPU VM using the core runner:
 
 ```bash
-bash run_bm.sh <path_to_case.json> [TARGET_CASE_NAME]
+bash run_bm.sh <path_to_case.json> <TARGET_CASE_NAME>
 ```
 
-*Note: `TARGET_CASE_NAME` is only required if the JSON file uses the multi-case structure.*
+*Note: TARGET_CASE_NAME is mandatory for all benchmark runs.*
 
 ## 2. Local Execution Prerequisites & Caveats
 
@@ -46,11 +46,11 @@ The `run_bm.sh` script is designed to be environment-aware. When running locally
 
 ## 3. Configuration Guide (JSON Cases)
 
-The feature is driven by JSON configuration files. A case file can define a single benchmark or multiple benchmarks using the `benchmark_cases` array.
+The framework is driven by JSON configuration files. Each file defines one or more benchmarks within the `benchmark_cases` array.
 
 ### Configuration Structure & Parameter Definitions
 
-* `global_env` (or `env` in single-case): Environment variables applied globally.
+* `global_env`: Environment variables applied globally to all cases in the file.
   * `GCP_PROJECT_ID`, `GCP_INSTANCE_ID`, `GCP_DATABASE_ID`, `GCS_BUCKET`: Cloud routing for logs, datasets, and DB.
   * `MODELTAG`: Identifier tag for the model state (e.g., `NEW`, `PROD`).
   * `EXPECTED_ETEL`: The target goal for End-to-End Latency (P99 in ms). The script adjusts the request rate via binary search to stay within this limit.
@@ -93,7 +93,11 @@ When supplying a custom dataset file via `dataset-path`:
 * **Local Execution**: The path should be an absolute path or relative to the directory where `run_bm.sh` is executed.
 
 #### D. Implicit DB Tracking Variables
-While variables like `EXPECTED_ETEL`, `INPUT_LEN`, `OUTPUT_LEN`, and `PREFIX_LEN` might not be directly passed to the `vllm` CLI, they are rigorously parsed and injected into the GCP Spanner `RunRecord` table by `report_result.sh` to track historical performance variations. Please ensure that the values of these variables remain consistent with the corresponding parameter settings in the args of the Case JSON file.
+While variables like `EXPECTED_ETEL`, `INPUT_LEN`, `OUTPUT_LEN`, and `PREFIX_LEN` might not be directly passed to the `vllm` CLI, they are rigorously parsed and injected into the GCP Spanner `RunRecord` table by `report_result.sh` to track historical performance variations.
+
+Please ensure that the values of these variables remain consistent with the corresponding parameter settings in the args of the Case JSON file.
+
+Additionally, `DirName`, `FileName`, and `CaseName` are automatically extracted from the json path and `case_name` field and reported to GCP Spanner `RunRecord` table.
 
 ## 4. **Test Case File Hierarchy**
 
