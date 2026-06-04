@@ -1602,7 +1602,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return prompt_logprobs_dict
 
-    def _get_precompute_gdn_fn(self, max_tokens: int, chunk_size: int):
+    def _get_precompute_gdn_fn(self, max_tokens: int, chunk_size: int,
+                               max_num_seqs_per_rank: int):
         """Returns a JIT-compiled shard_map fn for the given static args, cached per bucket.
 
         Builds shard_map OUTSIDE jit so the full jit(shard_map(...)) is one
@@ -1610,10 +1611,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         """
         if not hasattr(self, '_precompute_gdn_fn_cache'):
             self._precompute_gdn_fn_cache = {}
-        key = (max_tokens, chunk_size)
+        key = (max_tokens, chunk_size, max_num_seqs_per_rank)
         if key not in self._precompute_gdn_fn_cache:
             max_blocks = (max_tokens + chunk_size - 1) // chunk_size
-            max_num_seqs_per_rank = self.scheduler_config.max_num_seqs
+            # both lax.cond
+            # branches (do_compute and do_skip) must use the same value so their
+            # output shapes match.  max_num_seqs_per_rank = num_reqs // dp_size.
             safe_max_blocks = max_blocks + max_num_seqs_per_rank * 2
             num_sublanes = pltpu.get_tpu_info().num_sublanes
             qkv_dtype = to_jax_dtype(self.model_config.dtype)
@@ -1622,6 +1625,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 local_query_start_loc: jax.Array,
                 local_distribution: jax.Array,
             ) -> tuple[jax.Array, jax.Array]:
+                # Truncate to the bucket's per-rank req count inside JIT so
+                # the slice op is fused into the XLA program rather than
+                # running as an eager dispatch before each batch.
+                local_query_start_loc = local_query_start_loc[:
+                                                              max_num_seqs_per_rank
+                                                              + 1]
                 # Mirror the lax.cond condition in ragged_gated_delta_rule_wrapper:
                 # skip schedule computation per-rank when this rank is decode-only.
                 is_decode_only = local_distribution[0] == local_distribution[2]
@@ -1674,6 +1683,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         request_distribution: jax.Array,
         max_tokens: int,
         chunk_size: int,
+        max_num_seqs_per_rank: int,
     ) -> tuple[jax.Array, jax.Array]:
         """Precompute GDN schedule table on TPU for all DP ranks.
 
@@ -1682,12 +1692,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             request_distribution: (dp_size * 3,) distribution per rank
             max_tokens: Maximum tokens across all DP ranks
             chunk_size: Chunk size for GDN computation
+            max_num_seqs_per_rank: Max sequences per DP rank (= num_reqs // dp_size
+                for the current bucket); determines safe_max_blocks so both
+                lax.cond branches return the same output shape.
 
         Returns:
             gdn_schedule_table: (dp_size * safe_max_blocks, cols) schedule table
             gdn_total_blocks: (dp_size, 1) total blocks per DP rank
         """
-        fn = self._get_precompute_gdn_fn(max_tokens, chunk_size)
+        fn = self._get_precompute_gdn_fn(max_tokens, chunk_size,
+                                         max_num_seqs_per_rank)
         return fn(query_start_loc, request_distribution)
 
     def _prepare_input_metadata(self, scheduler_output: "VllmSchedulerOutput"):
@@ -2225,11 +2239,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Chunk size used in GDN attention (hardcoded to 32 in gdn_attention.py)
             gdn_chunk_size = 32
 
+            # Truncate query_start_loc to the current bucket size (same as
+            # gdn_attention_op.py does) so schedule computation iterates over
+            # fewer slots instead of the full max-reqs allocation.
+            attn_padded_num_reqs_per_dp = attn_padded_num_reqs // dp_size
             gdn_schedule_table, gdn_total_blocks = self._precompute_gdn_schedule(
                 query_start_loc,
                 request_distribution,
                 padded_num_scheduled_tokens_per_dp_rank,
                 gdn_chunk_size,
+                attn_padded_num_reqs_per_dp,
             )
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:

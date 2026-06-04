@@ -266,10 +266,20 @@ class CompilationManager:
                 # that its jit(shard_map(...)) is compiled and cached during
                 # warmup, not lazily on the first real request.
                 gdn_chunk_size = 32  # hardcoded in gdn_attention.py
+                logger.info(
+                    "Precompile gdn_schedule --> "
+                    "{num_tokens: %d, num_reqs: %d, chunk_size: %d}",
+                    num_tokens, num_reqs, gdn_chunk_size)
+                _gdn_t0 = time.perf_counter()
                 gdn_schedule_table, gdn_total_blocks = (
                     self.runner._precompute_gdn_schedule(
                         query_start_loc, request_distribution, num_tokens,
-                        gdn_chunk_size))
+                        gdn_chunk_size, num_reqs // dp_size))
+                jax.tree.map(lambda r: r.block_until_ready(),
+                             (gdn_schedule_table, gdn_total_blocks))
+                logger.info(
+                    "gdn_schedule compilation finished in %.2f [secs].",
+                    time.perf_counter() - _gdn_t0)
 
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
