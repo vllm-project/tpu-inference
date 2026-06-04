@@ -475,7 +475,11 @@ class Llama4ForCausalLM(nnx.Module):
 
         self.rope_scaling = getattr(text_config, "rope_scaling", None)
         if self.rope_scaling:
-            self.rope_scaling["scale_factor"] = self.rope_scaling.pop("factor")
+            if "factor" in self.rope_scaling:
+                self.rope_scaling = dict(self.rope_scaling)
+                self.rope_scaling["scale_factor"] = self.rope_scaling.pop("factor")
+            else:
+                self.rope_scaling = None
 
         self.use_qk_norm = getattr(text_config, "use_qk_norm", True)
 
