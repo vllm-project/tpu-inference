@@ -191,12 +191,13 @@ class CompilationManager:
                 ) from e
 
         warmup_start = time.perf_counter()
-        for name, fn, args, call_kwargs, warmup_handler in tasks:
-            if warmup_handler is not None:
-                out = warmup_handler(fn, args, call_kwargs)
-            else:
-                out = fn(*args, **call_kwargs)
-            jax.tree.map(lambda r: r.block_until_ready(), out)
+        with jax.set_mesh(self.runner.mesh):
+            for name, fn, args, call_kwargs, warmup_handler in tasks:
+                if warmup_handler is not None:
+                    out = warmup_handler(fn, args, call_kwargs)
+                else:
+                    out = fn(*args, **call_kwargs)
+                jax.tree.map(lambda r: r.block_until_ready(), out)
         warmup_elapsed = time.perf_counter() - warmup_start
         if tasks:
             logger.info(
