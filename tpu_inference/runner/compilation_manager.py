@@ -1218,20 +1218,9 @@ class CompilationManager:
                     padded_num_reqs=num_reqs,
                 )
 
-                def drafter_propose_fn_wrapper(
-                    kv_caches,
-                    input_ids,
-                    attn_metadata,
-                    last_token_indices,
-                    target_hidden_states,
-                ):
-                    kv_caches, draft_token_ids = self.runner.drafter.propose(
-                        kv_caches,
-                        input_ids,
-                        attn_metadata,
-                        last_token_indices,
-                        target_hidden_states,
-                    )
+                def drafter_propose_warmup(_fn, _args, _call_kwargs):
+                    new_args = (self.runner.kv_caches,) + _args[1:]
+                    kv_caches, draft_token_ids = self.runner.drafter.propose(*new_args, **_call_kwargs)
                     self.runner.kv_caches = kv_caches
                     return draft_token_ids
 
@@ -1245,13 +1234,14 @@ class CompilationManager:
                                                       jnp.int32, dp_sharding)
                 self._run_compilation(
                     "drafter_propose",
-                    drafter_propose_fn_wrapper,
+                    self.runner.drafter.propose,
                     self.runner.kv_caches,
                     input_ids,
                     attention_metadata,
                     last_token_indices,
                     draft_hidden_states,
                     num_tokens=num_tokens,
+                    warmup_handler=drafter_propose_warmup,
                 )
                 aux_hidden_states = [
                     self._create_dummy_tensor(
@@ -1371,20 +1361,9 @@ class CompilationManager:
                     padded_num_reqs=num_reqs,
                 )
 
-                def drafter_propose_fn_wrapper(
-                    kv_caches,
-                    input_ids,
-                    attn_metadata,
-                    last_token_indices,
-                    target_hidden_states,
-                ):
-                    kv_caches, draft_token_ids = self.runner.drafter.propose(
-                        kv_caches,
-                        input_ids,
-                        attn_metadata,
-                        last_token_indices,
-                        target_hidden_states,
-                    )
+                def drafter_propose_warmup(_fn, _args, _call_kwargs):
+                    new_args = (self.runner.kv_caches,) + _args[1:]
+                    kv_caches, draft_token_ids = self.runner.drafter.propose(*new_args, **_call_kwargs)
                     self.runner.kv_caches = kv_caches
                     return draft_token_ids
 
@@ -1398,13 +1377,14 @@ class CompilationManager:
                                                       jnp.int32, dp_sharding)
                 self._run_compilation(
                     "drafter_propose",
-                    drafter_propose_fn_wrapper,
+                    self.runner.drafter.propose,
                     self.runner.kv_caches,
                     input_ids,
                     attention_metadata,
                     last_token_indices,
                     draft_hidden_states,
                     num_tokens=num_tokens,
+                    warmup_handler=drafter_propose_warmup,
                 )
 
                 aux_hidden_states = (self._create_dummy_tensor(
