@@ -53,7 +53,7 @@ RUN if [ "$BM_INFRA" = "true" ]; then \
 
 # Build vLLM
 WORKDIR /workspace/vllm
-ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+ARG VLLM_REPO=https://github.com/QiliangCui/vllm.git
 ARG VLLM_COMMIT_HASH
 
 RUN git clone $VLLM_REPO . && \
