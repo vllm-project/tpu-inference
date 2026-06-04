@@ -37,6 +37,35 @@ def _l2_normalize(x: jnp.ndarray, eps: float = 1e-6) -> jnp.ndarray:
     return (x_f32 / norm).astype(x.dtype)
 
 
+def _split_mixed_qkv(
+    mixed_qkv: jnp.ndarray,
+    *,
+    n_kq: int,
+    n_v: int,
+    d_k: int,
+    d_v: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    num_tokens = mixed_qkv.shape[0]
+    if mixed_qkv.ndim == 3:
+        if d_k != d_v:
+            raise ValueError("3D mixed_qkv requires d_k == d_v")
+        expected_shape = (2 * n_kq + n_v, d_k)
+        if mixed_qkv.shape[1:] != expected_shape:
+            raise ValueError(
+                f"3D mixed_qkv must be [num_tokens, {expected_shape[0]}, "
+                f"{expected_shape[1]}], got {mixed_qkv.shape}")
+        query = mixed_qkv[:, :n_kq, :]
+        key = mixed_qkv[:, n_kq:2 * n_kq, :]
+        value = mixed_qkv[:, 2 * n_kq:, :]
+        return query, key, value
+
+    key_dim = n_kq * d_k
+    query = mixed_qkv[..., :key_dim].reshape(num_tokens, n_kq, d_k)
+    key = mixed_qkv[..., key_dim:key_dim * 2].reshape(num_tokens, n_kq, d_k)
+    value = mixed_qkv[..., key_dim * 2:].reshape(num_tokens, n_v, d_v)
+    return query, key, value
+
+
 def _recurrent_gated_delta_rule_step(
     query: jnp.ndarray,
     key: jnp.ndarray,
@@ -118,7 +147,7 @@ def ragged_gated_delta_rule(
 
     Args:
       mixed_qkv: Combined QKV tensor of shape `(num_tokens, 2 * n_kq * d_k + n_v *
-        d_v)`.
+        d_v)` or `(num_tokens, 2 * n_kq + n_v, d_k)` when `d_k == d_v`.
       b: B tensor of shape `(num_tokens, n_v)`.
       a: A tensor of shape `(num_tokens, n_v)`.
       recurrent_state: Recurrent state of shape `(num_blocks, n_v, d_k, d_v)`.
@@ -154,10 +183,11 @@ def ragged_gated_delta_rule(
     """
     mixed_qkv = jax.nn.silu(mixed_qkv)
     num_tokens = mixed_qkv.shape[0]
-    key_dim = n_kq * d_k
-    query = mixed_qkv[..., :key_dim]
-    key = mixed_qkv[..., key_dim:key_dim * 2]
-    value = mixed_qkv[..., key_dim * 2:]
+    query, key, value = _split_mixed_qkv(mixed_qkv,
+                                         n_kq=n_kq,
+                                         n_v=n_v,
+                                         d_k=d_k,
+                                         d_v=d_v)
     max_reqs = state_indices.shape[0]
     token_idx = jnp.arange(num_tokens)
 
@@ -199,9 +229,9 @@ def ragged_gated_delta_rule(
             is_valid_token,
         ) = xs
 
-        curr_q = curr_q[None, None, :]
-        curr_k = curr_k[None, None, :]
-        curr_v = curr_v[None, None, :]
+        curr_q = curr_q[None, None, :, :]
+        curr_k = curr_k[None, None, :, :]
+        curr_v = curr_v[None, None, :, :]
         curr_b = curr_b[None, None, :]
         curr_a = curr_a[None, None, :]
 
@@ -209,9 +239,9 @@ def ragged_gated_delta_rule(
         recurrent_state = recurrent_state_all[state_index][None, ...]
 
         B, T = 1, 1
-        query_reshaped = curr_q.reshape(B, T, n_kq, d_k)
-        key_reshaped = curr_k.reshape(B, T, n_kq, d_k)
-        value_reshaped = curr_v.reshape(B, T, n_v, d_v)
+        query_reshaped = curr_q
+        key_reshaped = curr_k
+        value_reshaped = curr_v
 
         # Cast b to fp32 before sigmoid to match GPU's
         # `fused_gdn_gating_kernel`

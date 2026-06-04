@@ -25,8 +25,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.layers.common.ragged_gated_delta_rule_wrapper as ragged_gated_delta_rule_wrapper
-from tpu_inference.layers.common.ragged_conv1d_jax import \
-    ragged_conv1d as ragged_conv1d_jax
+from tpu_inference.kernels.experimental.short_conv1d import short_conv1d
 from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
     ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -76,9 +75,9 @@ def run_jax_gdn_attention_local(
         b: B tensor of shape `(num_tokens, n_v)`.
         a: A tensor of shape `(num_tokens, n_v)`.
         conv_state: Combined convolutional state of shape `(num_blocks,
-          kernel_size - 1, dim)`. `num_blocks` is always equal or larger than
-          `max_seqs + 1`. The first block is a null_block and only used for
-          padded / invalid tokens.
+          kernel_size - 1, head_num, head_dim)`. `num_blocks` is always equal
+          or larger than `max_seqs + 1`. The first block is a null_block and
+          only used for padded / invalid tokens.
         recurrent_state: Recurrent state of shape `(num_blocks, n_v, d_k, d_v)`.
         conv_weight: Combined convolutional weight of shape `(dim, 1,
           kernel_size)`.
@@ -120,20 +119,32 @@ def run_jax_gdn_attention_local(
     query_lens = query_start_loc[1:max_reqs + 1] - query_start_loc[:max_reqs]
     has_initial_state = (seq_lens - query_lens) > 0
 
-    # TODO: Switch conv implementaion based on config once we have more than 1 impl
-    conv_impl = ragged_conv1d_jax
+    num_tokens = mixed_qkv.shape[0]
+    if conv_state.ndim != 4:
+        raise ValueError(
+            "conv_state must be [num_blocks, kernel_size - 1, head_num, "
+            f"head_dim], got {conv_state.shape}")
+    conv_head_num = conv_state.shape[2]
+    conv_head_dim = conv_state.shape[3]
+    conv_dim = conv_head_num * conv_head_dim
+    if mixed_qkv.shape[-1] != conv_dim:
+        raise ValueError(f"mixed_qkv dim {mixed_qkv.shape[-1]} does not match "
+                         f"conv_state head_num * head_dim {conv_dim}")
 
-    out_mixed_qkv, new_conv_state = conv_impl(
-        mixed_qkv,
+    short_conv_distribution = jnp.stack([distribution[0], distribution[2]])
+    short_conv_weight = conv_weight[:, 0, :].reshape(
+        conv_head_num, conv_head_dim, kernel_size).transpose(2, 0, 1)
+    out_mixed_qkv, new_conv_state = short_conv1d(
+        mixed_qkv.reshape(num_tokens, conv_head_num, conv_head_dim),
+        short_conv_weight,
         conv_state,
-        conv_weight,
-        conv_bias,
         query_start_loc,
         state_indices,
-        distribution,
-        has_initial_state,
-        kernel_size=kernel_size,
+        short_conv_distribution,
+        has_initial_state.astype(jnp.int32),
     )
+    if conv_bias is not None:
+        out_mixed_qkv += conv_bias.reshape(conv_head_num, conv_head_dim)
 
     if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
         ragged_gdn_impl = functools.partial(
@@ -208,9 +219,9 @@ def run_jax_gdn_attention(
         j_b: Input tensor of shape `(num_tokens, n_v)`.
         j_a: Input tensor of shape `(num_tokens, n_v)`.
         conv_state: Convolutional state tensor of shape `(num_blocks, kernel_size
-          - 1, dim)`. `num_blocks` is always equal or larger than `max_seqs +
-          1`. The first block is a null_block and only used for padded / invalid
-          tokens.
+          - 1, head_num, head_dim)`. `num_blocks` is always equal or larger than
+          `max_seqs + 1`. The first block is a null_block and only used for
+          padded / invalid tokens.
         recurrent_state: Recurrent state tensor of shape `(num_blocks, n_v, d_k,
           d_v)`.
         j_conv_weight: Convolutional weight tensor of shape `(dim, 1,
@@ -238,7 +249,7 @@ def run_jax_gdn_attention(
     Returns:
         A tuple containing:
         - A tuple of (new_conv_state, new_recurrent_state).
-          - new_conv_state: `(num_blocks, kernel_size - 1, dim)`
+          - new_conv_state: `(num_blocks, kernel_size - 1, head_num, head_dim)`
           - new_recurrent_state: `(num_blocks, n_v, d_k, d_v)`
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
@@ -247,8 +258,8 @@ def run_jax_gdn_attention(
           ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_b
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_a
-        P(ShardingAxisName.ATTN_DATA, None,
-          ShardingAxisName.ATTN_HEAD),  # conv_state
+        P(ShardingAxisName.ATTN_DATA, None, ShardingAxisName.ATTN_HEAD,
+          None),  # conv_state
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
           None),  # recurrent_state
         P(ShardingAxisName.ATTN_HEAD, None, None),  # j_conv_weight
@@ -264,8 +275,8 @@ def run_jax_gdn_attention(
 
     out_specs = (
         (
-            P(ShardingAxisName.ATTN_DATA, None,
-              ShardingAxisName.ATTN_HEAD),  # new_conv_state
+            P(ShardingAxisName.ATTN_DATA, None, ShardingAxisName.ATTN_HEAD,
+              None),  # new_conv_state
             P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
               None),  # new_recurrent_state
         ),
