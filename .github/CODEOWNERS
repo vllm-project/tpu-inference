@@ -26,15 +26,15 @@
 /tpu_inference/kernels/mla/ @m-liu @gxd3 @gpolovets1 @kyuyeunk
 
 # Model layers
-/tpu_inference/layers/ @kyuyeunk @lk-chen @jrplatin
+/tpu_inference/layers/ @kyuyeunk @lk-chen @jrplatin @gxd3
 /tpu_inference/layers/jax/ @jrplatin @gpolovets1
-/tpu_inference/layers/vllm/ @kyuyeunk @vanbasten23 @gxd3
+/tpu_inference/layers/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
 
 # Model Implementations and wrappers
 /tpu_inference/models/ @kyuyeunk @lk-chen @jrplatin
 /tpu_inference/models/jax/qwen2_5_vl.py @kwang3939 @JiriesKaileh
 /tpu_inference/models/jax/deepseek_v3.py @gpolovets1 @jrplatin @gxd3
-/tpu_inference/models/vllm/ @kyuyeunk @vanbasten23 @gxd3
+/tpu_inference/models/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
 
 # Runner and Execution
 /tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
