@@ -453,4 +453,5 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
                               weights=weights,
                               quant_method_instance=self,
                               x=x,
-                              router_logits=router_logits)
+                              router_logits=router_logits,
+                              input_ids=input_ids)
