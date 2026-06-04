@@ -507,7 +507,6 @@ class TestTpuPlatform:
 
         TpuPlatform._resolve_multiprocess_dp(vllm_config)  # must not raise
 
-
     @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
     @patch(
         "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
