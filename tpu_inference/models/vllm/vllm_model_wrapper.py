@@ -357,7 +357,7 @@ class VllmModelWrapper:
                 REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES,
             )
 
-        # NOTE: Apply model specific patches
+        # NOTE: Apply Qwen3-VL model specific patches
         apply_model_specific_patches(self.model.vllm_model)
 
         loading_end = time.time()
@@ -379,6 +379,7 @@ class VllmModelWrapper:
             "post_spmd_conservative",
             "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
         }
+
         sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
         if sc_offload_bytes > 0:
             threshold_bytes = str(sc_offload_bytes)
@@ -547,24 +548,23 @@ class VllmModelWrapper:
             params_and_buffers: Any,
             **kwargs,
         ) -> Any:
-            with torchax.default_env():
-                call_kwargs = {
-                    k: jax.tree.map(torch_view, v)
-                    for k, v in kwargs.items()
-                }
+            call_kwargs = {
+                k: jax.tree.map(torch_view, v)
+                for k, v in kwargs.items()
+            }
 
-                output_from_torch = torch.func.functional_call(
-                    self.model,
-                    torch_view(params_and_buffers),
-                    kwargs={
-                        "call_method": "embed_multimodal",
-                        "call_args": (),
-                        "call_kwargs": call_kwargs,
-                    },
-                    tie_weights=False,
-                )
+            output_from_torch = torch.func.functional_call(
+                self.model,
+                torch_view(params_and_buffers),
+                kwargs={
+                    "call_method": "embed_multimodal",
+                    "call_args": (),
+                    "call_kwargs": call_kwargs,
+                },
+                tie_weights=False,
+            )
 
-                return jax_view(output_from_torch)
+            return jax_view(output_from_torch)
 
         def embed_multimodal_func_torch(params_and_buffers: Any,
                                         **kwargs) -> Any:
@@ -586,6 +586,7 @@ class VllmModelWrapper:
                     k: jax.tree.map(move, v)
                     for k, v in kwargs.items()
                 }
+
                 return maybe_jit_embed_multimodal_func(
                     embed_multimodal_func_jax,
                     self.model.vllm_model)(params_and_buffers, **call_kwargs)
@@ -621,10 +622,8 @@ class VllmModelWrapper:
                         "call_method": "embed_input_ids",
                         "call_args": call_args,
                         "call_kwargs": {
-                            "is_multimodal":
-                            torch_view(is_multimodal)
-                            if is_multimodal is not None else False,
-                        },
+                            "is_multimodal": torch_view(is_multimodal)
+                        } if is_multimodal is not None else {},
                     },
                     tie_weights=False,
                 )

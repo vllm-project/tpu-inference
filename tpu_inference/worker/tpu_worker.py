@@ -4,7 +4,7 @@ import math
 import os
 import tempfile
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 import jax
 import jaxlib
@@ -19,6 +19,7 @@ from vllm.v1 import utils as vllm_utils
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 from tpu_inference import envs, utils
 from tpu_inference.distributed import jax_parallel_state
@@ -31,29 +32,6 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.offload.metrics import TPUKVCacheStatsLogger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
-
-try:
-    from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
-except ImportError:
-    CompilationTimes = None
-    from vllm.v1.worker.worker_base import WorkerBase
-
-
-class CompatibleCompilationTimes(float):
-    """
-    A float that also has a .language_model attribute.
-    Ensures compatibility between older vLLM versions (which expect an object
-    with a .language_model attr) and newer versions (which expect a float).
-    """
-
-    @property
-    def language_model(self) -> float:
-        return float(self)
-
-    @property
-    def encoder(self) -> float:
-        return 0.0
-
 
 logger = init_logger(__name__)
 
@@ -548,18 +526,15 @@ class TPUWorker(WorkerBase):
     def load_model(self) -> None:
         self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self) -> Any:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         self.model_runner._init_random()
-        comp_time = self.compilation_config.compilation_time
-        if CompilationTimes is not None:
-            return CompilationTimes(
-                language_model=comp_time,
-                encoder=0.0,
-            )
-        return CompatibleCompilationTimes(comp_time)
+        return CompilationTimes(
+            language_model=self.compilation_config.compilation_time,
+            encoder=0.0,
+        )
 
     def get_model(self):
         return self.model_runner.get_model()
