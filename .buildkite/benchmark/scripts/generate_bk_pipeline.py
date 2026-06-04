@@ -171,16 +171,14 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
             )
 
 
-def create_benchmark_steps(
-        case_data: Dict[str, Any],
-        global_env: Dict[str, Any],
-        file_path: str,
-        file_basename: str,
-        parent_dir: str,
-        used_keys: Set[str],
-        errors: List[str],
-        no_verify: bool = False,
-        is_single_case: bool = False) -> List[Dict[str, Any]]:
+def create_benchmark_steps(case_data: Dict[str, Any],
+                           global_env: Dict[str, Any],
+                           file_path: str,
+                           file_basename: str,
+                           parent_dir: str,
+                           used_keys: Set[str],
+                           errors: List[str],
+                           no_verify: bool = False) -> List[Dict[str, Any]]:
     """
     Generates a list of Buildkite steps for a case.
     """
@@ -219,18 +217,11 @@ def create_benchmark_steps(
         # Build the environment for this specific step
         step_env = {**combined_env, "ci_queue": agent}
 
-        if is_single_case:
-            # Include parent_dir in label for uniqueness
-            step_label = f"[{parent_dir}] {agent} {file_basename}"
-            case_parameter = f"{file_path}"
-            benchmark_name = file_basename
-        else:
-            step_env["TARGET_CASE_NAME"] = case_name
-            # Include parent_dir in label for uniqueness
-            step_label = f"[{parent_dir}] {agent} {file_basename} {case_name}"
-            case_parameter = f"{file_path} {case_name}"
-            benchmark_name = case_name
-        step_env["MLCOMPASS_TEST_NAME"] = f"vllm:{agent}:{benchmark_name}"
+        step_env["TARGET_CASE_NAME"] = case_name
+        # Include parent_dir in label for uniqueness
+        step_label = f"[{parent_dir}] {agent} {file_basename} {case_name}"
+        case_parameter = f"{file_path} {case_name}"
+        step_env["MLCOMPASS_TEST_NAME"] = f"vllm:{agent}:{case_name}"
 
         # Define step key and check for internal collisions
         step_safe_key = clean_key_string(step_label)
@@ -291,31 +282,22 @@ def main():
     errors = []
 
     # Process cases
-    if "benchmark_cases" in data:
-        for case in data["benchmark_cases"]:
-            # Aggregate all steps from all cases
-            all_steps.extend(
-                create_benchmark_steps(case,
-                                       global_env,
-                                       file_path,
-                                       file_basename,
-                                       parent_dir,
-                                       used_keys,
-                                       errors,
-                                       no_verify=args.no_verify,
-                                       is_single_case=False))
-    else:
-        # Single-case
+    if "benchmark_cases" not in data:
+        print(f"Error: 'benchmark_cases' is missing in {file_path}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    for case in data["benchmark_cases"]:
+        # Aggregate all steps from all cases
         all_steps.extend(
-            create_benchmark_steps(data,
+            create_benchmark_steps(case,
                                    global_env,
                                    file_path,
                                    file_basename,
                                    parent_dir,
                                    used_keys,
                                    errors,
-                                   no_verify=args.no_verify,
-                                   is_single_case=True))
+                                   no_verify=args.no_verify))
 
     # Final check: Ensure we actually produced steps and no errors occurred
     if errors:
