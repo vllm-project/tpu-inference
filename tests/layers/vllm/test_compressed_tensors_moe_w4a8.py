@@ -175,6 +175,7 @@ def test_fused_moe_method_w4(mesh, num_tokens, intermediate_size, hidden_size,
                          top_k=topk,
                          hidden_size=hidden_size,
                          intermediate_size=intermediate_size)
+        layer.moe_parallel_config.use_ep = use_ep
         moe = quant_config.get_moe_config(layer)
         method = VllmCompressedTensorsW4A8MoEMethod(weight_quant, input_quant,
                                                     moe, mesh)
