@@ -18,7 +18,7 @@ This implementation follows the same algorithm as the GPU version but is
 designed for JAX/TPU compatibility. It currently only supports greedy sampling.
 """
 
-from typing import Optional
+from typing import Any, Optional, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -35,6 +35,27 @@ PLACEHOLDER_TOKEN_ID = -1
 GREEDY_TEMPERATURE = -1
 
 
+def _unconditional_to_conditional_rates(
+        synthetic_acceptance_rates: Sequence[float]) -> Tuple[float, ...]:
+    if len(synthetic_acceptance_rates) == 0:
+        raise ValueError("synthetic_acceptance_rates must not be empty")
+
+    conditional_rates = []
+    previous_rate = 1.0
+    for rate in synthetic_acceptance_rates:
+        rate = float(rate)
+        if rate < 0 or rate > 1:
+            raise ValueError("synthetic_acceptance_rates values must be in [0, 1]")
+        if rate > previous_rate:
+            raise ValueError(
+                "synthetic_acceptance_rates must be monotonically non-increasing"
+            )
+        conditional_rates.append(rate / previous_rate if previous_rate > 0 else 0.0)
+        previous_rate = rate
+
+    return tuple(conditional_rates)
+
+
 class RejectionSampler:
     """
     JAX-based rejection sampler for speculative decoding.
@@ -43,8 +64,21 @@ class RejectionSampler:
     https://arxiv.org/abs/2211.17192.
     """
 
-    def __init__(self, mesh):
+    def __init__(self, mesh, speculative_config: Optional[Any] = None):
         self.mesh = mesh
+        self.synthetic_conditional_acceptance_rates = None
+        if (speculative_config is not None
+                and getattr(speculative_config, "rejection_sample_method",
+                            None) == "synthetic"):
+            synthetic_acceptance_rates = getattr(speculative_config,
+                                                 "synthetic_acceptance_rates",
+                                                 None)
+            if synthetic_acceptance_rates is None:
+                raise ValueError(
+                    "synthetic rejection sampling requires "
+                    "synthetic_acceptance_rates")
+            self.synthetic_conditional_acceptance_rates = (
+                _unconditional_to_conditional_rates(synthetic_acceptance_rates))
 
     def __call__(
         self,
@@ -120,6 +154,8 @@ class RejectionSampler:
         # `do_sampling` / `logprobs` are static (pytree meta fields)
         do_sampling = sampling_metadata.do_sampling
         logprobs = sampling_metadata.logprobs
+        synthetic_conditional_acceptance_rates = (
+            self.synthetic_conditional_acceptance_rates)
 
         def _forward(draft_token_ids, num_draft_tokens, draft_probs,
                      target_logits, bonus_token_ids, temperature, top_k, top_p,
@@ -150,6 +186,17 @@ class RejectionSampler:
             if key is not None:
                 axis_id = jax.lax.axis_index(ShardingAxisName.ATTN_DATA)
                 key = jax.random.fold_in(key, axis_id)
+
+            if synthetic_conditional_acceptance_rates is not None:
+                return synthetic_rejection_sample(
+                    draft_token_ids,
+                    num_draft_tokens,
+                    target_probs,
+                    bonus_token_ids,
+                    do_sampling,
+                    synthetic_conditional_acceptance_rates,
+                    key=key,
+                )
 
             return rejection_sample(
                 draft_token_ids,
@@ -366,6 +413,85 @@ def _sample_recovered_tokens(
     # Add a small epsilon to avoid division by zero
     recovered_token_ids = jnp.argmax(new_dist / (q + 1e-9), axis=-1)
     return recovered_token_ids
+
+
+def _sample_target_tokens(target_probs: jax.Array, do_sampling: bool,
+                          key: Optional[jax.random.PRNGKey]) -> jax.Array:
+    if do_sampling:
+        if key is None:
+            raise ValueError(
+                "A random key must be provided for synthetic sampling.")
+        q = jax.random.exponential(key, shape=target_probs.shape)
+        return jnp.argmax(target_probs / (q + 1e-9), axis=-1)
+    return jnp.argmax(target_probs, axis=-1)
+
+
+# Synthetic acceptance rates are conditional per position. For example,
+# [1.0, 0.5, 0.0] accepts the first draft token, accepts the second draft
+# token 50% of the time, and always rejects the third draft token.
+def synthetic_rejection_sample(
+    # [num_tokens] - flattened format
+    draft_token_ids: jnp.ndarray,
+    # [batch_size] - JAX array
+    num_draft_tokens: jnp.ndarray,
+    # [num_tokens, vocab_size] - flattened format
+    target_probs: jnp.ndarray,
+    # [batch_size]
+    bonus_token_ids: jnp.ndarray,
+    do_sampling: bool,
+    synthetic_conditional_acceptance_rates: Sequence[float],
+    key: Optional[jax.random.PRNGKey] = None,
+) -> jnp.ndarray:
+    if key is None:
+        raise ValueError("A random key must be provided for synthetic sampling.")
+
+    total_tokens = draft_token_ids.shape[0]
+    batch_size = num_draft_tokens.shape[0]
+    uniform_key, target_key = jax.random.split(key)
+    segment_ids, group_indices = _get_segment_info(num_draft_tokens,
+                                                   total_tokens)
+
+    rates = jnp.asarray(synthetic_conditional_acceptance_rates,
+                        dtype=jnp.float32)
+    clipped_group_indices = jnp.minimum(group_indices, rates.shape[0] - 1)
+    token_acceptance_rates = rates[clipped_group_indices]
+    token_acceptance_rates = jnp.where(group_indices < rates.shape[0],
+                                       token_acceptance_rates, 0.0)
+    uniform_probs = jax.random.uniform(uniform_key, shape=(total_tokens, ))
+    accepted = uniform_probs < token_acceptance_rates
+
+    rejections = ~accepted
+    large_value = total_tokens
+    rejection_indices = jnp.where(rejections, group_indices, large_value)
+    first_rejection_idx_per_segment = jax.ops.segment_min(
+        data=rejection_indices.astype(jnp.int32),
+        segment_ids=segment_ids,
+        num_segments=batch_size,
+        indices_are_sorted=True,
+    )
+    max_int = jnp.iinfo(jnp.int32).max
+    first_rejection_idx_per_segment = jnp.where(
+        first_rejection_idx_per_segment == max_int, large_value,
+        first_rejection_idx_per_segment)
+
+    target_token_ids = _sample_target_tokens(target_probs, do_sampling,
+                                             target_key)
+    first_rejection_idx_broadcast = jnp.repeat(
+        first_rejection_idx_per_segment,
+        num_draft_tokens,
+        total_repeat_length=total_tokens)
+
+    main_tokens = jnp.where(
+        group_indices < first_rejection_idx_broadcast, draft_token_ids,
+        jnp.where(group_indices == first_rejection_idx_broadcast,
+                  target_token_ids, PLACEHOLDER_TOKEN_ID))
+
+    all_accepted = first_rejection_idx_per_segment == large_value
+    no_draft_tokens = num_draft_tokens == 0
+    should_get_bonus = all_accepted | no_draft_tokens
+    bonus_tokens = jnp.where(should_get_bonus, bonus_token_ids,
+                             PLACEHOLDER_TOKEN_ID)
+    return jnp.concatenate([main_tokens, bonus_tokens])
 
 
 def rejection_sample(
