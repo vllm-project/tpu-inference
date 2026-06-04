@@ -647,3 +647,77 @@ class TestMultiModalManager:
         np.testing.assert_array_equal(
             self.runner.mrope_positions_cpu[:, 16:24], mrope_b)
         assert np.all(self.runner.mrope_positions_cpu[:, 24:32] == -7)
+
+    def test_gather_mm_embeddings_deepstack_concatenation(self):
+        """Verifies that gather_mm_embeddings correctly slices and concatenates DeepStack features."""
+        # 1. Setup
+        self.runner.is_multimodal_model = True
+        req_id = "req-deepstack"
+
+        # Mock base embedding (shape: 4 tokens, hidden_size 8)
+        base_emb = jnp.arange(4 * 8, dtype=jnp.float32).reshape((4, 8))
+        # Mock 2 DeepStack layers (each shape: 4 tokens, hidden_size 8)
+        ds_layer1 = base_emb + 100
+        ds_layer2 = base_emb + 200
+        deepstack_emb = [ds_layer1, ds_layer2]
+
+        # Store as tuple (base, deepstack) in cache (new format)
+        self.runner.encoder_cache = {req_id: (base_emb, deepstack_emb)}
+
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
+        # Mock request state with 4 tokens, image placeholder at offset 0, length 4
+        pos_info = PlaceholderRange(offset=0, length=4)
+        req_state = CachedRequestState(
+            req_id=req_id,
+            prompt_token_ids=list(range(4)),
+            output_token_ids=[],
+            sampling_params=mock_sampling_params,
+            block_ids=([], ),
+            num_computed_tokens=0,
+            mm_features=[
+                MultiModalFeatureSpec(data=None,
+                                      identifier=req_id,
+                                      modality="image",
+                                      mm_position=pos_info)
+            ],
+            lora_request=None,
+            pooling_params=None,
+            generator=None,
+        )
+        self.runner.requests = {req_id: req_state}
+        self.runner.input_batch.add_request(req_state)
+
+        # Schedule a chunk of 3 tokens (slices the visual tokens 0 to 3)
+        mock_scheduler_output = MagicMock(spec=VllmSchedulerOutput)
+        mock_scheduler_output.num_scheduled_tokens = {req_id: 3}
+        mock_scheduler_output.total_num_scheduled_tokens = 3
+
+        # 2. Act
+        mm_embeds, is_mm_embed = self.runner.mm_manager.gather_mm_embeddings(
+            mock_scheduler_output,
+            target_pad_len=3,
+            req_ids_dp={0: [req_id]},
+            padded_num_scheduled_tokens_per_dp_rank=3,
+        )
+
+        # 3. Assert
+        assert len(mm_embeds) == 1
+        # The gathered embedding should be concatenated along axis=-1
+        # Dimension should be: base (8) + ds_layer1 (8) + ds_layer2 (8) = 24
+        assert mm_embeds[0].shape == (3, 24)
+
+        # Verify slice and concatenation match expectations
+        expected_combined = jnp.concatenate(
+            [base_emb[:3], ds_layer1[:3], ds_layer2[:3]], axis=-1)
+        np.testing.assert_array_equal(mm_embeds[0], expected_combined)

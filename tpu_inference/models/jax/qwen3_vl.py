@@ -1679,12 +1679,12 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         if inputs_embeds is not None:
             text_config = getattr(self.config, "text_config", self.config)
-            expected_concat_dim = 4 * text_config.hidden_size
+            num_ds_layers = len(self.deepstack_visual_indexes)
+            expected_concat_dim = (1 + num_ds_layers) * text_config.hidden_size
             if inputs_embeds.shape[-1] == expected_concat_dim:
-                inputs_embeds, ds0, ds1, ds2 = jnp.split(inputs_embeds,
-                                                         4,
-                                                         axis=-1)
-                deepstack_embeds = [ds0, ds1, ds2]
+                splits = jnp.split(inputs_embeds, 1 + num_ds_layers, axis=-1)
+                inputs_embeds = splits[0]
+                deepstack_embeds = list(splits[1:])
             else:
                 deepstack_embeds = None
         else:

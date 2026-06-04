@@ -713,6 +713,8 @@ class TestQwen3VLForConditionalGeneration:
             mock_visual.config = mock_vllm_config.model_config.hf_config.vision_config
             mock_visual.spatial_merge_size = mock_vllm_config.model_config.hf_config.vision_config.spatial_merge_size
 
+            MockLM.return_value.deepstack_visual_indexes = mock_vllm_config.model_config.hf_config.vision_config.deepstack_visual_indexes
+
             model = Qwen3VLForConditionalGeneration(mock_vllm_config, rng,
                                                     mesh)
             model.visual = mock_visual
@@ -1112,20 +1114,23 @@ class TestServingIntegration:
                      dtype=model.vllm_config.model_config.dtype)
         ]
         inputs_embeds = model.get_input_embeddings(input_ids, None)
+        # Construct concatenated inputs_embeds containing the DeepStack embedding
+        placeholder_mask = input_ids == model.image_token_id
+        padded_ds = jnp.zeros_like(inputs_embeds)
+        padded_ds = padded_ds.at[placeholder_mask].set(deepstack[0])
+        inputs_embeds_deep = jnp.concatenate([inputs_embeds, padded_ds],
+                                             axis=-1)
 
         kv_caches_base = _make_kv_caches(model, mesh)
         kv_caches_deep = _make_kv_caches(model, mesh)
         _, out_base, _, _ = model(kv_caches_base, input_ids, attn_meta,
                                   inputs_embeds)
-        _, out_deep, _, _ = model(kv_caches_deep,
-                                  input_ids,
-                                  attn_meta,
-                                  inputs_embeds,
-                                  deepstack_embeds=deepstack)
+        _, out_deep, _, _ = model(kv_caches_deep, input_ids, attn_meta,
+                                  inputs_embeds_deep)
 
         diff = np.abs(np.array(out_deep - out_base))
-        placeholder_mask = np.array(input_ids) == model.image_token_id
-        assert diff[placeholder_mask].max() > 0
+        placeholder_mask_np = np.array(input_ids) == model.image_token_id
+        assert diff[placeholder_mask_np].max() > 0
 
     def test_deepstack_injection_uses_global_layer_indices(
             self, mock_vllm_config: MockVllmConfig, rng: PRNGKey, mesh: Mesh):
