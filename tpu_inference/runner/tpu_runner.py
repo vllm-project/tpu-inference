@@ -1622,20 +1622,35 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 local_query_start_loc: jax.Array,
                 local_distribution: jax.Array,
             ) -> tuple[jax.Array, jax.Array]:
-                decode_tokens = local_distribution[0]
-                num_valid_seqs = local_distribution[2]
-                return compute_schedule_table_v2.make_gdn_schedule_arrays(
-                    safe_max_blocks,
-                    qkv_dtype,
-                    num_sublanes,
-                    is_dummy=False,
-                    query_start_loc=local_query_start_loc,
-                    decode_tokens=decode_tokens,
-                    num_valid_seqs=num_valid_seqs,
-                    num_tokens=max_tokens,
-                    chunk_size=chunk_size,
-                    BT=chunk_size,
-                )
+                # Mirror the lax.cond condition in ragged_gated_delta_rule_wrapper:
+                # skip schedule computation per-rank when this rank is decode-only.
+                is_decode_only = local_distribution[0] == local_distribution[2]
+
+                def do_compute(_):
+                    return compute_schedule_table_v2.make_gdn_schedule_arrays(
+                        safe_max_blocks,
+                        qkv_dtype,
+                        num_sublanes,
+                        is_dummy=False,
+                        query_start_loc=local_query_start_loc,
+                        decode_tokens=local_distribution[0],
+                        num_valid_seqs=local_distribution[2],
+                        num_tokens=max_tokens,
+                        chunk_size=chunk_size,
+                        BT=chunk_size,
+                    )
+
+                def do_skip(_):
+                    return compute_schedule_table_v2.make_gdn_schedule_arrays(
+                        safe_max_blocks,
+                        qkv_dtype,
+                        num_sublanes,
+                        is_dummy=True)
+
+                return jax.lax.cond(is_decode_only,
+                                    do_skip,
+                                    do_compute,
+                                    operand=None)
 
             self._precompute_gdn_fn_cache[key] = jax.jit(
                 jax.shard_map(
@@ -2207,15 +2222,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         gdn_schedule_table = None
         gdn_total_blocks = None
         if self.kv_cache_config.has_mamba_layers:
-            # Use padded token count - this is the actual shape that mixed_qkv will have
-            # Same for all ranks due to bucketing, matches mixed_qkv.shape[0] in recurrent_scan
             # Chunk size used in GDN attention (hardcoded to 32 in gdn_attention.py)
             gdn_chunk_size = 32
 
             gdn_schedule_table, gdn_total_blocks = self._precompute_gdn_schedule(
                 query_start_loc,
                 request_distribution,
-                padded_num_scheduled_tokens_per_dp_rank,  # Static bucketed shape
+                padded_num_scheduled_tokens_per_dp_rank,
                 gdn_chunk_size,
             )
 
