@@ -213,14 +213,18 @@ def inner_kernel(
                     q = l2_normalize(q)
                     k = l2_normalize(k)
 
-                # Head repetition
+                # Head repetition. For GQA the q·k dot is identical across each
+                # repeat group, so compute it on the n_kq heads and repeat the
+                # scalar, instead of repeating q/k and redoing the reduction.
+                scale = d_k**-0.5
+                qk = jnp.sum(q * k, axis=-1, keepdims=True)  # (n_kq, 1)
                 repeat_factor = n_v // n_kq
                 if repeat_factor > 1:
                     q = jnp.repeat(q, repeat_factor, axis=0)
                     k = jnp.repeat(k, repeat_factor, axis=0)
-
-                scale = d_k**-0.5
+                    qk = jnp.repeat(qk, repeat_factor, axis=0)  # (n_v, 1)
                 q = q * scale
+                qk = qk * scale  # dot uses the scaled q (matches prior loop)
 
                 b_aligned = (b // sublanesize) * sublanesize
 
@@ -254,77 +258,37 @@ def inner_kernel(
 
                 current_state = decode_state_scratch[0]
 
-                # TODO: compare MXU vs VPU, MXU doesn't support FP32, VPU does
-                # (n_v, d_k, 1) * (n_v, 1, d_v) -> (n_v, d_k, d_v)
-                out_list = []
-                new_state_list = []
-                for h in range(n_v):
-                    q_h = q[h:h + 1, :]  # (1, d_k)
-                    k_h = k[h:h + 1, :]  # (1, d_k)
-                    v_h = v[h:h + 1, :]  # (1, d_v)
+                # Vectorized over heads using VPU broadcast+reduce. Mosaic does
+                # not support a batched dot_general inside Pallas (the reason
+                # the original used an n_v-way per-head pl.dot loop), so this
+                # uses the broadcast-multiply-sum form the authors left
+                # commented, in fp32 on the VPU, with the isinf guards added
+                # back. It removes the 3*n_v rank-1 MXU ops and the n_v-way live
+                # accumulator (out_list/new_state_list) the unrolled loop held
+                # across its body and spilled to VMEM.
+                decay_exp = decay[:, None]  # (n_v, 1)
 
-                    state_h = current_state[h]  # (d_k, d_v)
+                # k @ state and q @ state via broadcast-multiply-sum over d_k.
+                k_state = jnp.sum(k[:, :, None] * current_state,
+                                  axis=1)  # (n_v, d_v)
+                decay_k_state = jnp.where(jnp.isinf(k_state), 0.0,
+                                          decay_exp * k_state)
+                v_diff = v - decay_k_state
+                v_new = curr_beta[:, None] * v_diff  # (n_v, d_v)
 
-                    k_state_h = pl.dot(
-                        k_h, state_h,
-                        precision=jax.lax.Precision.HIGHEST)  # (1, d_v)
+                q_state = jnp.sum(q[:, :, None] * current_state,
+                                  axis=1)  # (n_v, d_v)
+                # Defensive: reset inf/NaN state contributions (from large
+                # decay / long sequences) and rely on the new value.
+                decay_q_state = jnp.where(jnp.isinf(q_state), 0.0,
+                                          decay_exp * q_state)
+                out = decay_q_state + qk * v_new  # (n_v, d_v)
 
-                    # v_diff_h = v_h - decay[h].astype(jnp.float32) * k_state_h
-                    decay_k_state = jnp.where(
-                        jnp.isinf(k_state_h),
-                        0.0,
-                        decay[h].astype(jnp.float32) * k_state_h,
-                    )
-                    v_diff_h = v_h - decay_k_state
-                    v_new_h = curr_beta[h].astype(jnp.float32) * v_diff_h
-
-                    q_state_h = pl.dot(
-                        q_h, state_h,
-                        precision=jax.lax.Precision.HIGHEST)  # (1, d_v)
-
-                    q_k_h = jnp.sum(q_h * k_h, axis=-1,
-                                    keepdims=True)  # (1, 1)
-
-                    # Defensive code to handle NaNs and infs in state,
-                    # Saw similar issue while trying newton schulz
-                    # which can happen due to large decay or long sequences.
-                    # TODO: analyze perf impact and risk of removing this.
-                    decay_q_state = jnp.where(jnp.isinf(q_state_h), 0.0,
-                                              decay[h] * q_state_h)
-                    out_h = decay_q_state + q_k_h * v_new_h
-                    out_list.append(out_h)
-
-                    k_v_new_h = pl.dot(k_h,
-                                       v_new_h,
-                                       trans_a=True,
-                                       precision=jax.lax.Precision.HIGHEST
-                                       )  # (d_k, 1) @ (1, d_v) -> (d_k, d_v)
-                    # Defensive code to handle NaNs and infs in state,
-                    # which can happen due to large decay or long sequences.
-                    # In such cases, we reset the state contribution to zero and rely solely on the new value
-                    # TODO: analyze perf impact and risk of removing this.
-                    decay_state = jnp.where(jnp.isinf(state_h), 0.0,
-                                            state_h * decay[h])
-                    new_state_h = decay_state + k_v_new_h
-                    new_state_list.append(new_state_h)
-
-                out = jnp.concatenate(out_list, axis=0)  # (n_v, d_v)
-                new_state = jnp.stack(new_state_list,
-                                      axis=0)  # (n_v, d_k, d_v)
-
-                # TODO: remove VPU path if MXU is certified path
-                # decay_exp = decay[..., None]  # (n_v, 1)
-
-                # k_state = jnp.sum(k[..., None] * current_state, axis=1)  # (n_v, d_v)
-                # v_diff = v - decay_exp * k_state
-                # v_new = curr_beta[..., None] * v_diff  # (n_v, d_v)
-
-                # q_state = jnp.sum(q[..., None] * current_state, axis=1)  # (n_v, d_v)
-                # q_k = jnp.sum(q * k, axis=-1, keepdims=True)  # (n_v, 1)
-
-                # out = decay_exp * q_state + q_k * v_new  # (n_v, d_v)
-                # k_v_new = k[..., None] * v_new[:, None, :]
-                # new_state = current_state * decay_exp[..., None] + k_v_new
+                # Per-head outer product: k (n_v,d_k) ⊗ v_new (n_v,d_v).
+                k_v_new = k[:, :, None] * v_new[:, None, :]  # (n_v, d_k, d_v)
+                decay_state = jnp.where(jnp.isinf(current_state), 0.0,
+                                        current_state * decay_exp[:, :, None])
+                new_state = decay_state + k_v_new  # (n_v, d_k, d_v)
 
                 decode_state_scratch[pl.ds(
                     0, 1)] = new_state[None, ...].astype(current_state.dtype)

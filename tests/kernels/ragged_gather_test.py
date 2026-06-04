@@ -52,6 +52,29 @@ class GatherTest(jtu.JaxTestCase):
 
         self.assertArraysEqual(actual, desired)
 
+    @parameterized.product(dtype=[jnp.bfloat16, jnp.float32], )
+    def test_sc_gather_large(self, dtype):
+        # Large input that exceeds the size-gated VMEM fallback threshold so
+        # the sparse-core kernel path is exercised. Threshold is
+        # ~0.3 * vmem_capacity_bytes / dtype_bytes; on current TPUs vmem is
+        # tens of MB, so (16384, 8192) is comfortably above for both dtypes.
+        in_size, hidden_size, out_size = 16384, 8192, 4096
+        start, end = 100, 3500
+        key = jax.random.key(0)
+        x = jax.random.normal(key, (in_size, hidden_size), jnp.float32)
+        x = x.astype(dtype)
+        indices = jax.random.randint(key, (out_size, ), 0, in_size, jnp.int32)
+
+        start_arr = jnp.array([start], jnp.int32)
+        end_arr = jnp.array([end], jnp.int32)
+
+        actual = ragged_gather(x, indices, start_arr, end_arr)
+
+        actual = actual[start:end]
+        desired = x[indices][start:end]
+
+        self.assertArraysEqual(actual, desired)
+
 
 if __name__ == "__main__":
     absltest.main(testLoader=jtu.JaxTestLoader())
