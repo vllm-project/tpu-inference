@@ -245,17 +245,18 @@ class InputBatch:
                         f"Request {req_id} active slot {slot} does not match "
                         f"cached slot {req_state.mamba_state_slot}")
 
-        duplicate_active = {
-            slot
-            for slot in active_slots if active_slots.count(slot) > 1
-        }
-        if duplicate_active:
+        if len(set(active_slots)) != len(active_slots):
+            from collections import Counter
+            duplicate_active = {
+                slot
+                for slot, count in Counter(active_slots).items() if count > 1
+            }
             raise AssertionError(
                 f"Duplicate active mamba slots: {sorted(duplicate_active)}")
 
         tail = self.mamba_state_indices_cpu[self.num_reqs:]
-        nonzero_tail = sorted({int(slot) for slot in tail if int(slot) != 0})
-        if nonzero_tail:
+        if tail.any():
+            nonzero_tail = sorted(set(tail[tail != 0].tolist()))
             raise AssertionError(
                 f"Non-zero mamba slots in padded tail: {nonzero_tail}")
 
