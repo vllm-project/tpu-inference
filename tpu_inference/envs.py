@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     TPU_NAME: str | None = None
     TPU_WORKER_ID: str | None = None
     TPU_MULTIHOST_BACKEND: str = ""
-    TPU_MULTIPROCESS_DP: bool = False
+    TPU_MULTIPROCESS_DP: bool | None = None
     PREFILL_SLICES: str = ""
     DECODE_SLICES: str = ""
     SKIP_JAX_PRECOMPILE: bool = False
@@ -113,19 +113,20 @@ def env_with_choices(
 
 
 def env_bool(env_name: str,
-             default: bool = False,
-             requires: list[str] | None = None) -> Callable[[], bool]:
+             default: bool | None = False,
+             requires: list[str] | None = None) -> Callable[[], bool | None]:
     """
     Accepts both numeric strings ("0", "1") and boolean strings
     ("true", "false", "True", "False").
 
     Args:
         env_name: Name of the environment variable
-        default: Default boolean value if not set
+        default: Default value if not set. Pass None for a tri-state flag
+            (unset -> None) that callers resolve themselves.
         requires: List of environment variables that must be set if this is True.
     """
 
-    def _get_bool_env() -> bool:
+    def _get_bool_env() -> bool | None:
         value = os.getenv(env_name)
         if value is None or value == "":
             parsed_value = default
@@ -211,9 +212,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use vLLM-native multi-process data parallelism (one engine process per
     # DP rank, single load-balanced API endpoint) instead of tpu-inference's
     # single-process SPMD data parallelism. Each DP rank is pinned to a
-    # disjoint set of TPU chips. Dense (non-MoE) models only.
+    # disjoint set of TPU chips. Unset (None) means "auto", and
+    # TpuPlatform.check_and_update_config resolves it to a concrete value
+    # (on for online `vllm serve` with DP > 1; off for offline, attention DP,
+    # and Pathways).
     "TPU_MULTIPROCESS_DP":
-    env_bool("TPU_MULTIPROCESS_DP", default=False),
+    env_bool("TPU_MULTIPROCESS_DP", default=None),
     # Slice configuration for disaggregated prefill workers
     "PREFILL_SLICES":
     lambda: os.getenv("PREFILL_SLICES", ""),
