@@ -152,21 +152,19 @@ class CompilationManager:
             )
             hf_conf = self.runner.vllm_config.model_config.hf_config
 
-            # Identify multimodal embedding size and if deepstack is used
+            # Identify multimodal embedding size
             mm_hidden_size = hidden_size
             vision_config = getattr(hf_conf, "vision_config", None)
-            deepstack_levels = 0
 
             if vision_config:
                 visual_dim = getattr(vision_config, "out_hidden_size", None)
                 deepstack_indexes = getattr(vision_config,
                                             "deepstack_visual_indexes", None)
-                if visual_dim is not None:
-                    if deepstack_indexes is not None:
-                        deepstack_levels = len(deepstack_indexes)
-                        mm_hidden_size = visual_dim * (1 + deepstack_levels)
-                    else:
-                        mm_hidden_size = visual_dim
+
+                # If both exist, we apply the deepstack concat logic
+                if visual_dim is not None and deepstack_indexes is not None:
+                    deepstack_levels = len(deepstack_indexes)
+                    mm_hidden_size = visual_dim * (1 + deepstack_levels)
 
             sharding = NamedSharding(
                 self.runner.mesh,
@@ -183,14 +181,13 @@ class CompilationManager:
             dummy_is_multimodal = self._create_dummy_tensor(
                 (num_tokens, ), jnp.bool_, sharding=input_sharding)
 
-            mm_embeds_arg = [dummy_multimodal_embeddings]
-
             self._run_compilation(
                 "input_embeddings_merger",
                 self.runner.embed_input_ids_fn,
                 self.runner.state_leaves,
                 dummy_input_ids,
-                mm_embeds_arg,
+                # Make _compute_deepstack_embeds happy.
+                [dummy_multimodal_embeddings],
                 call_kwargs={"is_multimodal": dummy_is_multimodal},
                 num_tokens=num_tokens,
             )
