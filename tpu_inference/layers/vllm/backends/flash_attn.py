@@ -19,9 +19,8 @@ from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
                                                  register_backend)
 
 from tpu_inference import utils
-from tpu_inference.layers.common.attention_interface import attention, sharded_flash_attention
+from tpu_inference.layers.common.attention_interface import attention, encoder_only_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.kernels.flash_attention.kernel import SegmentIds, BlockSizes
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
@@ -344,14 +343,6 @@ def _jax_attn_func(
     return new_kv_cache, outputs
 
 
-def _ceiling_div(a: int, b: int) -> int:
-    return (a + b - 1) // b
-
-
-def _align_to(x: int, a: int) -> int:
-    return _ceiling_div(x, a) * a
-
-
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -375,111 +366,24 @@ def _jax_encoder_only_attn_func(
     num_kv_heads: int,
     sliding_window: int | None = None,
 ) -> jax.Array:
-    # shape information, applied for O, Q, K, V.
-    # T: tokens, H: number of head, D: hidden dim 
-    # vLLM layer: T, (H * D)
-    # kernel layer: B, H, T, D (where B=1)
-
     # Get shapes from input tensors
     q_len = q.shape[0]
     k_len = k.shape[0]
-    assert k.shape == v.shape
-
-    assert q_len == k_len, "For encoder_only, token lengths should be the same"
 
     # Convert the shapes from vLLM's convention to what the attention function expects
     q_thd = q.reshape(q_len, num_heads, head_size)
     k_thd = k.reshape(k_len, num_kv_heads, head_size)
     v_thd = v.reshape(k_len, num_kv_heads, head_size)
 
-    # Swap axes to head-first per kernel limit: [num_heads, num_tokens, head_dim]
-    q_htd = q_thd.swapaxes(0, 1)
-    k_htd = k_thd.swapaxes(0, 1)
-    v_htd = v_thd.swapaxes(0, 1)
+    output = encoder_only_attention(
+        q_thd,
+        k_thd,
+        v_thd,
+        attention_metadata,
+        mesh,
+        sm_scale=scale,
+        sliding_window=sliding_window,
+    )
 
-    def pad_token(t: jax.Array, size) -> jax.Array:
-        return jnp.pad(t, ((0, 0), (0, size), (0, 0)), constant_values=0)
-
-    block_sizes = BlockSizes.get_default(1, num_heads, q_len, k_len, head_size)
-    block_q = block_sizes.block_q
-    block_kv = block_sizes.block_k
-
-    padded_len_q = _align_to(q_len, block_q)
-    padded_len_kv = _align_to(k_len, block_kv)
-
-    q_pad_htd = pad_token(q_htd, padded_len_q - q_len)
-    k_pad_htd = pad_token(k_htd, padded_len_kv - k_len)
-    v_pad_htd = pad_token(v_htd, padded_len_kv - k_len)
-
-    q_bhtd = jnp.expand_dims(q_pad_htd, axis=0)
-    k_bhtd = jnp.expand_dims(k_pad_htd, axis=0)
-    v_bhtd = jnp.expand_dims(v_pad_htd, axis=0)
-
-    def build_segment_ids() -> SegmentIds:
-        max_num_seqs = attention_metadata.seq_lens.shape[0]
-        zero_2_max_num_seqs = jnp.arange(max_num_seqs + 1, dtype=jnp.int32)
-        seq_lens_concat_zero = jnp.concatenate([
-            attention_metadata.seq_lens,
-            jnp.array([0], dtype=attention_metadata.seq_lens.dtype),
-        ])
-        qkv_segment_ids = jnp.repeat(
-            zero_2_max_num_seqs,
-            seq_lens_concat_zero,
-            total_repeat_length=q_len,
-        )
-
-        def build_padded_segment(size: int) -> jax.Array:
-            padding_segment_id = max_num_seqs
-            result = jnp.pad(
-                qkv_segment_ids,
-                (0, size),
-                constant_values=padding_segment_id,
-            )
-            result = jnp.expand_dims(result, axis=0)
-            return result
-
-        segment_ids = SegmentIds(
-            q=build_padded_segment(padded_len_q - q_len),
-            kv=build_padded_segment(padded_len_kv - k_len),
-        )
-        return segment_ids
-
-    if sliding_window is not None:
-        row_ids = jnp.arange(padded_len_q)[:, None]
-        col_ids = jnp.arange(padded_len_kv)[None, :]
-        mask = jnp.abs(row_ids - col_ids) <= sliding_window
-        ab = jnp.where(mask, 0.0, -1e4).astype(q_bhtd.dtype)
-        ab = jnp.expand_dims(ab, axis=(0, 1))
-        ab = jnp.tile(ab, (1, num_heads, 1, 1))
-
-        kernel = sharded_flash_attention(
-            mesh=mesh,
-            causal=False,
-            sm_scale=scale,
-            use_attention_bias=True,
-        )
-        output_bhtd = kernel(
-            q_bhtd,
-            k_bhtd,
-            v_bhtd,
-            ab,
-            build_segment_ids(),
-        )
-    else:
-        kernel = sharded_flash_attention(
-            mesh=mesh,
-            causal=False,
-            sm_scale=scale,
-            use_attention_bias=False,
-        )
-        output_bhtd = kernel(
-            q_bhtd,
-            k_bhtd,
-            v_bhtd,
-            build_segment_ids(),
-        )
-    output_htd = jnp.squeeze(output_bhtd, axis=0)
-
-    # Unpad and transpose back to vLLM's shape convention
-    output = output_htd[:, :q_len, :].swapaxes(0, 1)
+    # Convert the shape back to vLLM's convention
     return output.reshape(q_len, num_heads * head_size).astype(q.dtype)
