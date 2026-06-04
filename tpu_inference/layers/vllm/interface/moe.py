@@ -59,9 +59,12 @@ def select_moe_backend_from_fused_moe_config(
     return MoEBackend.GMM_TP
 
 
-def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
-                   quant_method_instance: FusedMoEMethodBase, x: torch.Tensor,
-                   router_logits: torch.Tensor) -> torch.Tensor:
+def vllm_moe_apply(layer: FusedMoE,
+                   weights: FusedMoEWeights,
+                   quant_method_instance: FusedMoEMethodBase,
+                   x: torch.Tensor,
+                   router_logits: torch.Tensor,
+                   input_ids: torch.Tensor | None = None) -> torch.Tensor:
     """
     Shared function for applying a FusedMoE layer for the TorchAX/vLLM backend.
 
@@ -107,6 +110,16 @@ def vllm_moe_apply(layer: FusedMoE, weights: FusedMoEWeights,
 
     extra_kwargs = dict(quant_method_instance.extra_backend_kwargs)
     extra_kwargs["scatter_results"] = is_dp
+
+    if getattr(layer, "hash_indices_table", None) is not None:
+        assert input_ids is not None, "input_ids must be provided when hash_indices_table is present in the layer"
+        hash_table = layer.hash_indices_table
+        hash_based_topk_indices = jax_view(hash_table)[jax_view(input_ids)]
+        extra_kwargs["hash_based_topk_indices"] = hash_based_topk_indices
+
+    if getattr(layer, "e_score_correction_bias", None) is not None:
+        extra_kwargs["e_score_correction_bias"] = jax_view(
+            layer.e_score_correction_bias)
 
     return torch_view(
         moe_apply(

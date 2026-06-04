@@ -18,7 +18,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import ModelConfig, VllmConfig
 
-from tpu_inference.layers.jax.norm import JaxRmsNorm
+from tpu_inference.layers.jax.norm import JaxLayerNorm, JaxRmsNorm
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 
 
@@ -63,3 +63,57 @@ class TestJaxRmsNorm:
                                   flax_output,
                                   rtol=1e-5,
                                   atol=1e-5)
+
+
+class TestJaxLayerNorm:
+    """Test for JaxLayerNorm layer."""
+
+    @pytest.mark.parametrize(
+        "rng_key",
+        [jax.random.PRNGKey(0), jax.random.PRNGKey(1)])
+    @pytest.mark.parametrize("num_features", [16, 32, 64])
+    @pytest.mark.parametrize(
+        "dtype", [jax.numpy.float32, jax.numpy.float16, jax.numpy.bfloat16])
+    def test_numerical_correctness_against_flax(self, rng_key, num_features,
+                                                dtype):
+        """Run the same input through JaxLayerNorm vs. flax LayerNorm and compare outputs.
+        """
+        kwargs = {
+            "num_features": num_features,
+            "epsilon": 1e-6,
+            "dtype": dtype,
+            "param_dtype": dtype,
+            "rngs": nnx.Rngs(0)
+        }
+        layer = JaxLayerNorm(**kwargs)
+        layer.weight[...] = jax.random.uniform(rng_key, (num_features, ),
+                                               dtype=dtype)
+        layer.bias[...] = jax.random.uniform(rng_key, (num_features, ),
+                                             dtype=dtype)
+        flax_layer = nnx.LayerNorm(**kwargs)
+        flax_layer.scale[...] = layer.weight[...]
+        flax_layer.bias[...] = layer.bias[...]
+        x = jax.random.uniform(rng_key, (2, 8, num_features), dtype=dtype)
+        jax_output = layer(x)
+        flax_output = flax_layer(x)
+        assert jax.numpy.allclose(jax_output,
+                                  flax_output,
+                                  rtol=1e-5,
+                                  atol=1e-5)
+
+    def test_parameter_aliasing(self):
+        """Verifies weight aliasing, scale deletion, and named_parameters matching."""
+        rngs = nnx.Rngs(0)
+        jax_ln = JaxLayerNorm(
+            num_features=16,
+            rngs=rngs,
+        )
+        assert "scale" not in jax_ln.__dict__
+        assert "weight" in jax_ln.__dict__
+        assert isinstance(jax_ln.weight, nnx.Param)
+        assert jax_ln.scale is jax_ln.weight
+
+        named_params = dict(jax_ln.named_parameters())
+
+        assert "weight" in named_params
+        assert "scale" not in named_params

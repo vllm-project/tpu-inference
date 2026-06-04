@@ -217,6 +217,7 @@ class SpeculativeDecodingManager:
         num_draft_tokens_dp: np.ndarray,
         dp_size: int,
         req_indices_dp: dict,
+        req_ids_dp: dict,
         query_start_loc: np.ndarray,
         padded_num_reqs_per_dp_rank: int,
         padded_logits_length_dp_rank: int,
@@ -323,4 +324,5 @@ class SpeculativeDecodingManager:
         )
         metadata.draft_lengths_cpu = padded_num_draft_tokens_cpu
         metadata.req_indices_dp = req_indices_dp
+        metadata.req_ids_dp = req_ids_dp
         return metadata

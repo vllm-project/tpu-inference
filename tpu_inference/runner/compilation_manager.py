@@ -25,7 +25,8 @@ import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.jax.sample.sampling import sample
+from tpu_inference.layers.jax.sample.sampling import (
+    compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -333,7 +334,8 @@ class CompilationManager:
         indices_sharding = NamedSharding(self.runner.mesh, PartitionSpec(None))
 
         def _compile_one(input_padding: int, input_sharding: NamedSharding,
-                         next_tokens_size: int) -> None:
+                         next_tokens_size: int,
+                         next_tokens_sharding: NamedSharding) -> None:
             padded_token_in_tpu_cur_input_indices = np.zeros((input_padding, ),
                                                              dtype=np.int32)
             padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
@@ -348,7 +350,7 @@ class CompilationManager:
             input_ids = self._create_dummy_tensor((input_padding, ), jnp.int32,
                                                   input_sharding)
             next_tokens = self._create_dummy_tensor(
-                (next_tokens_size, ), jnp.int32, sharding=replicated_sharding)
+                (next_tokens_size, ), jnp.int32, sharding=next_tokens_sharding)
             placeholder_num = device_array(self.runner.mesh,
                                            np.array([1], dtype=np.int32))
             self._run_compilation(
@@ -369,14 +371,16 @@ class CompilationManager:
             spec_next_tokens_size = self.runner.max_num_reqs * (
                 num_spec_tokens + 1)
             for num_tokens in self.runner.num_tokens_paddings:
-                _compile_one(num_tokens, dp_sharding, spec_next_tokens_size)
+                _compile_one(num_tokens, dp_sharding, spec_next_tokens_size,
+                             dp_sharding)
             for num_logits in self.runner.num_logits_paddings:
                 _compile_one(num_logits, replicated_sharding,
-                             spec_next_tokens_size)
+                             spec_next_tokens_size, dp_sharding)
         else:
             for num_tokens in self.runner.num_tokens_paddings:
                 for num_reqs in self.runner.num_reqs_paddings:
-                    _compile_one(num_tokens, dp_sharding, num_reqs)
+                    _compile_one(num_tokens, dp_sharding, num_reqs,
+                                 replicated_sharding)
 
     def _precompile_subtract_num_rejected_tokens(self) -> None:
         from tpu_inference.runner.tpu_runner import \
@@ -392,10 +396,17 @@ class CompilationManager:
             # (donate_argnums=(0, 1)) so a fresh pair must be created per call.
             seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
                                                  jnp.int32, dp_sharding)
-            positions = self._create_dummy_tensor((num_tokens, ), jnp.int32,
-                                                  dp_sharding)
+            if self.runner.uses_mrope:
+                mrope_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+                positions = self._create_dummy_tensor(
+                    (3, num_tokens), jnp.int32, mrope_sharding)
+            else:
+                positions = self._create_dummy_tensor((num_tokens, ),
+                                                      jnp.int32, dp_sharding)
             num_rejected_tokens = self._create_dummy_tensor(
-                (self.runner.max_num_reqs, ), jnp.int32, replicated_sharding)
+                (self.runner.max_num_reqs, ), jnp.int32, dp_sharding)
             seq_lens_subtract_indices = self._create_dummy_tensor(
                 (self.runner.max_num_reqs, ), jnp.int32, replicated_sharding)
             positions_subtract_indices = self._create_dummy_tensor(
@@ -419,16 +430,17 @@ class CompilationManager:
         num_spec_tokens = (
             self.runner.speculative_config.num_speculative_tokens)
         max_num_reqs = self.runner.max_num_reqs
-        replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
+        data_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
 
         last_sampled_tokens = device_array(self.runner.mesh,
                                            jnp.ones((max_num_reqs, ),
                                                     dtype=jnp.int32),
-                                           sharding=replicated_sharding)
+                                           sharding=data_sharding)
         draft_tokens = device_array(self.runner.mesh,
                                     jnp.ones((max_num_reqs, num_spec_tokens),
                                              dtype=jnp.int32),
-                                    sharding=replicated_sharding)
+                                    sharding=data_sharding)
         self._run_compilation(
             f"worker{self.runner.rank} "
             "concat_last_sampled_tokens_and_draft_tokens",
@@ -801,11 +813,41 @@ class CompilationManager:
                                                   token_ids_sharding)
             self._run_compilation(
                 f"worker{self.runner.rank} gather_logprobs",
-                self.runner._compute_and_gather_logprobs,
+                compute_and_gather_logprobs,
                 logits,
                 token_ids,
                 self.runner.model_config.max_logprobs,
                 num_reqs=num_reqs,
+            )
+
+        logger.info(
+            "Compiling compute_and_gather_prompt_logprobs with different input shapes."
+        )
+        MAX_PRECOMPILE_PROMPT_TOKENS = 1024
+        for num_tokens in self.runner.num_tokens_paddings:
+            if num_tokens > MAX_PRECOMPILE_PROMPT_TOKENS:
+                logger.info(
+                    f"Skipping precompilation of compute_and_gather_prompt_logprobs for {num_tokens=}, "
+                    f"as it exceeds the {MAX_PRECOMPILE_PROMPT_TOKENS=} limit to prevent HBM exhaustion."
+                )
+                continue
+            logits_sharding = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(ShardingAxisName.MLP_DATA,
+                              ShardingAxisName.MLP_TENSOR))
+            token_ids_sharding = NamedSharding(self.runner.mesh,
+                                               PartitionSpec())
+            logits = self._create_dummy_tensor((num_tokens, hsize),
+                                               jnp.float32, logits_sharding)
+            token_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
+                                                  token_ids_sharding)
+            self._run_compilation(
+                f"worker{self.runner.rank} compute_and_gather_prompt_logprobs",
+                compute_and_gather_prompt_logprobs,
+                logits,
+                token_ids,
+                self.runner.model_config.max_logprobs,
+                num_tokens=num_tokens,
             )
 
         self._gather_logprobs_precompiled = True
