@@ -256,23 +256,66 @@ class TestDPScheduler:
     def test_find_best_rank_without_cache_hit(self, mock_vllm_config,
                                               mock_kv_cache_config,
                                               mock_structured_output_manager):
-        """Test _find_best_rank_for_request uses pending prefill token counts."""
+        """_find_best_rank_for_request sorts by
+        (pending_prefill, inflight, min_remaining_output)."""
         scheduler = self._create_scheduler(mock_vllm_config,
                                            mock_kv_cache_config,
                                            mock_structured_output_manager)
 
         mock_request = MagicMock(spec=Request)
 
-        # Simulate rank 0 having more pending prefill tokens than rank 1
-        scheduler._get_rank_pending_prefill_tokens = MagicMock(return_value={
-            0: 100,
-            1: 50
-        })
+        # Primary key wins: rank 1 has fewer pending prefill tokens.
+        scheduler._get_rank_routing_state = MagicMock(return_value=(
+            {
+                0: 100,
+                1: 50
+            },  # pending
+            {
+                0: 5,
+                1: 5
+            },  # inflight
+            {
+                0: 1000,
+                1: 1000
+            }  # min_remaining
+        ))
+        assert scheduler._find_best_rank_for_request(mock_request) == 1
 
-        rank = scheduler._find_best_rank_for_request(mock_request)
+        # Primary ties; secondary key wins: rank 0 has fewer inflight.
+        scheduler._get_rank_routing_state = MagicMock(return_value=(
+            {
+                0: 50,
+                1: 50
+            },
+            {
+                0: 3,
+                1: 7
+            },
+            {
+                0: 1000,
+                1: 1000
+            },
+        ))
+        assert scheduler._find_best_rank_for_request(mock_request) == 0
 
-        # Should choose rank with fewer pending prefill tokens (rank 1)
-        assert rank == 1
+        # Primary and secondary tie; tertiary wins: rank 1 has the running
+        # req with the fewest remaining output tokens (closest to its
+        # max_tokens), so it is most likely to free a slot soonest.
+        scheduler._get_rank_routing_state = MagicMock(return_value=(
+            {
+                0: 0,
+                1: 0
+            },
+            {
+                0: 4,
+                1: 4
+            },
+            {
+                0: 9100,
+                1: 500
+            },
+        ))
+        assert scheduler._find_best_rank_for_request(mock_request) == 1
 
     def test_add_request_assigns_to_best_rank(self, mock_vllm_config,
                                               mock_kv_cache_config,
