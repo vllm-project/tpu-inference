@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import math
+import time
 from functools import partial
 from itertools import islice
 from typing import (Any, Iterable, List, Literal, NamedTuple, Optional, Tuple,
@@ -20,6 +21,7 @@ from typing import (Any, Iterable, List, Literal, NamedTuple, Optional, Tuple,
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 from flax import nnx
 from jax.sharding import Mesh
@@ -890,8 +892,22 @@ class Qwen3VLVisionPatchMerger(JaxModule):
         return x
 
 
-class Qwen3VLVisionTransformer(JaxModule):
-    """Vision Transformer for Qwen3VL with DeepStack support."""
+def generate_segment_ids_from_grid_thw_np(
+    grid_thw: Tuple[Tuple[int, int, int], ...], ) -> np.ndarray:
+    """Generate segment IDs from grid dimensions for variable-length attention (NumPy version)."""
+    segments = []
+    seg_id = 1
+    for (t, h, w) in grid_thw:
+        frame_size = h * w
+        for _ in range(t):
+            segments.append(np.full((frame_size, ), seg_id, dtype=np.int32))
+            seg_id += 1
+    return np.concatenate(segments, axis=0) if segments else np.zeros(
+        (0, ), dtype=np.int32)
+
+
+class Qwen3VLVisionTransformer(JaxModule, LoadableWithIterator):
+    """Vision Transformer for Qwen3VL with DeepStack and Static JIT support."""
 
     def __init__(
         self,
@@ -914,7 +930,6 @@ class Qwen3VLVisionTransformer(JaxModule):
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
 
-        # analyze full attn block indexes' purpose by visiting flash attention impl.
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.spatial_merge_unit = self.spatial_merge_size**2
 
@@ -927,7 +942,6 @@ class Qwen3VLVisionTransformer(JaxModule):
             dtype=dtype,
         )
 
-        # Learned positional embedding: VISION_GRID_SIZE x VISION_GRID_SIZE grid.
         num_position_embeddings = getattr(vision_config,
                                           "num_position_embeddings",
                                           VISION_GRID_SIZE * VISION_GRID_SIZE)
@@ -990,8 +1004,6 @@ class Qwen3VLVisionTransformer(JaxModule):
             ) for _ in range(vision_config.depth)
         ])
 
-        # Final merger settings
-        # Qwen3VLConfig uses text_config for text model hidden_size
         text_config = getattr(hf_config, "text_config", hf_config)
         out_hidden_size = getattr(vision_config, "out_hidden_size",
                                   text_config.hidden_size)
@@ -1006,7 +1018,6 @@ class Qwen3VLVisionTransformer(JaxModule):
             norm_eps=norm_eps,
         )
 
-        # DeepStack configuration
         self.deepstack_visual_indexes = tuple(
             getattr(vision_config, "deepstack_visual_indexes", [8, 16, 24]))
         self.deepstack_merger_list = nnx.List([
@@ -1016,7 +1027,7 @@ class Qwen3VLVisionTransformer(JaxModule):
                 spatial_merge_size=self.spatial_merge_size,
                 dtype=dtype,
                 rngs=rngs,
-                use_postshuffle_norm=True,  # DeepStack uses postshuffle norm
+                use_postshuffle_norm=True,
                 norm_eps=norm_eps,
             ) for _ in range(len(self.deepstack_visual_indexes))
         ])
@@ -1027,219 +1038,194 @@ class Qwen3VLVisionTransformer(JaxModule):
             "enable_dynamic_image_sizes", False)
         _sync_module_param_sharding(self)
 
-    def rotary_pos_emb_thw(self, t: int, h: int, w: int) -> jax.Array:
-        """Compute rotary position embeddings for a grid of patches.
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
 
-        Args:
-            t: Temporal dimension
-            h: Height dimension (in patches)
-            w: Width dimension (in patches)
+        def map_name(name: str) -> str:
+            if name.startswith("model.visual."):
+                name = name.replace("model.visual.", "", 1)
+            elif name.startswith("visual."):
+                name = name.replace("visual.", "", 1)
+            if "blocks." in name:
+                if "attn.qkv." in name:
+                    name = name.replace("attn.qkv.", "attn.qkv_projection.")
+                elif "mlp.linear_fc1." in name:
+                    name = name.replace("mlp.linear_fc1.", "mlp.fc1.")
+                elif "mlp.linear_fc2." in name:
+                    name = name.replace("mlp.linear_fc2.", "mlp.fc2.")
+            return name
 
-        Returns:
-            Rotary embeddings of shape (t * merged_h * merged_w, spatial_merge_unit, dim)
-        """
-        merge_size = self.spatial_merge_size
+        def filter_weights(weights_iterator):
+            for name, weight in weights_iterator:
+                yield map_name(name), weight
 
-        hpos_ids, wpos_ids = jnp.indices((h, w))
-        hpos_ids = (hpos_ids.reshape(
-            h // merge_size,
-            merge_size,
-            w // merge_size,
-            merge_size,
-        ).transpose(0, 2, 1, 3).flatten())
-        wpos_ids = (wpos_ids.reshape(
-            h // merge_size,
-            merge_size,
-            w // merge_size,
-            merge_size,
-        ).transpose(0, 2, 1, 3).flatten())
-        pos_ids = jnp.stack([hpos_ids, wpos_ids], axis=-1)
-        pos_ids = jnp.tile(pos_ids, (t, 1))
+        return super().load_weights(filter_weights(weights))
 
-        max_size = max(h, w)
-        rotary_pos_emb_full = self.rotary_pos_emb(max_size)
+    def compute_aux_arrays(
+        self, grid_thw: Tuple[Tuple[int, int, int], ...]
+    ) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        """Computes grid/position auxiliary arrays (RoPE, pos_embeds, segment_ids) on CPU using NumPy."""
 
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].reshape(
-            pos_ids.shape[0], -1)
-        rotary_pos_emb = rotary_pos_emb.reshape(
-            rotary_pos_emb.shape[0] // self.spatial_merge_unit,
-            self.spatial_merge_unit,
-            -1,
-        )
+        def get_rope_by_thw_np(t: int, h: int, w: int):
+            llm_h = h // self.spatial_merge_size
+            llm_w = w // self.spatial_merge_size
+            window_index_thw = np.arange(t * llm_h * llm_w)
 
-        return rotary_pos_emb
+            hpos_ids, wpos_ids = np.indices((h, w))
+            hpos_ids = hpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            ).transpose(0, 2, 1, 3).flatten()
+            wpos_ids = wpos_ids.reshape(
+                h // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w // self.spatial_merge_size,
+                self.spatial_merge_size,
+            ).transpose(0, 2, 1, 3).flatten()
+            pos_ids = np.stack([hpos_ids, wpos_ids], axis=-1)
+            pos_ids = np.tile(pos_ids, (t, 1))
 
-    def fast_pos_embed_interpolate(
-            self, grid_thw: Tuple[Tuple[int, int, int], ...]) -> jax.Array:
-        """Bilinear interpolation for learned positional embeddings.
+            max_size = max(h, w)
+            inv_freq = 1.0 / (self.rotary_pos_emb.theta**(
+                np.arange(0, self.rotary_pos_emb.dim, 2, dtype=np.float32) /
+                self.rotary_pos_emb.dim))
+            seq = np.arange(max_size, dtype=np.float32)
+            rotary_pos_emb_full = np.outer(seq, inv_freq)
 
-        Args:
-            grid_thw: Tuple of (T, H, W) for each image/video
+            rotary_pos_emb_thw = rotary_pos_emb_full[pos_ids].reshape(
+                pos_ids.shape[0], -1)
+            rotary_pos_emb_thw = rotary_pos_emb_thw.reshape(
+                rotary_pos_emb_thw.shape[0] // self.spatial_merge_unit,
+                self.spatial_merge_unit, -1)
 
-        Returns:
-            Position embeddings of shape (total_patches, hidden_size)
-        """
-        merge_size = self.spatial_merge_size
+            rotary_pos_emb_thw = rotary_pos_emb_thw[window_index_thw, :, :]
+            rotary_pos_emb_thw = rotary_pos_emb_thw.reshape(
+                -1, rotary_pos_emb_thw.shape[-1])
 
-        idx_list = [jnp.empty((0, ), dtype=jnp.int32) for _ in range(4)]
-        weight_list = [jnp.empty((0, ), dtype=jnp.float32) for _ in range(4)]
+            return rotary_pos_emb_thw, window_index_thw
 
-        grid_ts = [g[0] for g in grid_thw]
-        grid_hs = [g[1] for g in grid_thw]
-        grid_ws = [g[2] for g in grid_thw]
+        def pos_embed_interpolate_np(t: int, h: int, w: int):
+            embed_weight = np.array(self.pos_embed.weight[...])
+            hidden_dim = embed_weight.shape[1]
+            m_size = self.spatial_merge_size
 
-        for t, h, w in zip(grid_ts, grid_hs, grid_ws):
-            # Create linearly spaced indices for interpolation
-            h_idxs = jnp.linspace(0, self.pos_embed_grid_h - 1, h)
-            w_idxs = jnp.linspace(0, self.pos_embed_grid_w - 1, w)
+            h_idxs = np.linspace(0, self.pos_embed_grid_h - 1, h)
+            w_idxs = np.linspace(0, self.pos_embed_grid_w - 1, w)
 
-            # Floor and ceil indices for bilinear interpolation
-            h_idxs_floor = h_idxs.astype(jnp.int32)
-            w_idxs_floor = w_idxs.astype(jnp.int32)
-            h_idxs_ceil = (h_idxs.astype(jnp.int32) +
-                           1).clip(max=self.pos_embed_grid_h - 1)
-            w_idxs_ceil = (w_idxs.astype(jnp.int32) +
-                           1).clip(max=self.pos_embed_grid_w - 1)
+            h_floor = h_idxs.astype(np.int32)
+            w_floor = w_idxs.astype(np.int32)
+            h_ceil = np.clip(h_floor + 1, 0, self.pos_embed_grid_h - 1)
+            w_ceil = np.clip(w_floor + 1, 0, self.pos_embed_grid_w - 1)
 
-            # Interpolation weights
-            dh = h_idxs - h_idxs_floor
-            dw = w_idxs - w_idxs_floor
+            dh = h_idxs - h_floor
+            dw = w_idxs - w_floor
 
-            # Base indices for 2D grid (flattened)
-            base_h = h_idxs_floor * self.pos_embed_grid_w
-            base_h_ceil = h_idxs_ceil * self.pos_embed_grid_w
+            dh_grid, dw_grid = np.meshgrid(dh, dw, indexing="ij")
+            h_floor_grid, w_floor_grid = np.meshgrid(h_floor,
+                                                     w_floor,
+                                                     indexing="ij")
+            h_ceil_grid, w_ceil_grid = np.meshgrid(h_ceil,
+                                                   w_ceil,
+                                                   indexing="ij")
 
-            # Compute 4 corner indices for bilinear interpolation
-            indices = [
-                (base_h[:, None] +
-                 w_idxs_floor[None, :]).reshape(-1),  # top-left
-                (base_h[:, None] +
-                 w_idxs_ceil[None, :]).reshape(-1),  # top-right
-                (base_h_ceil[:, None] +
-                 w_idxs_floor[None, :]).reshape(-1),  # bottom-left
-                (base_h_ceil[:, None] +
-                 w_idxs_ceil[None, :]).reshape(-1),  # bottom-right
-            ]
+            w11 = dh_grid * dw_grid
+            w10 = dh_grid - w11
+            w01 = dw_grid - w11
+            w00 = 1.0 - dh_grid - w01
 
-            # Compute weights for bilinear interpolation
-            weights = [
-                ((1 - dh)[:, None] *
-                 (1 - dw)[None, :]).reshape(-1),  # top-left
-                ((1 - dh)[:, None] * dw[None, :]).reshape(-1),  # top-right
-                (dh[:, None] * (1 - dw)[None, :]).reshape(-1),  # bottom-left
-                (dh[:, None] * dw[None, :]).reshape(-1),  # bottom-right
-            ]
+            h_grid = np.stack(
+                [h_floor_grid, h_floor_grid, h_ceil_grid, h_ceil_grid])
+            w_grid = np.stack(
+                [w_floor_grid, w_ceil_grid, w_floor_grid, w_ceil_grid])
+            h_grid_idx = h_grid * self.pos_embed_grid_w
 
-            for i in range(4):
-                idx_list[i] = jnp.concatenate([idx_list[i], indices[i]],
-                                              axis=0)
-                weight_list[i] = jnp.concatenate([weight_list[i], weights[i]],
-                                                 axis=0)
+            indices = (h_grid_idx + w_grid).reshape(4, -1)
+            weights = np.stack([w00, w01, w10, w11], axis=0).reshape(4, -1, 1)
 
-        # Convert to JAX arrays
-        idx_tensor = jnp.stack(idx_list, axis=0)  # int32, shape (4, N)
-        weight_tensor = jnp.stack(weight_list, axis=0)  # float32, shape (4, N)
+            embeds = embed_weight[indices]
+            embeds *= weights
+            combined = embeds.sum(axis=0)
 
-        # Lookup embeddings and apply bilinear interpolation
-        pos_embeds = self.pos_embed(idx_tensor) * weight_tensor[:, :, None]
-        patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[
-            2] + pos_embeds[3]
+            combined = combined.reshape(h // m_size, m_size, w // m_size,
+                                        m_size, hidden_dim)
+            combined = np.transpose(combined,
+                                    (0, 2, 1, 3, 4)).reshape(-1, hidden_dim)
+            repeated = np.tile(combined, (t, 1))
 
-        # Split embeddings for each image/video
-        split_sizes = [h * w for h, w in zip(grid_hs, grid_ws)]
+            return repeated
 
-        patch_pos_embeds_list = []
-        offset = 0
-        for size in split_sizes:
-            patch_pos_embeds_list.append(patch_pos_embeds[offset:offset +
-                                                          size])
-            offset += size
+        num_grids = len(grid_thw)
 
-        # Rearrange embeddings to match patch ordering (with merge blocks)
-        patch_pos_embeds_permute = []
-        for pos_embed, t, h, w in zip(patch_pos_embeds_list, grid_ts, grid_hs,
-                                      grid_ws):
-            # Repeat for temporal dimension
-            pos_embed = jnp.tile(pos_embed, (t, 1))
+        rotary_pos_emb = []
+        pos_embeds = []
+        window_index = []
 
-            h_merged = h // merge_size
-            w_merged = w // merge_size
-            pos_embed = pos_embed.reshape(t, h_merged, merge_size, w_merged,
-                                          merge_size, -1)
-            pos_embed = jnp.transpose(pos_embed, (0, 1, 3, 2, 4, 5))
-            pos_embed = pos_embed.reshape(-1, pos_embed.shape[-1])
+        window_index_id = 0
+        for i in range(num_grids):
+            t, h, w = grid_thw[i]
+            llm_h = h // self.spatial_merge_size
+            llm_w = w // self.spatial_merge_size
 
-            patch_pos_embeds_permute.append(pos_embed)
+            rotary_pos_emb_thw, window_index_thw = get_rope_by_thw_np(t, h, w)
+            repeated = pos_embed_interpolate_np(t, h, w)
 
-        patch_pos_embeds = jnp.concatenate(patch_pos_embeds_permute, axis=0)
-        return patch_pos_embeds
+            window_index.append(window_index_thw + window_index_id)
+            window_index_id += (t * llm_h * llm_w)
 
-    def encode(
+            rotary_pos_emb.append(rotary_pos_emb_thw)
+            pos_embeds.append(repeated)
+
+        rotary_pos_emb = np.concatenate(rotary_pos_emb, axis=0)
+        pos_embeds = np.concatenate(pos_embeds, axis=0)
+        window_index = np.concatenate(window_index, axis=0)
+
+        num_patches = rotary_pos_emb.shape[0]
+        bucket_num_patches = 1 << (num_patches - 1).bit_length()
+        num_tokens = window_index.shape[0]
+        bucket_num_tokens = bucket_num_patches // self.spatial_merge_unit
+
+        rotary_pos_emb_padded = np.pad(rotary_pos_emb,
+                                       ((0, bucket_num_patches - num_patches),
+                                        (0, 0)))
+        pos_embeds_padded = np.pad(pos_embeds,
+                                   ((0, bucket_num_patches - num_patches),
+                                    (0, 0)))
+        window_index_padded = np.concatenate([
+            window_index,
+            np.arange(num_tokens, bucket_num_tokens, dtype=np.int32)
+        ])
+
+        segment_ids = generate_segment_ids_from_grid_thw_np(grid_thw)
+        segment_ids_padded = np.pad(
+            segment_ids, (0, bucket_num_patches - segment_ids.shape[0]))
+
+        return (jnp.array(window_index_padded),
+                jnp.array(rotary_pos_emb_padded, dtype=jnp.bfloat16),
+                jnp.array(pos_embeds_padded,
+                          dtype=self.dtype), jnp.array(segment_ids_padded))
+
+    @jax.jit
+    def encode_padded_jit(
         self,
-        x: jax.Array,
+        x_padded: jax.Array,
+        window_index: jax.Array,
         rotary_pos_emb: jax.Array,
+        pos_embeds: jax.Array,
         segment_ids: jax.Array,
     ) -> Tuple[jax.Array, List[jax.Array]]:
-        hidden_states = self.patch_embed(x)
-
-        # Reshape for merge block ordering
-        seq_len = x.shape[0]
-        hidden_states = hidden_states.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-
-        # Add batch dimension: (seq, merge_unit, dim) -> (seq * merge_unit, 1, dim)
-        hidden_states = hidden_states.reshape(seq_len, 1, -1)
-
-        deepstack_features = []
-        for layer_num, blk in enumerate(self.blocks):
-            hidden_states = blk(
-                hidden_states,
-                rotary_pos_emb=rotary_pos_emb,
-                segment_ids=segment_ids,
-            )
-
-            # Collect DeepStack features at specified layers
-            if layer_num in self.deepstack_visual_indexes:
-                idx = self.deepstack_visual_indexes.index(layer_num)
-                # Squeeze batch dim for merger: (seq, 1, dim) -> (seq, dim)
-                deepstack_feat = self.deepstack_merger_list[idx](
-                    hidden_states.squeeze(1))
-                deepstack_features.append(deepstack_feat)
-
-        # Squeeze batch dim and apply final merger
-        hidden_states = self.merger(hidden_states.squeeze(1))
-
-        return hidden_states, deepstack_features
-
-    @partial(jax.jit, static_argnames=("grid_thw", ))
-    def encode_jit(
-        self, x: jax.Array, grid_thw: Tuple[Tuple[int, int, int], ...]
-    ) -> Tuple[jax.Array, List[jax.Array]]:
-        """JIT-compiled encoding with static grid dimensions."""
-        # Learned PE interpolate
-        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
-
-        hidden_states = self.patch_embed(x)
+        hidden_states = self.patch_embed(x_padded)
         hidden_states = hidden_states + pos_embeds
 
-        rotary_pos_emb_list = []
-        for t, h, w in grid_thw:
-            rotary_pos_emb_list.append(self.rotary_pos_emb_thw(t, h, w))
-        rotary_pos_emb = jnp.concatenate(rotary_pos_emb_list, axis=0)
-        rotary_pos_emb = rotary_pos_emb.reshape(-1, rotary_pos_emb.shape[-1])
-
-        # pre-merge patch segment ids
-        segment_ids = generate_segment_ids_from_grid_thw(grid_thw)
-        # TODO: (chore) remove all robustness in the code for less latency
-        assert segment_ids.shape[0] == hidden_states.shape[0], (
-            "segment_ids must match the patch sequence length. "
-            f"Got {segment_ids.shape[0]=} vs {hidden_states.shape[0]=}.")
-
-        # Reshape for transformer
-        seq_len = hidden_states.shape[0]
+        seq_len = x_padded.shape[0]
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        hidden_states = hidden_states.reshape(seq_len, 1, -1)
+        hidden_states = hidden_states[window_index, :, :]
+        hidden_states = hidden_states.reshape(seq_len, -1)
+
+        # Add batch dimension: (seq, dim) -> (seq, 1, dim)
+        hidden_states = jnp.expand_dims(hidden_states, axis=1)
 
         deepstack_features = []
         for layer_num, blk in enumerate(self.blocks):
@@ -1260,19 +1246,41 @@ class Qwen3VLVisionTransformer(JaxModule):
         return hidden_states, deepstack_features
 
     def __call__(
-        self, x: jax.Array, grid_thw: Tuple[Tuple[int, int, int], ...]
+        self, x_padded: jax.Array, grid_thw: Tuple[Tuple[int, int, int], ...]
     ) -> Tuple[jax.Array, List[jax.Array]]:
-        """Forward pass for vision encoder.
+        """Forward pass for vision encoder with static JIT.
 
         Args:
-            x: Pixel values of shape (num_patches, C * T * ps * ps)
+            x_padded: Padded pixel values of shape (padded_num_patches, C * T * ps * ps)
             grid_thw: Tuple of (T, H, W) for each image/video
 
         Returns:
-            hidden_states: Final merged features (total_tokens, out_hidden_size)
+            hidden_states: Final merged features (padded_total_tokens, out_hidden_size)
             deepstack_features: List of intermediate features for DeepStack
         """
-        return self.encode_jit(x, grid_thw)
+        window_index, rotary_pos_emb, pos_embeds, segment_ids = self.compute_aux_arrays(
+            grid_thw)
+
+        trace_name = (
+            f"encode_padded_jit"
+            f"-x_padded_{'_'.join(map(str, x_padded.shape))}"
+            f"-window_index_{'_'.join(map(str, window_index.shape))}"
+            f"-rotary_pos_emb_{'_'.join(map(str, rotary_pos_emb.shape))}"
+            f"-pos_embeds_{'_'.join(map(str, pos_embeds.shape))}"
+            f"-segment_ids_{'_'.join(map(str, segment_ids.shape))}")
+
+        start_time = time.time()
+        jax.debug.print(f"[vision-jit-profile] Entering {trace_name}")
+        with jax.profiler.TraceAnnotation(trace_name):
+            hidden_states, deepstack_features = self.encode_padded_jit(
+                x_padded, window_index, rotary_pos_emb, pos_embeds,
+                segment_ids)
+            hidden_states.block_until_ready()
+        end_time = time.time()
+        jax.debug.print(
+            f"[vision-jit-profile] Exiting {trace_name}, time spend: {end_time - start_time}"
+        )
+        return hidden_states, deepstack_features
 
 
 def _inject_visual_features(
@@ -1611,8 +1619,28 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
             pixel_values = image_input["pixel_values"]
             if pixel_values is None:
                 return (), None
-            image_embeds, deepstack_embeds = self.visual(
-                pixel_values, grid_thw)
+
+            # Pad pixel_values to power of 2 eagerly
+            num_patches = pixel_values.shape[0]
+            bucket_num_patches = 1 << (num_patches - 1).bit_length()
+            pixel_values_padded = jnp.pad(
+                pixel_values, ((0, bucket_num_patches - num_patches), (0, 0)))
+
+            image_embeds_padded, deepstack_embeds_padded = self.visual(
+                pixel_values_padded, grid_thw)
+
+            # Unpad to actual tokens
+            actual_num_tokens = sum(t * (h // self.spatial_merge_size) *
+                                    (w // self.spatial_merge_size)
+                                    for t, h, w in grid_thw)
+            image_embeds = image_embeds_padded[:actual_num_tokens, :]
+            if deepstack_embeds_padded is not None:
+                deepstack_embeds = [
+                    x[:actual_num_tokens, :] for x in deepstack_embeds_padded
+                ]
+            else:
+                deepstack_embeds = None
+
         return split_mm_embeddings_by_grid(image_embeds, grid_thw,
                                            self.spatial_merge_size,
                                            deepstack_embeds)
