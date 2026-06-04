@@ -23,11 +23,21 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.v1.metrics.reader import Counter
 
-# TODO (guowei-dev): remove this skip once the libtpu pin is bumped past 0.0.42.dev20260527.
-_QWEN35_4B_SHARDY_SEGFAULT_REASON = (
-    "Qwen3.5-4B vision tower hits libtpu 0.0.41 Shardy "
-    "InsertExplicitReshardsPass::redistributeAxes segfault; "
-    "fixed in libtpu 0.0.42.dev20260527+nightly.")
+
+def _disable_shardy_for_qwen35_4b(mp: pytest.MonkeyPatch) -> None:
+    """Disables Shardy to avoid a libtpu 0.0.41 segfault in `embed_multimodal`.
+
+    TODO: Remove once libtpu >= 0.0.42.dev20260527.
+    """
+    import jax
+
+    mp.setenv("JAX_USE_SHARDY_PARTITIONER", "false")
+    libtpu_init_args = os.environ.get("LIBTPU_INIT_ARGS", "")
+    mp.setenv(
+        "LIBTPU_INIT_ARGS",
+        "--xla_use_shardy=false --xla_tpu_scoped_vmem_limit_kib=131072 " +
+        libtpu_init_args)
+    jax.config.update("jax_use_shardy_partitioner", False)
 
 
 # TODO (Qiliang Cui): remove this when XLA fixes the recursive jit call issue.
@@ -526,6 +536,7 @@ def mtp_baseline():
     }
     test_prompts = get_eagle3_test_prompts()
     with pytest.MonkeyPatch.context() as mp:
+        _disable_shardy_for_qwen35_4b(mp)
         ref_outputs = _get_baseline_results(
             mp,
             sampling_config,
@@ -537,7 +548,6 @@ def mtp_baseline():
     return test_prompts, ref_outputs, extra_kwargs
 
 
-@pytest.mark.skip(reason=_QWEN35_4B_SHARDY_SEGFAULT_REASON)
 @pytest.mark.parametrize(
     "async_scheduling, enable_dp_attention",
     [
@@ -560,6 +570,7 @@ def test_mtp_correctness(
     model_name = "Qwen/Qwen3.5-4B"
     monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
     monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
+    _disable_shardy_for_qwen35_4b(monkeypatch)
 
     speculative_config = {
         "method": "mtp",
@@ -581,7 +592,6 @@ def test_mtp_correctness(
     )
 
 
-@pytest.mark.skip(reason=_QWEN35_4B_SHARDY_SEGFAULT_REASON)
 @pytest.mark.parametrize(
     "max_num_seqs,async_scheduling, enable_dp_attention",
     [(1, False, False), (20, True, False), (20, True, True)],
@@ -599,6 +609,7 @@ def test_mtp_performance(
     model_name = "Qwen/Qwen3.5-4B"
     monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
     monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
+    _disable_shardy_for_qwen35_4b(monkeypatch)
 
     extra_kwargs = {
         "seed": 42,
