@@ -91,6 +91,8 @@ def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
             return jax.nn.softmax(x, axis=-1)
         case "sigmoid":
             return jax.nn.sigmoid(x)
+        case "sqrtsoftplus":
+            return jnp.sqrt(jax.nn.softplus(x))
         case _:
             raise NotImplementedError(
                 f"FusedMoE does not support {scoring_fn} scoring function")
