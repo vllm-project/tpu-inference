@@ -1085,8 +1085,8 @@ def _console_loop(source, db_path, spanner_db, global_args):
             else:
                 new_case_set_id = tokens[1]
                 if new_case_set_id != session_case_set_id:
-                    session_run_id = None
                     if session_run_id is not None:
+                        session_run_id = None
                         print('  run_id cleared')
                 session_case_set_id = new_case_set_id
                 print(f'  case_set_id set to: {session_case_set_id}')
