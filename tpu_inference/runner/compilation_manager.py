@@ -39,8 +39,8 @@ from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
     extract_last_sampled_tokens, process_and_extend_logits)
-from tpu_inference.utils import (device_array, time_function, get_mesh_shape_product,
-                                 to_jax_dtype)
+from tpu_inference.utils import (device_array, get_mesh_shape_product,
+                                 time_function, to_jax_dtype)
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
