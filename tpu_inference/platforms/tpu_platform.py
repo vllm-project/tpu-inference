@@ -8,6 +8,21 @@ import jax.numpy as jnp
 import numpy
 import torch
 import vllm.envs as vllm_envs
+
+# Monkeypatch torch.accelerator.empty_cache to ignore device_allocator error on TPU.
+if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "empty_cache"):
+    _orig_empty_cache = torch.accelerator.empty_cache
+
+    def _patched_empty_cache(*args, **kwargs):
+        try:
+            _orig_empty_cache(*args, **kwargs)
+        except RuntimeError as e:
+            if "Allocator for jax is not a DeviceAllocator" in str(e):
+                pass
+            else:
+                raise e
+
+    torch.accelerator.empty_cache = _patched_empty_cache
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
