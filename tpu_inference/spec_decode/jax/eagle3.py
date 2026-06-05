@@ -629,7 +629,6 @@ class Eagle3Proposer:
             draft token IDs.
         """
 
-
         kv_caches, hidden_states, residual, _ = self.model_fn(
             state_leaves,
             kv_caches,
@@ -640,7 +639,6 @@ class Eagle3Proposer:
             spec_step_idx=0,
         )
 
-
         if num_speculative_tokens == 1:
             return kv_caches, self._select_draft_token_ids(
                 state_leaves, hidden_states, last_token_indices)
@@ -648,7 +646,6 @@ class Eagle3Proposer:
         positions, hidden_states, draft_token_ids = self._select_inputs_for_loop_speculation(
             state_leaves, attn_metadata.input_positions, residual[0],
             hidden_states, last_token_indices)
-
         draft_token_ids_list = [draft_token_ids]
 
         for i in range(num_speculative_tokens - 1):
@@ -673,7 +670,6 @@ class Eagle3Proposer:
                 query_start_loc=query_start_loc,
                 block_tables=new_block_tables,
             )
-
             kv_caches, new_hidden_states, residual, _ = self.model_fn(
                 state_leaves,
                 kv_caches,
