@@ -16,7 +16,7 @@ import math
 from functools import partial
 from itertools import islice
 from typing import (Any, Iterable, List, Literal, NamedTuple, Optional, Tuple,
-                    TypedDict, Union)
+                    TypedDict)
 
 import jax
 import jax.numpy as jnp
@@ -109,16 +109,6 @@ class Qwen3VLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     pixel_values: jax.Array
     image_grid_thw: Tuple[Tuple[int, int, int], ...]
-
-
-class Qwen3VLImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    image_embeds: jax.Array
-    image_grid_thw: Tuple[Tuple[int, int, int], ...]
-
-
-Qwen3VLImageInputs = Union[Qwen3VLImagePixelInputs,
-                           Qwen3VLImageEmbeddingInputs]
 
 
 def generate_segment_ids_from_grid_thw(
@@ -1424,7 +1414,6 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
         multimodal_embeddings: Optional[jax.Array],
         *,
         is_multimodal: jax.Array | None = None,
-        do_language_embed_multimodal: bool = True,
     ) -> jax.Array:
         """Get input embeddings with multimodal content merged.
 
@@ -1432,19 +1421,11 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
             input_ids: Input token IDs
             multimodal_embeddings: Flattened multimodal embeddings
             is_multimodal: Optional boolean mask of multimodal token positions.
-            do_language_embed_multimodal: Whether to compute language embeddings
-                for multimodal placeholder tokens before merging.
 
         Returns:
             Input embeddings with multimodal content merged
         """
-        if do_language_embed_multimodal:
-            inputs_embeds = self.language_model.embed_tokens(input_ids)
-        else:
-            text_config = getattr(self.config, "text_config", self.config)
-            embed_shape = (*input_ids.shape, text_config.hidden_size)
-            inputs_embeds = jnp.zeros(
-                embed_shape, dtype=self.vllm_config.model_config.dtype)
+        inputs_embeds = self.language_model.embed_tokens(input_ids)
 
         if multimodal_embeddings is not None and multimodal_embeddings.shape[
                 0] != 0:
@@ -1496,37 +1477,24 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
 
     def _parse_and_validate_image_input(
             self, image_grid_thw: Tuple[Tuple[int, int, int], ...],
-            **kwargs: object) -> Optional[Qwen3VLImageInputs]:
+            **kwargs: object) -> Optional[Qwen3VLImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         if pixel_values is None:
             pixel_values = kwargs.pop("pixel_values_videos", None)
-        image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None and image_embeds is None:
+        if pixel_values is None:
             return None
 
-        if pixel_values is not None:
-            pixel_values = _safe_convert_torch_to_jax(pixel_values)
-            pixel_values = reshape_mm_tensor(pixel_values, "pixel values")
+        pixel_values = _safe_convert_torch_to_jax(pixel_values)
+        pixel_values = reshape_mm_tensor(pixel_values, "pixel values")
 
-            if not isinstance(pixel_values, jax.Array):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
+        if not isinstance(pixel_values, jax.Array):
+            raise ValueError("Incorrect type of pixel values. "
+                             f"Got type: {type(pixel_values)}")
 
-            return Qwen3VLImagePixelInputs(type="pixel_values",
-                                           pixel_values=pixel_values,
-                                           image_grid_thw=image_grid_thw)
-
-        # NOTE: Not supporting image embeddings precomputed. Matches Qwen2.5VL.
-        # if image_embeds is not None:
-        #     image_embeds = reshape_mm_tensor(image_embeds, "image embeds")
-        #     if not isinstance(image_embeds, jax.Array):
-        #         raise ValueError("Incorrect type of image embeddings. "
-        #                          f"Got type: {type(image_embeds)}")
-        #     return Qwen3VLImageEmbeddingInputs(
-        #         type="image_embeds",
-        #         image_embeds=image_embeds,
-        #         image_grid_thw=image_grid_thw)
+        return Qwen3VLImagePixelInputs(type="pixel_values",
+                                       pixel_values=pixel_values,
+                                       image_grid_thw=image_grid_thw)
 
     def _parse_and_validate_multimodal_inputs(self,
                                               image_grid_thw: Tuple[Tuple[int,
@@ -1536,16 +1504,15 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
                                               **kwargs: object) -> dict:
         mm_input_by_modality = {}
         for input_key in kwargs:
-            if input_key in (
-                    "pixel_values", "pixel_values_videos",
-                    "image_embeds") and "image" not in mm_input_by_modality:
+            if input_key in ("pixel_values", "pixel_values_videos"
+                             ) and "image" not in mm_input_by_modality:
                 mm_input_by_modality[
                     "image"] = self._parse_and_validate_image_input(
                         image_grid_thw, **kwargs)
         return mm_input_by_modality
 
     def _process_image_input(
-        self, image_input: Qwen3VLImageInputs
+        self, image_input: Qwen3VLImagePixelInputs
     ) -> tuple[tuple[jax.Array, ...], Optional[list[list[jax.Array]]]]:
 
         if not image_input:
@@ -1554,16 +1521,10 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
         if not grid_thw:
             return (), None
 
-        if image_input["type"] == "image_embeds":
-            image_embeds = image_input["image_embeds"].astype(
-                self.visual.dtype)
-            deepstack_embeds = None
-        else:
-            pixel_values = image_input["pixel_values"]
-            if pixel_values is None:
-                return (), None
-            image_embeds, deepstack_embeds = self.visual(
-                pixel_values, grid_thw)
+        pixel_values = image_input["pixel_values"]
+        if pixel_values is None:
+            return (), None
+        image_embeds, deepstack_embeds = self.visual(pixel_values, grid_thw)
         return split_mm_embeddings_by_grid(image_embeds, grid_thw,
                                            self.spatial_merge_size,
                                            deepstack_embeds)
