@@ -528,7 +528,6 @@ def tgmm_kernel_main(
     rhs_scale_ref, out_ref, acc_ref, metadata_ref, zero_ref, semaphore_ref = rest
   else:
     rhs_scale_ref = None
-    print(f"xw32 line517 {len(rest)=}, {rest}")
     out_ref, acc_ref, metadata_ref, zero_ref, semaphore_ref = rest
 
   num_groups_to_zero = zero_out_start(
