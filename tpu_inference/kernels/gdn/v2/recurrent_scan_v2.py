@@ -21,8 +21,10 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
-from tokamax.google.experimental.tpu.inference.gdn.ragged_kernel import (
-    compute_schedule_table_v2, recurrent_scan_impl)
+
+from tpu_inference.kernels.gdn.v2 import \
+    compute_schedule_v2 as compute_schedule_table_v2
+from tpu_inference.kernels.gdn.v2 import recurrent_scan_impl
 
 
 def invert_triangular_matrix(A, block_size=16):
@@ -73,36 +75,6 @@ def invert_triangular_matrix(A, block_size=16):
         x_blocks.append(x_block)
 
     return jnp.concatenate(x_blocks, axis=1)
-
-
-# This is actually slower in the fused kernel. But it's faster in unit tests. likely it's due to VPU pressure.
-# def invert_triangular_matrix(A, block_size=None):
-#   """Inverts a unit lower triangular matrix A using Neumann doubling.
-
-#   Algorithm: Neumann doubling. For L strictly lower triangular of size N x N,
-#   since L^N = 0 we have:
-#     (I + L)^{-1} = (I - L)(I + L^2)(I + L^4) ... (I + L^(N/2))
-
-#   Args:
-#     A: Unit lower triangular matrix of shape (B, N, N).
-#     block_size: Size of the blocks for Gaussian elimination (unused).
-
-#   Returns:
-#     Inverse of A, of shape (B, N, N).
-
-#   For N=128 this is exactly 6 iterations = 12 matmuls, all (B, 128, 128).
-#   """
-#   B, N, _ = A.shape
-#   num_iters = max(1, (N - 1).bit_length() - 1)
-#   in_dtype = A.dtype
-#   A_f32 = A.astype(jnp.float32)
-#   L = jnp.tril(A_f32, k=-1)
-#   eye = jnp.broadcast_to(jnp.eye(N, dtype=jnp.float32), (B, N, N))
-#   Y = eye - L
-#   for _ in range(num_iters):
-#     L = jnp.matmul(L, L, precision=jax.lax.Precision.HIGHEST)
-#     Y = Y + jnp.matmul(Y, L, precision=jax.lax.Precision.HIGHEST)
-#   return Y.astype(in_dtype)
 
 
 def inner_kernel(
@@ -171,9 +143,6 @@ def inner_kernel(
     decode_store_scratch,
     # VMEM scratchpad: (BT, n_v * d_v). To hold decode outputs before DMA
     decode_output_scratch,
-    # VMEM scratchpad: (5, n_v, max_d). To store temporary variables during
-    # decode loop
-    decode_step_scratch,
     # Array of C semaphores for decode state loads
     decode_read_semaphores,
     # 2 semaphores (one per decode_store_scratch slot) for async decode stores
@@ -254,7 +223,6 @@ def inner_kernel(
         load=decode_load_scratch,
         store=decode_store_scratch,
         output=decode_output_scratch,
-        step_scratch=decode_step_scratch,
         read_semaphores=decode_read_semaphores,
         write_semaphore=decode_write_semaphore,
     )
@@ -490,7 +458,6 @@ def fused_kernel(
         decode_load_scratch_ref,
         decode_store_scratch_ref,
         decode_output_scratch_ref,
-        decode_step_scratch_ref,
         decode_read_sems,
         decode_write_sem,
         prefill_sem,
@@ -517,7 +484,6 @@ def fused_kernel(
                 state_commit_scratch=state_commit_scratch_ref,
                 decode_load_scratch=decode_load_scratch_ref,
                 decode_store_scratch=decode_store_scratch_ref,
-                decode_step_scratch=decode_step_scratch_ref,
                 decode_read_semaphores=decode_read_sems,
                 decode_write_semaphore=decode_write_sem,
                 prefill_semaphore=prefill_sem,
@@ -548,7 +514,6 @@ def fused_kernel(
             ],
         )
 
-    max_d = max(d_k, d_v)
     pl.run_scoped(
         # TODO: Move this to outer pallas call and get rid of run_scoped
         _run_with_scratch,
@@ -565,8 +530,6 @@ def fused_kernel(
         ),  # decode_store_scratch (double-buffered; slot 0 also used as prefill's state_commit staging)
         pltpu.VMEM((BT, n_v * d_v),
                    mixed_qkv_ref.dtype),  # decode_output_scratch
-        pltpu.VMEM((5, n_v, max_d),
-                   mixed_qkv_ref.dtype),  # decode_step_scratch
         pltpu.SemaphoreType.DMA(
             (2, )),  # decode_read_semaphores (one per slot)
         pltpu.SemaphoreType.DMA(

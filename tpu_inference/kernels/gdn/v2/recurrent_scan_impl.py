@@ -66,7 +66,6 @@ class DecodeScratchRefs:
     load: Any
     store: Any
     output: Any
-    step_scratch: Any
     read_semaphores: Any
     write_semaphore: Any
 
@@ -339,21 +338,29 @@ class PrefillProcessor(ScanProcessor):
         a_raw_chunk = self.refs.a_raw[...]
         b_raw_chunk = self.refs.b_raw[...]
 
-        a_raw_processed = a_raw_chunk[:, :n_v]
-        b_raw_processed = b_raw_chunk[:, :n_v]
+        a_raw_processed_T = a_raw_chunk[:, :n_v].T
+        b_raw_processed_T = b_raw_chunk[:, :n_v].T
 
-        beta = jax.nn.sigmoid(b_raw_processed)
-        g = -jnp.exp(self.shared.a_log[...]) * jax.nn.softplus(
-            a_raw_processed + self.shared.dt_bias[...])
-        g = jnp.maximum(g, -100.0)
+        beta_T = jax.nn.sigmoid(b_raw_processed_T)
+        g_T = -jnp.exp(
+            # in jax 10.0.1 we can avoid the cast to float32,
+            # jax.errors.JaxRuntimeError: INTERNAL: Mosaic failed to compile TPU kernel: failed to legalize operation
+            # 'math.log1p': %7302 = "math.log1p"(%7295) <{fastmath =
+            # #arith.fastmath<none>}> : (vector<8x128x2xbf16>) -> vector<8x128x2xbf16>
+            self.shared.a_log[...].astype(
+                jnp.float32))[:, None] * jax.nn.softplus(
+                    # same issue with the cast here
+                    a_raw_processed_T +
+                    self.shared.dt_bias[...].astype(jnp.float32)[:, None])
+        g_T = jnp.maximum(g_T, -100.0)
 
         prefill_count = self.schedule.prefill_count
         mask_float = (jnp.arange(C) < prefill_count).astype(q.dtype)
         q = jnp.where(mask_float[:, None] > 0, q, 0.0)
         k = jnp.where(mask_float[:, None] > 0, k, 0.0)
-        g = jnp.where(mask_float[:, None] > 0, g, 0.0)
+        g_T = jnp.where(mask_float[None, :] > 0, g_T, 0.0)
         v = jnp.where(mask_float[:, None] > 0, v, 0.0)
-        beta = jnp.where(mask_float[:, None] > 0, beta, 0.0)
+        beta_T = jnp.where(mask_float[None, :] > 0, beta_T, 0.0)
 
         q = q.reshape(C, n_kq, d_k)
         k = k.reshape(C, n_kq, d_k)
@@ -368,8 +375,6 @@ class PrefillProcessor(ScanProcessor):
         q_T = q.transpose(1, 0, 2)  # (n_kq, C, d_k)
         k_T = k.transpose(1, 0, 2)  # (n_kq, C, d_k)
         v_T = v.transpose(1, 0, 2)  # (n_v, C, d_v)
-        g_T = g.T  # (n_v, C)
-        beta_T = beta.T  # (n_v, C)
 
         repeat_factor = self.cfg.model.repeat_factor
         if repeat_factor > 1:
@@ -522,14 +527,15 @@ class PrefillProcessor(ScanProcessor):
         a_raw_chunk = self.refs.a_raw[...]
         b_raw_chunk = self.refs.b_raw[...]
 
-        a_raw_processed = a_raw_chunk[:C_trans, :n_v]
-        b_raw_processed = b_raw_chunk[:C_trans, :n_v]
+        a_raw_processed_T = a_raw_chunk[:C_trans, :n_v].T
+        b_raw_processed_T = b_raw_chunk[:C_trans, :n_v].T
 
-        beta_chunk = jax.nn.sigmoid(b_raw_processed)
-        g_chunk = -jnp.exp(self.shared.a_log[...].astype(
-            jnp.float32)) * jax.nn.softplus(
-                a_raw_processed + self.shared.dt_bias[...].astype(jnp.float32))
-        g_chunk = jnp.maximum(g_chunk, -100.0)
+        beta_chunk_T = jax.nn.sigmoid(b_raw_processed_T)
+        g_chunk_T = -jnp.exp(self.shared.a_log[...].astype(
+            jnp.float32))[:, None] * jax.nn.softplus(
+                a_raw_processed_T +
+                self.shared.dt_bias[...].astype(jnp.float32)[:, None])
+        g_chunk_T = jnp.maximum(g_chunk_T, -100.0)
 
         q = q.reshape(C_trans, n_kq, d_k)
         k = k.reshape(C_trans, n_kq, d_k)
@@ -614,8 +620,8 @@ class PrefillProcessor(ScanProcessor):
 
             k_i = k[i, :, :]
             v_i = v[i, :, :]
-            g_i = g_chunk[i, :]
-            beta_i = beta_chunk[i, :]
+            g_i = g_chunk_T[:, i]
+            beta_i = beta_chunk_T[:, i]
             q_i = q[i, :, :]
 
             decay = jnp.exp(g_i)[..., None]
@@ -729,7 +735,6 @@ class DecodeProcessor(ScanProcessor):
                 )
                 wait_load.wait()
 
-                # Safe-copy of loaded state.
                 self.scratch.state[pl.ds(0, 1)] = self.scratch.load[pl.ds(
                     slot, 1)][...]
 
@@ -800,9 +805,6 @@ class DecodeProcessor(ScanProcessor):
                 decay = jnp.exp(curr_g)
 
                 current_state = self.scratch.state[0]
-
-                # Fully vectorized, batch-matmul step update across all heads.
-                # Avoids loops, unrolling, and dynamic slicing.
 
                 # 1. Batched dot product: k @ state -> (n_v, d_v)
                 k_state = jax.lax.dot_general(
@@ -922,7 +924,6 @@ class DecodeProcessor(ScanProcessor):
             )
             temp_desc.wait()
 
-        # Mask and write accumulated outputs to HBM
         mask = (jnp.arange(BT)
                 < decode_count).astype(self.scratch.output.dtype)[:, None]
         decode_output_scratch_masked = self.scratch.output[...] * mask
