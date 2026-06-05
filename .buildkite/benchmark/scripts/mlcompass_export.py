@@ -21,7 +21,6 @@ import uuid
 
 from google.cloud import bigquery
 
-
 _GCP_PROJECT = os.getenv('MLCOMPASS_GCP_PROJECT',
                          'google.com:ml-compass-benchmarks')
 _BIGQUERY_DATASET = os.getenv('MLCOMPASS_BIGQUERY_DATASET',
