@@ -589,7 +589,7 @@ def recurrent_scan(
       each request in mixed_qkv.
     state_indices: jax.Array of shape [num_requests] or larger. Mapping from
       request ID to state index.
-    distribution: jax.Array of shape [2]. Contains [decode_tokens,
+    distribution: jax.Array of shape [3]. Contains [decode_tokens,
       total_tokens].
     n_kq: Number of query/key heads.
     n_v: Number of value heads.
