@@ -13,7 +13,6 @@
 # limitations under the License.
 # yapf: disable
 import json
-import os
 import shlex
 import sys
 
@@ -148,12 +147,6 @@ def main():
 
     # Inject global_env into case_data so it will be included in the DB `Config`
     case_data["global_env"] = data.get("global_env", {})
-
-    dir_name = os.path.basename(os.path.dirname(config_file))
-    file_name = os.path.basename(config_file)
-    print(f"export DIR_NAME={shlex.quote(dir_name)}")
-    print(f"export FILE_NAME={shlex.quote(file_name)}")
-    print(f"export TARGET_CASE_NAME={shlex.quote(target_case)}")
 
     config_json_str = json.dumps(case_data)
     print(f"export CASE_CONFIG_JSON={shlex.quote(config_json_str)}")

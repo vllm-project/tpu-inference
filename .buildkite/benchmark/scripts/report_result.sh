@@ -320,8 +320,6 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
   SQL_MODEL=$(prepare_sql_val "${MODEL:-}" "")
   SQL_RUN_TYPE=$(prepare_sql_val "${RUN_TYPE:-DAILY}" "DAILY")
   SQL_CODE_HASH=$(prepare_sql_val "${CODE_HASH:-}" "")
-  SQL_DIR_NAME=$(prepare_sql_val "${DIR_NAME:-}" "")
-  SQL_FILE_NAME=$(prepare_sql_val "${FILE_NAME:-}" "")
   SQL_CASE_NAME=$(prepare_sql_val "${TARGET_CASE_NAME:-}" "")
   SQL_DATASET=$(prepare_sql_val "${DATASET:-}" "")
   SQL_MODELTAG=$(prepare_sql_val "${MODELTAG:-PROD}" "PROD")
@@ -341,7 +339,7 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
   SQL="INSERT INTO RunRecord (
       RecordId, Status, CreatedTime, LastUpdate, CreatedBy, JobReference, RunBy,
       Device, Model, RunType, CodeHash,
-      DirName, FileName, CaseName,
+      CaseName,
       MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
       Dataset, InputLen, OutputLen,
       ExpectedETEL, NumPrompts, ModelTag, PrefixLen,
@@ -349,7 +347,7 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
     ) VALUES (
       $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_JOB_REFERENCE, $SQL_AGENT_NAME,
       $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH,
-      $SQL_DIR_NAME, $SQL_FILE_NAME, $SQL_CASE_NAME,
+      $SQL_CASE_NAME,
       $SQL_MAX_NUM_SEQS, $SQL_MAX_NUM_BATCHED_TOKENS, $SQL_TENSOR_PARALLEL_SIZE, $SQL_MAX_MODEL_LEN,
       $SQL_DATASET, $SQL_INPUT_LEN, $SQL_OUTPUT_LEN,
       $SQL_EXPECTED_ETEL, $SQL_NUM_PROMPTS, $SQL_MODELTAG, $SQL_PREFIX_LEN,

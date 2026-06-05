@@ -231,7 +231,7 @@ def create_benchmark_steps(case_data: Dict[str, Any],
                 f"within {file_path}. Ensure all of case_name are unique.")
         used_keys.add(step_safe_key)
 
-        child_steps.append({
+        step = {
             "label":
             step_label,
             "key":
@@ -243,7 +243,13 @@ def create_benchmark_steps(case_data: Dict[str, Any],
             },
             "command":
             f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
-        })
+        }
+
+        # Add dependency on global case name validation if it was uploaded in bootstrap
+        if os.environ.get("BENCHMARK_VALIDATION_UPLOADED") == "true":
+            step["depends_on"] = "validate_benchmark_case_name"
+
+        child_steps.append(step)
 
     return child_steps
 
