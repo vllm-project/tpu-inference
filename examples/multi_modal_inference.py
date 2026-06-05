@@ -106,7 +106,7 @@ def get_multi_modal_input(args):
             "data": image,
             "questions": img_questions,
         }
-    
+
     msg = f"Modality {args.modality} is not supported."
     raise ValueError(msg)
 
