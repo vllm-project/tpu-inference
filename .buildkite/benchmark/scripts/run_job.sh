@@ -19,10 +19,10 @@ readonly EXIT_SUCCESS=0
 readonly EXIT_FAILURE=1
 
 CASE_FILE="$1"
-TARGET_CASE_NAME=${2:-""}
+TARGET_CASE_NAME="$2"
 
-if [ -z "$CASE_FILE" ]; then
-    echo "Usage: $0 <case.json> [TARGET_CASE_NAME]"
+if [ -z "$CASE_FILE" ] || [ -z "$TARGET_CASE_NAME" ]; then
+    echo "Usage: $0 <case.json> <TARGET_CASE_NAME>"
     exit 1
 fi
 
