@@ -138,7 +138,6 @@ class VllmAWQLinearMethod(AWQLinearMethod):
                 fused=self.linear_config.fuse_matmuls,
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
-                transposed=False,
             )
 
         weights = process_awq_linear_weights(weight, weight_scale, zero_point,
@@ -149,7 +148,6 @@ class VllmAWQLinearMethod(AWQLinearMethod):
                 mesh=self.linear_config.mesh,
                 weight_p_spec=self.linear_config.weight_sharding,
                 bias_p_spec=self.linear_config.bias_sharding,
-                transposed=False,
             ))
 
         if self.linear_config.fuse_matmuls:
@@ -498,4 +496,5 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
                               weights=weights,
                               quant_method_instance=self,
                               x=x,
-                              router_logits=router_logits)
+                              router_logits=router_logits,
+                              input_ids=input_ids)

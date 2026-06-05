@@ -24,6 +24,22 @@ from vllm import LLM, SamplingParams
 from vllm.v1.metrics.reader import Counter
 
 
+def _disable_shardy_for_qwen35_4b(mp: pytest.MonkeyPatch) -> None:
+    """Disables Shardy to avoid a libtpu 0.0.41 segfault in `embed_multimodal`.
+
+    TODO: Remove once libtpu >= 0.0.42.dev20260527.
+    """
+    import jax
+
+    mp.setenv("JAX_USE_SHARDY_PARTITIONER", "false")
+    libtpu_init_args = os.environ.get("LIBTPU_INIT_ARGS", "")
+    mp.setenv(
+        "LIBTPU_INIT_ARGS",
+        "--xla_use_shardy=false --xla_tpu_scoped_vmem_limit_kib=131072 " +
+        libtpu_init_args)
+    jax.config.update("jax_use_shardy_partitioner", False)
+
+
 # TODO (Qiliang Cui): remove this when XLA fixes the recursive jit call issue.
 def _is_v7x():
     # jax.devices() will hang so use TPU_VERSION to indicate the version.
@@ -88,24 +104,22 @@ def model_name():
 
 
 # TODO(pooyam): run vLLM engine with InProcClient (`VLLM_ENABLE_V1_MULTIPROCESSING = 0`) mode to avoid TPU contention among processes.
-def _test_correctness_helper(
+def _get_baseline_results(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_name: str,
-    speculative_config: dict,
+    test_prompts: list,
     max_num_seqs: int = 4,
     async_scheduling: bool = False,
     enable_dp_attention: bool = False,
     extra_kwargs: dict | None = None,
 ):
     '''
-    Helper function to test ngram correctness.
-    Compare the outputs of a original LLM and a speculative LLM
-    should be the same when using ngram speculative decoding.
+    Generate reference outputs from a non-speculative LLM, to be compared
+    against the speculative LLM outputs in _test_correctness_helper. The caller
+    must pass the same test_prompts to both so the comparison lines up.
     '''
     with monkeypatch.context():
-        test_prompts = get_test_prompts(speculative_config)
-
         kwargs = {
             "max_model_len": 1024,
             "max_num_seqs": max_num_seqs,
@@ -137,11 +151,64 @@ def _test_correctness_helper(
 
         # Waiting for TPUs to be released.
         time.sleep(10)
+        return ref_outputs
+
+
+# TODO(pooyam): run vLLM engine with InProcClient (`VLLM_ENABLE_V1_MULTIPROCESSING = 0`) mode to avoid TPU contention among processes.
+def _test_correctness_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    model_name: str,
+    speculative_config: dict,
+    test_prompts: list,
+    ref_outputs: list,
+    max_num_seqs: int = 4,
+    async_scheduling: bool = False,
+    enable_dp_attention: bool = False,
+    extra_kwargs: dict | None = None,
+):
+    '''
+    Helper function to test ngram correctness.
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using ngram speculative decoding.
+    '''
+    with monkeypatch.context():
+        kwargs = {
+            "max_model_len": 1024,
+            "max_num_seqs": max_num_seqs,
+            "tensor_parallel_size": _get_tensor_parallel_size(),
+            "model_loader_extra_config": {
+                "enable_weights_track": False
+            },
+            "async_scheduling": async_scheduling,
+        }
+        if enable_dp_attention:
+            os.environ["NEW_MODEL_DESIGN"] = "1"
+            kwargs["additional_config"] = {
+                "sharding": {
+                    "sharding_strategy": {
+                        "enable_dp_attention": True,
+                        "attn_dp_size": _get_tensor_parallel_size()
+                    }
+                }
+            }
+        else:
+            os.environ["NEW_MODEL_DESIGN"] = "0"
+        if extra_kwargs:
+            kwargs.update(extra_kwargs)
 
         spec_llm = LLM(model=model_name,
                        speculative_config=speculative_config,
                        **kwargs)
         spec_outputs = spec_llm.generate(test_prompts, sampling_config)
+
+        if sampling_config.logprobs is not None:
+            for spec_output in spec_outputs:
+                completion = spec_output.outputs[0]
+                assert completion.logprobs is not None, "Logprobs should not be None"
+                assert len(completion.logprobs) == len(completion.token_ids), (
+                    f"Length mismatch: len(logprobs)={len(completion.logprobs)} vs "
+                    f"len(token_ids)={len(completion.token_ids)}")
 
         matches = 0
         misses = 0
@@ -172,13 +239,23 @@ def test_ngram_correctness_greedy(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding with greedy sampling.
     '''
-    _test_correctness_helper(
-        monkeypatch, sampling_config, model_name, {
-            "method": "ngram",
-            "prompt_lookup_max": 5,
-            "prompt_lookup_min": 3,
-            "num_speculative_tokens": 3,
-        })
+    speculative_config = {
+        "method": "ngram",
+        "prompt_lookup_max": 5,
+        "prompt_lookup_min": 3,
+        "num_speculative_tokens": 3,
+    }
+    test_prompts = get_test_prompts(speculative_config)
+
+    ref_outputs = _get_baseline_results(monkeypatch, sampling_config,
+                                        model_name, test_prompts)
+
+    _test_correctness_helper(monkeypatch,
+                             sampling_config,
+                             model_name,
+                             speculative_config,
+                             test_prompts,
+                             ref_outputs=ref_outputs)
 
 
 def test_ngram_correctness_random(
@@ -195,13 +272,23 @@ def test_ngram_correctness_random(
     sampling_config.top_p = 0.9
     sampling_config.top_k = 5
 
-    _test_correctness_helper(
-        monkeypatch, sampling_config, model_name, {
-            "method": "ngram",
-            "prompt_lookup_max": 5,
-            "prompt_lookup_min": 3,
-            "num_speculative_tokens": 3,
-        })
+    speculative_config = {
+        "method": "ngram",
+        "prompt_lookup_max": 5,
+        "prompt_lookup_min": 3,
+        "num_speculative_tokens": 3,
+    }
+    test_prompts = get_test_prompts(speculative_config)
+
+    ref_outputs = _get_baseline_results(monkeypatch, sampling_config,
+                                        model_name, test_prompts)
+
+    _test_correctness_helper(monkeypatch,
+                             sampling_config,
+                             model_name,
+                             speculative_config,
+                             test_prompts,
+                             ref_outputs=ref_outputs)
 
 
 def _test_performance_helper(
@@ -319,12 +406,43 @@ def test_ngram_performance_random(
                              min_acceptance_rate=0.85)
 
 
+@pytest.fixture(scope="module")
+def eagle3_baseline():
+    '''
+    Compute the eagle3 reference prompts and baseline outputs once and share
+    them across all parametrized test_eagle3_correctness cases. The baseline is
+    non-speculative and greedy, so its outputs are deterministic regardless of
+    async_scheduling or enable_dp_attention.
+
+    Note: mirrors the default `sampling_config` fixture; that fixture is
+    function-scoped (and mutated by other tests) so it can't be injected here.
+    '''
+    model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
+    sampling_config = SamplingParams(temperature=0,
+                                     max_tokens=32,
+                                     ignore_eos=True,
+                                     repetition_penalty=1,
+                                     frequency_penalty=0,
+                                     presence_penalty=0,
+                                     min_p=0,
+                                     logprobs=None)
+    test_prompts = get_eagle3_test_prompts()
+    with pytest.MonkeyPatch.context() as mp:
+        ref_outputs = _get_baseline_results(mp,
+                                            sampling_config,
+                                            model_name,
+                                            test_prompts,
+                                            max_num_seqs=10)
+    return test_prompts, ref_outputs
+
+
 @pytest.mark.parametrize(
     "async_scheduling, enable_dp_attention",
     [
         (False, False),
-        (True, False),
         (False, True),
+        (True, False),
+        (True, True),
     ],
 )
 def test_eagle3_correctness(
@@ -332,6 +450,7 @@ def test_eagle3_correctness(
     sampling_config: SamplingParams,
     async_scheduling: bool,
     enable_dp_attention: bool,
+    eagle3_baseline: tuple,
 ):
     '''
     Compare the outputs of a original LLM and a speculative LLM
@@ -342,28 +461,28 @@ def test_eagle3_correctness(
     model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
     monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
 
-    _test_correctness_helper(
-        monkeypatch,
-        sampling_config,
-        model_name, {
-            'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
-            "num_speculative_tokens": 3,
-            "method": "eagle3",
-            "draft_tensor_parallel_size": 1
-        },
-        max_num_seqs=10,
-        async_scheduling=async_scheduling,
-        enable_dp_attention=enable_dp_attention)
+    speculative_config = {
+        'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
+        "num_speculative_tokens": 3,
+        "method": "eagle3",
+        "draft_tensor_parallel_size": 1
+    }
+    test_prompts, ref_outputs = eagle3_baseline
+
+    _test_correctness_helper(monkeypatch,
+                             sampling_config,
+                             model_name,
+                             speculative_config,
+                             test_prompts,
+                             ref_outputs=ref_outputs,
+                             max_num_seqs=10,
+                             async_scheduling=async_scheduling,
+                             enable_dp_attention=enable_dp_attention)
 
 
 @pytest.mark.parametrize(
     "max_num_seqs,async_scheduling, enable_dp_attention",
-    [
-        (1, False, False),
-        (20, False, False),
-        (20, True, False),
-        (20, False, True),
-    ],
+    [(1, False, False), (20, True, False), (20, True, True)],
 )
 def test_eagle3_performance(
     monkeypatch: pytest.MonkeyPatch,
@@ -395,75 +514,119 @@ def test_eagle3_performance(
         model_name='meta-llama/Llama-3.1-8B-Instruct')
 
 
-@pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
-                    reason="MTP is only supported with vllm model impl.")
-@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.fixture(scope="module")
+def mtp_baseline():
+    '''
+    Compute the mtp reference prompts, baseline outputs and the LLM extra_kwargs
+    once and share them across all parametrized test_mtp_correctness cases. The
+    baseline is non-speculative and greedy, so its outputs are deterministic
+    regardless of async_scheduling. extra_kwargs is returned so the spec LLM in
+    the test reuses the exact same config.
+
+    Note: mirrors the default `sampling_config` fixture; that fixture is
+    function-scoped (and mutated by other tests) so it can't be injected here.
+    '''
+    model_name = "Qwen/Qwen3.5-4B"
+    sampling_config = SamplingParams(temperature=0,
+                                     max_tokens=32,
+                                     ignore_eos=True,
+                                     repetition_penalty=1,
+                                     frequency_penalty=0,
+                                     presence_penalty=0,
+                                     min_p=0,
+                                     logprobs=None)
+    extra_kwargs = {
+        "seed": 42,
+        "max_model_len": 128,
+        "max_num_batched_tokens": 1024,
+        "enable_prefix_caching": False,
+        "kv_cache_dtype": "fp8",
+        "gpu_memory_utilization": 0.90,
+    }
+    test_prompts = get_eagle3_test_prompts()
+    with pytest.MonkeyPatch.context() as mp:
+        _disable_shardy_for_qwen35_4b(mp)
+        ref_outputs = _get_baseline_results(
+            mp,
+            sampling_config,
+            model_name,
+            test_prompts,
+            max_num_seqs=10,
+            extra_kwargs=extra_kwargs,
+        )
+    return test_prompts, ref_outputs, extra_kwargs
+
+
+@pytest.mark.parametrize(
+    "async_scheduling, enable_dp_attention",
+    [
+        (False, False),
+        (True, False),
+        (True, True),
+    ],
+)
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     async_scheduling: bool,
+    enable_dp_attention: bool,
+    mtp_baseline: tuple,
 ):
     '''
     Compare the outputs of an original LLM and a speculative LLM;
     they should be the same when using MTP speculative decoding.
     '''
     model_name = "Qwen/Qwen3.5-4B"
-    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
-    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
+    _disable_shardy_for_qwen35_4b(monkeypatch)
 
-    extra_kwargs = {
-        "seed": 42,
-        "max_model_len": 2048,
-        "max_num_batched_tokens": 16384,
-        "enable_prefix_caching": False,
-        "kv_cache_dtype": "fp8",
-        "gpu_memory_utilization": 0.70,
+    speculative_config = {
+        "method": "mtp",
+        "num_speculative_tokens": 3,
     }
+    test_prompts, ref_outputs, extra_kwargs = mtp_baseline
 
     _test_correctness_helper(
         monkeypatch,
         sampling_config,
         model_name,
-        speculative_config={
-            "method": "mtp",
-            "num_speculative_tokens": 3,
-        },
+        speculative_config=speculative_config,
+        test_prompts=test_prompts,
+        ref_outputs=ref_outputs,
         max_num_seqs=10,
         async_scheduling=async_scheduling,
+        enable_dp_attention=enable_dp_attention,
         extra_kwargs=extra_kwargs,
     )
 
 
-@pytest.mark.skipif(os.environ.get("MODEL_IMPL_TYPE", "auto") != "vllm",
-                    reason="MTP is only supported with vllm model impl.")
 @pytest.mark.parametrize(
-    "max_num_seqs,async_scheduling",
-    [
-        (1, False),
-        (20, False),
-        (20, True),
-    ],
+    "max_num_seqs,async_scheduling, enable_dp_attention",
+    [(1, False, False), (20, True, False), (20, True, True)],
 )
 def test_mtp_performance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     max_num_seqs: int,
     async_scheduling: bool,
+    enable_dp_attention: bool,
 ):
     '''
     Test that MTP speculative decoding achieves the expected acceptance rate.
     '''
     model_name = "Qwen/Qwen3.5-4B"
-    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
-    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
+    _disable_shardy_for_qwen35_4b(monkeypatch)
 
     extra_kwargs = {
         "seed": 42,
-        "max_model_len": 2048,
-        "max_num_batched_tokens": 16384,
+        "max_model_len": 128,
+        "max_num_batched_tokens": 1024,
         "enable_prefix_caching": False,
         "kv_cache_dtype": "fp8",
-        "gpu_memory_utilization": 0.70,
+        "gpu_memory_utilization": 0.90,
     }
 
     _test_performance_helper(
@@ -476,6 +639,52 @@ def test_mtp_performance(
         min_acceptance_rate=0.99,
         max_num_seqs=max_num_seqs,
         async_scheduling=async_scheduling,
+        enable_dp_attention=enable_dp_attention,
         model_name=model_name,
         extra_kwargs=extra_kwargs,
     )
+
+
+def test_eagle3_logprobs_correctness(monkeypatch: pytest.MonkeyPatch, ):
+    """Reproduction test for speculative decoding with logprobs enabled."""
+    model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
+
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
+    speculative_config = {
+        'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
+        "num_speculative_tokens": 3,
+        "method": "eagle3",
+        "draft_tensor_parallel_size": 1
+    }
+
+    sampling_config = SamplingParams(temperature=0,
+                                     max_tokens=8,
+                                     ignore_eos=True,
+                                     repetition_penalty=1,
+                                     frequency_penalty=0,
+                                     presence_penalty=0,
+                                     min_p=0,
+                                     logprobs=1)
+    test_prompts = [
+        "Predict the continuation of this sequence: 1 2 3 4 5 6 7 8"
+    ]
+
+    # Get baseline outputs with logprobs enabled
+    ref_outputs = _get_baseline_results(monkeypatch,
+                                        sampling_config,
+                                        model_name,
+                                        test_prompts,
+                                        max_num_seqs=2)
+
+    # Get speculative decoding outputs with logprobs enabled
+    _test_correctness_helper(monkeypatch,
+                             sampling_config,
+                             model_name,
+                             speculative_config,
+                             test_prompts,
+                             ref_outputs=ref_outputs,
+                             max_num_seqs=2,
+                             async_scheduling=True,
+                             enable_dp_attention=False)

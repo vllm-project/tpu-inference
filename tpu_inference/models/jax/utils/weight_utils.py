@@ -1044,15 +1044,24 @@ class JaxDummyModelLoader(DummyModelLoader):
                     num_experts, input_dim, intermediate_dim = param_shape
                     param_shape = (num_experts, intermediate_dim, input_dim)
 
-                dummy_weight = jax.random.uniform(
-                    key=jax.random.PRNGKey(0),
-                    shape=param_shape,
-                    dtype=param.value.dtype,
-                    # upstream claims this range works well
-                    # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
-                    minval=-1e-3,
-                    maxval=1e-3,
-                )
+                if jnp.issubdtype(param.value.dtype, jnp.integer):
+                    dummy_weight = jax.random.randint(
+                        key=jax.random.PRNGKey(0),
+                        shape=param_shape,
+                        minval=0,
+                        maxval=100,
+                        dtype=param.value.dtype,
+                    )
+                else:
+                    dummy_weight = jax.random.uniform(
+                        key=jax.random.PRNGKey(0),
+                        shape=param_shape,
+                        dtype=param.value.dtype,
+                        # upstream claims this range works well
+                        # https://github.com/vllm-project/vllm/blob/7291d1b288558d48508e1a17c37b0aa170332264/vllm/model_executor/model_loader/weight_utils.py#L1088
+                        minval=-1e-3,
+                        maxval=1e-3,
+                    )
 
                 if is_moe:
                     param._weights_to_load[:] = jnp.vsplit(

@@ -536,8 +536,8 @@ def test_blockwise_quant(requant_block_size, requant_weight_dtype):
     quant_method.process_weights_after_loading(linear_layer)
     weight_jax = jax_view(linear_layer.weight)
     weight_scale_jax = jax_view(linear_layer.weight_scale)
-    assert weight_jax.shape == (5120, 4096)
-    assert weight_scale_jax.shape == (4096 // requant_block_size, 1, 5120)
+    assert weight_jax.shape == (4096, 5120)
+    assert weight_scale_jax.shape == (1, 4096 // requant_block_size, 1, 5120)
     assert weight_jax.dtype == requant_weight_dtype
 
     # TODO: Check output similarity between quantized and unquantized ones.

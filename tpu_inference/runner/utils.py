@@ -29,14 +29,37 @@ from tpu_inference.runner.input_batch import InputBatch
 
 def trim_request_id_suffix(request_id: str) -> str:
     """Trims the suffix from a request ID, keeping only the base ID.
-    
-    Example: cmpl-f0d75fed-c25e-4ccf-b369-9bd0226021b3-0-a9cb3cca 
+
+    Example: cmpl-f0d75fed-c25e-4ccf-b369-9bd0226021b3-0-a9cb3cca
           -> cmpl-f0d75fed-c25e-4ccf-b369-9bd0226021b3
     """
     parts = request_id.split("-")
     if len(parts) >= 6 and parts[0] == "cmpl":
         return "-".join(parts[:6])
     return request_id
+
+
+def get_kv_transfer_metadata(kv: list[Any]) -> tuple[str, int]:
+    """Returns the dimensions string and size in bytes for a list of KV cache tensors.
+
+    Dimensions format: (num_layers, num_blocks, block_size, num_heads, 2 (K/V), head_dim)
+    """
+    if not kv:
+        return "()", 0
+
+    # Dimensions string
+    dims_str = str((len(kv), ) + tuple(kv[0].shape))
+
+    # Calculate bytes robustly (supports JAX/NumPy Tensors and ShapeDtypeStruct specs)
+    kv_size_bytes = 0
+    for k in kv:
+        if hasattr(k, "nbytes"):
+            kv_size_bytes += k.nbytes
+        else:
+            # Fallback for ShapeDtypeStruct specs
+            kv_size_bytes += int(np.prod(k.shape) * np.dtype(k.dtype).itemsize)
+
+    return dims_str, kv_size_bytes
 
 
 def extract_request_ids_for_tracing(
@@ -258,7 +281,6 @@ class ForbidCompile:
             info_after = original_cached_func.cache_info()
             misses_after = info_after.misses
 
-            # Check if a cache miss occurred
             if misses_after > misses_before:
                 raise RuntimeError(self.message)
 
@@ -849,7 +871,7 @@ class PhasedBasedProfiler:
         "final_logits_indices",
     ],
     meta_fields=[],
-    drop_fields=["draft_lengths_cpu", "req_indices_dp"],
+    drop_fields=["draft_lengths_cpu", "req_indices_dp", "req_ids_dp"],
 )
 @dataclass
 class SpecDecodeMetadata:
@@ -861,6 +883,7 @@ class SpecDecodeMetadata:
 
     draft_lengths_cpu: Any = field(init=False, default=None)
     req_indices_dp: dict = field(init=False, default_factory=dict)
+    req_ids_dp: dict = field(init=False, default_factory=dict)
 
 
 def host_extract_sampled_tokens(

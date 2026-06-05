@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import random
 from typing import TYPE_CHECKING, Optional, Tuple, Union
 
@@ -7,6 +8,21 @@ import jax.numpy as jnp
 import numpy
 import torch
 import vllm.envs as vllm_envs
+
+# Monkeypatch torch.accelerator.empty_cache to ignore device_allocator error on TPU.
+if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "empty_cache"):
+    _orig_empty_cache = torch.accelerator.empty_cache
+
+    def _patched_empty_cache(*args, **kwargs):
+        try:
+            _orig_empty_cache(*args, **kwargs)
+        except RuntimeError as e:
+            if "Allocator for jax is not a DeviceAllocator" in str(e):
+                pass
+            else:
+                raise e
+
+    torch.accelerator.empty_cache = _patched_empty_cache
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -92,7 +108,8 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "openxla"
 
     supported_quantization: list[str] = [
-        "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4", "modelopt_fp4"
+        "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4", "modelopt_fp4",
+        "deepseek_v4_fp8"
     ]
 
     additional_env_vars: list[str] = [
@@ -110,6 +127,7 @@ class TpuPlatform(Platform):
         "USE_JAX_PROFILER_SERVER",
         "JAX_PROFILER_SERVER_PORT",
         "ENABLE_RS_KERNEL",
+        "MOE_ALL_GATHER_ACTIVATION_DTYPE",
     ]
 
     @classmethod
@@ -191,7 +209,40 @@ class TpuPlatform(Platform):
         logger.info(f"Initialized sharding configuration: {sharding_config}")
 
     @classmethod
+    def _resolve_multiprocess_dp(cls, vllm_config: VllmConfig) -> None:
+        """vLLM-native multi-process DP only works for online `vllm serve` (which
+        sets _api_process_rank to -1) with DP > 1, and not with attention DP or
+        on Pathways.
+        """
+        pc = vllm_config.parallel_config
+        if pc.data_parallel_size <= 1:
+            return
+        enable_dp_attention = vllm_config.additional_config.get(
+            "sharding", {}).get("sharding_strategy",
+                                {}).get("enable_dp_attention", False)
+        incompatible = enable_dp_attention or vllm_envs.VLLM_TPU_USING_PATHWAYS
+
+        requested = envs.TPU_MULTIPROCESS_DP
+        if requested is not None:
+            if requested and incompatible:
+                raise ValueError(
+                    "TPU_MULTIPROCESS_DP=1 is not supported with attention DP "
+                    "(enable_dp_attention) or on Pathways. Set "
+                    "TPU_MULTIPROCESS_DP=0 to use single-process SPMD DP.")
+            return
+
+        # Unset: only the `vllm serve` launcher (which sets _api_process_rank to
+        # -1) auto-enables it; offline LLM() (rank 0) falls back to SPMD.
+        online_serving = getattr(pc, "_api_process_rank", 0) == -1
+        os.environ["TPU_MULTIPROCESS_DP"] = ("1" if online_serving
+                                             and not incompatible else "0")
+        logger.info("Resolved TPU_MULTIPROCESS_DP=%s",
+                    os.environ["TPU_MULTIPROCESS_DP"])
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+
+        cls._resolve_multiprocess_dp(vllm_config)
 
         if vllm_envs.VLLM_TPU_USING_PATHWAYS:
             assert not vllm_envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
