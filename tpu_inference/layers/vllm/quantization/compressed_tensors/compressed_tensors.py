@@ -29,7 +29,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, should_ignore_layer)
 
-from tpu_inference import envs
+import tpu_inference.envs as envs
 from tpu_inference.layers.common.quant_methods import COMPRESSED_TENSORS
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
     VllmCompressedTensorsMoEMethod
@@ -131,13 +131,10 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
             prefix,
             ignore=self.ignore,
             fused_mapping=self.packed_modules_mapping)
-
-        # Quantize attention layers in Kimi models, even if they are in the ignore list.
-        force_quantization = False
-        if is_ignored and envs.KIMI_QUANTIZE_ATTN_TO_FP8 and "self_attn" in prefix:
-            force_quantization = True
-            logger.info_once(
-                f"Force quantization for attention layer: {prefix}")
+        force_quantization = any(t in prefix
+                                 for t in envs.QUANTIZE_ON_LOAD_PREFIXES)
+        if force_quantization:
+            logger.info_once(f"Force on-load quantization for layer: {prefix}")
 
         if is_ignored and not force_quantization:
             return VllmUnquantizedConfig.get_quant_method(self, layer, prefix)
@@ -148,10 +145,11 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
                     from compressed_tensors.quantization import (
                         QuantizationArgs, QuantizationStrategy)
 
-                    # Force FP8 W8A8 for attention layers
+                    # TODO (jacobplatin): we shouldn't hardcode w8a8-fp8 here
                     weight_quant = QuantizationArgs(
                         num_bits=8,
                         type="float",
+                        # This is a dummy value since we'll requantize anywaays
                         strategy=QuantizationStrategy.TENSOR,
                         dynamic=False,
                         symmetric=True)
