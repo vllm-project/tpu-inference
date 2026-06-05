@@ -17,6 +17,11 @@ os.environ["VLLM_USE_AOT_COMPILE"] = "0"
 os.environ["XLA_FLAGS"] = "--xla_cpu_max_isa=AVX2 " + os.environ.get(
     "XLA_FLAGS", "")
 
+# TODO: Remove this when SMEM capacity optimization for batched rpa lands.
+os.environ[
+    "LIBTPU_INIT_ARGS"] = "--xla_tpu_use_dynamic_smem_negotiation=true " + os.environ.get(
+        "LIBTPU_INIT_ARGS", "")
+
 # Monkeypatch vLLM to avoid ImportError: cannot import name 'SamplingParams' from 'vllm'
 # in vllm/v1/... submodules due to circular imports or lazy loading failures.
 try:
