@@ -56,6 +56,8 @@ from tpu_inference.lora.lora_manager import (TPULRUCacheWorkerLoRAManager,
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.models.jax.utils.multi_modal_utils import \
+    flatten_pad_mm_embeds
 from tpu_inference.models.vllm.experimental.model_patcher import patch_mm_model
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
     maybe_apply_qwen3_vl_patches
@@ -483,20 +485,24 @@ class VllmModelWrapper:
         if not self.vllm_config.model_config.is_multimodal_model:
             return None
 
-        # The function cannot be JITted directly due to its dynamic implementation
-        def embed_input_ids_func(
+        @jax.jit
+        def _jitted_embed_input_ids(
             params_and_buffers: Any,
             input_ids: jax.Array,
-            mm_embeds: list[jax.Array] | jax.Array | None = None,
+            mm_embeds_flat: jax.Array | None = None,
             *,
             is_multimodal: jax.Array | None = None,
         ) -> jax.Array:
             with torchax.default_env():
-                if mm_embeds is not None:
-                    if isinstance(mm_embeds, list):
-                        torch_mm_embeds = [torch_view(x) for x in mm_embeds]
-                    else:
-                        torch_mm_embeds = torch_view(mm_embeds)
+                if mm_embeds_flat is not None:
+                    # Pass the single pre-flattened, fixed-shape array as a
+                    # ONE-element list: the vllm model's deepstack
+                    # (`visual_lens = [len(x) for x in mm]`,
+                    # `torch.split(..., visual_lens)`) then sees a single fixed
+                    # length, and `_merge_multimodal_embeddings` cats the
+                    # one-element list back to the same array — both stay
+                    # shape-static, so this whole graph caches.
+                    torch_mm_embeds = [torch_view(mm_embeds_flat)]
                     call_args = (torch_view(input_ids), torch_mm_embeds)
                 else:
                     call_args = (torch_view(input_ids), )
@@ -517,6 +523,33 @@ class VllmModelWrapper:
                 )
 
                 return jax_view(output_from_torch)
+
+        def embed_input_ids_func(
+            params_and_buffers: Any,
+            input_ids: jax.Array,
+            mm_embeds: list[jax.Array] | jax.Array | None = None,
+            *,
+            is_multimodal: jax.Array | None = None,
+        ) -> jax.Array:
+            # Flatten+pad the variable per-image `mm_embeds` list to ONE
+            # fixed-shape `[input_len, hidden]` array OUTSIDE the jit (cheap
+            # concatenate+pad, mirroring the native `run_embed_input_ids`). The
+            # jitted merge below otherwise recompiles on every distinct batch
+            # composition (number of images x per-image length) — by far the
+            # dominant steady-state cost (~59% of wall: 53 recompiles x ~2.5s).
+            # After flattening, the merge's only shape input is the (already
+            # bucketed) `input_len`, so it compiles a handful of times in warmup
+            # and then caches. `_merge_multimodal_embeddings` must be the static,
+            # sync-free variant (no `is_multimodal.sum().item()` D2H sync).
+            if isinstance(mm_embeds, list):
+                mm_embeds_flat = flatten_pad_mm_embeds(
+                    mm_embeds, target_pad_len=input_ids.shape[0])
+            else:
+                mm_embeds_flat = mm_embeds
+            return _jitted_embed_input_ids(params_and_buffers,
+                                           input_ids,
+                                           mm_embeds_flat,
+                                           is_multimodal=is_multimodal)
 
         return embed_input_ids_func
 
