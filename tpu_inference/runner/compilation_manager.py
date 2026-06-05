@@ -233,7 +233,7 @@ class CompilationManager:
                         self._precompile_concat_last_sampled_tokens_and_draft_tokens(
                         )
                         self._flush_compilations()
-                
+
                 if not self.runner.is_last_rank:
                     return
                 self._precompile_select_from_array()
@@ -1219,8 +1219,9 @@ class CompilationManager:
                 )
 
                 def drafter_propose_warmup(_fn, _args, _call_kwargs):
-                    new_args = (self.runner.kv_caches,) + _args[1:]
-                    kv_caches, draft_token_ids = self.runner.drafter.propose(*new_args, **_call_kwargs)
+                    new_args = (self.runner.kv_caches, ) + _args[1:]
+                    kv_caches, draft_token_ids = self.runner.drafter.propose(
+                        *new_args, **_call_kwargs)
                     self.runner.kv_caches = kv_caches
                     return draft_token_ids
 
@@ -1362,8 +1363,9 @@ class CompilationManager:
                 )
 
                 def drafter_propose_warmup(_fn, _args, _call_kwargs):
-                    new_args = (self.runner.kv_caches,) + _args[1:]
-                    kv_caches, draft_token_ids = self.runner.drafter.propose(*new_args, **_call_kwargs)
+                    new_args = (self.runner.kv_caches, ) + _args[1:]
+                    kv_caches, draft_token_ids = self.runner.drafter.propose(
+                        *new_args, **_call_kwargs)
                     self.runner.kv_caches = kv_caches
                     return draft_token_ids
 

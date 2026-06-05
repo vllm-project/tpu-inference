@@ -956,7 +956,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 hidden_states, logits, aux_hidden_states, spec_decode_metadata,
                 kv_connector_output, logits_indices_selector, padded_num_reqs,
                 expert_indices, full_hidden_states, full_logits, req_ids_dp,
-            padded_num_scheduled_tokens_per_dp_rank)
+                padded_num_scheduled_tokens_per_dp_rank)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
