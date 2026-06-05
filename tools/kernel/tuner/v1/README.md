@@ -6,7 +6,7 @@ A framework for measuring and tuning the latency of TPU kernels. Results are sto
 
 ## 1. Implementing a Custom Kernel Tuner
 
-To add a new kernel to the tuning framework, create a new file (e.g. `my_kernel_tuner.py`) and subclass `KernelTunerBase`.
+To add a new kernel to the tuning framework, create a new file (e.g. `my_kernel_tuner.py`) and subclass `KernelTunerBase`. You can add kernel specific flags in this file. To avoid name confliction, the flags should be named in the format of {your_kernel_name}\_{flag_name} in this tuner.py and should append KERNEL_TUNING_ as prefix when invoked through Buildkite UI. For example: flag your_kernel_name_flag_name in your tuner.py should result in specifying KERNEL_TUNNING_YOUR_KERNEL_NAME_FLAG_NAME in BuildKite UI.
 
 ### Step 1 — Define `TuningKey` and `TunableParams`
 
