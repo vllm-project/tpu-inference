@@ -22,6 +22,11 @@ import uuid
 from google.cloud import bigquery
 
 
+_GCP_PROJECT = os.getenv('MLCOMPASS_GCP_PROJECT', 'google.com:ml-compass-benchmarks')
+_BIGQUERY_DATASET = os.getenv('MLCOMPASS_BIGQUERY_DATASET', 'benchmarks_dataset')
+_BIGQUERY_TABLE = os.getenv('MLCOMPASS_BIGQUERY_TABLE', 'benchmarks_dev')
+
+
 def get_env_commit_map() -> dict[str, dict[str, str]]:
     code_hash = os.getenv('CODE_HASH')
     match = re.match('^([0-9a-fA-F]+)-([0-9a-fA-F]+)-$', code_hash)
@@ -94,8 +99,8 @@ def export(metrics: dict[str, float]) -> None:
         'mlcompass_execution_mode': mlcompass_execution_mode,
     }
 
-    client = bigquery.Client(project='google.com:ml-compass-benchmarks')
-    table_ref = client.dataset('benchmarks_dataset').table('benchmarks_dev')
+    client = bigquery.Client(project=_GCP_PROJECT)
+    table_ref = client.dataset(_BIGQUERY_DATASET).table(_BIGQUERY_TABLE)
     table_obj = client.get_table(table_ref)
     errors = client.insert_rows(table_obj, [row])
     if errors:
