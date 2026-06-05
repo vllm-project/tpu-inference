@@ -1,7 +1,7 @@
 {
   "benchmark_cases": [
     {
-      "case_name": "Qwen3-4B-dataset_custom-inlen_4096-outlen_1024",
+      "case_name": "Qwen3-4B-dataset_custom-inlen_4096-outlen_1024-CI",
       "env": {
         "GCS_BUCKET": "vllm-cb-storage2",
         "MODELTAG": "NEW",
