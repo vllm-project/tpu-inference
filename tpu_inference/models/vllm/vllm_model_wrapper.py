@@ -330,10 +330,16 @@ class VllmModelWrapper:
             for name, param in vllm_model.named_parameters():
                 full_name = f"vllm_model.{name}"
                 if full_name in shared_params:
+                    target_param = shared_params[full_name]
+                    if param.shape != target_param.shape:
+                        logger.warning(
+                            f"Shape mismatch for shared parameter {full_name}: "
+                            f"draft {param.shape} vs target {target_param.shape}. "
+                            "Skipping sharing.")
+                        continue
                     logger.info(f"Sharing parameter: {full_name}")
                     # torch_view creates a torchax tensor sharing memory with the JAX array
-                    param.data = torchax.interop.torch_view(
-                        shared_params[full_name])
+                    param.data = torchax.interop.torch_view(target_param)
 
         if self.vllm_config.speculative_config and self.vllm_config.speculative_config.method == "eagle3" and not self.is_draft_model:
             set_eagle3_aux_hidden_state_layers(
