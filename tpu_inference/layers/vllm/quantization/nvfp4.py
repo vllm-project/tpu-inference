@@ -466,4 +466,5 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
                               weights=weights,
                               quant_method_instance=self,
                               x=x,
-                              router_logits=router_logits)
+                              router_logits=router_logits,
+                              input_ids=kwargs.get("input_ids", None))
