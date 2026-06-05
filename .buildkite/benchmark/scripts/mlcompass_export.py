@@ -99,6 +99,7 @@ def export(metrics: dict[str, float]) -> None:
         'mlcompass_tracking_id': mlcompass_tracking_id,
         'mlcompass_execution_mode': mlcompass_execution_mode,
     }
+    print(f'Exporting row: {row}')
 
     client = bigquery.Client(project=_GCP_PROJECT)
     table_ref = client.dataset(_BIGQUERY_DATASET).table(_BIGQUERY_TABLE)
