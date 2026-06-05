@@ -23,8 +23,10 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.sharding import PartitionSpec
 
 from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -41,8 +43,8 @@ class RejectionSampler:
     https://arxiv.org/abs/2211.17192.
     """
 
-    def __init__(self):
-        pass
+    def __init__(self, mesh):
+        self.mesh = mesh
 
     def __call__(
         self,
@@ -115,25 +117,84 @@ class RejectionSampler:
         Returns:
             output_token_ids: A tensor containing the final output token IDs.
         """
-        if sampling_metadata._cache_collision_dummy is not None:
-            # Force a dependency on the dummy tensor's shape to ensure unique HLO.
-            target_logits = target_logits + 0 * jnp.sum(
-                sampling_metadata._cache_collision_dummy)
+        # `do_sampling` / `logprobs` are static (pytree meta fields)
+        do_sampling = sampling_metadata.do_sampling
+        logprobs = sampling_metadata.logprobs
 
-        if sampling_metadata.do_sampling:
-            target_probs = _compute_probs(target_logits, num_draft_tokens,
-                                          sampling_metadata)
-        else:
-            target_probs = target_logits
+        def _forward(draft_token_ids, num_draft_tokens, draft_probs,
+                     target_logits, bonus_token_ids, temperature, top_k, top_p,
+                     cache_collision_dummy, key):
+            # Reassemble the metadata from its sharded array fields. Each shard
+            # sees only its DP rank's slice of the per-request params.
+            metadata = TPUSupportedSamplingMetadata(
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                _cache_collision_dummy=cache_collision_dummy,
+                do_sampling=do_sampling,
+                logprobs=logprobs,
+            )
 
-        output_token_ids = rejection_sample(
+            if cache_collision_dummy is not None:
+                # Force a dependency on the dummy tensor's shape to ensure
+                # unique HLO.
+                target_logits = target_logits + 0 * jnp.sum(
+                    cache_collision_dummy)
+
+            if do_sampling:
+                target_probs = _compute_probs(target_logits, num_draft_tokens,
+                                              metadata)
+            else:
+                target_probs = target_logits
+
+            if key is not None:
+                axis_id = jax.lax.axis_index(ShardingAxisName.ATTN_DATA)
+                key = jax.random.fold_in(key, axis_id)
+
+            return rejection_sample(
+                draft_token_ids,
+                num_draft_tokens,
+                draft_probs,
+                target_probs,
+                bonus_token_ids,
+                do_sampling,
+                key=key,
+            )
+
+        data = PartitionSpec(ShardingAxisName.ATTN_DATA)
+
+        def _spec(value, spec):
+            return spec if value is not None else None
+
+        output_token_ids = jax.shard_map(
+            _forward,
+            mesh=self.mesh,
+            in_specs=(
+                _spec(draft_token_ids, data),  # draft_token_ids
+                _spec(num_draft_tokens, data),
+                _spec(draft_probs, data),
+                _spec(target_logits, data),
+                _spec(bonus_token_ids, data),
+                _spec(sampling_metadata.temperature, data),
+                _spec(sampling_metadata.top_k, data),
+                _spec(sampling_metadata.top_p, data),
+                # _cache_collision_dummy: small, replicated across shards.
+                _spec(sampling_metadata._cache_collision_dummy,
+                      PartitionSpec()),
+                _spec(key, PartitionSpec()),  # key
+            ),
+            out_specs=data,
+        )(
             draft_token_ids,
             num_draft_tokens,
             draft_probs,
-            target_probs,
+            target_logits,
             bonus_token_ids,
-            sampling_metadata,
-            key=key,
+            sampling_metadata.temperature,
+            sampling_metadata.top_k,
+            sampling_metadata.top_p,
+            sampling_metadata._cache_collision_dummy,
+            key,
         )
         return output_token_ids
 
@@ -144,6 +205,8 @@ class RejectionSampler:
         num_draft_tokens_cpu: np.ndarray,
         batch_size: int,
         padded_tokens_length: int,
+        dp_size: int,
+        req_indices_dp: dict,
     ) -> list[list[int]]:
         """Parse the output of the rejection sampler.
 
@@ -162,39 +225,58 @@ class RejectionSampler:
             A list of lists of token IDs.
         """
         # Convert JAX array to numpy for easier manipulation
-        output_token_ids_np = np.asarray(output_token_ids)
+        output_token_ids_np_dp = np.asarray(output_token_ids)
 
-        # Split main tokens and bonus tokens
-        main_tokens = output_token_ids_np[:
-                                          padded_tokens_length]  # [num_tokens]
-        bonus_tokens = output_token_ids_np[
-            padded_tokens_length:]  # [batch_size]
+        assert padded_tokens_length % dp_size == 0
+        assert output_token_ids_np_dp.size % dp_size == 0
+        padded_tokens_length = padded_tokens_length // dp_size
+        per_rank_output_size = output_token_ids_np_dp.size // dp_size
 
-        # Reconstruct per-sequence outputs
-        outputs = []
-        start_idx = 0
+        outputs = [[] for _ in range(batch_size)]
+        for rank in range(dp_size):
+            output_token_ids_np = output_token_ids_np_dp[rank *
+                                                         per_rank_output_size:
+                                                         (1 + rank) *
+                                                         per_rank_output_size]
+            assert output_token_ids_np.size == per_rank_output_size
 
-        for i in range(batch_size):
-            seq_length = int(num_draft_tokens_cpu[i])
-            end_idx = start_idx + seq_length
+            # Split main tokens and bonus tokens
+            main_tokens = output_token_ids_np[:
+                                              padded_tokens_length]  # [num_tokens]
+            bonus_tokens = output_token_ids_np[padded_tokens_length:]
+            padded_num_seqs_per_rank = bonus_tokens.size
+            cur_rank_num_draft_tokens = num_draft_tokens_cpu[
+                rank * padded_num_seqs_per_rank:(rank + 1) *
+                padded_num_seqs_per_rank]
 
-            # Get main tokens for this sequence
-            seq_main_tokens = main_tokens[start_idx:end_idx]
+            # Reconstruct per-sequence outputs
 
-            # Filter out placeholder tokens
-            valid_main_tokens = seq_main_tokens[
-                (seq_main_tokens != PLACEHOLDER_TOKEN_ID)
-                & (seq_main_tokens < vocab_size)]
+            start_idx = 0
+            req_indices = req_indices_dp[rank]
+            for i, req_idx in enumerate(req_indices):
 
-            # Add bonus token if it's valid
-            bonus_token = bonus_tokens[i]
-            if bonus_token != PLACEHOLDER_TOKEN_ID and bonus_token < vocab_size:
-                seq_tokens = np.concatenate([valid_main_tokens, [bonus_token]])
-            else:
-                seq_tokens = valid_main_tokens
+                seq_length = int(cur_rank_num_draft_tokens[i])
+                end_idx = start_idx + seq_length
 
-            outputs.append(seq_tokens.tolist())
-            start_idx = end_idx
+                # Get main tokens for this sequence
+                seq_main_tokens = main_tokens[start_idx:end_idx]
+
+                # Filter out placeholder tokens
+                valid_main_tokens = seq_main_tokens[
+                    (seq_main_tokens != PLACEHOLDER_TOKEN_ID)
+                    & (seq_main_tokens < vocab_size)]
+
+                # Add bonus token if it's valid
+                bonus_token = bonus_tokens[i]
+                if bonus_token != PLACEHOLDER_TOKEN_ID and bonus_token < vocab_size:
+                    seq_tokens = np.concatenate(
+                        [valid_main_tokens, [bonus_token]])
+                else:
+                    seq_tokens = valid_main_tokens
+
+                # reorders per-rank outputs back to the original batch ordering
+                outputs[req_idx] = seq_tokens.tolist()
+                start_idx = end_idx
 
         return outputs
 
@@ -297,7 +379,7 @@ def rejection_sample(
     target_probs: jnp.ndarray,
     # [batch_size]
     bonus_token_ids: jnp.ndarray,
-    sampling_metadata: TPUSupportedSamplingMetadata,
+    do_sampling: bool,
     key: Optional[jax.random.PRNGKey] = None,
 ) -> jnp.ndarray:
     """
@@ -309,13 +391,13 @@ def rejection_sample(
         draft_probs: Draft probabilities in flattened format [num_tokens, vocab_size].
         target_probs: Target probabilities in flattened format [num_tokens, vocab_size].
         bonus_token_ids: Bonus token IDs [batch_size].
-        sampling_metadata: Sampling metadata.
+        do_sampling: Whether to perform sampling.
         key: JAX random key for non-greedy sampling.
 
     Returns:
         output_token_ids: Output token IDs [num_tokens + batch_size].
     """
-    if sampling_metadata.do_sampling is False:
+    if do_sampling is False:
         greedy_output = _greedy_rejection_sample_with_segment(
             draft_token_ids, target_probs, num_draft_tokens, bonus_token_ids)
         return greedy_output

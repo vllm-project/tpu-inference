@@ -63,3 +63,24 @@ class JaxRmsNorm(nnx.RMSNorm, JaxModule):
         if self.quant_method is None:
             return nnx.RMSNorm.__call__(self, x, mask=mask)
         return self.quant_method.apply_jax(self, x, mask=mask)
+
+
+class JaxLayerNorm(nnx.LayerNorm, JaxModule):
+    """LayerNorm layer that inherits from JaxModule and maps scale to weight for compatibility."""
+
+    def __init__(self, *args, **kwargs):
+        # nnx.LayerNorm uses `param_dtype` for parameter initialization dtype.
+        # Accept `dtype` as an alias for backward compatibility.
+        if "dtype" in kwargs and "param_dtype" not in kwargs:
+            kwargs["param_dtype"] = kwargs.pop("dtype")
+        nnx.LayerNorm.__init__(self, *args, **kwargs)
+
+        # For compatibility, alias scale to weight
+        self.weight = self.scale
+        delattr(self, 'scale')
+
+    def __getattr__(self, name: str):
+        if name == "scale":
+            return self.weight
+        raise AttributeError(
+            f"'{self.__class__.__name__}' object has no attribute '{name}'")

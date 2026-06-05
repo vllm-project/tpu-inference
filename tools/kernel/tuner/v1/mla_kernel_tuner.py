@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import dataclasses
 import logging
 import time
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from absl import flags
 from vllm.utils.math_utils import cdiv
 
 from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
@@ -27,48 +27,26 @@ from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
                                                             TuningCase,
                                                             TuningStatus)
 from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
+from tpu_inference.kernels.mla.v2.tuned_params import TunableParams, TuningKey
 from tpu_inference.utils import align_to, get_dtype_packing
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-
-@dataclasses.dataclass
-class TuningKey:
-    max_num_tokens: int  # Maximum number of tokens in the batch
-    actual_num_q_heads: int  # Actual number of Q heads, <= num_q_heads in the model config, fixed at 128 for now
-    actual_lkv_dim: int  # Actual NOPE head dimension, <= lkv_dim in the model config, fixed at 512 for now
-    actual_r_dim: int  # Actual ROPE head dimension, <= r_dim in the model config, fixed at 64 for now
-    kv_dtype: str  # KV cache and KV input data type, fixed at fp8 for now
-    q_dtype: str  # Q activation dtype, fixed at fp8 for now
-    total_num_pages: int  # Total number of pages in the cache, should be large enough to cover all sequences in the batch
-    page_size_per_kv_packing: int  # Page size per KV packing, should be aligned with the kernel configuration
-    kv_packing: int  # Packing factor for KV, determined by the data type (e.g., 4 for fp8)
-    max_num_seqs: int  # Maximum number of sequences in the batch, should be large enough to cover all sequences in the batch
-    pages_per_seq: int  # Number of pages per sequence, determined by the maximum KV length and page size. Should be large enough to cover the longest sequence in the batch.
-
-    sm_scale: float  # Scaling factor for the softmax input, fixed at 1.0 for now
-    s_dtype: str  # Post QK einsum data type feeding into softmax, fixed at bf16 for now
-    case: str  # A string identifier for the case, support only: "batched_decode", "decode_only", "mixed"
-    soft_cap: float | None  # Optional softmax cap, if None, no capping is applied. If set, should be a positive value.
-    mask_value: float | None  # Optional mask value for masked positions, if None, no masking is applied.
-
-    chunk_prefill_size: int | None = None  # Chunk size for prefill in the decode case, range from 1 to max_num_tokens with steps of powers of two
-    sliding_window: int | None = None  # Sliding window size, [None, 5, 128]
-    p_same_dtype_as_v: bool = True  # Whether the softmax input should have the same data type as V, fixed at True for now
-
-
-@dataclasses.dataclass
-class TunableParams:
-    decode_batch_size: int  # range from 1 to as high as possible before OOM with steps powers of two
-    # Constraint: batch size % decode_batch_size = 0
-
-    # Below params if passed in as int, all cases are the same.
-    num_kv_pages_per_block: int  # Number of KV pages to process per block. Range from 1 to as high as possible before OOM,
-    # with steps of powers of two.
-    num_queries_per_block: int  # for batched_decode, this is always 1
-    vmem_limit_bytes: int  # 16MiB(?) to 64MiB, increments of 8MiB.
-    # Select lowest value that gives the highest performance
+flags.DEFINE_integer("mla_total_num_pages", 1506,
+                     "Total number of pages in the cache.")
+flags.DEFINE_integer("mla_page_size_per_kv_packing", 256,
+                     "Page size per KV packing.")
+flags.DEFINE_integer("mla_kv_packing", 4, "Packing factor for KV.")
+flags.DEFINE_integer("mla_max_num_seqs", 160,
+                     "Maximum number of sequences in the batch.")
+flags.DEFINE_integer("mla_pages_per_seq", 9, "Number of pages per sequence.")
+flags.DEFINE_integer("mla_actual_num_q_heads", 128,
+                     "Actual number of Q heads.")
+flags.DEFINE_integer("mla_actual_lkv_dim", 512, "Actual NOPE head dimension.")
+flags.DEFINE_integer("mla_actual_r_dim", 64, "Actual ROPE head dimension.")
+flags.DEFINE_string("mla_kv_dtype", "float8_e4m3fn", "KV cache data type.")
+flags.DEFINE_string("mla_q_dtype", "float8_e4m3fn", "Q activation dtype.")
 
 
 def _generate_mla_inputs(
@@ -191,25 +169,26 @@ class MlaKernelTuner(KernelTunerBase):
         # The tuningKey and tunableParams in this list is constructed based on the real kernel execution logs during benchmarking.
         # The tunableParams currently represent the baseline configuration from the attention_interface.py.
         # From the log, only the max_num_tokens is different across different cases
-        for max_num_tokens in [4, 8, 16, 32, 64, 128, 160, 256, 512]:
+        for max_num_tokens in [
+                4, 8, 16, 32, 64, 128, 160, 256, 512, 1024, 2048
+        ]:
             tuning_set_from_log.append([
                 TuningKey(
                     max_num_tokens=max_num_tokens,
-                    actual_num_q_heads=128,
-                    actual_lkv_dim=512,
-                    actual_r_dim=64,
-                    kv_dtype="float8_e4m3fn",
-                    q_dtype="float8_e4m3fn",
-                    total_num_pages=1506,
-                    page_size_per_kv_packing=256,
-                    kv_packing=4,
-                    max_num_seqs=160,
-                    pages_per_seq=9,
-                    sm_scale=0.1352337788608801,
+                    actual_num_q_heads=flags.FLAGS.mla_actual_num_q_heads,
+                    actual_lkv_dim=flags.FLAGS.mla_actual_lkv_dim,
+                    actual_r_dim=flags.FLAGS.mla_actual_r_dim,
+                    kv_dtype=flags.FLAGS.mla_kv_dtype,
+                    q_dtype=flags.FLAGS.mla_q_dtype,
+                    total_num_pages=flags.FLAGS.mla_total_num_pages,
+                    page_size_per_kv_packing=flags.FLAGS.
+                    mla_page_size_per_kv_packing,
+                    kv_packing=flags.FLAGS.mla_kv_packing,
+                    max_num_seqs=flags.FLAGS.mla_max_num_seqs,
+                    pages_per_seq=flags.FLAGS.mla_pages_per_seq,
                     s_dtype="bfloat16",
                     case="batched_decode",
                     soft_cap=None,
-                    mask_value=-3.38953e+38,
                     chunk_prefill_size=None,
                     sliding_window=None,
                     p_same_dtype_as_v=True,
@@ -302,10 +281,8 @@ class MlaKernelTuner(KernelTunerBase):
                         page_indices=input_cache['page_indices'],
                         cu_q_lens=input_cache['cu_q_lens'],
                         distribution=input_cache['distribution'],
-                        sm_scale=tuning_key.sm_scale,
                         sliding_window=tuning_key.sliding_window,
                         soft_cap=tuning_key.soft_cap,
-                        mask_value=tuning_key.mask_value,
                         q_scale=None,
                         k_scale=None,
                         v_scale=None,

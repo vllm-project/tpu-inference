@@ -20,10 +20,13 @@ import numpy as np
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, shard_linear_weights)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    W13PaddingConfig, get_w13_padding_config, process_w13_for_gmm)
+    FusedMoEWeights, W13PaddingConfig, _process_quantized_moe_weights_impl,
+    get_w13_padding_config, process_w13_for_gmm)
+from tpu_inference.layers.common.sharding import ShardingAxisName
 
 
 class TestProcessWeights(unittest.TestCase):
@@ -87,7 +90,7 @@ class TestProcessWeights(unittest.TestCase):
         )
 
         # 3D scale sharding: P(in_axis, None, out_axis)
-        expected_scale_spec = P('data', None, 'model')
+        expected_scale_spec = P('model', None, 'data')
         self.assertEqual(sharded_weights.weight_scale.sharding,
                          NamedSharding(mesh, expected_scale_spec))
 
@@ -145,6 +148,62 @@ class TestProcessWeights(unittest.TestCase):
         self.assertEqual(processed[0, 1], 1)
         self.assertEqual(processed[0, 2], 2)
         self.assertEqual(processed[0, 3], 3)
+
+    def test_process_weights_requant_512(self):
+        """Test process_quantized_moe_weights with MOE_REQUANTIZE_BLOCK_SIZE = 512."""
+        # Dynamically adapt the mesh size to the physical devices available (CPU or TPU)
+        devices = jax.devices()
+        tp_size = len(devices)
+        mock_mesh = Mesh(
+            np.array(devices).reshape(1, tp_size), ('data', 'model'))
+
+        # Create FusedMoEWeights with dynamically adapted shapes:
+        # hidden_size = 7168, intermediate_size = 256 * tp_size
+        # block_size = 128
+        input_weights = FusedMoEWeights(
+            w13_weight=jnp.ones((128, 512 * tp_size, 7168),
+                                dtype=jnp.float8_e4m3fn),
+            w13_weight_scale=jnp.ones((128, 4 * tp_size, 56),
+                                      dtype=jnp.float32),
+            w13_bias=None,
+            w2_weight=jnp.ones((128, 7168, 256 * tp_size),
+                               dtype=jnp.float8_e4m3fn),
+            w2_weight_scale=jnp.ones((128, 56, 2 * tp_size),
+                                     dtype=jnp.float32),
+            w2_bias=None,
+        )
+
+        # Process the weights under GMM_TP by calling the JIT implementation directly
+        processed_weights = _process_quantized_moe_weights_impl(
+            input_weights,
+            moe_backend=MoEBackend.GMM_TP,
+            mesh=mock_mesh,
+            activation="silu",
+            weight_block_size=(128, ),
+            desired_quant_dtype=jnp.float8_e4m3fn,
+            requant_block_size=512,
+        )
+
+        # Assertions:
+        # w2 scale: global shape
+        self.assertEqual(processed_weights.w2_weight_scale.shape,
+                         (128, tp_size, 1, 7168))
+
+        # w2 scale: sharding spec and local shard shapes
+        if tp_size == 1:
+            expected_w2_sharding = NamedSharding(mock_mesh, P())
+        else:
+            expected_w2_sharding = NamedSharding(
+                mock_mesh, P(None, ShardingAxisName.MLP_TENSOR))
+        self.assertEqual(processed_weights.w2_weight_scale.sharding,
+                         expected_w2_sharding)
+        w2_local_shapes = [
+            s.data.shape[1]
+            for s in processed_weights.w2_weight_scale.addressable_shards
+        ]
+        self.assertEqual(sum(w2_local_shapes), tp_size)
+        for s_size in w2_local_shapes:
+            self.assertEqual(s_size, 1)
 
 
 if __name__ == "__main__":

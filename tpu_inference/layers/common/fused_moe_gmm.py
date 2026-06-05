@@ -91,6 +91,8 @@ def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
             return jax.nn.softmax(x, axis=-1)
         case "sigmoid":
             return jax.nn.sigmoid(x)
+        case "sqrtsoftplus":
+            return jnp.sqrt(jax.nn.softplus(x))
         case _:
             raise NotImplementedError(
                 f"FusedMoE does not support {scoring_fn} scoring function")
@@ -494,6 +496,8 @@ def fused_moe_func(
     enable_rs_kernel: bool = False,
     onehot_moe_permute_threshold: int = 0,
     scatter_results: bool = False,
+    hash_based_topk_indices: jax.Array | None = None,
+    expert_score_correction_bias: jax.Array | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -528,13 +532,23 @@ def fused_moe_func(
     assert gating_output.shape == (num_tokens, global_num_experts)
 
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
-    if envs.MOE_APPROX_TOPK:
+    if hash_based_topk_indices is not None:
+        topk_indices = hash_based_topk_indices
+        topk_weights = jnp.take_along_axis(topk_weights, topk_indices, axis=-1)
+    elif envs.MOE_APPROX_TOPK:
         topk_weights, topk_indices = jax.lax.approx_max_k(
             topk_weights,
             k=topk,
             recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
     else:
-        topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+        if expert_score_correction_bias is not None:
+            _, topk_indices = jax.lax.top_k(
+                topk_weights + expert_score_correction_bias[None, :], k=topk)
+            topk_weights = jnp.take_along_axis(topk_weights,
+                                               topk_indices,
+                                               axis=-1)
+        else:
+            topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
     # All gathering topk_indices and topk_weights if attention dp is used.
@@ -648,6 +662,7 @@ def fused_moe_func(
             mesh=mesh,
             enable_rs_kernel=actual_enable_rs_kernel,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
+            scatter_results=scatter_results,
         )
     else:
         x = tensor_parallel_gmm(
@@ -666,6 +681,7 @@ def fused_moe_func(
             mesh=mesh,
             enable_rs_kernel=actual_enable_rs_kernel,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
+            scatter_results=scatter_results,
         )
 
     return x[:num_tokens, :hidden_size]

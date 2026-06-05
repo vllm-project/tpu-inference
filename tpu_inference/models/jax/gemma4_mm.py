@@ -33,7 +33,6 @@ from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import make_layers
-from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -80,45 +79,44 @@ def apply_multidimensional_rope(
     positions: jax.Array,
     base_frequency: int,
     rotary_fraction: Optional[float] = None,
-    rope_scaling: Optional[dict] = None,
 ) -> jax.Array:
     """Applies multidimensional RoPE."""
 
     b, seq_len, num_heads, head_dim = inputs.shape
+    ndim = positions.shape[-1]
 
-    inputs_flat = inputs.reshape((b * seq_len, num_heads, head_dim))
-    positions_flat = positions.reshape((b * seq_len, positions.shape[-1]))
-
-    ndim = positions_flat.shape[-1]
     num_rotated_channels = head_dim
     if rotary_fraction is not None:
         num_rotated_channels = int(
             round(num_rotated_channels * rotary_fraction))
-    num_rotated_channels_per_dim = 2 * (num_rotated_channels // (2 * ndim))
 
-    split_points = [(k + 1) * num_rotated_channels_per_dim
-                    for k in range(ndim)]
-    if rotary_fraction is None:
-        split_points = split_points[:-1]
+    c_per_dim = 2 * (num_rotated_channels // (2 * ndim))
+    half_c = c_per_dim // 2
+    rot_dim = ndim * c_per_dim
 
-    x_parts = jnp.split(inputs_flat, split_points, axis=-1)
+    x_rot = inputs[..., :rot_dim]
+    x_unrot = inputs[..., rot_dim:]
 
-    y_parts = [
-        apply_rope(
-            inputs=x_parts[k],
-            positions=positions_flat[..., k],
-            head_dim=x_parts[k].shape[-1],
-            rope_theta=base_frequency,
-            rope_scaling=rope_scaling,
-        ) for k in range(ndim)
-    ]
+    x_reshaped = x_rot.reshape(b, seq_len, num_heads, ndim, 2, half_c)
+    x1, x2 = x_reshaped[..., 0, :], x_reshaped[..., 1, :]
 
-    if rotary_fraction is not None:
-        y_parts.append(x_parts[-1])
+    inv_freq = 1.0 / (base_frequency**(
+        jnp.arange(0, c_per_dim, 2, dtype=jnp.float32) / c_per_dim))
+    freqs = jnp.expand_dims(positions[..., None] * inv_freq, axis=2)
 
-    out_flat = jnp.concatenate(y_parts, axis=-1)
+    cos = jnp.cos(freqs).astype(inputs.dtype)
+    sin = jnp.sin(freqs).astype(inputs.dtype)
 
-    return out_flat.reshape((b, seq_len, num_heads, head_dim))
+    out1 = (x1 * cos) - (x2 * sin)
+    out2 = (x2 * cos) + (x1 * sin)
+
+    out_rotated = jnp.stack([out1, out2],
+                            axis=-2).reshape(b, seq_len, num_heads, rot_dim)
+
+    if x_unrot.shape[-1] > 0:
+        return jnp.concatenate([out_rotated, x_unrot], axis=-1)
+
+    return out_rotated
 
 
 class SegmentIds(NamedTuple):
@@ -150,7 +148,6 @@ class Gemma4VisionFlashAttention(JaxModule):
         rope_params = getattr(config, "rope_parameters",
                               {}).get("full_attention", {})
         self.rope_base_frequency = rope_params.get("rope_theta", 100.0)
-        self.rope_scaling = getattr(config, "rope_scaling", None)
 
         self.q_proj = JaxEinsum("BTD,DNH->BTNH",
                                 (self.features, self.num_heads, self.head_dim),
@@ -213,15 +210,9 @@ class Gemma4VisionFlashAttention(JaxModule):
         value_proj = self.v_norm(value_proj)
 
         query_proj = apply_multidimensional_rope(
-            query_proj,
-            segment_pos,
-            base_frequency=self.rope_base_frequency,
-            rope_scaling=self.rope_scaling)
+            query_proj, segment_pos, base_frequency=self.rope_base_frequency)
         key_proj = apply_multidimensional_rope(
-            key_proj,
-            segment_pos,
-            base_frequency=self.rope_base_frequency,
-            rope_scaling=self.rope_scaling)
+            key_proj, segment_pos, base_frequency=self.rope_base_frequency)
 
         # Transpose for Flash Attention: (B, T, N, H) -> (B, N, T, H)
         q_BNTH = jnp.transpose(query_proj, (0, 2, 1, 3))
