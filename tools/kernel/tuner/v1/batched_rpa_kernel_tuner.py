@@ -26,7 +26,6 @@ from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
                                                             TunerConfig,
                                                             TuningCase,
                                                             TuningStatus)
-from tpu_inference.kernels.experimental.batched_rpa.configs import BlockSizes
 from tpu_inference.kernels.experimental.batched_rpa.configs_from_log import \
     LOG_ENTRIES
 from tpu_inference.kernels.experimental.batched_rpa.tuned_params import (

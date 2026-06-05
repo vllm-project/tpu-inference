@@ -88,12 +88,11 @@ class TunableParams:
     is_baseline: bool = False
 
     def to_block_sizes(self) -> configs.BlockSizes:
-        return configs.BlockSizes(
-            bq_sz=self.bq_sz,
-            bq_c_sz=self.bq_c_sz,
-            bkv_sz=self.bkv_sz,
-            batch_size=self.batch_size,
-            n_buffer=self.n_buffer)
+        return configs.BlockSizes(bq_sz=self.bq_sz,
+                                  bq_c_sz=self.bq_c_sz,
+                                  bkv_sz=self.bkv_sz,
+                                  batch_size=self.batch_size,
+                                  n_buffer=self.n_buffer)
 
 
 def get_tuned_params(
@@ -128,9 +127,8 @@ def get_tuned_params(
     else:
         # logger.info(f"Found tuned parameters for prefill tuning key: {prefill_tuning_key}")
         prefill_tuned_params = tuned_params_mapping[prefill_tuning_key]
-    return configs.BlockSizes(
-        **asdict(decode_tuned_params)), configs.BlockSizes(
-            **asdict(prefill_tuned_params))
+    return decode_tuned_params.to_block_sizes(
+    ), prefill_tuned_params.to_block_sizes()
 
 
 tuned_params_mapping: dict[TuningKey, TunableParams] = {}
