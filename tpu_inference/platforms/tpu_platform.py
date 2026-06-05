@@ -89,6 +89,7 @@ class TpuPlatform(Platform):
     dispatch_key: str = "XLA"
     ray_device_key: str = "TPU"
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
+    # Bypass torch.compile; torchax defers all compilation to JAX
     simple_compile_backend: str = "eager"
 
     supported_quantization: list[str] = [

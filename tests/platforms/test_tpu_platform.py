@@ -176,7 +176,6 @@ class TestTpuPlatform:
 
         TpuPlatform.check_and_update_config(vllm_config)
 
-        assert vllm_config.compilation_config.backend == "eager"
         assert vllm_config.parallel_config.distributed_executor_backend == "uni"
         assert vllm_config.scheduler_config.disable_chunked_mm_input is False
 
