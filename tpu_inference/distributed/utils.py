@@ -122,15 +122,28 @@ def get_device_topology_order_id(local_devices, global_devices) -> int:
 
     # 1. Find the 'anchor' (minimum coordinate) for the local devices.
     #    This represents the physical top-left corner of the local machine.
-    local_anchor = min(d.coords for d in local_devices)
+    #    Fallback to process_index if JAX devices do not have 'coords' attribute
+    #    (e.g., in some Ray or GKE environments).
+    try:
+        local_anchor = min(d.coords for d in local_devices)
+    except AttributeError:
+        logger.warning(
+            "TPU devices do not have 'coords' attribute. Falling back to process_index."
+        )
+        local_anchor = min(d.process_index for d in local_devices)
 
     # 2. Group global devices by process to find the anchor for EVERY process.
     process_anchors = {}
     for d in global_devices:
         pid = d.process_index
+        try:
+            coords = d.coords
+        except AttributeError:
+            coords = d.process_index
+
         # Update the minimum coordinate found for this process so far
-        if pid not in process_anchors or d.coords < process_anchors[pid]:
-            process_anchors[pid] = d.coords
+        if pid not in process_anchors or coords < process_anchors[pid]:
+            process_anchors[pid] = coords
 
     # 3. Sort the unique anchors to establish the canonical topology order.
     #    Tuples (x, y, z) sort lexicographically (x first, then y, then z).
