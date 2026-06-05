@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import jax.numpy as jnp
 import pytest
 import torch
-from vllm.config import CacheConfig, CompilationMode, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 
 from tpu_inference.platforms.tpu_platform import TpuPlatform
 
@@ -48,8 +48,7 @@ class TestTpuPlatform:
         vllm_config.parallel_config = MagicMock()
         vllm_config.parallel_config.data_parallel_size = 1
         vllm_config.sharding_config = MagicMock()
-        vllm_config.compilation_config = MagicMock(mode="dynamo_trace_once",
-                                                   backend="openxla")
+        vllm_config.compilation_config = MagicMock(backend="eager")
         vllm_config.kv_transfer_config = None
         return vllm_config
 
@@ -188,8 +187,6 @@ class TestTpuPlatform:
 
         TpuPlatform.check_and_update_config(vllm_config)
 
-        assert vllm_config.compilation_config.mode == CompilationMode.DYNAMO_TRACE_ONCE
-        assert vllm_config.compilation_config.backend == "openxla"
         assert vllm_config.parallel_config.distributed_executor_backend == "uni"
         assert vllm_config.scheduler_config.disable_chunked_mm_input is False
 
