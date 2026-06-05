@@ -80,57 +80,6 @@ def _safe_convert_torch_to_jax(v: Any) -> Any:
     return v
 
 
-class _Qwen3VLConfigAdapter:
-
-    def __init__(self, config):
-        self._config = config
-        self._text_config = getattr(config, "text_config", None)
-
-    def __getattr__(self, name):
-        try:
-            return getattr(self._config, name)
-        except AttributeError:
-            pass
-        if self._text_config is not None:
-            try:
-                return getattr(self._text_config, name)
-            except AttributeError:
-                pass
-        raise AttributeError(f"Attribute '{name}' not found in either"
-                             f" '{type(self._config).__name__}' or"
-                             f" '{type(self._text_config).__name__}'")
-
-
-class _ModelConfigAdapter:
-
-    def __init__(self, model_config):
-        self._model_config = model_config
-        self._hf_config_adapter = _Qwen3VLConfigAdapter(model_config.hf_config)
-
-    @property
-    def hf_config(self):
-        return self._hf_config_adapter
-
-    @property
-    def hf_text_config(self):
-        return self._hf_config_adapter
-
-    def __getattr__(self, name):
-        return getattr(self._model_config, name)
-
-
-class _VllmConfigAdapter:
-
-    def __init__(self, vllm_config: VllmConfig):
-        self._vllm_config = vllm_config
-        self.model_config = _ModelConfigAdapter(vllm_config.model_config)
-        self.cache_config = vllm_config.cache_config
-        self.quant_config = vllm_config.quant_config
-
-    def __getattr__(self, name):
-        return getattr(self._vllm_config, name)
-
-
 def _infer_pos_embed_grid_hw(num_position_embeddings: int) -> Tuple[int, int]:
     """Infer a (grid_h, grid_w) pair from a flattened 2D embedding table."""
     root = int(math.sqrt(num_position_embeddings))
@@ -1321,41 +1270,43 @@ class Qwen3VLModel(Qwen3Model):
         rng: nnx.Rngs,
         mesh: Mesh,
     ):
-        adapted = _VllmConfigAdapter(vllm_config)
-        model_config = adapted.model_config
+        model_config = vllm_config.model_config
         hf_config = model_config.hf_config
+        text_config = getattr(hf_config, "text_config", hf_config)
         vocab_size = model_config.get_vocab_size()
         dtype = model_config.dtype
-        rms_norm_eps = hf_config.rms_norm_eps
-        hidden_size = hf_config.hidden_size
+        rms_norm_eps = text_config.rms_norm_eps
+        hidden_size = text_config.hidden_size
         prefix = "model"
 
         self.is_first_rank = get_pp_group().is_first_rank
         self.is_last_rank = get_pp_group().is_last_rank
 
-        if self.is_first_rank or (hf_config.tie_word_embeddings
-                                  and self.is_last_rank):
+        tie_word_embeddings = getattr(
+            hf_config, "tie_word_embeddings",
+            getattr(text_config, "tie_word_embeddings", False))
+        if self.is_first_rank or (tie_word_embeddings and self.is_last_rank):
             self.embed_tokens = JaxEmbed(
                 num_embeddings=vocab_size,
                 features=hidden_size,
                 param_dtype=dtype,
                 embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
                 rngs=rng,
-                quant_config=adapted.quant_config,
+                quant_config=vllm_config.quant_config,
                 prefix=prefix + ".embed_tokens",
             )
         else:
             self.embed_tokens = PPMissingLayer()
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            hf_config.num_hidden_layers,
+            text_config.num_hidden_layers,
             lambda layer_index: Qwen3VLTextDecoderLayer(
-                config=hf_config,
+                config=text_config,
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
-                kv_cache_dtype=adapted.cache_config.cache_dtype,
-                quant_config=adapted.quant_config,
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+                quant_config=vllm_config.quant_config,
                 prefix=f"{prefix}.layers.{layer_index}",
             ))
 
@@ -1366,7 +1317,7 @@ class Qwen3VLModel(Qwen3Model):
                 param_dtype=dtype,
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 rngs=rng,
-                quant_config=adapted.quant_config,
+                quant_config=vllm_config.quant_config,
                 prefix=prefix + ".norm",
             )
         else:

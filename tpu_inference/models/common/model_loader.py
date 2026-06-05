@@ -52,6 +52,7 @@ _MODEL_REGISTRY = {}
 _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset({
     "GptOssForCausalLM",
     "Qwen3MoeForCausalLM",
+    "Qwen3VLForConditionalGeneration"
     "KimiK25ForConditionalGeneration",
     "Qwen3_5MoeForConditionalGeneration",
 })
