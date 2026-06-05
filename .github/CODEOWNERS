@@ -63,7 +63,7 @@
 /docker/ @jrplatin @QiliangCui @yiw-wang
 
 # Tools (kernel tuner, etc.)
-/tools/ @vipannalla @kyuyeunk @patrickji2014
+/tools/ @vipannalla @kyuyeunk @patrickji2014 @QiliangCui @yiw-wang
 
 # Unowned: scripts, examples, and bot-updated support_matrices —
 # anyone can approve, no required CODEOWNER review. Bot pushes to
