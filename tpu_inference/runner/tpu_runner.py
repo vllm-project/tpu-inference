@@ -982,23 +982,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          )
         self.execute_model_state = None
 
-        if grammar_output is not None:
-            (
-                require_struct_decoding, grammar_bitmask_padded, arange
-            ) = self.structured_decoding_manager.prepare_structured_decoding_input(
-                logits, grammar_output)
-            logits = self.structured_decoding_manager.structured_decode_fn(
-                require_struct_decoding,
-                grammar_bitmask_padded,
-                logits,
-                arange,
-            )
-        return self._sample_from_logits(
-            scheduler_output, attn_metadata, sampling_metadata, input_ids,
-            hidden_states, logits, aux_hidden_states, spec_decode_metadata,
-            kv_connector_output, logits_indices_selector, padded_num_reqs,
-            expert_indices, full_hidden_states, full_logits, req_ids_dp,
-            padded_num_scheduled_tokens_per_dp_rank)
+        with jax.set_mesh(self.mesh):
+            if grammar_output is not None:
+                (
+                    require_struct_decoding, grammar_bitmask_padded, arange
+                ) = self.structured_decoding_manager.prepare_structured_decoding_input(
+                    logits, grammar_output)
+                logits = self.structured_decoding_manager.structured_decode_fn(
+                    require_struct_decoding,
+                    grammar_bitmask_padded,
+                    logits,
+                    arange,
+                )
+            return self._sample_from_logits(
+                scheduler_output, attn_metadata, sampling_metadata, input_ids,
+                hidden_states, logits, aux_hidden_states, spec_decode_metadata,
+                kv_connector_output, logits_indices_selector, padded_num_reqs,
+                expert_indices, full_hidden_states, full_logits, req_ids_dp,
+                padded_num_scheduled_tokens_per_dp_rank)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
