@@ -34,8 +34,10 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
-    concat_last_sampled_tokens_and_draft_tokens, extract_last_sampled_tokens)
-from tpu_inference.utils import device_array, to_jax_dtype
+    concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
+    extract_last_sampled_tokens, process_and_extend_logits)
+from tpu_inference.utils import (device_array, get_mesh_shape_product,
+                                 to_jax_dtype)
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -825,6 +827,33 @@ class CompilationManager:
                 num_reqs=num_reqs,
             )
 
+        if self.runner.speculative_config:
+            logger.info(
+                "Compiling gather_logprobs for speculative decoding shapes.")
+            for num_logits in self.runner.num_logits_paddings:
+                for num_reqs in self.runner.num_reqs_paddings:
+                    if num_reqs > num_logits:
+                        continue
+                    combined_size = num_logits + num_reqs
+                    logits_sharding = NamedSharding(self.runner.mesh,
+                                                    PartitionSpec())
+                    token_ids_sharding = NamedSharding(
+                        self.runner.mesh,
+                        PartitionSpec(ShardingAxisName.ATTN_DATA))
+                    logits = self._create_dummy_tensor(
+                        (combined_size, hsize), jnp.float32, logits_sharding)
+                    token_ids = self._create_dummy_tensor(
+                        (combined_size, ), jnp.int32, token_ids_sharding)
+                    self._run_compilation(
+                        f"worker{self.runner.rank} gather_logprobs_spec",
+                        compute_and_gather_logprobs,
+                        logits,
+                        token_ids,
+                        self.runner.model_config.max_logprobs,
+                        num_logits=num_logits,
+                        num_reqs=num_reqs,
+                    )
+
         logger.info(
             "Compiling compute_and_gather_prompt_logprobs with different input shapes."
         )
@@ -857,12 +886,115 @@ class CompilationManager:
 
         self._gather_logprobs_precompiled = True
 
+    def _precompile_process_and_extend_logits(self) -> None:
+        logger.info(
+            "Compiling _process_and_extend_logits with different input shapes."
+        )
+        vocab_size = self.runner.vocab_size
+        for num_logits in self.runner.num_logits_paddings:
+            for num_reqs in self.runner.num_reqs_paddings:
+                if num_reqs > num_logits:
+                    continue
+
+                logits_sharding = NamedSharding(self.runner.mesh,
+                                                PartitionSpec())
+                dp_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
+
+                target_logits = self._create_dummy_tensor(
+                    (num_logits, vocab_size), jnp.float32, logits_sharding)
+
+                processed_bonus_logits = self._create_dummy_tensor(
+                    (num_reqs, vocab_size), jnp.float32, logits_sharding)
+
+                draft_lengths = self._create_dummy_tensor(
+                    (num_reqs, ), jnp.int32, dp_sharding)
+
+                temperature = self._create_dummy_tensor(
+                    (num_reqs, ), np.float32, dp_sharding)
+                top_k = self._create_dummy_tensor((num_reqs, ), np.int32,
+                                                  dp_sharding)
+                top_p = self._create_dummy_tensor((num_reqs, ), np.float32,
+                                                  dp_sharding)
+
+                dummy_shape = (1, )  # logprobs=True
+                _cache_collision_dummy = jnp.zeros(dummy_shape,
+                                                   dtype=jnp.int32)
+                _cache_collision_dummy = device_array(self.runner.mesh,
+                                                      _cache_collision_dummy)
+
+                sampling_metadata = TPUSupportedSamplingMetadata(
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    _cache_collision_dummy=_cache_collision_dummy,
+                    do_sampling=True,
+                    logprobs=True,
+                )
+
+                spec_decode_metadata = SpecDecodeMetadata(
+                    draft_lengths=draft_lengths,
+                    target_logits_indices=self._create_dummy_tensor(
+                        (num_logits, ), jnp.int32, dp_sharding),
+                    bonus_logits_indices=self._create_dummy_tensor(
+                        (num_reqs, ), jnp.int32, dp_sharding),
+                    final_logits_indices=self._create_dummy_tensor(
+                        (num_logits, ), jnp.int32, dp_sharding),
+                )
+
+                self._run_compilation(
+                    f"worker{self.runner.rank} _process_and_extend_logits",
+                    process_and_extend_logits,
+                    self.runner.mesh,
+                    target_logits,
+                    processed_bonus_logits,
+                    spec_decode_metadata,
+                    sampling_metadata,
+                    num_logits=num_logits,
+                    num_reqs=num_reqs,
+                )
+
+    def _precompile_extend_logits_simple(self) -> None:
+        logger.info(
+            "Compiling _extend_logits_simple with different input shapes.")
+        vocab_size = self.runner.vocab_size
+        for num_logits in self.runner.num_logits_paddings:
+            for num_reqs in self.runner.num_reqs_paddings:
+                if num_reqs > num_logits:
+                    continue
+
+                attn_data_size = get_mesh_shape_product(
+                    self.runner.mesh, ShardingAxisName.ATTN_DATA)
+                if attn_data_size == 1:
+                    logits_spec = PartitionSpec()
+                else:
+                    logits_spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
+                                                None)
+
+                logits_sharding = NamedSharding(self.runner.mesh, logits_spec)
+
+                target_logits = self._create_dummy_tensor(
+                    (num_logits, vocab_size), jnp.bfloat16, logits_sharding)
+                bonus_logits = self._create_dummy_tensor(
+                    (num_reqs, vocab_size), jnp.bfloat16, logits_sharding)
+
+                self._run_compilation(
+                    f"worker{self.runner.rank} _extend_logits_simple",
+                    extend_logits_simple,
+                    target_logits,
+                    bonus_logits,
+                    self.runner.mesh,
+                    num_logits=num_logits,
+                    num_reqs=num_reqs,
+                )
+
     def _precompile_speculative_decoding(self) -> None:
         logger.info(
             "Compiling speculative_decoding with different input shapes.")
         self._precompile_rejection_sampler()
         self._precompile_extract_last_sampled_tokens()
         self._precompile_extract_draft_token_ids()
+        self._precompile_process_and_extend_logits()
+        self._precompile_extend_logits_simple()
         if self.runner.speculative_config.method == "eagle3":
             self._precompile_eagle3_helpers()
         if self.runner.speculative_config.method == "mtp":
