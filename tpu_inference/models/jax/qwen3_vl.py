@@ -1804,35 +1804,31 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
         patch_input_dim = (vc.in_channels * vc.temporal_patch_size *
                            vc.patch_size * vc.patch_size)
 
-        image_shapes = []
-        if warmup_config := self.vllm_config.additional_config.get(
-                "vision_warmup_config"):
-            image_shapes = warmup_config.get("image_shapes", [])
+        # We want to precompile the power-of-2 buckets
+        bucket_sizes = [512, 1024, 2048, 4096, 8192, 16384, 32768]
 
-        factor = vc.patch_size * vc.spatial_merge_size
-        for input_hw in image_shapes:
-            if not isinstance(input_hw, list) or len(input_hw) != 2:
-                logger.warning(f"Skipping invalid shape {input_hw}.")
-                continue
-            h_input, w_input = input_hw
-            h_processed = round(h_input / factor) * factor
-            w_processed = round(w_input / factor) * factor
-            t, h, w = 1, h_processed // vc.patch_size, w_processed // vc.patch_size
+        for B in bucket_sizes:
+            # Find H, W such that H * W = B and both are even
+            # B is power of 2: B = 2^k
+            k = B.bit_length() - 1
+            h = 1 << (k // 2)
+            w = 1 << (k - k // 2)
+            t = 1
             grid_thw = (t, h, w)
-            num_patches = t * h * w
 
-            dummy_pixel_values = jnp.ones(
-                (num_patches, patch_input_dim),
-                self.vllm_config.model_config.dtype,
+            dummy_pixel_values_padded = jnp.ones(
+                (B, patch_input_dim),
+                dtype=utils.to_jax_dtype(self.vllm_config.model_config.dtype),
             )
             dummy_grid_thw = (grid_thw, )
 
+            # We call self.visual (which calls self.visual.__call__ -> encode_padded_jit)
             run_compilation_fn(
-                "vision_encoder",
-                self.visual.encode_jit,
-                dummy_pixel_values,
+                f"vision_encoder_bucket_{B}",
+                self.visual,
+                dummy_pixel_values_padded,
                 dummy_grid_thw,
-                image_shape=input_hw,
+                bucket_size=B,
             )
 
     def load_weights(self, weights: Iterable[tuple[str,
