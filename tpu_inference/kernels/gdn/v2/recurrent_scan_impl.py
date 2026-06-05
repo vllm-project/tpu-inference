@@ -23,7 +23,8 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-# 1. Registered Dataclasses for JAX/Pallas Tracing
+# 1. Dataclasses for holding references to inputs/outputs and shared data.
+# These are passed as arguments to the processor classes.
 
 
 @jax.tree_util.register_dataclass
@@ -40,7 +41,7 @@ class BranchRefs:
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class SharedRefs:
-    """Inputs/Outputs shared between both branches."""
+    """Inputs/Outputs refs shared between both branches(prefill and decode)."""
 
     a_log: Any
     dt_bias: Any
@@ -70,7 +71,7 @@ class DecodeScratchRefs:
     write_semaphore: Any
 
 
-# 2. Immutable Configuration Dataclasses (Host-instantiated, Static)
+# 2.  Configuration Dataclasses (static)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -215,8 +216,8 @@ class ScanProcessor:
         self.has_initial_state = has_initial_state
 
     def l2_normalize(self, x, eps=1e-6):
-        norm = jnp.sqrt(jnp.sum(x * x, axis=-1, keepdims=True) + eps)
-        return x / norm
+        rnorm = jax.lax.rsqrt(jnp.sum(x * x, axis=-1, keepdims=True) + eps)
+        return x * rnorm
 
 
 def invert_triangular_matrix(A, block_size=16):
@@ -370,7 +371,7 @@ class PrefillProcessor(ScanProcessor):
             q = self.l2_normalize(q)
             k = self.l2_normalize(k)
 
-        # Note: fusing transpose made it slower,
+        # Note: fusing transpose with (vmatpush.xpose) made it slower,
         # This has better instruction pipelining
         q_T = q.transpose(1, 0, 2)  # (n_kq, C, d_k)
         k_T = k.transpose(1, 0, 2)  # (n_kq, C, d_k)
@@ -390,6 +391,7 @@ class PrefillProcessor(ScanProcessor):
             current_sum = current_sum + g_T[:, i]
             g_cumsum_list.append(current_sum)
         g_cumsum_T = jnp.stack(g_cumsum_list, axis=1)  # shape (n_v, C)
+        exp_g = jnp.exp(g_cumsum_T)[..., None]  # Precomputed for reuse
         k_beta = k_T * beta_T[..., None]
 
         # Concatenate along sequence dimension: (n_v, 2 * C, d_k)
@@ -424,7 +426,7 @@ class PrefillProcessor(ScanProcessor):
         A_inv = invert_triangular_matrix(I_plus_S, block_size=16)
 
         v_beta = v_T * beta_T[..., None]
-        k_beta_g = k_beta * jnp.exp(g_cumsum_T)[..., None]
+        k_beta_g = k_beta * exp_g
         vk_in = jnp.concatenate(
             [
                 v_beta,
@@ -441,7 +443,7 @@ class PrefillProcessor(ScanProcessor):
         u = uw[..., :d_v]
         w = uw[..., d_v:]
 
-        q_g = q_T * jnp.exp(g_cumsum_T)[..., None]  # (n_v, C, d_k)
+        q_g = q_T * exp_g  # (n_v, C, d_k)
 
         @pl.when(should_load_init)
         def _finish_init_load():
@@ -463,7 +465,7 @@ class PrefillProcessor(ScanProcessor):
         term2 = jnp.matmul(S_q, v_new, precision=jax.lax.Precision.HIGHEST)
         o_c = attn_inter + term2  # (n_v, C, d_v)
 
-        g_i_last_exp = jnp.exp(g_cumsum_T[..., -1, None, None])
+        g_i_last_exp = exp_g[:, -1, None]
         g_diff_exp_state = jnp.exp(g_cumsum_T[..., -1, None] -
                                    g_cumsum_T)[..., None]
         k_i_g_diff = k_T * g_diff_exp_state
@@ -531,10 +533,9 @@ class PrefillProcessor(ScanProcessor):
         b_raw_processed_T = b_raw_chunk[:C_trans, :n_v].T
 
         beta_chunk_T = jax.nn.sigmoid(b_raw_processed_T)
-        g_chunk_T = -jnp.exp(self.shared.a_log[...].astype(
-            jnp.float32))[:, None] * jax.nn.softplus(
-                a_raw_processed_T +
-                self.shared.dt_bias[...].astype(jnp.float32)[:, None])
+        g_chunk_T = -jnp.exp(
+            self.shared.a_log[...])[:, None] * jax.nn.softplus(
+                a_raw_processed_T + self.shared.dt_bias[...][:, None])
         g_chunk_T = jnp.maximum(g_chunk_T, -100.0)
 
         q = q.reshape(C_trans, n_kq, d_k)
@@ -566,6 +567,7 @@ class PrefillProcessor(ScanProcessor):
         h = self.scratch.scratch[first_slot]
         current_r = first_req_id
         sequence_valid = True
+        exp_g_chunk_T = jnp.exp(g_chunk_T)
 
         for i in range(C_trans):
             t_req = self.schedule.schedule_table[self.schedule.step,
@@ -620,11 +622,10 @@ class PrefillProcessor(ScanProcessor):
 
             k_i = k[i, :, :]
             v_i = v[i, :, :]
-            g_i = g_chunk_T[:, i]
             beta_i = beta_chunk_T[:, i]
             q_i = q[i, :, :]
 
-            decay = jnp.exp(g_i)[..., None]
+            decay = exp_g_chunk_T[:, i][..., None]
 
             k_state = jnp.sum(k_i[..., None] * h, axis=1)
             v_diff = v_i - decay * k_state
@@ -695,6 +696,8 @@ class DecodeProcessor(ScanProcessor):
         key_dim = self.cfg.model.key_dim
         repeat_factor = self.cfg.model.repeat_factor
         use_qk_norm_in_gdn = self.cfg.use_qk_norm_in_gdn
+        exp_a_log = jnp.exp(self.shared.a_log[...].astype(jnp.float32))
+        dt_bias_f32 = self.shared.dt_bias[...].astype(jnp.float32)
 
         # Pre-loop: kick off async loads for iters 0 and 1.
         @pl.when(decode_count >= 1)
@@ -797,10 +800,7 @@ class DecodeProcessor(ScanProcessor):
 
                 # Compute gate
                 curr_beta = jax.nn.sigmoid(b_raw_new)
-                curr_g = -jnp.exp(self.shared.a_log[...].astype(
-                    jnp.float32)) * jax.nn.softplus(
-                        a_raw_new +
-                        self.shared.dt_bias[...].astype(jnp.float32))
+                curr_g = -exp_a_log * jax.nn.softplus(a_raw_new + dt_bias_f32)
                 curr_g = jnp.maximum(curr_g, -100.0)
                 decay = jnp.exp(curr_g)
 
