@@ -1024,7 +1024,6 @@ class Gemma4Model(JaxModule):
             kv_cache = kv_caches[cache_idx]
             layer_per_input = (per_layer_inputs[:, layer_idx, :]
                                if per_layer_inputs is not None else None)
-
             kv_cache, x, expert_ids = layer(
                 kv_cache,
                 x,
