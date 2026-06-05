@@ -24,8 +24,8 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mla import MLAAttention
-from vllm.models.deepseek_v4.attention import (DeepseekV4IndexerCache,
-                                               DeepseekV4MLAAttention)
+from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
+                                               DeepseekV4IndexerCache)
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
@@ -61,7 +61,7 @@ DEFAULT_KV_CACHE_LAYOUT = "NHD"
 def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
     return isinstance(attn_module, DeepseekV4IndexerCache) or isinstance(
         attn_module, DeepseekV4SWACache) or isinstance(
-            attn_module, DeepseekV4MLAAttention) or isinstance(
+            attn_module, DeepseekV4Attention) or isinstance(
                 attn_module, CompressorStateCache)
 
 
