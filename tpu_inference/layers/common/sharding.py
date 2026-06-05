@@ -153,7 +153,8 @@ class ShardingConfigManager:
 
     def __init__(self,
                  sharding_strategy: ShardingStrategy,
-                 device_indexes: Optional[List] = None):
+                 device_indexes: Optional[List] = None,
+                 mm_encoder_tp_mode: str = "weights"):
 
         self.sharding_strategy: ShardingStrategy = sharding_strategy
         self.device_indexes: Optional[List[int]] = device_indexes
@@ -161,6 +162,7 @@ class ShardingConfigManager:
             math.prod(asdict(sharding_strategy).values()))
         if device_indexes:
             assert self._total_devices == len(device_indexes)
+        self.mm_encoder_tp_mode = mm_encoder_tp_mode
 
     @classmethod
     def from_vllm_config(cls,
@@ -266,8 +268,12 @@ class ShardingConfigManager:
             vllm_config.parallel_config.data_parallel_rank = 0
             vllm_config.parallel_config.data_parallel_size_local = 1
 
+        # To enable data-parallel vision encoding, pass:
+        # --additional_config='{"mm_encoder_tp_mode": "data"}'
+        mm_encoder_tp_mode = vllm_config.additional_config.get(
+            'mm_encoder_tp_mode', 'weights')
         cls.validate(vllm_config, sharding_strategy)
-        return cls(sharding_strategy, device_indexes)
+        return cls(sharding_strategy, device_indexes, mm_encoder_tp_mode)
 
     @classmethod
     def validate(cls, vllm_config, sharding_strategy):
@@ -325,9 +331,24 @@ class ShardingConfigManager:
     def total_devices(self) -> int:
         return self._total_devices
 
+    @property
+    def vision_batch_axes(self):
+        batch_axes = ShardingAxisName.BATCH
+        if self.mm_encoder_tp_mode == "data" and self.tp_size > 1:
+            if isinstance(batch_axes, str):
+                return (batch_axes, ShardingAxisName.MODEL)
+            else:
+                return tuple(batch_axes) + (ShardingAxisName.MODEL, )
+        return batch_axes
+
+    @property
+    def vision_model_axis(self) -> Optional[str]:
+        return None if self.mm_encoder_tp_mode == "data" else ShardingAxisName.MODEL
+
     def __str__(self):
         return (f"ShardingConfigManager(total_devices={self.total_devices}, "
                 f"sharding_strategy={self.sharding_strategy}, "
+                f"mm_encoder_tp_mode={self.mm_encoder_tp_mode}, "
                 f"device_indexes={self.device_indexes})")
 
 
