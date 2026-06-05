@@ -156,6 +156,8 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             bias: jax.Array | None,
         ) -> LinearWeights:
             is_weight_unquantized = weight.dtype != jnp.float8_e4m3fn
+            # TODO (jacobplatin): we shouldn't assume 0 if the weight is unquantized
+            dim_to_quantize = 0 if is_weight_unquantized else None
             if per_tensor:
                 weights = []
                 start = 0
@@ -166,8 +168,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                     end = start + output_size
                     if is_weight_unquantized:
                         logger.warning_once(
-                            "Weight is unquantized, taking the unquantized path in FP8 scheme."
-                        )
+                            "Weight is unquantized, quantizing it on the fly.")
                         weights.append(weight[:, start:end])
                     else:
                         weights.append(
@@ -177,7 +178,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 weight = jnp.concat(weights, axis=1)
                 # Requantize into per-tensor.
                 weight, weight_scale = quantize_tensor(jnp.float8_e4m3fn,
-                                                       weight, 0)
+                                                       weight, dim_to_quantize)
             else:
                 # Handle 2D blockwise scales correctly for quantized_matmul_kernel
                 # which expects 3D dims for blockwise ops.
@@ -218,23 +219,6 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             )
         else:
             weights = process_fp8_linear_weights(weight, weight_scale, bias)
-
-        if self.linear_config.enable_quantized_matmul_kernel and weights.weight_scale is not None and weights.weight_scale.ndim == 2:
-            if weights.weight_scale.shape[
-                    0] > 1 and weights.weight_scale.shape[1] > 1:
-                # The quantized_matmul_kernel expects weight scales shaped (n_blocks, 1, n_out_features) for blockwisze quantization.
-                if self.weight_block_size is not None:
-                    # process_blockwise_fp8_linear_weights returns weight_scale shaped (n_out_features, n_blocks)
-                    # We need it shaped (n_blocks, 1, n_out_features)
-                    weights.weight_scale = jnp.expand_dims(
-                        jnp.transpose(weights.weight_scale),
-                        axis=1,
-                    )
-                else:
-                    weights.weight_scale = jnp.expand_dims(
-                        jnp.transpose(weights.weight_scale),
-                        axis=1,
-                    )
 
         weights = torch_view(
             shard_linear_weights(
