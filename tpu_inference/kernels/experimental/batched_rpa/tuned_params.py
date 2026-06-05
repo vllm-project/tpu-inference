@@ -87,6 +87,14 @@ class TunableParams:
     n_buffer: int
     is_baseline: bool = False
 
+    def to_block_sizes(self) -> configs.BlockSizes:
+        return configs.BlockSizes(
+            bq_sz=self.bq_sz,
+            bq_c_sz=self.bq_c_sz,
+            bkv_sz=self.bkv_sz,
+            batch_size=self.batch_size,
+            n_buffer=self.n_buffer)
+
 
 def get_tuned_params(
     model_config: configs.ModelConfigs,
