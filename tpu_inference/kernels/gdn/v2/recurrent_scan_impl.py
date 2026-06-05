@@ -23,6 +23,8 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+# 1. Registered Dataclasses for JAX/Pallas Tracing
+
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
@@ -38,7 +40,7 @@ class BranchRefs:
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class SharedRefs:
-    """Inputs/Outputs shared between both branches(prefill and decode)."""
+    """Inputs/Outputs shared between both branches."""
 
     a_log: Any
     dt_bias: Any
@@ -123,23 +125,16 @@ class DMAHelper:
         # double or n buffering
         self.has_multiple_slots = commit_scratch.shape[0] > 1
 
-    def copy_in(self, slot: int, state_idx: int):
+    def build_copy_in(self, slot: int, state_idx: int):
         target_slot = slot if self.has_multiple_slots else 0
-        copy_op = pltpu.make_async_copy(
+        return pltpu.make_async_copy(
             src_ref=self.state_in.at[pl.ds(state_idx, 1)],
             dst_ref=self.commit_scratch.at[pl.ds(target_slot, 1)],
             sem=self.sem.at[slot],
         )
-        copy_op.start()
-        return copy_op
 
-    def wait_in(self, slot: int, dst_ref, dst_slot: int, state_idx: int):
+    def commit_in(self, copy_op, slot: int, dst_ref, dst_slot: int):
         target_slot = slot if self.has_multiple_slots else 0
-        copy_op = pltpu.make_async_copy(
-            src_ref=self.state_in.at[pl.ds(state_idx, 1)],
-            dst_ref=self.commit_scratch.at[pl.ds(target_slot, 1)],
-            sem=self.sem.at[slot],
-        )
         copy_op.wait()
         dst_ref[dst_slot] = self.commit_scratch[target_slot].astype(
             dst_ref.dtype)
@@ -167,6 +162,18 @@ class DMAHelper:
 
 
 # 4. Schedule step helper
+COL_PREFILL_VALID = 0
+COL_PREFILL_OFFSET = 1
+COL_PREFILL_REQ_ID = 2
+COL_PREFILL_COUNT = 3
+COL_DECODE_VALID = 4
+COL_DECODE_OFFSET = 5
+COL_DECODE_REQ_ID = 6
+COL_DECODE_COUNT = 7
+COL_IS_LAST_CHUNK = 8
+COL_IS_FIRST_CHUNK = 9
+COL_IS_TRANSITION = 10
+COL_SUBLANE_REQ_IDS = 11
 
 
 class ScheduleStep:
@@ -175,19 +182,19 @@ class ScheduleStep:
     def __init__(self, schedule_table, step):
         self.step = step
         self.schedule_table = schedule_table
-        self.prefill_valid = schedule_table[step, 0][...]
-        self.prefill_offset = schedule_table[step, 1][...]
-        self.prefill_req_id = schedule_table[step, 2][...]
-        self.prefill_count = schedule_table[step, 3][...]
+        self.prefill_valid = schedule_table[step, COL_PREFILL_VALID][...]
+        self.prefill_offset = schedule_table[step, COL_PREFILL_OFFSET][...]
+        self.prefill_req_id = schedule_table[step, COL_PREFILL_REQ_ID][...]
+        self.prefill_count = schedule_table[step, COL_PREFILL_COUNT][...]
 
-        self.decode_valid = schedule_table[step, 4][...]
-        self.decode_offset = schedule_table[step, 5][...]
-        self.decode_req_id = schedule_table[step, 6][...]
-        self.decode_count = schedule_table[step, 7][...]
+        self.decode_valid = schedule_table[step, COL_DECODE_VALID][...]
+        self.decode_offset = schedule_table[step, COL_DECODE_OFFSET][...]
+        self.decode_req_id = schedule_table[step, COL_DECODE_REQ_ID][...]
+        self.decode_count = schedule_table[step, COL_DECODE_COUNT][...]
 
-        self.is_last_chunk = schedule_table[step, 8][...]
-        self.is_first_chunk = schedule_table[step, 9][...]
-        self.is_transition = schedule_table[step, 10][...]
+        self.is_last_chunk = schedule_table[step, COL_IS_LAST_CHUNK][...]
+        self.is_first_chunk = schedule_table[step, COL_IS_FIRST_CHUNK][...]
+        self.is_transition = schedule_table[step, COL_IS_TRANSITION][...]
 
 
 # 4. Base Processor Class
@@ -303,9 +310,11 @@ class PrefillProcessor(ScanProcessor):
         should_zero_init = (self.schedule.is_first_chunk > 0) & (init_has_init
                                                                  == 0)
 
+        init_copy_op = self.dma.build_copy_in(prefill_slot, init_state_idx)
+
         @pl.when(should_load_init)
         def _start_init_load():
-            self.dma.copy_in(prefill_slot, init_state_idx)
+            init_copy_op.start()
 
         @pl.when(should_zero_init)
         def _zero_init_state():
@@ -330,23 +339,21 @@ class PrefillProcessor(ScanProcessor):
         a_raw_chunk = self.refs.a_raw[...]
         b_raw_chunk = self.refs.b_raw[...]
 
-        a_raw_processed = a_raw_chunk[:, :n_v].T
-        b_raw_processed = b_raw_chunk[:, :n_v].T
+        a_raw_processed = a_raw_chunk[:, :n_v]
+        b_raw_processed = b_raw_chunk[:, :n_v]
 
         beta = jax.nn.sigmoid(b_raw_processed)
-        g = -jnp.exp(self.shared.a_log[...][:, None].astype(
-            jnp.float32)) * jax.nn.softplus(
-                a_raw_processed +
-                self.shared.dt_bias[...][:, None].astype(jnp.float32))
+        g = -jnp.exp(self.shared.a_log[...]) * jax.nn.softplus(
+            a_raw_processed + self.shared.dt_bias[...])
         g = jnp.maximum(g, -100.0)
 
         prefill_count = self.schedule.prefill_count
         mask_float = (jnp.arange(C) < prefill_count).astype(q.dtype)
         q = jnp.where(mask_float[:, None] > 0, q, 0.0)
         k = jnp.where(mask_float[:, None] > 0, k, 0.0)
-        g = jnp.where(mask_float[None, :] > 0, g, 0.0)
+        g = jnp.where(mask_float[:, None] > 0, g, 0.0)
         v = jnp.where(mask_float[:, None] > 0, v, 0.0)
-        beta = jnp.where(mask_float[None, :] > 0, beta, 0.0)
+        beta = jnp.where(mask_float[:, None] > 0, beta, 0.0)
 
         q = q.reshape(C, n_kq, d_k)
         k = k.reshape(C, n_kq, d_k)
@@ -356,37 +363,44 @@ class PrefillProcessor(ScanProcessor):
             q = self.l2_normalize(q)
             k = self.l2_normalize(k)
 
-        q = q.transpose(1, 0, 2)
-        k = k.transpose(1, 0, 2)
-        v = v.transpose(1, 0, 2)
+        # Note: fusing transpose made it slower,
+        # This has better instruction pipelining
+        q_T = q.transpose(1, 0, 2)  # (n_kq, C, d_k)
+        k_T = k.transpose(1, 0, 2)  # (n_kq, C, d_k)
+        v_T = v.transpose(1, 0, 2)  # (n_v, C, d_v)
+        g_T = g.T  # (n_v, C)
+        beta_T = beta.T  # (n_v, C)
 
         repeat_factor = self.cfg.model.repeat_factor
         if repeat_factor > 1:
-            q = jnp.repeat(q, repeat_factor, axis=0)
-            k = jnp.repeat(k, repeat_factor, axis=0)
+            q_T = jnp.repeat(q_T, repeat_factor, axis=0)
+            k_T = jnp.repeat(k_T, repeat_factor, axis=0)
 
         scale = d_k**-0.5
-        q = q * scale
+        q_T = q_T * scale
 
         g_cumsum_list = []
         current_sum = jnp.zeros((n_v, ), dtype=jnp.float32)
         for i in range(C):
-            current_sum = current_sum + g[:, i]
+            current_sum = current_sum + g_T[:, i]
             g_cumsum_list.append(current_sum)
-        g_cumsum = jnp.stack(g_cumsum_list, axis=-1)
-        k_beta = k * beta[..., None]
+        g_cumsum_T = jnp.stack(g_cumsum_list, axis=1)  # shape (n_v, C)
+        k_beta = k_T * beta_T[..., None]
 
-        kbeta_q = jnp.concatenate([k_beta, q], axis=1)
+        # Concatenate along sequence dimension: (n_v, 2 * C, d_k)
+        kbeta_q = jnp.concatenate([k_beta, q_T], axis=1)
+        # Batch is n_v (axis 0), contract is d_k (axis 2).
+        # Output shape: (n_v, 2 * C, C)
         S_both = jax.lax.dot_general(
             kbeta_q,
-            k,
+            k_T,
             (((2, ), (2, )), ((0, ), (0, ))),
             preferred_element_type=jnp.float32,
         )
         S = S_both[:, :C, :]
         S_q = S_both[:, C:, :]
 
-        g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
+        g_diff = g_cumsum_T[..., :, None] - g_cumsum_T[..., None, :]
         i_idx = jnp.arange(C)[:, None]
         j_idx = jnp.arange(C)[None, :]
         mask_float = (i_idx > j_idx).astype(jnp.float32)
@@ -404,50 +418,56 @@ class PrefillProcessor(ScanProcessor):
         I_plus_S = jnp.eye(C, dtype=jnp.float32)[None, ...] + S
         A_inv = invert_triangular_matrix(I_plus_S, block_size=16)
 
-        v_beta = v * beta[..., None]
-        k_beta_g = k_beta * jnp.exp(g_cumsum)[..., None]
+        v_beta = v_T * beta_T[..., None]
+        k_beta_g = k_beta * jnp.exp(g_cumsum_T)[..., None]
         vk_in = jnp.concatenate(
             [
                 v_beta,
                 k_beta_g,
             ],
             axis=2,
-        )
-        uw = jnp.matmul(A_inv, vk_in, precision=jax.lax.Precision.HIGHEST)
+        )  # (n_v, C, d_v + d_k)
+        uw = jax.lax.dot_general(
+            A_inv,
+            vk_in,
+            (((2, ), (1, )), ((0, ), (0, ))),
+            precision=jax.lax.Precision.HIGHEST,
+        )  # Output shape: (n_v, C, d_v + d_k)
         u = uw[..., :d_v]
         w = uw[..., d_v:]
 
-        q_g = q * jnp.exp(g_cumsum)[..., None]
+        q_g = q_T * jnp.exp(g_cumsum_T)[..., None]  # (n_v, C, d_k)
 
         @pl.when(should_load_init)
         def _finish_init_load():
-            self.dma.wait_in(prefill_slot, self.scratch.scratch, prefill_slot,
-                             init_state_idx)
+            self.dma.commit_in(init_copy_op, prefill_slot,
+                               self.scratch.scratch, prefill_slot)
 
-        current_state = self.scratch.scratch[prefill_slot]
-        qw = jnp.concatenate([q_g, w], axis=1)
-        comb = jnp.matmul(
+        current_state = self.scratch.scratch[prefill_slot]  # (n_v, d_k, d_v)
+
+        qw = jnp.concatenate([q_g, w], axis=1)  # (n_v, 2 * C, d_k)
+        comb = jax.lax.dot_general(
             qw,
             current_state.astype(jnp.float32),
+            (((2, ), (1, )), ((0, ), (0, ))),
             precision=jax.lax.Precision.DEFAULT,
-        )
-        attn_inter = comb[:, :C, :]
-        v_prime = comb[:, C:, :]
+        )  # Output shape: (n_v, 2 * C, d_v)
+        attn_inter, v_prime = jnp.split(comb, 2, axis=1)
 
         v_new = u - v_prime
         term2 = jnp.matmul(S_q, v_new, precision=jax.lax.Precision.HIGHEST)
-        o_c = attn_inter + term2
+        o_c = attn_inter + term2  # (n_v, C, d_v)
 
-        g_i_last_exp = jnp.exp(g_cumsum[..., -1, None, None])
-        g_diff_exp_state = jnp.exp(g_cumsum[..., -1, None] - g_cumsum)[...,
-                                                                       None]
-        k_i_g_diff = k * g_diff_exp_state
-
-        update_term = jnp.matmul(
-            k_i_g_diff.transpose(0, 2, 1),
+        g_i_last_exp = jnp.exp(g_cumsum_T[..., -1, None, None])
+        g_diff_exp_state = jnp.exp(g_cumsum_T[..., -1, None] -
+                                   g_cumsum_T)[..., None]
+        k_i_g_diff = k_T * g_diff_exp_state
+        update_term = jax.lax.dot_general(
+            k_i_g_diff,
             v_new,
+            (((1, ), (1, )), ((0, ), (0, ))),
             precision=jax.lax.Precision.DEFAULT,
-        )
+        )  # Output shape: (n_v, d_k, d_v)
         h_new = current_state * g_i_last_exp + update_term
 
         self.scratch.scratch[prefill_slot] = h_new.astype(
@@ -478,17 +498,20 @@ class PrefillProcessor(ScanProcessor):
         n_kq = self.cfg.model.n_kq
 
         first_req_id = self.schedule.schedule_table[self.schedule.step,
-                                                    11][...]
+                                                    COL_SUBLANE_REQ_IDS][...]
         first_is_first = self.schedule.schedule_table[self.schedule.step,
-                                                      11 + C_trans][...]
+                                                      COL_SUBLANE_REQ_IDS +
+                                                      C_trans][...]
         first_slot = first_req_id % 2
         first_has_init = self.has_initial_state[first_req_id][...]
         should_load_first = (first_is_first > 0) & (first_has_init > 0)
         first_state_idx = self.state_indices[first_req_id][...]
 
+        first_copy_op = self.dma.build_copy_in(first_slot, first_state_idx)
+
         @pl.when(should_load_first)
         def _start_first_load():
-            self.dma.copy_in(first_slot, first_state_idx)
+            first_copy_op.start()
 
         qkv_chunk = self.refs.qkv[:C_trans, :]
         qkv_chunk = jax.nn.silu(qkv_chunk)
@@ -531,8 +554,8 @@ class PrefillProcessor(ScanProcessor):
 
         @pl.when(should_load_first)
         def _finish_first_load():
-            self.dma.wait_in(first_slot, self.scratch.scratch, first_slot,
-                             first_state_idx)
+            self.dma.commit_in(first_copy_op, first_slot, self.scratch.scratch,
+                               first_slot)
 
         h = self.scratch.scratch[first_slot]
         current_r = first_req_id
@@ -570,9 +593,10 @@ class PrefillProcessor(ScanProcessor):
 
             def load_t_state(t_slot=t_slot, t_req=t_req):
                 state_idx = self.state_indices[t_req][...]
-                self.dma.copy_in(t_slot, state_idx)
-                self.dma.wait_in(t_slot, self.scratch.scratch, t_slot,
-                                 state_idx)
+                copy_op = self.dma.build_copy_in(t_slot, state_idx)
+                copy_op.start()
+                self.dma.commit_in(copy_op, t_slot, self.scratch.scratch,
+                                   t_slot)
 
             should_load_t = (t_is_first > 0) & (t_has_init > 0)
             jax.lax.cond(should_load_t, load_t_state, lambda: None)
@@ -844,13 +868,13 @@ class DecodeProcessor(ScanProcessor):
                 # wait for the previous same-slot store DMA (from iter b-2)
                 @pl.when(cur_slot_inflight > 0)
                 def _wait_same_slot_store():
-                    temp_desc = pltpu.make_async_copy(
+                    copy_op = pltpu.make_async_copy(
                         src_ref=self.scratch.store.at[pl.ds(slot, 1)],
                         dst_ref=self.shared.recurrent_state_out.at[pl.ds(0,
                                                                          1)],
                         sem=self.scratch.write_semaphore.at[slot],
                     )
-                    temp_desc.wait()
+                    copy_op.wait()
 
                 copy_op = pltpu.make_async_copy(
                     src_ref=self.scratch.store.at[pl.ds(slot, 1)],

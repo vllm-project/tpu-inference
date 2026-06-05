@@ -18,13 +18,11 @@
 import functools
 
 import jax
-from jax import numpy as jnp
+import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
-
-from tpu_inference.kernels.gdn.v2 import \
-    compute_schedule_v2 as compute_schedule_table_v2
-from tpu_inference.kernels.gdn.v2 import recurrent_scan_impl
+from tokamax.google.experimental.tpu.inference.gdn.ragged_kernel import (
+    compute_schedule_table_v2, recurrent_scan_impl)
 
 
 def invert_triangular_matrix(A, block_size=16):
@@ -279,11 +277,16 @@ def inner_kernel(
 
     # READ table
 
-    prefill_valid = schedule_table[step, 0][...]
-    decode_valid = schedule_table[step, 4][...]
-    decode_offset = schedule_table[step, 5][...]
-    prefill_offset = schedule_table[step, 1][...]
-    is_transition = schedule_table[step, 10][...]
+    prefill_valid = schedule_table[step,
+                                   recurrent_scan_impl.COL_PREFILL_VALID][...]
+    decode_valid = schedule_table[step,
+                                  recurrent_scan_impl.COL_DECODE_VALID][...]
+    decode_offset = schedule_table[step,
+                                   recurrent_scan_impl.COL_DECODE_OFFSET][...]
+    prefill_offset = schedule_table[
+        step, recurrent_scan_impl.COL_PREFILL_OFFSET][...]
+    is_transition = schedule_table[step,
+                                   recurrent_scan_impl.COL_IS_TRANSITION][...]
 
     # 2. Decode Branch
     @pl.when(decode_valid > 0)
@@ -324,7 +327,7 @@ def inner_kernel(
         iota = jax.lax.broadcasted_iota(jnp.int32, (sublanesize, ), 0)
         is_decode_mask = (iota < local_split).astype(jnp.int32)[:, None]
 
-        # 4. Merge the tensors
+        # 4. Merge
         merged_overlap = jnp.where(is_decode_mask, decode_overlap, prefill_arr)
 
         decode_output_ref[
@@ -372,8 +375,8 @@ def create_block_specs(
     prefill_qkv_index_map = functools.partial(
         get_qkv_index_map_v2,
         schedule_table=schedule_table,
-        valid_col=0,
-        offset_col=1,
+        valid_col=recurrent_scan_impl.COL_PREFILL_VALID,
+        offset_col=recurrent_scan_impl.COL_PREFILL_OFFSET,
         alignment=alignment,
         block_size=chunk_size,
         sink_offset=sink_offset,
@@ -382,8 +385,8 @@ def create_block_specs(
     decode_qkv_index_map = functools.partial(
         get_qkv_index_map_v2,
         schedule_table=schedule_table,
-        valid_col=4,
-        offset_col=5,
+        valid_col=recurrent_scan_impl.COL_DECODE_VALID,
+        offset_col=recurrent_scan_impl.COL_DECODE_OFFSET,
         alignment=alignment,
         block_size=BT,
         sink_offset=sink_offset,
