@@ -202,6 +202,14 @@ def _test_correctness_helper(
                        **kwargs)
         spec_outputs = spec_llm.generate(test_prompts, sampling_config)
 
+        if sampling_config.logprobs is not None:
+            for spec_output in spec_outputs:
+                completion = spec_output.outputs[0]
+                assert completion.logprobs is not None, "Logprobs should not be None"
+                assert len(completion.logprobs) == len(completion.token_ids), (
+                    f"Length mismatch: len(logprobs)={len(completion.logprobs)} vs "
+                    f"len(token_ids)={len(completion.token_ids)}")
+
         matches = 0
         misses = 0
         for ref_output, spec_output in zip(ref_outputs, spec_outputs):
@@ -432,6 +440,7 @@ def eagle3_baseline():
     "async_scheduling, enable_dp_attention",
     [
         (False, False),
+        (False, True),
         (True, False),
         (True, True),
     ],
@@ -634,3 +643,48 @@ def test_mtp_performance(
         model_name=model_name,
         extra_kwargs=extra_kwargs,
     )
+
+
+def test_eagle3_logprobs_correctness(monkeypatch: pytest.MonkeyPatch, ):
+    """Reproduction test for speculative decoding with logprobs enabled."""
+    model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
+
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
+    speculative_config = {
+        'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
+        "num_speculative_tokens": 3,
+        "method": "eagle3",
+        "draft_tensor_parallel_size": 1
+    }
+
+    sampling_config = SamplingParams(temperature=0,
+                                     max_tokens=8,
+                                     ignore_eos=True,
+                                     repetition_penalty=1,
+                                     frequency_penalty=0,
+                                     presence_penalty=0,
+                                     min_p=0,
+                                     logprobs=1)
+    test_prompts = [
+        "Predict the continuation of this sequence: 1 2 3 4 5 6 7 8"
+    ]
+
+    # Get baseline outputs with logprobs enabled
+    ref_outputs = _get_baseline_results(monkeypatch,
+                                        sampling_config,
+                                        model_name,
+                                        test_prompts,
+                                        max_num_seqs=2)
+
+    # Get speculative decoding outputs with logprobs enabled
+    _test_correctness_helper(monkeypatch,
+                             sampling_config,
+                             model_name,
+                             speculative_config,
+                             test_prompts,
+                             ref_outputs=ref_outputs,
+                             max_num_seqs=2,
+                             async_scheduling=True,
+                             enable_dp_attention=False)
