@@ -46,7 +46,7 @@ steps:
       TEST_MODEL: Qwen/Qwen3-VL-8B-Instruct
       # The default values are for tpu6e. For tpu7x, the CI procedure will export TENSOR_PARALLEL_SIZE_SINGLE=2, TENSOR_PARALLEL_SIZE_MULTI=8 automatically
       TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
-      MINIMUM_ACCURACY_THRESHOLD: 0.50
+      MINIMUM_ACCURACY_THRESHOLD: 0.72
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
