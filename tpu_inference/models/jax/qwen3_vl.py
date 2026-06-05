@@ -24,6 +24,7 @@ import torch
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
+from vllm.model_executor.models.utils import WeightsMapper
 
 from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -1724,31 +1725,14 @@ class Qwen3VLForConditionalGeneration(JaxModule, LoadableWithIterator):
         if not isinstance(weights, Iterable):
             return super().load_weights(weights)
 
-        def map_name(name: str) -> str:
-            # Remap PyTorch vision tower keys
-            if name.startswith("model.visual."):
-                name = name.replace("model.visual.", "visual.", 1)
+        mapper = WeightsMapper(orig_to_new_prefix={
+            "model.visual.": "visual.",
+            "model.language_model.": "language_model.",
+        },
+                               orig_to_new_substr={
+                                   "attn.qkv.": "attn.qkv_projection.",
+                                   "mlp.linear_fc1.": "mlp.fc1.",
+                                   "mlp.linear_fc2.": "mlp.fc2.",
+                               })
 
-                # Attention block remappings
-                if "blocks." in name:
-                    # QKV projection: name attn.qkv -> attn.qkv_proj
-                    if "attn.qkv." in name:
-                        name = name.replace("attn.qkv.",
-                                            "attn.qkv_projection.")
-                    # MLP feedforward layers: PyTorch uses linear_fc1/linear_fc2, JAX uses fc1/fc2
-                    elif "mlp.linear_fc1." in name:
-                        name = name.replace("mlp.linear_fc1.", "mlp.fc1.")
-                    elif "mlp.linear_fc2." in name:
-                        name = name.replace("mlp.linear_fc2.", "mlp.fc2.")
-
-            # Remap PyTorch language model keys (replace 'model.language_model.' with 'language_model.')
-            elif name.startswith("model.language_model."):
-                name = name.replace("model.", "", 1)
-
-            return name
-
-        def filter_weights(weights_iterator):
-            for name, weight in weights_iterator:
-                yield map_name(name), weight
-
-        return super().load_weights(filter_weights(weights))
+        return super().load_weights(mapper.apply(weights))
