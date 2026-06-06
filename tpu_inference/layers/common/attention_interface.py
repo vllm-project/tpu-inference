@@ -347,6 +347,7 @@ def sharded_ragged_paged_attention(
     # Handle GQA/MQA where num_kv_heads < tp_size
     # We replicate KV heads to match tp_size so that we can shard them evenly.
     # TODO (ranlihao): This is not performant and introduces extra overhead during inference. We need to handle this during weight loading
+    logger.info_once(f"mesh: {mesh=}")
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
     if tp_size > 1:
         num_kv_heads = k.shape[1]
@@ -406,6 +407,41 @@ def sharded_ragged_paged_attention(
         # update_kv_cache is supported by both the v3 default and batched
         # RPA kernels; only the hd64 path doesn't accept it. Default True
         # is a no-op so we don't forward it to the hd64 signature.
+        per_tp_q = args[0]
+        per_tp_k = args[1]
+        per_tp_v = args[2]
+        per_tp_kv_cache = args[3]
+        per_tp_page_indices = args[5]
+        per_tp_kv_lens = args[4]
+        per_tp_cu_q_lens = args[6]
+        per_tp_distribution = args[7]
+    # model=ModelConfigs(
+    #     num_q_heads=16,
+    #     num_kv_heads=8,
+    #     head_dim=256,
+    #     mask_value=-3.38953e+38,
+    #     sliding_window=1024,
+    # ),
+    # serve=ServingConfigs(
+    #     num_seqs=1024,
+    #     page_size=256,
+    #     total_q_tokens=4,
+    #     num_page_indices=6144,
+        # log all the shapes
+        num_kv_heads = per_tp_k.shape[1]
+        sliding_window = kwargs["sliding_window"]
+        logger.info_once(f"per_tp_q: {per_tp_q.shape}, per_tp_k: {per_tp_k.shape}, per_tp_v: {per_tp_v.shape}, "
+                        f"per_tp_kv_cache: {per_tp_kv_cache.shape}, per_tp_kv_lens: {per_tp_kv_lens.shape}, "
+                        f"per_tp_page_indices: {per_tp_page_indices.shape}, per_tp_cu_q_lens: {per_tp_cu_q_lens.shape}, "
+                        f"per_tp_distribution: {per_tp_distribution.shape}, sliding_window: {sliding_window}, num_kv_heads: {num_kv_heads}")
+        total_q_tokens = per_tp_q.shape[0]
+        with jax.disable_jit():
+            if sliding_window is not None and num_kv_heads == 8 and total_q_tokens == 1024:
+                logger.info_once(f'per_tp_page_indices: {per_tp_page_indices[:32]}')
+                logger.info_once(f'per_tp_kv_lens: {per_tp_kv_lens[:32]}')
+                logger.info_once(f'per_tp_cu_q_lens: {per_tp_cu_q_lens[:32]}')
+                logger.info_once(f'per_tp_distribution: {per_tp_distribution}')
+
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             # add the tuned block size here

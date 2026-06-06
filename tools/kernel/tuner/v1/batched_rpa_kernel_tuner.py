@@ -21,6 +21,8 @@ import jax.numpy as jnp
 import numpy as np
 from vllm.utils.math_utils import cdiv
 
+
+from tools.kernel.tuner.v1.utils import print_dataclasses_as_table
 from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
                                                             RunConfig,
                                                             TunerConfig,
@@ -36,7 +38,6 @@ from tpu_inference.utils import get_dtype_packing
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-
 
 def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
                                          rng: np.random.Generator
@@ -129,24 +130,26 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
     kv_lens = [max_input_len] * max_prefill_seqs + [0] * (
         num_seqs - max_prefill_seqs
     )  # for prefill sequence, the kv lens is max_input_len, ignore decode sequence for now
-    cu_q_lens = [0] * (num_seqs + 1)
+    logger.debug(f"{max_input_len=}, {num_seqs=}, {max_prefill_seqs=}")
+    cu_q_lens = [1] * (num_seqs + 1)
+    cu_q_lens[0] = 0
     for i in range(1, max_prefill_seqs + 1):
         cu_q_lens[i] = cu_q_lens[i - 1] + max_input_len
     page_indices = []
-    starting_page_index = 0
+    starting_page_index = 1
     for i in range(max_decode_seqs + max_prefill_seqs):
         num_pages_for_seq = cdiv(kv_lens[i], page_size)
         assert num_pages_for_seq <= pages_per_seq, f"num_pages_for_seq should not exceed pages_per_seq, but got num_pages_for_seq={num_pages_for_seq}, pages_per_seq={pages_per_seq}"
         page_indices.extend(
             list(
                 range(starting_page_index, starting_page_index +
-                      num_pages_for_seq)) + [-1] *
+                      num_pages_for_seq)) + [0] *
             (pages_per_seq - num_pages_for_seq))
         starting_page_index += num_pages_for_seq
     assert len(
         page_indices
     ) <= num_page_indices, f"len(page_indices) should not exceed num_page_indices, but got len(page_indices)={len(page_indices)}, num_page_indices={num_page_indices}"
-    page_indices.extend([-1] * (num_page_indices - len(page_indices)))
+    page_indices.extend([0] * (num_page_indices - len(page_indices)))
 
     kv_lens = jnp.array(kv_lens, dtype=jnp.int32)
     cu_q_lens = jnp.array(cu_q_lens, dtype=jnp.int32)
@@ -154,6 +157,14 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
     distribution = jnp.array([0, 0, max_prefill_seqs], dtype=jnp.int32)
     page_indices = jnp.array(page_indices, dtype=jnp.int32)
 
+    logger.debug(f'queries shape: {queries.shape}, dtype: {queries.dtype}')
+    logger.debug(f'keys shape: {keys.shape}, dtype: {keys.dtype}')
+    logger.debug(f'values shape: {values.shape}, dtype: {values.dtype}')
+    logger.debug(f'kv_cache shape: {kv_cache.shape}, dtype: {kv_cache.dtype}')
+    logger.debug(f'kv_lens shape: {kv_lens.shape}, {kv_lens[:32]=}')
+    logger.debug(f'page_indices shape: {page_indices.shape}, {page_indices[:32]=}')
+    logger.debug(f'cu_q_lens shape: {cu_q_lens.shape}, {cu_q_lens[:32]=}')
+    logger.debug(f'distribution shape: {distribution.shape}, {distribution=}')
     return {
         'queries': queries,
         'keys': keys,
@@ -226,16 +237,15 @@ class BatchedRpaKernelTuner(KernelTunerBase):
 
             def gen_bq_sz():
                 start = 8
-                yield start
-                # while start <= 256:
-                #     yield start
-                #     start += 16
+                while start <= 24:
+                    yield start
+                    start += 8
 
             for prefill_batch_size in [1, 2]:
                 for bq_sz in gen_bq_sz():
                     bq_c_sz = bq_sz
                     for bkv_sz in range(256, 513, 128):
-                        for n_buffer in [1, 2, 3, 4]:
+                        for n_buffer in [2, 3]: # when n_buffer is 1, it stucks at the second iteration.
                             tuning_cases.append(
                                 TuningCase(tuning_key=prefill_tuning_key,
                                            tunable_params=TunableParams(
@@ -245,6 +255,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                                                batch_size=prefill_batch_size,
                                                n_buffer=n_buffer)))
 
+        tuning_cases = tuning_cases[:1]  # for debug, only run 10 cases
         logger.info(f"Generated {len(tuning_cases)} tuning cases.")
         return tuning_cases
 
@@ -262,9 +273,12 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             tuning_key: TuningKey,
             tunable_params: TunableParams,
             iters: int = 1) -> tuple[TuningStatus, float, float]:
-        logger.debug(
-            f"Running mla kernel with tuning_key={tuning_key}, tunable_params={tunable_params}, iters={iters}"
-        )
+        if iters == 1:
+            logger.info(
+                f"Running batched RPA kernel for tuning key & tunable params:\n"
+            )
+            print_dataclasses_as_table(tuning_key)
+            print_dataclasses_as_table(tunable_params)
         input_cache = self.generate_inputs(tuning_key)
         prefill_block_sizes = tunable_params.to_block_sizes()
         try:
@@ -298,6 +312,10 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                     ))
             end_ns = time.perf_counter_ns()
             latency_ns = (end_ns - start_ns)
+            if iters > 1:
+                logger.info(
+                    f"latency_ns={latency_ns}, average_latency_ns={latency_ns / iters}"
+                )
             return TuningStatus.SUCCESS, latency_ns // iters, latency_ns  # status, average latency, total latency
         except Exception as err:
             if "RESOURCE_EXHAUSTED:" in str(err):

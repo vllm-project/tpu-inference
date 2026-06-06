@@ -147,7 +147,7 @@ def local_query_run_status(db_path, case_set_id, run_id):
     }
 
 
-def local_query_min_latency(db_path, case_set_id, run_id):
+def local_query_min_latency(db_path, case_set_id, run_id, show_baseline=False):
     results = _read_json(db_path, 'CaseResults')
     cases = _read_json(db_path, 'KernelTuningCases')
 
@@ -163,6 +163,8 @@ def local_query_min_latency(db_path, case_set_id, run_id):
     ]
 
     key_best = {}
+    key_baseline = {}  # tk_str -> latency for is_baseline=True rows
+    has_is_baseline_field = False
     for r in relevant:
         kv_str = case_kv_map.get((r['ID'], r['CaseId']))
         if not kv_str:
@@ -173,14 +175,28 @@ def local_query_min_latency(db_path, case_set_id, run_id):
             continue
         tk_str = json.dumps(kv.get('tuning_key', {}), sort_keys=True)
         lat = r.get('Latency', float('inf'))
+        tp = kv.get('tunable_params') or {}
+        if 'is_baseline' in tp:
+            has_is_baseline_field = True
         if tk_str not in key_best or lat < key_best[tk_str]['Latency']:
             key_best[tk_str] = {
                 'tuning_key': kv.get('tuning_key'),
-                'tunable_params': kv.get('tunable_params'),
+                'tunable_params': tp,
                 'Latency': lat,
                 'WarmupTime': r.get('WarmupTime'),
                 'CaseId': r.get('CaseId'),
             }
+        if show_baseline and tp.get('is_baseline') is True:
+            key_baseline[tk_str] = lat
+
+    if show_baseline:
+        if not has_is_baseline_field:
+            print(
+                'Warning: --show_baseline specified but no TunableParams entry '
+                'has an "is_baseline" field; ignoring --show_baseline.')
+        else:
+            for tk_str, row in key_best.items():
+                row['baseline_latency_us'] = key_baseline.get(tk_str)
 
     return sorted(key_best.values(),
                   key=lambda x: json.dumps(x['tuning_key'], sort_keys=True))
@@ -468,7 +484,7 @@ def spanner_query_run_status(db, case_set_id, run_id):
     }
 
 
-def spanner_query_min_latency(db, case_set_id, run_id):
+def spanner_query_min_latency(db, case_set_id, run_id, show_baseline=False):
     from google.cloud import \
         spanner as gspanner  # pylint: disable=import-outside-toplevel
     query = """
@@ -479,6 +495,8 @@ def spanner_query_min_latency(db, case_set_id, run_id):
         ORDER BY cr.CaseId
     """
     key_best = {}
+    key_baseline = {}  # tk_str -> latency for is_baseline=True rows
+    has_is_baseline_field = False
     with db.snapshot() as snap:
         for case_id, lat, warmup, kv_str in snap.execute_sql(
                 query,
@@ -495,14 +513,29 @@ def spanner_query_min_latency(db, case_set_id, run_id):
             except (json.JSONDecodeError, TypeError):
                 continue
             tk_str = json.dumps(kv.get('tuning_key', {}), sort_keys=True)
+            tp = kv.get('tunable_params') or {}
+            if 'is_baseline' in tp:
+                has_is_baseline_field = True
             if tk_str not in key_best or lat < key_best[tk_str]['Latency']:
                 key_best[tk_str] = {
                     'tuning_key': kv.get('tuning_key'),
-                    'tunable_params': kv.get('tunable_params'),
+                    'tunable_params': tp,
                     'Latency': lat,
                     'WarmupTime': warmup,
                     'CaseId': case_id,
                 }
+            if show_baseline and tp.get('is_baseline') is True:
+                key_baseline[tk_str] = lat
+
+    if show_baseline:
+        if not has_is_baseline_field:
+            print(
+                'Warning: --show_baseline specified but no TunableParams entry '
+                'has an "is_baseline" field; ignoring --show_baseline.')
+        else:
+            for tk_str, row in key_best.items():
+                row['baseline_latency_us'] = key_baseline.get(tk_str)
+
     return sorted(key_best.values(),
                   key=lambda x: json.dumps(x['tuning_key'], sort_keys=True))
 
@@ -650,16 +683,29 @@ def _print_flattened_table(rows,
     print(f'  ({len(rows)} result(s){count_suffix})')
 
 
-def _print_min_latency(rows, show_fields=None):
+def _print_min_latency(rows, show_fields=None, show_baseline=False):
     """Print query_min_latency results as a table."""
-    _print_flattened_table(
-        rows,
-        builtin_cols=['case_id', 'latency_us', 'warmup_us'],
-        row_builder=lambda r: {
+    has_baseline_col = show_baseline and any('baseline_latency_us' in r
+                                             for r in rows)
+    builtin_cols = ['case_id', 'latency_us']
+    if has_baseline_col:
+        builtin_cols.append('baseline_latency_us')
+    builtin_cols.append('warmup_us')
+
+    def _build_row(r):
+        d = {
             'case_id': r['CaseId'],
             'latency_us': r['Latency'],
             'warmup_us': r['WarmupTime'],
-        },
+        }
+        if has_baseline_col:
+            d['baseline_latency_us'] = r.get('baseline_latency_us')
+        return d
+
+    _print_flattened_table(
+        rows,
+        builtin_cols=builtin_cols,
+        row_builder=_build_row,
         show_fields=show_fields,
         empty_msg='  (no successful results)',
     )
@@ -763,6 +809,15 @@ def _build_parser():
               'Built-in columns: case_id, latency_us, warmup_us. '
               'Any tuning_key or tunable_params field name is also valid. '
               'Example: --show latency_us --show max_num_tokens'),
+    )
+    p.add_argument(
+        '--show_baseline',
+        action='store_true',
+        default=False,
+        help=('Add a baseline_latency_us column showing the latency of the '
+              'is_baseline=True TunableParams entry for each TuningKey. '
+              'A warning is printed and the flag is ignored if TunableParams '
+              'does not have an is_baseline field.'),
     )
 
     p = sub.add_parser(
@@ -910,10 +965,13 @@ def _run_command(args, source, db_path=None, spanner_db=None):
                     print(f'  {k}: {v}')
 
         elif args.command == 'query_min_latency':
-            _print_min_latency(local_query_min_latency(db_path,
-                                                       args.case_set_id,
-                                                       args.run_id),
-                               show_fields=args.show_fields)
+            _print_min_latency(local_query_min_latency(
+                db_path,
+                args.case_set_id,
+                args.run_id,
+                show_baseline=args.show_baseline),
+                               show_fields=args.show_fields,
+                               show_baseline=args.show_baseline)
 
         elif args.command == 'query_case_latency':
             _print_case_latency(local_query_case_latency(
@@ -962,8 +1020,12 @@ def _run_command(args, source, db_path=None, spanner_db=None):
 
         elif args.command == 'query_min_latency':
             _print_min_latency(spanner_query_min_latency(
-                spanner_db, args.case_set_id, args.run_id),
-                               show_fields=args.show_fields)
+                spanner_db,
+                args.case_set_id,
+                args.run_id,
+                show_baseline=args.show_baseline),
+                               show_fields=args.show_fields,
+                               show_baseline=args.show_baseline)
 
         elif args.command == 'query_case_latency':
             _print_case_latency(spanner_query_case_latency(
@@ -988,8 +1050,9 @@ Commands:
   count_buckets [--case_set_id ID] [--run_id ID]
   list_bucket_status [--case_set_id ID] [--run_id ID]
   query_run_status [--case_set_id ID] [--run_id ID]
-  query_min_latency [--case_set_id ID] [--run_id ID] [--show FIELD ...]
+  query_min_latency [--case_set_id ID] [--run_id ID] [--show FIELD ...] [--show_baseline]
       --show: columns to display (default: all). Built-ins: case_id, latency_us, warmup_us
+      --show_baseline: add baseline_latency_us column (requires is_baseline field in TunableParams)
   query_case_latency [--case_set_id ID] [--run_id ID] [--filter_key FIELD=VALUE ...] [--show FIELD ...] [--show_all]
       --filter_key: any key in tuning_key or tunable_params (varies by case set type)
       --show: columns to display (default: all). Built-ins: case_id, processed_status,

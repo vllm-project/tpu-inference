@@ -1237,6 +1237,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     scheduler_output) as kv_connector_output:
                 # NOTE(Wenlong): It takes both `input_ids` and `inputs_embeds`,
                 # but one of them would be `None`
+
+                # md.seq_lens, # kv_lens
+                # md.block_tables, # page_indices
+                # md.query_start_loc, # cu_q_lens
+                # md.request_distribution, # distribution
+                logger.info('---------------------------------------------------------------------------')
+                logger.info('---------------------------------------------------------------------------\n')
+                logger.info(f'{self.kv_caches[0].shape=} {input_positions[:32]=} {input_ids.shape=}')
+                logger.info(f'kv_lens.shape={attn_metadata.seq_lens.shape} kv_lens[:128] = {attn_metadata.seq_lens[:128]}')
+                logger.info(f'page_indices.shape={attn_metadata.block_tables.shape} page_indices[:128] = {attn_metadata.block_tables[:128]}')
+                logger.info(f'cu_q_lens.shape={attn_metadata.query_start_loc.shape} cu_q_lens[:128] = {attn_metadata.query_start_loc[:128]}')
+                logger.info(f'distribution.shape={attn_metadata.request_distribution.shape} distribution[:3] = {attn_metadata.request_distribution[:3]}')
                 (self.kv_caches, hidden_states, aux_hidden_states,
                  expert_indices) = self.model_fn(
                      self.state_leaves,

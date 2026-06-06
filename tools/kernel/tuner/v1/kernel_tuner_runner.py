@@ -67,7 +67,7 @@ _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'The Spanner database ID to use. Only used when --run_locally is false.')
 _WORKER_ID = flags.DEFINE_string('worker_id',
                                  os.getenv('HOST_NAME',
-                                           'unknown'), 'The worker id')
+                                           'Local' if _RUN_LOCALLY.value else 'Unknown'), 'The worker id')
 _TPU_VERSION = flags.DEFINE_string(
     'tpu_version', '',
     'The TPU version to use for tuning. Supported values are "tpu6e" and "tpu7x".'

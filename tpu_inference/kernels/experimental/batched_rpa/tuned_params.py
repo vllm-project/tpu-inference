@@ -111,24 +111,24 @@ def get_tuned_params(
     if decode_tuning_key not in tuned_params_mapping:
         from tpu_inference.kernels.experimental.batched_rpa.wrapper import \
             calculate_block_sizes
-        decode_tuned_params, _ = calculate_block_sizes(model_config,
+        decode_block_sizes, _ = calculate_block_sizes(model_config,
                                                        serve_config,
                                                        vmem_limit_bytes)
         # logger.warning(f"No tuned parameters found for the given tuning keys: {decode_tuning_key}, using calculated decode tuned params {decode_tuned_params}")
     else:
         # logger.info(f"Found tuned parameters for decode tuning key: {decode_tuning_key}")
-        decode_tuned_params = tuned_params_mapping[decode_tuning_key]
+        decode_block_sizes = tuned_params_mapping[decode_tuning_key].to_block_sizes()
     if prefill_tuning_key not in tuned_params_mapping:
         from tpu_inference.kernels.experimental.batched_rpa.wrapper import \
             calculate_block_sizes
-        _, prefill_tuned_params = calculate_block_sizes(
+        _, prefill_block_sizes = calculate_block_sizes(
             model_config, serve_config, vmem_limit_bytes)
         # logger.warning(f"No tuned parameters found for the given tuning keys: {prefill_tuning_key}, using calculated prefill tuned params {prefill_tuned_params}")
     else:
         # logger.info(f"Found tuned parameters for prefill tuning key: {prefill_tuning_key}")
-        prefill_tuned_params = tuned_params_mapping[prefill_tuning_key]
-    return decode_tuned_params.to_block_sizes(
-    ), prefill_tuned_params.to_block_sizes()
+        prefill_block_sizes = tuned_params_mapping[prefill_tuning_key].to_block_sizes()
+    return decode_block_sizes, prefill_block_sizes
+
 
 
 tuned_params_mapping: dict[TuningKey, TunableParams] = {}
