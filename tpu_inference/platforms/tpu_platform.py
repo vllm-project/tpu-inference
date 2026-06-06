@@ -8,6 +8,21 @@ import jax.numpy as jnp
 import numpy
 import torch
 import vllm.envs as vllm_envs
+
+# Monkeypatch torch.accelerator.empty_cache to ignore device_allocator error on TPU.
+if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "empty_cache"):
+    _orig_empty_cache = torch.accelerator.empty_cache
+
+    def _patched_empty_cache(*args, **kwargs):
+        try:
+            _orig_empty_cache(*args, **kwargs)
+        except RuntimeError as e:
+            if "Allocator for jax is not a DeviceAllocator" in str(e):
+                pass
+            else:
+                raise e
+
+    torch.accelerator.empty_cache = _patched_empty_cache
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -90,7 +105,8 @@ class TpuPlatform(Platform):
     dispatch_key: str = "XLA"
     ray_device_key: str = "TPU"
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
-    simple_compile_backend: str = "openxla"
+    # Bypass torch.compile; torchax defers all compilation to JAX
+    simple_compile_backend: str = "eager"
 
     supported_quantization: list[str] = [
         "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4", "modelopt_fp4",
@@ -243,18 +259,6 @@ class TpuPlatform(Platform):
                     "variable to be set and DP attention set via: --additional_config \'{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}\'"
                 )
         cls._initialize_sharding_config(vllm_config)
-
-        from vllm.config import CompilationMode
-
-        compilation_config = vllm_config.compilation_config
-
-        # TPU only supports DYNAMO_TRACE_ONCE compilation level
-        # NOTE(xiang): the compilation_config is not used by jax.
-        if compilation_config.mode != CompilationMode.DYNAMO_TRACE_ONCE:
-            compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
-
-        if compilation_config.backend == "":
-            compilation_config.backend = "openxla"
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.

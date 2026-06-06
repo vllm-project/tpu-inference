@@ -281,7 +281,6 @@ class ForbidCompile:
             info_after = original_cached_func.cache_info()
             misses_after = info_after.misses
 
-            # Check if a cache miss occurred
             if misses_after > misses_before:
                 raise RuntimeError(self.message)
 

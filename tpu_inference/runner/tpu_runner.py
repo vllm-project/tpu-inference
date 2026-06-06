@@ -84,7 +84,9 @@ from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.spec_decode.jax.utils import (
-    concat_last_sampled_tokens_and_draft_tokens, extract_last_sampled_tokens)
+    concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
+    extract_last_sampled_tokens, filter_speculative_logprobs,
+    process_and_extend_logits)
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function, to_jax_dtype, to_torch_dtype)
 
@@ -151,7 +153,11 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         if self._logprobs_tensors is not None:
             # Use materialize to ensure logprobs are ready on host when we return async results
             self._model_runner_output.logprobs = _jax_logprobs_materialize(
-                self._logprobs_tensors, self.logits_indices_selector)
+                self._logprobs_tensors,
+                self.logits_indices_selector,
+                spec_decode_metadata=self._spec_decode_metadata,
+                runner=self._runner,
+                num_reqs=self._num_reqs)
 
         if self._prompt_logprobs_async_data is not None:
             self._model_runner_output.prompt_logprobs_dict = (
@@ -252,6 +258,7 @@ def _substitute_placeholder_token(
     new_token_values = next_tokens[token_in_tpu_pre_next_tokens_indices]
     original_values = input_ids[token_in_tpu_cur_input_indices]
     update_values = jnp.where(mask, new_token_values, original_values)
+
     return input_ids.at[token_in_tpu_cur_input_indices].set(update_values)
 
 
@@ -281,7 +288,10 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
 def _jax_logprobs_materialize(
         logprobs_tensors: LogprobsTensors,
         logits_indices_selector: Optional[List[int]] = None,
-        cu_num_generated_tokens: Optional[Any] = None) -> LogprobsLists:
+        cu_num_generated_tokens: Optional[Any] = None,
+        spec_decode_metadata: Optional[SpecDecodeMetadata] = None,
+        runner: Optional[Any] = None,
+        num_reqs: Optional[int] = None) -> LogprobsLists:
     """Materializes logprobs from JAX arrays into NumPy-backed LogprobsLists."""
     log_token_ids = np.asarray(
         jax.device_get(logprobs_tensors.logprob_token_ids))
@@ -289,10 +299,43 @@ def _jax_logprobs_materialize(
     selected_token_ranks = np.asarray(
         jax.device_get(logprobs_tensors.selected_token_ranks))
 
-    if logits_indices_selector is not None:
-        log_token_ids = log_token_ids[logits_indices_selector]
-        logprobs_arr = logprobs_arr[logits_indices_selector]
-        selected_token_ranks = selected_token_ranks[logits_indices_selector]
+    # For speculative decoding, we need to filter and reorganize the materialized
+    # logprobs. The raw logprobs contain info for all proposed draft tokens (including
+    # rejected ones) and bonus tokens. We filter them to only keep the accepted
+    # draft tokens and the actual bonus token for each request, and flatten them
+    # back to match the output format.
+    if (spec_decode_metadata is not None
+            and np.sum(spec_decode_metadata.draft_lengths_cpu) > 0):
+        assert runner is not None
+        vocab_size = runner.input_batch.vocab_size
+        dp_size = runner.dp_size
+        num_reqs = runner.input_batch.num_reqs if num_reqs is None else num_reqs
+
+        (
+            log_token_ids,
+            logprobs_arr,
+            selected_token_ranks,
+            cu_num_generated_tokens,
+        ) = filter_speculative_logprobs(
+            log_token_ids,
+            logprobs_arr,
+            selected_token_ranks,
+            spec_decode_metadata,
+            vocab_size,
+            dp_size,
+            num_reqs,
+        )
+
+    else:
+        if logits_indices_selector is not None:
+            log_token_ids = log_token_ids[logits_indices_selector]
+            logprobs_arr = logprobs_arr[logits_indices_selector]
+            selected_token_ranks = selected_token_ranks[
+                logits_indices_selector]
+
+        if cu_num_generated_tokens is None and runner is not None:
+            num_reqs = runner.input_batch.num_reqs if num_reqs is None else num_reqs
+            cu_num_generated_tokens = list(range(num_reqs + 1))
 
     return LogprobsLists(
         logprob_token_ids=np.array(log_token_ids.tolist()),
@@ -939,23 +982,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          )
         self.execute_model_state = None
 
-        if grammar_output is not None:
-            (
-                require_struct_decoding, grammar_bitmask_padded, arange
-            ) = self.structured_decoding_manager.prepare_structured_decoding_input(
-                logits, grammar_output)
-            logits = self.structured_decoding_manager.structured_decode_fn(
-                require_struct_decoding,
-                grammar_bitmask_padded,
-                logits,
-                arange,
-            )
-        return self._sample_from_logits(
-            scheduler_output, attn_metadata, sampling_metadata, input_ids,
-            hidden_states, logits, aux_hidden_states, spec_decode_metadata,
-            kv_connector_output, logits_indices_selector, padded_num_reqs,
-            expert_indices, full_hidden_states, full_logits, req_ids_dp,
-            padded_num_scheduled_tokens_per_dp_rank)
+        with jax.set_mesh(self.mesh):
+            if grammar_output is not None:
+                (
+                    require_struct_decoding, grammar_bitmask_padded, arange
+                ) = self.structured_decoding_manager.prepare_structured_decoding_input(
+                    logits, grammar_output)
+                logits = self.structured_decoding_manager.structured_decode_fn(
+                    require_struct_decoding,
+                    grammar_bitmask_padded,
+                    logits,
+                    arange,
+                )
+            return self._sample_from_logits(
+                scheduler_output, attn_metadata, sampling_metadata, input_ids,
+                hidden_states, logits, aux_hidden_states, spec_decode_metadata,
+                kv_connector_output, logits_indices_selector, padded_num_reqs,
+                expert_indices, full_hidden_states, full_logits, req_ids_dp,
+                padded_num_scheduled_tokens_per_dp_rank)
 
     def _modify_prev_results(self):
         # If copy to host has not been done, we just wait.
@@ -1264,6 +1308,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             step_rng = self.rng_params_for_sampling
 
+        processed_bonus_logits = None
         if spec_decode_metadata is None:
             logits = logits.astype(jnp.float32)
             with self.maybe_forbid_compile:
@@ -1281,7 +1326,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 rejection_rng = step_rng
             bonus_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.bonus_logits_indices)
-            bonus_token_ids, _ = sample(
+            bonus_token_ids, processed_bonus_logits = sample(
                 bonus_rng,
                 self.mesh,
                 bonus_logits,
@@ -1307,11 +1352,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if full_logits is not None:
             full_logits = full_logits.astype(jnp.float32)
         with self.maybe_forbid_compile:
-
             if tpu_sampling_metadata.logprobs:
-                logits = processed_logits if self.model_config.logprobs_mode == "processed_logprobs" else logits
+                if spec_decode_metadata is not None:
+                    with jax.set_mesh(self.mesh):
+                        if (self.model_config.logprobs_mode
+                                == "processed_logprobs"
+                                and tpu_sampling_metadata.do_sampling):
+                            extended_logits = process_and_extend_logits(
+                                self.mesh, target_logits,
+                                processed_bonus_logits, spec_decode_metadata,
+                                tpu_sampling_metadata)
+                        else:
+                            extended_logits = extend_logits_simple(
+                                target_logits, bonus_logits, self.mesh)
+
+                        logprobs_logits = extended_logits
+                else:
+                    logprobs_logits = (processed_logits
+                                       if self.model_config.logprobs_mode
+                                       == "processed_logprobs" else logits)
                 logprobs = compute_and_gather_logprobs(
-                    logits, next_tokens, self.model_config.max_logprobs)
+                    logprobs_logits, next_tokens,
+                    self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
             else:
                 logprobs = None
@@ -1480,7 +1542,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if logprobs is not None:
             # Use materialize to ensure logprobs are ready on host when we return async results
             logprobs_lists = _jax_logprobs_materialize(
-                logprobs, logits_indices_selector)
+                logprobs,
+                logits_indices_selector,
+                spec_decode_metadata=spec_decode_metadata,
+                runner=self,
+                num_reqs=num_reqs)
         else:
             logprobs_lists = None
 
@@ -2176,6 +2242,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     all_token_indices_to_substitute)
                 token_in_tpu_pre_next_tokens_indices = np.array(
                     all_pre_next_tokens_indices)
+
                 input_ids = self._apply_async_token_substitution(
                     input_ids, next_tokens, token_in_tpu_cur_input_indices,
                     token_in_tpu_pre_next_tokens_indices)
