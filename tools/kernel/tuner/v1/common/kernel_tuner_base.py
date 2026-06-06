@@ -460,10 +460,13 @@ class KernelTunerBase(ABC):
                     cid, end_case_id, parent_step_key=parent_step_key)
                 bucket_fully_processed = False
                 break
+            logger.info("marker 1")
             last_processed_case_id = cid
             if cid in processed_ids:
+                logger.info("marker 2")
                 continue
             assert cid in all_configs, f"CaseId {cid} is missing in the configs retrieved from storage manager for CaseSetId {self.run_config.case_set_id}. This should not happen as the configs should have been generated and stored in the storage manager before."
+            logger.info("marker 3")
             _, _, case_key_value = all_configs[cid]
             tuning_key, tunable_params = TuningCase.from_string(
                 case_key_value, self.tuner_config.tuning_key_class,
@@ -471,9 +474,11 @@ class KernelTunerBase(ABC):
 
             begin_case_id_time = time.perf_counter_ns()
             # status can be SUCCESS, FAILED_OOM, UNKNOWN_ERROR.
+            logger.info('marker 4')
             status, warmup_ns, _ = self.run(tuning_key,
                                             tunable_params,
                                             iters=1)
+            logger.info('marker 5')
             if status != TuningStatus.SUCCESS:
                 results_buffer.append(
                     (self.run_config.case_set_id, self.run_config.run_id, cid,
@@ -485,13 +490,16 @@ class KernelTunerBase(ABC):
                 )
                 continue
             warmup_us = int(warmup_ns // 1000)
+            logger.info('marker 6')
 
             status, average_latency_ns, _ = self.run(tuning_key,
                                                      tunable_params,
                                                      iters=10)
             end_time = time.perf_counter_ns()
             total_time = end_time - begin_case_id_time
+            logger.info('marker 7')
             if status != TuningStatus.SUCCESS:
+                logger.info('marker 8')
                 results_buffer.append(
                     (self.run_config.case_set_id, self.run_config.run_id, cid,
                      status.value, FLAGS.worker_id, warmup_us, 0, 0,
@@ -504,31 +512,39 @@ class KernelTunerBase(ABC):
 
             average_latency_us = int(average_latency_ns // 1000)
             total_time_us = int(total_time // 1000)
+            logger.info('marker 9')
             results_buffer.append(
                 (self.run_config.case_set_id, self.run_config.run_id, cid,
                  status.value, FLAGS.worker_id, average_latency_us, warmup_us,
                  total_time_us, self.storage_manager.get_timestamp_sec(),
                  self.run_config.tpu_queue_multi))
-
+            logger.info('marker 10')
             if FLAGS.debug:
                 logger.info(
                     f"Case {cid} completed with AvgLat={average_latency_us}us, Warmup={warmup_us}us, Total={total_time_us}us"
                 )
 
             if len(results_buffer) >= 10:
+                logger.info('marker 11')
                 self.storage_manager.save_results_batch(results_buffer)
                 results_buffer = []
+            logger.info('marker 12')
 
+        logger.info('marker 13')
         self.storage_manager.save_results_batch(results_buffer)
 
         bucket_total_time_us = int(
             (time.perf_counter() - bucket_start_perf) * 1_000_000)
+        logger.info('marker 14')
         self.storage_manager.add_bucket_processed_time_us(
             self.run_config.case_set_id, self.run_config.run_id, bucket_id,
             bucket_total_time_us)
+        logger.info('marker 15')
         if bucket_fully_processed:
+            logger.info('marker 15.1')
             self.storage_manager.mark_bucket_completed(
                 self.run_config.case_set_id, self.run_config.run_id, bucket_id)
+        logger.info('marker 16')
         logger.info(
             f"Worker [{FLAGS.worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
         )
