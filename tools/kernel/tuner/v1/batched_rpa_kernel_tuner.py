@@ -255,7 +255,6 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                                                batch_size=prefill_batch_size,
                                                n_buffer=n_buffer)))
 
-        tuning_cases = tuning_cases[:1]  # for debug, only run 10 cases
         logger.info(f"Generated {len(tuning_cases)} tuning cases.")
         return tuning_cases
 
