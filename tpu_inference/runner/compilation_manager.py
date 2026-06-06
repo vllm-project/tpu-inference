@@ -26,6 +26,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
+from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
@@ -1596,7 +1597,7 @@ class CompilationManager:
             self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
 
         user_max_decode_steps = self.runner.vllm_config.additional_config.get(
-            "max_decode_steps", 10)
+            "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
 
         # We only need to compile once for user_max_decode_steps
 
