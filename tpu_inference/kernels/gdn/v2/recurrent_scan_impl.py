@@ -23,6 +23,12 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+
+def l2_normalize(x, eps=1e-6):
+    rnorm = jax.lax.rsqrt(jnp.sum(x * x, axis=-1, keepdims=True) + eps)
+    return x * rnorm
+
+
 # 1. Dataclasses for holding references to inputs/outputs and shared data.
 # These are passed as arguments to the processor classes.
 
@@ -215,10 +221,6 @@ class ScanProcessor:
         self.state_indices = state_indices
         self.has_initial_state = has_initial_state
 
-    def l2_normalize(self, x, eps=1e-6):
-        rnorm = jax.lax.rsqrt(jnp.sum(x * x, axis=-1, keepdims=True) + eps)
-        return x * rnorm
-
 
 def invert_triangular_matrix(A, block_size=16):
     """Inverts a unit lower triangular matrix A block-wise.
@@ -348,11 +350,9 @@ class PrefillProcessor(ScanProcessor):
             # jax.errors.JaxRuntimeError: INTERNAL: Mosaic failed to compile TPU kernel: failed to legalize operation
             # 'math.log1p': %7302 = "math.log1p"(%7295) <{fastmath =
             # #arith.fastmath<none>}> : (vector<8x128x2xbf16>) -> vector<8x128x2xbf16>
-            self.shared.a_log[...].astype(
-                jnp.float32))[:, None] * jax.nn.softplus(
-                    # same issue with the cast here
-                    a_raw_processed_T +
-                    self.shared.dt_bias[...].astype(jnp.float32)[:, None])
+            self.shared.a_log[...])[:, None] * jax.nn.softplus(
+                # same issue with the cast here
+                a_raw_processed_T + self.shared.dt_bias[...][:, None])
         g_T = jnp.maximum(g_T, -100.0)
 
         prefill_count = self.schedule.prefill_count
@@ -368,8 +368,8 @@ class PrefillProcessor(ScanProcessor):
         v = v.reshape(C, n_v, d_v)
 
         if self.cfg.use_qk_norm_in_gdn:
-            q = self.l2_normalize(q)
-            k = self.l2_normalize(k)
+            q = l2_normalize(q)
+            k = l2_normalize(k)
 
         # Note: fusing transpose with (vmatpush.xpose) made it slower,
         # This has better instruction pipelining
@@ -543,8 +543,8 @@ class PrefillProcessor(ScanProcessor):
         v = v.reshape(C_trans, n_v, d_v)
 
         if self.cfg.use_qk_norm_in_gdn:
-            q = self.l2_normalize(q)
-            k = self.l2_normalize(k)
+            q = l2_normalize(q)
+            k = l2_normalize(k)
 
         repeat_factor = self.cfg.model.repeat_factor
         if repeat_factor > 1:
@@ -773,8 +773,8 @@ class DecodeProcessor(ScanProcessor):
                 v = qkv_row[:, 2 * key_dim:].reshape(n_v, d_v)
 
                 if use_qk_norm_in_gdn:
-                    q = self.l2_normalize(q)
-                    k = self.l2_normalize(k)
+                    q = l2_normalize(q)
+                    k = l2_normalize(k)
 
                 # Head repetition
                 if repeat_factor > 1:

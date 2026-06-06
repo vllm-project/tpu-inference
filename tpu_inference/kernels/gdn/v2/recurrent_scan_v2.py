@@ -177,7 +177,7 @@ def inner_kernel(
 
     schedule = recurrent_scan_impl.ScheduleStep(schedule_table, step)
 
-    shared = recurrent_scan_impl.SharedRefs(
+    shared_refs = recurrent_scan_impl.SharedRefs(
         a_log=a_log_ref,
         dt_bias=dt_bias_ref,
         recurrent_state_in=recurrent_state_in,
@@ -207,7 +207,7 @@ def inner_kernel(
         state_indices=state_indices,
         has_initial_state=has_initial_state,
         refs=prefill_refs,
-        shared=shared,
+        shared=shared_refs,
         scratch=prefill_scratch_refs,
         dma=prefill_dma,
     )
@@ -238,7 +238,7 @@ def inner_kernel(
         state_indices=state_indices,
         has_initial_state=has_initial_state,
         refs=decode_refs,
-        shared=shared,
+        shared=shared_refs,
         scratch=decode_scratch,
         dma=decode_dma_in,
     )
