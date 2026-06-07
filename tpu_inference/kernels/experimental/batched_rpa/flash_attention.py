@@ -22,7 +22,7 @@ from tpu_inference.kernels.experimental.batched_rpa import configs, utils
 
 def flash_attention_qk_softmax(
     q: jax.Array,  # [B, KV, TQ, H]
-    k: jax.Array,  # [B, KV, S, H]
+    k: jax.Array,  # [B, KV, S, H] or [B, KV, H, S]
     m_prev: jax.Array,  # [B, KV, TQ, 128]
     l_prev: jax.Array,  # [B, KV, TQ, 128]
     *,
@@ -34,7 +34,6 @@ def flash_attention_qk_softmax(
 ):
     """Flash attention kernel."""
     b, k_heads, tq, _ = q.shape
-    s = k.shape[2]
 
     if cfgs.serve.scale_q is not None:
         q = q / cfgs.serve.scale_q
@@ -45,12 +44,23 @@ def flash_attention_qk_softmax(
             q = jnp.clip(q, min=minval, max=maxval)
         q = q.astype(k.dtype)
 
-    qk = lax.dot_general(
-        pltpu.einshape("bkth->(bk)th", q, True),
-        pltpu.einshape("bksh->(bk)sh", k, True),
-        dimension_numbers=(([2], [2]), ([0], [0])),
-        preferred_element_type=jnp.float32,
-    ).astype(cfgs.serve.dtype_out)
+    if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
+        s = k.shape[3]
+        qk = lax.dot_general(
+            pltpu.einshape("bkth->(bk)th", q, True),
+            pltpu.einshape("bkhs->(bk)hs", k, True),
+            dimension_numbers=(([2], [1]), ([0], [0])),
+            preferred_element_type=jnp.float32,
+        ).astype(cfgs.serve.dtype_out)
+    else:
+        s = k.shape[2]
+        qk = lax.dot_general(
+            pltpu.einshape("bkth->(bk)th", q, True),
+            pltpu.einshape("bksh->(bk)sh", k, True),
+            dimension_numbers=(([2], [2]), ([0], [0])),
+            preferred_element_type=jnp.float32,
+        ).astype(cfgs.serve.dtype_out)
+
     qk = pltpu.einshape("(bk)ts->bkts", qk, True, b=b)
 
     qk *= cfgs.model.sm_scale
@@ -66,11 +76,11 @@ def flash_attention_qk_softmax(
 
     int_ty = cfgs.serve.int_ty
 
-    for b_idx in range(cfgs.block.batch_size):
+    for b_idx in range(b):
         kv_idx_b = (lax.broadcasted_iota(int_ty, (k_heads, tq, s), 2) +
                     processed_kv_len[b_idx])
         q_idx_b = (lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1) //
-                   cfgs.model.num_q_heads_per_kv_head +
+                   cfgs.aligned_num_q_heads_per_kv_head +
                    bq_start).astype(int_ty) + processed_q_len[b_idx]
 
         eff_kv_len_b = effective_kv_len[b_idx]
@@ -97,19 +107,27 @@ def flash_attention_qk_softmax(
 
 def flash_attention_pv(
     p: jax.Array,  # [B, KV, TQ, S]
-    v: jax.Array,  # [B, KV, S, H]
+    v: jax.Array,  # [B, KV, S, H] or [B, KV, H, S]
     alpha: jax.Array,  # [B, KV, TQ, 128]
     o_prev: jax.Array,  # [B, KV, TQ, H]
     cfgs: configs.RpaConfigs,
 ):
     """Flash attention kernel."""
     b = p.shape[0]
-    pv = lax.dot_general(
-        pltpu.einshape("bkts->(bk)ts", p, True),
-        pltpu.einshape("bksh->(bk)sh", v, True),
-        dimension_numbers=(([2], [1]), ([0], [0])),
-        preferred_element_type=jnp.float32,
-    ).astype(cfgs.serve.dtype_out)
+    if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
+        pv = lax.dot_general(
+            pltpu.einshape("bkts->(bk)ts", p, True),
+            pltpu.einshape("bkhs->(bk)hs", v, True),
+            dimension_numbers=(([2], [2]), ([0], [0])),
+            preferred_element_type=jnp.float32,
+        ).astype(cfgs.serve.dtype_out)
+    else:
+        pv = lax.dot_general(
+            pltpu.einshape("bkts->(bk)ts", p, True),
+            pltpu.einshape("bksh->(bk)sh", v, True),
+            dimension_numbers=(([2], [1]), ([0], [0])),
+            preferred_element_type=jnp.float32,
+        ).astype(cfgs.serve.dtype_out)
     pv = pltpu.einshape("(bk)th->bkth", pv, True, b=b)
 
     if cfgs.serve.scale_v is not None:

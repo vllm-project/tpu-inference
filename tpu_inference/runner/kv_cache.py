@@ -22,7 +22,6 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 import tpu_inference.envs as envs
 import tpu_inference.kernels.mla.v2.kernel as mla
-import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -32,6 +31,13 @@ from tpu_inference.utils import to_jax_dtype
 logger = init_logger(__name__)
 
 DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
+
+if envs.USE_BATCHED_RPA_KERNEL:
+    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
+    logger.info_once("Using experimental batched RPA kernel")
+else:
+    import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
+    logger.info_once("Using default RPA kernel")
 
 
 @dataclass
