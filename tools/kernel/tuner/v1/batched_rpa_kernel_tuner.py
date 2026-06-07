@@ -235,7 +235,9 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                     for bq_c_sz in range(bq_sz, bq_sz + 1, 8):
                         if bq_sz % bq_c_sz != 0:
                             continue
-                        for bkv_sz in range(128, 1025, 128):
+                        for bkv_sz in range(256, 1025, 256):
+                            if bkv_sz % prefill_tuning_key.page_size != 0: # requirement from scheduler
+                                continue
                             for n_buffer in [2, 3]: # when n_buffer is 1, it stucks at the second iteration.
                                 tuning_cases.append(
                                     TuningCase(tuning_key=prefill_tuning_key,

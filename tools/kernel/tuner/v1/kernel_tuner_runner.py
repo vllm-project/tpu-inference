@@ -93,6 +93,12 @@ _MAX_EXECUTION_MINUTES = flags.DEFINE_integer(
     'Only used when the kernel tuning job is scheduled through Buildkite. The maximum execution time in minutes for each kernel tuning job. If the job exceeds this time, it will save the job progresss, generate a new job to be scheduled by Buildkite and exit.'
 )
 
+_JOB_BUCKET_SIZE = flags.DEFINE_integer(
+    'job_bucket_size', 500,
+    'The number of cases to include in each tuning job. Only used when --generate_buildkite_pipeline is false and --run_locally is false. Default is 500.'
+)
+
+
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system
 # if we have more kernel tuners. For example, we can define an interface for
@@ -160,6 +166,7 @@ def main(argv):
                            tpu_queue_multi=tpu_queue_multi,
                            run_locally=_RUN_LOCALLY.value,
                            job_priority=_JOB_PRIORITY.value,
+                           job_bucket_size=_JOB_BUCKET_SIZE.value,
                            max_execution_minutes=_MAX_EXECUTION_MINUTES.value)
     kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
     kernel_tuner = kernel_tuner_cls(run_config=run_config)
