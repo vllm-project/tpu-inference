@@ -93,6 +93,9 @@ class TunableParams:
                                   bkv_sz=self.bkv_sz,
                                   batch_size=self.batch_size,
                                   n_buffer=self.n_buffer)
+    
+    def __ge__(self, other) -> bool:
+        return self.bq_sz >= other.bq_sz and self.bq_c_sz >= other.bq_c_sz and self.bkv_sz >= other.bkv_sz and self.batch_size >= other.batch_size
 
 
 def get_tuned_params(

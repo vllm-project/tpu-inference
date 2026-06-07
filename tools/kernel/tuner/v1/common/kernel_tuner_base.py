@@ -443,6 +443,7 @@ class KernelTunerBase(ABC):
         results_buffer = []
         bucket_fully_processed = True
         last_processed_case_id = begin_case_id - 1
+        all_processed_cases_status = []
         for cid in range(begin_case_id, end_case_id):
             time_elapsed_minutes = (time.perf_counter() -
                                     bucket_start_perf) / 60
@@ -469,6 +470,19 @@ class KernelTunerBase(ABC):
                 case_key_value, self.tuner_config.tuning_key_class,
                 self.tuner_config.tunable_params_class)
 
+            # check whether tuning_key is same as last one and if last one is OOM, then we can skip
+            if any(tuning_key == k and s == TuningStatus.FAILED_OOM and p <= tunable_params for k, p, s in all_processed_cases_status):
+                logger.warning(
+                    f"Skipping CaseId {cid} with tuning key {tuning_key} and tunable params {tunable_params} because it is expected to fail with OOM based on previous cases."
+                )
+                results_buffer.append(
+                    (self.run_config.case_set_id, self.run_config.run_id, cid,
+                     TuningStatus.SKIPPED.value, FLAGS.worker_id, 0, 0, 0,
+                     self.storage_manager.get_timestamp_sec(),
+                     self.run_config.tpu_queue_multi))
+                all_processed_cases_status.append([tuning_key, tunable_params, TuningStatus.SKIPPED])
+                continue
+
             begin_case_id_time = time.perf_counter_ns()
             # status can be SUCCESS, FAILED_OOM, UNKNOWN_ERROR.
             status, warmup_ns, _ = self.run(tuning_key,
@@ -483,6 +497,8 @@ class KernelTunerBase(ABC):
                 logger.warning(
                     f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
                 )
+                all_processed_cases_status.append([tuning_key, tunable_params, status])
+                last_run_status = status
                 continue
             warmup_us = int(warmup_ns // 1000)
 
@@ -500,6 +516,7 @@ class KernelTunerBase(ABC):
                 logger.warning(
                     f"Case {cid} failed during main run with status: {status}. Total time spent: {total_time/1e9:.2f}s."
                 )
+                all_processed_cases_status.append([tuning_key, tunable_params, status])
                 continue
 
             average_latency_us = int(average_latency_ns // 1000)
@@ -509,6 +526,7 @@ class KernelTunerBase(ABC):
                  status.value, FLAGS.worker_id, average_latency_us, warmup_us,
                  total_time_us, self.storage_manager.get_timestamp_sec(),
                  self.run_config.tpu_queue_multi))
+            all_processed_cases_status.append([tuning_key, tunable_params, status])
 
             if FLAGS.debug:
                 logger.info(
