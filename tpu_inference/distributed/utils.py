@@ -75,7 +75,7 @@ def get_transfer_channel_number() -> str:
 
 def get_enable_d2h_transfer() -> bool:
     """Check if device-to-host transfer is enabled via environment variable."""
-    enable_str = os.getenv("TPU_ENABLE_D2H_TRANSFER", "false").lower()
+    enable_str = os.getenv("TPU_ENABLE_D2H_TRANSFER", "true").lower()
     return enable_str in ("true", "1", "yes")
 
 
