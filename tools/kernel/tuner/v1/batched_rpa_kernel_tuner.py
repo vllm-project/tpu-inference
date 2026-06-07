@@ -218,42 +218,33 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             prefill_tunable_params = TunableParams(**asdict(
                 prefill_tuned_block_size),
                                                    is_baseline=True)
-            # add the baseline case from log for comparison
-            # not doing decode tuning now
-            # tuning_cases.append(
-            #     TuningCase(tuning_key=decode_tuning_key,
-            #                tunable_params=decode_tunable_params))
             if serve_config.total_q_tokens < 1024:  # batched_rpa_0
                 continue
             tuning_cases.append(
                 TuningCase(tuning_key=prefill_tuning_key,
                            tunable_params=prefill_tunable_params))
-            bq_sz = prefill_tunable_params.bq_sz
+
             bq_c_sz = prefill_tunable_params.bq_c_sz
             bkv_sz = prefill_tunable_params.bkv_sz
             batch_size = prefill_tunable_params.batch_size
             n_buffer = prefill_tunable_params.n_buffer
             total_q_tokens = serve_config.total_q_tokens
 
-            def gen_bq_sz():
-                start = 8
-                while start <= 24:
-                    yield start
-                    start += 8
-
             for prefill_batch_size in [1, 2]:
-                for bq_sz in gen_bq_sz():
-                    bq_c_sz = bq_sz
-                    for bkv_sz in range(256, 513, 128):
-                        for n_buffer in [2, 3]: # when n_buffer is 1, it stucks at the second iteration.
-                            tuning_cases.append(
-                                TuningCase(tuning_key=prefill_tuning_key,
-                                           tunable_params=TunableParams(
-                                               bq_sz=bq_sz,
-                                               bq_c_sz=bq_c_sz,
-                                               bkv_sz=bkv_sz,
-                                               batch_size=prefill_batch_size,
-                                               n_buffer=n_buffer)))
+                for bq_sz in range(8, 513, 8):
+                    for bq_c_sz in range(bq_sz, bq_sz + 1, 8):
+                        if bq_sz % bq_c_sz != 0:
+                            continue
+                        for bkv_sz in range(128, 1025, 128):
+                            for n_buffer in [2, 3]: # when n_buffer is 1, it stucks at the second iteration.
+                                tuning_cases.append(
+                                    TuningCase(tuning_key=prefill_tuning_key,
+                                            tunable_params=TunableParams(
+                                                bq_sz=bq_sz,
+                                                bq_c_sz=bq_c_sz,
+                                                bkv_sz=bkv_sz,
+                                                batch_size=prefill_batch_size,
+                                                n_buffer=n_buffer)))
 
         logger.info(f"Generated {len(tuning_cases)} tuning cases.")
         return tuning_cases
