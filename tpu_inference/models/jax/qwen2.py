@@ -185,6 +185,7 @@ class Qwen2Attention(JaxModule):
         kv_cache: Optional[jax.Array],
         x: jax.Array,
         attention_metadata: AttentionMetadata,
+        layer_idx: Optional[int] = None,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
         # q: (T, N, H)
@@ -219,6 +220,7 @@ class Qwen2Attention(JaxModule):
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            layer_idx=layer_idx,
         )
         # (T, D)
         o = self.o_proj(outputs)
@@ -276,12 +278,14 @@ class Qwen2DecoderLayer(JaxModule):
         kv_cache: jax.Array,
         x: jax.Array,
         attention_metadata: AttentionMetadata,
+        layer_idx: Optional[int] = None,
     ) -> Tuple[jax.Array, jax.Array]:
         hidden_states = self.input_layernorm(x)
         kv_cache, attn_output = self.self_attn(
             kv_cache,
             hidden_states,
             attention_metadata,
+            layer_idx=layer_idx,
         )
         attn_output += x
 
@@ -363,17 +367,34 @@ class Qwen2Model(JaxModule):
         else:
             x = self.embed_tokens(input_ids)
 
-        for i, layer in enumerate(
-                islice(self.layers, self.start_layer, self.end_layer)):
-            kv_cache = kv_caches[i]
-            kv_cache, x = layer(
-                kv_cache,
-                x,
-                attention_metadata,
-            )
-            kv_caches[i] = kv_cache
+        # Check if we are using unified KV cache
+        is_unified = len(kv_caches) == 1 and (self.end_layer - self.start_layer) > 1
+
+        if is_unified:
+            large_kv_cache = kv_caches[0]
+            for i, layer in enumerate(
+                    islice(self.layers, self.start_layer, self.end_layer)):
+                large_kv_cache, x = layer(
+                    large_kv_cache,
+                    x,
+                    attention_metadata,
+                    layer_idx=i,
+                )
+            new_kv_caches = [large_kv_cache]
+        else:
+            for i, layer in enumerate(
+                    islice(self.layers, self.start_layer, self.end_layer)):
+                kv_cache = kv_caches[i]
+                kv_cache, x = layer(
+                    kv_cache,
+                    x,
+                    attention_metadata,
+                )
+                kv_caches[i] = kv_cache
+            new_kv_caches = kv_caches
+
         x = self.norm(x)
-        return kv_caches, x
+        return new_kv_caches, x
 
 
 class Qwen2ForCausalLM(JaxModule, LoadableWithIterator):

@@ -434,6 +434,7 @@ def attention(
     v_scale: float | None = None,
     sinks: jax.Array | None = None,
     update_kv_cache: bool = True,
+    layer_idx: int | None = None,  # Added layer_idx for unified cache
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -455,13 +456,21 @@ def attention(
 
     md = attention_metadata
 
+    if layer_idx is not None:
+        # kv_cache is actually the 6D unified cache
+        large_kv_cache = kv_cache
+        # Slice out the 5D view for this layer
+        sliced_kv_cache = large_kv_cache[:, layer_idx, ...]
+    else:
+        sliced_kv_cache = kv_cache
+
     # (T, N, H)
-    output, kv_cache = sharded_ragged_paged_attention(
+    output, new_sliced_kv_cache = sharded_ragged_paged_attention(
         mesh,
         q,
         k,
         v,
-        kv_cache,
+        sliced_kv_cache,
         md.seq_lens,
         md.block_tables,
         md.query_start_loc,
@@ -475,7 +484,14 @@ def attention(
         update_kv_cache=update_kv_cache,
     )
 
-    return kv_cache, output
+    if layer_idx is not None:
+        # Update the 6D unified cache in-place with the new slice
+        new_kv_cache = large_kv_cache.at[:, layer_idx, ...].set(new_sliced_kv_cache)
+    else:
+        new_kv_cache = new_sliced_kv_cache
+
+    return new_kv_cache, output
+
 
 
 def mla_attention(

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import dataclasses
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Tuple, Dict, Any
 
 import jax
 import jax.numpy as jnp
@@ -44,6 +44,7 @@ from tpu_inference.offload.utils import get_kv_connector_cache_layout
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache import (KVCacheMetadata, create_kv_caches,
+                                           create_unified_kv_cache,
                                            get_attention_page_size_bytes)
 
 if TYPE_CHECKING:
@@ -63,6 +64,22 @@ def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
         attn_module, DeepseekV4SWACache) or isinstance(
             attn_module, DeepseekV4MLAAttention) or isinstance(
                 attn_module, CompressorStateCache)
+
+
+def _unpack_kv_caches(kv_caches: List[Any],
+                      attn_flat_indices: Tuple[int, ...],
+                      mamba_flat_indices: Tuple[int, ...],
+                      num_total_caches: int) -> List[Any]:
+    if not attn_flat_indices:
+        return kv_caches
+
+    large_attn_cache = kv_caches[0]
+    unpacked = [None] * num_total_caches
+    for i, flat_idx in enumerate(attn_flat_indices):
+        unpacked[flat_idx] = large_attn_cache[:, i, ...]
+    for i, flat_idx in enumerate(mamba_flat_indices):
+        unpacked[flat_idx] = kv_caches[1 + i]
+    return unpacked
 
 
 class KVCacheManager:
@@ -747,6 +764,17 @@ class KVCacheManager:
                             ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
                     break
 
+        # Classify tensors and calculate flat indices
+        attn_specs = []
+        mamba_specs = []
+        attn_flat_indices = []
+        mamba_flat_indices = []
+        flat_idx = 0
+
+        num_shared_layers = 1
+        if kv_cache_config.kv_cache_tensors:
+             num_shared_layers = len(kv_cache_config.kv_cache_tensors[0].shared_by)
+
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             if duplicate_shared_layers:
                 total_group_page_size = 0
@@ -803,85 +831,104 @@ class KVCacheManager:
                 self.actual_mamba_num_blocks = mamba_num_blocks
 
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
-                layer_spec = layer_name_to_spec[layer_name]
-                if isinstance(layer_spec, MambaSpec):
-                    mamba_states = []
-                    for state_index, (shape, dtype) in enumerate(
-                            zip(layer_spec.shapes, layer_spec.dtypes)):
-                        jax_dtype = t2j_dtype(dtype)
-                        cache_shape = (mamba_num_blocks, *shape)
-                        if state_index == 0:
-                            # conv_state: [num_blocks, conv_kernel_size, intermediate_size]
-                            spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
-                                                 None,
-                                                 ShardingAxisName.ATTN_HEAD)
-                        elif state_index == 1:
-                            # ssm_state: [num_blocks, num_heads, head_dim, state_size]
-                            spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
-                                                 ShardingAxisName.ATTN_HEAD,
-                                                 None, None)
-                        else:
-                            spec = PartitionSpec(
-                                None, *([None] * (len(cache_shape) - 1)))
-
-                        sharding = NamedSharding(self.runner.mesh, spec)
-
-                        # NOTE: conv state will always be BF16 and SSM state will always be FP32
-                        # regardless of the `kv-cache-dtype` (as is in upstream vLLM)
-                        def _allocate_mamba(c_shape=cache_shape,
-                                            c_dtype=jax_dtype):
-                            return jnp.empty(shape=c_shape, dtype=c_dtype)
-
-                        mamba_allocate = jax.jit(_allocate_mamba,
-                                                 out_shardings=sharding)
-                        mamba_states.append(mamba_allocate())
-
-                    metadata["mamba"].count += 1
-                    if metadata["mamba"].shape is None:
-                        # Mamba is a tuple of arrays, so we store a tuple of their metadata
-                        metadata["mamba"].shape = tuple(s.shape
-                                                        for s in mamba_states)
-                        metadata["mamba"].dtype = tuple(s.dtype
-                                                        for s in mamba_states)
-                        metadata["mamba"].sharding = tuple(
-                            s.sharding for s in mamba_states)
-
-                    kv_caches.append(tuple(mamba_states))
-                else:
-                    # We should only init a new kv cache for the first layer in shared_by
-                    # if duplicate_shared_layers is False.  Otherwise, if duplicate_shared_layers
-                    # is True, we should init a new kv cache for each layer in shared_by
-                    if j == 0 or duplicate_shared_layers:
-                        # NOTE: we'll multiply the num_kv_heads by 2 in the function
-                        head_size = layer_spec.head_size
-
-                        kv_cache = create_kv_caches(
-                            num_blocks=num_blocks,
-                            block_size=layer_spec.block_size,
-                            num_kv_heads=layer_spec.num_kv_heads,
-                            head_size=head_size,
-                            mesh=self.runner.mesh,
-                            layer_names=[f'kv_cache_tensor.{i}'],
-                            cache_dtype=t2j_dtype(layer_spec.dtype),
-                            use_mla=self.use_mla,
-                        )[0]
-                        kv_caches.append(kv_cache)
-
-                        # Update Regular Attention Metadata
-                        metadata["regular_attn"].count += 1
-                        if metadata["regular_attn"].shape is None:
-                            metadata["regular_attn"].shape = kv_cache.shape
-                            metadata["regular_attn"].dtype = kv_cache.dtype
-                            metadata[
-                                "regular_attn"].sharding = kv_cache.sharding
-                # We should only add the blocks for the first layer in shared_by
-                # if duplicate_shared_layers is False.  Otherwise, if duplicate_shared_layers
-                # is True, we should add the blocks for each layer in shared_by.
                 if j == 0 or duplicate_shared_layers:
-                    num_blocks_list.append(mamba_num_blocks if isinstance(
-                        layer_spec, MambaSpec) else num_blocks)
-                layer_idx = (i * num_shared_layers
-                             ) + j if duplicate_shared_layers else i
+                    layer_spec = layer_name_to_spec[layer_name]
+                    if isinstance(layer_spec, MambaSpec):
+                        mamba_specs.append((flat_idx, layer_spec, mamba_num_blocks))
+                        mamba_flat_indices.append(flat_idx)
+                    else:
+                        attn_specs.append((flat_idx, layer_spec, num_blocks))
+                        attn_flat_indices.append(flat_idx)
+                    flat_idx += 1
+
+        self.attn_flat_indices = tuple(attn_flat_indices)
+        self.mamba_flat_indices = tuple(mamba_flat_indices)
+        self.num_total_caches = flat_idx
+
+        kv_caches = []
+        num_blocks_list = []
+
+        # Allocate unified attention cache if we have any
+        if attn_specs:
+            first_flat_idx, first_spec, first_num_blocks = attn_specs[0]
+            # Verify all attention layers have the same spec
+            for fid, spec, nblocks in attn_specs:
+                assert spec.block_size == first_spec.block_size
+                assert spec.num_kv_heads == first_spec.num_kv_heads
+                assert spec.head_size == first_spec.head_size
+                assert spec.dtype == first_spec.dtype
+                assert nblocks == first_num_blocks
+
+            if self.use_mla:
+                head_size = self.runner.model_config.hf_config.kv_lora_rank + \
+                    self.runner.model_config.hf_config.qk_rope_head_dim
+            else:
+                head_size = first_spec.head_size
+
+            logger.info(f"Allocating unified KV cache for {len(attn_specs)} attention layers. "
+                        f"Shape: ({first_num_blocks}, {len(attn_specs)}, ...)")
+
+            unified_cache = create_unified_kv_cache(
+                num_blocks=first_num_blocks,
+                block_size=first_spec.block_size,
+                num_kv_heads=first_spec.num_kv_heads,
+                head_size=head_size,
+                mesh=self.runner.mesh,
+                num_layers=len(attn_specs),
+                cache_dtype=t2j_dtype(first_spec.dtype),
+                use_mla=self.use_mla,
+            )
+            kv_caches.append(unified_cache)
+            num_blocks_list.append(first_num_blocks)
+
+            # Update Regular Attention Metadata
+            metadata["regular_attn"].count = len(attn_specs)
+            metadata["regular_attn"].shape = unified_cache.shape
+            metadata["regular_attn"].dtype = unified_cache.dtype
+            metadata["regular_attn"].sharding = unified_cache.sharding
+
+        # Allocate Mamba caches individually, preserving the new ATTN_DATA sharding
+        for fid, layer_spec, num_blocks in mamba_specs:
+            mamba_states = []
+            for state_index, (shape, dtype) in enumerate(
+                    zip(layer_spec.shapes, layer_spec.dtypes)):
+                jax_dtype = t2j_dtype(dtype)
+                cache_shape = (num_blocks, *shape)
+                if state_index == 0:
+                    spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
+                                         None,
+                                         ShardingAxisName.ATTN_HEAD)
+                elif state_index == 1:
+                    spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
+                                         ShardingAxisName.ATTN_HEAD,
+                                         None, None)
+                else:
+                    spec = PartitionSpec(
+                        None, *([None] * (len(cache_shape) - 1)))
+
+                sharding = NamedSharding(self.runner.mesh, spec)
+
+                def _allocate_mamba(c_shape=cache_shape, c_dtype=jax_dtype):
+                    return jnp.empty(shape=c_shape, dtype=c_dtype)
+
+                mamba_allocate = jax.jit(_allocate_mamba, out_shardings=sharding)
+                mamba_states.append(mamba_allocate())
+
+            metadata["mamba"].count += 1
+            if metadata["mamba"].shape is None:
+                metadata["mamba"].shape = tuple(s.shape for s in mamba_states)
+                metadata["mamba"].dtype = tuple(s.dtype for s in mamba_states)
+                metadata["mamba"].sharding = tuple(s.sharding for s in mamba_states)
+
+            kv_caches.append(tuple(mamba_states))
+            num_blocks_list.append(num_blocks)
+
+        self.runner.kv_caches = kv_caches
+
+        # Pass 2: Set up layer_name_to_kvcache_index mapping
+        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+            for j, layer_name in enumerate(kv_cache_tensor.shared_by):
+                layer_idx = (i * num_shared_layers) + j if duplicate_shared_layers else i
                 self.runner.layer_name_to_kvcache_index[layer_name] = layer_idx
         if self.shared_kv_cache_layers:
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
@@ -1054,7 +1101,7 @@ class KVCacheManager:
 
     @staticmethod
     @jax.jit(
-        static_argnames=("block_size", "chunk_size"),
+        static_argnames=("block_size", "chunk_size", "attn_flat_indices", "mamba_flat_indices", "num_total_caches"),
         donate_argnames=("kv_caches", ),
     )
     def _jitted_insert_continuous_kv_cache_from_slice(
@@ -1064,16 +1111,34 @@ class KVCacheManager:
         kv_cache_slices: List[jax.Array],
         token_start: int,
         start_block: int,
+        attn_flat_indices: Tuple[int, ...] = (),
+        mamba_flat_indices: Tuple[int, ...] = (),
+        num_total_caches: int = 0,
     ) -> List[jax.Array]:
         """
         JIT-compiled function that dynamically slices the required tokens from KV cache
         slices and inserts them into continuous physical blocks.
         """
+        if not attn_flat_indices:
+            def _update_layer(cache, slices):
+                extracted_slices = jax.lax.dynamic_slice_in_dim(slices,
+                                                                token_start,
+                                                                chunk_size *
+                                                                block_size,
+                                                                axis=0)
+                reshaped_slices = extracted_slices.reshape(-1, block_size,
+                                                           *slices.shape[1:])
+                return jax.lax.dynamic_update_slice_in_dim(cache,
+                                                           reshaped_slices,
+                                                           start_block,
+                                                           axis=0)
+            return jax.tree.map(_update_layer, kv_caches, kv_cache_slices)
 
-        def _update_layer(cache, slices):
-            """The function to apply to each layer's cache and slices."""
+        large_attn_cache = kv_caches[0]
+        new_large_attn_cache = large_attn_cache
 
-            # Dynamically slice exactly chunk_size * block_size tokens starting at token_start
+        for i, flat_idx in enumerate(attn_flat_indices):
+            slices = kv_cache_slices[flat_idx]
             extracted_slices = jax.lax.dynamic_slice_in_dim(slices,
                                                             token_start,
                                                             chunk_size *
@@ -1081,13 +1146,28 @@ class KVCacheManager:
                                                             axis=0)
             reshaped_slices = extracted_slices.reshape(-1, block_size,
                                                        *slices.shape[1:])
+            current_slice = new_large_attn_cache[:, i, ...]
+            updated_slice = jax.lax.dynamic_update_slice_in_dim(current_slice,
+                                                               reshaped_slices,
+                                                               start_block,
+                                                               axis=0)
+            new_large_attn_cache = new_large_attn_cache.at[:, i, ...].set(updated_slice)
 
-            return jax.lax.dynamic_update_slice_in_dim(cache,
-                                                       reshaped_slices,
-                                                       start_block,
-                                                       axis=0)
+        new_kv_caches = [new_large_attn_cache]
 
-        return jax.tree.map(_update_layer, kv_caches, kv_cache_slices)
+        for i, flat_idx in enumerate(mamba_flat_indices):
+            mamba_cache = kv_caches[1 + i]
+            mamba_slice = kv_cache_slices[flat_idx]
+            def _update_mamba_state(state, slc):
+                extracted_slc = jax.lax.dynamic_slice_in_dim(slc,
+                                                                token_start,
+                                                                chunk_size * block_size,
+                                                                axis=0)
+                return jax.lax.dynamic_update_slice_in_dim(state, extracted_slc, start_block, axis=0)
+            updated_mamba = jax.tree.map(_update_mamba_state, mamba_cache, mamba_slice)
+            new_kv_caches.append(updated_mamba)
+
+        return new_kv_caches
 
     def get_kv_cache_for_block_ids(
         self,
@@ -1104,14 +1184,20 @@ class KVCacheManager:
             A list of JAX arrays, with each array representing the KV cache
             slices for a layer, concatenated for all blocks.
         """
+        unpacked_caches = _unpack_kv_caches(
+            self.runner.kv_caches,
+            self.attn_flat_indices,
+            self.mamba_flat_indices,
+            self.num_total_caches
+        )
         if block_ids == list(range(block_ids[0],
                                    block_ids[0] + len(block_ids))):
             batched_kv_cache_per_layer = self._jitted_gather_continuous_kv_cache(
-                self.runner.kv_caches, block_ids[0], len(block_ids))
+                unpacked_caches, block_ids[0], len(block_ids))
 
         else:
             batched_kv_cache_per_layer = self._jitted_gather_kv_cache(
-                self.runner.kv_caches, jnp.array(block_ids))
+                unpacked_caches, jnp.array(block_ids))
         return batched_kv_cache_per_layer
 
     def transfer_kv_cache(self,
@@ -1201,6 +1287,9 @@ class KVCacheManager:
                     kv_cache_slices,
                     0,
                     start_block,
+                    self.attn_flat_indices,
+                    self.mamba_flat_indices,
+                    self.num_total_caches,
                 )
                 jax.block_until_ready(self.runner.kv_caches)
         else:

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
-from typing import List
+from typing import List, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -145,6 +145,60 @@ def create_kv_caches(
     for _ in layer_names:
         kv_caches.append(sharded_allocate())
     return kv_caches
+
+
+def create_unified_kv_cache(
+    num_blocks: int,
+    block_size: int,
+    num_kv_heads: int,
+    head_size: int,
+    mesh: Mesh,
+    num_layers: int,
+    cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
+    use_mla: bool = False,
+) -> jax.Array:
+    """Creates a single unified KV cache array for all layers.
+
+    The shape of the unified KV cache is:
+    (num_blocks, num_layers, block_size, cdiv(num_kv_heads * 2, packing), packing, head_dim)
+    where packing = (32 // dtype bits)
+
+    Args:
+        num_blocks: The number of blocks in the KV cache.
+        block_size: The size of each block in the KV cache.
+        num_kv_heads: The number of KV heads in the KV cache.
+        head_size: The size of each head in the KV cache.
+        mesh: The mesh to shard the KV caches across.
+        num_layers: The number of layers to unify into this cache.
+        cache_dtype: The datatype of KV cache.
+
+    Returns:
+        A single sharded JAX array representing the unified KV cache.
+    """
+    single_layer_shape = get_kv_cache_shape_with_mesh(
+        mesh, num_blocks, block_size, num_kv_heads, head_size, cache_dtype, use_mla
+    )
+    # Insert num_layers as the second dimension
+    unified_shape = (single_layer_shape[0], num_layers, *single_layer_shape[1:])
+
+    if use_mla:
+        sharding = NamedSharding(mesh, PartitionSpec(ShardingAxisName.MLP_TENSOR, None))
+    else:
+        sharding = NamedSharding(
+            mesh,
+            PartitionSpec(
+                ShardingAxisName.ATTN_DATA, None, None, ShardingAxisName.ATTN_HEAD
+            ),
+        )
+
+    def _allocate() -> jax.Array:
+        return jnp.empty(
+            shape=unified_shape,
+            dtype=cache_dtype,
+        )
+
+    sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
+    return sharded_allocate()
 
 
 def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,

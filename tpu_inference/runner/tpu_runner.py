@@ -893,6 +893,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
+        if hasattr(self.model, "set_kv_cache_metadata"):
+            self.model.set_kv_cache_metadata(
+                self.kv_cache_manager.attn_flat_indices,
+                self.kv_cache_manager.mamba_flat_indices,
+            )
 
         if self.kv_cache_manager.actual_mamba_num_blocks is not None:
             self.input_batch.init_mamba_pools(

@@ -176,7 +176,21 @@ class PallasAttentionBackendImpl(AttentionImpl):
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
         kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
             layer.layer_name]
-        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
+        
+        attn_flat_indices = vllm_model_wrapper_context.attn_flat_indices
+        mamba_flat_indices = vllm_model_wrapper_context.mamba_flat_indices
+        is_unified = attn_flat_indices is not None and kv_cache_index in attn_flat_indices
+
+        if is_unified:
+            kv_cache = vllm_model_wrapper_context.kv_caches[0]
+            layer_idx = attn_flat_indices.index(kv_cache_index)
+        else:
+            if mamba_flat_indices is not None and kv_cache_index in mamba_flat_indices:
+                mamba_idx = mamba_flat_indices.index(kv_cache_index)
+                kv_cache = vllm_model_wrapper_context.kv_caches[1 + mamba_idx]
+            else:
+                kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
+            layer_idx = None
 
         mesh = vllm_model_wrapper_context.mesh
 
@@ -209,8 +223,17 @@ class PallasAttentionBackendImpl(AttentionImpl):
             k_scale,
             v_scale,
             self.sliding_window,
+            layer_idx=layer_idx,
         )
-        vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
+        
+        if is_unified:
+            vllm_model_wrapper_context.kv_caches[0] = new_kv_cache
+        else:
+            if mamba_flat_indices is not None and kv_cache_index in mamba_flat_indices:
+                mamba_idx = mamba_flat_indices.index(kv_cache_index)
+                vllm_model_wrapper_context.kv_caches[1 + mamba_idx] = new_kv_cache
+            else:
+                vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
 
         out_torch = torch_view(outputs)
         if output is not None:
@@ -229,6 +252,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         "k_scale",
         "v_scale",
         "sliding_window",
+        "layer_idx",
     ),
     donate_argnames=("kv_cache"),
 )
@@ -248,6 +272,7 @@ def _jax_attn_func(
     k_scale: float | None = None,
     v_scale: float | None = None,
     sliding_window: int | None = None,
+    layer_idx: int | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # Get shapes from vllm
     q_len = q.shape[0]
@@ -271,6 +296,7 @@ def _jax_attn_func(
         v_scale=v_scale,
         sinks=sinks,
         attention_chunk_size=sliding_window,
+        layer_idx=layer_idx,
     )
 
     # Convert the shape back to vLLM's convention

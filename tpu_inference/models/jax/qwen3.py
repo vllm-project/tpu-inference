@@ -164,6 +164,7 @@ class Qwen3Attention(JaxModule):
         kv_cache: Optional[jax.Array],
         x: jax.Array,
         attention_metadata: AttentionMetadata,
+        layer_idx: Optional[int] = None,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
         # q: (T, N, H)
@@ -201,6 +202,7 @@ class Qwen3Attention(JaxModule):
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            layer_idx=layer_idx,
         )
         # (T, D)
         o = self.o_proj(outputs)
