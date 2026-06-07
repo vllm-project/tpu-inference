@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import gc
+from contextlib import nullcontext
 from typing import Optional
 
 import jax
@@ -27,6 +28,7 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
     shard_moe_weights)
 from tpu_inference.layers.common.quantization import unquantized as jax_common
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
+from tpu_inference.layers.common.utils import cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.moe.moe import JaxMoE
@@ -36,6 +38,25 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import shard_put
 
 logger = init_logger(__name__)
+
+MOE_WEIGHTS_STAGED_ON_HOST = "_moe_weights_staged_on_host"
+
+
+def _moe_staged_weights_ready(param: nnx.Param) -> bool:
+    weights_to_load = getattr(param, "_weights_to_load", None)
+    return bool(weights_to_load) and all(w is not None
+                                         for w in weights_to_load)
+
+
+def _concat_staged_moe_weights(param: nnx.Param) -> jax.Array:
+    weights_to_load = param._weights_to_load
+    if len(weights_to_load) == 1:
+        return weights_to_load[0]
+    return jnp.concatenate(weights_to_load, axis=0)
+
+
+def _param_is_staged_on_host(param: nnx.Param) -> bool:
+    return bool(param.get_metadata().get(MOE_WEIGHTS_STAGED_ON_HOST, False))
 
 
 class UnquantizedLinearMethod(QuantizeMethodBase,
@@ -114,35 +135,58 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             }
 
         elif layer.moe_backend in [MoEBackend.GMM_EP, MoEBackend.GMM_TP]:
-            if any(
-                    any(w is None for w in param._weights_to_load)
-                    for param in [
-                        layer.kernel_gating_EDF, layer.kernel_up_proj_EDF,
-                        layer.kernel_down_proj_EFD
-                    ]):
+
+            moe_params = [
+                layer.kernel_gating_EDF, layer.kernel_up_proj_EDF,
+                layer.kernel_down_proj_EFD
+            ]
+            if any(not _moe_staged_weights_ready(param)
+                   for param in moe_params):
                 return False
-            w_gate = layer.kernel_gating_EDF.get_value()
-            w_up = layer.kernel_up_proj_EDF.get_value()
-            w2_val = layer.kernel_down_proj_EFD.get_value()
+
+            use_staged_host_weights = all(
+                _param_is_staged_on_host(param) for param in moe_params)
+            if use_staged_host_weights:
+                with cpu_mesh_context():
+                    w_gate = _concat_staged_moe_weights(
+                        layer.kernel_gating_EDF)
+                    w_up = _concat_staged_moe_weights(layer.kernel_up_proj_EDF)
+                    w2_val = _concat_staged_moe_weights(
+                        layer.kernel_down_proj_EFD)
+            else:
+                w_gate = layer.kernel_gating_EDF.get_value()
+                w_up = layer.kernel_up_proj_EDF.get_value()
+                w2_val = layer.kernel_down_proj_EFD.get_value()
 
             # Free old params before processing to reduce peak memory.
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
+            del layer.kernel_down_proj_EFD
 
             # Fuse the weights into w13: [Gate, Up]
-            w13_val = jnp.concatenate([w_gate, w_up], axis=1)
-            del w_gate, w_up
-
+            # Capture the target TPU mesh outside cpu_mesh_context(); the CPU
+            # mesh is only for temporary host-side processing.
             mesh = jax.sharding.get_mesh()
-            weights = process_unquantized_moe_weights(
-                mesh=mesh,
-                moe_backend=layer.moe_backend,
-                activation=layer.activation,
-                w13_weight=w13_val,
-                w13_bias=None,
-                w2_weight=w2_val,
-                w2_bias=None,
-            )
+            if use_staged_host_weights:
+                mesh_context = cpu_mesh_context()
+            else:
+                mesh_context = nullcontext()
+            with mesh_context:
+                w13_val = jnp.concatenate([w_gate, w_up], axis=1)
+                del w_gate, w_up
+                weights = process_unquantized_moe_weights(
+                    mesh=mesh,
+                    moe_backend=layer.moe_backend,
+                    activation=layer.activation,
+                    w13_weight=w13_val,
+                    w13_bias=None,
+                    w2_weight=w2_val,
+                    w2_bias=None,
+                )
+                if use_staged_host_weights:
+                    # Drop CPU sharding metadata before the final layout-aware
+                    # transfer to the TPU mesh.
+                    weights = jax.device_get(weights)
 
             sharded_weights = shard_moe_weights(weights,
                                                 moe_backend=layer.moe_backend,
@@ -162,6 +206,10 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             if sharded_weights.w2_weight_scale is not None:
                 layer.kernel_down_proj_EFD_weight_scale = nnx.Param(
                     sharded_weights.w2_weight_scale)
+
+            # Wait for final transfers so the next MoE layer does not overlap
+            # with transient buffers from this layer during weight loading.
+            jax.block_until_ready(sharded_weights)
 
             del weights
             del w13_val

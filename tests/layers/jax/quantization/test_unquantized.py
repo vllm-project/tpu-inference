@@ -26,7 +26,8 @@ from tpu_inference.layers.common.process_weights.moe_weights import \
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
-from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
+from tpu_inference.layers.jax.quantization.unquantized import (
+    UnquantizedConfig, _concat_staged_moe_weights, _moe_staged_weights_ready)
 
 
 @pytest.fixture
@@ -141,6 +142,29 @@ class TestUnquantizedJaxMoe:
                                (num_experts, hidden_size, intermediate_size),
                                dtype=jnp.bfloat16)
         return w13, w2
+
+    def test_concat_staged_moe_weights_concatenates_per_expert_chunks(self):
+        chunks = [
+            jnp.full((1, 3, 4), expert_id, dtype=jnp.bfloat16)
+            for expert_id in range(4)
+        ]
+        param = nnx.Param(jnp.zeros((4, 3, 4), dtype=jnp.bfloat16))
+        param.set_metadata("_weights_to_load", chunks)
+
+        assert _moe_staged_weights_ready(param)
+        weights = _concat_staged_moe_weights(param)
+
+        assert weights.shape == (4, 3, 4)
+        np.testing.assert_array_equal(np.asarray(weights[:, 0, 0]),
+                                      np.arange(4))
+
+    def test_concat_staged_moe_weights_returns_single_chunk(self):
+        chunk = jnp.ones((4, 3, 4), dtype=jnp.bfloat16)
+        param = nnx.Param(jnp.zeros((4, 3, 4), dtype=jnp.bfloat16))
+        param.set_metadata("_weights_to_load", [chunk])
+
+        assert _moe_staged_weights_ready(param)
+        assert _concat_staged_moe_weights(param) is chunk
 
     @pytest.mark.parametrize("requantize_dtype,expect_w_dtype,expect_scale", [
         ("", jnp.bfloat16, None),
