@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import jax
+import jax.numpy as jnp
 from flax import nnx
 
 from tpu_inference.layers.jax import JaxModule
@@ -208,3 +209,76 @@ class JaxMergedColumnParallelLinear(JaxLinear):
                          quant_config=quant_config,
                          prefix=prefix,
                          **kwargs)
+
+
+class JaxQKVParallelLinear(JaxModule):
+    """Fused QKV Parallel Linear layer for JAX-native models.
+    
+    Performs fused Q, K, and V projections in a single HBM read pass and
+    partitions them locally per TPU device without incurring all-to-all collectives.
+    """
+
+    def __init__(self,
+                 hidden_size: int,
+                 num_heads: int,
+                 num_kv_heads: int,
+                 head_dim: int,
+                 use_bias: bool,
+                 dtype: jnp.dtype,
+                 rngs: nnx.Rngs,
+                 tp_size: int,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.use_bias = use_bias
+        self.tp_size = tp_size
+
+        self.q_size = num_heads * head_dim
+        self.k_size = num_kv_heads * head_dim
+        self.v_size = num_kv_heads * head_dim
+        self.total_output_dim = self.q_size + self.k_size + self.v_size
+
+        # Output dimension is sharded along the "model" (TP) axis
+        self.proj = JaxEinsum(
+            "TD,DV->TV",
+            (hidden_size, self.total_output_dim),
+            bias_shape=(self.total_output_dim, ) if use_bias else None,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.uniform(),
+                                              (None, "model")),
+            bias_init=nnx.with_partitioning(nnx.initializers.uniform(),
+                                            ("model", )) if use_bias else None,
+            rngs=rngs,
+            quant_config=quant_config,
+            prefix=prefix + ".qkv_proj",
+        )
+
+    def __call__(self, x: jax.Array) -> Tuple[jax.Array, jax.Array, jax.Array]:
+        # Single projection operation (loads inputs from HBM once)
+        outs = self.proj(
+            x)  # Shape: [T, total_output_dim] sharded on "model" axis
+
+        # Reshape to separate the shards physically: [T, tp_size, total_output_dim // tp_size]
+        new_shape = outs.shape[:-1] + (self.tp_size, -1)
+        sharded_outs = outs.reshape(new_shape)
+
+        # Slice locally on each shard
+        q_sz = self.q_size // self.tp_size
+        k_sz = self.k_size // self.tp_size
+
+        outs_q = sharded_outs[..., :q_sz]
+        outs_k = sharded_outs[..., q_sz:q_sz + k_sz]
+        outs_v = sharded_outs[..., q_sz + k_sz:]
+
+        # Reshape directly to their global multi-head shapes
+        q = outs_q.reshape(outs.shape[:-1] + (self.num_heads, self.head_dim))
+        k = outs_k.reshape(outs.shape[:-1] +
+                           (self.num_kv_heads, self.head_dim))
+        v = outs_v.reshape(outs.shape[:-1] +
+                           (self.num_kv_heads, self.head_dim))
+
+        return q, k, v
