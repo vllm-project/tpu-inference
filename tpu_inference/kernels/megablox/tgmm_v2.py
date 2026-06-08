@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 import functools
-from typing import Callable, Tuple
+from typing import Any, Callable, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -22,6 +23,22 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.megablox import gmm_v2
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class OperandRef:
+  """Bundles a kernel operand with its optional per-N scale.
+
+  Registered as a pytree so it can be passed as a single 'pl.pallas_call' /
+  'emit_pipeline' operand (and in_spec). When 'scale' is None it contributes no
+  pytree leaf, so the kernel signature stays fixed-arity regardless of whether a
+  scale is present; the kernel just reads 'rhs_ref.scale' (None or a ref).
+  """
+
+  value: Any
+  scale: Any | None = None
+
 
 TileTgmmFn = Callable[
     [
@@ -251,9 +268,13 @@ def make_tgmm_configs(
 def tgmm_inner_kernel(
     tiled_lhs_ref: jax.Array,
     # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
-    tiled_rhs_ref: jax.Array,
-    # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
-    *rest,
+    tiled_rhs_ref: OperandRef,
+    # .value: [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
+    # .scale: [1, 1, tile_n] or None
+    tiled_out_ref: jax.Array,
+    acc_ref: jax.Array,
+    metadata_ref: gmm_v2.MetadataRef,
+    *,
     cfgs: gmm_v2.GmmConfigs,
 ):
   """Inner kernel for TGMM computation.
@@ -264,20 +285,18 @@ def tgmm_inner_kernel(
 
   Args:
     tiled_lhs_ref: Reference to the tiled LHS data.
-    tiled_rhs_ref: Reference to the tiled RHS data.
+    tiled_rhs_ref: OperandRef bundling the tiled RHS data ('.value') and its
+      optional per-N scale ('.scale', None when there is no scale).
     tiled_out_ref: Reference to the tiled output buffer [None, tile_k, tile_n].
     acc_ref: Scratch memory for accumulation [tile_k, tile_n].
     metadata_ref: Contains metadata like group offsets and group IDs.
     cfgs: GmmConfigs object containing kernel configurations.
   """
   # NB: grid=(num_n, num_k, num_gm)
-  if cfgs.rhs_cfgs.has_scale:
-    tiled_rhs_scale_ref, tiled_out_ref, acc_ref, metadata_ref = rest
-  else:
-    tiled_out_ref, acc_ref, metadata_ref = rest
+  tiled_rhs_scale_ref = tiled_rhs_ref.scale
 
   tiled_lhs_ref = tiled_lhs_ref.reshape(-1, tiled_lhs_ref.shape[-1])
-  tiled_rhs_ref = tiled_rhs_ref.reshape(-1, tiled_rhs_ref.shape[-1])
+  tiled_rhs_ref = tiled_rhs_ref.value.reshape(-1, tiled_rhs_ref.value.shape[-1])
   gm_id = pl.program_id(2)
 
   def _matmul(is_new_group: bool, is_group_changing: bool):
@@ -409,7 +428,7 @@ class TgmmIndexMaps:
 
 def generate_tgmm_block_specs(
     metadata_ref: gmm_v2.MetadataRef, cfgs: gmm_v2.GmmConfigs
-) -> Tuple[Tuple[pl.BlockSpec, pl.BlockSpec], pl.BlockSpec]:
+) -> Tuple[Tuple[pl.BlockSpec, OperandRef], pl.BlockSpec]:
   """Generates block specs for the given lhs, rhs, and out refs."""
   index_map = TgmmIndexMaps(metadata_ref, cfgs)
   # NB: in tgmm, LHS is reshaped from (M, K) to (-1, size_lhs_sublane, K) so
@@ -427,19 +446,19 @@ def generate_tgmm_block_specs(
       (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_n),
       index_map.rhs_index_map,
   )
-  in_specs = [lhs_block_spec, rhs_block_spec]
+  rhs_scale_block_spec = None
   if cfgs.rhs_cfgs.has_scale:
     rhs_scale_block_spec = pl.BlockSpec(
         (1, 1, cfgs.tiles.tile_n),
         index_map.rhs_scale_index_map,
     )
-    in_specs.append(rhs_scale_block_spec)
+  rhs_spec = OperandRef(value=rhs_block_spec, scale=rhs_scale_block_spec)
   out_block_spec = pl.BlockSpec(
       (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
       index_map.out_index_map,
   )
 
-  return tuple(in_specs), out_block_spec
+  return (lhs_block_spec, rhs_spec), out_block_spec
 
 
 def zero_out_start(
@@ -508,8 +527,13 @@ def tgmm_kernel_main(
     lhs_group_sizes_ref,  # int32[size_lhs_group]
     group_offset_ref,  # int32[1]
     lhs_ref,  # [m, k]
-    rhs_ref,  # [m, n]
-    *rest,
+    rhs_ref,  # OperandRef: .value [m, n], .scale [1, 1, n] or None
+    out_ref,  # [num_groups, k, n]
+    acc_ref,  # [tile_k, tile_n]
+    metadata_ref,
+    zero_ref,  # [tile_zero_k, num_lanes]
+    semaphore_ref,  # [1]
+    *,
     cfgs,
 ):
   """Main kernel function for TGMM computation.
@@ -518,18 +542,15 @@ def tgmm_kernel_main(
     lhs_group_sizes_ref: Reference to the group sizes of lhs.
     group_offset_ref: Reference to the group offset.
     lhs_ref: Reference to the LHS array [m, k].
-    rhs_ref: Reference to the RHS array [m, n].
+    rhs_ref: OperandRef bundling the RHS array ('.value' [m, n]) and its
+      optional per-N scale ('.scale' [1, 1, n], None when there is no scale).
     out_ref: Reference to the output array [num_groups, k, n].
     acc_ref: Scratch memory reference for accumulation [tile_k, tile_n].
     metadata_ref: Reference to the metadata structure.
+    zero_ref: Scratch buffer for zeroing empty groups' output.
+    semaphore_ref: DMA semaphore for the zeroing copies.
     cfgs: GmmConfigs object containing kernel configurations.
   """
-  if cfgs.rhs_cfgs.has_scale:
-    rhs_scale_ref, out_ref, acc_ref, metadata_ref, zero_ref, semaphore_ref = rest
-  else:
-    rhs_scale_ref = None
-    out_ref, acc_ref, metadata_ref, zero_ref, semaphore_ref = rest
-
   num_groups_to_zero = zero_out_start(
       lhs_group_sizes_ref,
       group_offset_ref,
@@ -555,13 +576,14 @@ def tgmm_kernel_main(
       out_specs=out_specs,
   )
   lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
-  rhs_in = rhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, rhs_ref.shape[-1])
-  pipeline_in_args = (
-      (lhs_in, rhs_in, rhs_scale_ref) if cfgs.rhs_cfgs.has_scale else (lhs_in, rhs_in)
+  rhs_value = rhs_ref.value
+  rhs_in = rhs_value.reshape(
+      -1, cfgs.dims.size_lhs_sublane, rhs_value.shape[-1]
   )
+  rhs_operand = OperandRef(value=rhs_in, scale=rhs_ref.scale)
   scratches = [acc_ref, metadata_ref]
 
-  pipeline_fn(*pipeline_in_args, out_ref, scratches=scratches)
+  pipeline_fn(lhs_in, rhs_operand, out_ref, scratches=scratches)
   zero_out_end(
       num_groups_to_zero,
       out_ref,
@@ -707,18 +729,26 @@ def tgmm_v2(
       pltpu.SemaphoreType.DMA((1,)),
   ]
 
-  in_specs = [
-    pl.BlockSpec(memory_space=pl.tpu.HBM),  # lhs
-    pl.BlockSpec(memory_space=pl.tpu.HBM),  # rhs
-  ]
-  call_args = [group_sizes, group_offset, lhs, rhs]
+  rhs_scale_spec = None
   if rhs_scale is not None:
     rhs_scale = rhs_scale.astype(jnp.float32)
     pad_n = aligned_n - dims.size_n
     if pad_n > 0:
       rhs_scale = jnp.pad(rhs_scale, ((0, 0), (0, 0), (0, pad_n)))
-    in_specs.append(pl.BlockSpec(memory_space=pltpu.HBM))  # rhs_scale
-    call_args.append(rhs_scale)
+    rhs_scale_spec = pl.BlockSpec(memory_space=pltpu.HBM)
+  in_specs = [
+      pl.BlockSpec(memory_space=pltpu.HBM),  # lhs
+      OperandRef(  # rhs (+ optional per-N scale)
+          value=pl.BlockSpec(memory_space=pltpu.HBM),
+          scale=rhs_scale_spec,
+      ),
+  ]
+  call_args = [
+      group_sizes,
+      group_offset,
+      lhs,
+      OperandRef(value=rhs, scale=rhs_scale),
+  ]
 
   return pl.pallas_call(
       functools.partial(tgmm_kernel_main, cfgs=cfgs),
