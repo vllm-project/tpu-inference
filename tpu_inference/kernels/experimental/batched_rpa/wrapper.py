@@ -129,6 +129,8 @@ def get_kv_cache_shape(
     kv_dtype,
     kv_layout: configs.KVLayout = configs.KVLayout.HEAD_ALONG_SUBLANE,
 ):
+    kv_layout = configs.KVLayout.SEQ_ALONG_LANE
+
     num_lanes = pltpu.get_tpu_info().num_lanes
     num_sublanes = pltpu.get_tpu_info().num_sublanes
     kv_packing = utils.get_dtype_packing(kv_dtype)
@@ -431,6 +433,8 @@ def ragged_paged_attention(
             kv_packing, head_dim]. Result of new kv cache where k & vs are
             concatenated along num kv heads dim.
     """
+
+    kv_layout = configs.KVLayout.SEQ_ALONG_LANE
 
     if not use_causal_mask:
         raise ValueError("Only causal attention is supported.")
