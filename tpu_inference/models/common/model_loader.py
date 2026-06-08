@@ -553,14 +553,14 @@ def get_vllm_model(
 
     multimodal_fns = MultiModalInterface(
         precompile_vision_encoder_fn=getattr(
-            model.model.vllm_model,
+            model.model,
             "precompile_vision_encoder",
             model.wrap_precompile_vision_encoder_fn(params),
         ),
         embed_multimodal_fn=model.wrap_embed_multimodal_func(),
         embed_input_ids_fn=model.wrap_embed_input_ids_func(),
         get_mrope_input_positions_fn=getattr(
-            model.model.vllm_model,
+            model.model,
             "get_mrope_input_positions",
             None,
         ),
