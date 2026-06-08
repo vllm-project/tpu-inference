@@ -1,5 +1,5 @@
-
 """TPU-Friendly Ragged Paged Attention kernel.
+
 This kernel offers a highly optimized implementation of ragged paged attention,
 specifically designed for TPU and compatible with a wide range of model
 specifications. It supports mixed prefill and decoding, enhancing throughput
@@ -60,7 +60,6 @@ def ref_ragged_paged_attention(
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
     *,
-    kv_cache_lens: jax.Array | None = None,
     cp_rank: jax.Array | int | None = None,
     cp_group_size: int | None = None,
     use_causal_mask: bool = True,
@@ -91,7 +90,6 @@ def ref_ragged_paged_attention(
       page_indices,
       cu_q_lens,
       distribution,
-      kv_cache_lens=kv_cache_lens,
       cp_rank=cp_rank,
       cp_group_size=cp_group_size,
       use_causal_mask=use_causal_mask,
@@ -186,10 +184,7 @@ def ref_ragged_paged_attention(
         mask = jnp.logical_and(mask, q_span < kv_span + sliding_window)
       attn = jnp.where(mask, attn, mask_value)
     if skip_cache_attn:
-      if kv_cache_lens is not None:
-        kv_new_len_i = int(kv_len) - int(kv_cache_lens[i])
-      else:
-        kv_new_len_i = int(q_len)
+      kv_new_len_i = int(q_len)
       kv_new_start_i = int(kv_len) - kv_new_len_i
       sa_kv_span = jax.lax.broadcasted_iota(jnp.int32, attn.shape, 2)
       attn = jnp.where(sa_kv_span >= kv_new_start_i, attn, mask_value)
@@ -205,7 +200,7 @@ def ref_ragged_paged_attention(
   return result, kv_cache
 
 def get_smem_estimate_bytes(
-    max_num_seqs, pages_per_seq, has_kv_cache_lens
+    max_num_seqs, pages_per_seq
 ):
   total_bits = (
       # kv_lens_ref: i32[max_num_seqs]
@@ -229,12 +224,6 @@ def get_smem_estimate_bytes(
       # bkv_update_ids_ref: i32[8]
       128 * 32
   )
-  if has_kv_cache_lens:
-    total_bits += (
-        # kv_cache_lens_ref: i32[max_num_seqs]
-        align_to(max_num_seqs, 128)
-        * 32
-    )
   return cdiv(total_bits, 8)
 
 
@@ -313,7 +302,6 @@ def _ragged_paged_attention_kernel_loop(
     sem_ids_ref,  # [3] (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
     bo_ids_ref,  # [4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
     bkv_update_ids_ref,  # [8] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz, bkv_sem_0_src, bkv_sem_1_src)
-    kv_cache_lens_ref, # [max_num_seqs]
     cp_rank_ref,  # [1] scaler
     # Input
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
@@ -407,45 +395,41 @@ def _ragged_paged_attention_kernel_loop(
   q_len = q_end - q_start
   total_kv_len = kv_lens_ref[seq_idx]
 
-  kv_cache_len_global = kv_cache_lens_ref[seq_idx]
-  kv_new_len = total_kv_len - kv_cache_len_global
+  # Helper functions for context parallelism.
+  def get_cp_local_size(x):
+    return  (x + cp_group_size - 1 - cp_rank) // cp_group_size
+
+  def get_kv_cache_len_local(seq_idx):
+    global_len = kv_lens_ref[seq_idx] - (
+        cu_q_lens_ref[seq_idx + 1] - cu_q_lens_ref[seq_idx]
+    )
+    return get_cp_local_size(global_len)
+
+  def get_start_bkv_idx(seq_idx):
+    local_cache_len = get_kv_cache_len_local(seq_idx)
+    start_idx = 0
+    if sliding_window is not None:
+      start_idx = jnp.maximum(local_cache_len - sliding_window, 0) // bkv_sz
+    if skip_cache_attn:
+      start_idx = jnp.maximum(start_idx, local_cache_len // bkv_sz)
+    return start_idx
+
+  # Get cache length and new token length.
+  kv_cache_len_global = total_kv_len - q_len
+  kv_new_len = q_len
 
   # Convert global kv_cache_len to per-device local values.
-  kv_cache_len_local = (kv_cache_len_global + cp_group_size - 1 - cp_rank) // cp_group_size
+  kv_cache_len_local = get_kv_cache_len_local(seq_idx)
 
   # Local kv_len = partial cache + full KV
   kv_len = kv_cache_len_local + kv_new_len
 
   # kv_q_gap is used to calculate processed_q_len.
   kv_q_gap = kv_cache_len_local
-  cur_seq_start_bkv_idx = 0
-  next_seq_start_bkv_idx = 0
 
-  if sliding_window is not None:
-    # TODO(jevinjiang): can skip by page_size instead of bkv_sz.
-    cur_seq_start_bkv_idx = jnp.maximum(kv_q_gap - sliding_window, 0) // bkv_sz
-    next_seq_idx = jnp.minimum(seq_idx + 1, end_seq_idx - 1)
-    next_kv_len = kv_lens_ref[next_seq_idx]
-    next_q_len = cu_q_lens_ref[next_seq_idx + 1] - cu_q_lens_ref[next_seq_idx]
-    next_kv_cache_len_global = next_kv_len - next_q_len
-
-    next_kv_cache_len_local = (next_kv_cache_len_global + cp_group_size - 1 - cp_rank) // cp_group_size
-    next_kv_q_gap = next_kv_cache_len_local
-    next_seq_start_bkv_idx = (
-        jnp.maximum(next_kv_q_gap - sliding_window, 0) // bkv_sz
-    )
-
-  if skip_cache_attn:
-    kv_new_start = kv_cache_len_local
-    cur_seq_start_bkv_idx = jnp.maximum(cur_seq_start_bkv_idx, kv_new_start // bkv_sz)
-    next_seq_idx_sa = jnp.minimum(seq_idx + 1, end_seq_idx - 1)
-    next_kv_cache_len_global = kv_cache_lens_ref[next_seq_idx_sa]
-
-    next_kv_cache_len_local = (next_kv_cache_len_global + cp_group_size - 1 - cp_rank) // cp_group_size
-    next_seq_start_bkv_idx = jnp.maximum(
-        next_seq_start_bkv_idx,
-        next_kv_cache_len_local // bkv_sz,
-    )
+  cur_seq_start_bkv_idx = get_start_bkv_idx(seq_idx)
+  next_seq_idx = jnp.minimum(seq_idx + 1, end_seq_idx - 1)
+  next_seq_start_bkv_idx = get_start_bkv_idx(next_seq_idx)
 
   def debug_print(msg, *args):
     if debug_mode:
@@ -606,8 +590,7 @@ def _ragged_paged_attention_kernel_loop(
     _seq_kv_cache_len_global = _seq_total_kv_len - _seq_q_len
     _seq_kv_new_len = _seq_q_len
 
-
-    _seq_kv_cache_len_local = (_seq_kv_cache_len_global + cp_group_size - 1 - cp_rank) // cp_group_size
+    _seq_kv_cache_len_local = get_kv_cache_len_local(seq_idx)
     _seq_kv_len = _seq_kv_cache_len_local + _seq_kv_new_len
 
     kv_len_start = bkv_idx * bkv_sz
@@ -644,30 +627,37 @@ def _ragged_paged_attention_kernel_loop(
 
       # Fetch effective kv from kv cache. To pipeline multiple DMA calls, we
       # utilize static for loop instead of dynamic for loop.
-      for i in range(bkv_p):
-        # Ensure only effective kvs are copied.
-        sz = jnp.clip(kv_left_frm_cache - i * page_size, 0, page_size)
-        # If the page index is out of bound, we set page_idx to the last page.
-        # And there will be no copy since sz will be 0.
-        page_idx = jnp.minimum(page_indices_offset + i, num_page_indices - 1)
+      if not skip_cache_attn:
+        for i in range(bkv_p):
+          # Ensure only effective kvs are copied.
+          sz = jnp.clip(kv_left_frm_cache - i * page_size, 0, page_size)
+          # If the page index is out of bound, we set page_idx to the last page.
+          # And there will be no copy since sz will be 0.
+          page_idx = jnp.minimum(page_indices_offset + i, num_page_indices - 1)
+          _async_copy(
+              cache_hbm_ref.at[pl.ds(page_indices_ref[page_idx] * page_size, sz)],
+              vmem_ref.at[pl.ds(i * page_size, sz)],
+              sem,
+              wait=False,
+          )
+          debug_print("[RPA debug] loop_body i={}, sz={}", i, sz)
+      # Fetch new kvs.
+      if not skip_current_attn:
+        new_kv_len_start = _seq_q_end - kv_left_frm_new
+        debug_print("[RPA debug] new_kv_len_start={}", new_kv_len_start)
         _async_copy(
-            cache_hbm_ref.at[pl.ds(page_indices_ref[page_idx] * page_size, sz)],
-            vmem_ref.at[pl.ds(i * page_size, sz)],
+            kv_hbm_ref.at[pl.ds(new_kv_len_start, bkv_sz_frm_new)],
+            vmem_ref.at[pl.ds(bkv_sz_frm_cache, bkv_sz_frm_new)],
             sem,
-            wait=False,
+            wait,
         )
-        debug_print("[RPA debug] loop_body i={}, sz={}", i, sz)
-
-      new_kv_len_start = _seq_q_end - kv_left_frm_new
-      debug_print("[RPA debug] new_kv_len_start={}", new_kv_len_start)
-      _async_copy(
-          kv_hbm_ref.at[pl.ds(new_kv_len_start, bkv_sz_frm_new)],
-          vmem_ref.at[pl.ds(bkv_sz_frm_cache, bkv_sz_frm_new)],
-          sem,
-          wait,
-      )
     else:
-      dst = vmem_ref.at[pl.ds(0, bkv_sz_frm_cache + bkv_sz_frm_new)]
+      fetch_sz = 0
+      if not skip_cache_attn:
+        fetch_sz += bkv_sz_frm_cache
+      if not skip_current_attn:
+        fetch_sz += bkv_sz_frm_new
+      dst = vmem_ref.at[pl.ds(0, fetch_sz)]
       _async_copy(
           src=dst,
           dst=dst,
@@ -683,8 +673,8 @@ def _ragged_paged_attention_kernel_loop(
   def _update_kv_cache(seq_idx, bkv_sem_idx, offset, src_start_base, update_sz, *, wait=False):
     sem = sems.at[3, bkv_sem_idx]
 
-    local_offset_start = (offset + cp_group_size - 1 - cp_rank) // cp_group_size
-    local_offset_end = (offset + update_sz + cp_group_size - 1 - cp_rank) // cp_group_size
+    local_offset_start = get_cp_local_size(offset)
+    local_offset_end = get_cp_local_size(offset + update_sz)
     update_sz = local_offset_end - local_offset_start
 
     kv_p_start = local_offset_start // page_size
@@ -971,14 +961,7 @@ def _ragged_paged_attention_kernel_loop(
       )
 
       _next_seq_idx = jnp.minimum(seq_idx + 1, end_seq_idx - 1)
-      _next_kv_cache_len_global = kv_cache_lens_ref[_next_seq_idx]
-      _next_kv_cache_len_local = (_next_kv_cache_len_global + cp_group_size - 1 - cp_rank) // cp_group_size
-
-      _next_seq_start_bkv_idx = 0
-      if sliding_window is not None:
-         _next_seq_start_bkv_idx = (jnp.maximum(_next_kv_cache_len_local - sliding_window, 0) // bkv_sz)
-      if skip_cache_attn:
-         _next_seq_start_bkv_idx = jnp.maximum(_next_seq_start_bkv_idx, _next_kv_cache_len_local // bkv_sz)
+      _next_seq_start_bkv_idx = get_start_bkv_idx(_next_seq_idx)
 
       next_bkv_idx = lax.select(
           is_last_bq, _next_seq_start_bkv_idx, next_bkv_idx
@@ -1330,7 +1313,6 @@ def dynamic_validate_inputs(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
-    kv_cache_lens: jax.Array | None = None,
     *,
     cp_rank: jax.Array | int | None = None,
     cp_group_size: int | None = None,
@@ -1364,7 +1346,6 @@ def dynamic_validate_inputs(
       page_indices,
       cu_q_lens,
       distribution,
-      kv_cache_lens=kv_cache_lens,
       cp_group_size=cp_group_size,
       use_causal_mask=use_causal_mask,
       skip_kv_mask=skip_kv_mask,
@@ -1431,7 +1412,6 @@ def static_validate_inputs(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
-    kv_cache_lens: jax.Array,
     *,
     cp_rank: jax.Array | int | None = None,
     cp_group_size: int | None = None,
@@ -1650,7 +1630,6 @@ def get_default_block_sizes(
 
   max_q = next_power_of_2(max_num_tokens)
   max_kv = pages_per_seq * page_size
-  max_bkv_sz = 4096  # Add this to avoid vmem oom
 
   match tpu_version:
     case 5 | 6:
@@ -1665,7 +1644,7 @@ def get_default_block_sizes(
                 // head_dim_align_factor
                 // num_kv_heads_x2,
                 max_kv,
-            ) // page_size * page_size,
+            ),
         )
         bq_csz = 1
         bkv_csz = max(
@@ -1677,7 +1656,7 @@ def get_default_block_sizes(
                 // head_dim_align_factor
                 // num_kv_heads_x2,
                 max_kv,
-            ) // page_size * page_size,
+            ),
         )
       else:
         bq_sz = min(
@@ -1693,7 +1672,7 @@ def get_default_block_sizes(
                 // head_dim_align_factor
                 // num_kv_heads_x2,
                 max_kv,
-            ) // page_size * page_size,
+            ),
         )
         bq_csz = min(
             128 * 16 * q_packing // head_dim_align_factor // num_q_heads,
@@ -1708,7 +1687,7 @@ def get_default_block_sizes(
                 // head_dim_align_factor
                 // num_kv_heads_x2,
                 max_kv // 4,
-            ) // page_size * page_size,
+            ),
         )
     case 7:
       max_bkv_sz = min(max_kv, 4096)
@@ -1723,7 +1702,7 @@ def get_default_block_sizes(
                 // head_dim_align_factor
                 // num_kv_heads_x2,
                 max_bkv_sz,
-            ) // page_size * page_size,
+            ),
         )
         bq_csz = 1
         bkv_csz = max(
@@ -1735,7 +1714,7 @@ def get_default_block_sizes(
                 // head_dim_align_factor
                 // num_kv_heads_x2,
                 max_bkv_sz,
-            ) // page_size * page_size,
+            ),
         )
       else:
         bq_sz = min(
@@ -1751,7 +1730,7 @@ def get_default_block_sizes(
                 // head_dim_align_factor
                 // num_kv_heads_x2,
                 max_bkv_sz // 2,
-            ) // page_size * page_size,
+            ),
         )
         bq_csz = min(
             128 * 16 * q_packing // head_dim_align_factor // num_q_heads,
@@ -1766,14 +1745,13 @@ def get_default_block_sizes(
                 // head_dim_align_factor
                 // num_kv_heads_x2,
                 max_bkv_sz // 8,
-            ) // page_size * page_size,
+            ),
         )
     case _:
       raise NotImplementedError(f"Unsupported {tpu_version=}.")
 
-  # Ensure bkv_sz is divisible by bkv_csz
-  bkv_sz = max(bkv_sz, bkv_csz)
-  bkv_sz = (bkv_sz // bkv_csz) * bkv_csz
+  # Ensure bkv_sz is a multiple of bkv_csz
+  bkv_sz = max(bkv_csz, (bkv_sz // bkv_csz) * bkv_csz)
 
   return {
       "bq_sz": bq_sz,
@@ -1821,7 +1799,6 @@ def ragged_paged_attention(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
-    kv_cache_lens: jax.Array | None = None,
     *,
     cp_rank: jax.Array,  # i32[1] - per-device rank, sharded along the DCP axis
     cp_group_size: int | None = None,
@@ -1919,7 +1896,6 @@ def ragged_paged_attention(
       page_indices,
       cu_q_lens,
       distribution,
-      kv_cache_lens=kv_cache_lens,
       cp_rank=cp_rank,
       cp_group_size=cp_group_size,
       use_causal_mask=use_causal_mask,
@@ -2070,7 +2046,6 @@ def ragged_paged_attention(
         init_sem_ids,
         init_bo_ids,
         init_bkv_update_ids,
-        kv_cache_lens,
         cp_rank,  # cp_rank is a (1,) int32 sharded array, pass it to SMEM.
     )
 
