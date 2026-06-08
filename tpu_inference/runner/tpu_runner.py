@@ -508,7 +508,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # in the future.
             self.mesh = self._create_2d_mesh()
 
-        logger.info(f"Init mesh | mesh={self.mesh}")
+        self.draft_mesh = self._create_draft_mesh()
+        logger.info(
+            f"Init mesh | mesh={self.mesh} | draft_mesh={self.draft_mesh}")
 
     def _create_new_model_mesh(self) -> jax.sharding.Mesh:
         num_slices = envs.NUM_SLICES
@@ -605,6 +607,30 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return make_optimized_mesh(mesh_shape,
                                        MESH_AXIS_NAMES_2D,
                                        devices=self.devices)
+
+    def _create_draft_mesh(self) -> jax.sharding.Mesh:
+        if not self.speculative_config:
+            return self.mesh
+
+        draft_parallel_config = getattr(self.speculative_config,
+                                        "draft_parallel_config", None)
+        if draft_parallel_config is None:
+            return self.mesh
+
+        draft_tp = draft_parallel_config.tensor_parallel_size
+        target_tp = self.parallel_config.tensor_parallel_size
+
+        if draft_tp == target_tp:
+            return self.mesh
+
+        # Create a 2D draft mesh over the same devices
+        flat_devices = np.array(self.devices).flatten()
+        total_devices = flat_devices.size
+
+        draft_dp = total_devices // draft_tp
+        draft_devices_array = flat_devices.reshape((draft_dp, draft_tp))
+
+        return jax.sharding.Mesh(draft_devices_array, MESH_AXIS_NAMES_2D)
 
     def _init_phased_profiling(self) -> None:
         self.phased_profiling_dir = envs.PHASED_PROFILING_DIR

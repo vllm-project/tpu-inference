@@ -94,15 +94,17 @@ class KVCacheManager:
         self._mamba_num_blocks: int | None = None
         self.actual_mamba_num_blocks: int | None = None
 
-    def _create_attention_spec(
-            self,
-            block_size: int,
-            num_kv_heads: int,
-            head_size: int,
-            sliding_window: bool | None = None) -> KVCacheSpec:
+    def _create_attention_spec(self,
+                               block_size: int,
+                               num_kv_heads: int,
+                               head_size: int,
+                               sliding_window: bool | None = None,
+                               mesh=None) -> KVCacheSpec:
+        if mesh is None:
+            mesh = self.runner.mesh
         if self.use_mla:
             page_size_bytes = get_attention_page_size_bytes(
-                self.runner.mesh, block_size, num_kv_heads, head_size,
+                mesh, block_size, num_kv_heads, head_size,
                 self.runner.kv_cache_dtype, True)
             page_size_padded = (self._hybrid_uniform_page_size_bytes
                                 if self._hybrid_uniform_page_size_bytes
@@ -116,7 +118,7 @@ class KVCacheManager:
                                     page_size_padded=page_size_padded)
         else:
             page_size_bytes = get_attention_page_size_bytes(
-                self.runner.mesh, block_size, num_kv_heads, head_size,
+                mesh, block_size, num_kv_heads, head_size,
                 self.runner.kv_cache_dtype, False)
             page_size_padded = (self._hybrid_uniform_page_size_bytes
                                 if self._hybrid_uniform_page_size_bytes
@@ -544,8 +546,12 @@ class KVCacheManager:
                     for draft_layer, target_layer in redirects.items():
                         self.shared_kv_cache_layers[draft_layer] = target_layer
                 elif method == "eagle3":
+                    draft_mesh = getattr(self.runner, "draft_mesh",
+                                         self.runner.mesh)
+                    draft_model_cnt = common_utils.get_mesh_shape_product(
+                        draft_mesh, tp_axis_name)
                     num_kv_heads = common_utils.get_padded_num_heads(
-                        draft_hf_config.num_key_value_heads, model_cnt)
+                        draft_hf_config.num_key_value_heads, draft_model_cnt)
                     head_size = common_utils.get_padded_head_dim(
                         draft_hf_config.hidden_size //
                         draft_hf_config.num_attention_heads)
@@ -554,11 +560,17 @@ class KVCacheManager:
                         if self.use_mla:
                             kv_cache_spec[
                                 f"draft_layer.{i}"] = self._create_attention_spec(
-                                    block_size, 1, mla_head_size)
+                                    block_size,
+                                    1,
+                                    mla_head_size,
+                                    mesh=draft_mesh)
                         else:
                             kv_cache_spec[
                                 f"draft_layer.{i}"] = self._create_attention_spec(
-                                    block_size, num_kv_heads, head_size)
+                                    block_size,
+                                    num_kv_heads,
+                                    head_size,
+                                    mesh=draft_mesh)
         else:
             # Else propagate attention modules from compilation config.
             layers = get_layers_from_vllm_config(
@@ -870,12 +882,17 @@ class KVCacheManager:
                         # NOTE: we'll multiply the num_kv_heads by 2 in the function
                         head_size = layer_spec.head_size
 
+                        is_draft = any("draft" in name
+                                       for name in kv_cache_tensor.shared_by)
+                        mesh = getattr(
+                            self.runner, "draft_mesh",
+                            self.runner.mesh) if is_draft else self.runner.mesh
                         kv_cache = create_kv_caches(
                             num_blocks=num_blocks,
                             block_size=layer_spec.block_size,
                             num_kv_heads=layer_spec.num_kv_heads,
                             head_size=head_size,
-                            mesh=self.runner.mesh,
+                            mesh=mesh,
                             layer_names=[f'kv_cache_tensor.{i}'],
                             cache_dtype=t2j_dtype(layer_spec.dtype),
                             use_mla=self.use_mla,

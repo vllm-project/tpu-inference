@@ -59,7 +59,7 @@ class Eagle3Proposer:
         self.method = self.speculative_config.method
 
         self.runner = runner
-        self.mesh = runner.mesh
+        self.mesh = getattr(runner, "draft_mesh", runner.mesh)
         self.num_speculative_tokens = (
             self.speculative_config.num_speculative_tokens)
         self.block_size = vllm_config.cache_config.block_size
