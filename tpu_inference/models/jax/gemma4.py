@@ -36,7 +36,8 @@ from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear, JaxLmHead
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
-from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.layers.jax.rope_interface import (apply_rope,
+                                                     normalize_rope_scaling)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.kv_share import compute_kv_share_map
@@ -294,8 +295,11 @@ class Gemma4Attention(JaxModule):
             rope_parameters = rope_parameters[self.layer_type]
             self.rope_theta = rope_parameters.get(
                 "rope_theta", getattr(config, "rope_theta", 10000.0))
-            self.rope_scaling = rope_parameters.get(
-                "rope_scaling", getattr(config, "rope_scaling", None))
+            rope_scaling = rope_parameters.get(
+                "rope_scaling", None) or getattr(config, "rope_scaling", None)
+            if rope_scaling is None and "rope_type" in rope_parameters:
+                rope_scaling = rope_parameters
+            self.rope_scaling = normalize_rope_scaling(rope_scaling)
             self.rope_proportion = rope_parameters.get("partial_rotary_factor",
                                                        1.0)
         else:

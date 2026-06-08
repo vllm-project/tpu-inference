@@ -13,10 +13,28 @@
 # limitations under the License.
 
 import math
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import jax
 import jax.numpy as jnp
+
+
+def normalize_rope_scaling(rope_scaling: Any) -> Optional[Dict[str, Any]]:
+    if rope_scaling is not None:
+        rope_scaling = dict(rope_scaling)
+        if (rope_scaling.get("rope_type", "default") == "default"
+                and "factor" not in rope_scaling
+                and "scale_factor" not in rope_scaling):
+            rope_scaling = None
+        elif "factor" in rope_scaling and "scale_factor" not in rope_scaling:
+            rope_scaling["scale_factor"] = rope_scaling.pop("factor")
+    return rope_scaling
+
+
+def get_rope_scaling(config: Any) -> Optional[Dict[str, Any]]:
+    rope_scaling = getattr(config, "rope_parameters", None) or getattr(
+        config, "rope_scaling", None)
+    return normalize_rope_scaling(rope_scaling)
 
 
 def apply_rope(

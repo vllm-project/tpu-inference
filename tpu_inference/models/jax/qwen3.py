@@ -32,7 +32,8 @@ from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLmHead
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
-from tpu_inference.layers.jax.rope_interface import apply_rope
+from tpu_inference.layers.jax.rope_interface import (apply_rope,
+                                                     get_rope_scaling)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
@@ -62,7 +63,7 @@ class Qwen3Attention(JaxModule):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.rope_theta = config.rope_parameters["rope_theta"]
-        self.rope_scaling = getattr(config, "rope_scaling", None)
+        self.rope_scaling = get_rope_scaling(config)
         self.rms_norm_eps = config.rms_norm_eps
 
         self.head_dim_original = getattr(config, "head_dim",
