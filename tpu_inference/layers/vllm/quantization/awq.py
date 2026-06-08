@@ -20,10 +20,10 @@ import torch
 from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
+                                                  FusedMoeWeightScaleSupported,
+                                                  RoutedExperts)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.layer import \
-    FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization import \
@@ -81,7 +81,7 @@ class VllmAWQConfig(AWQConfig, VllmQuantConfig):
                 if is_layer_skipped(prefix, self.modules_to_not_convert):
                     return VllmUnquantizedLinearMethod(linear_config)
                 return VllmAWQLinearMethod(self, linear_config)
-            case FusedMoE():
+            case RoutedExperts():
                 layer.moe_config = self.get_moe_config(layer)
                 return VllmAWQMoEMethod(self, layer, self.mesh)
             case _:
@@ -373,7 +373,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
 
         w13_qweight = t2j(layer.w13_qweight, use_dlpack=False)
         delattr(layer, "w13_qweight")
@@ -479,7 +479,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,

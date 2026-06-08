@@ -25,7 +25,7 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE, RoutedExperts
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32, quantize_weights)
 from vllm.scalar_type import scalar_types
@@ -81,7 +81,7 @@ def initialize_int4_layer_weights(layer: torch.nn.Module,
                                   weight_quant: QuantizationArgs,
                                   hidden_size: int):
     torch.manual_seed(42)
-    assert isinstance(layer, FusedMoE)
+    assert isinstance(layer, RoutedExperts)
 
     group_size = weight_quant.group_size
     experts = layer.global_num_experts
@@ -175,26 +175,27 @@ def test_fused_moe_method_w4(mesh, num_tokens, intermediate_size, hidden_size,
                          top_k=topk,
                          hidden_size=hidden_size,
                          intermediate_size=intermediate_size)
-        layer.moe_parallel_config.use_ep = use_ep
-        moe = quant_config.get_moe_config(layer)
+        layer.moe_config.moe_parallel_config.use_ep = use_ep
+        moe = quant_config.get_moe_config(layer.routed_experts)
         method = VllmCompressedTensorsW4A8MoEMethod(weight_quant, input_quant,
                                                     moe, mesh)
-    method.create_weights(layer,
+    method.create_weights(layer.routed_experts,
                           num_experts,
                           hidden_size,
                           intermediate_size,
                           params_dtype=torch.bfloat16)
 
     w13_weight_ref, w2_weight_ref = initialize_int4_layer_weights(
-        layer, weight_quant, hidden_size=hidden_size)
-    method.process_weights_after_loading(layer)
+        layer.routed_experts, weight_quant, hidden_size=hidden_size)
+    method.process_weights_after_loading(layer.routed_experts)
 
     seqlen = num_tokens
     with torchax.default_env():
         x = torch.ones((seqlen, hidden_size), dtype=torch.bfloat16).to('jax')
         router_logits = torch.randn((seqlen, num_experts),
                                     dtype=torch.bfloat16).to('jax')
-        result = method.apply_monolithic(layer, x, router_logits)
+        result = method.apply_monolithic(layer.routed_experts, x,
+                                         router_logits)
         expected = test_utils.ref_moe(x.to(torch.float32).cpu(),
                                       router_logits.to(torch.float32).cpu(),
                                       w13_weight_ref.to(torch.float32).cpu(),
