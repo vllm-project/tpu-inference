@@ -246,6 +246,10 @@ class Gemma4MTPAttention(JaxModule):
         )
 
         self.is_kv_shared_layer = True
+        self.kv_cache_quantized_dtype = None
+        if kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                kv_cache_dtype)
 
     def __call__(
         self,
@@ -267,10 +271,11 @@ class Gemma4MTPAttention(JaxModule):
         )
 
         num_tokens = q.shape[0]
+        dummy_dtype = self.kv_cache_quantized_dtype or q.dtype
         dummy_k = jnp.zeros((num_tokens, self.num_kv_heads, self.head_dim),
-                            dtype=q.dtype)
+                            dtype=dummy_dtype)
         dummy_v = jnp.zeros((num_tokens, self.num_kv_heads, self.head_dim),
-                            dtype=q.dtype)
+                            dtype=dummy_dtype)
 
         new_kv_cache, outputs = attention(
             kv_cache,

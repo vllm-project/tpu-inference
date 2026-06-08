@@ -2008,16 +2008,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def _prepare_async_token_substitution_indices(
             self, req_ids_dp, scheduled_tokens_per_dp_rank,
-            padded_num_scheduled_tokens_per_dp_rank, dp_size,
-            scheduler_output: "VllmSchedulerOutput"):
+            padded_num_scheduled_tokens_per_dp_rank, dp_size):
         """Prepare token substitution indices for async scheduling."""
         # For input_ids substitution.
         token_in_tpu_cur_input_indices_dp = {}
         token_in_tpu_pre_next_tokens_indices_dp = {}
         spec_decode_enabled = (self.speculative_config is not None)
-
-        spec_decode_req_ids = set(scheduler_output.scheduled_spec_decode_tokens
-                                  .keys()) if spec_decode_enabled else set()
 
         for dp_rank in range(dp_size):
             token_in_tpu_cur_input_indices_dp[dp_rank] = []
@@ -2203,8 +2199,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 token_in_tpu_pre_next_tokens_indices_dp,
             ) = self._prepare_async_token_substitution_indices(
                 req_ids_dp, scheduled_tokens_per_dp_rank,
-                padded_num_scheduled_tokens_per_dp_rank, dp_size,
-                scheduler_output)
+                padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
         self.device_buffer.reset()
 
