@@ -87,6 +87,18 @@ class Gemma4MTPMaskedEmbedder(JaxModule):
     ) -> Tuple[jax.Array, jax.Array]:
         """Centroid selection + sparse dot product."""
         num_tokens = hidden_states.shape[0]
+
+        # Handle transposed lm_head_weight if necessary.
+        # lm_head.weight is (hidden_size, vocab_size) due to weight loader permutation.
+        # embed_tokens.weight is (vocab_size, hidden_size).
+        if lm_head_weight.shape == (self.hidden_size, self.vocab_size):
+            lm_head_weight = lm_head_weight.T
+        elif lm_head_weight.shape != (self.vocab_size, self.hidden_size):
+            raise ValueError(
+                f"Unexpected lm_head_weight shape: {lm_head_weight.shape}, "
+                f"expected ({self.hidden_size}, {self.vocab_size}) or ({self.vocab_size}, {self.hidden_size})"
+            )
+
         centroid_logits = self.centroids(
             hidden_states)  # (num_tokens, num_centroids)
         _, top_k_indices = jax.lax.top_k(

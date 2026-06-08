@@ -422,6 +422,7 @@ class Eagle3Proposer:
             # Offsets within each request window: [0,1,2, 0,1,2,3, ...]
             token_offsets = jnp.arange(total_num_tokens, dtype=np.int32)
             token_offsets -= expanded_new_query_start_loc
+
             # Map into old flat indices by adding original request starts.
             old_query_start_loc_expanded = jnp.repeat(
                 query_start_loc[:-1],

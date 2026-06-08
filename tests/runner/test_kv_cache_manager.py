@@ -678,6 +678,54 @@ class TestKVCacheManager:
             assert isinstance(spec, MLAAttentionSpec)
             assert spec.num_kv_heads == 1
 
+    @patch('tpu_inference.models.common.kv_share.compute_mtp_kv_share_map')
+    def test_get_kv_cache_spec_with_gemma4_mtp(self, mock_compute_map):
+        # tests we create kv cache spec for gemma4 mtp draft model (KV-sharing)
+        self.runner.vllm_config.compilation_config.static_forward_context = {}
+
+        mock_speculative_config = MagicMock()
+        mock_speculative_config.method = "mtp"
+        mock_speculative_config.use_gemma4_mtp = MagicMock(return_value=True)
+        mock_draft_model_config = MagicMock()
+        mock_hf_config = MagicMock()
+        mock_draft_model_config.hf_config = mock_hf_config
+        mock_speculative_config.draft_model_config = mock_draft_model_config
+        self.runner.speculative_config = mock_speculative_config
+
+        # Target config
+        mock_text_config = MagicMock()
+        mock_text_config.num_global_key_value_heads = None
+        mock_text_config.global_head_dim = None
+        mock_text_config.num_key_value_heads = None
+        mock_text_config.head_dim = None
+        mock_text_config.layer_types = []
+        self.runner.model_config.hf_text_config = mock_text_config
+
+        # Mock redirect map
+        fake_redirects = {
+            "draft_layer.0": "layer.2",
+            "draft_layer.1": "layer.5",
+        }
+        mock_compute_map.return_value = fake_redirects
+
+        # Clear any existing shared layers
+        self.runner.kv_cache_manager.shared_kv_cache_layers = {}
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        # Assertions
+        mock_compute_map.assert_called_once_with(mock_hf_config,
+                                                 mock_text_config)
+
+        # Draft layers should NOT be in kv_cache_spec because they are shared
+        assert "draft_layer.0" not in kv_cache_spec
+        assert "draft_layer.1" not in kv_cache_spec
+
+        # Redirects should be registered in shared_kv_cache_layers
+        shared_layers = self.runner.kv_cache_manager.shared_kv_cache_layers
+        assert shared_layers["draft_layer.0"] == "layer.2"
+        assert shared_layers["draft_layer.1"] == "layer.5"
+
     def test_delete_kv_cache(self):
         """Test that delete_kv_cache deletes JAX arrays and clears state."""
         # First, initialize KV cache using the same setup as

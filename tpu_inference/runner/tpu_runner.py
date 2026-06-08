@@ -1741,16 +1741,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def _prepare_async_token_substitution_indices(
             self, req_ids_dp, scheduled_tokens_per_dp_rank,
-            padded_num_scheduled_tokens_per_dp_rank, dp_size,
-            scheduler_output: "VllmSchedulerOutput"):
+            padded_num_scheduled_tokens_per_dp_rank, dp_size):
         """Prepare token substitution indices for async scheduling."""
         # For input_ids substitution.
         token_in_tpu_cur_input_indices_dp = {}
         token_in_tpu_pre_next_tokens_indices_dp = {}
         spec_decode_enabled = (self.speculative_config is not None)
-
-        spec_decode_req_ids = set(scheduler_output.scheduled_spec_decode_tokens
-                                  .keys()) if spec_decode_enabled else set()
 
         for dp_rank in range(dp_size):
             token_in_tpu_cur_input_indices_dp[dp_rank] = []
@@ -1768,20 +1764,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             for i, req_id in enumerate(req_ids_dp[dp_rank]):
                 acc_cur_len += num_scheduled_tokens_per_req[i]
-                if req_id not in self._pre_async_results.placeholder_req_id_to_index:
-                    continue
 
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 is_prefill = self.input_batch.num_computed_tokens_cpu[
                     req_idx] < self.input_batch.num_prompt_tokens[req_idx]
 
+                # We need an explicit `is_prefill` check here because of preemption.
+                # If a request is preempted and immediately resumed, it goes back to
+                # the prefill stage. However, its `req_id` might still be in
+                # `_pre_async_results.placeholder_req_id_to_index` from the previous step.
+                # Without this check, we would incorrectly perform token substitution
+                # for a resumed prefill request.
                 if is_prefill:
                     # Skip substitution for prefill requests (including chunked prefill)
                     continue
 
-                req_doing_spec_decode = req_id in spec_decode_req_ids
+                if req_id not in self._pre_async_results.placeholder_req_id_to_index:
+                    continue
 
-                if not req_doing_spec_decode:
+                if not spec_decode_enabled:
                     # Treat as normal decode: substitute 1 token
                     assert num_scheduled_tokens_per_req[i] == 1, (
                         f"Expected 1 token for normal decode request {req_id}, "
@@ -1866,6 +1867,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             scheduled_tokens_cur_rank = scheduled_tokens_per_dp_rank[rank]
             for i, req_id in enumerate(req_ids_dp[rank]):
                 acc_cur_len += scheduled_tokens_cur_rank[i]
+
                 if req_id not in self._pre_async_results.placeholder_req_id_to_index:
                     continue
 
@@ -1930,8 +1932,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 token_in_tpu_pre_next_tokens_indices_dp,
             ) = self._prepare_async_token_substitution_indices(
                 req_ids_dp, scheduled_tokens_per_dp_rank,
-                padded_num_scheduled_tokens_per_dp_rank, dp_size,
-                scheduler_output)
+                padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
         self.device_buffer.reset()
 
