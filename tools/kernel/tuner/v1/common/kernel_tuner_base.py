@@ -471,7 +471,9 @@ class KernelTunerBase(ABC):
                 self.tuner_config.tunable_params_class)
 
             # check whether tuning_key is same as last one and if last one is OOM, then we can skip
-            if any(tuning_key == k and s == TuningStatus.FAILED_OOM and p <= tunable_params for k, p, s in all_processed_cases_status):
+            if any(tuning_key == k and s == TuningStatus.FAILED_OOM
+                   and p <= tunable_params
+                   for k, p, s in all_processed_cases_status):
                 logger.warning(
                     f"Skipping CaseId {cid} with tuning key {tuning_key} and tunable params {tunable_params} because it is expected to fail with OOM based on previous cases."
                 )
@@ -480,53 +482,77 @@ class KernelTunerBase(ABC):
                      TuningStatus.SKIPPED.value, FLAGS.worker_id, 0, 0, 0,
                      self.storage_manager.get_timestamp_sec(),
                      self.run_config.tpu_queue_multi))
-                all_processed_cases_status.append([tuning_key, tunable_params, TuningStatus.SKIPPED])
+                all_processed_cases_status.append(
+                    [tuning_key, tunable_params, TuningStatus.SKIPPED])
                 continue
 
             begin_case_id_time = time.perf_counter_ns()
+
+            def run_and_record_failure(tuning_key,
+                                       tunable_params,
+                                       iters,
+                                       warmup_us=0):
+                status, avg_latency_ns, _ = self.run(tuning_key,
+                                                     tunable_params,
+                                                     iters=iters)
+                if status != TuningStatus.SUCCESS:
+                    results_buffer.append(
+                        (self.run_config.case_set_id, self.run_config.run_id,
+                         cid, status.value, FLAGS.worker_id, 0, warmup_us, 0,
+                         self.storage_manager.get_timestamp_sec(),
+                         self.run_config.tpu_queue_multi))
+                    all_processed_cases_status.append(
+                        [tuning_key, tunable_params, status])
+                return status, avg_latency_ns
+
             # status can be SUCCESS, FAILED_OOM, UNKNOWN_ERROR.
-            status, warmup_ns, _ = self.run(tuning_key,
-                                            tunable_params,
-                                            iters=1)
+            status, warmup_ns = run_and_record_failure(tuning_key,
+                                                       tunable_params,
+                                                       iters=1)
             if status != TuningStatus.SUCCESS:
-                results_buffer.append(
-                    (self.run_config.case_set_id, self.run_config.run_id, cid,
-                     status.value, FLAGS.worker_id, 0, 0, 0,
-                     self.storage_manager.get_timestamp_sec(),
-                     self.run_config.tpu_queue_multi))
                 logger.warning(
                     f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
                 )
-                all_processed_cases_status.append([tuning_key, tunable_params, status])
-                last_run_status = status
                 continue
             warmup_us = int(warmup_ns // 1000)
 
-            status, average_latency_ns, _ = self.run(tuning_key,
-                                                     tunable_params,
-                                                     iters=100)
-            end_time = time.perf_counter_ns()
-            total_time = end_time - begin_case_id_time
+            measurement_iters = 100
+            status, average_latency_ns = run_and_record_failure(
+                tuning_key,
+                tunable_params,
+                iters=measurement_iters,
+                warmup_us=warmup_us)
             if status != TuningStatus.SUCCESS:
-                results_buffer.append(
-                    (self.run_config.case_set_id, self.run_config.run_id, cid,
-                     status.value, FLAGS.worker_id, warmup_us, 0, 0,
-                     self.storage_manager.get_timestamp_sec(),
-                     self.run_config.tpu_queue_multi))
                 logger.warning(
-                    f"Case {cid} failed during main run with status: {status}. Total time spent: {total_time/1e9:.2f}s."
+                    f"Case {cid} failed during main run with status: {status}. Total time spent: {(time.perf_counter_ns() - begin_case_id_time)/1e9:.2f}s."
                 )
-                all_processed_cases_status.append([tuning_key, tunable_params, status])
                 continue
 
+            # remeasure if the average latency is too small, force to run at least for 1 second to get more stable measurement
+            if average_latency_ns * measurement_iters < 1_000_000_000:  # if average latency is less than 10ms, we consider it as too small
+                logger.info(
+                    f"Average latency for Case {cid} is too small. Rerunning with more iterations for stable measurement."
+                )
+                iters = max(
+                    1000, int(1_000_000_000 //
+                              average_latency_ns))  # run at least for 1 second
+                status, average_latency_ns = run_and_record_failure(
+                    tuning_key,
+                    tunable_params,
+                    iters=iters,
+                    warmup_us=warmup_us)
+                assert status == TuningStatus.SUCCESS, f"Case {cid} failed during remeasure with status: {status}. This is unexpected because the first run was successful. Please check the logs for more details. Total time spent: {(time.perf_counter_ns() - begin_case_id_time)/1e9:.2f}s."
+
             average_latency_us = int(average_latency_ns // 1000)
-            total_time_us = int(total_time // 1000)
+            total_time_us = int(
+                (time.perf_counter_ns() - begin_case_id_time) // 1000)
             results_buffer.append(
                 (self.run_config.case_set_id, self.run_config.run_id, cid,
                  status.value, FLAGS.worker_id, average_latency_us, warmup_us,
                  total_time_us, self.storage_manager.get_timestamp_sec(),
                  self.run_config.tpu_queue_multi))
-            all_processed_cases_status.append([tuning_key, tunable_params, status])
+            all_processed_cases_status.append(
+                [tuning_key, tunable_params, status])
 
             if FLAGS.debug:
                 logger.info(

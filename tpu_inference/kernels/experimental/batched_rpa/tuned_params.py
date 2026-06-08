@@ -93,7 +93,7 @@ class TunableParams:
                                   bkv_sz=self.bkv_sz,
                                   batch_size=self.batch_size,
                                   n_buffer=self.n_buffer)
-    
+
     def __ge__(self, other) -> bool:
         return self.bq_sz >= other.bq_sz and self.bq_c_sz >= other.bq_c_sz and self.bkv_sz >= other.bkv_sz and self.batch_size >= other.batch_size
 
@@ -115,23 +115,25 @@ def get_tuned_params(
         from tpu_inference.kernels.experimental.batched_rpa.wrapper import \
             calculate_block_sizes
         decode_block_sizes, _ = calculate_block_sizes(model_config,
-                                                       serve_config,
-                                                       vmem_limit_bytes)
+                                                      serve_config,
+                                                      vmem_limit_bytes)
         # logger.warning(f"No tuned parameters found for the given tuning keys: {decode_tuning_key}, using calculated decode tuned params {decode_tuned_params}")
     else:
         # logger.info(f"Found tuned parameters for decode tuning key: {decode_tuning_key}")
-        decode_block_sizes = tuned_params_mapping[decode_tuning_key].to_block_sizes()
+        decode_block_sizes = tuned_params_mapping[
+            decode_tuning_key].to_block_sizes()
     if prefill_tuning_key not in tuned_params_mapping:
         from tpu_inference.kernels.experimental.batched_rpa.wrapper import \
             calculate_block_sizes
-        _, prefill_block_sizes = calculate_block_sizes(
-            model_config, serve_config, vmem_limit_bytes)
+        _, prefill_block_sizes = calculate_block_sizes(model_config,
+                                                       serve_config,
+                                                       vmem_limit_bytes)
         # logger.warning(f"No tuned parameters found for the given tuning keys: {prefill_tuning_key}, using calculated prefill tuned params {prefill_tuned_params}")
     else:
         # logger.info(f"Found tuned parameters for prefill tuning key: {prefill_tuning_key}")
-        prefill_block_sizes = tuned_params_mapping[prefill_tuning_key].to_block_sizes()
+        prefill_block_sizes = tuned_params_mapping[
+            prefill_tuning_key].to_block_sizes()
     return decode_block_sizes, prefill_block_sizes
-
 
 
 tuned_params_mapping: dict[TuningKey, TunableParams] = {}

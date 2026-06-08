@@ -65,9 +65,10 @@ _SPANNER_INSTANCE_ID = flags.DEFINE_string(
 _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'spanner_database_id', 'tune-gmm',
     'The Spanner database ID to use. Only used when --run_locally is false.')
-_WORKER_ID = flags.DEFINE_string('worker_id',
-                                 os.getenv('HOST_NAME',
-                                           'Local' if _RUN_LOCALLY.value else 'Unknown'), 'The worker id')
+_WORKER_ID = flags.DEFINE_string(
+    'worker_id',
+    os.getenv('HOST_NAME', 'Local' if _RUN_LOCALLY.value else 'Unknown'),
+    'The worker id')
 _TPU_VERSION = flags.DEFINE_string(
     'tpu_version', '',
     'The TPU version to use for tuning. Supported values are "tpu6e" and "tpu7x".'
@@ -97,7 +98,6 @@ _JOB_BUCKET_SIZE = flags.DEFINE_integer(
     'job_bucket_size', 500,
     'The number of cases to include in each tuning job. Only used when --generate_buildkite_pipeline is false and --run_locally is false. Default is 500.'
 )
-
 
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system

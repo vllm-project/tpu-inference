@@ -11,6 +11,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+''' How to use this kernel tuner:
+1. Through BuildKite new build UI:
+    1.1 Select the correct Commit and Branch
+    1.2 Add below env variables in the "Environment Variables" section
+        KERNEL_TUNING_KERNEL_NAME=batched_rpa_kernel_tuner
+        KERNEL_TUNING_CASE_SET_ID=batched_rpa_kernel_YOUR_ID
+        KERNEL_TUNING_RUN_ID=000
+        KERNEL_TUNING_CASE_SET_DESC=YOUR_DESC
+        KERNEL_TUNING_TPU_VERSION=tpu7x
+        KERNEL_TUNING_TPU_CORES=2
+2. Run Locally through local command line:
+    python -m tools.kernel.tuner.v1.kernel_tuner_runner --run_locally \
+        --kernel_tuner_name=batched_rpa_kernel_tuner \
+        --case_set_desc=batched_rpa_kernel_tuning_setup \
+        --case_set_id=batched_rpa_2 --run_id=0 \
+        --tpu_version=tpu7x --tpu_cores=2
+'''
 
 import logging
 import time
@@ -21,13 +38,12 @@ import jax.numpy as jnp
 import numpy as np
 from vllm.utils.math_utils import cdiv
 
-
-from tools.kernel.tuner.v1.utils import print_dataclasses_as_table
 from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
                                                             RunConfig,
                                                             TunerConfig,
                                                             TuningCase,
                                                             TuningStatus)
+from tools.kernel.tuner.v1.utils import print_dataclasses_as_table
 from tpu_inference.kernels.experimental.batched_rpa.configs_from_log import \
     LOG_ENTRIES
 from tpu_inference.kernels.experimental.batched_rpa.tuned_params import (
@@ -38,6 +54,7 @@ from tpu_inference.utils import get_dtype_packing
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
 
 def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
                                          rng: np.random.Generator
@@ -94,7 +111,7 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
     k_scale = tuning_key.scale_k
     v_scale = tuning_key.scale_v
     sliding_window = tuning_key.sliding_window
-    case = tuning_key.case
+    # case = tuning_key.case
 
     kv_packing = get_dtype_packing(kv_dtype)
 
@@ -126,7 +143,7 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
     # for decode case, the kv has lens of max_input_len(actaully should be more, should be max_model_len or sliding_window), for prefill case, the kv lens should be 0.
     # max_model_len can be calculated from num_page_indices, num_page_indices = num_seqs * pages_per_seq, so
     pages_per_seq = num_page_indices // num_seqs
-    max_model_len = pages_per_seq * page_size
+    # max_model_len = pages_per_seq * page_size
     kv_lens = [max_input_len] * max_prefill_seqs + [0] * (
         num_seqs - max_prefill_seqs
     )  # for prefill sequence, the kv lens is max_input_len, ignore decode sequence for now
@@ -162,7 +179,8 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
     logger.debug(f'values shape: {values.shape}, dtype: {values.dtype}')
     logger.debug(f'kv_cache shape: {kv_cache.shape}, dtype: {kv_cache.dtype}')
     logger.debug(f'kv_lens shape: {kv_lens.shape}, {kv_lens[:32]=}')
-    logger.debug(f'page_indices shape: {page_indices.shape}, {page_indices[:32]=}')
+    logger.debug(
+        f'page_indices shape: {page_indices.shape}, {page_indices[:32]=}')
     logger.debug(f'cu_q_lens shape: {cu_q_lens.shape}, {cu_q_lens[:32]=}')
     logger.debug(f'distribution shape: {distribution.shape}, {distribution=}')
     return {
@@ -204,17 +222,17 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         for log_entry in LOG_ENTRIES:
             model_config = log_entry.model
             serve_config = log_entry.serve
-            decode_tuned_block_size = log_entry.decode_block_sizes
+            # decode_tuned_block_size = log_entry.decode_block_sizes
             prefill_tuned_block_size = log_entry.prefill_block_sizes
-            decode_tuning_key = TuningKey.from_config(model_config,
-                                                      serve_config,
-                                                      case='decode')
+            # decode_tuning_key = TuningKey.from_config(model_config,
+            #                                           serve_config,
+            #                                           case='decode')
             prefill_tuning_key = TuningKey.from_config(model_config,
                                                        serve_config,
                                                        case='prefill')
-            decode_tunable_params = TunableParams(**asdict(
-                decode_tuned_block_size),
-                                                  is_baseline=True)
+            # decode_tunable_params = TunableParams(**asdict(
+            #     decode_tuned_block_size),
+            #                                       is_baseline=True)
             prefill_tunable_params = TunableParams(**asdict(
                 prefill_tuned_block_size),
                                                    is_baseline=True)
@@ -226,9 +244,9 @@ class BatchedRpaKernelTuner(KernelTunerBase):
 
             bq_c_sz = prefill_tunable_params.bq_c_sz
             bkv_sz = prefill_tunable_params.bkv_sz
-            batch_size = prefill_tunable_params.batch_size
+            # batch_size = prefill_tunable_params.batch_size
             n_buffer = prefill_tunable_params.n_buffer
-            total_q_tokens = serve_config.total_q_tokens
+            # total_q_tokens = serve_config.total_q_tokens
 
             for prefill_batch_size in [1, 2]:
                 for bq_sz in range(8, 513, 8):
@@ -236,17 +254,20 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                         if bq_sz % bq_c_sz != 0:
                             continue
                         for bkv_sz in range(256, 1025, 256):
-                            if bkv_sz % prefill_tuning_key.page_size != 0: # requirement from scheduler
+                            if bkv_sz % prefill_tuning_key.page_size != 0:  # requirement from scheduler
                                 continue
-                            for n_buffer in [2, 3]: # when n_buffer is 1, it stucks at the second iteration.
+                            for n_buffer in [
+                                    2, 3
+                            ]:  # when n_buffer is 1, it stucks at the second iteration.
                                 tuning_cases.append(
-                                    TuningCase(tuning_key=prefill_tuning_key,
-                                            tunable_params=TunableParams(
-                                                bq_sz=bq_sz,
-                                                bq_c_sz=bq_c_sz,
-                                                bkv_sz=bkv_sz,
-                                                batch_size=prefill_batch_size,
-                                                n_buffer=n_buffer)))
+                                    TuningCase(
+                                        tuning_key=prefill_tuning_key,
+                                        tunable_params=TunableParams(
+                                            bq_sz=bq_sz,
+                                            bq_c_sz=bq_c_sz,
+                                            bkv_sz=bkv_sz,
+                                            batch_size=prefill_batch_size,
+                                            n_buffer=n_buffer)))
 
         logger.info(f"Generated {len(tuning_cases)} tuning cases.")
         return tuning_cases
@@ -267,7 +288,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             iters: int = 1) -> tuple[TuningStatus, float, float]:
         if iters == 1:
             logger.info(
-                f"Running batched RPA kernel for tuning key & tunable params:\n"
+                "Running batched RPA kernel for tuning key & tunable params:\n"
             )
             print_dataclasses_as_table(tuning_key)
             print_dataclasses_as_table(tunable_params)
