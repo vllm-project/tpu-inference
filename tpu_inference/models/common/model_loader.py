@@ -93,6 +93,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY[
         "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
     _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
+    _MODEL_REGISTRY["LlamaForCausalLMEagle3"] = EagleLlama3ForCausalLM
     _MODEL_REGISTRY["GptOssForCausalLM"] = GptOss
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
     _MODEL_REGISTRY[
