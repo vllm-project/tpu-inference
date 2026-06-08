@@ -56,7 +56,7 @@ except ImportError:
 # yapf: disable
 from benchmark_core import BenchmarkContext, SampleRequest
 from benchmark_dataset import (GPQADataset, MLPerfDataset, MMLUDataset,
-                               MMMUProDataset, RandomDataset, SonnetDataset)
+                               MMMUProDataset, RandomDataset, SonnetDataset, MixedRandomDataset)
 # yapf: disable
 from benchmark_utils import (eval_benchmark_dataset_result,
                              sample_warmup_requests)
@@ -588,7 +588,14 @@ def main(args: argparse.Namespace):
                                       output_len=args.random_output_len,
                                       range_ratio=args.random_range_ratio,
                                       request_id_prefix=args.request_id_prefix,
+                                      num_prefixes=args.random_num_prefixes,
                                       ),
+            "mixed_random":
+            lambda: MixedRandomDataset(random_seed=args.seed,
+                                       dataset_path=args.dataset_path).sample(
+                                           tokenizer=tokenizer,
+                                           num_requests=args.num_prompts,
+                                           ),
         }
 
         try:
@@ -683,7 +690,7 @@ if __name__ == "__main__":
         default="sharegpt",
         choices=[
             "sharegpt", "burstgpt", "sonnet", "random", "hf", "custom", "mmlu",
-            "mlperf", "gpqa", "mmmu_pro"
+            "mlperf", "gpqa", "mmmu_pro", "mixed_random"
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -958,6 +965,12 @@ if __name__ == "__main__":
             "context length sampled from [input_len * (1 - range_ratio), "
             "input_len * (1 + range_ratio)]."
         ),
+    )
+    random_group.add_argument(
+        "--random-num-prefixes",
+        type=int,
+        default=1,
+        help="Number of different random prefixes to generate.",
     )
 
     sampling_group = parser.add_argument_group("sampling parameters")

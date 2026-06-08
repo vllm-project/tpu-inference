@@ -564,6 +564,7 @@ class RandomDataset(BenchmarkDataset):
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         request_id_prefix: str = "",
+        num_prefixes: int = 1,
         **kwargs,
     ) -> list[SampleRequest]:
         # Enforce range_ratio < 1
@@ -575,8 +576,13 @@ class RandomDataset(BenchmarkDataset):
         num_special_tokens = tokenizer.num_special_tokens_to_add()
         real_input_len = input_len - num_special_tokens
 
-        prefix_token_ids = (np.random.randint(
-            0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else [])
+        # Generate multiple prefixes
+        prefix_token_ids_list = []
+        if prefix_len > 0 and num_prefixes > 0:
+            for _ in range(num_prefixes):
+                prefix_token_ids_list.append(
+                    np.random.randint(0, vocab_size, size=prefix_len).tolist()
+                )
 
         # New sampling logic: [X * (1 - b), X * (1 + b)]
         input_low = int(real_input_len * (1 - range_ratio))
@@ -604,6 +610,11 @@ class RandomDataset(BenchmarkDataset):
         for i in range(num_requests):
             inner_seq = ((offsets[i] + i + np.arange(input_lens[i])) %
                          vocab_size).tolist()
+            if prefix_token_ids_list:
+                # Randomly select one of the pre-generated prefixes
+                prefix_token_ids = random.choice(prefix_token_ids_list)
+            else:
+                prefix_token_ids = []
             token_sequence = prefix_token_ids + inner_seq
             prompt = tokenizer.decode(token_sequence)
             # After decoding the prompt we have to encode and decode it again.
@@ -859,3 +870,115 @@ class SonnetDataset(BenchmarkDataset):
                     ))
                 ind += 1
         return samples
+
+
+class MixedRandomDataset(BenchmarkDataset):
+    """
+    Generates a mixed random dataset with a hardcoded distribution of profiles:
+    - Short: 10% share, ISL 512, OSL 512, prefix 400
+    - Medium: 15% share, ISL 2048, OSL 512, prefix 1600
+    - Large: 50% share, ISL 8192, OSL 1024, prefix 7168
+    - XL: 25% share, ISL 18000, OSL 2048, prefix 15500
+    20 prefixes per bucket.
+    """
+    PROFILES = [
+        # (share, prefix_len, random_input_len, output_len, name, num_prefixes)
+        (0.10, 400, 112, 512, 'short', 20),
+        (0.15, 1600, 448, 512, 'medium', 20),
+        (0.50, 7168, 1024, 1024, 'large', 20),
+        (0.25, 15500, 2500, 2048, 'xl', 20)
+    ]
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+
+    def _generate_stable_text(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        length: int,
+        vocab_size: int,
+        seed: int,
+    ) -> str:
+        rng = np.random.RandomState(seed)
+        initial_tokens = rng.randint(0, vocab_size, size=length).tolist()
+        text = tokenizer.decode(initial_tokens)
+        tokens = tokenizer.encode(text, add_special_tokens=False)
+        tokens_truncated = tokens[:length]
+        stable_text = tokenizer.decode(tokens_truncated)
+        return stable_text
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        vocab_size = tokenizer.vocab_size
+        num_special_tokens = tokenizer.num_special_tokens_to_add()
+
+        counts = []
+        total_assigned = 0
+        for i, profile in enumerate(self.PROFILES):
+            share = profile[0]
+            if i == len(self.PROFILES) - 1:
+                count = num_requests - total_assigned
+            else:
+                count = int(num_requests * share)
+                total_assigned += count
+            counts.append(count)
+
+        logger.info("Generating mixed dataset with counts: %s", 
+                    {p[4]: c for p, c in zip(self.PROFILES, counts)})
+
+        requests = []
+        base_seed = self.random_seed
+
+        for profile_idx, (share, prefix_len, random_input_len, output_len, name, num_prefixes) in enumerate(self.PROFILES):
+            count = counts[profile_idx]
+            if count <= 0:
+                continue
+
+            # Generate multiple stable prefixes for this profile
+            prefix_texts = []
+            if prefix_len > 0 and num_prefixes > 0:
+                for p_idx in range(num_prefixes):
+                    seed = base_seed + profile_idx * 10000 + p_idx
+                    prefix_texts.append(
+                        self._generate_stable_text(tokenizer, prefix_len, vocab_size, seed)
+                    )
+
+            real_input_len = random_input_len - num_special_tokens
+
+            for r_idx in range(count):
+                if prefix_texts:
+                    prefix_idx = (base_seed + r_idx) % len(prefix_texts)
+                    prefix_text = prefix_texts[prefix_idx]
+                else:
+                    prefix_text = ""
+
+                seed = base_seed + profile_idx * 10000 + num_prefixes + r_idx
+                random_text = self._generate_stable_text(tokenizer, real_input_len, vocab_size, seed)
+
+                prompt = prefix_text + random_text
+                
+                # Check length and truncate if necessary to match target_len exactly
+                enc_prompt = tokenizer.encode(prompt, add_special_tokens=False)
+                target_total_len = prefix_len + real_input_len
+                if len(enc_prompt) > target_total_len:
+                     enc_prompt = enc_prompt[:target_total_len]
+                     prompt = tokenizer.decode(enc_prompt)
+                
+                total_input_len = len(enc_prompt)
+
+                requests.append(
+                    SampleRequest(
+                        prompt=prompt,
+                        prompt_len=total_input_len,
+                        expected_output_len=output_len,
+                        request_id=f"{name}_{r_idx}",
+                    )
+                )
+
+        random.Random(base_seed).shuffle(requests)
+        return requests
+
