@@ -42,6 +42,14 @@ if TYPE_CHECKING:
     JAX_PROFILER_SERVER_PORT: int = 9999
     USE_BATCHED_RPA_KERNEL: bool = False
     FORCE_MOE_RANDOM_ROUTING: bool = False
+    # Fuse the MoE permute (token gather) into GMM1's LHS read instead of
+    # materializing the grouped activations with a standalone ragged_gather.
+    MOE_FUSE_PERMUTE: bool = False
+    # Only apply MOE_FUSE_PERMUTE at num_tokens >= MOE_FUSE_PERMUTE_MIN_TOKENS, so
+    # the fused gather is used only where prefill-size batches amortize its per-row
+    # overhead (avoids a small-batch decode regression).
+    MOE_FUSE_BATCH_GATED: bool = False
+    MOE_FUSE_PERMUTE_MIN_TOKENS: int = 768
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
     RAGGED_GATED_DELTA_RULE_IMPL: str = "chunked_jax_pd"
@@ -327,6 +335,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force random expert routing in MoE layers (for testing purposes only)
     "FORCE_MOE_RANDOM_ROUTING":
     env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
+    # Fuse the MoE permute (token gather) into GMM1's LHS read.
+    "MOE_FUSE_PERMUTE":
+    env_bool("MOE_FUSE_PERMUTE", default=False),
+    "MOE_FUSE_BATCH_GATED":
+    env_bool("MOE_FUSE_BATCH_GATED", default=False),
+    "MOE_FUSE_PERMUTE_MIN_TOKENS":
+    lambda: int(os.getenv("MOE_FUSE_PERMUTE_MIN_TOKENS", "768")),
     "JITTED_MM_MODULE_KEYS":
     env_str_list("JITTED_MM_MODULE_KEYS"),
     "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
