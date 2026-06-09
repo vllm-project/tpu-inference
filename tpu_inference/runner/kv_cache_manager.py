@@ -948,7 +948,7 @@ class KVCacheManager:
 
         # Explicitly delete each JAX array to release HBM.
         for kv_cache in kv_caches:
-            kv_cache.delete()
+            jax.tree.map(lambda x: x.delete(), kv_cache)
         self.runner.kv_caches.clear()
         self.runner.layer_name_to_kvcache_index.clear()
 

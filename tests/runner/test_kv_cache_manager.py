@@ -86,6 +86,30 @@ class TestKVCacheManager:
                                          devices=self.mock_devices)
             self.runner.mesh = self.mock_mesh
 
+    def _create_mamba_kv_cache_config(self, num_blocks, page_size_bytes,
+                                      layer_names):
+        mamba_spec = MagicMock(spec=MambaSpec)
+        mamba_spec.block_size = self.runner.vllm_config.cache_config.block_size
+        mamba_spec.page_size_bytes = page_size_bytes
+        mamba_spec.shapes = [(4, 128), (8, 64, 32)]
+        mamba_spec.dtypes = [torch.bfloat16, torch.float32]
+
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=layer_names,
+                             kv_cache_spec=mamba_spec),
+        ]
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=num_blocks * page_size_bytes,
+                shared_by=layer_names,
+            )
+        ]
+        return KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
     @pytest.fixture(autouse=True)
     def setup_runner_fixture(self):
         self._setup_runner(use_mla=False)
@@ -717,6 +741,32 @@ class TestKVCacheManager:
         assert len(self.runner.kv_caches) == 0
         assert len(self.runner.layer_name_to_kvcache_index) == 0
 
+    def test_delete_kv_cache_mamba(self):
+        """Test that delete_kv_cache successfully deletes Mamba states (tuples)."""
+        num_blocks = 100
+        page_size_bytes = 16 * 1024
+        layer_names = ['layer.0', 'layer.1']
+        kv_cache_config = self._create_mamba_kv_cache_config(
+            num_blocks, page_size_bytes, layer_names)
+
+        if not hasattr(self.runner.vllm_config, 'sharding_config'
+                       ) or self.runner.vllm_config.sharding_config is None:
+            self.runner.vllm_config.sharding_config = MagicMock()
+            self.runner.vllm_config.sharding_config.total_dp_size = 1
+
+        with patch('dataclasses.replace') as mock_replace:
+            mock_replaced_spec = MagicMock()
+            mock_replaced_spec.page_size_bytes = page_size_bytes
+            mock_replace.return_value = mock_replaced_spec
+            self.runner.initialize_kv_cache(kv_cache_config)
+
+        assert len(self.runner.kv_caches) == 2
+
+        # Now delete.
+        self.runner.delete_kv_cache()
+        assert len(self.runner.kv_caches) == 0
+        assert len(self.runner.layer_name_to_kvcache_index) == 0
+
     def test_reinitialize_kv_cache(self):
         """Test that reinitialize_kv_cache reallocates fresh KV cache."""
         block_size = self.runner.vllm_config.cache_config.block_size
@@ -802,29 +852,9 @@ class TestKVCacheManager:
     def test_initialize_kv_cache_mamba(self):
         num_blocks = 100
         page_size_bytes = 16 * 1024
-
-        mamba_spec = MagicMock(spec=MambaSpec)
-        mamba_spec.block_size = self.runner.vllm_config.cache_config.block_size
-        mamba_spec.page_size_bytes = page_size_bytes
-        mamba_spec.shapes = [(4, 128), (8, 64, 32)]
-        mamba_spec.dtypes = [torch.bfloat16, torch.float32]
-
         layer_names = ['layer.0', 'layer.1']
-        kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=layer_names,
-                             kv_cache_spec=mamba_spec),
-        ]
-        kv_cache_tensors = [
-            KVCacheTensor(
-                size=num_blocks * page_size_bytes,
-                shared_by=layer_names,
-            )
-        ]
-        kv_cache_config = KVCacheConfig(
-            num_blocks=num_blocks,
-            kv_cache_tensors=kv_cache_tensors,
-            kv_cache_groups=kv_cache_groups,
-        )
+        kv_cache_config = self._create_mamba_kv_cache_config(
+            num_blocks, page_size_bytes, layer_names)
 
         if not hasattr(self.runner.vllm_config, 'sharding_config'
                        ) or self.runner.vllm_config.sharding_config is None:
@@ -904,29 +934,9 @@ class TestKVCacheManager:
     def test_initialize_kv_cache_mamba_duplicate_fallback(self):
         num_blocks = 100
         page_size_bytes = 16 * 1024
-
-        mamba_spec = MagicMock(spec=MambaSpec)
-        mamba_spec.block_size = self.runner.vllm_config.cache_config.block_size
-        mamba_spec.page_size_bytes = page_size_bytes
-        mamba_spec.shapes = [(4, 128), (8, 64, 32)]
-        mamba_spec.dtypes = [torch.bfloat16, torch.float32]
-
         layer_names = [f'layer.{i}' for i in range(4)]
-        kv_cache_groups = [
-            KVCacheGroupSpec(layer_names=layer_names,
-                             kv_cache_spec=mamba_spec),
-        ]
-        kv_cache_tensors = [
-            KVCacheTensor(
-                size=num_blocks * page_size_bytes,
-                shared_by=layer_names,
-            )
-        ]
-        kv_cache_config = KVCacheConfig(
-            num_blocks=num_blocks,
-            kv_cache_tensors=kv_cache_tensors,
-            kv_cache_groups=kv_cache_groups,
-        )
+        kv_cache_config = self._create_mamba_kv_cache_config(
+            num_blocks, page_size_bytes, layer_names)
 
         if not hasattr(self.runner.vllm_config, 'sharding_config'
                        ) or self.runner.vllm_config.sharding_config is None:
