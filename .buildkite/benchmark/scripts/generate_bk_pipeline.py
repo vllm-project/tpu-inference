@@ -223,11 +223,14 @@ def create_benchmark_steps(
             # Include parent_dir in label for uniqueness
             step_label = f"[{parent_dir}] {agent} {file_basename}"
             case_parameter = f"{file_path}"
+            benchmark_name = file_basename
         else:
             step_env["TARGET_CASE_NAME"] = case_name
             # Include parent_dir in label for uniqueness
             step_label = f"[{parent_dir}] {agent} {file_basename} {case_name}"
             case_parameter = f"{file_path} {case_name}"
+            benchmark_name = case_name
+        step_env["MLCOMPASS_TEST_NAME"] = f"vllm:{agent}:{benchmark_name}"
 
         # Define step key and check for internal collisions
         step_safe_key = clean_key_string(step_label)
