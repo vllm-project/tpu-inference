@@ -92,6 +92,25 @@ class TestTpuPlatform:
         with pytest.raises(NotImplementedError):
             TpuPlatform.get_device_total_memory()
 
+    @patch('tpu_inference.platforms.tpu_platform.jax.local_devices')
+    def test_mem_get_info(self, mock_local_devices):
+        mock_dev1 = MagicMock()
+        mock_dev1.memory_stats.return_value = {
+            'bytes_limit': 1000,
+            'bytes_in_use': 200
+        }
+        mock_dev2 = MagicMock()
+        mock_dev2.memory_stats.return_value = {
+            'bytes_limit': 1000,
+            'bytes_in_use': 300
+        }
+        mock_local_devices.return_value = [mock_dev1, mock_dev2]
+
+        free_mem, total_mem = TpuPlatform.mem_get_info()
+
+        assert total_mem == 2000
+        assert free_mem == 1500
+
     def test_get_infinity_values(self):
         min_val, max_val = TpuPlatform.get_infinity_values(jnp.float32)
         assert min_val == jnp.finfo(jnp.float32).min
