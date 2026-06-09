@@ -97,7 +97,7 @@ While variables like `EXPECTED_ETEL`, `INPUT_LEN`, `OUTPUT_LEN`, and `PREFIX_LEN
 
 Please ensure that the values of these variables remain consistent with the corresponding parameter settings in the args of the Case JSON file.
 
-Additionally, `DirName`, `FileName`, and `CaseName` are automatically extracted from the json path and `case_name` field and reported to GCP Spanner `RunRecord` table.
+Additionally, it will extract the json `case_name` value and reported to GCP Spanner `RunRecord` table for `CaseName` column.
 
 ## 4. **Test Case File Hierarchy**
 
