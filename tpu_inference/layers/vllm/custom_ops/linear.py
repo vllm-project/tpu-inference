@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import jax
 import jax.numpy as jnp
 import torch
-from jax.sharding import PartitionSpec as P
 from torch.nn.parameter import Parameter
-from torchax.interop import jax_view, shard_map, torch_view
+from torchax.interop import jax_view, torch_view
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -25,9 +23,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import (
-    reorder_concatenated_tensor_for_sharding,
-    slice_sharded_tensor_for_concatenation)
 from tpu_inference.utils import get_mesh_shape_product
 
 
@@ -158,69 +153,16 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         out, bias = super().forward(x)
         out_jax = jax_view(out)
 
-        out_jax = reorder_concatenated_tensor_for_sharding(
+        from tpu_inference.layers.common.utils import \
+            process_sharded_qkv_projection
+
+        # Call the consolidated common JAX helper
+        q_jax, k_jax, v_jax = process_sharded_qkv_projection(
             out_jax,
             self.output_sizes,
             self.tp_size,
-            dim=-1,
+            num_kv_head_replicas=self.num_kv_head_replicas,
         )
-        q_jax, k_jax, v_jax = slice_sharded_tensor_for_concatenation(
-            out_jax,
-            self.output_sizes,
-            self.tp_size,
-        )
-
-        mesh = jax.sharding.get_abstract_mesh()
-        # Split the `kv_head` mesh axis (size kv_size) into a pair
-        # `(kv_head, replica)` of sizes `(kv_size // replicas, replicas)`.
-        # The `replica` sub-axis is later replicated via `shard_map` with no
-        # data movement, since `_tile_kv` already placed identical KV-head
-        # copies on each replica-group of devices when TP > total_num_kv_heads.
-        replicas = self.num_kv_head_replicas
-        kv_head_axis = None
-        for a in reversed(mesh.axis_names):
-            if a in ShardingAxisName.ATTN_HEAD and get_mesh_shape_product(
-                    mesh, a) >= replicas:
-                kv_head_axis = a
-                break
-
-        if kv_head_axis is None:
-            raise ValueError(
-                f"Cannot find a mesh axis to split for KV-head replication: "
-                f"no axis in {mesh.axis_names} contains "
-                f"{ShardingAxisName.ATTN_HEAD} and has size >= {replicas}")
-
-        replica_axis = 'replica'
-        data_axis = ShardingAxisName.ATTN_DATA
-        head_axis = ShardingAxisName.ATTN_HEAD
-
-        i = mesh.axis_names.index(kv_head_axis)
-        kv_size = mesh.axis_sizes[i]
-        kv_type = mesh.axis_types[i]
-        new_mesh = jax.sharding.AbstractMesh(
-            mesh.axis_sizes[:i] + (kv_size // replicas, replicas) +
-            mesh.axis_sizes[i + 1:],
-            mesh.axis_names[:i] + (kv_head_axis, replica_axis) +
-            mesh.axis_names[i + 1:],
-            mesh.axis_types[:i] + (kv_type, kv_type) + mesh.axis_types[i + 1:],
-        )
-        if isinstance(head_axis, tuple):
-            in_head_axis = list(head_axis)
-            in_head_axis.insert(
-                in_head_axis.index(kv_head_axis) + 1, replica_axis)
-        else:
-            in_head_axis = (head_axis, replica_axis)
-
-        @shard_map(mesh=new_mesh,
-                   in_specs=P(data_axis, in_head_axis),
-                   out_specs=P(data_axis, head_axis),
-                   check_vma=False)
-        def _mark_kv_head_replicated(t):
-            return t
-
-        with jax.sharding.use_abstract_mesh(new_mesh):
-            k_jax = _mark_kv_head_replicated(k_jax)
-            v_jax = _mark_kv_head_replicated(v_jax)
 
         out_jax = jnp.concatenate([q_jax, k_jax, v_jax], axis=-1)
         return torch_view(out_jax), bias

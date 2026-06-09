@@ -659,8 +659,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                                 layer_idx = int(m.group(1))
                                 if self.model.start_layer <= layer_idx < self.model.end_layer:
                                     jax_attn = self.model.layers[
-                                        layer_idx -
-                                        self.model.start_layer].self_attn
+                                        layer_idx].self_attn
 
                                     if jax_attn.qkv_proj is not None:
                                         is_separate_proj = True
@@ -672,7 +671,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                                         separate_cache[cache_key][
                                             proj_type] = weight
 
-                                        # If we collected all three, fuse and yield them
+                                        # Since qkv_proj is active only on local layers, we always expect all three
                                         layer_cache = separate_cache[cache_key]
                                         if "q_proj" in layer_cache and "k_proj" in layer_cache and "v_proj" in layer_cache:
                                             q_weight = layer_cache.pop(
@@ -722,7 +721,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                         layer_idx = int(m.group(1))
                         if self.model.start_layer <= layer_idx < self.model.end_layer:
                             jax_attn = self.model.layers[
-                                layer_idx - self.model.start_layer].self_attn
+                                layer_idx].self_attn  # Direct absolute indexing
 
                             if jax_attn.qkv_proj is not None:
                                 tp_size = jax_attn.qkv_proj.tp_size
@@ -747,6 +746,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                                                head_dim:],
                                         tp_size,
                                         dim=0)
+
                                     rearranged = []
                                     for i in range(tp_size):
                                         rearranged.append(q_shards[i])

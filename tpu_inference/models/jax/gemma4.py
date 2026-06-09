@@ -1108,8 +1108,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                             layer_idx = int(m.group(1))
                             if self.model.start_layer <= layer_idx < self.model.end_layer:
                                 jax_attn = self.model.layers[
-                                    layer_idx -
-                                    self.model.start_layer].self_attn
+                                    layer_idx].self_attn
 
                                 if jax_attn.qkv_proj is not None:
                                     is_separate_proj = True
@@ -1120,12 +1119,19 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                                     separate_cache[cache_key][
                                         proj_type] = weight
 
-                                    # If we collected all three, fuse and yield them
+                                    # Determine expected projections based on whether V exists
+                                    expected_projs = (
+                                        "q_proj", "k_proj"
+                                    ) if jax_attn.qkv_proj.v_proj is None else (
+                                        "q_proj", "k_proj", "v_proj")
+
                                     layer_cache = separate_cache[cache_key]
-                                    if "q_proj" in layer_cache and "k_proj" in layer_cache and "v_proj" in layer_cache:
+                                    if all(p in layer_cache
+                                           for p in expected_projs):
                                         q_weight = layer_cache.pop("q_proj")
                                         k_weight = layer_cache.pop("k_proj")
-                                        v_weight = layer_cache.pop("v_proj")
+                                        v_weight = layer_cache.pop(
+                                            "v_proj", None)
 
                                         tp_size = jax_attn.qkv_proj.tp_size
 
@@ -1135,15 +1141,20 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                                         k_shards = torch.chunk(k_weight,
                                                                tp_size,
                                                                dim=0)
-                                        v_shards = torch.chunk(v_weight,
-                                                               tp_size,
-                                                               dim=0)
 
                                         rearranged = []
-                                        for i in range(tp_size):
-                                            rearranged.append(q_shards[i])
-                                            rearranged.append(k_shards[i])
-                                            rearranged.append(v_shards[i])
+                                        if v_weight is not None:
+                                            v_shards = torch.chunk(v_weight,
+                                                                   tp_size,
+                                                                   dim=0)
+                                            for i in range(tp_size):
+                                                rearranged.append(q_shards[i])
+                                                rearranged.append(k_shards[i])
+                                                rearranged.append(v_shards[i])
+                                        else:
+                                            for i in range(tp_size):
+                                                rearranged.append(q_shards[i])
+                                                rearranged.append(k_shards[i])
                                         rearranged_tensor = torch.cat(
                                             rearranged, dim=0)
 
@@ -1159,8 +1170,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                     if m:
                         layer_idx = int(m.group(1))
                         if self.model.start_layer <= layer_idx < self.model.end_layer:
-                            jax_attn = self.model.layers[
-                                layer_idx - self.model.start_layer].self_attn
+                            jax_attn = self.model.layers[layer_idx].self_attn
 
                             if jax_attn.qkv_proj is not None:
                                 tp_size = jax_attn.qkv_proj.tp_size
@@ -1180,16 +1190,22 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                                                head_dim],
                                         tp_size,
                                         dim=0)
-                                    v_shards = torch.chunk(
-                                        weight[(num_heads + num_kv_heads) *
-                                               head_dim:],
-                                        tp_size,
-                                        dim=0)
+
                                     rearranged = []
-                                    for i in range(tp_size):
-                                        rearranged.append(q_shards[i])
-                                        rearranged.append(k_shards[i])
-                                        rearranged.append(v_shards[i])
+                                    if jax_attn.qkv_proj.v_proj is not None:
+                                        v_shards = torch.chunk(
+                                            weight[(num_heads + num_kv_heads) *
+                                                   head_dim:],
+                                            tp_size,
+                                            dim=0)
+                                        for i in range(tp_size):
+                                            rearranged.append(q_shards[i])
+                                            rearranged.append(k_shards[i])
+                                            rearranged.append(v_shards[i])
+                                    else:
+                                        for i in range(tp_size):
+                                            rearranged.append(q_shards[i])
+                                            rearranged.append(k_shards[i])
                                     rearranged_weight = torch.cat(rearranged,
                                                                   dim=0)
                                     yield name.replace(
@@ -1207,16 +1223,22 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                                                head_dim],
                                         tp_size,
                                         dim=0)
-                                    v_shards = torch.chunk(
-                                        weight[(num_heads + num_kv_heads) *
-                                               head_dim:],
-                                        tp_size,
-                                        dim=0)
+
                                     rearranged = []
-                                    for i in range(tp_size):
-                                        rearranged.append(q_shards[i])
-                                        rearranged.append(k_shards[i])
-                                        rearranged.append(v_shards[i])
+                                    if jax_attn.qkv_proj.v_proj is not None:
+                                        v_shards = torch.chunk(
+                                            weight[(num_heads + num_kv_heads) *
+                                                   head_dim:],
+                                            tp_size,
+                                            dim=0)
+                                        for i in range(tp_size):
+                                            rearranged.append(q_shards[i])
+                                            rearranged.append(k_shards[i])
+                                            rearranged.append(v_shards[i])
+                                    else:
+                                        for i in range(tp_size):
+                                            rearranged.append(q_shards[i])
+                                            rearranged.append(k_shards[i])
                                     rearranged_bias = torch.cat(rearranged,
                                                                 dim=0)
                                     yield name.replace(
