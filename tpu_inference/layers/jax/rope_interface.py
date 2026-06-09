@@ -24,7 +24,8 @@ def normalize_rope_scaling(rope_scaling: Any) -> Optional[Dict[str, Any]]:
         rope_scaling = dict(rope_scaling)
         if (rope_scaling.get("rope_type", "default") == "default"
                 and "factor" not in rope_scaling
-                and "scale_factor" not in rope_scaling):
+                and "scale_factor" not in rope_scaling
+                and "mrope_section" not in rope_scaling):
             rope_scaling = None
         elif "factor" in rope_scaling and "scale_factor" not in rope_scaling:
             rope_scaling["scale_factor"] = rope_scaling.pop("factor")
@@ -179,7 +180,7 @@ def apply_rope(
         timescale = 1.0 / (rope_theta**fraction)
 
         # Apply scaling if provided
-        if rope_scaling:
+        if rope_scaling and rope_scaling.get("rope_type") != "proportional":
             timescale = apply_rope_scaling(timescale, rope_scaling)
 
         if nope_angles > 0:

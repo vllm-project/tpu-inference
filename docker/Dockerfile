@@ -61,7 +61,7 @@ RUN git clone $VLLM_REPO . && \
         git checkout $VLLM_COMMIT_HASH; \
     fi
 
-RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements/tpu.txt --retries 3
+RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu torch -r requirements/tpu.txt --retries 3
 RUN --mount=type=cache,target=/root/.cache/pip pip install setuptools-rust>=1.9.0
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install --no-build-isolation -e .
 
