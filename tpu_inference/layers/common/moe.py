@@ -82,6 +82,16 @@ def moe_apply(
     extra_backend_kwargs = dict(
         extra_backend_kwargs) if extra_backend_kwargs else {}
     scatter_results = extra_backend_kwargs.pop("scatter_results", False)
+    # When set, the GMM backends skip their tensor-/expert-parallel all-reduce
+    # and return per-shard partial sums, so the reduction can be deferred and
+    # fused with a later collective (e.g. a shared-expert all-reduce).
+    defer_all_reduce = extra_backend_kwargs.pop("defer_all_reduce", False)
+
+    if defer_all_reduce and moe_backend not in {
+            MoEBackend.GMM_EP, MoEBackend.GMM_TP
+    }:
+        raise ValueError(
+            "defer_all_reduce can only be True for GMM_EP and GMM_TP backends")
 
     with jax.named_scope(layer._get_name()):
         activation = layer.activation if isinstance(
@@ -157,6 +167,7 @@ def moe_apply(
                     onehot_moe_permute_threshold=envs.
                     ONEHOT_MOE_PERMUTE_THRESHOLD,
                     scatter_results=scatter_results,
+                    defer_all_reduce=defer_all_reduce,
                     hash_based_topk_indices=extra_backend_kwargs.get(
                         "hash_based_topk_indices", None),
                     expert_score_correction_bias=extra_backend_kwargs.get(
