@@ -29,7 +29,7 @@ MODEL_PATH="remyxai/SpaceThinker-Qwen2.5VL-3B"
 MODE_DIR="${OUTPUT_DIR}/${MODEL_NAME}/${MODE}"
 
 mkdir -p "${MODE_DIR}"
-cd /drive/SpatialScore || exit
+cd /drive/SpatialScore
 
 FREE_GPUS=(2 6)
 NUM_SHARDS=2
@@ -42,13 +42,13 @@ echo "================================================="
 # Launch shards on the 2 specified GPUs
 for i in {0..1}; do
   gpu_id=${FREE_GPUS[$i]}
-  CUDA_VISIBLE_DEVICES="$gpu_id" ${PYTHON_EXEC} /drive/SpatialScore/stress_test_sharded.py \
-    --shard_idx "$i" \
-    --num_shards "${NUM_SHARDS}" \
-    --mode "${MODE}" \
-    --model_name "${MODEL_NAME}" \
-    --model_path "${MODEL_PATH}" \
-    --output_dir "${OUTPUT_DIR}" > "${MODE_DIR}/shard_${i}.log" 2>&1 &
+  CUDA_VISIBLE_DEVICES=$gpu_id ${PYTHON_EXEC} /drive/SpatialScore/stress_test_sharded.py \
+    --shard_idx $i \
+    --num_shards ${NUM_SHARDS} \
+    --mode ${MODE} \
+    --model_name ${MODEL_NAME} \
+    --model_path ${MODEL_PATH} \
+    --output_dir ${OUTPUT_DIR} > "${MODE_DIR}/shard_${i}.log" 2>&1 &
     
   echo "Launched SpaceThinker Shard $i on GPU $gpu_id (PID: $!)"
 done
@@ -76,5 +76,5 @@ print(f'Merged {len(merged)} items into all_results.json!')
 # Run official rule-based metric evaluation
 echo "Running rule-based metric evaluation..."
 ${PYTHON_EXEC} /drive/SpatialScore/evaluate_results.py \
-  --input "${MODE_DIR}" \
+  --input ${MODE_DIR} \
   --no_llm

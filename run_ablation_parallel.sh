@@ -36,17 +36,17 @@ echo "Output Directory: ${MODE_DIR}"
 echo "=========================================="
 
 mkdir -p "${MODE_DIR}"
-cd /drive/SpatialScore || exit
+cd /drive/SpatialScore
 
 # 1. Spawn 8 parallel processes on GPUs 0-7
 for i in {0..7}; do
-  CUDA_VISIBLE_DEVICES="$i" ${PYTHON_EXEC} /drive/SpatialScore/stress_test_sharded.py \
-    --shard_idx "$i" \
+  CUDA_VISIBLE_DEVICES=$i ${PYTHON_EXEC} /drive/SpatialScore/stress_test_sharded.py \
+    --shard_idx $i \
     --num_shards 8 \
-    --mode "${MODE}" \
-    --model_name "${MODEL_NAME}" \
-    --model_path "${MODEL_PATH}" \
-    --output_dir "${OUTPUT_DIR}" > "${MODE_DIR}/shard_${i}.log" 2>&1 &
+    --mode ${MODE} \
+    --model_name ${MODEL_NAME} \
+    --model_path ${MODEL_PATH} \
+    --output_dir ${OUTPUT_DIR} > "${MODE_DIR}/shard_${i}.log" 2>&1 &
   
   echo "Launched Shard $i on GPU $i (PID: $!)"
 done
@@ -63,5 +63,5 @@ ${PYTHON_EXEC} -c "import os, json; mode_dir='${MODE_DIR}'; merged=[]; [merged.e
 # 4. Run evaluation metrics
 echo "Running rule-based metric evaluation..."
 ${PYTHON_EXEC} /drive/SpatialScore/evaluate_results.py \
-  --input "${MODE_DIR}" \
+  --input ${MODE_DIR} \
   --no_llm
