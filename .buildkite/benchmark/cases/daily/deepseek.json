@@ -7,7 +7,7 @@
   },
   "benchmark_cases": [
     {
-      "case_name": "deepseek-r1-dataset_custom-inlen_1024-outlen_4096",
+      "case_name": "deepseek-r1-dataset_custom-inlen_1024-outlen_4096-prelen_0",
       "ci_queue": [
         "tpu_v7x_8_queue"
       ],
