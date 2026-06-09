@@ -20,7 +20,11 @@ from tpu_inference.utils import to_jax_dtype
 
 class QuantLinearConfig:
 
-    def __init__(self, *, enable_sp: bool, output_sizes: list[int]):
+    def __init__(self,
+                 *,
+                 enable_sp: bool,
+                 output_sizes: list[int],
+                 defer_all_reduce: bool = False):
         # Output size across all TP ranks.
         self.output_sizes = output_sizes
         self.weight_sharding = P(None, None)
@@ -29,6 +33,13 @@ class QuantLinearConfig:
         self.input_sharding = None
         self.output_sharding = None
         self.mesh = None
+
+        # If True, defer the all-reduce (psum) over the contracting (in) axis of
+        # the matmul: it is not performed here even when that axis is sharded.
+        # The matmul then returns per-shard partial sums and the caller is
+        # responsible for reducing them later (e.g. fusing the reduction with a
+        # downstream collective).
+        self.defer_all_reduce = defer_all_reduce
 
         self.bias_sharding = P(self.weight_sharding[1])
         self.n_shards = len(output_sizes)
