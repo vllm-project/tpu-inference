@@ -159,7 +159,8 @@ def main():
     cli_opts = case_data.get("client_command_options", {})
 
     # Export specific environment for insert to db
-    export_env_if_valid(cli_opts, "dataset-name", "DATASET")
+    if "DATASET" not in merged_env:
+        export_env_if_valid(cli_opts, "dataset-name", "DATASET")
     export_env_if_valid(cli_opts, "num-prompts", "NUM_PROMPTS")
     export_env_if_valid(srv_opts, "additional-config", "ADDITIONAL_CONFIG")
     model = srv_opts.get("args", {}).get("model")

@@ -157,6 +157,56 @@
           "ignore-eos": true
         }
       }
+    },
+    {
+      "case_name": "Qwen3_5-397B-A17B-FP8-dataset_mmmu-pro-outlen_1",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "MODELTAG": "NEW",
+        "EXPECTED_ETEL": 43200000,
+        "DATASET": "mmmu-pro"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "MODEL_IMPL_TYPE": "vllm"
+        },
+        "args": {
+          "model": "Qwen/Qwen3.5-397B-A17B-FP8",
+          "max-num-seqs": 8,
+          "max-num-batched-tokens": 4096,
+          "tensor-parallel-size": {
+            "v7x-8": 8
+          },
+          "max-model-len": 9216,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.9,
+          "block-size": 256,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true,
+          "limit-mm-per-prompt": "{\"image\":8,\"video\":0}",
+          "allowed-local-media-path": "./artifacts/dataset"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3.5-397B-A17B-FP8",
+          "backend": "openai-chat",
+          "endpoint": "/v1/chat/completions",
+          "dataset-name": "custom_image",
+          "dataset-path": "./artifacts/dataset/mmmu_pro_custom_image.jsonl",
+          "num-prompts": 1730,
+          "output-len": 1,
+          "max-concurrency": 320,
+          "request-rate": "inf",
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
     }
   ]
 }
