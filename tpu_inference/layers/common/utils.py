@@ -17,7 +17,10 @@ from contextlib import nullcontext
 import jax
 import jax.numpy as jnp
 from jax.experimental.layout import Format, Layout
-from jax.sharding import Mesh, Sharding
+from jax.experimental.shard_map import shard_map
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
+from jax.sharding import Sharding
 
 from tpu_inference import envs
 
@@ -186,14 +189,13 @@ def process_sharded_qkv_projection(
     tp_size: int,
     num_kv_head_replicas: int = 1,
     reorder_output: bool = True,
+    flatten_output: bool = True,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Consolidated JAX/SPMD kernel that reorders, slices, and replicates sharded KV heads when TP > num_kv_heads."""
-    from jax.experimental.shard_map import shard_map
-    from jax.sharding import PartitionSpec as P
+    """Consolidated JAX/SPMD kernel that reorders, slices, and replicates sharded KV heads.
 
-    from tpu_inference.layers.common.sharding import ShardingAxisName
-    from tpu_inference.utils import get_mesh_shape_product
-
+    Supports both flat sequential outputs (for Torchax/vLLM) and direct multidimensional 
+    SRAM-sliced outputs (for JAX-native models via flatten_output=False) to allow layout propagation.
+    """
     # 1. Reorder concatenated tensor along the sharded axis ONLY if requested
     if reorder_output:
         out_jax = reorder_concatenated_tensor_for_sharding(
@@ -204,14 +206,31 @@ def process_sharded_qkv_projection(
         )
 
     # 2. Slice sharded tensor into Q, K, and V
-    q_jax, k_jax, v_jax = slice_sharded_tensor_for_concatenation(
-        out_jax,
-        output_sizes,
-        tp_size,
-    )
+    if flatten_output:
+        # Standard flat slicing (expected by Torchax wrapper)
+        q_jax, k_jax, v_jax = slice_sharded_tensor_for_concatenation(
+            out_jax,
+            output_sizes,
+            tp_size,
+        )
+    else:
+        # Direct SRAM slicing (maintains multi-dimensional layout for JAX-native models)
+        new_shape = out_jax.shape[:-1] + (tp_size, -1)
+        sharded_outs = out_jax.reshape(new_shape)
+
+        q_size, k_size, v_size = output_sizes
+        q_sz = q_size // tp_size
+        k_sz = k_size // tp_size
+
+        q_jax = sharded_outs[..., :q_sz]
+        k_jax = sharded_outs[..., q_sz:q_sz + k_sz]
+        v_jax = sharded_outs[..., q_sz + k_sz:]
 
     # 3. Handle KV head replication if replicas > 1
     if num_kv_head_replicas > 1:
+        from tpu_inference.layers.common.sharding import ShardingAxisName
+        from tpu_inference.utils import get_mesh_shape_product
+
         mesh = jax.sharding.get_abstract_mesh()
         kv_head_axis = None
         for a in reversed(mesh.axis_names):
@@ -261,3 +280,24 @@ def process_sharded_qkv_projection(
             v_jax = _mark_kv_head_replicated(v_jax)
 
     return q_jax, k_jax, v_jax
+
+
+def slice_sharded_tensor_for_causal_lm(
+    outs: jax.Array,
+    q_size: int,
+    k_size: int,
+    v_size: int,
+    tp_size: int,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Direct, zero-copy SRAM slicing for JAX-native models. Bypasses flat layout constraints."""
+    new_shape = outs.shape[:-1] + (tp_size, -1)
+    sharded_outs = outs.reshape(new_shape)
+
+    q_sz = q_size // tp_size
+    k_sz = k_size // tp_size
+
+    outs_q = sharded_outs[..., :q_sz]
+    outs_k = sharded_outs[..., q_sz:q_sz + k_sz]
+    outs_v = sharded_outs[..., q_sz + k_sz:]
+
+    return outs_q, outs_k, outs_v

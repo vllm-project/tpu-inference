@@ -258,26 +258,19 @@ class JaxQKVParallelLinear(JaxModule):
         )
 
     def __call__(self, x: jax.Array) -> Tuple[jax.Array, jax.Array, jax.Array]:
+        from tpu_inference.layers.common.utils import \
+            slice_sharded_tensor_for_causal_lm
+
         # Single projection operation (loads inputs from HBM once)
         outs = self.proj(
             x)  # Shape: [T, total_output_dim] sharded on "model" axis
 
-        # NOTE: We do not use layers.common.utils.slice_sharded_tensor_for_concatenation
-        # or process_sharded_qkv_projection here. Those helpers flatten sharded axes
-        # to sequential layouts [..., -1] to return flat tensors expected by PyTorch/vLLM.
-        # For JAX-native models, we reshape sharded slices directly to global head shapes
-        # in SRAM, enabling XLA to compile this as a pure zero-copy metadata-only change.
-        # Flattening and un-flattening sharded axes inserts memory layout conversion overhead.
-        new_shape = outs.shape[:-1] + (self.tp_size, -1)
-        sharded_outs = outs.reshape(new_shape)
-
-        # Slice locally on each shard
-        q_sz = self.q_size // self.tp_size
-        k_sz = self.k_size // self.tp_size
-
-        outs_q = sharded_outs[..., :q_sz]
-        outs_k = sharded_outs[..., q_sz:q_sz + k_sz]
-        outs_v = sharded_outs[..., q_sz + k_sz:]
+        # Call the consolidated common SRAM slicing JAX helper.
+        # This is located under layers/common/utils.py, but contains only primitive math ops
+        # with zero abstract-mesh tracking or shard_map calls. This ensures JAX traces and inlines
+        # it as a pure metadata-only zero-copy slice and reshape with 100% optimal HLO speed.
+        outs_q, outs_k, outs_v = slice_sharded_tensor_for_causal_lm(
+            outs, self.q_size, self.k_size, self.v_size, self.tp_size)
 
         # Reshape directly to their global multi-head shapes (metadata change under JAX!)
         q = outs_q.reshape(outs.shape[:-1] + (self.num_heads, self.head_dim))
