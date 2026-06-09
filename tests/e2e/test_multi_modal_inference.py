@@ -173,8 +173,8 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes,
 
         # Check output against the closest known-good caption.
         similarity_score = max(
-            difflib.SequenceMatcher(None, generated_text, expected, autojunk=False
-                                   ).ratio()
+            difflib.SequenceMatcher(
+                None, generated_text, expected, autojunk=False).ratio()
             for expected in EXPECTED_TEXTS)
         print(f"Similarity Score: {similarity_score:.4f}")
 
