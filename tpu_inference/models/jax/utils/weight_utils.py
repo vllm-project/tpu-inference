@@ -924,6 +924,59 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         self._process_weights_after_loading_per_module = defaultdict(
             lambda: False)
 
+    def _packed_remap(self) -> list[tuple[str, str, int]]:
+        """Derive (fused_name, shard_name, shard_id) tuples for merged linears.
+
+        Mirrors vLLM's ``stacked_params_mapping`` but sources it from the
+        model's declarative ``packed_modules_mapping`` (``{fused: [sub, ...]}``);
+        the position of each sub-module in the list is its ``shard_id``. The
+        ``"__no_packing__"`` sentinel (used elsewhere to signal "no packing" to
+        the vLLM quant path) is ignored here.
+        """
+        packed = getattr(self.module, "packed_modules_mapping", {})
+        remap: list[tuple[str, str, int]] = []
+        for fused_name, shard_names in packed.items():
+            if fused_name == "__no_packing__":
+                continue
+            for shard_id, shard_name in enumerate(shard_names):
+                remap.append((fused_name, shard_name, shard_id))
+        return remap
+
+    def load_weights(self, weights: Iterable, **kwargs) -> set:
+        """Route packed (e.g. fused gate_up_proj) checkpoint weights, then
+        delegate the rest to the standard recursive auto-loader.
+
+        For each checkpoint weight whose name contains a packed sub-module
+        (e.g. ``gate_proj``), rename it to the fused param (``gate_up_proj``)
+        and hand it to that param's ``weight_loader`` together with the
+        ``shard_id``; the merged linear's quant method accumulates the shards
+        and fuses them. Weights whose fused param does not exist (e.g. the
+        vision tower's unfused gate/up projections) fall through unchanged.
+        """
+        remap = self._packed_remap()
+        params_dict = dict(self.module.named_parameters())
+        routed_loaded: set = set()
+
+        def _route(weights_iter):
+            for name, weight in weights_iter:
+                for fused_name, shard_name, shard_id in remap:
+                    if shard_name not in name:
+                        continue
+                    fused_param_name = name.replace(shard_name, fused_name)
+                    param = params_dict.get(fused_param_name)
+                    if param is None:
+                        # No fused param at this path (e.g. vision tower keeps
+                        # gate_proj/up_proj separate) — load normally.
+                        continue
+                    param.weight_loader(param, weight, shard_id)
+                    routed_loaded.add(fused_param_name)
+                    break
+                else:
+                    yield name, weight
+
+        autoloaded = super().load_weights(_route(weights), **kwargs)
+        return autoloaded | routed_loaded
+
     def _add_loadable_non_param_tensors(self, module: JaxModule,
                                         child_params: dict[str, Any]):
         """

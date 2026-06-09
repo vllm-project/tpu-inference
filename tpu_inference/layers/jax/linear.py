@@ -169,3 +169,42 @@ class JaxLmHead(nnx.Einsum, JaxModule):
 
     def __call__(self, inputs: jax.Array) -> jax.Array:
         return jax.numpy.einsum(self.einsum_str, inputs, self.weight.value)
+
+
+class JaxMergedColumnParallelLinear(JaxLinear):
+    """Merged version of JaxLinear. This is used to fuse multiple
+    JaxLinear layers into one for better efficiency.
+
+    The einsum string is the same as JaxLinear, but the weight is expected to
+    have multiple output dimensions concatenated together, and the output will
+    be split accordingly.
+
+    Args:
+        input_size: input dimension of the linear layer.
+        output_sizes: a list of output dimensions for each fused linear layer.
+        use_bias: If false, skip adding bias.
+        param_dtype: Data type for the parameters.
+        quant_config: Quantization configuration.
+        prefix: Prefix for parameter names.
+    """
+
+    def __init__(self,
+                 input_size: int,
+                 output_sizes: list[int],
+                 rngs,
+                 *,
+                 use_bias: bool = True,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "",
+                 **kwargs):
+        # Must be set before super().__init__(): JaxEinsum.__init__ calls
+        # quant_config.get_quant_method(self), which reads self.output_sizes to
+        # build the merged linear's QuantLinearConfig.
+        self.output_sizes = output_sizes
+        super().__init__(input_size=input_size,
+                         output_size=sum(output_sizes),
+                         rngs=rngs,
+                         use_bias=use_bias,
+                         quant_config=quant_config,
+                         prefix=prefix,
+                         **kwargs)

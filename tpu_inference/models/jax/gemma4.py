@@ -32,7 +32,8 @@ from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
-from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear, JaxLmHead
+from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear, JaxLmHead,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
@@ -69,25 +70,15 @@ class Gemma4MLP(JaxModule):
         # config.intermediate_size. The caller computes this in
         # Gemma4DecoderLayer and passes it in explicitly.
 
-        self.gate_proj = JaxLinear(
+        self.gate_up_proj = JaxMergedColumnParallelLinear(
             hidden_size,
-            intermediate_size,
+            [intermediate_size] * 2,
             use_bias=False,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".gate_proj",
-        )
-        self.up_proj = JaxLinear(
-            hidden_size,
-            intermediate_size,
-            use_bias=False,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
-            rngs=rng,
-            quant_config=quant_config,
-            prefix=prefix + ".up_proj",
         )
         self.down_proj = JaxLinear(
             intermediate_size,
@@ -102,8 +93,9 @@ class Gemma4MLP(JaxModule):
         self.act_fn = partial(nnx.gelu, approximate=True)
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        gate = self.act_fn(self.gate_proj(x))
-        up = self.up_proj(x)
+        gate_up = self.gate_up_proj(x)
+        gate, up = jnp.split(gate_up, 2, axis=-1)
+        gate = self.act_fn(gate)
         fuse = gate * up
         result = self.down_proj(fuse)
         return result

@@ -537,7 +537,7 @@ class Gemma4MultimodalEmbedder(JaxModule):
 
 
 class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
-    packed_modules_mapping = {"__no_packing__": []}
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     WeightLoader = StandardWeightLoader
     supports_multimodal = True
     _processor_factory = getattr(PtGemma4MM, "_processor_factory", None)
