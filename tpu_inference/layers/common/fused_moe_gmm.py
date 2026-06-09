@@ -197,7 +197,8 @@ def moe_gmm_local(x: jax.Array,
                   enable_rs_kernel: bool = False,
                   onehot_moe_permute_threshold: int = 0,
                   scatter_results: bool = False,
-                  moe_chunk_size: int = 0) -> jax.Array:
+                  moe_chunk_size: int = 0,
+                  defer_all_reduce: bool = False) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
@@ -356,6 +357,28 @@ def moe_gmm_local(x: jax.Array,
                                            tiled=True).astype(x.dtype)
             else:
                 out = chunk_hidden.astype(x.dtype)
+    # Then global reduction on all ranks for all tokens and all experts
+    if defer_all_reduce:
+        # The caller defers the tensor-/expert-parallel all-reduce (e.g. to
+        # fuse it with a shared-expert reduction downstream). Return the
+        # per-shard partial sums; the output spec leaves the reduction axis
+        # replicated, matching the unreduced representation the caller expects.
+        out = out.astype(x.dtype)
+    elif enable_rs_kernel:
+        reduction_axes = reduction_axis if isinstance(
+            reduction_axis, tuple) else (reduction_axis, )
+        num_devices = 1
+        for axis in reduction_axes:
+            num_devices *= jax.lax.axis_size(axis)
+
+        # Fallback to psum-scatter for small token sizes to avoid Mosaic compilation.
+        # The threshold is chosen based on the tile dimension (8) in the
+        # hierarchical reduce-scatter kernel.
+        if out.shape[0] // num_devices < 8:
+            out = jax.lax.psum_scatter(out,
+                                       axis_name=reduction_axis,
+                                       scatter_dimension=0,
+                                       tiled=True).astype(x.dtype)
         else:
             out = jax.lax.psum(chunk_hidden,
                                axis_name=reduction_axis).astype(x.dtype)
@@ -385,6 +408,7 @@ def tensor_parallel_gmm(
     onehot_moe_permute_threshold: int = 0,
     scatter_results: bool = False,
     moe_chunk_size: int = 0,
+    defer_all_reduce: bool = False,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
@@ -418,6 +442,7 @@ def tensor_parallel_gmm(
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
+            defer_all_reduce=defer_all_reduce,
         ),
         mesh=mesh,
         in_specs=(
@@ -469,6 +494,7 @@ def expert_parallel_gmm(
     onehot_moe_permute_threshold: int = 0,
     moe_chunk_size: int = 0,
     scatter_results: bool = False,
+    defer_all_reduce: bool = False,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
@@ -501,6 +527,7 @@ def expert_parallel_gmm(
             enable_rs_kernel=enable_rs_kernel,
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
+            defer_all_reduce=defer_all_reduce,
         ),
         mesh=mesh,
         in_specs=(
@@ -568,6 +595,7 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     "onehot_moe_permute_threshold",
     "scatter_results",
     "moe_chunk_size",
+    "defer_all_reduce",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -588,6 +616,7 @@ def fused_moe_func(
     enable_rs_kernel: bool = False,
     onehot_moe_permute_threshold: int = 0,
     scatter_results: bool = False,
+    defer_all_reduce: bool = False,
     hash_based_topk_indices: jax.Array | None = None,
     expert_score_correction_bias: jax.Array | None = None,
     moe_chunk_size: int = 0,
@@ -757,6 +786,7 @@ def fused_moe_func(
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
+            defer_all_reduce=defer_all_reduce,
         )
     else:
         x = tensor_parallel_gmm(
@@ -777,6 +807,7 @@ def fused_moe_func(
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
+            defer_all_reduce=defer_all_reduce,
         )
 
     return x[:num_tokens, :hidden_size]

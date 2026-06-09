@@ -112,6 +112,13 @@ def vllm_moe_apply(layer: RoutedExperts,
     extra_kwargs = dict(quant_method_instance.extra_backend_kwargs)
     extra_kwargs["scatter_results"] = is_dp
     extra_kwargs["moe_chunk_size"] = envs.VLLM_MOE_CHUNK_SIZE
+    # Defer the tensor-parallel all-reduce inside the GMM kernel exactly when the
+    # runner does NOT expect the fused output to be reduced -- the deferred path
+    # where the shared and fused outputs are summed and reduced together in a
+    # single collective downstream. This is the inverse of (and tied to)
+    # ``VllmMoERunner._fused_output_is_reduced`` so the two never drift.
+    extra_kwargs[
+        "defer_all_reduce"] = not layer.runner._fused_output_is_reduced
 
     if getattr(layer, "hash_indices_table", None) is not None:
         assert input_ids is not None, "input_ids must be provided when hash_indices_table is present in the layer"
