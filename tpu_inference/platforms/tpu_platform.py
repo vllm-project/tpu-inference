@@ -176,8 +176,7 @@ class TpuPlatform(Platform):
         return torch.float8_e4m3fn
 
     @classmethod
-    def mem_get_info(cls,
-                     device: Optional[torch.device] = None) -> Tuple[int, int]:
+    def mem_get_info(cls) -> Tuple[int, int]:
         """
         Returns (free_memory, total_memory) in bytes for the specified TPU device.
         """
