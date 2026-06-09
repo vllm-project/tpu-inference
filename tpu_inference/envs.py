@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
+    QUANTIZE_ON_LOAD_PREFIXES: list[str] = []
 
 
 def env_with_choices(
@@ -399,6 +400,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use VMEM size as the threshold.
     "SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES":
     lambda: os.getenv("SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES", "auto"),
+    # A comma-separated string that, if passed, will be quantized
+    # during loading.  Only supported for the CompressedTensors path
+    # and for FP8-W8A* currently.
+    "QUANTIZE_ON_LOAD_PREFIXES":
+    env_str_list("QUANTIZE_ON_LOAD_PREFIXES"),
 }
 
 
