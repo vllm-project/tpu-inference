@@ -29,6 +29,10 @@ def l2_normalize(x, eps=1e-6):
     return x * rnorm
 
 
+def _softplus(x):
+    return jnp.log(1.0 + jnp.exp(-jnp.abs(x))) + jnp.maximum(x, 0.0)
+
+
 # 1. Dataclasses for holding references to inputs/outputs and shared data.
 # These are passed as arguments to the processor classes.
 
@@ -350,7 +354,7 @@ class PrefillProcessor(ScanProcessor):
             # jax.errors.JaxRuntimeError: INTERNAL: Mosaic failed to compile TPU kernel: failed to legalize operation
             # 'math.log1p': %7302 = "math.log1p"(%7295) <{fastmath =
             # #arith.fastmath<none>}> : (vector<8x128x2xbf16>) -> vector<8x128x2xbf16>
-            self.shared.a_log[...])[:, None] * jax.nn.softplus(
+            self.shared.a_log[...])[:, None] * _softplus(
                 # same issue with the cast here
                 a_raw_processed_T + self.shared.dt_bias[...][:, None])
         g_T = jnp.maximum(g_T, -100.0)
@@ -534,7 +538,7 @@ class PrefillProcessor(ScanProcessor):
 
         beta_chunk_T = jax.nn.sigmoid(b_raw_processed_T)
         g_chunk_T = -jnp.exp(
-            self.shared.a_log[...])[:, None] * jax.nn.softplus(
+            self.shared.a_log[...])[:, None] * _softplus(
                 a_raw_processed_T + self.shared.dt_bias[...][:, None])
         g_chunk_T = jnp.maximum(g_chunk_T, -100.0)
 
@@ -800,7 +804,7 @@ class DecodeProcessor(ScanProcessor):
 
                 # Compute gate
                 curr_beta = jax.nn.sigmoid(b_raw_new)
-                curr_g = -exp_a_log * jax.nn.softplus(a_raw_new + dt_bias_f32)
+                curr_g = -exp_a_log * _softplus(a_raw_new + dt_bias_f32)
                 curr_g = jnp.maximum(curr_g, -100.0)
                 decay = jnp.exp(curr_g)
 

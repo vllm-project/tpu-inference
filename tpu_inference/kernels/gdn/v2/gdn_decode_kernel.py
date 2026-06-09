@@ -28,6 +28,10 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 
+def _softplus(x):
+    return jnp.log(1.0 + jnp.exp(-jnp.abs(x))) + jnp.maximum(x, 0.0)
+
+
 def validate_gdn_inputs(
     q,
     k,
@@ -349,7 +353,7 @@ def _decode_kernel_main(
                         gk = lower_bound / (1.0 +
                                             jnp.exp(-(a_val[:, None] * g_val)))
                     else:
-                        gk = -a_val[:, None] * jax.nn.softplus(
+                        gk = -a_val[:, None] * _softplus(
                             g_val.astype(jnp.float32)).astype(g_val.dtype)
                 else:
                     gk = g_t
