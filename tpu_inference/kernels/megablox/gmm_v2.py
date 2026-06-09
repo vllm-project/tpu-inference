@@ -39,6 +39,17 @@ def swigluoai(gate: jax.Array,
     return (up + 1.0) * glu
 
 
+def silu_and_mul_with_clamp(gate: jax.Array,
+                            up: jax.Array,
+                            limit: float = 10.0) -> jax.Array:
+    """Activation used in some models DeepSeek V4."""
+    # The limit value is from DSV4's config.
+    # TODO: pass limit from model config, instead of hardcoding here.
+    gate = jnp.clip(gate, max=limit)
+    up = jnp.clip(up, min=-limit, max=limit)
+    return jax.nn.silu(gate) * up
+
+
 def apply_act_fn(acc: jax.Array, fuse_act: str | None):
     """Applies a fused activation function to the accumulator.
 
@@ -69,6 +80,8 @@ def apply_act_fn(acc: jax.Array, fuse_act: str | None):
             return jax.nn.gelu(acc_gate) * acc_up
         case "swigluoai":
             return swigluoai(acc_gate, acc_up)
+        case "silu_and_mul_with_clamp":
+            return silu_and_mul_with_clamp(acc_gate, acc_up)
         case _:
             raise NotImplementedError(
                 f"Unsupported activation function: {fuse_act}")
@@ -367,6 +380,7 @@ def inner_kernel(
     """
 
     def _matmul(is_first_k_step: bool, is_last_k_step: bool):
+        rhs_qbs = cfgs.rhs_cfgs.quant_block_size
         tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[...]
         # When rhs is packed (quantized dtype packed into uint32), unpack it
         # back to the original dtype using pltpu.bitcast which operates on K
@@ -380,7 +394,6 @@ def inner_kernel(
         # the scales and thus we need to dequantize inside VMEM to avoid small
         # contracting dimmensions
         if cfgs.rhs_cfgs.should_dequantize_before_matmul:
-            rhs_qbs = cfgs.rhs_cfgs.quant_block_size
             tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(acc_ref.dtype)
             num_blocks = cfgs.num_quant_blocks_per_tile_k
             tiled_rhs_dequant = tiled_rhs.astype(acc_ref.dtype).reshape(
@@ -388,6 +401,9 @@ def inner_kernel(
             tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
             tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
                                                   rhs_tile_n)
+            rhs_step_k = cfgs.tiles.tile_k
+        else:
+            rhs_step_k = rhs_qbs
 
         valid_k = cfgs.dims.size_k % cfgs.tiles.tile_k
         if is_last_k_step and valid_k != 0:
@@ -399,7 +415,6 @@ def inner_kernel(
         if cfgs.lhs_cfgs.quant_dtype is None:
             # Unquantized matmul path.
             mxu_size = pltpu.get_tpu_info().mxu_column_size
-            rhs_qbs = cfgs.rhs_cfgs.quant_block_size
 
             for start_n in range(0, rhs_tile_n, mxu_size):
                 end_n = min(rhs_tile_n, start_n + mxu_size)
@@ -407,18 +422,18 @@ def inner_kernel(
 
                 acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
                                   dtype=acc_ref.dtype)
-                for b_id in range(cfgs.num_quant_blocks_per_tile_k):
-                    k_start = b_id * rhs_qbs
-                    k_end = k_start + rhs_qbs
+                for start_k in range(0, cfgs.tiles.tile_k, rhs_step_k):
+                    end_k = min(cfgs.tiles.tile_k, start_k + rhs_step_k)
 
                     block_acc = jnp.matmul(
-                        tiled_lhs[:, k_start:k_end],
-                        tiled_rhs[k_start:k_end, start_n:end_n],
+                        tiled_lhs[:, start_k:end_k],
+                        tiled_rhs[start_k:end_k, start_n:end_n],
                         preferred_element_type=jnp.float32,
                     ).astype(acc_ref.dtype)
 
                     if (cfgs.rhs_cfgs.has_scale and
                             not cfgs.rhs_cfgs.should_dequantize_before_matmul):
+                        b_id = start_k // cfgs.rhs_cfgs.quant_block_size
                         tiled_rhs_scale = tiled_rhs_ref.get_scale()
                         block_acc *= tiled_rhs_scale[b_id, :,
                                                      start_n:end_n].astype(
