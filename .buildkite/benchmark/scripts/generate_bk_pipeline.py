@@ -171,14 +171,22 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
             )
 
 
-def create_benchmark_steps(case_data: Dict[str, Any],
-                           global_env: Dict[str, Any],
-                           file_path: str,
-                           file_basename: str,
-                           parent_dir: str,
-                           used_keys: Set[str],
-                           errors: List[str],
-                           no_verify: bool = False) -> List[Dict[str, Any]]:
+def _get_mlcompass_select_tests() -> Set[str]:
+    selected = os.getenv('MLCOMPASS_SELECT_TESTS')
+    if selected:
+        return {s.strip() for s in selected.split(',') if s.strip()}
+    return set()
+
+
+def create_benchmark_steps(
+        case_data: Dict[str, Any],
+        global_env: Dict[str, Any],
+        file_path: str,
+        file_basename: str,
+        parent_dir: str,
+        used_keys: Set[str],
+        errors: List[str],
+        no_verify: bool = False) -> List[Dict[str, Any]]:
     """
     Generates a list of Buildkite steps for a case.
     """
@@ -213,6 +221,7 @@ def create_benchmark_steps(case_data: Dict[str, Any],
 
     # Construct the Step dictionary
     child_steps = []
+    mlcompass_select_tests = _get_mlcompass_select_tests()
     for agent in ci_queues:
         # Build the environment for this specific step
         step_env = {**combined_env, "ci_queue": agent}
@@ -221,7 +230,11 @@ def create_benchmark_steps(case_data: Dict[str, Any],
         # Include parent_dir in label for uniqueness
         step_label = f"[{parent_dir}] {agent} {file_basename} {case_name}"
         case_parameter = f"{file_path} {case_name}"
-        step_env["MLCOMPASS_TEST_NAME"] = f"vllm:{agent}:{case_name}"
+        benchmark_name = case_name
+        step_env["MLCOMPASS_TEST_NAME"] = f"vllm:{agent}:{benchmark_name}"
+        if mlcompass_select_tests and step_env[
+                "MLCOMPASS_TEST_NAME"] not in mlcompass_select_tests:
+            continue
 
         # Define step key and check for internal collisions
         step_safe_key = clean_key_string(step_label)
@@ -312,9 +325,18 @@ def main():
         sys.exit(1)
 
     if not all_steps:
-        print(f"Error: No steps were generated for {file_path}",
-              file=sys.stderr)
-        sys.exit(1)
+        if _get_mlcompass_select_tests():
+            all_steps.append({
+                "label":
+                "⏭️ Benchmark case skipped — not selected by MLCompass.",
+                "command":
+                "echo Benchmark case skipped — not selected by MLCompass.",
+                "skip": True
+            })
+        else:
+            print(f"Error: No steps were generated for {file_path}",
+                  file=sys.stderr)
+            sys.exit(1)
 
     # Wrap everything in a single group
     # Group name and key both use parent_dir for absolute uniqueness
