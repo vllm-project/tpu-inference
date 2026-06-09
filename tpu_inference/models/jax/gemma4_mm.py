@@ -184,10 +184,14 @@ class Gemma4VisionFlashAttention(JaxModule):
 
         self.q_norm = JaxRmsNorm(self.head_dim,
                                  param_dtype=dtype,
+                                 scale_init=nnx.with_partitioning(
+                                     init_fn, (None, )),
                                  rngs=rng,
                                  quant_config=quant_config)
         self.k_norm = JaxRmsNorm(self.head_dim,
                                  param_dtype=dtype,
+                                 scale_init=nnx.with_partitioning(
+                                     init_fn, (None, )),
                                  rngs=rng,
                                  quant_config=quant_config)
         self.v_norm = JaxRmsNorm(self.head_dim,
@@ -382,26 +386,34 @@ class Gemma4VisionEncoderLayer(JaxModule):
                  quant_config: Optional[VllmQuantConfig] = None):
         self.input_layernorm = JaxRmsNorm(config.hidden_size,
                                           param_dtype=dtype,
+                                          scale_init=nnx.with_partitioning(
+                                              init_fn, (None, )),
                                           rngs=rng,
                                           quant_config=quant_config)
 
         self.self_attn = Gemma4VisionFlashAttention(config, dtype, rng, mesh,
                                                     quant_config)
 
-        self.post_attention_layernorm = JaxRmsNorm(config.hidden_size,
-                                                   param_dtype=dtype,
-                                                   rngs=rng,
-                                                   quant_config=quant_config)
+        self.post_attention_layernorm = JaxRmsNorm(
+            config.hidden_size,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=quant_config)
 
-        self.pre_feedforward_layernorm = JaxRmsNorm(config.hidden_size,
-                                                    param_dtype=dtype,
-                                                    rngs=rng,
-                                                    quant_config=quant_config)
+        self.pre_feedforward_layernorm = JaxRmsNorm(
+            config.hidden_size,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=quant_config)
         self.mlp = Gemma4VisionMLP(config, dtype, rng, quant_config)
-        self.post_feedforward_layernorm = JaxRmsNorm(config.hidden_size,
-                                                     param_dtype=dtype,
-                                                     rngs=rng,
-                                                     quant_config=quant_config)
+        self.post_feedforward_layernorm = JaxRmsNorm(
+            config.hidden_size,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=quant_config)
 
     def __call__(self,
                  inputs: jax.Array,
