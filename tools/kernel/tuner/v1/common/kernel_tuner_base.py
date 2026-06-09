@@ -20,8 +20,11 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from enum import Enum
 
+import jax
 import yaml
 from absl import flags
+
+from tools.kernel.tuner.v1.common.utils import find_events_by_pattern
 
 FLAGS = flags.FLAGS
 
@@ -85,6 +88,7 @@ class TunerConfig:
     tuning_key_class: any = None
     tunable_params_class: any = None
     kernel_tuner_name: str = None
+    jit_kernel_pattern: str = None
 
 
 @dataclass
@@ -140,6 +144,9 @@ class KernelTunerBase(ABC):
         self._tuning_key = None
         self.tuner_config = tuner_config
         self.run_config = run_config
+        self.xprof_dir = os.path.join("/tmp/kernel_tuning",
+                                      self.tuner_config.kernel_tuner_name,
+                                      "xprof")
 
     def _init_case_set(self) -> bool:
         """Initialize the case set which will be used for tuning. The case set will be written to the storage manager. This will be called when the caseset_id is new.
@@ -419,6 +426,15 @@ class KernelTunerBase(ABC):
             "Specific kernel should implement this to call the kernl with the inputs from generate_inputs"
         )
 
+    def _cleanup_xprof_dir(self):
+        """Clean up the xprof directory to avoid interference from previous runs."""
+        if os.path.exists(self.xprof_dir):
+            try:
+                os.system(f'rm -rf {self.xprof_dir}/*')
+            except Exception as e:
+                logger.warning(
+                    f"Failed to clean up xprof dir {self.xprof_dir}: {e}")
+
     def measure_latency(self, begin_case_id: int, end_case_id: int):
         """Measure the latency of cases in the caseset with case_id in [begin_case_id, end_case_id). The latency of each case will be persisted in local file or database using storage_management module.
 
@@ -450,6 +466,7 @@ class KernelTunerBase(ABC):
             logger.info(
                 f"Worker [{FLAGS.worker_id}] Processing CaseId: {cid} in Bucket {bucket_id}, [{begin_case_id}-{end_case_id}) @ elapsed time {time_elapsed_minutes:.2f} minutes."
             )
+            self._cleanup_xprof_dir()
             if not self.run_config.run_locally and (
                     time_elapsed_minutes
                     > self.run_config.max_execution_minutes):
@@ -517,33 +534,42 @@ class KernelTunerBase(ABC):
             warmup_us = int(warmup_ns // 1000)
 
             measurement_iters = 100
-            status, average_latency_ns = run_and_record_failure(
-                tuning_key,
-                tunable_params,
-                iters=measurement_iters,
-                warmup_us=warmup_us)
+            if self.tuner_config.jit_kernel_pattern is not None:
+                with jax.profiler.trace(self.xprof_dir,
+                                        create_perfetto_link=False):
+                    status, average_latency_ns = run_and_record_failure(
+                        tuning_key,
+                        tunable_params,
+                        iters=measurement_iters,
+                        warmup_us=warmup_us)
+            else:
+                status, average_latency_ns = run_and_record_failure(
+                    tuning_key,
+                    tunable_params,
+                    iters=measurement_iters,
+                    warmup_us=warmup_us)
             if status != TuningStatus.SUCCESS:
                 logger.warning(
                     f"Case {cid} failed during main run with status: {status}. Total time spent: {(time.perf_counter_ns() - begin_case_id_time)/1e9:.2f}s."
                 )
                 continue
 
-            # remeasure if the average latency is too small, force to run at least for 1 second to get more stable measurement
-            if average_latency_ns * measurement_iters < 1_000_000_000:  # if average latency is less than 10ms, we consider it as too small
+            if self.tuner_config.jit_kernel_pattern is not None:
+                matching_events, average_duration_ms = find_events_by_pattern(
+                    self.xprof_dir, self.tuner_config.jit_kernel_pattern)
+                average_latency_us = int(average_duration_ms * 1000)
+                assert len(
+                    matching_events
+                ) == measurement_iters, f"The number of matching events {len(matching_events)} is different from the measurement iters {measurement_iters} for Case {cid}."
                 logger.info(
-                    f"Average latency for Case {cid} is too small. Rerunning with more iterations for stable measurement."
+                    f'Case {cid} average latency is {average_latency_us}us from xprof'
                 )
-                iters = max(
-                    1000, int(1_000_000_000 //
-                              average_latency_ns))  # run at least for 1 second
-                status, average_latency_ns = run_and_record_failure(
-                    tuning_key,
-                    tunable_params,
-                    iters=iters,
-                    warmup_us=warmup_us)
-                assert status == TuningStatus.SUCCESS, f"Case {cid} failed during remeasure with status: {status}. This is unexpected because the first run was successful. Please check the logs for more details. Total time spent: {(time.perf_counter_ns() - begin_case_id_time)/1e9:.2f}s."
+            else:
+                average_latency_us = int(average_latency_ns // 1000)
+                logger.info(
+                    f'Case {cid} average latency is {average_latency_us}us from timer'
+                )
 
-            average_latency_us = int(average_latency_ns // 1000)
             total_time_us = int(
                 (time.perf_counter_ns() - begin_case_id_time) // 1000)
             results_buffer.append(
@@ -576,3 +602,4 @@ class KernelTunerBase(ABC):
         logger.info(
             f"Worker [{FLAGS.worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
         )
+        self._cleanup_xprof_dir()

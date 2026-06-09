@@ -214,7 +214,9 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         self.tuner_config = TunerConfig(
             tuning_key_class=TuningKey,
             tunable_params_class=TunableParams,
-            kernel_tuner_name="batched_rpa_kernel_tuner")
+            kernel_tuner_name="batched_rpa_kernel_tuner",
+            jit_kernel_pattern=r"(jit_ragged_paged_attention\()",
+        )
         super().__init__(tuner_config=self.tuner_config, run_config=run_config)
 
     def generate_cases(self) -> list[TuningCase]:
@@ -326,7 +328,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             end_ns = time.perf_counter_ns()
             latency_ns = (end_ns - start_ns)
             if iters > 1:
-                logger.info(
+                logger.debug(
                     f"latency_ns={latency_ns}, average_latency_ns={latency_ns / iters}"
                 )
             return TuningStatus.SUCCESS, latency_ns // iters, latency_ns  # status, average latency, total latency
