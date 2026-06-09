@@ -60,7 +60,7 @@ def generate_response(model, tokenizer_or_processor, model_inputs):
 
     device = next(model.parameters()).device
 
-    assistant_prompt, image_paths, images, text = model_inputs[
+    assistant_prompt, _, images, text = model_inputs[
         'assistant_prompt'], model_inputs['img_paths'], model_inputs[
             'images'], model_inputs['question']
 
