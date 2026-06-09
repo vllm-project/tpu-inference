@@ -213,7 +213,7 @@ class JaxMergedColumnParallelLinear(JaxLinear):
 
 class JaxQKVParallelLinear(JaxModule):
     """Fused QKV Parallel Linear layer for JAX-native models.
-    
+
     Performs fused Q, K, and V projections in a single HBM read pass and
     partitions them locally per TPU device without incurring all-to-all collectives.
     """
@@ -262,7 +262,12 @@ class JaxQKVParallelLinear(JaxModule):
         outs = self.proj(
             x)  # Shape: [T, total_output_dim] sharded on "model" axis
 
-        # Reshape to separate the shards physically: [T, tp_size, total_output_dim // tp_size]
+        # NOTE: We do not use layers.common.utils.slice_sharded_tensor_for_concatenation
+        # or process_sharded_qkv_projection here. Those helpers flatten sharded axes
+        # to sequential layouts [..., -1] to return flat tensors expected by PyTorch/vLLM.
+        # For JAX-native models, we reshape sharded slices directly to global head shapes
+        # in SRAM, enabling XLA to compile this as a pure zero-copy metadata-only change.
+        # Flattening and un-flattening sharded axes inserts memory layout conversion overhead.
         new_shape = outs.shape[:-1] + (self.tp_size, -1)
         sharded_outs = outs.reshape(new_shape)
 
@@ -274,7 +279,7 @@ class JaxQKVParallelLinear(JaxModule):
         outs_k = sharded_outs[..., q_sz:q_sz + k_sz]
         outs_v = sharded_outs[..., q_sz + k_sz:]
 
-        # Reshape directly to their global multi-head shapes
+        # Reshape directly to their global multi-head shapes (metadata change under JAX!)
         q = outs_q.reshape(outs.shape[:-1] + (self.num_heads, self.head_dim))
         k = outs_k.reshape(outs.shape[:-1] +
                            (self.num_kv_heads, self.head_dim))
