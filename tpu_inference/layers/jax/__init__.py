@@ -62,6 +62,15 @@ class JaxModule(nnx.Module):
             elif isinstance(value, list) or isinstance(value, nnx.List):
                 yield name, JaxModuleList(value)
 
+    def children(self) -> Iterator["JaxModule | JaxModuleList"]:
+        """Yields immediate child modules.
+
+        Mirrors ``torch.nn.Module.children`` so vLLM's upstream loader
+        (``AutoWeightsLoader.load_weights``) works against JAX models.
+        """
+        for _, child in self.named_children():
+            yield child
+
     def named_modules(
         self,
         memo: set | None = None,
@@ -129,6 +138,11 @@ class JaxModuleList(nnx.List):
                 yield str(idx), item
             elif isinstance(item, list):
                 yield str(idx), JaxModuleList(item)
+
+    def children(self) -> Iterator["JaxModule | JaxModuleList"]:
+        """Yields the contained modules (see ``torch.nn.ModuleList.children``)."""
+        for _, child in self.named_children():
+            yield child
 
     def named_modules(
         self,
