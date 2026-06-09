@@ -145,16 +145,32 @@ def _scheduler_worker_process(
 ):
     """Worker process that manages a single scheduler instance."""
     # Initialize the scheduler in this process
-    scheduler = original_scheduler_cls(
-        vllm_config=vllm_config,
-        kv_cache_config=kv_cache_config,
-        structured_output_manager=structured_output_manager,
-        block_size=block_size,
-        hash_block_size=hash_block_size,
-        mm_registry=mm_registry,
-        include_finished_set=include_finished_set,
-        log_stats=log_stats,
-    )
+    import inspect
+    sig = inspect.signature(original_scheduler_cls)
+    scheduler_kwargs = {
+        "vllm_config": vllm_config,
+        "kv_cache_config": kv_cache_config,
+        "structured_output_manager": structured_output_manager,
+        "block_size": block_size,
+        "mm_registry": mm_registry,
+        "include_finished_set": include_finished_set,
+        "log_stats": log_stats,
+    }
+    if "hash_block_size" in sig.parameters:
+        scheduler_kwargs["hash_block_size"] = hash_block_size
+
+    import os
+
+    enable_continue_decode = False
+    if hasattr(vllm_config, "additional_config"):
+        enable_continue_decode = vllm_config.additional_config.get(
+            "enable_continue_decode", False)
+
+    if enable_continue_decode:
+        from tpu_inference.core.sched.utils import \
+            patch_vllm_scheduler_for_continue_decode
+        patch_vllm_scheduler_for_continue_decode()
+    scheduler = original_scheduler_cls(**scheduler_kwargs)
 
     _cached_scheduler_outputs: deque[SchedulerOutput] = deque()
 

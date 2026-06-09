@@ -263,8 +263,8 @@ for model_name in $model_list; do
         elif [ "$TPU_VERSION" == "tpu7x" ]; then
             # Set the default value to 2 for tpu v7x for most models
             current_device_count=2
-            # If using large model (e.g. DeepSeek, then set the count to 8)
-            if [[ "${model_name,,}" == *"deepseek"* ]]; then
+            # If using large model (e.g. DeepSeek or Kimi, then set the count to 8)
+            if [[ "${model_name,,}" == *"deepseek"* ]] || [[ "${model_name,,}" == *"kimi"* ]]; then
                 current_device_count=8
             fi
         else
@@ -295,11 +295,23 @@ for model_name in $model_list; do
                 current_serve_args+=(--enable-expert-parallel)
                 current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}')
             elif [ "$MODEL_IMPL_TYPE" == "flax_nnx" ]; then
-                current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy": 
+                current_serve_args+=(--additional_config '{"sharding": {"sharding_strategy":
                     {"enable_dp_attention": true, "expert_parallelism": '"${current_device_count}"', "tensor_parallelism": 1}},
                         "replicate_attn_weights": "True", "sparse_matmul": "True"}')
             fi
+        elif [[ "${model_name,,}" == *"kimi"* ]]; then
+            export TIMEOUT_SECONDS=3600 # Kimi needs a longer timeout
+            max_batched_tokens=1024
+            served_name=moonshotai/Kimi-K2.6
+            TARGET_ACCURACY="0.87"
+            current_serve_args+=(--kv-cache-dtype=fp8 --gpu-memory-utilization 0.977 --limit-mm-per-prompt='{"image": 0, "video": 0, "vision_chunk": 0}' )
+            current_serve_args+=(--served-model-name "${served_name}" --load-format=runai_streamer --enable-expert-parallel --trust-remote-code --kv-cache-dtype=fp8 --additional-config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "tensor_parallelism": '"${current_device_count}"'}}}')
         fi
+    fi
+
+    if [ -n "$EXTRA_SERVE_ARGS" ]; then
+        eval "extra_args_array=($EXTRA_SERVE_ARGS)"
+        current_serve_args+=("${extra_args_array[@]}")
     fi
 
     # Spin up the vLLM server
