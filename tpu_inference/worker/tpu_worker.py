@@ -402,12 +402,6 @@ class TPUWorker(WorkerBase):
             total_hbm_used += used
             total_hbm_limit += limit
 
-        if total_hbm_limit == 0:
-            logger.warning(
-                "Could not determine TPU HBM limit. Defaulting to 16GiB virtual limit."
-            )
-            total_hbm_limit = 16 * utils.GBYTES
-
         total_hbm_limit_cap = total_hbm_limit * gpu_memory_utilization
         total_hbm_avail = int(total_hbm_limit_cap - total_hbm_used)
 
