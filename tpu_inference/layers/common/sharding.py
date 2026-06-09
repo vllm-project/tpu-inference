@@ -63,6 +63,10 @@ class ShardingAxisNameBase:
     CONTEXT = 'dcp'
     KV_CACHE_HEAD = ('model', 'expert')
 
+    # Vision encoder sharding axes
+    VIT_BATCH = ('data', 'attn_dp', 'attn_dp_expert')
+    VIT_MODEL = 'model'
+
 
 class ShardingAxisName2D:
     """Sharding axis names for 2D data parallelism scenarios.
@@ -85,6 +89,10 @@ class ShardingAxisName2D:
     KV_CACHE_HEAD = 'model'
     MODEL = 'model'
 
+    # Vision encoder sharding axes
+    VIT_BATCH = 'data'
+    VIT_MODEL = 'model'
+
 
 # Lazily initialize the ShardingAxisName so that we can decide which one to use based on the
 # propagated / updated environment variables in the multi-host setup.
@@ -93,6 +101,7 @@ class LazyShardingAxisName:
 
     def __init__(self):
         self._cls = None
+        self._overrides: dict = {}
 
     def _initialize(self):
         if self._cls is None:
@@ -106,7 +115,17 @@ class LazyShardingAxisName:
             except Exception:
                 self._cls = ShardingAxisName2D
 
+    def override(self, **kwargs):
+        """Set runtime axis overrides."""
+        self._overrides.update(kwargs)
+
+    def reset(self):
+        """Clear all overrides, restoring base-class values."""
+        self._overrides.clear()
+
     def __getattr__(self, name):
+        if name in self._overrides:
+            return self._overrides[name]
         self._initialize()
         return getattr(self._cls, name)
 
@@ -331,19 +350,22 @@ class ShardingConfigManager:
     def total_devices(self) -> int:
         return self._total_devices
 
+    def apply_vision_sharding(self):
+        ShardingAxisName.reset()
+        if self.mm_encoder_tp_mode == "data" and self.tp_size > 1:
+            base = ShardingAxisName.VIT_BATCH
+            model_axis = ShardingAxisName.MODEL
+            vit_batch = (base, model_axis) if isinstance(
+                base, str) else tuple(base) + (model_axis, )
+            ShardingAxisName.override(VIT_BATCH=vit_batch, VIT_MODEL=None)
+
     @property
     def vision_batch_axes(self):
-        batch_axes = ShardingAxisName.BATCH
-        if self.mm_encoder_tp_mode == "data" and self.tp_size > 1:
-            if isinstance(batch_axes, str):
-                return (batch_axes, ShardingAxisName.MODEL)
-            else:
-                return tuple(batch_axes) + (ShardingAxisName.MODEL, )
-        return batch_axes
+        return ShardingAxisName.VIT_BATCH
 
     @property
     def vision_model_axis(self) -> Optional[str]:
-        return None if self.mm_encoder_tp_mode == "data" else ShardingAxisName.MODEL
+        return ShardingAxisName.VIT_MODEL
 
     def __str__(self):
         return (f"ShardingConfigManager(total_devices={self.total_devices}, "

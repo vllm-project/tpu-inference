@@ -28,12 +28,14 @@ from vllm.model_executor.models.gemma4_mm import \
 
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import make_layers
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.gemma4 import Gemma4Model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.multi_modal_utils import \
@@ -135,9 +137,7 @@ class Gemma4VisionFlashAttention(JaxModule):
                  dtype: jnp.dtype,
                  rng: nnx.Rngs,
                  mesh: Mesh,
-                 quant_config: Optional[VllmQuantConfig] = None,
-                 vision_batch_axes="data",
-                 vision_model_axis="model"):
+                 quant_config: Optional[VllmQuantConfig] = None):
         self.features = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = getattr(config, "num_key_value_heads",
@@ -145,8 +145,6 @@ class Gemma4VisionFlashAttention(JaxModule):
         self.head_dim = getattr(config, "head_dim",
                                 self.features // self.num_heads)
         self.mesh = mesh
-        self.vision_batch_axes = vision_batch_axes
-        self.vision_model_axis = vision_model_axis
 
         # Fetch Gemma Vision specific RoPE config (theta=100.0)
         rope_params = getattr(config, "rope_parameters",
@@ -157,28 +155,30 @@ class Gemma4VisionFlashAttention(JaxModule):
                                 (self.features, self.num_heads, self.head_dim),
                                 param_dtype=dtype,
                                 kernel_init=nnx.with_partitioning(
-                                    init_fn, (None, vision_model_axis, None)),
+                                    init_fn,
+                                    (None, ShardingAxisName.VIT_MODEL, None)),
                                 rngs=rng,
                                 quant_config=quant_config)
         self.k_proj = JaxEinsum(
             "BTD,DKH->BTKH", (self.features, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn,
-                                              (None, vision_model_axis, None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
             quant_config=quant_config)
         self.v_proj = JaxEinsum(
             "BTD,DKH->BTKH", (self.features, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn,
-                                              (None, vision_model_axis, None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
             quant_config=quant_config)
         self.o_proj = JaxEinsum("BTNH,NHD->BTD",
                                 (self.num_heads, self.head_dim, self.features),
                                 param_dtype=dtype,
                                 kernel_init=nnx.with_partitioning(
-                                    init_fn, (vision_model_axis, None, None)),
+                                    init_fn,
+                                    (ShardingAxisName.VIT_MODEL, None, None)),
                                 rngs=rng,
                                 quant_config=quant_config)
 
@@ -247,8 +247,8 @@ class Gemma4VisionFlashAttention(JaxModule):
             mesh=self.mesh,
             causal=False,
             sm_scale=1.0,
-            batch_axis=self.vision_batch_axes,
-            head_axis=self.vision_model_axis,
+            batch_axis=ShardingAxisName.VIT_BATCH,
+            head_axis=ShardingAxisName.VIT_MODEL,
         )(q_BNTH, k_BKTH, v_BKTH, segment_ids)
 
         # Transpose back: (B, N, T, H) -> (B, T, N, H)
@@ -268,12 +268,7 @@ class Gemma4VisionPatchEmbedder(JaxModule):
     adding factorized positional embeddings.
     """
 
-    def __init__(self,
-                 config,
-                 dtype,
-                 rngs: nnx.Rngs,
-                 quant_config=None,
-                 vision_model_axis="model"):
+    def __init__(self, config, dtype, rngs: nnx.Rngs, quant_config=None):
         self.config = config
         self.dtype = dtype
 
@@ -283,8 +278,8 @@ class Gemma4VisionPatchEmbedder(JaxModule):
             "...d,dh->...h",
             (3 * self.patch_size**2, config.hidden_size),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn,
-                                              (None, vision_model_axis)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL)),
             bias_init=None,
             rngs=rngs,
             quant_config=quant_config,
@@ -335,8 +330,7 @@ class Gemma4VisionMLP(JaxModule):
                  config: PretrainedConfig,
                  dtype: jnp.dtype,
                  rng: nnx.Rngs,
-                 quant_config: Optional[VllmQuantConfig] = None,
-                 vision_model_axis="model"):
+                 quant_config: Optional[VllmQuantConfig] = None):
         self.features = config.hidden_size
         self.hidden_dim = config.intermediate_size
 
@@ -344,8 +338,8 @@ class Gemma4VisionMLP(JaxModule):
             "...d,df->...f",
             (self.features, self.hidden_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn,
-                                              (None, vision_model_axis)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL)),
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
@@ -355,8 +349,8 @@ class Gemma4VisionMLP(JaxModule):
             "...d,df->...f",
             (self.features, self.hidden_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn,
-                                              (None, vision_model_axis)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL)),
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
@@ -366,8 +360,8 @@ class Gemma4VisionMLP(JaxModule):
             "...f,fd->...d",
             (self.hidden_dim, self.features),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn,
-                                              (vision_model_axis, None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (ShardingAxisName.VIT_MODEL, None)),
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
@@ -385,22 +379,14 @@ class Gemma4VisionEncoderLayer(JaxModule):
                  dtype: jnp.dtype,
                  rng: nnx.Rngs,
                  mesh: Mesh,
-                 quant_config: Optional[VllmQuantConfig] = None,
-                 vision_batch_axes="data",
-                 vision_model_axis="model"):
+                 quant_config: Optional[VllmQuantConfig] = None):
         self.input_layernorm = JaxRmsNorm(config.hidden_size,
                                           param_dtype=dtype,
                                           rngs=rng,
                                           quant_config=quant_config)
 
-        self.self_attn = Gemma4VisionFlashAttention(
-            config,
-            dtype,
-            rng,
-            mesh,
-            quant_config,
-            vision_batch_axes=vision_batch_axes,
-            vision_model_axis=vision_model_axis)
+        self.self_attn = Gemma4VisionFlashAttention(config, dtype, rng, mesh,
+                                                    quant_config)
 
         self.post_attention_layernorm = JaxRmsNorm(config.hidden_size,
                                                    param_dtype=dtype,
@@ -411,11 +397,7 @@ class Gemma4VisionEncoderLayer(JaxModule):
                                                     param_dtype=dtype,
                                                     rngs=rng,
                                                     quant_config=quant_config)
-        self.mlp = Gemma4VisionMLP(config,
-                                   dtype,
-                                   rng,
-                                   quant_config,
-                                   vision_model_axis=vision_model_axis)
+        self.mlp = Gemma4VisionMLP(config, dtype, rng, quant_config)
         self.post_feedforward_layernorm = JaxRmsNorm(config.hidden_size,
                                                      param_dtype=dtype,
                                                      rngs=rng,
@@ -489,31 +471,19 @@ class Gemma4VisionModel(JaxModule):
                  dtype: jnp.dtype,
                  rng: nnx.Rngs,
                  mesh: Mesh,
-                 quant_config: Optional[VllmQuantConfig] = None,
-                 vision_batch_axes="data",
-                 vision_model_axis="model"):
+                 quant_config: Optional[VllmQuantConfig] = None):
         self.config = config
 
         self.dtype = dtype
         self.mesh = mesh
 
         self.patch_embedder = Gemma4VisionPatchEmbedder(
-            config,
-            dtype,
-            rng,
-            quant_config,
-            vision_model_axis=vision_model_axis)
+            config, dtype, rng, quant_config)
 
         num_layers = getattr(config, "num_hidden_layers", 32)
         self.start_layer, self.end_layer, self.layers = make_layers(
             num_layers, lambda *_: Gemma4VisionEncoderLayer(
-                config,
-                dtype,
-                rng,
-                self.mesh,
-                quant_config,
-                vision_batch_axes=vision_batch_axes,
-                vision_model_axis=vision_model_axis))
+                config, dtype, rng, self.mesh, quant_config))
 
         self.pooler = Gemma4VisionPooler(config, dtype)
 
@@ -555,15 +525,14 @@ class Gemma4MultimodalEmbedder(JaxModule):
                  rng: nnx.Rngs,
                  quant_config: Optional[VllmQuantConfig] = None,
                  prefix: str = "",
-                 rms_norm_eps: float = 1e-6,
-                 vision_model_axis="model"):
+                 rms_norm_eps: float = 1e-6):
         self.embedding_projection = JaxEinsum(
             "bld,dh->blh",
             (vision_hidden_size, text_hidden_size),
             bias_shape=None,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn,
-                                              (None, vision_model_axis)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL)),
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
@@ -599,7 +568,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
-        from tpu_inference.models.jax.gemma4 import Gemma4Model
+        vllm_config.sharding_config.apply_vision_sharding()
+
         self.model = Gemma4Model(
             vllm_config=vllm_config,
             rng=rng,
@@ -607,9 +577,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             prefix="model",
         )
         model_config = vllm_config.model_config
-        self.vision_batch_axes = vllm_config.sharding_config.vision_batch_axes
-        self.vision_model_axis = vllm_config.sharding_config.vision_model_axis
-
         vision_config = model_config.hf_config.vision_config
         self.image_token_id = getattr(model_config.hf_config, "image_token_id",
                                       258880)
@@ -619,9 +586,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             dtype=model_config.dtype,
             rng=rng,
             quant_config=vllm_config.quant_config,
-            mesh=mesh,
-            vision_batch_axes=self.vision_batch_axes,
-            vision_model_axis=self.vision_model_axis)
+            mesh=mesh)
 
         self.embed_vision = Gemma4MultimodalEmbedder(
             vision_hidden_size=vision_config.hidden_size,
@@ -629,8 +594,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             dtype=model_config.dtype,
             rng=rng,
             quant_config=vllm_config.quant_config,
-            prefix="embed_vision",
-            vision_model_axis=self.vision_model_axis)
+            prefix="embed_vision")
 
         self.final_logit_softcapping = getattr(
             model_config.hf_config.text_config, "final_logit_softcapping",
@@ -822,16 +786,13 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         # Process images in fixed-size micro-batches of exactly `dp_size` so
         # every vision-tower call shares the same (B=dp_size, ...) JIT cache
-        # entry regardless of how many images this step has.
-        # Gemma4VisionFlashAttention's sharded_flash_attention has
-        # in_specs=P('data','model',None,None), which requires
-        # B % dp_size == 0; B=dp_size always satisfies that. The last
+        # entry regardless of how many images this step has. The last
         # micro-batch is right-padded with pixel_position_ids=POSITIONS_PAD_VALUE
         # entries so input_mask masks the padded entries out of the encoder.
         n_images = pixel_values.shape[0]
-        dp_size = get_mesh_shape_product(self.mesh, self.vision_batch_axes)
+        dp_size = get_mesh_shape_product(self.mesh, ShardingAxisName.VIT_BATCH)
         input_sharding = NamedSharding(
-            self.mesh, PartitionSpec(self.vision_batch_axes, None, None))
+            self.mesh, PartitionSpec(ShardingAxisName.VIT_BATCH, None, None))
 
         per_image_features = []
         for chunk_start in range(0, n_images, dp_size):
