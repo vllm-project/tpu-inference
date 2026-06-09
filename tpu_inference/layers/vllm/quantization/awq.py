@@ -20,6 +20,7 @@ import torch
 from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
+from vllm.model_executor.layers import linear
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.layer import \
@@ -89,6 +90,10 @@ class VllmAWQConfig(AWQConfig, VllmQuantConfig):
 
 
 class VllmAWQLinearMethod(AWQLinearMethod):
+
+    # Dynamically register this method to support weight_loader_v2 in vLLM.
+    if "VllmAWQLinearMethod" not in linear.WEIGHT_LOADER_V2_SUPPORTED:
+        linear.WEIGHT_LOADER_V2_SUPPORTED.append("VllmAWQLinearMethod")
 
     def __init__(self, quant_config: VllmAWQConfig,
                  linear_config: VllmQuantLinearConfig):
