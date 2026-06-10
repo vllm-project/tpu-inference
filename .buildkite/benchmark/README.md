@@ -97,7 +97,12 @@ While variables like `EXPECTED_ETEL`, `INPUT_LEN`, `OUTPUT_LEN`, and `PREFIX_LEN
 
 Please ensure that the values of these variables remain consistent with the corresponding parameter settings in the args of the Case JSON file.
 
-Additionally, it will extract the json `case_name` value and reported to GCP Spanner `RunRecord` table for `CaseName` column.
+Additionally, the `case_name` defined in the JSON will be extracted and reported to the `CaseName` column in the Spanner `RunRecord` table.
+
+> **Important Note on `case_name` Modification:**
+> * **For new cases:** You can define and modify the `case_name` freely during initial development. (Please make it similar to current cases name convention as possible)
+> * **For established cases:** If a case has been running for a long time and has historical data in the database, **strongly recommend NOT to modify its `case_name`**.
+> * **Data Migration:** If a name change is strictly necessary for an established case, you must coordinate and execute a data migration in the database to link the old records to the new name. Modifying the name without migration will cause the dashboard to treat it as a brand-new entity, breaking historical performance tracking.
 
 ## 4. **Test Case File Hierarchy**
 
