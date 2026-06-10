@@ -172,7 +172,9 @@
         "command_type": "vllm_serve",
         "env": {
           "VLLM_USE_V1": "1",
-          "MODEL_IMPL_TYPE": "vllm"
+          "MODEL_IMPL_TYPE": "vllm",
+          "JAX_USE_SHARDY_PARTITIONER": "false",
+          "LIBTPU_INIT_ARGS": "--xla_use_shardy=false --xla_tpu_scoped_vmem_limit_kib=131072"
         },
         "args": {
           "model": "Qwen/Qwen3.5-397B-A17B-FP8",
@@ -183,12 +185,14 @@
           },
           "max-model-len": 9216,
           "kv-cache-dtype": "fp8",
-          "gpu-memory-utilization": 0.9,
+          "gpu-memory-utilization": 0.85,
           "block-size": 256,
           "no-enable-prefix-caching": true,
           "async-scheduling": true,
           "limit-mm-per-prompt": "{\"image\":8,\"video\":0}",
-          "allowed-local-media-path": "./artifacts/dataset"
+          "allowed-local-media-path": "./",
+          "disable-chunked-mm-input": true,
+          "mm-processor-kwargs": "{\"size\":{\"longest_edge\":200704}}"
         }
       },
       "client_command_options": {
