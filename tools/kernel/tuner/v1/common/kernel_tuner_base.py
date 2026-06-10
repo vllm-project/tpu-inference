@@ -268,6 +268,7 @@ class KernelTunerBase(ABC):
                     'pip install --upgrade google-api-core && '
                     'pip install --upgrade google-auth && '
                     'pip install --upgrade absl-py && '
+                    'pip install --upgrade tensorflow && '
                     'python -m tools.kernel.tuner.v1.kernel_tuner_runner '
                     f'--kernel_tuner_name={self.tuner_config.kernel_tuner_name} '
                     f'  --case_set_id={self.run_config.case_set_id} --run_id={self.run_config.run_id} '
