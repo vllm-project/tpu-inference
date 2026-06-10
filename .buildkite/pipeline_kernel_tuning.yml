@@ -87,7 +87,7 @@ steps:
         .buildkite/scripts/run_in_docker.sh bash -c '
           set -e
           
-          python3 -m pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
+          python3 -m pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt tensorflow
           
           # Start with the arguments that do not follow the KERNEL_TUNING_ pattern
           PYTHON_ARGS=( 

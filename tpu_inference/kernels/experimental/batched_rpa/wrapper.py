@@ -37,6 +37,8 @@ from jax.experimental.pallas import tpu as pltpu
 from tpu_inference import envs
 from tpu_inference.kernels.experimental.batched_rpa import (configs, kernel,
                                                             schedule, utils)
+from tpu_inference.kernels.experimental.batched_rpa.tuned_params import \
+    get_tuned_params
 
 
 def prepare_inputs(
@@ -382,7 +384,10 @@ def calculate_block_sizes(
         "update_kv_cache",
         "kv_layout",
     ),
-    donate_argnames=("queries", "keys", "values", "kv_cache"),
+    # Donation of transient inputs can fail for some runtime buffer layouts in
+    # the experimental tuning path. Keep donation only for kv_cache, which is
+    # the intended long-lived mutable state.
+    donate_argnames=("kv_cache", ),
 )
 def ragged_paged_attention(
     queries: jax.Array,
@@ -517,18 +522,23 @@ def ragged_paged_attention(
         kv_layout=kv_layout,
     )
 
-    default_decode, default_prefill = calculate_block_sizes(
-        model_cfgs, serve_cfgs, vmem_limit_bytes)
-
     def run_rpa_kernel(
         mode: configs.RpaCase,
         o_hbm_alias_q_hbm: jax.Array,
         kv_cache: jax.Array,
     ):
         if mode == configs.RpaCase.DECODE:
-            effective_blocks = decode_block_sizes or default_decode
+            effective_blocks = decode_block_sizes or get_tuned_params(
+                model_cfgs,
+                serve_cfgs,
+                case='decode',
+                vmem_limit_bytes=vmem_limit_bytes)
         else:
-            effective_blocks = prefill_block_sizes or default_prefill
+            effective_blocks = prefill_block_sizes or get_tuned_params(
+                model_cfgs,
+                serve_cfgs,
+                case='prefill',
+                vmem_limit_bytes=vmem_limit_bytes)
 
         cfgs = configs.RpaConfigs(
             block=effective_blocks,
