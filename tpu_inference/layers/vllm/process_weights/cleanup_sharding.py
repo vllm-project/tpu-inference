@@ -26,7 +26,7 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA)
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
@@ -181,7 +181,7 @@ def _shard_row_parallel_linear_lora(layer: RowParallelLinearWithLoRA,
 
 def _replicate_fused_moe_hash_indices_tables_and_e_score_correction_bias(
         module: torch.nn.Module, mesh: Mesh) -> None:
-    if isinstance(module, FusedMoE):
+    if isinstance(module, RoutedExperts):
         table = getattr(module, "hash_indices_table", None)
         if table is not None:
             sharded = _shard_tensor_to_tpu_replicated(table, mesh)

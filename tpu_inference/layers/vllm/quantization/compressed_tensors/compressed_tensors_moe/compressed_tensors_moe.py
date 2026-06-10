@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import torch
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe import \
     CompressedTensorsMoEMethod
 
@@ -34,7 +34,7 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
         layer: torch.nn.Module,
         layer_name: str,
     ) -> CompressedTensorsMoEMethod:
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
 
         # FusedMoE was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it

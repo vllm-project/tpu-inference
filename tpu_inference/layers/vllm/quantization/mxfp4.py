@@ -21,7 +21,8 @@ from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
+                                                  RoutedExperts)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config)
@@ -82,7 +83,7 @@ class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
                 "MXFP4 linear layer is not implemented - falling back to "
                 "UnquantizedLinearMethod.")
             return VllmUnquantizedLinearMethod(linear_config)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             moe_config = self.get_moe_config(layer)
             return VllmMxfp4MoEMethod(moe_config, self.mesh)
         elif isinstance(layer, Attention):
@@ -128,7 +129,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
         has_bias = layer.moe_config.has_bias
 
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
@@ -202,7 +203,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
