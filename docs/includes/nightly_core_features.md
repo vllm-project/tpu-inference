@@ -21,6 +21,12 @@
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
+      <td>DCN-based P/D disaggregation</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
       <td>KV Cache Offload</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
@@ -63,34 +69,16 @@
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td>DCN-based P/D disaggregation</td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-    </tr>
-    <tr>
       <td>Multimodal Inputs</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td>Single-Host-P-D-disaggregation</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-    </tr>
-    <tr>
       <td>runai_model_streamer_loader</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>Step Pooling (Embedding)</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
       <td>hybrid kv cache</td>
@@ -106,6 +94,12 @@
     </tr>
     <tr>
       <td>sampling_params</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+    </tr>
+    <tr>
+      <td>Step Pooling (Embedding)</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
