@@ -55,10 +55,13 @@ TARGET_CASE_NAME=${2:-""}
 VLLM_PID=""
 CLEANUP_DONE="false"
 
-if [ -z "$CASE_FILE" ]; then
-    echo "Usage: $0 <case.json> [TARGET_CASE_NAME]"
+if [ -z "$CASE_FILE" ] || [ -z "$TARGET_CASE_NAME" ]; then
+    echo "Usage: $0 <case.json> <TARGET_CASE_NAME>"
     exit 1
 fi
+
+export TARGET_CASE_NAME
+echo "TARGET_CASE_NAME: $TARGET_CASE_NAME"
 
 # shellcheck disable=SC2317
 cleanup() {
