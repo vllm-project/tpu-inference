@@ -102,7 +102,7 @@ class RunConfig:
     run_locally: bool = False
     job_priority: int = -10
     max_execution_minutes: int = 20
-    job_bucket_size: int = 100
+    job_bucket_size: int = 500
 
 
 class KernelTunerBase(ABC):
@@ -556,9 +556,8 @@ class KernelTunerBase(ABC):
                 continue
 
             if self.tuner_config.jit_kernel_pattern is not None:
-                matching_events, average_duration_ms = find_events_by_pattern(
+                matching_events, average_latency_us = find_events_by_pattern(
                     self.xprof_dir, self.tuner_config.jit_kernel_pattern)
-                average_latency_us = int(average_duration_ms * 1000)
                 assert len(
                     matching_events
                 ) == measurement_iters, f"The number of matching events {len(matching_events)} is different from the measurement iters {measurement_iters} for Case {cid}."

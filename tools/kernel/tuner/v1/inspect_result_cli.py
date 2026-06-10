@@ -691,6 +691,8 @@ def _print_min_latency(rows, show_fields=None, show_baseline=False):
     if has_baseline_col:
         builtin_cols.append('baseline_latency_us')
     builtin_cols.append('warmup_us')
+    if show_baseline:
+        show_fields = (show_fields or []) + ['baseline_latency_us']
 
     def _build_row(r):
         d = {

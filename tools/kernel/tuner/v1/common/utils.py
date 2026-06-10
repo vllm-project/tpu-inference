@@ -14,9 +14,7 @@
 
 import os
 import re
-import time
 
-# from tensorflow.core.profiler.protobuf import xplane_pb2
 from tensorflow.tsl.profiler.protobuf import xplane_pb2
 
 
@@ -26,7 +24,7 @@ def find_events_by_pattern(pb_file_path, event_pattern_string):
     pattern = re.compile(event_pattern_string, re.IGNORECASE)
 
     if os.path.isdir(pb_file_path):
-        # walk the directory to find the most recent .xplane.pb file
+        # walk the directory to find the .xplane.pb and expect only one file
         pb_files = []
         for root, dirs, files in os.walk(pb_file_path):
             for file in files:
@@ -39,14 +37,6 @@ def find_events_by_pattern(pb_file_path, event_pattern_string):
             pb_files
         ) == 1, f"Multiple .xplane.pb files found in directory: {pb_file_path}. Please specify the file path directly."
         pb_file_path = pb_files[0]
-
-        # # If a directory is provided, find the most recent .xplane.pb file in it
-        # pb_files = [f for f in os.listdir(pb_file_path) if f.endswith(".xplane.pb")]
-        # if not pb_files:
-        #     raise FileNotFoundError(f"No .xplane.pb files found in directory: {pb_file_path}")
-        # pb_files.sort(key=lambda f: os.path.getmtime(os.path.join(pb_file_path, f)), reverse=True)
-        # pb_file_path = os.path.join(pb_file_path, pb_files[0])
-        # print(f"Found .xplane.pb file: {pb_file_path}")
 
     # 2. Parse the binary file
     xspace = xplane_pb2.XSpace()
@@ -71,51 +61,18 @@ def find_events_by_pattern(pb_file_path, event_pattern_string):
 
                 # 4. Check if the event name matches our regex pattern
                 if pattern.search(name):
-                    duration_ms = event.duration_ps / 1e9
-                    start_ms = event.offset_ps / 1e9
+                    duration_us = event.duration_ps // 1e6
+                    start_us = event.offset_ps // 1e6
 
                     matching_events.append({
                         "plane": plane.name,
                         "line": line_name,
                         "name": name,
-                        "start_ms": start_ms,
-                        "duration_ms": duration_ms
+                        "start_us": start_us,
+                        "duration_us": duration_us
                     })
-    average_duration_ms = (sum(e["duration_ms"] for e in matching_events) /
-                           len(matching_events)) if matching_events else 0
+    average_duration_us = (
+        sum(e["duration_us"] for e in matching_events) //
+        len(matching_events)) if matching_events else 0xFFFFFFFF
 
-    return matching_events, average_duration_ms
-
-
-if __name__ == "__main__":
-    file_path = "/mnt/disks/persist/batched_rpa_kernel_tuning/tmp/batched_rpa_run/"
-
-    # Example 1: Match any event containing "dot" or "matmul"
-    start_time = time.perf_counter()
-    search_pattern = r"(jit_ragged_paged_attention\()"
-
-    print(f"Searching for pattern: '{search_pattern}'\n")
-    matching_events, average_duration_ms = find_events_by_pattern(
-        file_path, search_pattern)
-    end_time = time.perf_counter()
-    print(f"Search completed in {end_time - start_time:.4f} seconds.\n")
-
-    if not matching_events:
-        print("No matching events found.")
-    else:
-        # Sort results by duration (longest taking events first)
-        matching_events.sort(key=lambda x: x["duration_ms"], reverse=True)
-        print(
-            f"Average duration of matching events: {average_duration_ms:.4f} ms"
-        )
-        print(f"Found {len(matching_events)} matching events. Top 15 longest:")
-        print(
-            f"{'DURATION (ms)':<15} | {'START (ms)':<15} | {'PLANE / LINE':<30} | {'EVENT NAME'}"
-        )
-        print("-" * 80)
-
-        for e in matching_events:
-            plane_line = f"{e['plane'][:10]} / {e['line'][:15]}"
-            print(
-                f"{e['duration_ms']:<15.4f} | {e['start_ms']:<15.4f} | {plane_line:<30} | {e['name']}"
-            )
+    return matching_events, average_duration_us

@@ -43,7 +43,6 @@ from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
                                                             TunerConfig,
                                                             TuningCase,
                                                             TuningStatus)
-from tools.kernel.tuner.v1.utils import print_dataclasses_as_table
 from tpu_inference.kernels.experimental.batched_rpa.configs_from_log import \
     LOG_ENTRIES
 from tpu_inference.kernels.experimental.batched_rpa.tuned_params import (
@@ -59,7 +58,7 @@ logging.basicConfig(level=logging.INFO)
 def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
                                          rng: np.random.Generator
                                          | None = None):
-    """Generates inputs for the batched RPA kernel Prefill case.
+    """Generates inputs for the batched RPA kernel Prefill case ONLY.
 
   Args:
     tuning_key: TuningKey object containing the configuration for the kernel.
@@ -111,47 +110,31 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
     k_scale = tuning_key.scale_k
     v_scale = tuning_key.scale_v
     sliding_window = tuning_key.sliding_window
-    # case = tuning_key.case
 
     kv_packing = get_dtype_packing(kv_dtype)
 
     queries = gen_random((total_q_tokens, num_q_heads, head_dim), q_dtype)
     keys = gen_random((total_q_tokens, num_kv_heads, head_dim), kv_dtype)
     values = gen_random((total_q_tokens, num_kv_heads, head_dim), kv_dtype)
-    num_pages = 1296  # get this number from log
     kv_cache = gen_random(
-        (num_pages, page_size, cdiv(
+        (num_page_indices, page_size, cdiv(
             num_kv_heads * 2, kv_packing), kv_packing, head_dim), kv_dtype)
 
-    # distribution: [3]. Cumulative sum of number of decode, prefill, and mixed
-    #     sequences. distribution[2] represents total number of sequences.
-
-    # step 1: calculate how many prefill and decode can have seprately, fit prefill first
-    # max input length is 1024, max number of input tokens is total_q_tokens, for prefill case, we want to pack as many prefill sequences as possible.
-    #    if there are still space left, we add decode sequence until we reach the total_q_tokens limit. also need to make sure the total sequences not
-    #    exceed num_seqs.
-    max_input_len = 1024  # (TODO): We cannot get this number from the TuningKey, need to find a way to pass this information in. Currently this is from the vllm serve bench command line args
+    max_input_len = 1024  # (TODO): This depends on the bench serve command line input-len flag
     max_prefill_seqs = min(num_seqs, total_q_tokens // max_input_len)
     remaining_tokens = total_q_tokens - max_prefill_seqs * max_input_len
-    max_decode_seqs = min(
-        num_seqs - max_prefill_seqs, remaining_tokens
-    )  # assume decode sequence has 1 token input, this is the best case for decode heavy case
-    # remove decode sequence first for debug
-    assert max_decode_seqs == 0, f"For Prefill case, we only want prefill sequence, so max_decode_seqs should be 0, but got max_decode_seqs={max_decode_seqs}"
+    max_decode_seqs = min(num_seqs - max_prefill_seqs, remaining_tokens)
+    assert max_decode_seqs == 0, "Only pack prefill sequences in prefill case, expect max_decode_seqs to be 0"
 
-    # step 2: generate the distribution based on the step 1 result
-    # for decode case, the kv has lens of max_input_len(actaully should be more, should be max_model_len or sliding_window), for prefill case, the kv lens should be 0.
-    # max_model_len can be calculated from num_page_indices, num_page_indices = num_seqs * pages_per_seq, so
     pages_per_seq = num_page_indices // num_seqs
-    # max_model_len = pages_per_seq * page_size
-    kv_lens = [max_input_len] * max_prefill_seqs + [0] * (
-        num_seqs - max_prefill_seqs
-    )  # for prefill sequence, the kv lens is max_input_len, ignore decode sequence for now
-    logger.debug(f"{max_input_len=}, {num_seqs=}, {max_prefill_seqs=}")
+    kv_lens = [max_input_len
+               ] * max_prefill_seqs + [0] * (num_seqs - max_prefill_seqs)
+
     cu_q_lens = [1] * (num_seqs + 1)
     cu_q_lens[0] = 0
     for i in range(1, max_prefill_seqs + 1):
         cu_q_lens[i] = cu_q_lens[i - 1] + max_input_len
+
     page_indices = []
     starting_page_index = 1
     for i in range(max_decode_seqs + max_prefill_seqs):
@@ -170,19 +153,9 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
 
     kv_lens = jnp.array(kv_lens, dtype=jnp.int32)
     cu_q_lens = jnp.array(cu_q_lens, dtype=jnp.int32)
-    # tpu-inference/tpu_inference/kernels/experimental/batched_rpa/configs.py using MIX rather than Prefill for Prefill case
     distribution = jnp.array([0, 0, max_prefill_seqs], dtype=jnp.int32)
     page_indices = jnp.array(page_indices, dtype=jnp.int32)
 
-    logger.debug(f'queries shape: {queries.shape}, dtype: {queries.dtype}')
-    logger.debug(f'keys shape: {keys.shape}, dtype: {keys.dtype}')
-    logger.debug(f'values shape: {values.shape}, dtype: {values.dtype}')
-    logger.debug(f'kv_cache shape: {kv_cache.shape}, dtype: {kv_cache.dtype}')
-    logger.debug(f'kv_lens shape: {kv_lens.shape}, {kv_lens[:32]=}')
-    logger.debug(
-        f'page_indices shape: {page_indices.shape}, {page_indices[:32]=}')
-    logger.debug(f'cu_q_lens shape: {cu_q_lens.shape}, {cu_q_lens[:32]=}')
-    logger.debug(f'distribution shape: {distribution.shape}, {distribution=}')
     return {
         'queries': queries,
         'keys': keys,
@@ -192,19 +165,16 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
         'page_indices': page_indices,
         'cu_q_lens': cu_q_lens,
         'distribution': distribution,
-        'sm_scale':
-        1.0,  # (TODO) value is from log, needs to confirm with others
+        'sm_scale': 1.0,  # (TODO) Value is from log
         'sliding_window': sliding_window,
-        'soft_cap':
-        None,  # (TODO) value is from log, needs to confirm with others
-        'mask_value':
-        -3.38953e+38,  # (TODO) value is from log, needs to confirm with others
+        'soft_cap': None,  # (TODO) Value is from log
+        'mask_value': -3.38953e+38,  # (TODO) Value is from log
         'q_scale': q_scale,
         'k_scale': k_scale,
         'v_scale': v_scale,
         'out_dtype': out_dtype,
-        'use_causal_mask': True,  # only support causal mask for now,
-        'update_kv_cache': True,  # (TODO) Need to check from log
+        'use_causal_mask': True,  # Only support causal mask
+        'update_kv_cache': True,  # (TODO) Value is from log
     }
 
 
@@ -224,21 +194,16 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         for log_entry in LOG_ENTRIES:
             model_config = log_entry.model
             serve_config = log_entry.serve
-            # decode_tuned_block_size = log_entry.decode_block_sizes
             prefill_tuned_block_size = log_entry.prefill_block_sizes
-            # decode_tuning_key = TuningKey.from_config(model_config,
-            #                                           serve_config,
-            #                                           case='decode')
             prefill_tuning_key = TuningKey.from_config(model_config,
                                                        serve_config,
                                                        case='prefill')
-            # decode_tunable_params = TunableParams(**asdict(
-            #     decode_tuned_block_size),
-            #                                       is_baseline=True)
             prefill_tunable_params = TunableParams(**asdict(
                 prefill_tuned_block_size),
                                                    is_baseline=True)
-            if serve_config.total_q_tokens < 1024:  # batched_rpa_0
+            # We setup this for tuning Gemme4's rpa block sizes. When total_q_tokens is smaller than sequence input length,
+            # it cannot be used for scheduling prefill case. We only tuned for prefill case at this moment.
+            if serve_config.total_q_tokens < 1024:
                 continue
             tuning_cases.append(
                 TuningCase(tuning_key=prefill_tuning_key,
@@ -246,9 +211,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
 
             bq_c_sz = prefill_tunable_params.bq_c_sz
             bkv_sz = prefill_tunable_params.bkv_sz
-            # batch_size = prefill_tunable_params.batch_size
             n_buffer = prefill_tunable_params.n_buffer
-            # total_q_tokens = serve_config.total_q_tokens
 
             for prefill_batch_size in [1, 2]:
                 for bq_sz in range(8, 513, 8):
@@ -258,9 +221,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                         for bkv_sz in range(256, 1025, 256):
                             if bkv_sz % prefill_tuning_key.page_size != 0:  # requirement from scheduler
                                 continue
-                            for n_buffer in [
-                                    2, 3
-                            ]:  # when n_buffer is 1, it stucks at the second iteration.
+                            for n_buffer in [2, 3]:
                                 tuning_cases.append(
                                     TuningCase(
                                         tuning_key=prefill_tuning_key,
@@ -290,10 +251,8 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             iters: int = 1) -> tuple[TuningStatus, float, float]:
         if iters == 1:
             logger.info(
-                "Running batched RPA kernel for tuning key & tunable params:\n"
+                f"Running batched RPA kernel for tuning key & tunable params:\nTuningKey=\n{tuning_key}, TunableParams=\n{tunable_params}"
             )
-            print_dataclasses_as_table(tuning_key)
-            print_dataclasses_as_table(tunable_params)
         input_cache = self.generate_inputs(tuning_key)
         prefill_block_sizes = tunable_params.to_block_sizes()
         try:

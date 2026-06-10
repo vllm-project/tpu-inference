@@ -415,32 +415,34 @@ def sharded_ragged_paged_attention(
         per_tp_kv_lens = args[4]
         per_tp_cu_q_lens = args[6]
         per_tp_distribution = args[7]
-    # model=ModelConfigs(
-    #     num_q_heads=16,
-    #     num_kv_heads=8,
-    #     head_dim=256,
-    #     mask_value=-3.38953e+38,
-    #     sliding_window=1024,
-    # ),
-    # serve=ServingConfigs(
-    #     num_seqs=1024,
-    #     page_size=256,
-    #     total_q_tokens=4,
-    #     num_page_indices=6144,
+        # model=ModelConfigs(
+        #     num_q_heads=16,
+        #     num_kv_heads=8,
+        #     head_dim=256,
+        #     mask_value=-3.38953e+38,
+        #     sliding_window=1024,
+        # ),
+        # serve=ServingConfigs(
+        #     num_seqs=1024,
+        #     page_size=256,
+        #     total_q_tokens=4,
+        #     num_page_indices=6144,
         # log all the shapes
         num_kv_heads = per_tp_k.shape[1]
         sliding_window = kwargs["sliding_window"]
-        logger.info_once(f"per_tp_q: {per_tp_q.shape}, per_tp_k: {per_tp_k.shape}, per_tp_v: {per_tp_v.shape}, "
-                        f"per_tp_kv_cache: {per_tp_kv_cache.shape}, per_tp_kv_lens: {per_tp_kv_lens.shape}, "
-                        f"per_tp_page_indices: {per_tp_page_indices.shape}, per_tp_cu_q_lens: {per_tp_cu_q_lens.shape}, "
-                        f"per_tp_distribution: {per_tp_distribution.shape}, sliding_window: {sliding_window}, num_kv_heads: {num_kv_heads}")
+        logger.info_once(
+            f"per_tp_q: {per_tp_q.shape}, per_tp_k: {per_tp_k.shape}, per_tp_v: {per_tp_v.shape}, "
+            f"per_tp_kv_cache: {per_tp_kv_cache.shape}, per_tp_kv_lens: {per_tp_kv_lens.shape}, "
+            f"per_tp_page_indices: {per_tp_page_indices.shape}, per_tp_cu_q_lens: {per_tp_cu_q_lens.shape}, "
+            f"per_tp_distribution: {per_tp_distribution.shape}, sliding_window: {sliding_window}, num_kv_heads: {num_kv_heads}"
+        )
         total_q_tokens = per_tp_q.shape[0]
-        with jax.disable_jit():
-            if sliding_window is not None and num_kv_heads == 8 and total_q_tokens == 1024:
-                logger.info_once(f'per_tp_page_indices: {per_tp_page_indices[:32]}')
-                logger.info_once(f'per_tp_kv_lens: {per_tp_kv_lens[:32]}')
-                logger.info_once(f'per_tp_cu_q_lens: {per_tp_cu_q_lens[:32]}')
-                logger.info_once(f'per_tp_distribution: {per_tp_distribution}')
+        # if sliding_window is not None and num_kv_heads == 8 and total_q_tokens == 1024:
+        #     logger.info_once(
+        #         f'per_tp_page_indices: {per_tp_page_indices[:32]}')
+        #     logger.info_once(f'per_tp_kv_lens: {per_tp_kv_lens[:32]}')
+        #     logger.info_once(f'per_tp_cu_q_lens: {per_tp_cu_q_lens[:32]}')
+        #     logger.info_once(f'per_tp_distribution: {per_tp_distribution}')
 
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache

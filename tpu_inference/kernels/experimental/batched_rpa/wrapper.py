@@ -39,9 +39,6 @@ from tpu_inference.kernels.experimental.batched_rpa import (configs, kernel,
                                                             schedule, utils)
 from tpu_inference.kernels.experimental.batched_rpa.tuned_params import \
     get_tuned_params
-from tpu_inference.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 def prepare_inputs(
@@ -129,9 +126,8 @@ def prepare_inputs(
             aligned_head_dim,
         )
     else:
-        # Most performant when XLA auto-generates {2,0,1} minor-to-major layout
-        # for concatenated K,V (when actual_num_kv_heads < 4), avoiding the
-        # layout constraint and memory-space migration copy needed in the if branch.
+        # Most performant for {2,0,1} minor-to-major layout
+        # avoiding copies from the layout constraint above.
         new_kv_hbm = jnp.pad(
             jnp.concatenate([k, v], axis=-1).reshape(total_q_tokens,
                                                      actual_num_kv_heads_x2,
@@ -500,11 +496,7 @@ def ragged_paged_attention(
     q_hbm, new_kv_hbm = prepare_inputs(queries, keys, values, queries.dtype,
                                        kv_cache.dtype)
 
-    # default_decode, default_prefill = calculate_block_sizes(
-    #     model_cfgs, serve_cfgs, vmem_limit_bytes)
     default_decode, default_prefill = get_tuned_params(model_cfgs, serve_cfgs)
-
-    # logger.info(f'num_pages={kv_cache.shape[0]}, k_dtype={kv_cache.dtype}, v_dtype={kv_cache.dtype}')
 
     def run_rpa_kernel(
         mode: configs.RpaCase,
@@ -512,10 +504,8 @@ def ragged_paged_attention(
         kv_cache: jax.Array,
     ):
         if mode == configs.RpaCase.DECODE:
-            # logger.info(f"Running RPA in decode mode, {decode_block_sizes is None=}")
             effective_blocks = decode_block_sizes or default_decode
         else:
-            # logger.info(f"Running RPA in prefill mode, {prefill_block_sizes is None=}")
             effective_blocks = prefill_block_sizes or default_prefill
 
         cfgs = configs.RpaConfigs(

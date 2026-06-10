@@ -65,10 +65,9 @@ _SPANNER_INSTANCE_ID = flags.DEFINE_string(
 _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'spanner_database_id', 'tune-gmm',
     'The Spanner database ID to use. Only used when --run_locally is false.')
-_WORKER_ID = flags.DEFINE_string(
-    'worker_id',
-    os.getenv('HOST_NAME', 'Local' if _RUN_LOCALLY.value else 'Unknown'),
-    'The worker id')
+_WORKER_ID = flags.DEFINE_string('worker_id',
+                                 os.getenv('HOST_NAME',
+                                           'unknown'), 'The worker id')
 _TPU_VERSION = flags.DEFINE_string(
     'tpu_version', '',
     'The TPU version to use for tuning. Supported values are "tpu6e" and "tpu7x".'
@@ -92,11 +91,6 @@ _JOB_PRIORITY = flags.DEFINE_integer(
 _MAX_EXECUTION_MINUTES = flags.DEFINE_integer(
     'max_execution_minutes', 20,
     'Only used when the kernel tuning job is scheduled through Buildkite. The maximum execution time in minutes for each kernel tuning job. If the job exceeds this time, it will save the job progresss, generate a new job to be scheduled by Buildkite and exit.'
-)
-
-_JOB_BUCKET_SIZE = flags.DEFINE_integer(
-    'job_bucket_size', 500,
-    'The number of cases to include in each tuning job. Only used when --generate_buildkite_pipeline is false and --run_locally is false. Default is 500.'
 )
 
 # Note: For simplicity, we are directly referencing the kernel tuner class
@@ -166,7 +160,6 @@ def main(argv):
                            tpu_queue_multi=tpu_queue_multi,
                            run_locally=_RUN_LOCALLY.value,
                            job_priority=_JOB_PRIORITY.value,
-                           job_bucket_size=_JOB_BUCKET_SIZE.value,
                            max_execution_minutes=_MAX_EXECUTION_MINUTES.value)
     kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
     kernel_tuner = kernel_tuner_cls(run_config=run_config)
