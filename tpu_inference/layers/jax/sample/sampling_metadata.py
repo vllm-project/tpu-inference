@@ -56,8 +56,8 @@ class TPUSupportedSamplingMetadata:
         mesh: Mesh,
         input_batch: InputBatch,
         padded_num_reqs: int,
+        req_indices_dp: dict,
         sharding: Optional[jax.sharding.Sharding] = None,
-        req_indices_dp: Optional[dict] = None,
     ) -> "TPUSupportedSamplingMetadata":
         needs_logprobs = input_batch.max_num_logprobs > 0 if input_batch.max_num_logprobs else False
 
@@ -74,7 +74,6 @@ class TPUSupportedSamplingMetadata:
             return cls(do_sampling=False,
                        logprobs=needs_logprobs,
                        _cache_collision_dummy=cache_collision_dummy)
-        num_reqs = input_batch.num_reqs
 
         def fill_slice(cpu_tensor_np: np.ndarray,
                        fill_val: float) -> np.ndarray:
@@ -82,18 +81,14 @@ class TPUSupportedSamplingMetadata:
                                  fill_val,
                                  dtype=cpu_tensor_np.dtype)
 
-            if req_indices_dp is not None:
-                dp_size = len(req_indices_dp)
-                padded_num_reqs_per_dp_rank = padded_num_reqs // dp_size
-                for dp_rank in range(dp_size):
-                    req_indices = req_indices_dp.get(dp_rank, [])
-                    if req_indices:
-                        start_idx = dp_rank * padded_num_reqs_per_dp_rank
-                        out_tensor[start_idx:start_idx +
-                                   len(req_indices
-                                       )] = cpu_tensor_np[req_indices]
-            else:
-                out_tensor[:num_reqs] = cpu_tensor_np[:num_reqs]
+            dp_size = len(req_indices_dp)
+            padded_num_reqs_per_dp_rank = padded_num_reqs // dp_size
+            for dp_rank in range(dp_size):
+                req_indices = req_indices_dp.get(dp_rank, [])
+                if req_indices:
+                    start_idx = dp_rank * padded_num_reqs_per_dp_rank
+                    out_tensor[start_idx:start_idx +
+                               len(req_indices)] = cpu_tensor_np[req_indices]
 
             return out_tensor
 
