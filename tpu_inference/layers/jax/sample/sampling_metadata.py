@@ -82,7 +82,7 @@ class TPUSupportedSamplingMetadata:
                                  dtype=cpu_tensor_np.dtype)
 
             dp_size = len(req_indices_dp)
-            assert padded_num_reqs % dp_size == 0, "padded_num_reqs must be divisible by dp_size"
+            assert padded_num_reqs % dp_size == 0, f"padded_num_reqs ({padded_num_reqs}) must be divisible by dp_size ({dp_size})"
             padded_num_reqs_per_dp_rank = padded_num_reqs // dp_size
             for dp_rank in range(dp_size):
                 req_indices = req_indices_dp.get(dp_rank, [])
