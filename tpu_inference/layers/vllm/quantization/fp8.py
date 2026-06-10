@@ -22,7 +22,8 @@ from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
+                                                  RoutedExperts)
 from vllm.model_executor.layers.quantization import fp8 as vllm_fp8
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -73,7 +74,7 @@ class VllmFp8Config(vllm_fp8.Fp8Config, VllmQuantConfig):
                 ):
                     return VllmUnquantizedLinearMethod(linear_config)
                 return VllmFp8LinearMethod(self, linear_config)
-            case FusedMoE():
+            case RoutedExperts():
                 if is_layer_skipped(
                         prefix=prefix,
                         ignored_layers=self.ignored_layers,
@@ -297,7 +298,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
         return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
 
         assert not self.moe.has_bias
 
@@ -350,7 +351,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
