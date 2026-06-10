@@ -178,15 +178,14 @@ def _get_mlcompass_select_tests() -> Set[str]:
     return set()
 
 
-def create_benchmark_steps(
-        case_data: Dict[str, Any],
-        global_env: Dict[str, Any],
-        file_path: str,
-        file_basename: str,
-        parent_dir: str,
-        used_keys: Set[str],
-        errors: List[str],
-        no_verify: bool = False) -> List[Dict[str, Any]]:
+def create_benchmark_steps(case_data: Dict[str, Any],
+                           global_env: Dict[str, Any],
+                           file_path: str,
+                           file_basename: str,
+                           parent_dir: str,
+                           used_keys: Set[str],
+                           errors: List[str],
+                           no_verify: bool = False) -> List[Dict[str, Any]]:
     """
     Generates a list of Buildkite steps for a case.
     """
@@ -230,8 +229,7 @@ def create_benchmark_steps(
         # Include parent_dir in label for uniqueness
         step_label = f"[{parent_dir}] {agent} {file_basename} {case_name}"
         case_parameter = f"{file_path} {case_name}"
-        benchmark_name = case_name
-        step_env["MLCOMPASS_TEST_NAME"] = f"vllm:{agent}:{benchmark_name}"
+        step_env["MLCOMPASS_TEST_NAME"] = f"vllm:{agent}:{case_name}"
         if mlcompass_select_tests and step_env[
                 "MLCOMPASS_TEST_NAME"] not in mlcompass_select_tests:
             continue
