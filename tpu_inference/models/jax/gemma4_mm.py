@@ -277,7 +277,7 @@ class Gemma4VisionPatchEmbedder(JaxModule):
                               dtype=dtype))
 
     def _factorized_posemb(self, pixel_position_ids: jax.Array) -> jax.Array:
-        posemb = self.position_embedding_table.value
+        posemb = self.position_embedding_table.get_value()
         one_hot = jax.nn.one_hot(pixel_position_ids,
                                  posemb.shape[0],
                                  dtype=posemb.dtype)
@@ -493,7 +493,8 @@ class Gemma4VisionModel(JaxModule):
 
         if self.standardize:
             pooled_x, mask = outputs[0]
-            pooled_x = (pooled_x - self.std_bias.value) * self.std_scale.value
+            pooled_x = (pooled_x - self.std_bias.get_value()
+                        ) * self.std_scale.get_value()
             outputs = ((pooled_x, mask), )
 
         return outputs

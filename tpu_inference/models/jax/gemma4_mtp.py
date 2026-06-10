@@ -105,7 +105,7 @@ class Gemma4MTPMaskedEmbedder(JaxModule):
             centroid_logits,
             k=self.centroid_intermediate_top_k)  # (num_tokens, top_k)
 
-        clusters = self.token_ordering.value.reshape(
+        clusters = self.token_ordering.get_value().reshape(
             self.num_centroids, self.vocab_size_per_centroid)
         selected = clusters[
             top_k_indices]  # (num_tokens, top_k, vocab_size_per_centroid)
@@ -394,7 +394,7 @@ class Gemma4MTPDecoderLayer(JaxModule):
         mlp_output = self.post_feedforward_layernorm(hidden_states)
         outputs = residual + mlp_output
 
-        outputs = outputs * self.layer_scalar.value
+        outputs = outputs * self.layer_scalar.get_value()
 
         return kv_cache, outputs, None
 
@@ -655,9 +655,9 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
 
     def _get_full_lm_head_weight(self) -> jax.Array:
         if hasattr(self, "lm_head"):
-            return self.lm_head.weight.value
+            return self.lm_head.weight.get_value()
         else:
-            return self.model.embed_tokens.embedding.value
+            return self.model.embed_tokens.embedding.get_value()
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.masked_embedding is not None:

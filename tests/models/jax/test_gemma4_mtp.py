@@ -180,8 +180,9 @@ class TestGemma4MTPForCausalLM:
 
             # Populate centroids ordering if enabled to avoid sparse projection crashes
             if use_ordered_embeddings and model.masked_embedding is not None:
-                model.masked_embedding.token_ordering.value = jnp.arange(
-                    draft_hf_config.text_config.vocab_size, dtype=jnp.int32)
+                model.masked_embedding.token_ordering.set_value(
+                    jnp.arange(draft_hf_config.text_config.vocab_size,
+                               dtype=jnp.int32))
 
             with jax.set_mesh(mesh):
                 _, jax_output, _ = layer_0(

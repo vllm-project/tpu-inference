@@ -154,7 +154,7 @@ class Gemma4Router(JaxModule):
         """Returns raw router logits [T, E]."""
         x = self.norm(x)
         x = x * self.root_size
-        x = x * self.scale.value.astype(x.dtype)
+        x = x * self.scale.get_value().astype(x.dtype)
         router_logits = self.proj(x)
         return router_logits
 
@@ -227,8 +227,8 @@ class Gemma4MoE(JaxMoE):
                 self.kernel_down_proj_EFD._weights_to_load.clear()
                 # Other MoE models store expert weights in shape (D, F) and permute in *FusedMoEMethod.process_weights_after_loading.
                 # For compatibility, we permute here then expect another permute in process_weights_after_loading.
-                self.kernel_down_proj_EFD.value = jnp.swapaxes(
-                    self.kernel_down_proj_EFD.value, 1, 2)
+                self.kernel_down_proj_EFD.set_value(
+                    jnp.swapaxes(self.kernel_down_proj_EFD.get_value(), 1, 2))
             elif name.endswith("gate_up_proj"):
                 F = tensor.shape[1] // 2
                 load_nnx_param_from_reshaped_torch(self.kernel_gating_EDF,
@@ -245,10 +245,10 @@ class Gemma4MoE(JaxMoE):
                 self.kernel_gating_EDF._weights_to_load.clear()
                 # Other MoE models store expert weights in shape (F, D) and permute in *FusedMoEMethod.process_weights_after_loading.
                 # For compatibility, we permute here then expect another permute in process_weights_after_loading.
-                self.kernel_up_proj_EDF.value = jnp.swapaxes(
-                    self.kernel_up_proj_EDF.value, 1, 2)
-                self.kernel_gating_EDF.value = jnp.swapaxes(
-                    self.kernel_gating_EDF.value, 1, 2)
+                self.kernel_up_proj_EDF.set_value(
+                    jnp.swapaxes(self.kernel_up_proj_EDF.get_value(), 1, 2))
+                self.kernel_gating_EDF.set_value(
+                    jnp.swapaxes(self.kernel_gating_EDF.get_value(), 1, 2))
         return loaded
 
 
@@ -764,7 +764,7 @@ class Gemma4DecoderLayer(JaxModule):
                 per_layer_contribution)
             outputs = outputs + per_layer_contribution
 
-        outputs = outputs * self.layer_scalar.value
+        outputs = outputs * self.layer_scalar.get_value()
 
         return kv_cache, outputs, expert_ids
 
