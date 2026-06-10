@@ -359,14 +359,6 @@ class ShardingConfigManager:
                 base, str) else tuple(base) + (model_axis, )
             ShardingAxisName.override(VIT_BATCH=vit_batch, VIT_MODEL=None)
 
-    @property
-    def vision_batch_axes(self):
-        return ShardingAxisName.VIT_BATCH
-
-    @property
-    def vision_model_axis(self) -> Optional[str]:
-        return ShardingAxisName.VIT_MODEL
-
     def __str__(self):
         return (f"ShardingConfigManager(total_devices={self.total_devices}, "
                 f"sharding_strategy={self.sharding_strategy}, "
