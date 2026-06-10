@@ -10,7 +10,7 @@
   },
   "benchmark_cases": [
     {
-      "case_name": "Qwen3-32B-dataset_random-inlen_1024-outlen_1024-max-concurrency-64",
+      "case_name": "Qwen3-32B-dataset_random-inlen_1024-outlen_1024-max-concurrency-64-dev",
       "ci_queue": [
         "tpu_v7x_2_queue"
       ],
