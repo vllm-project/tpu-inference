@@ -4,6 +4,7 @@ import os
 import random
 from typing import TYPE_CHECKING, Optional, Tuple, Union
 
+import jax
 import jax.numpy as jnp
 import numpy
 import torch
@@ -173,6 +174,24 @@ class TpuPlatform(Platform):
                 "Automatically using fp8_e5m2 for FP8 KV cache on TPU v6e.")
             return torch.float8_e5m2
         return torch.float8_e4m3fn
+
+    @classmethod
+    def mem_get_info(cls) -> Tuple[int, int]:
+        """
+        Returns (free_memory, total_memory) in bytes for the specified TPU device.
+        """
+        # Fetch TPU memory statistics via JAX
+        # On TPU SPMD, we need to aggregate both the limit and usage across all
+        # local devices because global tensor dimensions are used for budget calculations.
+        total_memory = 0
+        bytes_in_use = 0
+        for d in jax.local_devices():
+            stats = d.memory_stats()
+            total_memory += stats.get('bytes_limit', 0)
+            bytes_in_use += stats.get('bytes_in_use', 0)
+
+        free_memory = total_memory - bytes_in_use
+        return free_memory, total_memory
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
