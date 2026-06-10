@@ -37,6 +37,8 @@ from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.batched_rpa import (configs, kernel,
                                                             schedule, utils)
+from tpu_inference.kernels.experimental.batched_rpa.tuned_params import \
+    get_tuned_params
 
 
 def prepare_inputs(
@@ -373,7 +375,10 @@ def calculate_block_sizes(
         "use_causal_mask",
         "update_kv_cache",
     ),
-    donate_argnames=("queries", "keys", "values", "kv_cache"),
+    # Donation of transient inputs can fail for some runtime buffer layouts in
+    # the experimental tuning path. Keep donation only for kv_cache, which is
+    # the intended long-lived mutable state.
+    donate_argnames=("kv_cache", ),
 )
 def ragged_paged_attention(
     queries: jax.Array,
@@ -411,7 +416,7 @@ def ragged_paged_attention(
             kv_packing, head_dim]. Stores existing kv cache data where k & vs are
             concatenated along num kv heads dim.
         kv_lens: [max_num_seqs]. Existing kv cache length of each sequence.
-            page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
+        page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
             sequence.
         cu_q_lens: [max_num_seqs + 1]. Cumulative sum of each sequence's query
             length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
@@ -491,18 +496,23 @@ def ragged_paged_attention(
     q_hbm, new_kv_hbm = prepare_inputs(queries, keys, values, queries.dtype,
                                        kv_cache.dtype)
 
-    default_decode, default_prefill = calculate_block_sizes(
-        model_cfgs, serve_cfgs, vmem_limit_bytes)
-
     def run_rpa_kernel(
         mode: configs.RpaCase,
         o_hbm_alias_q_hbm: jax.Array,
         kv_cache: jax.Array,
     ):
         if mode == configs.RpaCase.DECODE:
-            effective_blocks = decode_block_sizes or default_decode
+            effective_blocks = decode_block_sizes or get_tuned_params(
+                model_cfgs,
+                serve_cfgs,
+                case='decode',
+                vmem_limit_bytes=vmem_limit_bytes)
         else:
-            effective_blocks = prefill_block_sizes or default_prefill
+            effective_blocks = prefill_block_sizes or get_tuned_params(
+                model_cfgs,
+                serve_cfgs,
+                case='prefill',
+                vmem_limit_bytes=vmem_limit_bytes)
 
         cfgs = configs.RpaConfigs(
             block=effective_blocks,
