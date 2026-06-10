@@ -2361,6 +2361,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.input_batch,
             padded_num_reqs,
             sharding=data_parallel_attn_sharding,
+            req_indices_dp=req_indices_dp,
         )
 
         if self.uses_mrope:
