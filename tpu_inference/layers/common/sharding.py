@@ -288,9 +288,9 @@ class ShardingConfigManager:
             vllm_config.parallel_config.data_parallel_size_local = 1
 
         # To enable data-parallel vision encoding, pass:
-        # --additional_config='{"mm_encoder_tp_mode": "data"}'
+        # --additional_config='{"mm-encoder-tp-mode": "data"}'
         mm_encoder_tp_mode = vllm_config.additional_config.get(
-            'mm_encoder_tp_mode', 'weights')
+            'mm-encoder-tp-mode', 'weights')
         cls.validate(vllm_config, sharding_strategy)
         return cls(sharding_strategy, device_indexes, mm_encoder_tp_mode)
 
