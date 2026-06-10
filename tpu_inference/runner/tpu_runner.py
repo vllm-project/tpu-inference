@@ -2031,10 +2031,29 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             for i, req_id in enumerate(req_ids_dp[dp_rank]):
                 acc_cur_len += num_scheduled_tokens_per_req[i]
+
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                is_prefill = self.input_batch.num_computed_tokens_cpu[
+                    req_idx] < self.input_batch.num_prompt_tokens[req_idx]
+
+                # We need an explicit `is_prefill` check here because of preemption.
+                # If a request is preempted and immediately resumed, it goes back to
+                # the prefill stage. However, its `req_id` might still be in
+                # `_pre_async_results.placeholder_req_id_to_index` from the previous step.
+                # Without this check, we would incorrectly perform token substitution
+                # for a resumed prefill request.
+                if is_prefill:
+                    # Skip substitution for prefill requests (including chunked prefill)
+                    continue
+
                 if req_id not in self._pre_async_results.placeholder_req_id_to_index:
                     continue
 
                 if not spec_decode_enabled:
+                    # Treat as normal decode: substitute 1 token
+                    assert num_scheduled_tokens_per_req[i] == 1, (
+                        f"Expected 1 token for normal decode request {req_id}, "
+                        f"but got {num_scheduled_tokens_per_req[i]}")
                     token_in_tpu_cur_input_indices_list.append(acc_cur_len - 1)
                     token_in_tpu_pre_next_tokens_indices_list.append(
                         self._pre_async_results.
@@ -2115,6 +2134,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             scheduled_tokens_cur_rank = scheduled_tokens_per_dp_rank[rank]
             for i, req_id in enumerate(req_ids_dp[rank]):
                 acc_cur_len += scheduled_tokens_cur_rank[i]
+
                 if req_id not in self._pre_async_results.placeholder_req_id_to_index:
                     continue
 
@@ -2287,7 +2307,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 num_scheduled_tokens_per_req,
                 out=query_start_loc_cpu[1:_num_reqs + 1],
             )
-            query_start_loc_cpu[_num_reqs + 1:] = 1
+            query_start_loc_cpu[_num_reqs +
+                                1:] = query_start_loc_cpu[_num_reqs]
 
             seq_lens_cpu[:_num_reqs] = (
                 self.input_batch.num_computed_tokens_cpu[req_indices] +
