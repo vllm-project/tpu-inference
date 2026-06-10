@@ -32,7 +32,7 @@ from tpu_inference.layers.jax.pp_utils import make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.gemma4 import Gemma4MLP
+from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM, Gemma4MLP
 from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
                                                          StandardWeightLoader)
 
@@ -516,6 +516,7 @@ class Gemma4MultiTokenPredictor(JaxModule):
 
 
 class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
+    packed_modules_mapping = Gemma4ForCausalLM.packed_modules_mapping
     WeightLoader = StandardWeightLoader
 
     def __init__(

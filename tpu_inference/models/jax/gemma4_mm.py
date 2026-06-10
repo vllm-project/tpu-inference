@@ -35,6 +35,7 @@ from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import make_layers
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM, Gemma4Model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.multi_modal_utils import \
@@ -537,7 +538,7 @@ class Gemma4MultimodalEmbedder(JaxModule):
 
 
 class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
-    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+    packed_modules_mapping = Gemma4ForCausalLM.packed_modules_mapping
     WeightLoader = StandardWeightLoader
     supports_multimodal = True
     _processor_factory = getattr(PtGemma4MM, "_processor_factory", None)
@@ -548,7 +549,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
-        from tpu_inference.models.jax.gemma4 import Gemma4Model
         self.model = Gemma4Model(
             vllm_config=vllm_config,
             rng=rng,

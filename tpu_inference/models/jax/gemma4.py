@@ -1032,6 +1032,7 @@ class Gemma4Model(JaxModule):
 
 
 class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     WeightLoader = StandardWeightLoader
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,

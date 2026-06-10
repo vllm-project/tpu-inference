@@ -297,11 +297,16 @@ def test_double_wide_mlp(mesh, rng=jax.random.PRNGKey(0)):
     expected_regular = intermediate_size
     expected_double = intermediate_size * 2
 
-    # gate_proj.weight is [hidden_size, intermediate_size]
-    assert model.layers[0].mlp.gate_proj.weight.shape == (32, expected_regular)
-    assert model.layers[1].mlp.gate_proj.weight.shape == (32, expected_regular)
-    assert model.layers[2].mlp.gate_proj.weight.shape == (32, expected_double)
-    assert model.layers[3].mlp.gate_proj.weight.shape == (32, expected_double)
+    # gate_proj and up_proj are fused into a single gate_up_proj, so the fused
+    # weight is [hidden_size, 2 * intermediate_size].
+    assert model.layers[0].mlp.gate_up_proj.weight.shape == (32, 2 *
+                                                             expected_regular)
+    assert model.layers[1].mlp.gate_up_proj.weight.shape == (32, 2 *
+                                                             expected_regular)
+    assert model.layers[2].mlp.gate_up_proj.weight.shape == (32, 2 *
+                                                             expected_double)
+    assert model.layers[3].mlp.gate_up_proj.weight.shape == (32, 2 *
+                                                             expected_double)
 
 
 def test_double_wide_mlp_off(mesh, rng=jax.random.PRNGKey(0)):
@@ -314,5 +319,7 @@ def test_double_wide_mlp_off(mesh, rng=jax.random.PRNGKey(0)):
     with jax.set_mesh(mesh):
         model = Gemma4Model(vllm_config, nnx.Rngs(rng), mesh)
 
+    # gate_proj and up_proj are fused: gate_up_proj is [hidden, 2*intermediate].
     for layer in model.layers:
-        assert layer.mlp.gate_proj.weight.shape == (32, intermediate_size)
+        assert layer.mlp.gate_up_proj.weight.shape == (32,
+                                                       2 * intermediate_size)
