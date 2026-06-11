@@ -178,15 +178,14 @@ def _get_mlcompass_select_tests() -> Set[str]:
     return set()
 
 
-def create_benchmark_steps(
-        case_data: Dict[str, Any],
-        global_env: Dict[str, Any],
-        file_path: str,
-        file_basename: str,
-        parent_dir: str,
-        used_keys: Set[str],
-        errors: List[str],
-        no_verify: bool = False) -> List[Dict[str, Any]]:
+def create_benchmark_steps(case_data: Dict[str, Any],
+                           global_env: Dict[str, Any],
+                           file_path: str,
+                           file_basename: str,
+                           parent_dir: str,
+                           used_keys: Set[str],
+                           errors: List[str],
+                           no_verify: bool = False) -> List[Dict[str, Any]]:
     """
     Generates a list of Buildkite steps for a case.
     """
