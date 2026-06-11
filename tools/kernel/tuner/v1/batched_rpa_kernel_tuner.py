@@ -213,8 +213,8 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             n_buffer = prefill_tunable_params.n_buffer
 
             for prefill_batch_size in [1, 2]:
-                for bq_sz in range(8, 513, 8):
-                    for bq_c_sz in range(bq_sz, bq_sz + 1, 8):
+                for bq_sz in range(128, 1025, 128):
+                    for bq_c_sz in range(16, bq_sz + 1, 16):
                         if bq_sz % bq_c_sz != 0:
                             continue
                         for bkv_sz in range(256, 1025, 256):
