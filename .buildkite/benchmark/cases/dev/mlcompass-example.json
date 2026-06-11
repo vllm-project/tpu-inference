@@ -59,7 +59,24 @@
       }
     },
     {
-      "case_name": "Error-case"
+      "case_name": "Error-case--should-be-skiped-by-MLCOMPASS_SELECT_TESTS-env-var",
+      "ci_queue": [
+        "tpu_v7x_2_queue"
+      ],
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "args": {
+          "model": "Qwen/Qwen3-32B",
+          "invalid-flag": 256
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-32B",
+          "invalid-flag": "vllm"
+        }
+      }
     }
   ]
 }
