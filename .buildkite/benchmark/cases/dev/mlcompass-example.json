@@ -57,6 +57,9 @@
           "ignore-eos": true
         }
       }
+    },
+    {
+      "case_name": ""
     }
   ]
 }
