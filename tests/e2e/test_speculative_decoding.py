@@ -688,3 +688,127 @@ def test_eagle3_logprobs_correctness(monkeypatch: pytest.MonkeyPatch, ):
                              max_num_seqs=2,
                              async_scheduling=True,
                              enable_dp_attention=False)
+
+
+@pytest.fixture(scope="module")
+def gemma4_mtp_baseline():
+    '''
+    Compute the gemma4 mtp reference prompts, baseline outputs and the LLM extra_kwargs
+    once and share them across all parameterized test_gemma4_mtp_correctness cases.
+    '''
+    model_name = "google/gemma-4-E2B-it"
+    sampling_config = SamplingParams(temperature=0,
+                                     max_tokens=32,
+                                     ignore_eos=True,
+                                     repetition_penalty=1,
+                                     frequency_penalty=0,
+                                     presence_penalty=0,
+                                     min_p=0,
+                                     logprobs=None)
+    extra_kwargs = {
+        "seed": 42,
+        "max_model_len": 128,
+        "max_num_batched_tokens": 1024,
+        "block_size": 256,
+        "enable_prefix_caching": False,
+        "gpu_memory_utilization": 0.8,
+    }
+    test_prompts = get_eagle3_test_prompts()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("MODEL_IMPL_TYPE", "flax_nnx")
+        ref_outputs = _get_baseline_results(
+            mp,
+            sampling_config,
+            model_name,
+            test_prompts,
+            max_num_seqs=10,
+            extra_kwargs=extra_kwargs,
+        )
+    return test_prompts, ref_outputs, extra_kwargs
+
+
+@pytest.mark.parametrize(
+    "async_scheduling, enable_dp_attention",
+    [
+        (False, False),
+        (True, False),
+        (True, True),
+    ],
+)
+def test_gemma4_mtp_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    async_scheduling: bool,
+    enable_dp_attention: bool,
+    gemma4_mtp_baseline: tuple,
+):
+    '''
+    Compare the outputs of an original LLM and a speculative LLM;
+    they should be the same when using Gemma-4 MTP speculative decoding.
+    '''
+    model_name = "google/gemma-4-E2B-it"
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "flax_nnx")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "flax_nnx")
+
+    speculative_config = {
+        "model": "google/gemma-4-E2B-it-assistant",
+        "num_speculative_tokens": 4,
+    }
+    test_prompts, ref_outputs, extra_kwargs = gemma4_mtp_baseline
+
+    _test_correctness_helper(
+        monkeypatch,
+        sampling_config,
+        model_name,
+        speculative_config=speculative_config,
+        test_prompts=test_prompts,
+        ref_outputs=ref_outputs,
+        max_num_seqs=10,
+        async_scheduling=async_scheduling,
+        enable_dp_attention=enable_dp_attention,
+        extra_kwargs=extra_kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    "max_num_seqs,async_scheduling, enable_dp_attention",
+    [(1, False, False), (20, True, False), (20, True, True)],
+)
+def test_gemma4_mtp_performance(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    max_num_seqs: int,
+    async_scheduling: bool,
+    enable_dp_attention: bool,
+):
+    '''
+    Test that Gemma-4 MTP speculative decoding achieves the expected acceptance rate.
+    '''
+    model_name = "google/gemma-4-E2B-it"
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "flax_nnx")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "flax_nnx")
+
+    extra_kwargs = {
+        "seed": 42,
+        "max_model_len": 128,
+        "max_num_batched_tokens": 1024,
+        "block_size": 256,
+        "enable_prefix_caching": False,
+        "gpu_memory_utilization": 0.8,
+    }
+
+    _test_performance_helper(
+        monkeypatch,
+        sampling_config,
+        speculative_config={
+            "model": "google/gemma-4-E2B-it-assistant",
+            "num_speculative_tokens": 4,
+            "method": "mtp",
+        },
+        min_acceptance_rate=0.80,
+        max_num_seqs=max_num_seqs,
+        async_scheduling=async_scheduling,
+        enable_dp_attention=enable_dp_attention,
+        model_name=model_name,
+        extra_kwargs=extra_kwargs,
+    )
