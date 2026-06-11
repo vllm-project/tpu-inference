@@ -1644,7 +1644,8 @@ class TPUOffloadConnectorWorker:
         else:
             blocks_to_save_arr = jnp.array(blocks_to_save)
             kv_caches, gathered_kv_caches_tpu = stack_kv_cache_cross_layers(
-                self.runner.kv_caches, blocks_to_save_arr, num_blocks_to_save)
+                self.runner.kv_caches, blocks_to_save_arr, num_blocks_to_save,
+                self.grouped_layer_indices_tuple)
         self.runner.kv_caches = kv_caches
 
         if gathered_kv_caches_tpu is not None:
@@ -2167,6 +2168,7 @@ class TPUOffloadConnectorWorker:
                     self.mesh,
                     self.cached_kv_sharding_spec,
                     self.indices_sharding,
+                    self.grouped_layer_indices_tuple,
                 )
             jax.block_until_ready(self.runner.kv_caches)
             update_duration = time.time() - update_kv_start
