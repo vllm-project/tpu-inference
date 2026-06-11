@@ -954,6 +954,12 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         vision tower's unfused gate/up projections) fall through unchanged.
         """
         remap = self._packed_remap()
+        if not remap:
+            # No packed/fused params to route. Skip building the full param
+            # dict: materializing the entire parameter tree up front
+            # transiently doubles device HBM, so go straight to the streaming
+            # recursive loader.
+            return super().load_weights(weights, **kwargs)
         params_dict = dict(self.module.named_parameters())
         routed_loaded: set = set()
 
