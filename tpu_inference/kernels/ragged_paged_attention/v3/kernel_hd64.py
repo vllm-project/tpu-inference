@@ -1050,8 +1050,13 @@ def prepare_inputs(
     kv = merge_kv(k, v)
 
     if attention_sink is not None:
-        attention_sink = attention_sink.reshape(
-            (-1, num_q_heads_per_kv_head, 1))
+        attention_sink = jnp.pad(
+            attention_sink.reshape(actual_num_kv_heads,
+                                   actual_num_q_heads_per_kv_head),
+            ((0, 0),
+             (0, num_q_heads_per_kv_head - actual_num_q_heads_per_kv_head)),
+            constant_values=0,
+        )[..., None]
         attention_sink = jnp.repeat(attention_sink, 128, -1)
 
     return q, kv, attention_sink

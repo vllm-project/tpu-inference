@@ -738,6 +738,67 @@ class GmmTest(jtu.JaxTestCase):
 
         self.assertArraysAllClose(actual, expected, atol=atol, rtol=rtol)
 
+    def test_gmm_fused_activation_weight_quantized_masks_padded_lhs_k(self):
+        batch_size = 128
+        in_size = 384
+        out_size = 512
+        num_groups = 16
+        block_size = 128
+        tile_k = 256
+        fuse_act = "silu"
+        key = jax.random.key(0)
+
+        lhs = jax.random.uniform(key, (batch_size, in_size), jnp.bfloat16, -1,
+                                 1)
+        rhs = jax.random.uniform(key, (num_groups, in_size, out_size),
+                                 jnp.bfloat16, -1, 1)
+        rhs_q, rhs_scale = quantize_tensor(rhs,
+                                           jnp.int8,
+                                           axis=1,
+                                           block_size=block_size)
+        rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
+        group_sizes = get_group_sizes(batch_size, num_groups)
+        group_offset = jnp.array([0], dtype=jnp.int32)
+
+        lhs_tiles = []
+        for start_k in range(0, in_size, tile_k):
+            lhs_tile = lhs[:, start_k:start_k + tile_k]
+            valid_k = lhs_tile.shape[1]
+            if valid_k < tile_k:
+                lhs_tile = jnp.pad(lhs_tile, ((0, 0), (0, tile_k - valid_k)))
+            lhs_q, lhs_scale = quantize_tensor(lhs_tile,
+                                               jnp.int8,
+                                               axis=1,
+                                               block_size=tile_k)
+            lhs_tile = (lhs_q.astype(jnp.float32) * lhs_scale).astype(lhs.dtype)
+            lhs_tiles.append(lhs_tile[:, :valid_k])
+        lhs_simulated = jnp.concatenate(lhs_tiles, axis=1)
+
+        raw_expected = reference_gmm(
+            lhs_simulated,
+            rhs_q,
+            group_sizes,
+            rhs_scale=rhs_scale,
+            group_offset=group_offset,
+        )
+        expected = apply_act_fn(raw_expected.astype(jnp.float32),
+                                fuse_act).astype(lhs.dtype)
+
+        tile_info = TileSizes(tile_m=128, tile_k=tile_k, tile_n=out_size // 2)
+        actual = gmm_v2(
+            lhs,
+            rhs_q,
+            group_sizes,
+            rhs_scale=rhs_scale,
+            group_offset=group_offset,
+            tile_info=tile_info,
+            maybe_quantize_lhs=True,
+            fuse_act=fuse_act,
+        ).astype(lhs.dtype)
+
+        self.assertEqual(actual.shape, (batch_size, out_size // 2))
+        self.assertArraysAllClose(actual, expected, atol=4.0, rtol=2.0)
+
 
 if __name__ == "__main__":
     absltest.main(testLoader=jtu.JaxTestLoader())
