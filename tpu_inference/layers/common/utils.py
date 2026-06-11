@@ -183,48 +183,27 @@ def cpu_mesh_context():
     return jax.set_mesh(cpu_mesh())
 
 
-def process_sharded_qkv_projection(
+def slice_qkv_merge_projection_output(
     out_jax: jax.Array,
     output_sizes: list[int],
     tp_size: int,
     num_kv_head_replicas: int = 1,
-    reorder_output: bool = True,
-    flatten_output: bool = True,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Consolidated JAX/SPMD kernel that reorders, slices, and replicates sharded KV heads.
-
-    Supports both flat sequential outputs (for Torchax/vLLM) and direct multidimensional 
-    SRAM-sliced outputs (for JAX-native models via flatten_output=False) to allow layout propagation.
-    """
-    # 1. Reorder concatenated tensor along the sharded axis ONLY if requested
-    if reorder_output:
-        out_jax = reorder_concatenated_tensor_for_sharding(
-            out_jax,
-            output_sizes,
-            tp_size,
-            dim=-1,
-        )
+    """Consolidated JAX/SPMD kernel that reorders, slices, and replicates sharded KV heads."""
+    # 1. Reorder concatenated tensor along the sharded axis
+    out_jax = reorder_concatenated_tensor_for_sharding(
+        out_jax,
+        output_sizes,
+        tp_size,
+        dim=-1,
+    )
 
     # 2. Slice sharded tensor into Q, K, and V
-    if flatten_output:
-        # Standard flat slicing (expected by Torchax wrapper)
-        q_jax, k_jax, v_jax = slice_sharded_tensor_for_concatenation(
-            out_jax,
-            output_sizes,
-            tp_size,
-        )
-    else:
-        # Direct SRAM slicing (maintains multi-dimensional layout for JAX-native models)
-        new_shape = out_jax.shape[:-1] + (tp_size, -1)
-        sharded_outs = out_jax.reshape(new_shape)
-
-        q_size, k_size, v_size = output_sizes
-        q_sz = q_size // tp_size
-        k_sz = k_size // tp_size
-
-        q_jax = sharded_outs[..., :q_sz]
-        k_jax = sharded_outs[..., q_sz:q_sz + k_sz]
-        v_jax = sharded_outs[..., q_sz + k_sz:]
+    q_jax, k_jax, v_jax = slice_sharded_tensor_for_concatenation(
+        out_jax,
+        output_sizes,
+        tp_size,
+    )
 
     # 3. Handle KV head replication if replicas > 1
     if num_kv_head_replicas > 1:
@@ -253,6 +232,12 @@ def process_sharded_qkv_projection(
         i = mesh.axis_names.index(kv_head_axis)
         kv_size = mesh.axis_sizes[i]
         kv_type = mesh.axis_types[i]
+
+        # Split the `kv_head` mesh axis (size kv_size) into a pair
+        # `(kv_head, replica)` of sizes `(kv_size // replicas, replicas)`.
+        # The `replica` sub-axis is later replicated via `shard_map` with no
+        # data movement, since `_tile_kv` already placed identical KV-head
+        # copies on each replica-group of devices when TP > total_num_kv_heads.
         new_mesh = jax.sharding.AbstractMesh(
             mesh.axis_sizes[:i] +
             (kv_size // num_kv_head_replicas, num_kv_head_replicas) +

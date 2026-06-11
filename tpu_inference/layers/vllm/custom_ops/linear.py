@@ -23,6 +23,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.utils import slice_qkv_merge_projection_output
 from tpu_inference.utils import get_mesh_shape_product
 
 
@@ -153,11 +154,8 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         out, bias = super().forward(x)
         out_jax = jax_view(out)
 
-        from tpu_inference.layers.common.utils import \
-            process_sharded_qkv_projection
-
-        # Call the consolidated common JAX helper
-        q_jax, k_jax, v_jax = process_sharded_qkv_projection(
+        # Call the consolidated common JAX helper (imported at top level)
+        q_jax, k_jax, v_jax = slice_qkv_merge_projection_output(
             out_jax,
             self.output_sizes,
             self.tp_size,

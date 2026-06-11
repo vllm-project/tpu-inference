@@ -18,6 +18,8 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
+from tpu_inference.layers.common.utils import \
+    slice_sharded_tensor_for_causal_lm
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
@@ -219,6 +221,7 @@ class JaxQKVParallelLinear(JaxModule):
     """
 
     def __init__(self,
+                 *,
                  hidden_size: int,
                  num_heads: int,
                  num_kv_heads: int,
@@ -244,7 +247,7 @@ class JaxQKVParallelLinear(JaxModule):
 
         # Output dimension is sharded along the "model" (TP) axis
         self.proj = JaxEinsum(
-            "TD,DV->TV",
+            "TD,DA->TA",
             (hidden_size, self.total_output_dim),
             bias_shape=(self.total_output_dim, ) if use_bias else None,
             param_dtype=dtype,
@@ -258,9 +261,6 @@ class JaxQKVParallelLinear(JaxModule):
         )
 
     def __call__(self, x: jax.Array) -> Tuple[jax.Array, jax.Array, jax.Array]:
-        from tpu_inference.layers.common.utils import \
-            slice_sharded_tensor_for_causal_lm
-
         # Single projection operation (loads inputs from HBM once)
         outs = self.proj(
             x)  # Shape: [T, total_output_dim] sharded on "model" axis
@@ -269,6 +269,7 @@ class JaxQKVParallelLinear(JaxModule):
         # This is located under layers/common/utils.py, but contains only primitive math ops
         # with zero abstract-mesh tracking or shard_map calls. This ensures JAX traces and inlines
         # it as a pure metadata-only zero-copy slice and reshape with 100% optimal HLO speed.
+        # TODO(jiries): Add support for cases where the v projection is optional.
         outs_q, outs_k, outs_v = slice_sharded_tensor_for_causal_lm(
             outs, self.q_size, self.k_size, self.v_size, self.tp_size)
 
