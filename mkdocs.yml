@@ -59,16 +59,30 @@ nav:
   - Getting Started:
     - TPU Setup: getting_started/tpu_setup.md
     - Installation: getting_started/installation.md
-    - Quickstart: getting_started/quickstart.md
-    - 'Out-of-Tree Usage': getting_started/out-of-tree.md
-  - 'Recommended Models and Features': recommended_models_features.md
-  - Developer Guides:
-    - 'JAX Model Development': developer_guides/jax_model_development.md
-    - 'Torch Model Development': developer_guides/torchax_model_development.md
-  - 'Recipes (External)':
-    - 'v7x (Ironwood)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM
-    - 'v6e (Trillium)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM
-  - 'Profiling' : profiling.md
+    - Serving model: getting_started/quickstart.md
+  - 'Basic Usage (I use HuggingFace model)':
+    - 'Overview & TPU': basic_usage/overview.md
+    - 'Recommended Models': basic_usage/recommended_models.md
+    - 'Deploying model on GCE':
+      - 'v7x setup (Ironwood)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM
+      - 'v6e setup (Trillium)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM
+    - 'Code Examples':
+      - 'Multi Modal Inference': https://github.com/vllm-project/tpu-inference/blob/main/examples/multi_modal_inference.py
+      - 'Offline LoRA': https://github.com/vllm-project/tpu-inference/blob/main/examples/offline_lora_inference.py
+  - Advanced Usage (I need my custom model):
+    - 'JAX':
+      - 'How it works': advanced_usage/jax_overview.md
+      - 'Model Development': advanced_usage/jax_model_development.md
+    - 'Torch':
+      - 'How it works': advanced_usage/torch_overview.md
+      - 'Model Development': advanced_usage/torchax_model_development.md
+    - 'Your custom model on GCE': advanced_usage/gce_example.md
+    - 'Recommended Features': advanced_usage/recommended_features.md
+  - 'See Also':
+    - 'Profiling' : profiling.md
+    - 'FAQ': faq.md
+    - 'Contributors Guide': contributors_guide.md
+
 plugins:
   - search
   - same-dir
@@ -106,6 +120,9 @@ markdown_extensions:
   # For math rendering
   - mdx_math:
       enable_dollar_delimiter: true
+
+extra_css:
+  - mkdocs/stylesheets/extra.css
 
 extra_javascript:
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
