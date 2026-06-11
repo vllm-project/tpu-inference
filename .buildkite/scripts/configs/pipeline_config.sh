@@ -109,6 +109,8 @@ process_json_benchmark_cases() {
       error_msgs+=("❌ Generation Failure in $f:\n$py_output")
       return
     fi
+    echo $py_output
+    return
 
     # 2. Upload the captured YAML (stdout from python)
     if ! upload_with_priority <(echo "$py_output") "$priority"; then
