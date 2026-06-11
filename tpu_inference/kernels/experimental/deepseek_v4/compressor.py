@@ -63,9 +63,7 @@ def compressor_forward(
     token_to_req_indices: jax.Array,  # [num_tokens] int
     kv_slot_mapping: jax.Array,     # [num_tokens] int
     state_cache: jax.Array,         # [num_blocks, block_size, 2*coff*head_dim] fp32
-    nope_cache: jax.Array,          # [kv_blocks, kv_block_size, nope_dim] fp8
-    rope_cache: jax.Array,          # [kv_blocks, kv_block_size, rope_head_dim] bf16
-    scale_cache: jax.Array,         # [kv_blocks, kv_block_size, nope_dim//qb] f32
+    kv_cache: jax.Array,            # [kv_blocks, kv_block_size, packed_width] uint8
     block_size: int,
     head_dim: int,
     rope_head_dim: int,
@@ -74,21 +72,19 @@ def compressor_forward(
     rms_eps: float,
     quant_block: int,
 ):
-    """head_dim=512 path: fp8 nope + bf16 rope KV caches."""
+    """head_dim=512 path: fp8 nope + bf16 rope packed into one uint8 KV cache."""
     state_cache = _project_and_save(
         hidden_states, wkv_wgate, ape, positions, state_cache, slot_mapping,
         head_dim, overlap, compress_ratio)
 
-    nope_cache, rope_cache, scale_cache = compress_norm_rope_store(
+    kv_cache = compress_norm_rope_store(
         state_cache=state_cache,
         positions=positions,
         slot_mapping=slot_mapping,
         block_table=block_table,
         token_to_req_indices=token_to_req_indices,
         kv_slot_mapping=kv_slot_mapping,
-        nope_cache=nope_cache,
-        rope_cache=rope_cache,
-        scale_cache=scale_cache,
+        kv_cache=kv_cache,
         rms_weight=norm_weight,
         cos_sin_cache=cos_sin_cache,
         block_size=block_size,
@@ -100,7 +96,7 @@ def compressor_forward(
         quant_block=quant_block,
     )
 
-    return state_cache, nope_cache, rope_cache, scale_cache
+    return state_cache, kv_cache
 
 
 def compressor_forward_indexer(
@@ -115,8 +111,7 @@ def compressor_forward_indexer(
     token_to_req_indices: jax.Array,  # [num_tokens] int
     kv_slot_mapping: jax.Array,     # [num_tokens] int
     state_cache: jax.Array,         # [num_blocks, block_size, 2*coff*head_dim] fp32
-    fp8_cache: jax.Array,           # [kv_blocks, kv_block_size, head_dim] fp8
-    scale_cache: jax.Array,         # [kv_blocks, kv_block_size, head_dim//qb] f32
+    kv_cache: jax.Array,            # [kv_blocks, kv_block_size, packed_width] uint8
     block_size: int,
     head_dim: int,
     rope_head_dim: int,
@@ -125,20 +120,19 @@ def compressor_forward_indexer(
     rms_eps: float,
     quant_block: int,
 ):
-    """head_dim=128 indexer path: whole-head fp8 + one scale."""
+    """head_dim=128 indexer path: whole-head fp8 + one scale, one uint8 cache."""
     state_cache = _project_and_save(
         hidden_states, wkv_wgate, ape, positions, state_cache, slot_mapping,
         head_dim, overlap, compress_ratio)
 
-    fp8_cache, scale_cache = compress_norm_rope_store_indexer(
+    kv_cache = compress_norm_rope_store_indexer(
         state_cache=state_cache,
         positions=positions,
         slot_mapping=slot_mapping,
         block_table=block_table,
         token_to_req_indices=token_to_req_indices,
         kv_slot_mapping=kv_slot_mapping,
-        fp8_cache=fp8_cache,
-        scale_cache=scale_cache,
+        kv_cache=kv_cache,
         rms_weight=norm_weight,
         cos_sin_cache=cos_sin_cache,
         block_size=block_size,
@@ -150,4 +144,4 @@ def compressor_forward_indexer(
         quant_block=quant_block,
     )
 
-    return state_cache, fp8_cache, scale_cache
+    return state_cache, kv_cache

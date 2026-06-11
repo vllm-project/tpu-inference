@@ -19,6 +19,61 @@ import jax.numpy as jnp
 from tpu_inference.layers.common.quantization import quantize_tensor
 
 
+def _to_byte_lane(x: jax.Array) -> jax.Array:
+    """Reinterpret each element of ``x``'s trailing dim as raw bytes.
+
+    ``bitcast_convert_type`` appends a trailing itemsize dim for dtypes wider
+    than 8 bits (bf16 -> ``[..., 2]``, f32 -> ``[..., 4]``).
+    """
+    b = jax.lax.bitcast_convert_type(x, jnp.uint8)
+    if b.ndim > x.ndim:
+        b = b.reshape(*x.shape[:-1], -1)
+    return b
+
+
+def _from_byte_lane(b: jax.Array, dtype) -> jax.Array:
+    """Inverse of ``_to_byte_lane``: read trailing bytes back as ``dtype``."""
+    itemsize = jnp.dtype(dtype).itemsize
+    if itemsize == 1:
+        return jax.lax.bitcast_convert_type(b, dtype)
+    grouped = b.reshape(*b.shape[:-1], b.shape[-1] // itemsize, itemsize)
+    return jax.lax.bitcast_convert_type(grouped, dtype)
+
+
+def sparse_packed_width(nope_dim: int, rope_head_dim: int,
+                        quant_block: int) -> int:
+    """Bytes per token in the packed sparse (head_dim=512) KV cache."""
+    # nope fp8 (1B) + rope bf16 (2B) + block-scale fp32 (4B)
+    return nope_dim + rope_head_dim * 2 + (nope_dim // quant_block) * 4
+
+
+def indexer_packed_width(head_dim: int, quant_block: int) -> int:
+    """Bytes per token in the packed indexer (head_dim=128) KV cache."""
+    return head_dim + (head_dim // quant_block) * 4
+
+
+def unpack_sparse_kv_cache(kv_cache: jax.Array, nope_dim: int,
+                           rope_head_dim: int, quant_block: int):
+    """Split the packed sparse KV cache into native-dtype component views."""
+    n_qb = nope_dim // quant_block
+    a = nope_dim
+    b = a + rope_head_dim * 2
+    nope = _from_byte_lane(kv_cache[..., :a], jnp.float8_e4m3fn)
+    rope = _from_byte_lane(kv_cache[..., a:b], jnp.bfloat16)
+    scale = _from_byte_lane(kv_cache[..., b:b + n_qb * 4], jnp.float32)
+    return nope, rope, scale
+
+
+def unpack_indexer_kv_cache(kv_cache: jax.Array, head_dim: int,
+                            quant_block: int):
+    """Split the packed indexer KV cache into ``(fp8, scale)`` views."""
+    n_qb = head_dim // quant_block
+    fp8 = _from_byte_lane(kv_cache[..., :head_dim], jnp.float8_e4m3fn)
+    scale = _from_byte_lane(kv_cache[..., head_dim:head_dim + n_qb * 4],
+                            jnp.float32)
+    return fp8, scale
+
+
 def interleaved_rope(
     x: jax.Array,            # [..., head_dim] fp32
     cos_sin: jax.Array,        # [..., rope_head_dim] fp32 ([cos | sin])
@@ -130,13 +185,11 @@ def _boundary_dest(
 def compress_norm_rope_store(
     state_cache: jax.Array,         # [num_blocks, block_size, 2*state_width] fp32
     positions: jax.Array,           # [num_tokens] int
-    slot_mapping: jax.Array,        # [num_tokens] int
-    block_table: jax.Array,         # [num_reqs, max_blocks] int
+    slot_mapping: jax.Array,        # [num_tokens] int (state-cache slots)
+    block_table: jax.Array,         # [num_reqs, max_blocks] int (STATE cache)
     token_to_req_indices: jax.Array,  # [num_tokens] int
-    kv_slot_mapping: jax.Array,     # [num_tokens] int
-    nope_cache: jax.Array,          # [num_blocks, block_size, nope_dim] fp8
-    rope_cache: jax.Array,          # [num_blocks, block_size, rope_head_dim] bf16
-    scale_cache: jax.Array,         # [num_blocks, block_size, nope_dim//qb] f32
+    kv_slot_mapping: jax.Array,     # [num_tokens] int (compressed-KV slots)
+    kv_cache: jax.Array,            # [num_blocks, block_size, packed_width] uint8
     rms_weight: jax.Array,          # [head_dim] fp32
     cos_sin_cache: jax.Array,       # [max_pos, rope_head_dim] fp32
     block_size: int,
@@ -147,7 +200,13 @@ def compress_norm_rope_store(
     rms_eps: float,
     quant_block: int,
 ):
-    """head_dim=512: fp8 nope + bf16 rope at compression boundaries."""
+    """Store each boundary token's compressed KV as one packed record.
+
+    Record layout along ``kv_cache``'s minor dim:
+    ``[nope fp8 | rope bf16 | block-scale fp32]``.
+
+    TODO(kv-cache-aliasing): make different caches share one memory buffer.
+    """
     kv_window, score_window, valid_mask = gather_state_windows(
         state_cache=state_cache,
         positions=positions,
@@ -179,32 +238,29 @@ def compress_norm_rope_store(
         jnp.float8_e4m3fn, nope, axis=-1, block_size=quant_block)
     rope_q = rope.astype(jnp.bfloat16)
 
-    num_blocks, blk, _ = nope_cache.shape
+    # Pack [nope fp8 | rope bf16 | scale fp32] into per-token uint8 records.
+    packed = jnp.concatenate(
+        [_to_byte_lane(q), _to_byte_lane(rope_q), _to_byte_lane(scale)],
+        axis=-1)
+
+    num_blocks, blk, packed_width = kv_cache.shape
     num_slots = num_blocks * blk
     dest = _boundary_dest(positions, slot_mapping, kv_slot_mapping,
                           compress_ratio, num_slots)
 
-    n_qb = scale.shape[-1]
-    flat_nope = nope_cache.reshape(num_slots, nope_dim)
-    flat_rope = rope_cache.reshape(num_slots, rope_head_dim)
-    flat_scale = scale_cache.reshape(num_slots, n_qb)
-    flat_nope = flat_nope.at[dest].set(q, mode="drop")
-    flat_rope = flat_rope.at[dest].set(rope_q, mode="drop")
-    flat_scale = flat_scale.at[dest].set(scale, mode="drop")
-    return (flat_nope.reshape(num_blocks, blk, nope_dim),
-            flat_rope.reshape(num_blocks, blk, rope_head_dim),
-            flat_scale.reshape(num_blocks, blk, n_qb))
+    flat = kv_cache.reshape(num_slots, packed_width)
+    flat = flat.at[dest].set(packed, mode="drop")
+    return flat.reshape(num_blocks, blk, packed_width)
 
 
 def compress_norm_rope_store_indexer(
     state_cache: jax.Array,         # [num_blocks, block_size, 2*state_width] fp32
     positions: jax.Array,           # [num_tokens] int
-    slot_mapping: jax.Array,        # [num_tokens] int
-    block_table: jax.Array,         # [num_reqs, max_blocks] int
+    slot_mapping: jax.Array,        # [num_tokens] int (state-cache slots)
+    block_table: jax.Array,         # [num_reqs, max_blocks] int (STATE cache)
     token_to_req_indices: jax.Array,  # [num_tokens] int
-    kv_slot_mapping: jax.Array,     # [num_tokens] int
-    fp8_cache: jax.Array,           # [num_blocks, block_size, head_dim] fp8
-    scale_cache: jax.Array,         # [num_blocks, block_size, head_dim//qb] f32
+    kv_slot_mapping: jax.Array,     # [num_tokens] int (indexer-KV slots)
+    kv_cache: jax.Array,            # [num_blocks, block_size, packed_width] uint8
     rms_weight: jax.Array,          # [head_dim] fp32
     cos_sin_cache: jax.Array,       # [max_pos, rope_head_dim] fp32
     block_size: int,
@@ -215,7 +271,13 @@ def compress_norm_rope_store_indexer(
     rms_eps: float,
     quant_block: int,
 ):
-    """head_dim=128: whole-head fp8 + one scale at boundaries."""
+    """Store each boundary token's compressed KV as one packed record.
+
+    Record layout along ``kv_cache``'s minor dim: ``[fp8 | scale fp32]``.
+
+    TODO(kv-cache-aliasing): the wired vLLM model plans the indexer
+    ``state_cache`` and this ``kv_cache`` onto one physical memory buffer.
+    """
     kv_window, score_window, valid_mask = gather_state_windows(
         state_cache=state_cache,
         positions=positions,
@@ -242,15 +304,15 @@ def compress_norm_rope_store_indexer(
     q, scale = quantize_tensor(
         jnp.float8_e4m3fn, compressed, axis=-1, block_size=quant_block)
 
-    num_blocks, blk, _ = fp8_cache.shape
+    # Pack [fp8 | scale fp32] into per-token uint8 records.
+    packed = jnp.concatenate(
+        [_to_byte_lane(q), _to_byte_lane(scale)], axis=-1)
+
+    num_blocks, blk, packed_width = kv_cache.shape
     num_slots = num_blocks * blk
     dest = _boundary_dest(positions, slot_mapping, kv_slot_mapping,
                           compress_ratio, num_slots)
 
-    n_qb = scale.shape[-1]
-    flat_fp8 = fp8_cache.reshape(num_slots, head_dim)
-    flat_scale = scale_cache.reshape(num_slots, n_qb)
-    flat_fp8 = flat_fp8.at[dest].set(q, mode="drop")
-    flat_scale = flat_scale.at[dest].set(scale, mode="drop")
-    return (flat_fp8.reshape(num_blocks, blk, head_dim),
-            flat_scale.reshape(num_blocks, blk, n_qb))
+    flat = kv_cache.reshape(num_slots, packed_width)
+    flat = flat.at[dest].set(packed, mode="drop")
+    return flat.reshape(num_blocks, blk, packed_width)
