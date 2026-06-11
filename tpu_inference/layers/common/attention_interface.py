@@ -29,14 +29,14 @@ from jax.sharding import Sharding
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import envs
-from tpu_inference.kernels.flash_attention.kernel import flash_attention, SegmentIds, BlockSizes
+from tpu_inference.kernels.flash_attention.kernel import flash_attention, encoder_only_flash_attention
 from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_megacore, get_mesh_shape_product, align_to
+from tpu_inference.utils import get_megacore, get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -115,6 +115,44 @@ def sharded_flash_attention(
                       in_specs=in_specs,
                       out_specs=out_specs,
                       check_vma=False))
+
+
+def sharded_encoder_only_attention(
+    mesh: Mesh,
+    causal: bool = True,
+    sm_scale: Optional[float] = None,
+    sliding_window: Optional[int] = None,
+    vmem_limit_bytes: int | None = None,
+) -> Callable[..., Any]:
+    in_specs = (
+        P(None, "model", None),  # q: [q_len, num_heads, head_size]
+        P(None, "model", None),  # k: [k_len, num_kv_heads, head_size]
+        P(None, "model", None),  # v: [k_len, num_kv_heads, head_size]
+        P(),  # seq_lens: [batch_size]
+    )
+    out_specs = P(None, "model", None)
+
+    def _flash_attention(q, k, v, seq_lens):
+        return encoder_only_flash_attention(
+            q,
+            k,
+            v,
+            seq_lens,
+            causal=causal,
+            sm_scale=sm_scale,
+            sliding_window=sliding_window,
+            vmem_limit_bytes=vmem_limit_bytes,
+        )
+
+    return jax.jit(
+        jax.shard_map(
+            _flash_attention,
+            mesh=mesh,
+            in_specs=in_specs,
+            out_specs=out_specs,
+            check_vma=False,
+        )
+    )
 
 
 def sharded_paged_attention(
@@ -604,103 +642,10 @@ def encoder_only_attention(
     sm_scale: float | None = None,
     sliding_window: int | None = None,
 ) -> jax.Array:
-    # Get shapes
-    q_len, num_heads, head_size = q.shape
-    k_len, num_kv_heads, _ = k.shape
-    assert k.shape == v.shape
-    assert q_len == k_len, "For encoder_only, token lengths should be the same"
-
-    if sm_scale is None:
-        sm_scale = head_size**-0.5
-
-    # Swap axes to head-first per kernel limit: [num_heads, num_tokens, head_dim]
-    q_htd = q.swapaxes(0, 1)
-    k_htd = k.swapaxes(0, 1)
-    v_htd = v.swapaxes(0, 1)
-
-    def pad_token(t: jax.Array, size) -> jax.Array:
-        return jnp.pad(t, ((0, 0), (0, size), (0, 0)), constant_values=0)
-
-    block_sizes = BlockSizes.get_default(1, num_heads, q_len, k_len, head_size)
-    block_q = block_sizes.block_q
-    block_kv = block_sizes.block_k
-
-    padded_len_q = align_to(q_len, block_q)
-    padded_len_kv = align_to(k_len, block_kv)
-
-    q_pad_htd = pad_token(q_htd, padded_len_q - q_len)
-    k_pad_htd = pad_token(k_htd, padded_len_kv - k_len)
-    v_pad_htd = pad_token(v_htd, padded_len_kv - k_len)
-
-    q_bhtd = jnp.expand_dims(q_pad_htd, axis=0)
-    k_bhtd = jnp.expand_dims(k_pad_htd, axis=0)
-    v_bhtd = jnp.expand_dims(v_pad_htd, axis=0)
-
-    def build_segment_ids() -> SegmentIds:
-        max_num_seqs = attention_metadata.seq_lens.shape[0]
-        zero_2_max_num_seqs = jnp.arange(max_num_seqs + 1, dtype=jnp.int32)
-        seq_lens_concat_zero = jnp.concatenate([
-            attention_metadata.seq_lens,
-            jnp.array([0], dtype=attention_metadata.seq_lens.dtype),
-        ])
-        qkv_segment_ids = jnp.repeat(
-            zero_2_max_num_seqs,
-            seq_lens_concat_zero,
-            total_repeat_length=q_len,
-        )
-
-        def build_padded_segment(size: int) -> jax.Array:
-            padding_segment_id = max_num_seqs
-            result = jnp.pad(
-                qkv_segment_ids,
-                (0, size),
-                constant_values=padding_segment_id,
-            )
-            result = jnp.expand_dims(result, axis=0)
-            return result
-
-        segment_ids = SegmentIds(
-            q=build_padded_segment(padded_len_q - q_len),
-            kv=build_padded_segment(padded_len_kv - k_len),
-        )
-        return segment_ids
-
-    if sliding_window is not None:
-        row_ids = jnp.arange(padded_len_q)[:, None]
-        col_ids = jnp.arange(padded_len_kv)[None, :]
-        mask = jnp.abs(row_ids - col_ids) <= sliding_window
-        ab = jnp.where(mask, 0.0, -1e4).astype(q_bhtd.dtype)
-        ab = jnp.expand_dims(ab, axis=(0, 1))
-        ab = jnp.tile(ab, (1, num_heads, 1, 1))
-
-        kernel = sharded_flash_attention(
-            mesh=mesh,
-            causal=False,
-            sm_scale=sm_scale,
-            use_attention_bias=True,
-        )
-        output_bhtd = kernel(
-            q_bhtd,
-            k_bhtd,
-            v_bhtd,
-            ab,
-            build_segment_ids(),
-        )
-    else:
-        kernel = sharded_flash_attention(
-            mesh=mesh,
-            causal=False,
-            sm_scale=sm_scale,
-            use_attention_bias=False,
-        )
-        output_bhtd = kernel(
-            q_bhtd,
-            k_bhtd,
-            v_bhtd,
-            build_segment_ids(),
-        )
-    output_htd = jnp.squeeze(output_bhtd, axis=0)
-
-    # Unpad and transpose back
-    output = output_htd[:, :q_len, :].swapaxes(0, 1)
-    return output
+    kernel = sharded_encoder_only_attention(
+        mesh=mesh,
+        causal=False,
+        sm_scale=sm_scale,
+        sliding_window=sliding_window,
+    )
+    return kernel(q, k, v, attention_metadata.seq_lens)
