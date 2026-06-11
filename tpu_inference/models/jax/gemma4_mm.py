@@ -659,9 +659,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         def filter_weights(weights_iterator):
             import re
 
-            import torch
-
-            separate_cache = {}  # (layer_idx, suffix) -> {proj_type: weight}
             for name, weight in weights_iterator:
                 mapped_name = map_name(name)
 
@@ -682,72 +679,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                         )):
                     continue
 
-                # Handle separate Q, K, V projections and fuse them on the fly if needed
-                is_separate_proj = False
-                if "model.layers." in mapped_name:
-                    for proj_type in ("q_proj", "k_proj", "v_proj"):
-                        if proj_type in mapped_name:
-                            m = re.search(r"layers\.(\d+)\.", mapped_name)
-                            if m:
-                                layer_idx = int(m.group(1))
-                                if self.model.start_layer <= layer_idx < self.model.end_layer:
-                                    jax_attn = self.model.layers[
-                                        layer_idx].self_attn
-
-                                    if jax_attn.qkv_proj is not None:
-                                        is_separate_proj = True
-                                        suffix = mapped_name.split(proj_type +
-                                                                   ".")[-1]
-                                        cache_key = (layer_idx, suffix)
-                                        if cache_key not in separate_cache:
-                                            separate_cache[cache_key] = {}
-                                        separate_cache[cache_key][
-                                            proj_type] = weight
-
-                                        # Since qkv_proj is active only on local layers, we always expect all three
-                                        layer_cache = separate_cache[cache_key]
-                                        if "q_proj" in layer_cache and "k_proj" in layer_cache and "v_proj" in layer_cache:
-                                            q_weight = layer_cache.pop(
-                                                "q_proj")
-                                            k_weight = layer_cache.pop(
-                                                "k_proj")
-                                            v_weight = layer_cache.pop(
-                                                "v_proj")
-
-                                            tp_size = jax_attn.qkv_proj.tp_size
-
-                                            q_shards = torch.chunk(q_weight,
-                                                                   tp_size,
-                                                                   dim=0)
-                                            k_shards = torch.chunk(k_weight,
-                                                                   tp_size,
-                                                                   dim=0)
-                                            v_shards = torch.chunk(v_weight,
-                                                                   tp_size,
-                                                                   dim=0)
-
-                                            rearranged = []
-                                            for i in range(tp_size):
-                                                rearranged.append(q_shards[i])
-                                                rearranged.append(k_shards[i])
-                                                rearranged.append(v_shards[i])
-                                            rearranged_tensor = torch.cat(
-                                                rearranged, dim=0)
-
-                                            target_name = mapped_name.replace(
-                                                proj_type, "qkv_proj.proj")
-                                            yield target_name, process_tensor(
-                                                target_name, rearranged_tensor)
-
-                if is_separate_proj:
-                    continue
-
-                # Handle packed QKV weights for the text tower.
-                # Note: KV-shared layers DO have full Q/K/V weights in the
-                # checkpoint — vllm-pytorch's Gemma4Attention constructs
-                # qkv_proj unconditionally. K/V are still computed and used
-                # for the current step's attention; the kernel skips writing
-                # them to the cache via update_kv_cache=False.
+                # Handle packed QKV weights for the text tower when the model uses separate projections (e.g. k_eq_v layers)
                 if "qkv_proj" in mapped_name and "model.layers." in mapped_name:
                     m = re.search(r"layers\.(\d+)\.", mapped_name)
                     if m:
@@ -756,75 +688,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                             jax_attn = self.model.layers[
                                 layer_idx].self_attn  # Direct absolute indexing
 
-                            if jax_attn.qkv_proj is not None:
-                                tp_size = jax_attn.qkv_proj.tp_size
-                                num_heads = jax_attn.qkv_proj.num_heads
-                                num_kv_heads = jax_attn.qkv_proj.num_kv_heads
-                                head_dim = jax_attn.qkv_proj.head_dim
-
-                                if "weight" in mapped_name:
-                                    q_shards = torch.chunk(weight[:num_heads *
-                                                                  head_dim],
-                                                           tp_size,
-                                                           dim=0)
-                                    k_shards = torch.chunk(
-                                        weight[num_heads *
-                                               head_dim:(num_heads +
-                                                         num_kv_heads) *
-                                               head_dim],
-                                        tp_size,
-                                        dim=0)
-                                    v_shards = torch.chunk(
-                                        weight[(num_heads + num_kv_heads) *
-                                               head_dim:],
-                                        tp_size,
-                                        dim=0)
-
-                                    rearranged = []
-                                    for i in range(tp_size):
-                                        rearranged.append(q_shards[i])
-                                        rearranged.append(k_shards[i])
-                                        rearranged.append(v_shards[i])
-                                    rearranged_weight = torch.cat(rearranged,
-                                                                  dim=0)
-                                    yield mapped_name.replace(
-                                        "qkv_proj",
-                                        "qkv_proj.proj"), process_tensor(
-                                            mapped_name.replace(
-                                                "qkv_proj", "qkv_proj.proj"),
-                                            rearranged_weight)
-                                elif "bias" in mapped_name:
-                                    q_shards = torch.chunk(weight[:num_heads *
-                                                                  head_dim],
-                                                           tp_size,
-                                                           dim=0)
-                                    k_shards = torch.chunk(
-                                        weight[num_heads *
-                                               head_dim:(num_heads +
-                                                         num_kv_heads) *
-                                               head_dim],
-                                        tp_size,
-                                        dim=0)
-                                    v_shards = torch.chunk(
-                                        weight[(num_heads + num_kv_heads) *
-                                               head_dim:],
-                                        tp_size,
-                                        dim=0)
-                                    rearranged = []
-                                    for i in range(tp_size):
-                                        rearranged.append(q_shards[i])
-                                        rearranged.append(k_shards[i])
-                                        rearranged.append(v_shards[i])
-                                    rearranged_bias = torch.cat(rearranged,
-                                                                dim=0)
-                                    yield mapped_name.replace(
-                                        "qkv_proj",
-                                        "qkv_proj.proj"), process_tensor(
-                                            mapped_name.replace(
-                                                "qkv_proj", "qkv_proj.proj"),
-                                            rearranged_bias)
-                                continue
-                            else:
+                            if jax_attn.qkv_proj is None:
                                 q_size = jax_attn.num_heads * jax_attn.head_dim_original
                                 kv_size = jax_attn.num_kv_heads * jax_attn.head_dim_original
 

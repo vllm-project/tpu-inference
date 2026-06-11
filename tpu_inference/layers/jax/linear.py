@@ -260,6 +260,86 @@ class JaxQKVParallelLinear(JaxModule):
             prefix=prefix + ".qkv_proj",
         )
 
+        from functools import partial
+        self.proj.weight.set_metadata(
+            "weight_loader",
+            partial(self._weight_loader,
+                    param_name=prefix + ".qkv_proj.proj.weight"))
+        if use_bias:
+            self.proj.bias.set_metadata(
+                "weight_loader",
+                partial(self._weight_loader,
+                        param_name=prefix + ".qkv_proj.proj.bias"))
+
+    def _weight_loader(self,
+                       param: nnx.Param,
+                       loaded_weight,
+                       shard_id: Optional[int] = None,
+                       *,
+                       param_name: str = "Unknown"):
+        import torch
+
+        from tpu_inference.models.jax.utils.weight_utils import \
+            load_nnx_param_from_reshaped_torch
+
+        if shard_id is not None:
+            shards_to_load = param.get_metadata().get("_shards_to_load")
+            if shards_to_load is None:
+                shards_to_load = [None, None, None]
+                param.set_metadata("_shards_to_load", shards_to_load)
+            shards_to_load[shard_id] = loaded_weight
+
+            if all(w is not None for w in shards_to_load):
+                q_weight, k_weight, v_weight = shards_to_load
+                param.set_metadata("_shards_to_load", None)
+
+                tp_size = self.tp_size
+                q_shards = torch.chunk(q_weight, tp_size, dim=0)
+                k_shards = torch.chunk(k_weight, tp_size, dim=0)
+                v_shards = torch.chunk(v_weight, tp_size, dim=0)
+
+                rearranged = []
+                for i in range(tp_size):
+                    rearranged.append(q_shards[i])
+                    rearranged.append(k_shards[i])
+                    rearranged.append(v_shards[i])
+                rearranged_tensor = torch.cat(rearranged, dim=0)
+
+                load_nnx_param_from_reshaped_torch(
+                    param,
+                    rearranged_tensor,
+                    param_name=param_name,
+                )
+        else:
+            tp_size = self.tp_size
+            num_heads = self.num_heads
+            num_kv_heads = self.num_kv_heads
+            head_dim = self.head_dim
+
+            q_len = num_heads * head_dim
+            kv_len = num_kv_heads * head_dim
+
+            q_weight = loaded_weight[:q_len]
+            k_weight = loaded_weight[q_len:q_len + kv_len]
+            v_weight = loaded_weight[q_len + kv_len:]
+
+            q_shards = torch.chunk(q_weight, tp_size, dim=0)
+            k_shards = torch.chunk(k_weight, tp_size, dim=0)
+            v_shards = torch.chunk(v_weight, tp_size, dim=0)
+
+            rearranged = []
+            for i in range(tp_size):
+                rearranged.append(q_shards[i])
+                rearranged.append(k_shards[i])
+                rearranged.append(v_shards[i])
+            rearranged_tensor = torch.cat(rearranged, dim=0)
+
+            load_nnx_param_from_reshaped_torch(
+                param,
+                rearranged_tensor,
+                param_name=param_name,
+            )
+
     def __call__(self, x: jax.Array) -> Tuple[jax.Array, jax.Array, jax.Array]:
         # Single projection operation (loads inputs from HBM once)
         outs = self.proj(
