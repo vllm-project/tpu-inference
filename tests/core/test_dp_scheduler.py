@@ -22,7 +22,7 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
+from vllm.v1.outputs import KVConnectorOutput, LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request
 
 from tpu_inference.core.sched.dp_scheduler import (
@@ -851,7 +851,7 @@ class TestDPScheduler:
             prompt_logprobs_dict={"req2": MagicMock()},
             pooler_output=None,
             num_nans_in_logits=None,
-            kv_connector_output=MagicMock(),
+            kv_connector_output=MagicMock(invalid_block_ids=set()),
         )
 
         outputs = scheduler._split_model_output_by_rank(
@@ -996,6 +996,142 @@ class TestDPScheduler:
                                       np.array([1, 2, 6]))
         assert sliced.cu_num_generated_tokens == [0, 2, 3]
 
+    def test_split_model_output_by_rank_with_kv_connector(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """Test _split_model_output_by_rank correctly filters kv_connector_output by rank."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+
+        scheduler.assigned_dp_rank = {"req1": 0, "req2": 1, "req3": 0}
+
+        scheduler_output = DPSchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={
+                "req1": 5,
+                "req2": 10,
+                "req3": 3
+            },
+            total_num_scheduled_tokens=18,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=set(),
+            assigned_dp_rank={
+                "req1": 0,
+                "req2": 1,
+                "req3": 0
+            },
+            max_num_scheduled_tokens_per_dp_rank=10,
+            req_ids_per_rank={
+                0: ["req1", "req3"],
+                1: ["req2"]
+            },
+        )
+
+        kv_connector_output = KVConnectorOutput(
+            finished_sending={"req1", "req2"},
+            finished_recving={"req2", "req3"},
+            invalid_block_ids=set(),
+        )
+
+        model_runner_output = ModelRunnerOutput(
+            req_ids=["req1", "req2", "req3"],
+            req_id_to_index={
+                "req1": 0,
+                "req2": 1,
+                "req3": 2
+            },
+            sampled_token_ids=[[42], [99], [77]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=None,
+            num_nans_in_logits=None,
+            kv_connector_output=kv_connector_output,
+        )
+
+        outputs = scheduler._split_model_output_by_rank(
+            scheduler_output, model_runner_output)
+
+        assert len(outputs) == 2
+
+        # Rank 0 should have req1, req3
+        assert outputs[0].kv_connector_output is not None
+        assert outputs[0].kv_connector_output.finished_sending == {"req1"}
+        assert outputs[0].kv_connector_output.finished_recving == {"req3"}
+
+        # Rank 1 should have req2
+        assert outputs[1].kv_connector_output is not None
+        assert outputs[1].kv_connector_output.finished_sending == {"req2"}
+        assert outputs[1].kv_connector_output.finished_recving == {"req2"}
+
+    def test_split_model_output_by_rank_with_invalid_blocks_raises_assertion_error(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """Test _split_model_output_by_rank raises AssertionError if invalid_block_ids is not empty in DP mode."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+
+        scheduler.assigned_dp_rank = {"req1": 0, "req2": 1, "req3": 0}
+
+        scheduler_output = DPSchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={
+                "req1": 5,
+                "req2": 10,
+                "req3": 3
+            },
+            total_num_scheduled_tokens=18,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=set(),
+            assigned_dp_rank={
+                "req1": 0,
+                "req2": 1,
+                "req3": 0
+            },
+            max_num_scheduled_tokens_per_dp_rank=10,
+            req_ids_per_rank={
+                0: ["req1", "req3"],
+                1: ["req2"]
+            },
+        )
+
+        kv_connector_output = KVConnectorOutput(
+            finished_sending={"req1", "req2"},
+            finished_recving={"req2", "req3"},
+            invalid_block_ids={1, 2},  # Non-empty, should trigger assertion
+        )
+
+        model_runner_output = ModelRunnerOutput(
+            req_ids=["req1", "req2", "req3"],
+            req_id_to_index={
+                "req1": 0,
+                "req2": 1,
+                "req3": 2
+            },
+            sampled_token_ids=[[42], [99], [77]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=None,
+            num_nans_in_logits=None,
+            kv_connector_output=kv_connector_output,
+        )
+
+        with pytest.raises(AssertionError) as exc_info:
+            scheduler._split_model_output_by_rank(scheduler_output,
+                                                  model_runner_output)
+
+        assert "invalid_block_ids is not supported in DP mode" in str(
+            exc_info.value)
+
     def test_shutdown(self, mock_vllm_config, mock_kv_cache_config,
                       mock_structured_output_manager):
         """Test shutdown sends SHUTDOWN command to all workers."""
@@ -1021,6 +1157,145 @@ class TestDPScheduler:
         # Verify processes were joined
         mock_process_0.join.assert_called()
         mock_process_1.join.assert_called()
+
+    def test_combine_scheduler_outputs_combines_kv_connector_metadata(
+        self,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test that _combine_scheduler_outputs combines kv_connector_metadata."""
+        scheduler = self._create_scheduler(
+            mock_vllm_config,
+            mock_kv_cache_config,
+            mock_structured_output_manager,
+        )
+
+        from tpu_inference.distributed.tpu_connector import (
+            LoadMeta, SendMeta, TPUConnectorMetadata)
+
+        # Rank 0 metadata
+        meta_0 = TPUConnectorMetadata(
+            reqs_to_send={
+                "req1":
+                SendMeta(uuid="uuid1", local_block_ids=[], expiration_time=0.0)
+            },
+            reqs_to_load={
+                "req2":
+                LoadMeta(uuid="uuid2",
+                         local_block_ids=[],
+                         remote_block_ids=[],
+                         remote_host="localhost",
+                         remote_port=1234)
+            },
+        )
+        output_0 = MagicMock(spec=SchedulerOutput)
+        output_0.kv_connector_metadata = meta_0
+        output_0.num_scheduled_tokens = {"req1": 10}
+        output_0.total_num_scheduled_tokens = 10
+        output_0.scheduled_new_reqs = []
+        output_0.scheduled_spec_decode_tokens = {}
+        output_0.scheduled_encoder_inputs = {}
+        output_0.finished_req_ids = set()
+        output_0.scheduled_cached_reqs = CachedRequestData.make_empty()
+        output_0.num_common_prefix_blocks = []
+
+        # Rank 1 metadata
+        meta_1 = TPUConnectorMetadata(
+            reqs_to_send={
+                "req3":
+                SendMeta(uuid="uuid3", local_block_ids=[], expiration_time=0.0)
+            },
+            reqs_to_load={
+                "req4":
+                LoadMeta(uuid="uuid4",
+                         local_block_ids=[],
+                         remote_block_ids=[],
+                         remote_host="localhost",
+                         remote_port=1234)
+            },
+        )
+        output_1 = MagicMock(spec=SchedulerOutput)
+        output_1.kv_connector_metadata = meta_1
+        output_1.num_scheduled_tokens = {"req2": 20}
+        output_1.total_num_scheduled_tokens = 20
+        output_1.scheduled_new_reqs = []
+        output_1.scheduled_spec_decode_tokens = {}
+        output_1.scheduled_encoder_inputs = {}
+        output_1.finished_req_ids = set()
+        output_1.scheduled_cached_reqs = CachedRequestData.make_empty()
+        output_1.num_common_prefix_blocks = []
+
+        scheduler.assigned_dp_rank = {"req1": 0, "req2": 1}
+
+        combined = scheduler._combine_scheduler_outputs([output_0, output_1])
+
+        # Verify combined metadata
+        combined_meta = combined.kv_connector_metadata
+        assert isinstance(combined_meta, TPUConnectorMetadata)
+        assert "req1" in combined_meta.reqs_to_send
+        assert "req3" in combined_meta.reqs_to_send
+        assert "req2" in combined_meta.reqs_to_load
+        assert "req4" in combined_meta.reqs_to_load
+        assert combined_meta.reqs_to_send["req1"].uuid == "uuid1"
+        assert combined_meta.reqs_to_send["req3"].uuid == "uuid3"
+
+    def test_combine_scheduler_outputs_combines_tpu_offload_metadata(
+        self,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test that _combine_scheduler_outputs combines TPUOffloadConnectorMetadata."""
+        scheduler = self._create_scheduler(
+            mock_vllm_config,
+            mock_kv_cache_config,
+            mock_structured_output_manager,
+        )
+
+        from tpu_inference.offload.tpu_offload_connector import (
+            TPUOffloadConnectorMetadata, TPUReqMeta)
+
+        # Rank 0 metadata
+        meta_0 = TPUOffloadConnectorMetadata(requests_meta=[
+            TPUReqMeta(req_id="req1", token_ids=[], local_block_ids=[])
+        ])
+        output_0 = MagicMock(spec=SchedulerOutput)
+        output_0.kv_connector_metadata = meta_0
+        output_0.num_scheduled_tokens = {"req1": 10}
+        output_0.total_num_scheduled_tokens = 10
+        output_0.scheduled_new_reqs = []
+        output_0.scheduled_spec_decode_tokens = {}
+        output_0.scheduled_encoder_inputs = {}
+        output_0.finished_req_ids = set()
+        output_0.scheduled_cached_reqs = CachedRequestData.make_empty()
+        output_0.num_common_prefix_blocks = []
+
+        # Rank 1 metadata
+        meta_1 = TPUOffloadConnectorMetadata(requests_meta=[
+            TPUReqMeta(req_id="req2", token_ids=[], local_block_ids=[])
+        ])
+        output_1 = MagicMock(spec=SchedulerOutput)
+        output_1.kv_connector_metadata = meta_1
+        output_1.num_scheduled_tokens = {"req2": 20}
+        output_1.total_num_scheduled_tokens = 20
+        output_1.scheduled_new_reqs = []
+        output_1.scheduled_spec_decode_tokens = {}
+        output_1.scheduled_encoder_inputs = {}
+        output_1.finished_req_ids = set()
+        output_1.scheduled_cached_reqs = CachedRequestData.make_empty()
+        output_1.num_common_prefix_blocks = []
+
+        scheduler.assigned_dp_rank = {"req1": 0, "req2": 1}
+
+        combined = scheduler._combine_scheduler_outputs([output_0, output_1])
+
+        # Verify combined metadata
+        combined_meta = combined.kv_connector_metadata
+        assert isinstance(combined_meta, TPUOffloadConnectorMetadata)
+        assert len(combined_meta.requests_meta) == 2
+        assert combined_meta.requests_meta[0].req_id == "req1"
+        assert combined_meta.requests_meta[1].req_id == "req2"
 
 
 class TestUpdateVllmConfigForDPScheduler:
