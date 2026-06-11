@@ -229,8 +229,7 @@ def create_benchmark_steps(case_data: Dict[str, Any],
         # Include parent_dir in label for uniqueness
         step_label = f"[{parent_dir}] {agent} {file_basename} {case_name}"
         case_parameter = f"{file_path} {case_name}"
-        benchmark_name = case_name
-        step_env["MLCOMPASS_TEST_NAME"] = f"vllm:{agent}:{benchmark_name}"
+        step_env["MLCOMPASS_TEST_NAME"] = f"vllm:{agent}:{case_name}"
         if mlcompass_select_tests and step_env[
                 "MLCOMPASS_TEST_NAME"] not in mlcompass_select_tests:
             continue
