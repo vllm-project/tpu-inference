@@ -151,7 +151,8 @@ def moe_gmm_local(x: jax.Array,
                   parallelism: Literal["tp", "ep"],
                   enable_rs_kernel: bool = False,
                   onehot_moe_permute_threshold: int = 0,
-                  scatter_results: bool = False) -> jax.Array:
+                  scatter_results: bool = False,
+                  moe_chunk_size: int = 0) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
@@ -184,6 +185,43 @@ def moe_gmm_local(x: jax.Array,
     batch_size = gmm2_res.shape[0]
     local_group_size = w1.shape[0]
 
+    reduction_axis = (ShardingAxisName.MLP_TENSOR
+                      if parallelism == "tp" else ShardingAxisName.EXPERT)
+
+    scatter_axis_size = 1
+    reduce_axes = ()
+    scatter_axes = ()
+
+    if enable_rs_kernel:
+        reduction_axes = reduction_axis if isinstance(
+            reduction_axis, tuple) else (reduction_axis, )
+        for axis in reduction_axes:
+            scatter_axis_size *= jax.lax.axis_size(axis)
+    elif scatter_results:
+        dp_axes = ShardingAxisName.ATTN_DATA
+        if not isinstance(dp_axes, tuple):
+            dp_axes = (dp_axes, )
+        if isinstance(reduction_axis, tuple):
+            reduce_axes = tuple(a for a in reduction_axis if a not in dp_axes)
+            scatter_axes = tuple(a for a in reduction_axis if a in dp_axes)
+        else:
+            reduce_axes = () if reduction_axis in dp_axes else (
+                reduction_axis, )
+            scatter_axes = (
+                reduction_axis, ) if reduction_axis in dp_axes else ()
+        for a in scatter_axes:
+            scatter_axis_size *= jax.lax.axis_size(a)
+
+    # Chunk Size Resolution
+    num_tokens = batch_size // topk
+    is_onehot = (local_group_size < group_sizes.size) and (
+        onehot_moe_permute_threshold > 0
+        and batch_size <= onehot_moe_permute_threshold)
+    if moe_chunk_size > 0 and num_tokens > moe_chunk_size * scatter_axis_size and not is_onehot:
+        actual_chunk_size = moe_chunk_size * scatter_axis_size
+    else:
+        actual_chunk_size = num_tokens
+
     if local_group_size < group_sizes.size:
         mask = valid_rows_mask(
             gmm1_res.shape[0],
@@ -194,89 +232,81 @@ def moe_gmm_local(x: jax.Array,
     else:
         mask = jnp.full((batch_size, ), True).reshape(-1, topk, 1)
 
-    reduction_axis = (ShardingAxisName.MLP_TENSOR
-                      if parallelism == "tp" else ShardingAxisName.EXPERT)
+    out_list = []
 
-    if local_group_size < group_sizes.size:
-        if batch_size <= onehot_moe_permute_threshold:
-            # Use onehot + matmul for unpermutation, which can be faster
-            # for small batch size.
-            assert batch_size % topk == 0, (
-                f"batch_size ({batch_size}) should be a multiple of topk "
-                f"({topk})")
-            num_tokens = batch_size // topk
-            revert_indices = topk_argsort_revert_indices.reshape(
-                num_tokens, topk)
-            onehot = jax.nn.one_hot(revert_indices,
-                                    batch_size,
-                                    dtype=gmm2_res.dtype)
-            combine = (onehot * topk_weights[..., None] * mask).sum(axis=1)
-            out = combine @ gmm2_res
+    # Pipelining Loop
+    for start_tok in range(0, num_tokens, actual_chunk_size):
+        end_tok = min(num_tokens, start_tok + actual_chunk_size)
+        start_idx = start_tok * topk
+        end_idx = end_tok * topk
+
+        cur_indices = topk_argsort_revert_indices[start_idx:end_idx]
+        cur_weights = topk_weights[start_tok:end_tok]
+        cur_mask = mask[start_tok:end_tok]
+
+        if local_group_size < group_sizes.size:
+            if onehot_moe_permute_threshold > 0 and batch_size <= onehot_moe_permute_threshold:
+                revert_indices = cur_indices.reshape(-1, topk)
+                onehot = jax.nn.one_hot(revert_indices,
+                                        batch_size,
+                                        dtype=gmm2_res.dtype)
+                combine = (onehot * cur_weights[..., None] *
+                           cur_mask).sum(axis=1)
+                chunk_hidden = combine @ gmm2_res
+            else:
+                chunk_hidden = ragged_gather_reduce(gmm2_res, cur_indices,
+                                                    cur_weights.reshape(-1),
+                                                    cur_mask.reshape(-1), topk)
         else:
-            out = ragged_gather_reduce(gmm2_res, topk_argsort_revert_indices,
-                                       topk_weights.reshape(-1),
-                                       mask.reshape(-1), topk)
-    else:
-        token_hidden_full = gmm2_res[topk_argsort_revert_indices]
-        cur_sorted = token_hidden_full.reshape((-1, topk, gmm2_res.shape[-1]))
-        cur_topk_weights = jnp.expand_dims(topk_weights, axis=-1)
-        cur_weighted = cur_sorted * cur_topk_weights
-        cur_masked = jnp.where(mask, cur_weighted, 0.0)
-        out = cur_masked.sum(axis=-2)
+            token_hidden_full = gmm2_res[cur_indices]
+            cur_sorted = token_hidden_full.reshape(
+                (-1, topk, gmm2_res.shape[-1]))
+            cur_topk_weights = jnp.expand_dims(cur_weights, axis=-1)
+            cur_weighted = cur_sorted * cur_topk_weights
+            cur_masked = jnp.where(cur_mask, cur_weighted, 0.0)
+            chunk_hidden = cur_masked.sum(axis=-2)
 
-    # Then global reduction on all ranks for all tokens and all experts
-    if enable_rs_kernel:
-        reduction_axes = reduction_axis if isinstance(
-            reduction_axis, tuple) else (reduction_axis, )
-        num_devices = 1
-        for axis in reduction_axes:
-            num_devices *= jax.lax.axis_size(axis)
-
-        # Fallback to psum-scatter for small token sizes to avoid Mosaic compilation.
-        # The threshold is chosen based on the tile dimension (8) in the
-        # hierarchical reduce-scatter kernel.
-        if out.shape[0] // num_devices < 8:
-            out = jax.lax.psum_scatter(out,
-                                       axis_name=reduction_axis,
-                                       scatter_dimension=0,
-                                       tiled=True).astype(x.dtype)
+        if enable_rs_kernel:
+            # Fallback to psum-scatter for small token sizes to avoid Mosaic compilation.
+            # The threshold is chosen based on the tile dimension (8) in the
+            # hierarchical reduce-scatter kernel.
+            if chunk_hidden.shape[0] // scatter_axis_size < 8:
+                out = jax.lax.psum_scatter(chunk_hidden,
+                                           axis_name=reduction_axis,
+                                           scatter_dimension=0,
+                                           tiled=True).astype(x.dtype)
+            else:
+                # Determine the number of micro-batches
+                # Use 4 for large inputs to improve efficiency by maximizing the number of
+                # concurrent reduction streams, and 2 for smaller inputs to fit in ~32MB VMEM
+                num_mb = 2
+                if chunk_hidden.shape[0] // scatter_axis_size > 600:
+                    num_mb = 4
+                rs_out = hier_rs.hierarchical_reduce_scatter_local(
+                    chunk_hidden,
+                    num_devices=scatter_axis_size,
+                    num_micro_batches=num_mb,
+                    axis_name=reduction_axis)
+                out = rs_out.astype(x.dtype)
+        elif scatter_results:
+            if reduce_axes:
+                chunk_hidden = jax.lax.psum(chunk_hidden,
+                                            axis_name=reduce_axes)
+            if scatter_axes:
+                out = jax.lax.psum_scatter(chunk_hidden,
+                                           axis_name=scatter_axes,
+                                           scatter_dimension=0,
+                                           tiled=True).astype(x.dtype)
+            else:
+                out = chunk_hidden.astype(x.dtype)
         else:
-            # Determine the number of micro-batches
-            # Use 4 for large inputs to improve efficiency by maximizing the number of
-            # concurrent reduction streams, and 2 for smaller inputs to fit in ~32MB VMEM
-            num_mb = 2
-            if out.shape[0] // num_devices > 600:
-                num_mb = 4
-            rs_out = hier_rs.hierarchical_reduce_scatter_local(
-                out,
-                num_devices=num_devices,
-                num_micro_batches=num_mb,
-                axis_name=reduction_axis)
-            out = rs_out.astype(x.dtype)
-    elif scatter_results:
-        dp_axes = ShardingAxisName.ATTN_DATA
-        if isinstance(reduction_axis, tuple):
-            reduce_axes = tuple(a for a in reduction_axis if a not in dp_axes)
-            scatter_axes = tuple(a for a in reduction_axis if a in dp_axes)
-        else:
-            reduce_axes = () if reduction_axis in dp_axes else (
-                reduction_axis, )
-            scatter_axes = (
-                reduction_axis, ) if reduction_axis in dp_axes else ()
+            out = jax.lax.psum(chunk_hidden,
+                               axis_name=reduction_axis).astype(x.dtype)
 
-        if reduce_axes:
-            out = jax.lax.psum(out, axis_name=reduce_axes)
+        out_list.append(out)
 
-        if scatter_axes:
-            out = jax.lax.psum_scatter(out,
-                                       axis_name=scatter_axes,
-                                       scatter_dimension=0,
-                                       tiled=True).astype(x.dtype)
-        else:
-            out = out.astype(x.dtype)
-    else:
-        out = jax.lax.psum(out, axis_name=reduction_axis).astype(x.dtype)
-    return out
+    return jnp.concatenate(out_list,
+                           axis=0) if len(out_list) > 1 else out_list[0]
 
 
 def tensor_parallel_gmm(
@@ -297,6 +327,7 @@ def tensor_parallel_gmm(
     enable_rs_kernel: bool = False,
     onehot_moe_permute_threshold: int = 0,
     scatter_results: bool = False,
+    moe_chunk_size: int = 0,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
@@ -329,6 +360,7 @@ def tensor_parallel_gmm(
             enable_rs_kernel=False,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             scatter_results=scatter_results,
+            moe_chunk_size=moe_chunk_size,
         ),
         mesh=mesh,
         in_specs=(
@@ -378,6 +410,7 @@ def expert_parallel_gmm(
     mesh: Mesh,
     enable_rs_kernel: bool = False,
     onehot_moe_permute_threshold: int = 0,
+    moe_chunk_size: int = 0,
     scatter_results: bool = False,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
@@ -410,6 +443,7 @@ def expert_parallel_gmm(
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             enable_rs_kernel=enable_rs_kernel,
             scatter_results=scatter_results,
+            moe_chunk_size=moe_chunk_size,
         ),
         mesh=mesh,
         in_specs=(
@@ -476,6 +510,7 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     "enable_rs_kernel",
     "onehot_moe_permute_threshold",
     "scatter_results",
+    "moe_chunk_size",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -498,6 +533,7 @@ def fused_moe_func(
     scatter_results: bool = False,
     hash_based_topk_indices: jax.Array | None = None,
     expert_score_correction_bias: jax.Array | None = None,
+    moe_chunk_size: int = 0,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -663,6 +699,7 @@ def fused_moe_func(
             enable_rs_kernel=actual_enable_rs_kernel,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             scatter_results=scatter_results,
+            moe_chunk_size=moe_chunk_size,
         )
     else:
         x = tensor_parallel_gmm(
@@ -682,6 +719,7 @@ def fused_moe_func(
             enable_rs_kernel=actual_enable_rs_kernel,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             scatter_results=scatter_results,
+            moe_chunk_size=moe_chunk_size,
         )
 
     return x[:num_tokens, :hidden_size]

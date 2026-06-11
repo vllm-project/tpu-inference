@@ -82,6 +82,7 @@ def moe_apply(
     extra_backend_kwargs = dict(
         extra_backend_kwargs) if extra_backend_kwargs else {}
     scatter_results = extra_backend_kwargs.pop("scatter_results", False)
+    moe_chunk_size = extra_backend_kwargs.pop("moe_chunk_size", 0)
 
     with jax.named_scope(layer._get_name()):
         activation = layer.activation if isinstance(
@@ -161,6 +162,7 @@ def moe_apply(
                         "hash_based_topk_indices", None),
                     expert_score_correction_bias=extra_backend_kwargs.get(
                         "e_score_correction_bias", None),
+                    moe_chunk_size=moe_chunk_size,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
