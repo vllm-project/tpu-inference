@@ -171,6 +171,7 @@ while IFS= read -r file; do
         validate_field "CI_TPU_VERSION" "$file" "Specifies the TPU hardware generation (e.g., tpu6e, tpu7x) required for this test."
         validate_field "CI_STAGE"      "$file" "Defines the testing phase (e.g., UnitTest, Accuracy/Correctness, Benchmark, CorrectnessTest, PerformanceTest, Single-Host CorrectnessTest, Single-Host PerformanceTest, Multi-Host CorrectnessTest, Multi-Host PerformanceTest."
         validate_field "CI_CATEGORY"   "$file" "Determines which support matrix (e.g., multimodal, text-only, feature support matrix) the results belong to."
+        validate_field "MODEL_IMPL_TYPE" "$file" "Defines the model implementation type (e.g., vllm, flax_nnx)."
 
         # Extract values for consistency checks
         C_CAT=$(yq '.steps[].env.CI_CATEGORY | select(. != null)' "$file" | head -1 || true)
@@ -246,11 +247,11 @@ while IFS= read -r file; do
         done < <(echo "$ALL_FILE_STAGES")
 
         # Step key and label format (prefix check)
-        INVALID_KEYS=$(yq '.steps[] | select(.key != null and (.key | test("^\$\{TPU_VERSION(:-|\})") | not)) | .key' "$file")
+        INVALID_KEYS=$(yq '.steps[] | select(.key != null and (.key | test("^\$\{BK_KEY(:-|\})") | not)) | .key' "$file")
         if [[ -n "$INVALID_KEYS" ]]; then
             echo "+++ ❌ Error: Invalid key format in $file"
-            echo "Found keys: $INVALID_KEYS"
-            echo "💡 Tip: All step keys must start with '\${TPU_VERSION}'."
+            echo "Found keys without \${BK_KEY} prefix: $INVALID_KEYS"
+            echo "💡 Tip: All step keys must start with \${BK_KEY} to ensure unique identification."
             echo ""
             ERRORS_FOUND=1
         fi
@@ -263,7 +264,7 @@ while IFS= read -r file; do
             echo ""
             ERRORS_FOUND=1
         fi
-
+        
         # Recording step consistency (record_step_result.sh)
         RECORD_STEPS_JSON=$(yq '[.steps[] | select(.commands != null) | select(.commands[] | test("record_step_result.sh"))]' -o json "$file" || echo "[]")
 

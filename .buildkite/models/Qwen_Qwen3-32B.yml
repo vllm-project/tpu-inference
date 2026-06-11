@@ -13,19 +13,22 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3-32B"
-    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Unit tests for Qwen/Qwen3-32B"
+    key: "${BK_KEY}_Qwen_Qwen3-32B_UnitTest"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_qwen3.py'
-  - label: "${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3-32B"
-    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-32B_UnitTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record unit test result for Qwen/Qwen3-32B"
+    key: "${BK_KEY}_record_Qwen_Qwen3-32B_UnitTest"
+    depends_on: "${BK_KEY}_Qwen_Qwen3-32B_UnitTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Qwen/Qwen3-32B"
       CI_STAGE: "UnitTest"
@@ -34,25 +37,27 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_UnitTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-32B_UnitTest
 
-  - label: "${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3-32B"
-    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-32B_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for Qwen/Qwen3-32B"
+    key: "${BK_KEY}_Qwen_Qwen3-32B_Accuracy"
+    depends_on: "${BK_KEY}_record_Qwen_Qwen3-32B_UnitTest"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       TEST_MODEL: Qwen/Qwen3-32B
       TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MINIMUM_ACCURACY_THRESHOLD: 0.74
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
-  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen3-32B"
-    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-32B_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for Qwen/Qwen3-32B"
+    key: "${BK_KEY}_record_Qwen_Qwen3-32B_Accuracy"
+    depends_on: "${BK_KEY}_Qwen_Qwen3-32B_Accuracy"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Qwen/Qwen3-32B"
       CI_STAGE: "Accuracy/Correctness"
@@ -61,15 +66,16 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-32B_Accuracy
 
-  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3-32B"
-    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-32B_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for Qwen/Qwen3-32B"
+    key: "${BK_KEY}_Qwen_Qwen3-32B_Benchmark"
+    depends_on: "${BK_KEY}_record_Qwen_Qwen3-32B_Accuracy"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       TEST_MODEL: Qwen/Qwen3-32B
       TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
       MINIMUM_THROUGHPUT_THRESHOLD: 12.46
@@ -82,10 +88,11 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
-  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3-32B"
-    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-32B_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_Benchmark"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance benchmark result for Qwen/Qwen3-32B"
+    key: "${BK_KEY}_record_Qwen_Qwen3-32B_Benchmark"
+    depends_on: "${BK_KEY}_Qwen_Qwen3-32B_Benchmark"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Qwen/Qwen3-32B"
       CI_STAGE: "Benchmark"
@@ -94,4 +101,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_Benchmark
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-32B_Benchmark

@@ -13,24 +13,27 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3.5-397B-A17B-FP8"
-    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Unit tests for Qwen/Qwen3.5-397B-A17B-FP8"
+    key: "${BK_KEY}_Qwen_Qwen3_5-397B-A17B_UnitTest"
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_UnitTest" "not enough HBM"
+          buildkite-agent meta-data set "${BK_KEY}_Qwen_Qwen3_5-397B-A17B_UnitTest" "not enough HBM"
         else
           .buildkite/scripts/run_in_docker.sh \
             bash -c 'SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 MODEL_IMPL_TYPE=vllm python /workspace/tpu_inference/examples/offline_inference.py --model Qwen/Qwen3.5-397B-A17B-FP8 --tensor-parallel-size 8 --enable-expert-parallel  --max-num-batched-tokens 256 --max-num-seqs 256  --limit-mm-per-prompt "{\"image\": 0, \"video\": 0}" --chat-template-kwargs="{\"enable_thinking\": false}"'
         fi
 
-  - label: "${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3.5-397B-A17B-FP8"
-    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_5-397B-A17B_UnitTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record unit test result for Qwen/Qwen3.5-397B-A17B-FP8"
+    key: "${BK_KEY}_record_Qwen_Qwen3_5-397B-A17B_UnitTest"
+    depends_on: "${BK_KEY}_Qwen_Qwen3_5-397B-A17B_UnitTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Qwen/Qwen3.5-397B-A17B"
       CI_STAGE: "UnitTest"
@@ -39,26 +42,29 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_UnitTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3_5-397B-A17B_UnitTest
 
-  - label: "${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3.5-397B-A17B-FP8"
-    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_5-397B-A17B_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for Qwen/Qwen3.5-397B-A17B-FP8"
+    key: "${BK_KEY}_Qwen_Qwen3_5-397B-A17B_Accuracy"
+    depends_on: "${BK_KEY}_record_Qwen_Qwen3_5-397B-A17B_UnitTest"
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Accuracy" "not enough HBM"
+          buildkite-agent meta-data set "${BK_KEY}_Qwen_Qwen3_5-397B-A17B_Accuracy" "not enough HBM"
         else
           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3.5-397B-A17B-FP8" --use_moe_ep_kernel 0 --tensor_parallel_size 8 --max_model_len 4096 --max_num_batched_tokens 4096 --max_gen_toks 2048 --enable_expert_parallel 1 --flex_threshold 0.63 --strict_threshold 0.63 --limit_mm_per_prompt '{"image": 0, "video": 0}' --block_size 256 --limit 100 --enable_thinking false
         fi
 
-  - label: "${TPU_VERSION:-tpu6e} Record integration test result for Qwen/Qwen3.5-397B-A17B-FP8"
-    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_5-397B-A17B_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record integration test result for Qwen/Qwen3.5-397B-A17B-FP8"
+    key: "${BK_KEY}_record_Qwen_Qwen3_5-397B-A17B_Accuracy"
+    depends_on: "${BK_KEY}_Qwen_Qwen3_5-397B-A17B_Accuracy"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Qwen/Qwen3.5-397B-A17B"
       CI_STAGE: "Accuracy/Correctness"
@@ -67,11 +73,13 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3_5-397B-A17B_Accuracy
 
-  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3.5-397B-A17B-FP8"
-    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_5-397B-A17B_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for Qwen/Qwen3.5-397B-A17B-FP8"
+    key: "${BK_KEY}_Qwen_Qwen3_5-397B-A17B_Benchmark"
+    depends_on: "${BK_KEY}_record_Qwen_Qwen3_5-397B-A17B_Accuracy"
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
@@ -80,15 +88,16 @@ steps:
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Benchmark" "not enough HBM"
+          buildkite-agent meta-data set "${BK_KEY}_Qwen_Qwen3_5-397B-A17B_Benchmark" "not enough HBM"
         else
               .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3.5-397B-A17B-FP8 --tp 8 --req_tput_limit 0.04  --output_token_tput_limit 300 --total_token_tput_limit 345 --input_len 1024 --output_len 8192 --use_moe_ep_kernel 0 --limit_mm_per_prompt '{"image": 0, "video": 0}' --block_size 256 --num_prompts 64 --timeout 52 --gpu-memory-utilization 0.9
         fi
 
-  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3.5-397B-A17B-FP8"
-    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_5-397B-A17B_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Benchmark"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance benchmark result for Qwen/Qwen3.5-397B-A17B-FP8"
+    key: "${BK_KEY}_record_Qwen_Qwen3_5-397B-A17B_Benchmark"
+    depends_on: "${BK_KEY}_Qwen_Qwen3_5-397B-A17B_Benchmark"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Qwen/Qwen3.5-397B-A17B"
       CI_STAGE: "Benchmark"
@@ -97,4 +106,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Benchmark
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3_5-397B-A17B_Benchmark

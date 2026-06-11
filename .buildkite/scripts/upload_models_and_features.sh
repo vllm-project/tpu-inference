@@ -20,18 +20,9 @@ BUILDKITE_DIR=".buildkite"
 MODEL_LIST_KEY="model-list"
 FEATURE_LIST_KEY="feature-list"
 
-MODEL_IMPL_TYPE="${MODEL_IMPL_TYPE:-auto}"
-
-# Validate inputs that will later be interpolated into uploaded pipeline YAML.
-# Reject anything that isn't on the allowlist / numeric to prevent injection of
-# extra YAML keys (e.g. via embedded newlines or quotes) through env vars.
-case "${MODEL_IMPL_TYPE}" in
-  auto|flax_nnx|vllm) ;;
-  *)
-    echo "ERROR: MODEL_IMPL_TYPE must be one of auto|flax_nnx|vllm, got: '${MODEL_IMPL_TYPE}'"
-    exit 1
-    ;;
-esac
+# Define the target execution frameworks. 
+# The script iterates through these to set MODEL_IMPL_TYPE and generate separate pipeline groups.
+FRAMEWORKS=("vllm" "flax_nnx")
 
 if [[ ! "${JOB_PRIORITY:-1}" =~ ^-?[0-9]+$ ]]; then
   echo "ERROR: JOB_PRIORITY must be an integer, got: '${JOB_PRIORITY:-}'"
@@ -64,18 +55,8 @@ add_kernel_microbenchmarks() {
   fi
 }
 
-case "${MODEL_IMPL_TYPE}" in
-  "auto")
-    TARGET_FOLDERS=("parallelism" "models" "features" "rl")
-    add_kernel_microbenchmarks
-    ;;
-  "flax_nnx")
-    TARGET_FOLDERS=("quantization" "parallelism" "features")
-    ;;
-  "vllm")
-    TARGET_FOLDERS=("quantization" "parallelism" "models" "features")
-    ;;
-esac
+TARGET_FOLDERS=("quantization" "parallelism" "models" "features" "rl")
+add_kernel_microbenchmarks
 
 # Arrays to store YAML content fragments (without 'steps:' header)
 pipeline_v6e_fragments=()
@@ -84,7 +65,6 @@ pipeline_v7x_fragments=()
 # Declare separate arrays for each list
 declare -a model_list
 declare -a feature_list
-
 
 for folder_path in "${TARGET_FOLDERS[@]}"; do
   folder=$BUILDKITE_DIR/$folder_path
@@ -158,14 +138,22 @@ if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
   export TENSOR_PARALLEL_SIZE_SINGLE=1
   export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v6_matrix" "true"
-  {
-    echo "priority: ${JOB_PRIORITY:-1}"
-    echo "steps:"
-    echo "  - group: \"TPU v6e nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
-    echo "    key: \"v6e-group\""
-    echo "    steps:"
-    printf "%s\n" "${pipeline_v6e_fragments[@]}" | sed 's/^/      /'
-  } | buildkite-agent pipeline upload
+  
+  # Loop through each model implementation type
+  for IMPL_TYPE in "${FRAMEWORKS[@]}"; do
+    export MODEL_IMPL_TYPE="${IMPL_TYPE}"
+    # Standardize prefix to keep buildkite step keys under the 100-character linter limit
+    export BK_KEY="${TPU_VERSION}_${MODEL_IMPL_TYPE}"
+    echo "Uploading v6e pipeline group for: ${MODEL_IMPL_TYPE}"
+    {
+      echo "priority: ${JOB_PRIORITY:-1}"
+      echo "steps:"
+      echo "  - group: \"TPU v6e nightly Tests (${MODEL_IMPL_TYPE})\""
+      echo "    key: \"v6e-group-${MODEL_IMPL_TYPE}\""
+      echo "    steps:"
+      printf "%s\n" "${pipeline_v6e_fragments[@]}" | sed 's/^/      /'
+    } | buildkite-agent pipeline upload
+  done
 else
   echo "--- No .yml files found, nothing to upload."
   exit 0
@@ -180,14 +168,22 @@ if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   export TENSOR_PARALLEL_SIZE_SINGLE=2
   export TENSOR_PARALLEL_SIZE_MULTI=8
   buildkite-agent meta-data set "run_v7_matrix" "true"
-  {
-    echo "priority: ${JOB_PRIORITY:-1}"
-    echo "steps:"
-    echo "  - group: \"TPU v7x nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
-    echo "    key: \"v7x-group\""
-    echo "    steps:"
-    printf "%s\n" "${pipeline_v7x_fragments[@]}" | sed 's/^/      /'
-  } | buildkite-agent pipeline upload
+
+  # Loop through each model implementation type
+  for IMPL_TYPE in "${FRAMEWORKS[@]}"; do
+    export MODEL_IMPL_TYPE="${IMPL_TYPE}"
+    # Standardize prefix to keep buildkite step keys under the 100-character linter limit
+    export BK_KEY="${TPU_VERSION}_${MODEL_IMPL_TYPE}"
+    echo "Uploading v7x pipeline group for: ${MODEL_IMPL_TYPE}"
+    {
+      echo "priority: ${JOB_PRIORITY:-1}"
+      echo "steps:"
+      echo "  - group: \"TPU v7x nightly Tests (${MODEL_IMPL_TYPE})\""
+      echo "    key: \"v7x-group-${MODEL_IMPL_TYPE}\""
+      echo "    steps:"
+      printf "%s\n" "${pipeline_v7x_fragments[@]}" | sed 's/^/      /'
+    } | buildkite-agent pipeline upload
+  done
 else
   echo "--- No .yml files found, nothing to upload."
   exit 0
