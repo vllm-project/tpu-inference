@@ -734,6 +734,8 @@ def test_eagle3_logprobs_correctness_random(monkeypatch: pytest.MonkeyPatch, ):
                              max_num_seqs=2,
                              async_scheduling=True,
                              enable_dp_attention=False)
+
+
 @pytest.fixture(scope="module")
 def gemma4_mtp_baseline():
     '''
@@ -749,7 +751,7 @@ def gemma4_mtp_baseline():
                                      presence_penalty=0,
                                      min_p=0,
                                      logprobs=None)
-                                     
+
     extra_kwargs = {
         "seed": 42,
         "max_model_len": 128,
