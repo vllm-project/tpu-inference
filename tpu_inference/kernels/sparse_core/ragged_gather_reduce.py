@@ -443,30 +443,30 @@ def ragged_gather_reduce(
 ) -> jax.Array:
     """Gathers `x` according to `indices`, applies weights and masks, and reduces.
 
-    This function performs a gathered lookup from `x` using `indices`, scales the
-    obtained rows by `topk_weights`, masks out any rows where `valid_rows_mask` is
-    False, and then groups every `reduce_group_size` rows together and reduces
-    them via summation.
+  This function performs a gathered lookup from `x` using `indices`, scales the
+  obtained rows by `topk_weights`, masks out any rows where `valid_rows_mask` is
+  False, and then groups every `reduce_group_size` rows together and reduces
+  them via summation.
 
-    The typical use case of this kernel is unpermute + local-reduction in the
-    MOE after GMM. Compared to maxtext.src.maxtext.kernels.gather_reduce_sc,
-    this kernel provides better performance if large sparsity exists in
-    `valid_rows_mask`. For example, expert_parallelism =8, 16 etc.
+  The typical use case of this kernel is unpermute + local-reduction in the
+  MOE after GMM. Compared to maxtext.src.maxtext.kernels.gather_reduce_sc,
+  this kernel provides better performance if large sparsity exists in
+  `valid_rows_mask`. For example, expert_parallelism =8, 16 etc.
 
-    Args:
-        x: A 2D JAX array of input features with shape `(input_size, hidden_size)`.
-        indices: A 1D JAX array of indices to gather with shape `(input_size,)`.
-        topk_weights: A 1D JAX array of weights to scale the gathered rows with
-        shape `(input_size,)`.
-        valid_rows_mask: A 1D boolean JAX array indicating which gathered rows are
-            valid, with shape `(input_size,)`.
-        reduce_group_size: An integer representing the number of consecutive rows to
-            reduce (sum) together.
+  Args:
+    x: A 2D JAX array of input features with shape `(input_size, hidden_size)`.
+    indices: A 1D JAX array of indices to gather with shape `(input_size,)`.
+    topk_weights: A 1D JAX array of weights to scale the gathered rows with
+      shape `(input_size,)`.
+    valid_rows_mask: A 1D boolean JAX array indicating which gathered rows are
+      valid, with shape `(input_size,)`.
+    reduce_group_size: An integer representing the number of consecutive rows to
+      reduce (sum) together.
 
-    Returns:
-        A 2D JAX array of reduced data with shape
-        `(input_size // reduce_group_size, hidden_size)`.
-    """
+  Returns:
+    A 2D JAX array of reduced data with shape
+    `(input_size // reduce_group_size, hidden_size)`.
+  """
 
     assert x.ndim == 2, "ragged_gather_reduce only supports 2d inputs."
     assert indices.ndim == 1, "ragged_gather_reduce only supports 1d indices."
@@ -553,7 +553,7 @@ def ragged_gather_reduce(
             num_row_partitions=num_row_partitions,
             num_column_partitions=num_column_partitions,
         ),
-        out_type=jax.ShapeDtypeStruct(
+        out_shape=jax.ShapeDtypeStruct(
             (x.shape[0] // reduce_group_size, x.shape[1]),
             jnp.float32,
         ),
@@ -561,18 +561,16 @@ def ragged_gather_reduce(
             use_tc_tiling_on_sc=True,
             disable_bounds_checks=True,
         ),
-        scratch_types=dict(
-            num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes, ),
-                                                           jnp.int32),
-            out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-            prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
-            src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.float32),
-            sorted_by_validity_vmem_ref=pltpu.VMEM((num_simd_lanes, ),
-                                                   jnp.int32),
-            sem_ref=pltpu.SemaphoreType.DMA((2, )),
-        ),
+        scratch_shapes=[
+            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+            pltpu.VMEM((1, col_size), jnp.uint32),
+            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            pltpu.VMEM((num_simd_lanes, ), jnp.float32),
+            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            pltpu.SemaphoreType.DMA((2, )),
+        ],
         mesh=vector_mesh,
         name="sc_ragged_gather_reduce",
     )(

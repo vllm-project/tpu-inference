@@ -24,22 +24,6 @@ from vllm import LLM, SamplingParams
 from vllm.v1.metrics.reader import Counter
 
 
-def _disable_shardy_for_qwen35_4b(mp: pytest.MonkeyPatch) -> None:
-    """Disables Shardy to avoid a libtpu 0.0.41 segfault in `embed_multimodal`.
-
-    TODO: Remove once libtpu >= 0.0.42.dev20260527.
-    """
-    import jax
-
-    mp.setenv("JAX_USE_SHARDY_PARTITIONER", "false")
-    libtpu_init_args = os.environ.get("LIBTPU_INIT_ARGS", "")
-    mp.setenv(
-        "LIBTPU_INIT_ARGS",
-        "--xla_use_shardy=false --xla_tpu_scoped_vmem_limit_kib=131072 " +
-        libtpu_init_args)
-    jax.config.update("jax_use_shardy_partitioner", False)
-
-
 # TODO (Qiliang Cui): remove this when XLA fixes the recursive jit call issue.
 def _is_v7x():
     # jax.devices() will hang so use TPU_VERSION to indicate the version.
@@ -545,7 +529,6 @@ def mtp_baseline():
     }
     test_prompts = get_eagle3_test_prompts()
     with pytest.MonkeyPatch.context() as mp:
-        _disable_shardy_for_qwen35_4b(mp)
         ref_outputs = _get_baseline_results(
             mp,
             sampling_config,
@@ -579,7 +562,6 @@ def test_mtp_correctness(
     model_name = "Qwen/Qwen3.5-4B"
     monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
     monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
-    _disable_shardy_for_qwen35_4b(monkeypatch)
 
     speculative_config = {
         "method": "mtp",
@@ -618,7 +600,6 @@ def test_mtp_performance(
     model_name = "Qwen/Qwen3.5-4B"
     monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
     monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
-    _disable_shardy_for_qwen35_4b(monkeypatch)
 
     extra_kwargs = {
         "seed": 42,
