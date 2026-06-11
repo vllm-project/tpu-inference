@@ -13,18 +13,21 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for fused moe-w4a8"
-    key: "${TPU_VERSION:-tpu6e}_fused_moe-w4a8_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for fused moe-w4a8"
+    key: "${BK_KEY}_fused_moe-w4a8_CorrectnessTest"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_fused_moe-w4a8_CorrectnessTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for fused moe w4a8"
-    key: "${TPU_VERSION:-tpu6e}_record_fused_moe-w4a8_CorrectnessTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_fused_moe-w4a8_CorrectnessTest"
+        buildkite-agent meta-data set "${BK_KEY}_fused_moe-w4a8_CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for fused moe w4a8"
+    key: "${BK_KEY}_record_fused_moe-w4a8_CorrectnessTest"
+    depends_on: "${BK_KEY}_fused_moe-w4a8_CorrectnessTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "fused moe-w4a8"
       CI_STAGE: "CorrectnessTest"
@@ -33,21 +36,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_fused_moe-w4a8_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_fused_moe-w4a8_CorrectnessTest
 
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for fused moe-w4a8"
-    key: "${TPU_VERSION:-tpu6e}_fused_moe-w4a8_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_fused_moe-w4a8_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for fused moe-w4a8"
+    key: "${BK_KEY}_fused_moe-w4a8_PerformanceTest"
+    depends_on: "${BK_KEY}_record_fused_moe-w4a8_CorrectnessTest"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_fused_moe-w4a8_PerformanceTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for fused moe-w4a8"
-    key: "${TPU_VERSION:-tpu6e}_record_fused_moe-w4a8_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_fused_moe-w4a8_PerformanceTest"
+        buildkite-agent meta-data set "${BK_KEY}_fused_moe-w4a8_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for fused moe-w4a8"
+    key: "${BK_KEY}_record_fused_moe-w4a8_PerformanceTest"
+    depends_on: "${BK_KEY}_fused_moe-w4a8_PerformanceTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "fused moe-w4a8"
       CI_STAGE: "PerformanceTest"
@@ -56,4 +62,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_fused_moe-w4a8_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_fused_moe-w4a8_PerformanceTest

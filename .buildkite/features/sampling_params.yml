@@ -15,17 +15,20 @@
 # Sampling parameters control how the model selects tokens during generation.
 # These tests verify that temperature, top_p, top_k, and logprobs work correctly.
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for sampling_params"
-    key: "${TPU_VERSION:-tpu6e}_sampling_params_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for sampling_params"
+    key: "${BK_KEY}_sampling_params_CorrectnessTest"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_sampling_params.py
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for sampling_params"
-    key: "${TPU_VERSION:-tpu6e}_record_sampling_params_CorrectnessTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_sampling_params_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for sampling_params"
+    key: "${BK_KEY}_record_sampling_params_CorrectnessTest"
+    depends_on: "${BK_KEY}_sampling_params_CorrectnessTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "sampling_params"
       CI_STAGE: "CorrectnessTest"
@@ -34,4 +37,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_sampling_params_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_sampling_params_CorrectnessTest

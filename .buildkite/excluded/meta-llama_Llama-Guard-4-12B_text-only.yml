@@ -13,19 +13,22 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Unit tests for meta-llama/Llama-Guard-4-12B/text-only"
-    key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_text-only_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Unit tests for meta-llama/Llama-Guard-4-12B/text-only"
+    key: "${BK_KEY}_meta-llama_Llama-Guard-4-12B_text-only_UnitTest"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_llama_guard_4.py'
-  - label: "${TPU_VERSION:-tpu6e} Record unit test result for meta-llama/Llama-Guard-4-12B/text-only"
-    key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-Guard-4-12B_text-only_UnitTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_text-only_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record unit test result for meta-llama/Llama-Guard-4-12B/text-only"
+    key: "${BK_KEY}_record_meta-llama_Llama-Guard-4-12B_text-only_UnitTest"
+    depends_on: "${BK_KEY}_meta-llama_Llama-Guard-4-12B_text-only_UnitTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "meta-llama/Llama-Guard-4-12B/text-only"
       CI_STAGE: "UnitTest"
@@ -34,25 +37,27 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_text-only_UnitTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_meta-llama_Llama-Guard-4-12B_text-only_UnitTest
 
-  - label: "${TPU_VERSION:-tpu6e} Accuracy for meta-llama/Llama-Guard-4-12B/text-only"
-    key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_text-only_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-Guard-4-12B_text-only_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for meta-llama/Llama-Guard-4-12B/text-only"
+    key: "${BK_KEY}_meta-llama_Llama-Guard-4-12B_text-only_Accuracy"
+    depends_on: "${BK_KEY}_record_meta-llama_Llama-Guard-4-12B_text-only_UnitTest"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       TEST_MODEL: meta-llama/Llama-Guard-4-12B
       TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
       MINIMUM_ACCURACY_THRESHOLD: 0.31 #TODO: This will be updated later with a true threshold
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/safety_model_benchmark.sh --mode accuracy --benchmark text-only
-  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for meta-llama/Llama-Guard-4-12B/text-only"
-    key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-Guard-4-12B_text-only_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_text-only_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for meta-llama/Llama-Guard-4-12B/text-only"
+    key: "${BK_KEY}_record_meta-llama_Llama-Guard-4-12B_text-only_Accuracy"
+    depends_on: "${BK_KEY}_meta-llama_Llama-Guard-4-12B_text-only_Accuracy"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "meta-llama/Llama-Guard-4-12B/text-only"
       CI_STAGE: "Accuracy/Correctness"
@@ -61,24 +66,26 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_text-only_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_meta-llama_Llama-Guard-4-12B_text-only_Accuracy
 
-  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for meta-llama/Llama-Guard-4-12B/text-only"
-    key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_text-only_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-Guard-4-12B_text-only_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for meta-llama/Llama-Guard-4-12B/text-only"
+    key: "${BK_KEY}_meta-llama_Llama-Guard-4-12B_text-only_Benchmark"
+    depends_on: "${BK_KEY}_record_meta-llama_Llama-Guard-4-12B_text-only_Accuracy"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       TEST_MODEL: meta-llama/Llama-Guard-4-12B
       TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/safety_model_benchmark.sh --mode performance --benchmark text-only
-  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for meta-llama/Llama-Guard-4-12B/text-only"
-    key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-Guard-4-12B_text-only_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_text-only_Benchmark"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance benchmark result for meta-llama/Llama-Guard-4-12B/text-only"
+    key: "${BK_KEY}_record_meta-llama_Llama-Guard-4-12B_text-only_Benchmark"
+    depends_on: "${BK_KEY}_meta-llama_Llama-Guard-4-12B_text-only_Benchmark"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "meta-llama/Llama-Guard-4-12B/text-only"
       CI_STAGE: "Benchmark"
@@ -87,4 +94,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_meta-llama_Llama-Guard-4-12B_text-only_Benchmark
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_meta-llama_Llama-Guard-4-12B_text-only_Benchmark
