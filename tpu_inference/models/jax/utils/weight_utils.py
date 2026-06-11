@@ -186,17 +186,37 @@ def model_weights_single_file_generator(
                 yield name, weight_tensor
 
 
-def get_param(params: nnx.State, path: str) -> nnx.State:
+def get_param(params: nnx.State,
+              path: str,
+              strict: bool = True) -> Optional[nnx.State]:
+    """Walk a dotted ``path`` into an ``nnx.State`` tree.
+
+    Integer segments index into list nodes; all others are key lookups.
+
+    Args:
+        params: the State tree to resolve against.
+        path: dotted path, e.g. ``"layers.0.mlp.gate_up_proj.weight"``.
+        strict: when True (default) an unresolvable path raises
+            ``ValueError``; when False it returns ``None`` (so callers can
+            probe for optional params).
+    """
     keys = path.split(".")
     plevel = params
     for key in keys:
         if key.isdigit():
-            plevel = plevel[int(key)]
+            try:
+                plevel = plevel[int(key)]
+            except (IndexError, KeyError, TypeError):
+                if strict:
+                    raise ValueError(f"{path} is not a valid param path")
+                return None
         else:
             if key in plevel:
                 plevel = plevel[key]
-            else:
+            elif strict:
                 raise ValueError(f"{path} is not a valid param path")
+            else:
+                return None
     return plevel
 
 
@@ -955,30 +975,33 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         """
         remap = self._packed_remap()
         if not remap:
-            # No packed/fused params to route. Skip building the full param
-            # dict: materializing the entire parameter tree up front
-            # transiently doubles device HBM, so go straight to the streaming
+            # No packed/fused params to route; go straight to the streaming
             # recursive loader.
             return super().load_weights(weights, **kwargs)
-        params_dict = dict(self.module.named_parameters())
         routed_loaded: set = set()
 
         def _route(weights_iter):
+            param_state = nnx.state(self.module)
             for name, weight in weights_iter:
                 for fused_name, shard_name, shard_id in remap:
                     if shard_name not in name:
                         continue
+                    # fused_param_name is the name of the param in the model
+                    # that corresponds to this shard. E.g. "gate_up_proj" "qkv_proj"
                     fused_param_name = name.replace(shard_name, fused_name)
-                    param = params_dict.get(fused_param_name)
-                    if param is None:
-                        # No fused param at this path (e.g. vision tower keeps
-                        # gate_proj/up_proj separate) — load normally.
+                    param = get_param(param_state,
+                                      fused_param_name,
+                                      strict=False)
+                    if not isinstance(param, nnx.Param):
                         continue
                     param.weight_loader(param, weight, shard_id)
                     routed_loaded.add(fused_param_name)
                     break
                 else:
                     yield name, weight
+            # release it before returning so we don't retain a whole-model
+            # param structure post the load.
+            del param_state
 
         autoloaded = super().load_weights(_route(weights), **kwargs)
         return autoloaded | routed_loaded
