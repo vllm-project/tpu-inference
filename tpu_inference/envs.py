@@ -399,6 +399,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use VMEM size as the threshold.
     "SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES":
     lambda: os.getenv("SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES", "auto"),
+    "MLA_TRANSPOSE_KV_CACHE":
+    env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
 }
 
 

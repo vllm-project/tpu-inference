@@ -248,6 +248,57 @@ class TestPallasMLAttentionBackendImpl:
         assert outputs is not None
         assert new_kv_cache is not None
 
+    @patch("tpu_inference.envs.MLA_TRANSPOSE_KV_CACHE", True)
+    def test_forward_with_transpose_kv_cache(self, mesh):
+        impl = PallasMLAttentionBackendImpl(
+            num_heads=NUM_HEADS,
+            head_size=KV_LORA_RANK + QK_ROPE_HEAD_DIM,
+            scale=0.088,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            logits_soft_cap=None,
+            attn_type=AttentionType.DECODER,
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=Q_LORA_RANK,
+            kv_lora_rank=KV_LORA_RANK,
+            qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+            qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+            qk_head_dim=QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM,
+            v_head_dim=V_HEAD_DIM,
+        )
+
+        layer = MagicMock()
+        layer.kv_cache_quantized_dtype = None
+
+        # block_size=128 is required for transpose_kv_cache to work.
+        q, kv_c_normed, k_pe, kv_cache, metadata = create_mla_inputs(
+            mesh, block_size=128)
+
+        with torchax.default_env():
+            key = jax.random.key(0)
+            layer.W_UK_T = torchax.tensor.Tensor(jax.random.normal(
+                key, (NUM_HEADS, QK_NOPE_HEAD_DIM, KV_LORA_RANK),
+                dtype=jnp.bfloat16),
+                                                 env=torchax.default_env())
+            layer.W_UV = torchax.tensor.Tensor(
+                jax.random.normal(key, (NUM_HEADS, KV_LORA_RANK, V_HEAD_DIM),
+                                  dtype=jnp.bfloat16),
+                env=torchax.default_env())
+            layer.W_UK_T_scale = torchax.tensor.Tensor(
+                jnp.ones((NUM_HEADS, 1, KV_LORA_RANK), dtype=jnp.float32),
+                env=torchax.default_env())
+            layer.W_UV_scale = torchax.tensor.Tensor(jnp.ones(
+                (1, NUM_HEADS, V_HEAD_DIM), dtype=jnp.float32),
+                                                     env=torchax.default_env())
+            outputs, new_kv_cache = impl.forward(q, kv_c_normed, k_pe,
+                                                 kv_cache, metadata, mesh,
+                                                 layer)
+
+        assert outputs is not None
+        assert new_kv_cache is not None
+
     def test_forward_with_fp8_kv_cache(self, mesh):
         impl = PallasMLAttentionBackendImpl(
             num_heads=NUM_HEADS,
