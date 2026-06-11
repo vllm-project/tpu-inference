@@ -526,6 +526,7 @@ class TestTpuPlatform:
 
         TpuPlatform._resolve_multiprocess_dp(vllm_config)  # must not raise
 
+    @pytest.mark.parametrize("async_sched", [False, True])
     @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
     @patch(
         "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
@@ -534,11 +535,12 @@ class TestTpuPlatform:
         "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_continue_decode"
     )
     def test_check_and_update_config_continue_decode_success(
-            self, mock_patch, mock_dp_update, mock_sharding, vllm_config):
+            self, mock_patch, mock_dp_update, mock_sharding, vllm_config,
+            async_sched):
         vllm_config.additional_config = {"enable_continue_decode": True}
         vllm_config.parallel_config.pipeline_parallel_size = 1
         vllm_config.model_config.runner_type = "generate"  # not pooling
-        vllm_config.scheduler_config.async_scheduling = False
+        vllm_config.scheduler_config.async_scheduling = async_sched
         vllm_config.cache_config = None
 
         TpuPlatform.check_and_update_config(vllm_config)
@@ -552,8 +554,6 @@ class TestTpuPlatform:
              "continue_decode is not supported with pipeline parallelism"),
             (1, "pooling", False,
              "continue_decode is not supported for pooling models"),
-            (1, "generate", True,
-             "continue_decode is not supported with async scheduling"),
         ],
     )
     @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
