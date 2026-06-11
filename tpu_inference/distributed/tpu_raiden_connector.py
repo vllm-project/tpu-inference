@@ -558,8 +558,8 @@ class TPUConnectorWorker:
         for req_id, req_meta in reqs.items():
             # Producer: register the prefilled blocks so D can pull them.
             # Replaces select_from_kv_caches + kv_transfer_server.await_pull.
-            self.kv_manager.notify_for_read(req_id, req_meta.uuid,
-                                        req_meta.local_block_ids)
+            self.kv_manager.register_read(req_id, req_meta.uuid,
+                                          req_meta.local_block_ids)
 
         reqs = metadata.reqs_to_load
         if reqs:
@@ -609,7 +609,7 @@ class TPUConnectorWorker:
         # Replaces the reqs_wait_pull/reqs_pulling bookkeeping + ZMQ side channel.
         if self.kv_manager is None:
             return set(), set()
-        done_sending, done_recving, failed_recving = self.kv_manager.complete_read(
+        done_sending, done_recving, failed_recving = self.kv_manager.poll_stats(
         )
         if failed_recving:
             # Do NOT report failed receives as done_recving: vllm would then try
