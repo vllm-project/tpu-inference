@@ -2339,12 +2339,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # Calculate batch composition statistics for active hardware profilers
             # and/or continuous batch logging.
+        batch_composition_stats = runner_utils.get_batch_composition_stats(
+            self.batch_counter, self.input_batch,
+            total_num_scheduled_tokens, num_reqs,
+            padded_total_num_scheduled_tokens, scheduler_output)
+        print(batch_composition_stats)
         if self.phase_based_profiler or self.aggregated_stats_logger:
             self.batch_counter += 1
-            batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.batch_counter, self.input_batch,
-                total_num_scheduled_tokens, num_reqs,
-                padded_total_num_scheduled_tokens, scheduler_output)
+
 
             if self.phase_based_profiler:
                 self.phase_based_profiler.step(batch_composition_stats)

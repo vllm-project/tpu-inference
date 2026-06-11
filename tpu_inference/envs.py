@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
     QUANTIZE_ON_LOAD_PREFIXES: list[str] = []
+    MLA_TRANSPOSE_KV_CACHE: bool = False
 
 
 def env_with_choices(

@@ -114,6 +114,12 @@ PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP = 0
 # For decode only batches, start capturing traces after all requests in the
 # batch has KV caches that have reached this length threshold
 PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD = -1
+# For prefill only batches, start capturing traces after all requests in the
+# batch has KV caches that have reached this length threshold
+PHASED_PROFILER_PREFILL_ONLY_KV_LEN_THRESHOLD = -1
+# For decode only batches, start capturing traces after the longest request
+# in the batch has a KV cache that has reached this length threshold
+PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_MAX = -1
 
 logger = init_logger(__name__)
 
@@ -329,6 +335,7 @@ def get_batch_composition_stats(
 
     scheduled_spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
     min_kv_len = float('inf') if num_reqs > 0 else 0
+    all_kv_lens = []
     for i, req_id in enumerate(input_batch.req_ids[:num_reqs]):
         assert req_id is not None
 
@@ -340,6 +347,8 @@ def get_batch_composition_stats(
         num_already_computed = int(
             num_computed_tokens_per_req[i])  # Cast from np.int32
         min_kv_len = min(min_kv_len, num_already_computed)
+
+        all_kv_lens.append(num_already_computed)
 
         # When speculative decoding is enabled for this request, the extra
         # tokens are draft tokens being verified, not chunked prefill tokens.
@@ -368,7 +377,8 @@ def get_batch_composition_stats(
         "num_decode_tokens": num_decode_tokens,
         "padded_total_num_scheduled_tokens": padded_total_num_scheduled_tokens,
         "num_reqs": num_reqs,
-        "min_kv_len": min_kv_len if min_kv_len != float('inf') else 0
+        "min_kv_len": min_kv_len if min_kv_len != float('inf') else 0,
+        "all_kv_lens": all_kv_lens
     }
     stats["phase"] = determine_phase_from_batch_composition_stats(stats).name
     return stats
@@ -572,6 +582,12 @@ class PhasedBasedProfiler:
         self.decode_kv_len_threshold: int = int(
             os.getenv("PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD",
                       PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD))
+        self.prefill_kv_len_threshold: int = int(
+            os.getenv("PHASED_PROFILER_PREFILL_ONLY_KV_LEN_THRESHOLD",
+                      PHASED_PROFILER_PREFILL_ONLY_KV_LEN_THRESHOLD))
+        self.decode_kv_len_threshold_max: int = int(
+            os.getenv("PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_MAX",
+                      PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_MAX))
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phase_seen: dict = {
@@ -610,6 +626,12 @@ class PhasedBasedProfiler:
         if self.decode_kv_len_threshold >= 0:
             logger.info("Will skip decode-only steps until min KV len >= %d.",
                         self.decode_kv_len_threshold)
+        if self.prefill_kv_len_threshold >= 0:
+            logger.info("Will skip prefill-only steps until min KV len >= %d.",
+                        self.prefill_kv_len_threshold)
+        if self.decode_kv_len_threshold_max >= 0:
+            logger.info("Will skip decode-only steps until max KV len >= %d.",
+                        self.decode_kv_len_threshold_max)
 
     def _write_batch_composition_stats_to_file_helper(
             self, batch_composition_stats: dict) -> None:
@@ -665,6 +687,27 @@ class PhasedBasedProfiler:
                     logger.debug(
                         "Skipping decode-only step as min KV len %d < threshold %d.",
                         min_kv_len, self.decode_kv_len_threshold)
+                    break
+
+            # Skip decode-only steps until max KV len reaches threshold
+            if phase == InferencePhase.DECODE_ONLY and \
+                    self.decode_kv_len_threshold_max >= 0:
+                all_kv_lens = batch_composition_stats.get("all_kv_lens", [])
+                max_kv_len = max(all_kv_lens) if all_kv_lens else 0
+                if max_kv_len < self.decode_kv_len_threshold_max:
+                    logger.debug(
+                        "Skipping decode-only step as max KV len %d < threshold %d.",
+                        max_kv_len, self.decode_kv_len_threshold_max)
+                    break
+
+            # Skip prefill-only steps until min KV len reaches threshold
+            if phase == InferencePhase.PREFILL_ONLY and \
+                    self.prefill_kv_len_threshold >= 0:
+                min_kv_len = batch_composition_stats.get("min_kv_len", 0)
+                if min_kv_len < self.prefill_kv_len_threshold:
+                    logger.debug(
+                        "Skipping prefill-only step as min KV len %d < threshold %d.",
+                        min_kv_len, self.prefill_kv_len_threshold)
                     break
 
             self.inference_phase_seen[phase] = True

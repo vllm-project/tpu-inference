@@ -1,0 +1,18 @@
+PHASED_PROFILER_PREFILL_ONLY_KV_LEN_THRESHOLD=7168 MLA_XPOSE_NTILE=96  FORCE_MOE_RANDOM_ROUTING=1 QUANTIZE_ON_LOAD_PREFIXES="self_attn" PHASED_PROFILING_DIR=profs/kimi-k2.6/5-layer/random-routing/kv_len_thres_7168 DP_SCHED_BATCH_PREFILL=0 MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 MOE_REQUANTIZE_WEIGHT_DTYPE=fp4 MOE_REQUANTIZE_BLOCK_SIZE=512 NEW_MODEL_DESIGN=1 MODEL_IMPL_TYPE=vllm  nohup vllm serve --seed 42 --model "gs://tpu-commons-ci/moonshootai/kimi/2.6" --served-model-name moonshotai/Kimi-K2.6 --max-model-len=9216 --max-num-batched-tokens=1024  --max-num-seqs=61 --kv-cache-dtype=fp8 --no-enable-prefix-caching --gpu-memory-utilization=0.98 --tensor-parallel-size=8  --enable-expert-parallel --additional-config '{"compilation_sizes": [488], "sharding": {"sharding_strategy": {"enable_dp_attention": true}}}' --generation-config="vllm" --override-generation-config='{"do_sample": false, "temperature": 0.0, "model": "moonshotai/Kimi-K2.6"}' --limit-mm-per-prompt='{"image": 0, "video": 0, "vision_chunk": 0}'  --trust_remote_code  --hf-overrides='{"text_config": {"num_hidden_layers": 5}}' &
+
+nohup vllm bench serve --model moonshotai/Kimi-K2.6 --dataset-name random --random-input-len 8192 --random-output-len 1024 --num-prompts 496 --ignore-eos --skip-chat-template &
+
+
+tpu-inference/profs/kimi-k2.6/5-layer/random-routing/kv_len_thres_7168/prefill_only
+
+gcloud storage cp -r profs/kimi-k2.6/5-layer/random-routing/kv_len_thres_7168/prefill_only/* gs://jacobplatin/profs/kimi-k2.6/06-10-2026/5-layers-random-routing-kv-lens-7168/prefill_only
+
+
+
+
+
+
+
+PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_MAX=9214 MLA_XPOSE_NTILE=96  FORCE_MOE_RANDOM_ROUTING=1 QUANTIZE_ON_LOAD_PREFIXES="self_attn" PHASED_PROFILING_DIR=profs/kimi-k2.6/5-layer/random-routing/kv_len_thres_9200 DP_SCHED_BATCH_PREFILL=0 MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 MOE_REQUANTIZE_WEIGHT_DTYPE=fp4 MOE_REQUANTIZE_BLOCK_SIZE=512 NEW_MODEL_DESIGN=1 MODEL_IMPL_TYPE=vllm  nohup vllm serve --seed 42 --model "gs://tpu-commons-ci/moonshootai/kimi/2.6" --served-model-name moonshotai/Kimi-K2.6 --max-model-len=9216 --max-num-batched-tokens=1024  --max-num-seqs=61 --kv-cache-dtype=fp8 --no-enable-prefix-caching --gpu-memory-utilization=0.98 --tensor-parallel-size=8  --enable-expert-parallel --additional-config '{"compilation_sizes": [488], "sharding": {"sharding_strategy": {"enable_dp_attention": true}}}' --generation-config="vllm" --override-generation-config='{"do_sample": false, "temperature": 0.0, "model": "moonshotai/Kimi-K2.6"}' --limit-mm-per-prompt='{"image": 0, "video": 0, "vision_chunk": 0}'  --trust_remote_code  --hf-overrides='{"text_config": {"num_hidden_layers": 5}}' &
+
+nohup vllm bench serve --model moonshotai/Kimi-K2.6 --dataset-name random --random-input-len 8192 --random-output-len 1024 --num-prompts 488 --ignore-eos --skip-chat-template &

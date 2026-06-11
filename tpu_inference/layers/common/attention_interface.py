@@ -523,6 +523,50 @@ def mla_attention(
         v_scale: scale to apply to v (if quantized)
         sm_scale: softmax scale
     """
+    import random
+    rand_val = random.uniform(0.0, 1.0)
+    # prefill
+    # cond_pred = (jnp.sum(md.seq_lens > 0) == 1) & (jnp.max(md.seq_lens) > 7168)
+    # decode,  (jnp.max(md.seq_lens) >= 9100)
+    # cond_pred = jnp.sum(md.seq_lens > 0) == 61
+
+    cond_pred = jnp.all(md.request_distribution == 61)
+
+    def _print_debug(_):
+        jax.debug.print(
+            "KV lens condition met). Printing MLA inputs metadata:\n"
+            "KV lens are {mda}\n"
+            "q_NTA: shape={q_NTA_shape}, dtype={q_NTA_dtype}\n"
+            "q_rope_TNH: shape={q_rope_shape}, dtype={q_rope_dtype}\n"
+            "k_SA: shape={k_SA_shape}, dtype={k_SA_dtype}\n"
+            "k_rope_SH: shape={k_rope_shape}, dtype={k_rope_dtype}\n"
+            "kv_cache: shape={kv_cache_shape}, dtype={kv_cache_dtype}\n"
+            "md.request_distribution: {request_distribution}\n"
+            "md.query_start_loc: {query_start_loc}\n"
+            "Random float: {rand_val}",
+            mda=md.seq_lens,
+            q_NTA_shape=q_NTA.shape,
+            q_NTA_dtype=q_NTA.dtype,
+            q_rope_shape=q_rope_TNH.shape,
+            q_rope_dtype=q_rope_TNH.dtype,
+            k_SA_shape=k_SA.shape,
+            k_SA_dtype=k_SA.dtype,
+            k_rope_shape=k_rope_SH.shape,
+            k_rope_dtype=k_rope_SH.dtype,
+            kv_cache_shape=kv_cache.shape,
+            kv_cache_dtype=kv_cache.dtype,
+            request_distribution=md.request_distribution,
+            query_start_loc=md.query_start_loc,
+            rand_val=rand_val,
+        )
+
+    jax.lax.cond(
+        cond_pred,
+        _print_debug,
+        lambda _: None,
+        operand=None,
+    )
+
     in_specs = (
         query_nth_sharding
         or P(None, ShardingAxisName.MLP_TENSOR, None),  # q (head-major)
@@ -562,21 +606,22 @@ def mla_attention(
             f"Using MLA tuned block sizes for batched decode: {batched_decode_tuned_params} for input shapes: {batched_decode_tuning_key}"
         )
 
-        out, new_cache = mla_ragged_paged_attention(
-            q,
-            q_rope,
-            k,
-            k_rope,
-            cache,
-            *args,
-            sm_scale=sm_scale,
-            num_kv_pages_per_block=num_kv_pages_per_block,
-            num_queries_per_block=num_queries_per_block,
-            decode_batch_size=decode_batch_size,
-            q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
-            transpose_kv_cache=envs.MLA_TRANSPOSE_KV_CACHE)
+        with jax.named_scope(f"mla_ragged_paged_attention_{rand_val}"):
+            out, new_cache = mla_ragged_paged_attention(
+                q,
+                q_rope,
+                k,
+                k_rope,
+                cache,
+                *args,
+                sm_scale=sm_scale,
+                num_kv_pages_per_block=num_kv_pages_per_block,
+                num_queries_per_block=num_queries_per_block,
+                decode_batch_size=decode_batch_size,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
+                transpose_kv_cache=envs.MLA_TRANSPOSE_KV_CACHE)
 
         return new_cache, out
 
