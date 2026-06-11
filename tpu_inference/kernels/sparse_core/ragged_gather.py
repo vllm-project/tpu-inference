@@ -113,7 +113,8 @@ def main_kernel(
         out_32b_hbm_ref = out_hbm_ref.bitcast(jnp.uint32)
 
         for col_vmem_start in range(0, col_size, num_lanes):
-            col_hbm_start = col_tile_start + col_vmem_start
+            col_hbm_start = pl.multiple_of(col_tile_start + col_vmem_start,
+                                           num_lanes)
             for row_vmem in range(num_simd_lanes):
                 row_hbm = indices[row_vmem] // packing
                 # Since we have changed layout from (8, 128) to (1, 128), continuous
@@ -279,19 +280,19 @@ def ragged_gather(x: jax.Array, indices: jax.Array, start: jax.Array,
             core_axis_name=vector_mesh.core_axis_name,
             subcore_axis_name=vector_mesh.subcore_axis_name,
         ),
-        out_shape=jax.ShapeDtypeStruct(
+        out_type=jax.ShapeDtypeStruct(
             (out_size + out_pad_size, aligned_hidden_size), dtype),
         compiler_params=pltpu.CompilerParams(
             use_tc_tiling_on_sc=True,
             disable_bounds_checks=True,
         ),
-        scratch_shapes=[
-            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            pltpu.SemaphoreType.DMA((2, )),
-        ],
+        scratch_types=dict(
+            start_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            end_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+            indices_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            sem_ref=pltpu.SemaphoreType.DMA((2, )),
+        ),
         mesh=vector_mesh,
         name="sc_ragged_gather",
     )(start, end, x, indices)[:out_size, :hidden_size]

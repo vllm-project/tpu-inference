@@ -26,6 +26,76 @@ from tpu_inference import envs
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch import InputBatch
 
+
+def trim_request_id_suffix(request_id: str) -> str:
+    """Trims the suffix from a request ID, keeping only the base ID.
+
+    Example: cmpl-f0d75fed-c25e-4ccf-b369-9bd0226021b3-0-a9cb3cca
+          -> cmpl-f0d75fed-c25e-4ccf-b369-9bd0226021b3
+    """
+    parts = request_id.split("-")
+    if len(parts) >= 6 and parts[0] == "cmpl":
+        return "-".join(parts[:6])
+    return request_id
+
+
+def get_kv_transfer_metadata(kv: list[Any]) -> tuple[str, int]:
+    """Returns the dimensions string and size in bytes for a list of KV cache tensors.
+
+    Dimensions format: (num_layers, num_blocks, block_size, num_heads, 2 (K/V), head_dim)
+    """
+    if not kv:
+        return "()", 0
+
+    # Dimensions string
+    dims_str = str((len(kv), ) + tuple(kv[0].shape))
+
+    # Calculate bytes robustly (supports JAX/NumPy Tensors and ShapeDtypeStruct specs)
+    kv_size_bytes = 0
+    for k in kv:
+        if hasattr(k, "nbytes"):
+            kv_size_bytes += k.nbytes
+        else:
+            # Fallback for ShapeDtypeStruct specs
+            kv_size_bytes += int(np.prod(k.shape) * np.dtype(k.dtype).itemsize)
+
+    return dims_str, kv_size_bytes
+
+
+def extract_request_ids_for_tracing(
+    input_batch: InputBatch,
+    scheduler_output: Optional[Any] = None,
+) -> dict[str, str]:
+    """Extracts request IDs from an InputBatch and formats them for XProf tracing."""
+    req_id_kwargs = {}
+    try:
+        num_reqs = input_batch.num_reqs
+        raw_req_ids = [
+            str(rid) for rid in input_batch.req_ids[:num_reqs]
+            if rid is not None
+        ]
+
+        active_req_ids = []
+        for rid in raw_req_ids:
+            # Only trace requests that have non-zero scheduled tokens in this step
+            if scheduler_output is not None:
+                num_tokens = scheduler_output.num_scheduled_tokens.get(rid, 0)
+                if num_tokens == 0:
+                    continue
+            active_req_ids.append(rid)
+
+        trimmed_req_ids = [
+            trim_request_id_suffix(rid) for rid in active_req_ids
+        ]
+        for i, rid in enumerate(trimmed_req_ids):
+            req_id_kwargs[f"request_id{i+1}"] = rid
+    except Exception as e:
+        logger.warning(
+            f"Failed to extract request IDs for tracing from input_batch. Error: {e}"
+        )
+    return req_id_kwargs
+
+
 MIN_NUM_SEQS = 8
 
 # These are used for determining the inference phase for a given batch in
@@ -211,7 +281,6 @@ class ForbidCompile:
             info_after = original_cached_func.cache_info()
             misses_after = info_after.misses
 
-            # Check if a cache miss occurred
             if misses_after > misses_before:
                 raise RuntimeError(self.message)
 
@@ -519,6 +588,12 @@ class PhasedBasedProfiler:
             "tpu_num_sparse_cores_to_trace": 1,
             "tpu_num_sparse_core_tiles_to_trace": 1,
         }
+        if envs.PROFILE_SINGLE_DEVICE:
+            self.default_profiling_options.advanced_configuration = {
+                "tpu_num_chips_to_profile_per_task": 1,
+                "tpu_num_sparse_cores_to_trace": 1,
+                "tpu_num_sparse_core_tiles_to_trace": 1,
+            }
 
         self.current_phase: str = ""
 
@@ -790,25 +865,25 @@ class PhasedBasedProfiler:
 @functools.partial(
     jax.tree_util.register_dataclass,
     data_fields=[
-        "draft_token_ids",
         "draft_lengths",
         "target_logits_indices",
         "bonus_logits_indices",
         "final_logits_indices",
     ],
     meta_fields=[],
-    drop_fields=["draft_lengths_cpu"],
+    drop_fields=["draft_lengths_cpu", "req_indices_dp", "req_ids_dp"],
 )
 @dataclass
 class SpecDecodeMetadata:
     """Metadata for speculative decoding on JAX/TPU, containing all necessary indices."""
-    draft_token_ids: jnp.ndarray
     draft_lengths: jnp.ndarray
     target_logits_indices: jnp.ndarray
     bonus_logits_indices: jnp.ndarray
     final_logits_indices: jnp.ndarray
 
     draft_lengths_cpu: Any = field(init=False, default=None)
+    req_indices_dp: dict = field(init=False, default_factory=dict)
+    req_ids_dp: dict = field(init=False, default_factory=dict)
 
 
 def host_extract_sampled_tokens(
@@ -828,9 +903,39 @@ def host_extract_sampled_tokens(
         valid_sampled_token_ids = runner.rejection_sampler.parse_output(
             next_tokens, runner.input_batch.vocab_size,
             spec_decode_metadata.draft_lengths_cpu, num_reqs,
-            spec_decode_metadata.draft_token_ids.shape[0])
+            spec_decode_metadata.final_logits_indices.shape[0], runner.dp_size,
+            spec_decode_metadata.req_indices_dp)
     # Mask out the sampled tokens that should not be sampled.
     for i in discard_sampled_tokens_req_indices:
         valid_sampled_token_ids[i].clear()
 
     return valid_sampled_token_ids
+
+
+def get_eos_token_id(model_config: Any) -> tuple[int, ...]:
+    """Extract EOS token ID from the model configuration with fallback."""
+    eos_token_id = model_config.get_vocab_size() - 1
+    if hasattr(model_config, "hf_config"):
+        eos_token_id = getattr(model_config.hf_config, "eos_token_id",
+                               eos_token_id)
+        if eos_token_id is None:
+            eos_token_id = model_config.get_vocab_size() - 1
+
+    if isinstance(eos_token_id, int):
+        return (eos_token_id, )
+    elif isinstance(eos_token_id, list):
+        return tuple(eos_token_id)
+    elif eos_token_id is None:
+        return ()
+    else:
+        return tuple(eos_token_id)
+
+
+def get_pad_token_id(model_config: Any) -> int:
+    """Extract padding token ID from the model configuration with fallback."""
+    padding_token_id = 0
+    if hasattr(model_config, "hf_config"):
+        padding_token_id = getattr(model_config.hf_config, "pad_token_id", 0)
+        if padding_token_id is None:
+            padding_token_id = 0
+    return padding_token_id

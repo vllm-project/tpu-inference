@@ -201,6 +201,10 @@ upload_benchmark_pipeline() {
             echo "$changed_cases"
             # Note: We keep changed_cases as a newline-separated string
             # to correctly handle filenames with spaces in process_json_benchmark_cases.
+
+            # Upload global case name validation step
+            upload_with_priority .buildkite/validate_benchmark_case_name.yml "$JOB_PRIORITY"
+            export BENCHMARK_VALIDATION_UPLOADED="true"
         fi
     fi
 

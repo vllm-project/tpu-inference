@@ -510,32 +510,32 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
             has_bias=has_bias,
             activation=activation,
         )
-        vllm_fused_moe.moe_parallel_config.use_ep = use_ep
-    vllm_fused_moe.w13_weight.data = w1
-    vllm_fused_moe.w2_weight.data = w2
+        vllm_fused_moe.moe_config.moe_parallel_config.use_ep = use_ep
+    vllm_fused_moe.routed_experts.w13_weight.data = w1
+    vllm_fused_moe.routed_experts.w2_weight.data = w2
     if has_bias:
-        vllm_fused_moe.w13_bias.data = w1_bias
-        vllm_fused_moe.w2_bias.data = w2_bias
+        vllm_fused_moe.routed_experts.w13_bias.data = w1_bias
+        vllm_fused_moe.routed_experts.w2_bias.data = w2_bias
 
     expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias,
-                                  vllm_fused_moe.top_k,
-                                  vllm_fused_moe.renormalize,
+                                  vllm_fused_moe.routed_experts.top_k,
+                                  vllm_fused_moe.routed_experts.renormalize,
                                   vllm_fused_moe.activation.value)
 
     with torchax.default_env(), set_forward_context(
             None, vllm_config), jax.set_mesh(mesh):
-        assert isinstance(vllm_fused_moe.quant_method,
+        assert isinstance(vllm_fused_moe.routed_experts.quant_method,
                           VllmUnquantizedFusedMoEMethod)
         if use_ep:
-            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_EP
+            assert vllm_fused_moe.routed_experts.quant_method.moe_backend == MoEBackend.GMM_EP
         else:
-            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_TP
+            assert vllm_fused_moe.routed_experts.quant_method.moe_backend == MoEBackend.GMM_TP
 
         jax_a = a.to('jax')
         score = score.to('jax')
 
-        vllm_fused_moe.quant_method.process_weights_after_loading(
-            vllm_fused_moe)
+        vllm_fused_moe.routed_experts.quant_method.process_weights_after_loading(
+            vllm_fused_moe.routed_experts)
         actual = vllm_fused_moe(jax_a, score)
 
         torch.testing.assert_close(expected,
@@ -632,39 +632,40 @@ def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
             quant_config=quant_config,
             has_bias=has_bias,
         )
-        vllm_fused_moe.moe_parallel_config.use_ep = True
+        vllm_fused_moe.moe_config.moe_parallel_config.use_ep = True
 
-    vllm_fused_moe.w13_weight.data = w1
-    vllm_fused_moe.w2_weight.data = w2
+    vllm_fused_moe.routed_experts.w13_weight.data = w1
+    vllm_fused_moe.routed_experts.w2_weight.data = w2
     if has_bias:
-        vllm_fused_moe.w13_bias.data = w1_bias
-        vllm_fused_moe.w2_bias.data = w2_bias
+        vllm_fused_moe.routed_experts.w13_bias.data = w1_bias
+        vllm_fused_moe.routed_experts.w2_bias.data = w2_bias
 
     expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias,
-                                  vllm_fused_moe.top_k,
-                                  vllm_fused_moe.renormalize,
+                                  vllm_fused_moe.routed_experts.top_k,
+                                  vllm_fused_moe.routed_experts.renormalize,
                                   vllm_fused_moe.activation.value)
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
-        assert isinstance(vllm_fused_moe.quant_method,
+        assert isinstance(vllm_fused_moe.routed_experts.quant_method,
                           VllmUnquantizedFusedMoEMethod)
-        assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.FUSED_MOE
+        assert vllm_fused_moe.routed_experts.quant_method.moe_backend == MoEBackend.FUSED_MOE
 
         jax_a = a.to('jax')
         score = score.to('jax')
 
-        vllm_fused_moe.quant_method.process_weights_after_loading(
-            vllm_fused_moe)
-        vllm_fused_moe.quant_method.extra_backend_kwargs.update({
-            "bt": 32,
-            "bf": 512,
-            "bd1": 512,
-            "bd2": 512,
-            "btc": 32,
-            "bfc": 256,
-            "bd1c": 256,
-            "bd2c": 256,
-        })
+        vllm_fused_moe.routed_experts.quant_method.process_weights_after_loading(
+            vllm_fused_moe.routed_experts)
+        vllm_fused_moe.routed_experts.quant_method.extra_backend_kwargs.update(
+            {
+                "bt": 32,
+                "bf": 512,
+                "bd1": 512,
+                "bd2": 512,
+                "btc": 32,
+                "bfc": 256,
+                "bd1c": 256,
+                "bd2c": 256,
+            })
         actual = vllm_fused_moe(jax_a, score)
 
         torch.testing.assert_close(

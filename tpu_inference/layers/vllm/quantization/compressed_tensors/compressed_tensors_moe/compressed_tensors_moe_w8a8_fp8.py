@@ -17,7 +17,7 @@ from compressed_tensors.quantization import QuantizationArgs
 from jax.sharding import Mesh
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEConfig
+from vllm.model_executor.layers.fused_moe import FusedMoEConfig, RoutedExperts
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import \
     CompressedTensorsW8A8Fp8MoEMethod
 
@@ -73,7 +73,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
             c. w13_weight_scale - FP32 shape: (num_experts, 2 x intermediate_size, 1)
             d. w2_weight_scale - FP32shape: (num_experts, output_size, 1)
         """
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
 
         # N.B
         # layer.w13_weight: [num_experts, 2*moe_intermediate_size, hidden_size]
@@ -129,7 +129,7 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
@@ -147,4 +147,5 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                               weights=weights,
                               quant_method_instance=self,
                               x=x,
-                              router_logits=router_logits)
+                              router_logits=router_logits,
+                              input_ids=input_ids)

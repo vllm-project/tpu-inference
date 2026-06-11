@@ -100,10 +100,15 @@ def quantize_moe_weights(
         # Use per-channel quantizaiton.
         w13_block_size = w13_weight.shape[-1]
         w2_block_size = w2_weight.shape[-1]
+    elif isinstance(block_size, tuple):
+        w13_block_size, w2_block_size = block_size
     else:
         w13_block_size = w2_block_size = block_size
 
     _, orig_hidden_size, orig_intermediate_size = w2_weight.shape
+
+    # Cap the block size for w2 at its contracting dimension size
+    w2_block_size = min(w2_block_size, orig_intermediate_size)
 
     hidden_size = align_to(orig_hidden_size, w13_block_size)
     intermediate_size = align_to(orig_intermediate_size, w2_block_size)
@@ -693,7 +698,7 @@ def process_quantized_moe_weights(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
     mesh: Mesh,
-    activation: str,
+    activation: str | MoEActivation,
     weight_block_size: tuple[int, ...] | None = None,
     desired_quant_dtype: jnp.dtype | None = None,
     requant_block_size: int | None = None,
@@ -874,10 +879,21 @@ def _requant_expert_batch_fn(
     else:
         w2_s_batch = None
 
-    w13_fp32 = dequantize_tensor(w13_batch,
-                                 w13_s_batch, (1, 2),
-                                 jnp.float32,
-                                 block_size=weight_block_size)
+    if weight_block_size is None and w13_s_batch is not None and w13_s_batch.ndim == 2 and w13_s_batch.shape[
+            -1] == 2:
+        # Mistral Small 4 manual splitting for fused per-channel scales during TPU scan
+        w1 = w13_batch[:, :orig_intermediate_size, :]
+        w3 = w13_batch[:, orig_intermediate_size:, :]
+        s1 = w13_s_batch[:, 0]
+        s3 = w13_s_batch[:, 1]
+        w1_fp32 = dequantize_tensor(w1, s1, (1, 2), jnp.float32)
+        w3_fp32 = dequantize_tensor(w3, s3, (1, 2), jnp.float32)
+        w13_fp32 = jnp.concatenate([w1_fp32, w3_fp32], axis=1)
+    else:
+        w13_fp32 = dequantize_tensor(w13_batch,
+                                     w13_s_batch, (1, 2),
+                                     jnp.float32,
+                                     block_size=weight_block_size)
     w2_fp32 = dequantize_tensor(w2_batch,
                                 w2_s_batch, (1, 2),
                                 jnp.float32,
@@ -1036,7 +1052,7 @@ def _process_quantized_moe_weights_impl(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
     mesh: Mesh,
-    activation: str,
+    activation: str | MoEActivation,
     weight_block_size: tuple[int, ...] | None = None,
     desired_quant_dtype: jnp.dtype | None = None,
     requant_block_size: int | None = None,
@@ -1049,7 +1065,8 @@ def _process_quantized_moe_weights_impl(
     w13_bias = weights.w13_bias
     w2_bias = weights.w2_bias
 
-    w13_interleave = activation == "swigluoai"
+    w13_interleave = (activation == "swigluoai"
+                      or activation == MoEActivation.SWIGLUOAI)
     w13_reorder_size = get_mesh_shape_product(mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
@@ -1081,8 +1098,17 @@ def _process_quantized_moe_weights_impl(
     if requant_block_size is None:
         w13_block_size = w13_weight.shape[-1]
         w2_block_size = w2_weight.shape[-1]
+    elif isinstance(requant_block_size, tuple):
+        w13_block_size, w2_block_size = requant_block_size
     else:
         w13_block_size = w2_block_size = requant_block_size
+
+    if requant_block_size is not None and moe_backend == MoEBackend.GMM_TP:
+        tp_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
+        max_w2_block_size = orig_intermediate_size // tp_size
+
+        # Cap the block size to avoid sharding indivisible errors
+        w2_block_size = min(w2_block_size, max_w2_block_size)
     hidden_size = align_to(orig_hidden_size, w13_block_size)
     intermediate_size = align_to(orig_intermediate_size, w2_block_size)
 
@@ -1190,6 +1216,13 @@ def process_unquantized_moe_weights(
         if requant_block_size_from_env := envs.MOE_REQUANTIZE_BLOCK_SIZE:
             requant_block_size = (int(requant_block_size_from_env)
                                   if requant_block_size_from_env else None)
+            if requant_block_size is not None and moe_backend == MoEBackend.GMM_TP:
+                tp_size = get_mesh_shape_product(mesh,
+                                                 ShardingAxisName.MLP_TENSOR)
+                orig_intermediate_size = w2_weight.shape[1]
+                max_w2_block_size = orig_intermediate_size // tp_size
+                w2_block_size = min(requant_block_size, max_w2_block_size)
+                requant_block_size = (requant_block_size, w2_block_size)
         moe_logging_str = (
             "[MoE requantization]: re-quantizing MoE weights to "
             f"{desired_quant_dtype}")

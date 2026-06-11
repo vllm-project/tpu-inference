@@ -40,8 +40,10 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
+from vllm.v1.outputs import (DraftTokenIds, LogprobsLists, ModelRunnerOutput,
+                             RoutedExpertsLists)
 from vllm.v1.request import Request
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tpu_inference import envs
@@ -66,6 +68,7 @@ class SchedulerCommand(Enum):
     GET_REQUEST_COUNTS = "get_request_counts"
     GET_TOKEN_COUNT = "get_token_count"
     GET_PENDING_PREFILL_TOKENS = "get_pending_prefill_tokens"
+    GET_MIN_REMAINING_OUTPUT = "get_min_remaining_output"
     PROBE_COMPUTED_BLOCKS = "probe_computed_blocks"
     RESET_ENCODER_CACHE = "reset_encoder_cache"
     SET_PAUSE_STATE = "set_pause_state"
@@ -142,16 +145,32 @@ def _scheduler_worker_process(
 ):
     """Worker process that manages a single scheduler instance."""
     # Initialize the scheduler in this process
-    scheduler = original_scheduler_cls(
-        vllm_config=vllm_config,
-        kv_cache_config=kv_cache_config,
-        structured_output_manager=structured_output_manager,
-        block_size=block_size,
-        hash_block_size=hash_block_size,
-        mm_registry=mm_registry,
-        include_finished_set=include_finished_set,
-        log_stats=log_stats,
-    )
+    import inspect
+    sig = inspect.signature(original_scheduler_cls)
+    scheduler_kwargs = {
+        "vllm_config": vllm_config,
+        "kv_cache_config": kv_cache_config,
+        "structured_output_manager": structured_output_manager,
+        "block_size": block_size,
+        "mm_registry": mm_registry,
+        "include_finished_set": include_finished_set,
+        "log_stats": log_stats,
+    }
+    if "hash_block_size" in sig.parameters:
+        scheduler_kwargs["hash_block_size"] = hash_block_size
+
+    import os
+
+    enable_continue_decode = False
+    if hasattr(vllm_config, "additional_config"):
+        enable_continue_decode = vllm_config.additional_config.get(
+            "enable_continue_decode", False)
+
+    if enable_continue_decode:
+        from tpu_inference.core.sched.utils import \
+            patch_vllm_scheduler_for_continue_decode
+        patch_vllm_scheduler_for_continue_decode()
+    scheduler = original_scheduler_cls(**scheduler_kwargs)
 
     _cached_scheduler_outputs: deque[SchedulerOutput] = deque()
 
@@ -250,6 +269,19 @@ def _scheduler_worker_process(
                     for req in scheduler.waiting:
                         pending += req.num_prompt_tokens
                     _send_result(pending)
+
+                case SchedulerCommand.GET_MIN_REMAINING_OUTPUT:
+                    # Smallest (max_tokens - len(output_token_ids)) across
+                    # this rank's running reqs. Used as an admission
+                    # tiebreaker: lower = a running req closer to its
+                    # max_tokens, so this rank will likely free a slot
+                    # soonest.
+                    if not scheduler.running:
+                        _send_result(2**31 - 1)
+                    else:
+                        _send_result(
+                            min(r.max_tokens - len(r.output_token_ids)
+                                for r in scheduler.running))
 
                 case SchedulerCommand.PROBE_COMPUTED_BLOCKS:
                     # Probe for cached blocks without recording prefix cache stats.
@@ -596,12 +628,70 @@ class DPScheduler(SchedulerInterface):
 
         return pending
 
+    def _get_rank_inflight_reqs(self) -> Dict[int, int]:
+        """Per-rank count of in-flight requests (running + waiting)."""
+        for rank in range(self.dp_size):
+            self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
+
+        inflight: Dict[int, int] = {}
+        for rank in range(self.dp_size):
+            running, waiting = self._get_result(
+                rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            inflight[rank] = running + waiting
+
+        return inflight
+
+    def _get_rank_min_remaining_output(self) -> Dict[int, int]:
+        """Per-rank min (max_tokens - len(output_token_ids)) across running
+        reqs. Lower = a running req closer to its max_tokens, so this rank
+        will likely free a slot soonest. Used as an admission tiebreaker."""
+        for rank in range(self.dp_size):
+            self._send_command(rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+        result: Dict[int, int] = {}
+        for rank in range(self.dp_size):
+            result[rank] = self._get_result(
+                rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+        return result
+
+    def _get_rank_routing_state(
+            self) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, int]]:
+        """Per-rank (pending_prefill_tokens, inflight_reqs,
+        min_remaining_output) collected in a single round-trip.
+
+        Send all comments first and collect all results after to
+        allow pipelinening across ranks, minimizing the overhead."""
+        for rank in range(self.dp_size):
+            self._send_command(rank,
+                               SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
+            self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            self._send_command(rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+
+        pending: Dict[int, int] = {}
+        inflight: Dict[int, int] = {}
+        min_remaining: Dict[int, int] = {}
+        for rank in range(self.dp_size):
+            pending[rank] = self._get_result(
+                rank, SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
+            running, waiting = self._get_result(
+                rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            inflight[rank] = running + waiting
+            min_remaining[rank] = self._get_result(
+                rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+        return pending, inflight, min_remaining
+
     def _find_best_rank_for_request(self, request: Request) -> int:
         """Find the best DP rank for a new request based on load balancing.
 
         Two-tier strategy:
         1. Prefix cache hit: assign to rank with best cache hit.
-        2. Otherwise: pick rank with the fewest pending prefill tokens.
+        2. Otherwise:
+           - Primary key: fewest pending prefill tokens (keeps prefill
+             balanced across ranks).
+           - Secondary key: fewest in-flight reqs (balances decode load
+             across ranks under DP lockstep once prefills finish).
+           - Tertiary key: rank whose running req is closest to its
+             max_tokens (smallest remaining output tokens), which is
+             most likely to free a slot soon.
         """
         # First, try to find a rank with prefix cache hit.
         if self.vllm_config.cache_config.enable_prefix_caching:
@@ -621,8 +711,9 @@ class DPScheduler(SchedulerInterface):
             if best_cache_tokens > 0:
                 return best_cache_rank
 
-        pending = self._get_rank_pending_prefill_tokens()
-        return min(pending, key=pending.get)
+        pending, inflight, min_remaining = self._get_rank_routing_state()
+        return min(range(self.dp_size),
+                   key=lambda r: (pending[r], inflight[r], min_remaining[r]))
 
     def add_request(self, request: Request) -> None:
         """
@@ -850,6 +941,7 @@ class DPScheduler(SchedulerInterface):
         combined_prefix_cache_stats = PrefixCacheStats()
         combined_connector_prefix_cache_stats: Optional[
             PrefixCacheStats] = None
+        combined_spec_decoding_stats: Optional[SpecDecodingStats] = None
         has_any_stats = False
 
         for rank_stats in rank_stats_list:
@@ -886,6 +978,21 @@ class DPScheduler(SchedulerInterface):
                 combined_connector_prefix_cache_stats.hits += (
                     rank_stats.connector_prefix_cache_stats.hits)
 
+            # Combine spec decoding stats.
+            rank_spec = rank_stats.spec_decoding_stats
+            if rank_spec is not None:
+                if combined_spec_decoding_stats is None:
+                    combined_spec_decoding_stats = SpecDecodingStats.new(
+                        rank_spec.num_spec_tokens)
+                combined_spec_decoding_stats.num_drafts += rank_spec.num_drafts
+                combined_spec_decoding_stats.num_draft_tokens += (
+                    rank_spec.num_draft_tokens)
+                combined_spec_decoding_stats.num_accepted_tokens += (
+                    rank_spec.num_accepted_tokens)
+                for i, v in enumerate(rank_spec.num_accepted_tokens_per_pos):
+                    combined_spec_decoding_stats.num_accepted_tokens_per_pos[
+                        i] += v
+
         if not has_any_stats:
             return None
 
@@ -900,6 +1007,7 @@ class DPScheduler(SchedulerInterface):
             kv_cache_usage=avg_kv_cache_usage,
             prefix_cache_stats=combined_prefix_cache_stats,
             connector_prefix_cache_stats=combined_connector_prefix_cache_stats,
+            spec_decoding_stats=combined_spec_decoding_stats,
         )
 
     def get_grammar_bitmask(
@@ -1051,16 +1159,17 @@ class DPScheduler(SchedulerInterface):
 
         outputs = []
 
-        expert_indices = getattr(g, "expert_indices", None)
-        req_id_to_token_range = {}
-        if expert_indices is not None:
+        routed_experts = getattr(g, "routed_experts", None)
+        req_id_to_routed_experts_range = {}
+        if routed_experts is not None:
             current_token_offset = 0
-            for req_id, num_tokens_scheduled in scheduler_output.num_scheduled_tokens.items(
-            ):
+            for req_id in g.req_ids:
+                num_tokens_scheduled = scheduler_output.num_scheduled_tokens[
+                    req_id]
                 start_idx = current_token_offset
                 end_idx = start_idx + num_tokens_scheduled
                 current_token_offset = end_idx
-                req_id_to_token_range[req_id] = (start_idx, end_idx)
+                req_id_to_routed_experts_range[req_id] = (start_idx, end_idx)
 
         for rank in range(self.dp_size):
             req_ids = scheduler_output.req_ids_per_rank.get(rank, [])
@@ -1090,20 +1199,26 @@ class DPScheduler(SchedulerInterface):
                 kv_connector_output=g.kv_connector_output,
             )
 
-            if expert_indices is not None:
-                rank_expert_indices = []
+            if routed_experts is not None:
+                rank_routing_data = []
+                rank_slot_mapping = []
                 for rid in req_ids:
-                    if rid in req_id_to_token_range:
-                        start_idx, end_idx = req_id_to_token_range[rid]
-                        rank_expert_indices.append(
-                            expert_indices[:, start_idx:end_idx, :])
-                if rank_expert_indices:
-                    rank_model_runner_output.expert_indices = np.concatenate(
-                        rank_expert_indices, axis=1)
+                    if rid in req_id_to_routed_experts_range:
+                        start_idx, end_idx = req_id_to_routed_experts_range[
+                            rid]
+                        rank_routing_data.append(routed_experts.routing_data[
+                            start_idx:end_idx, :, :])
+                        rank_slot_mapping.append(
+                            routed_experts.slot_mapping[start_idx:end_idx])
+
+                if rank_routing_data:
+                    rank_model_runner_output.routed_experts = RoutedExpertsLists(
+                        routing_data=np.concatenate(rank_routing_data, axis=0),
+                        slot_mapping=np.concatenate(rank_slot_mapping, axis=0))
                 else:
-                    rank_model_runner_output.expert_indices = None
+                    rank_model_runner_output.routed_experts = None
             else:
-                rank_model_runner_output.expert_indices = None
+                rank_model_runner_output.routed_experts = None
 
             outputs.append(rank_model_runner_output)
 

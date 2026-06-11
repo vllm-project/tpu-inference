@@ -136,6 +136,21 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
 
     # Specific Rules for `vllm_bench_serve`
     if client_cmd_type == "vllm_bench_serve":
+        # Ensure percentile-metrics is present and contains 'e2el'
+        percentile_metrics = client_args.get("percentile-metrics")
+        if not percentile_metrics:
+            errors.append(
+                f"Validation Error: {file_path} is missing 'percentile-metrics' in client_command_options. "
+                f"It must be defined and include 'e2el'.")
+        else:
+            # Check if 'e2el' is in the comma-separated string
+            metrics_list = [m.strip() for m in percentile_metrics.split(",")]
+            if "e2el" not in metrics_list:
+                errors.append(
+                    f"Validation Error: {file_path} has 'percentile-metrics' set to '{percentile_metrics}' "
+                    f"but it must include 'e2el' for proper benchmark reporting."
+                )
+
         # Model consistency check to ensure client/server are aligned
         server_model = server_args.get("model")
         client_model = client_args.get("model")
@@ -156,16 +171,14 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
             )
 
 
-def create_benchmark_steps(
-        case_data: Dict[str, Any],
-        global_env: Dict[str, Any],
-        file_path: str,
-        file_basename: str,
-        parent_dir: str,
-        used_keys: Set[str],
-        errors: List[str],
-        no_verify: bool = False,
-        is_single_case: bool = False) -> List[Dict[str, Any]]:
+def create_benchmark_steps(case_data: Dict[str, Any],
+                           global_env: Dict[str, Any],
+                           file_path: str,
+                           file_basename: str,
+                           parent_dir: str,
+                           used_keys: Set[str],
+                           errors: List[str],
+                           no_verify: bool = False) -> List[Dict[str, Any]]:
     """
     Generates a list of Buildkite steps for a case.
     """
@@ -204,15 +217,11 @@ def create_benchmark_steps(
         # Build the environment for this specific step
         step_env = {**combined_env, "ci_queue": agent}
 
-        if is_single_case:
-            # Include parent_dir in label for uniqueness
-            step_label = f"[{parent_dir}] {agent} {file_basename}"
-            case_parameter = f"{file_path}"
-        else:
-            step_env["TARGET_CASE_NAME"] = case_name
-            # Include parent_dir in label for uniqueness
-            step_label = f"[{parent_dir}] {agent} {file_basename} {case_name}"
-            case_parameter = f"{file_path} {case_name}"
+        step_env["TARGET_CASE_NAME"] = case_name
+        # Include parent_dir in label for uniqueness
+        step_label = f"[{parent_dir}] {agent} {file_basename} {case_name}"
+        case_parameter = f"{file_path} {case_name}"
+        step_env["MLCOMPASS_TEST_NAME"] = f"vllm:{agent}:{case_name}"
 
         # Define step key and check for internal collisions
         step_safe_key = clean_key_string(step_label)
@@ -222,7 +231,7 @@ def create_benchmark_steps(
                 f"within {file_path}. Ensure all of case_name are unique.")
         used_keys.add(step_safe_key)
 
-        child_steps.append({
+        step = {
             "label":
             step_label,
             "key":
@@ -234,7 +243,13 @@ def create_benchmark_steps(
             },
             "command":
             f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
-        })
+        }
+
+        # Add dependency on global case name validation if it was uploaded in bootstrap
+        if os.environ.get("BENCHMARK_VALIDATION_UPLOADED") == "true":
+            step["depends_on"] = "validate_benchmark_case_name"
+
+        child_steps.append(step)
 
     return child_steps
 
@@ -273,31 +288,22 @@ def main():
     errors = []
 
     # Process cases
-    if "benchmark_cases" in data:
-        for case in data["benchmark_cases"]:
-            # Aggregate all steps from all cases
-            all_steps.extend(
-                create_benchmark_steps(case,
-                                       global_env,
-                                       file_path,
-                                       file_basename,
-                                       parent_dir,
-                                       used_keys,
-                                       errors,
-                                       no_verify=args.no_verify,
-                                       is_single_case=False))
-    else:
-        # Single-case
+    if "benchmark_cases" not in data:
+        print(f"Error: 'benchmark_cases' is missing in {file_path}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    for case in data["benchmark_cases"]:
+        # Aggregate all steps from all cases
         all_steps.extend(
-            create_benchmark_steps(data,
+            create_benchmark_steps(case,
                                    global_env,
                                    file_path,
                                    file_basename,
                                    parent_dir,
                                    used_keys,
                                    errors,
-                                   no_verify=args.no_verify,
-                                   is_single_case=True))
+                                   no_verify=args.no_verify))
 
     # Final check: Ensure we actually produced steps and no errors occurred
     if errors:

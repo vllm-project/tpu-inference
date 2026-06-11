@@ -30,6 +30,11 @@ class CachedRequestState(NewRequestData):
     mrope_positions: Optional[jax.Array] = None
     mrope_position_delta: Optional[int] = None
     pooling_states: PoolingStates = field(default_factory=PoolingStates)
+    # Accumulates prompt logprob chunks across chunked-prefill steps.
+    # Tuple of (token_ids, logprobs, ranks) numpy arrays, each of shape
+    # [num_prompt_tokens-1, ...]. Set to None when prefill completes.
+    in_progress_prompt_logprobs_cpu: Optional[tuple] = None
+    mamba_state_slot: Optional[int] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -123,6 +128,7 @@ class InputBatch:
         self.generators: dict[int, Any] = {}
 
         self.num_logprobs: dict[str, int] = {}
+        self.num_prompt_logprobs: dict[str, int] = {}
 
         self.logit_bias: list[Optional[dict[int,
                                             float]]] = [None] * max_num_reqs
@@ -184,6 +190,89 @@ class InputBatch:
             base = k * self._mamba_local_slots
             self._free_mamba_slots_per_rank.append(
                 list(range(base + self._mamba_local_slots - 1, base, -1)))
+
+    def release_mamba_slot(self, slot: Optional[int]) -> None:
+        if slot is None:
+            return
+        slot = int(slot)
+        if slot == 0 or slot % self._mamba_local_slots == 0:
+            return
+        rank = slot // self._mamba_local_slots
+        pool = self._free_mamba_slots_per_rank[rank]
+        if slot not in pool:
+            pool.append(slot)
+
+    def assert_mamba_state_invariants(
+        self,
+        requests: Optional[dict[str, CachedRequestState]] = None,
+        assigned_dp_rank: Optional[dict[str, int]] = None,
+    ) -> None:
+        active_slots: list[int] = []
+        active_req_ids = self._req_ids[:self.num_reqs]
+        free_slots = {
+            int(slot)
+            for pool in self._free_mamba_slots_per_rank
+            for slot in pool
+        }
+
+        if sum(len(pool)
+               for pool in self._free_mamba_slots_per_rank) != len(free_slots):
+            raise AssertionError("Duplicate mamba slots in free pools")
+
+        for req_index, req_id in enumerate(active_req_ids):
+            if req_id is None:
+                raise AssertionError(
+                    f"Active mamba batch has a hole at index {req_index}")
+            slot = int(self.mamba_state_indices_cpu[req_index])
+            active_slots.append(slot)
+            if slot <= 0 or slot % self._mamba_local_slots == 0:
+                raise AssertionError(
+                    f"Request {req_id} has invalid mamba slot {slot}")
+            if slot in free_slots:
+                raise AssertionError(
+                    f"Active request {req_id} uses free mamba slot {slot}")
+            if assigned_dp_rank is not None:
+                expected_rank = assigned_dp_rank.get(req_id, 0)
+                slot_rank = slot // self._mamba_local_slots
+                if slot_rank != expected_rank:
+                    raise AssertionError(
+                        f"Request {req_id} on DP rank {expected_rank} has "
+                        f"mamba slot {slot} from rank {slot_rank}")
+            if requests is not None:
+                req_state = requests.get(req_id)
+                if req_state is not None and req_state.mamba_state_slot != slot:
+                    raise AssertionError(
+                        f"Request {req_id} active slot {slot} does not match "
+                        f"cached slot {req_state.mamba_state_slot}")
+
+        if len(set(active_slots)) != len(active_slots):
+            from collections import Counter
+            duplicate_active = {
+                slot
+                for slot, count in Counter(active_slots).items() if count > 1
+            }
+            raise AssertionError(
+                f"Duplicate active mamba slots: {sorted(duplicate_active)}")
+
+        tail = self.mamba_state_indices_cpu[self.num_reqs:]
+        if tail.any():
+            nonzero_tail = sorted(set(tail[tail != 0].tolist()))
+            raise AssertionError(
+                f"Non-zero mamba slots in padded tail: {nonzero_tail}")
+
+        if requests is not None:
+            preserved_slot_list = [
+                int(req.mamba_state_slot) for req in requests.values()
+                if req.mamba_state_slot is not None
+            ]
+            preserved_slots = set(preserved_slot_list)
+            if len(preserved_slot_list) != len(preserved_slots):
+                raise AssertionError("Duplicate preserved mamba slots")
+            overlap = preserved_slots & free_slots
+            if overlap:
+                raise AssertionError(
+                    f"Preserved mamba slots also in free pool: "
+                    f"{sorted(overlap)}")
 
     @property
     def req_ids(self) -> list[str]:
@@ -263,8 +352,19 @@ class InputBatch:
         # Allocate a fresh mamba state slot for this request. The slot stays
         # with the request through the persistent batch's lifetime, even when
         # condense moves the request to a different `req_index`.
-        self.mamba_state_indices_cpu[req_index] = (
-            self._free_mamba_slots_per_rank[dp_rank].pop())
+        if request.mamba_state_slot is None:
+            request.mamba_state_slot = self._free_mamba_slots_per_rank[
+                dp_rank].pop()
+        else:
+            slot_rank = int(
+                request.mamba_state_slot) // self._mamba_local_slots
+            assert slot_rank == dp_rank, (
+                f"Preserved mamba slot {request.mamba_state_slot} belongs to "
+                f"DP rank {slot_rank}, not {dp_rank}")
+            pool = self._free_mamba_slots_per_rank[dp_rank]
+            if request.mamba_state_slot in pool:
+                pool.remove(request.mamba_state_slot)
+        self.mamba_state_indices_cpu[req_index] = request.mamba_state_slot
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
@@ -294,6 +394,17 @@ class InputBatch:
 
             if sampling_params.logprobs is not None:
                 self.num_logprobs[req_id] = sampling_params.logprobs
+            if sampling_params.prompt_logprobs is not None:
+                num_k = (self.vocab_size if sampling_params.prompt_logprobs
+                         == -1 else sampling_params.prompt_logprobs)
+                self.num_prompt_logprobs[req_id] = num_k
+                n = len(request.prompt_token_ids) - 1
+                if n > 0:
+                    request.in_progress_prompt_logprobs_cpu = (
+                        np.empty((n, num_k + 1), dtype=np.int32),
+                        np.empty((n, num_k + 1), dtype=np.float32),
+                        np.empty(n, dtype=np.int32),
+                    )
             if sampling_params.logit_bias is not None:
                 self.logit_bias[req_index] = sampling_params.logit_bias
 
@@ -335,7 +446,10 @@ class InputBatch:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
 
-    def remove_request(self, req_id: str) -> Optional[int]:
+    def remove_request(self,
+                       req_id: str,
+                       *,
+                       free_mamba_slot: bool = True) -> Optional[int]:
         """This method must always be followed by a call to condense()."""
 
         req_index = self.req_id_to_index.pop(req_id, None)
@@ -347,8 +461,8 @@ class InputBatch:
         # contents in the kv cache are stale and will be zeroed by the
         # has_initial_state guard when the next request takes this slot id.
         slot = int(self.mamba_state_indices_cpu[req_index])
-        rank = slot // self._mamba_local_slots
-        self._free_mamba_slots_per_rank[rank].append(slot)
+        if free_mamba_slot:
+            self.release_mamba_slot(slot)
         # Clear this position to slot 0 (the null block) so the trailing
         # tail of `mamba_state_indices_cpu` (which the GDN op reads over
         # its full length every step) cannot alias an active slot.
@@ -371,6 +485,7 @@ class InputBatch:
         self.min_tokens.pop(req_index, None)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
+        self.num_prompt_logprobs.pop(req_id, None)
 
         # It's ok to pop nothing for non-pooling model.
         self.pooling_params.pop(req_id, None)
@@ -540,6 +655,11 @@ class InputBatch:
     @property
     def max_num_logprobs(self) -> Optional[int]:
         return max(self.num_logprobs.values()) if self.num_logprobs else None
+
+    @property
+    def max_num_prompt_logprobs(self) -> Optional[int]:
+        return (max(self.num_prompt_logprobs.values())
+                if self.num_prompt_logprobs else None)
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray
