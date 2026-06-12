@@ -75,8 +75,9 @@ RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
 WORKDIR /workspace
 # Please replace the bucket path below with your actual GCS bucket path!
 ARG GCS_WHL_PATH="gs://vllm-bm-bk-storage/test_whl/v0.22.0_whl/vllm_tpu-0.22.0-py3-none-any.whl"
-RUN gsutil cp ${GCS_WHL_PATH} /workspace/vllm_tpu_test.whl
-RUN VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir /workspace/vllm_tpu_test.whl
+RUN mkdir -p /workspace/whl_dir
+RUN gsutil cp ${GCS_WHL_PATH} /workspace/whl_dir/
+RUN VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir /workspace/whl_dir/*.whl
 # =========================================================================
 
 # Install tpu_inference test/benchmarking requirements ONLY
