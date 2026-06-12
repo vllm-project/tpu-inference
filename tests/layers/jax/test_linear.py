@@ -25,7 +25,10 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 
 from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.linear import JaxLinear
+from tpu_inference.layers.jax.linear import (JaxLinear,
+                                             JaxMergedColumnParallelLinear)
+from tpu_inference.layers.jax.quantization.unquantized import (
+    UnquantizedConfig, UnquantizedMergedLinearMethod)
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 
 
@@ -159,3 +162,54 @@ class TestJaxLinear(unittest.TestCase):
         self.assertSequenceEqual(jax_linear.weight.sharding, (None, "model"))
         self.assertEqual(f"{jax.typeof(jax_linear.weight.value)}",
                          "float32[16,32]")
+
+    def test_merged_column_parallel_fuses_projections(self):
+        """JaxMergedColumnParallelLinear exposes a single fused kernel sized to
+        the sum of its projection widths (no separate gate/up params) and
+        dispatches to the merged unquantized method, which carries each
+        projection's size so the per-shard interleave is well defined."""
+
+        hidden_size = 16
+        intermediate_size = 32
+        mesh = Mesh(jax.devices('cpu')[:1], ("model", ))
+        with jax.set_mesh(mesh):
+            jax_merged = JaxMergedColumnParallelLinear(
+                hidden_size,
+                [intermediate_size, intermediate_size],
+                use_bias=False,
+                quant_config=UnquantizedConfig({}),
+                rngs=nnx.Rngs(0),
+                prefix="mlp.gate_up_proj",
+            )
+
+        # One fused kernel of shape (in, gate + up); no split gate/up params.
+        self.assertEqual(list(dict(jax_merged.named_parameters()).keys()),
+                         ["weight"])
+        self.assertEqual(tuple(jax_merged.weight.value.shape),
+                         (hidden_size, 2 * intermediate_size))
+
+        method = jax_merged.quant_method
+        self.assertIsInstance(method, UnquantizedMergedLinearMethod)
+        self.assertEqual(method.linear_config.output_sizes,
+                         [intermediate_size, intermediate_size])
+        self.assertEqual(method.linear_config.n_shards, 2)
+
+    def test_merged_column_parallel_sharding(self):
+        """The fused kernel's output dim (gate + up) is sharded on `model`."""
+
+        mesh = Mesh(jax.devices('cpu')[:1], ("model", ))
+        with jax.set_mesh(mesh):
+            jax_merged = JaxMergedColumnParallelLinear(
+                16,
+                [32, 32],
+                kernel_init=nnx.with_partitioning(nnx.initializers.uniform(),
+                                                  sharding=(None, "model")),
+                use_bias=False,
+                quant_config=UnquantizedConfig({}),
+                rngs=nnx.Rngs(0),
+                prefix="mlp.gate_up_proj",
+            )
+
+        self.assertSequenceEqual(jax_merged.weight.sharding, (None, "model"))
+        self.assertEqual(f"{jax.typeof(jax_merged.weight.value)}",
+                         "float32[16,64]")

@@ -11,6 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Pallas kernel for GDN recurrent scan."""
+
+# pylint: disable=invalid-name
 
 import functools
 
@@ -21,34 +24,7 @@ from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.gdn.v2 import \
     compute_schedule_v2 as compute_schedule_table_v2
-
-# def invert_triangular_matrix(A, block_size=None):
-#   """Inverts a unit lower triangular matrix A using Neumann doubling.
-
-#   Algorithm: Neumann doubling. For L strictly lower triangular of size N x N,
-#   since L^N = 0 we have:
-#     (I + L)^{-1} = (I - L)(I + L^2)(I + L^4) ... (I + L^(N/2))
-
-#   Args:
-#     A: Unit lower triangular matrix of shape (B, N, N).
-#     block_size: Size of the blocks for Gaussian elimination (unused).
-
-#   Returns:
-#     Inverse of A, of shape (B, N, N).
-
-#   For N=128 this is exactly 6 iterations = 12 matmuls, all (B, 128, 128).
-#   """
-#   B, N, _ = A.shape
-#   num_iters = max(1, (N - 1).bit_length() - 1)
-#   in_dtype = A.dtype
-#   A_f32 = A.astype(jnp.float32)
-#   L = jnp.tril(A_f32, k=-1)
-#   eye = jnp.broadcast_to(jnp.eye(N, dtype=jnp.float32), (B, N, N))
-#   Y = eye - L
-#   for _ in range(num_iters):
-#     L = jnp.matmul(L, L, precision=jax.lax.Precision.HIGHEST)
-#     Y = Y + jnp.matmul(Y, L, precision=jax.lax.Precision.HIGHEST)
-#   return Y.astype(in_dtype)
+from tpu_inference.kernels.gdn.v2 import recurrent_scan_impl
 
 
 def invert_triangular_matrix(A, block_size=16):
@@ -184,759 +160,126 @@ def inner_kernel(
   """
     step = pl.program_id(0)
 
+    # Instantiate helper config structures
+    model_dims = recurrent_scan_impl.ModelDims(n_kq=n_kq,
+                                               n_v=n_v,
+                                               d_k=d_k,
+                                               d_v=d_v)
+    tiling_cfg = recurrent_scan_impl.TilingConfig(C=C,
+                                                  BT=BT,
+                                                  sublanesize=sublanesize)
+    config = recurrent_scan_impl.ScanConfig(
+        model=model_dims,
+        tiling=tiling_cfg,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        decode_tokens=decode_tokens,
+    )
+
+    schedule = recurrent_scan_impl.ScheduleStep(schedule_table, step)
+
+    shared_refs = recurrent_scan_impl.SharedRefs(
+        a_log=a_log_ref,
+        dt_bias=dt_bias_ref,
+        recurrent_state_in=recurrent_state_in,
+        recurrent_state_out=recurrent_state_out,
+    )
+
+    prefill_refs = recurrent_scan_impl.BranchRefs(
+        qkv=prefill_qkv_ref,
+        a_raw=prefill_a_raw_ref,
+        b_raw=prefill_b_raw_ref,
+        output=prefill_output_ref,
+    )
+    prefill_scratch_refs = recurrent_scan_impl.PrefillScratchRefs(
+        scratch=prefill_scratch,
+        semaphore=prefill_semaphore,
+    )
+    prefill_dma = recurrent_scan_impl.DMAHelper(
+        state_in=recurrent_state_in,
+        state_out=recurrent_state_out,
+        commit_scratch=state_commit_scratch,
+        semaphore=prefill_semaphore,
+    )
+
+    prefill_processor = recurrent_scan_impl.PrefillProcessor(
+        config=config,
+        schedule=schedule,
+        state_indices=state_indices,
+        has_initial_state=has_initial_state,
+        refs=prefill_refs,
+        shared=shared_refs,
+        scratch=prefill_scratch_refs,
+        dma=prefill_dma,
+    )
+
+    decode_refs = recurrent_scan_impl.BranchRefs(
+        qkv=decode_qkv_ref,
+        a_raw=decode_a_raw_ref,
+        b_raw=decode_b_raw_ref,
+        output=decode_output_ref,
+    )
+    decode_scratch = recurrent_scan_impl.DecodeScratchRefs(
+        state=decode_state_scratch,
+        load=decode_load_scratch,
+        store=decode_store_scratch,
+        output=decode_output_scratch,
+        read_semaphores=decode_read_semaphores,
+        write_semaphore=decode_write_semaphore,
+    )
+    decode_dma_in = recurrent_scan_impl.DMAHelper(
+        state_in=recurrent_state_in,
+        state_out=recurrent_state_out,
+        commit_scratch=decode_load_scratch,
+        semaphore=decode_read_semaphores,
+    )
+    decode_processor = recurrent_scan_impl.DecodeProcessor(
+        config=config,
+        schedule=schedule,
+        state_indices=state_indices,
+        has_initial_state=has_initial_state,
+        refs=decode_refs,
+        shared=shared_refs,
+        scratch=decode_scratch,
+        dma=decode_dma_in,
+    )
+
     # READ table
 
-    prefill_valid = schedule_table[step, 0][...]
-    prefill_req_id = schedule_table[step, 2][...]
-
-    decode_valid = schedule_table[step, 4][...]
-    decode_offset = schedule_table[step, 5][...]
-    decode_req_id = schedule_table[step, 6][...]
-    decode_count = schedule_table[step, 7][...]
-
-    prefill_offset = schedule_table[step, 1][...]
-    is_transition = schedule_table[step, 10][...]
-
-    is_last_chunk = schedule_table[step, 8][...]
-    is_first_chunk = schedule_table[step, 9][...]
-
-    def l2_normalize(x, eps=1e-6):
-        norm = jnp.sqrt(jnp.sum(x * x, axis=-1, keepdims=True) + eps)
-        return x / norm
+    prefill_valid = schedule_table[step,
+                                   recurrent_scan_impl.COL_PREFILL_VALID][...]
+    decode_valid = schedule_table[step,
+                                  recurrent_scan_impl.COL_DECODE_VALID][...]
+    decode_offset = schedule_table[step,
+                                   recurrent_scan_impl.COL_DECODE_OFFSET][...]
+    prefill_offset = schedule_table[
+        step, recurrent_scan_impl.COL_PREFILL_OFFSET][...]
+    is_transition = schedule_table[step,
+                                   recurrent_scan_impl.COL_IS_TRANSITION][...]
 
     # 2. Decode Branch
     @pl.when(decode_valid > 0)
     def decode_wrapper():
-
-        def get_target_idx(b):
-            safe_req_id = jnp.minimum(decode_req_id + b,
-                                      state_indices.shape[0] - 1)
-            return state_indices[safe_req_id][...]
-
-        # Pre-loop: kick off async loads for iters 0 and 1.
-        # iter b consumes the load that lands in decode_load_scratch[b % 2].
-        # Subsequent loads (iter b+2 for each iter b) are issued from inside
-        # the loop as prefetches.
-        @pl.when(decode_count >= 1)
-        def _preload_slot_0():
-            tgt = get_target_idx(0)
-            op = pltpu.make_async_copy(
-                src_ref=recurrent_state_in.at[pl.ds(tgt, 1)],
-                dst_ref=decode_load_scratch.at[pl.ds(0, 1)],
-                sem=decode_read_semaphores.at[0],
-            )
-            op.start()
-
-        @pl.when(decode_count >= 2)
-        def _preload_slot_1():
-            tgt = get_target_idx(1)
-            op = pltpu.make_async_copy(
-                src_ref=recurrent_state_in.at[pl.ds(tgt, 1)],
-                dst_ref=decode_load_scratch.at[pl.ds(1, 1)],
-                sem=decode_read_semaphores.at[1],
-            )
-            op.start()
-
-        def process_decode(b, store_inflight):
-            # store_inflight: tuple (s0_inflight, s1_inflight) of int32 scalars.
-            # s{n}_inflight == 1 iff slot n has an in-flight async store DMA.
-            s0_inflight, s1_inflight = store_inflight
-            is_valid = b < decode_count
-            slot = b % 2
-            using_slot_0 = slot == 0
-            cur_slot_inflight = jax.lax.select(using_slot_0, s0_inflight,
-                                               s1_inflight)
-
-            @pl.when(is_valid)
-            def do_work():
-                # Wait for THIS iter's load (issued by preload or by iter b-2 prefetch).
-                wait_load = pltpu.make_async_copy(
-                    src_ref=recurrent_state_in.at[pl.ds(0, 1)],
-                    dst_ref=decode_load_scratch.at[pl.ds(slot, 1)],
-                    sem=decode_read_semaphores.at[slot],
-                )
-                wait_load.wait()
-
-                # Safe-copy of loaded state. Isolates compute from the
-                # prefetch DMA below that writes the same slot of
-                # decode_load_scratch concurrently. bf16 -> bf16, no cast.
-                decode_state_scratch[pl.ds(0, 1)] = decode_load_scratch[pl.ds(
-                    slot, 1)][...]
-
-                # Prefetch load for iter b+2 (same slot, since (b+2) % 2 == b % 2).
-                # This DMA overlaps with the compute below.
-                next_b = b + 2
-
-                @pl.when(next_b < decode_count)
-                def _prefetch_next_load():
-                    next_tgt = get_target_idx(next_b)
-                    op = pltpu.make_async_copy(
-                        src_ref=recurrent_state_in.at[pl.ds(next_tgt, 1)],
-                        dst_ref=decode_load_scratch.at[pl.ds(slot, 1)],
-                        sem=decode_read_semaphores.at[slot],
-                    )
-                    op.start()
-
-                target_idx = get_target_idx(b)
-
-                key_dim = n_kq * d_k
-                b_aligned = (b // sublanesize) * sublanesize
-                # Workaround: Upcast to fp32 to avoid NaNs
-                qkv_block_data = decode_qkv_ref[
-                    pl.ds(b_aligned, sublanesize), :].astype(jnp.float32)
-                mask = (jnp.arange(sublanesize) == (b % sublanesize)).astype(
-                    qkv_block_data.dtype)[:, None]
-                qkv_row = jnp.sum(qkv_block_data * mask, axis=0, keepdims=True)
-                # Fused SiLU
-                qkv_row = jax.nn.silu(qkv_row)
-                q = qkv_row[:, :key_dim].reshape(n_kq, d_k)
-                k = qkv_row[:, key_dim:2 * key_dim].reshape(n_kq, d_k)
-                v = qkv_row[:, 2 * key_dim:].reshape(n_v, d_v)
-
-                if use_qk_norm_in_gdn:
-                    q = l2_normalize(q)
-                    k = l2_normalize(k)
-
-                # Head repetition
-                repeat_factor = n_v // n_kq
-                if repeat_factor > 1:
-                    q = jnp.repeat(q, repeat_factor, axis=0)
-                    k = jnp.repeat(k, repeat_factor, axis=0)
-
-                scale = d_k**-0.5
-                q = q * scale
-
-                b_aligned = (b // sublanesize) * sublanesize
-
-                g_block_new = decode_a_raw_ref[
-                    pl.ds(b_aligned, sublanesize), :]
-                beta_block_new = decode_b_raw_ref[
-                    pl.ds(b_aligned, sublanesize), :]
-
-                mask_new = (jnp.arange(sublanesize) == (
-                    b % sublanesize)).astype(g_block_new.dtype)[:, None]
-
-                curr_g_slice_new = jnp.sum(g_block_new * mask_new,
-                                           axis=0,
-                                           keepdims=True)
-                curr_beta_slice_new = jnp.sum(beta_block_new * mask_new,
-                                              axis=0,
-                                              keepdims=True)
-
-                a_raw_new = curr_g_slice_new[:, :n_v].reshape(n_v).astype(
-                    jnp.float32)
-                b_raw_new = (curr_beta_slice_new[:, :n_v].reshape(n_v).astype(
-                    jnp.float32))
-
-                # Compute gate
-                curr_beta = jax.nn.sigmoid(b_raw_new)
-                curr_g = -jnp.exp(a_log_ref[...].astype(
-                    jnp.float32)) * jax.nn.softplus(
-                        a_raw_new + dt_bias_ref[...].astype(jnp.float32))
-                curr_g = jnp.maximum(curr_g, -100.0)
-                decay = jnp.exp(curr_g)
-
-                current_state = decode_state_scratch[0]
-
-                # TODO: compare MXU vs VPU, MXU doesn't support FP32, VPU does
-                # (n_v, d_k, 1) * (n_v, 1, d_v) -> (n_v, d_k, d_v)
-                out_list = []
-                new_state_list = []
-                for h in range(n_v):
-                    q_h = q[h:h + 1, :]  # (1, d_k)
-                    k_h = k[h:h + 1, :]  # (1, d_k)
-                    v_h = v[h:h + 1, :]  # (1, d_v)
-
-                    state_h = current_state[h].astype(
-                        jnp.float32)  # (d_k, d_v)
-
-                    k_state_h = pl.dot(
-                        k_h, state_h,
-                        precision=jax.lax.Precision.HIGHEST)  # (1, d_v)
-
-                    # v_diff_h = v_h - decay[h].astype(jnp.float32) * k_state_h
-                    decay_k_state = jnp.where(
-                        jnp.isinf(k_state_h),
-                        0.0,
-                        decay[h].astype(jnp.float32) * k_state_h,
-                    )
-                    v_diff_h = v_h - decay_k_state
-                    v_new_h = curr_beta[h].astype(jnp.float32) * v_diff_h
-
-                    q_state_h = pl.dot(
-                        q_h, state_h,
-                        precision=jax.lax.Precision.HIGHEST)  # (1, d_v)
-
-                    q_k_h = jnp.sum(q_h * k_h, axis=-1,
-                                    keepdims=True)  # (1, 1)
-
-                    # Defensive code to handle NaNs and infs in state,
-                    # Saw similar issue while trying newton schulz
-                    # which can happen due to large decay or long sequences.
-                    # TODO: analyze perf impact and risk of removing this.
-                    decay_q_state = jnp.where(jnp.isinf(q_state_h), 0.0,
-                                              decay[h] * q_state_h)
-                    out_h = decay_q_state + q_k_h * v_new_h
-                    out_list.append(out_h)
-
-                    k_v_new_h = pl.dot(k_h,
-                                       v_new_h,
-                                       trans_a=True,
-                                       precision=jax.lax.Precision.HIGHEST
-                                       )  # (d_k, 1) @ (1, d_v) -> (d_k, d_v)
-                    # Defensive code to handle NaNs and infs in state,
-                    # which can happen due to large decay or long sequences.
-                    # In such cases, we reset the state contribution to zero and rely solely on the new value
-                    # TODO: analyze perf impact and risk of removing this.
-                    decay_state = jnp.where(jnp.isinf(state_h), 0.0,
-                                            state_h * decay[h])
-                    new_state_h = decay_state + k_v_new_h
-                    new_state_list.append(new_state_h)
-
-                out = jnp.concatenate(out_list, axis=0)  # (n_v, d_v)
-                new_state = jnp.stack(new_state_list,
-                                      axis=0)  # (n_v, d_k, d_v)
-
-                # Accumulate output in scratchpad
-                current_output = decode_output_scratch[...]
-                mask = (jnp.arange(BT) == b).astype(current_output.dtype)[:,
-                                                                          None]
-                new_output = jnp.where(
-                    mask,
-                    out.reshape(1, n_v * d_v),
-                    current_output,
-                )
-                decode_output_scratch[...] = new_output.astype(
-                    current_output.dtype)
-
-                # Async store. Before writing to decode_store_scratch[slot],
-                # wait for the previous same-slot store DMA (from iter b-2)
-                # so we don't clobber a buffer that's still being read.
-                @pl.when(cur_slot_inflight > 0)
-                def _wait_same_slot_store():
-                    temp_desc = pltpu.make_async_copy(
-                        src_ref=decode_store_scratch.at[pl.ds(slot, 1)],
-                        dst_ref=recurrent_state_out.at[pl.ds(0, 1)],
-                        sem=decode_write_semaphore.at[slot],
-                    )
-                    temp_desc.wait()
-
-                decode_store_scratch[slot] = new_state.astype(
-                    decode_store_scratch.dtype)
-                copy_op = pltpu.make_async_copy(
-                    src_ref=decode_store_scratch.at[pl.ds(slot, 1)],
-                    dst_ref=recurrent_state_out.at[pl.ds(target_idx, 1)],
-                    sem=decode_write_semaphore.at[slot],
-                )
-                copy_op.start()
-                # No wait — drained after fori_loop.
-
-            # Update carry: this iter marked its slot as having an in-flight
-            # store iff is_valid.
-            next_s0_inflight = jax.lax.select(
-                is_valid & using_slot_0,
-                jnp.int32(1),
-                s0_inflight,
-            )
-            next_s1_inflight = jax.lax.select(
-                is_valid & (~using_slot_0),
-                jnp.int32(1),
-                s1_inflight,
-            )
-            return (next_s0_inflight, next_s1_inflight)
-
-        # loop over bt, could be for loop, BT is static anyway, unroll
-        final_s0_inflight, final_s1_inflight = jax.lax.fori_loop(
-            0,
-            BT,
-            process_decode,
-            (jnp.int32(0), jnp.int32(0)),
-        )
-
-        # Drain any remaining async store DMAs (at most one per slot).
-        @pl.when(final_s0_inflight > 0)
-        def _drain_slot_0():
-            temp_desc = pltpu.make_async_copy(
-                src_ref=decode_store_scratch.at[pl.ds(0, 1)],
-                dst_ref=recurrent_state_out.at[pl.ds(0, 1)],
-                sem=decode_write_semaphore.at[0],
-            )
-            temp_desc.wait()
-
-        @pl.when(final_s1_inflight > 0)
-        def _drain_slot_1():
-            temp_desc = pltpu.make_async_copy(
-                src_ref=decode_store_scratch.at[pl.ds(1, 1)],
-                dst_ref=recurrent_state_out.at[pl.ds(0, 1)],
-                sem=decode_write_semaphore.at[1],
-            )
-            temp_desc.wait()
-
-        # Mask and write accumulated outputs to HBM
-        mask = (jnp.arange(BT)
-                < decode_count).astype(decode_output_scratch.dtype)[:, None]
-        decode_output_scratch_masked = decode_output_scratch[...] * mask
-        decode_output_ref[...] = decode_output_scratch_masked
-
+        decode_processor.process()
         return None
 
     # Prefill Branch
     # Process prefill if there is valid prefill work in this step
     @pl.when(prefill_valid > 0)
     def process_prefill():
-        # TODO: eliminate k.transpose in matmuls by directly slicing in the right shape above
-
-        # not used meaningfully, because dma is sync.
-        # intention is to index into scratch for storing state and not overwrite each other
-        prefill_slot = prefill_req_id % 2
-
-        def process_regular_prefill():
-            init_has_init = has_initial_state[prefill_req_id][...]
-            init_state_idx = state_indices[prefill_req_id][...]
-            should_load_init = (is_first_chunk > 0) & (init_has_init > 0)
-            should_zero_init = (is_first_chunk > 0) & (init_has_init == 0)
-
-            @pl.when(should_load_init)
-            def _start_init_load():
-                copy_op = pltpu.make_async_copy(
-                    src_ref=recurrent_state_in.at[pl.ds(init_state_idx, 1)],
-                    dst_ref=state_commit_scratch,
-                    sem=prefill_semaphore.at[prefill_slot],
-                )
-                copy_op.start()
-
-            @pl.when(should_zero_init)
-            def _zero_init_state():
-                prefill_scratch[prefill_slot] = jnp.zeros(
-                    (n_v, d_k, d_v), dtype=prefill_scratch.dtype)
-
-            ### Preparataion for chunk wise math,
-            ### this kernel design could be optimized lot by not doing this every chunk
-            # 1. Extract Q, K, V, g, beta for the chunk
-            key_dim = n_kq * d_k
-
-            # Workaround: Upcast to fp32 to avoid NaNs in long sequences
-            qkv_chunk = prefill_qkv_ref[...].astype(jnp.float32)  # (C, d)
-            # Fused SiLU
-            qkv_chunk = jax.nn.silu(qkv_chunk)
-            q = qkv_chunk[:, :key_dim]
-            k = qkv_chunk[:, key_dim:2 * key_dim]
-            v = qkv_chunk[:, 2 * key_dim:]
-
-            # Load a, b
-            a_raw_chunk = prefill_a_raw_ref[...]  # (C, 128)
-            b_raw_chunk = prefill_b_raw_ref[...]  # (C, 128)
-
-            # Slice and transpose to match expected shape (n_v, C),
-            # TODO: this transpose can be eliminated
-            a_raw_processed = a_raw_chunk[:, :n_v].T
-            b_raw_processed = b_raw_chunk[:, :n_v].T
-
-            a_raw_processed = a_raw_processed.astype(jnp.float32)
-            b_raw_processed = b_raw_processed.astype(jnp.float32)
-            beta = jax.nn.sigmoid(b_raw_processed)
-            g = -jnp.exp(a_log_ref[...][:, None].astype(
-                jnp.float32)) * jax.nn.softplus(a_raw_processed + dt_bias_ref[
-                    ...][:, None].astype(jnp.float32))
-            # Workaround: Clamp g to avoid underflow to negative inf
-            # g is always negative, from above line
-            # for long prefill sequence this negative value will get more negative
-            # pow(e,-100) is close to 0.
-            g = jnp.maximum(g, -100.0)
-            prefill_count = schedule_table[step, 3][...]
-            mask_float = (jnp.arange(C) < prefill_count).astype(q.dtype)
-            q = jnp.where(mask_float[:, None] > 0, q, 0.0)
-            k = jnp.where(mask_float[:, None] > 0, k, 0.0)
-            g = jnp.where(mask_float[None, :] > 0, g, 0.0)
-            v = jnp.where(mask_float[:, None] > 0, v, 0.0)
-            beta = jnp.where(mask_float[None, :] > 0, beta, 0.0)
-
-            q = q.reshape(C, n_kq, d_k)
-            k = k.reshape(C, n_kq, d_k)
-            v = v.reshape(C, n_v, d_v)
-
-            if use_qk_norm_in_gdn:
-                q = l2_normalize(q)
-                k = l2_normalize(k)
-
-            # Transpose first, then repeat: the transpose operates on the
-            # smaller (C, n_kq, d_k) tensor; the subsequent repeat on the
-            # (now-leading) axis produces the same final layout.
-            q = q.transpose(1, 0, 2)
-            k = k.transpose(1, 0, 2)
-            v = v.transpose(1, 0, 2)
-
-            repeat_factor = n_v // n_kq
-            if repeat_factor > 1:
-                q = jnp.repeat(q, repeat_factor, axis=0)
-                k = jnp.repeat(k, repeat_factor, axis=0)
-
-            scale = d_k**-0.5
-            q = q * scale
-
-            g_cumsum_list = []
-            current_sum = jnp.zeros((n_v, ), dtype=jnp.float32)
-            # cumsum not implemented in pallas
-            for i in range(C):
-                current_sum = current_sum + g[:, i].astype(jnp.float32)
-                g_cumsum_list.append(current_sum)
-            g_cumsum = jnp.stack(g_cumsum_list, axis=-1)
-            k_beta = k * beta[..., None]
-
-            # Fuse S and S_q into a single matmul.
-            k_T = k.transpose(0, 2, 1)
-            kbeta_q = jnp.concatenate([k_beta, q], axis=1)  # (n_v, 2C, d_k)
-            S_both = jnp.matmul(
-                kbeta_q.astype(jnp.float32),
-                k_T.astype(jnp.float32),
-                precision=jax.lax.Precision.HIGHEST,
-            )  # (n_v, 2C, C)
-            S = S_both[:, :C, :]
-            S_q = S_both[:, C:, :]
-
-            g_diff = g_cumsum[..., :, None] - g_cumsum[..., None, :]
-            i = jnp.arange(C)[:, None]
-            j = jnp.arange(C)[None, :]
-            mask_float = (i > j).astype(jnp.float32)
-
-            # Defensive code to handle large positive g_diff which can cause
-            # overflow in exp,
-            # TODO: analyze if this is a common case and if we can remove this or do
-            # by other means (like clipping g values before cumsum or using a
-            # different data type for g/g_cumsum)
-            g_diff_safe = jnp.minimum(g_diff, 0.0)
-            S = jnp.where(mask_float[None, :, :] > 0, S * jnp.exp(g_diff_safe),
-                          0.0)
-
-            mask_float_q = (i >= j).astype(jnp.float32)
-            g_diff_Sq = g_diff_safe * mask_float_q[None, ...] + (
-                1.0 - mask_float_q[None, ...]) * (-1e30)
-            S_q = S_q * jnp.exp(g_diff_Sq)
-            S_q = S_q * mask_float_q[None, ...]
-
-            I_plus_S = jnp.eye(C, dtype=jnp.float32)[None, ...] + S
-            # TODO: call the function in kernels file
-            A_inv = invert_triangular_matrix(I_plus_S, block_size=16)
-
-            # Fuse u and w into a single matmul. Both compute
-            # A_inv @ <something>; stack v_beta and k_beta_g along the last
-            # axis (d_v -> d_v + d_k), do one matmul, then split.
-            v_beta = v * beta[..., None]
-            k_beta_g = k_beta * jnp.exp(g_cumsum)[..., None]
-            vk_in = jnp.concatenate(
-                [
-                    v_beta.astype(jnp.float32),
-                    k_beta_g.astype(jnp.float32),
-                ],
-                axis=2,
-            )  # (n_v, C, d_v + d_k)
-            uw = jnp.matmul(A_inv, vk_in, precision=jax.lax.Precision.HIGHEST)
-            u = uw[..., :d_v]
-            w = uw[..., d_v:]
-
-            q_g = q * jnp.exp(g_cumsum)[..., None]
-
-            # Fuse attn_inter and v_prime into a single matmul. With attentionDP, the async copy leads to very small perf gain.
-            @pl.when(should_load_init)
-            def _finish_init_load():
-                temp_desc = pltpu.make_async_copy(
-                    src_ref=recurrent_state_in.at[pl.ds(init_state_idx, 1)],
-                    dst_ref=state_commit_scratch,
-                    sem=prefill_semaphore.at[prefill_slot],
-                )
-                temp_desc.wait()
-                prefill_scratch[prefill_slot] = state_commit_scratch[0].astype(
-                    prefill_scratch.dtype)
-
-            current_state = prefill_scratch[prefill_slot]
-            qw = jnp.concatenate([q_g.astype(jnp.float32), w], axis=1)
-            comb = jnp.matmul(
-                qw,
-                current_state.astype(jnp.float32),
-                precision=jax.lax.Precision.HIGHEST,
-            )  # (n_v, 2C, d_v)
-            attn_inter = comb[:, :C, :]
-            v_prime = comb[:, C:, :]
-
-            v_new = u - v_prime
-            term2 = jnp.matmul(S_q, v_new, precision=jax.lax.Precision.HIGHEST)
-            o_c = attn_inter + term2
-
-            g_i_last_exp = jnp.exp(g_cumsum[..., -1, None, None])
-            g_diff_exp_state = jnp.exp(g_cumsum[..., -1, None] -
-                                       g_cumsum)[..., None]
-            k_i_g_diff = k * g_diff_exp_state
-
-            update_term = jnp.matmul(
-                k_i_g_diff.transpose(0, 2, 1).astype(jnp.float32),
-                v_new,
-                precision=jax.lax.Precision.HIGHEST,
-            )
-            h_new = current_state * g_i_last_exp + update_term
-
-            prefill_scratch[prefill_slot] = h_new.astype(prefill_scratch.dtype)
-
-            # Store state only if it's the last chunk of the request.
-            store_state_idx = state_indices[prefill_req_id][...]
-
-            @pl.when(is_last_chunk > 0)
-            def store_state():
-                # TODO: if dtype of state in HBM is always f32,
-                # then we can eliminate this copy and directly write from scratch to HBM
-                state_commit_scratch[0] = prefill_scratch[prefill_slot].astype(
-                    state_commit_scratch.dtype)
-                copy_op = pltpu.make_async_copy(
-                    src_ref=state_commit_scratch,
-                    dst_ref=recurrent_state_out.at[pl.ds(store_state_idx, 1)],
-                    sem=prefill_semaphore.at[prefill_slot],
-                )
-                copy_op.start()
-                copy_op.wait()
-
-            # TODO: eliminate this transpose and reshape by directly writing in the right shape above
-            o_c_tr = o_c.transpose(1, 0, 2)
-            o_c_flat = o_c_tr.reshape(C, n_v * d_v)
-
-            prefill_count = schedule_table[step, 3][...]
-            mask_float = (jnp.arange(C) < prefill_count).astype(o_c_flat.dtype)
-            o_c_flat_masked = o_c_flat * mask_float[:, None]
-            prefill_output_ref[...] = o_c_flat_masked.astype(
-                prefill_output_ref.dtype)
-
-            return None
-
-        def process_transition_prefill():
-            # this is processing prefill sequences in a sublane that has multiple sequences
-            C_trans = sublanesize
-            key_dim = n_kq * d_k
-
-            first_req_id = schedule_table[step, 11][...]
-            first_is_first = schedule_table[step, 11 + C_trans][...]
-            first_slot = first_req_id % 2
-            first_has_init = has_initial_state[first_req_id][...]
-            should_load_first = (first_is_first > 0) & (first_has_init > 0)
-            first_state_idx = state_indices[first_req_id][...]
-
-            # Async initial load
-            @pl.when(should_load_first)
-            def _start_first_load():
-                copy_op = pltpu.make_async_copy(
-                    src_ref=recurrent_state_in.at[pl.ds(first_state_idx, 1)],
-                    dst_ref=state_commit_scratch,
-                    sem=prefill_semaphore.at[first_slot],
-                )
-                copy_op.start()
-
-            # Workaround: Upcast to fp32 to avoid NaNs
-            qkv_chunk = prefill_qkv_ref[:C_trans, :].astype(jnp.float32)
-            # Fused SiLU TODO: maybe 'SiLU' needs to be parametrized,
-            qkv_chunk = jax.nn.silu(qkv_chunk)
-            q = qkv_chunk[:, :key_dim]
-            k = qkv_chunk[:, key_dim:2 * key_dim]
-            v = qkv_chunk[:, 2 * key_dim:]
-
-            # Load untransposed a and b
-            a_raw_chunk = prefill_a_raw_ref[...]  # (C, 128)
-            b_raw_chunk = prefill_b_raw_ref[...]  # (C, 128)
-
-            # Slice and transpose to match expected shape (n_v, C_trans)
-            a_raw_processed = a_raw_chunk[:C_trans, :n_v].T
-            b_raw_processed = b_raw_chunk[:C_trans, :n_v].T
-
-            a_raw_processed = a_raw_processed.astype(jnp.float32)
-            b_raw_processed = b_raw_processed.astype(jnp.float32)
-            beta_chunk = jax.nn.sigmoid(b_raw_processed)
-            g_chunk = -jnp.exp(a_log_ref[...][:, None].astype(
-                jnp.float32)) * jax.nn.softplus(a_raw_processed + dt_bias_ref[
-                    ...][:, None].astype(jnp.float32))
-            g_chunk = jnp.maximum(g_chunk, -100.0)
-            q = q.reshape(C_trans, n_kq, d_k)
-            k = k.reshape(C_trans, n_kq, d_k)
-            v = v.reshape(C_trans, n_v, d_v)
-
-            if use_qk_norm_in_gdn:
-                q = l2_normalize(q)
-                k = l2_normalize(k)
-
-            # Transpose first, then repeat
-            q = q.transpose(1, 0, 2)
-            k = k.transpose(1, 0, 2)
-            v = v.transpose(1, 0, 2)
-
-            repeat_factor = n_v // n_kq
-            if repeat_factor > 1:
-                q = jnp.repeat(q, repeat_factor, axis=0)
-                k = jnp.repeat(k, repeat_factor, axis=0)
-
-            scale = d_k**-0.5
-            q = q * scale
-
-            # Cold-start: zero the slot in place when the first sequence has
-            # no carried-over state, then read.
-            @pl.when((first_is_first > 0) & (first_has_init == 0))
-            def _zero_first_slot():
-                prefill_scratch[first_slot] = jnp.zeros(
-                    (n_v, d_k, d_v), dtype=prefill_scratch.dtype)
-
-            # Finish the async initial load started above
-            @pl.when(should_load_first)
-            def _finish_first_load():
-                temp_desc = pltpu.make_async_copy(
-                    src_ref=recurrent_state_in.at[pl.ds(first_state_idx, 1)],
-                    dst_ref=state_commit_scratch,
-                    sem=prefill_semaphore.at[first_slot],
-                )
-                temp_desc.wait()
-                prefill_scratch[first_slot] = state_commit_scratch[0].astype(
-                    prefill_scratch.dtype)
-
-            h = prefill_scratch[first_slot]
-
-            current_r = first_req_id
-            sequence_valid = True
-
-            # Loop over tokens in the sublane.
-            for i in range(sublanesize):
-                t_req = schedule_table[step, 11 + i][...]
-                t_is_first = schedule_table[step, 11 + C_trans + i][...]
-                t_is_last = schedule_table[step, 11 + 2 * C_trans + i][...]
-
-                is_new_seq = t_req != current_r
-                sequence_valid = jnp.where(is_new_seq, True, sequence_valid)
-
-                # Ignore tokens that belong to decode requests,
-                # (assumes decode tokens are at packed at head)
-                is_decode_token = t_req < decode_tokens
-                sequence_valid = jnp.where(is_decode_token, False,
-                                           sequence_valid)
-
-                c_slot = current_r % 2
-
-                # Commit the previous iter's h to the current request's slot.
-                # The other slot is untouched.
-                prefill_scratch[c_slot] = h
-
-                def do_write():
-                    state_idx = state_indices[current_r][...]
-                    # Stage h only when we actually DMA out.
-                    state_commit_scratch[0] = h.astype(
-                        state_commit_scratch.dtype)
-                    copy_op = pltpu.make_async_copy(
-                        src_ref=state_commit_scratch,
-                        dst_ref=recurrent_state_out.at[pl.ds(state_idx, 1)],
-                        sem=prefill_semaphore.at[c_slot],
-                    )
-                    copy_op.start()
-                    copy_op.wait()
-                    return None
-
-                is_current_r_prefill = current_r >= decode_tokens
-                should_write = is_current_r_prefill & is_new_seq
-                jax.lax.cond(should_write, do_write, lambda: None)
-
-                t_slot = t_req % 2
-                t_has_init = has_initial_state[t_req][...]
-
-                def load_t_state():
-                    state_idx = state_indices[t_req][...]
-                    copy_op = pltpu.make_async_copy(
-                        src_ref=recurrent_state_in.at[pl.ds(state_idx, 1)],
-                        dst_ref=state_commit_scratch,
-                        sem=prefill_semaphore.at[t_slot],
-                    )
-                    copy_op.start()
-                    copy_op.wait()
-                    prefill_scratch[t_slot] = state_commit_scratch[0].astype(
-                        prefill_scratch.dtype)
-
-                should_load_t = (t_is_first > 0) & (t_has_init > 0)
-                jax.lax.cond(should_load_t, load_t_state, lambda: None)
-
-                # Cold-start: zero the slot in place for a new sequence with
-                # no carried-over state. Mutually exclusive with load_t_state.
-                @pl.when((t_is_first > 0) & (t_has_init == 0))
-                def _zero_t_slot():
-                    prefill_scratch[t_slot] = jnp.zeros(
-                        (n_v, d_k, d_v), dtype=prefill_scratch.dtype)
-
-                h = prefill_scratch[t_slot]
-
-                current_r = t_req
-
-                k_i = k[:, i, :]
-                v_i = v[:, i, :]
-                g_i = g_chunk[:, i]
-                beta_i = beta_chunk[:, i]
-                q_i = q[:, i, :]
-
-                decay = jnp.exp(g_i)[..., None]
-
-                k_state = jnp.sum(k_i[..., None] * h, axis=1)
-                v_diff = v_i - decay * k_state
-                v_new = beta_i[:, None] * v_diff
-
-                q_state = jnp.sum(q_i[..., None] * h, axis=1)
-                q_k = jnp.sum(q_i * k_i, axis=-1, keepdims=True)
-
-                out_i = decay * q_state + q_k * v_new
-
-                k_v_new = k_i[..., None] * v_new[:, None, :]
-                h_new = h * decay[..., None] + k_v_new
-
-                h = jnp.where(sequence_valid, h_new, h)
-
-                # Mask output before invalidating the sequence for the next token.
-                out_i = jnp.where(sequence_valid, out_i, 0.0)
-
-                sequence_valid = jnp.where(t_is_last > 0, False,
-                                           sequence_valid)
-
-                prefill_output_ref[i, :] = out_i.reshape(n_v * d_v).astype(
-                    prefill_output_ref.dtype)
-
-            final_slot = current_r % 2
-            prefill_scratch[final_slot] = h
-
-            is_current_r_prefill = current_r >= decode_tokens
-
-            # Store state if the current request is a prefill.
-            # At the end of the transition prefill. No need to make this async.
-            @pl.when(is_current_r_prefill)
-            def do_final_write():
-                state_idx = state_indices[current_r][...]
-                # Stage h into state_commit only when we actually DMA out.
-                state_commit_scratch[0] = h.astype(state_commit_scratch.dtype)
-                copy_op = pltpu.make_async_copy(
-                    src_ref=state_commit_scratch,
-                    dst_ref=recurrent_state_out.at[pl.ds(state_idx, 1)],
-                    sem=prefill_semaphore.at[final_slot],
-                )
-                copy_op.start()
-                copy_op.wait()
-                return None
-
-            return None
-
-        is_transition = schedule_table[step, 10][...]
-
-        def process_prefill_dispatch():
-            return jax.lax.cond(
-                is_transition > 0,
-                lambda _: process_transition_prefill(),
-                lambda _: process_regular_prefill(),
-                operand=None,
-            )
-
-        process_prefill_dispatch()
+        prefill_processor.process()
         return None
 
-    # For transition block at boundary of decode and prefill we will have overlap
-    # decode block BT contains prefill tokens
-    # sublane size transition prefill block contains some decode tokens in the sublane
-    # so we need to stitch the outputs so they don't overwrite each other in global index
-    # we exchange decode and prefill outputs so
-    # prefill output ref has decode token outputs at decode token indexes in its out ref
-    # decode output ref has prefill token outputs have prefill token indexes in its out ref
+    # For transition block at boundary of decode and prefill we will have
+    # overlap:
+    # - Decode block BT contains prefill tokens
+    # - Sublane size transition prefill block contains some decode tokens in the
+    #   sublane
+    # So we need to stitch the outputs so they don't overwrite each other in the
+    # global index. We exchange decode and prefill outputs so:
+    # - Prefill output ref has decode token outputs at decode token indexes in its
+    #   out ref
+    # - Decode output ref has prefill token outputs at prefill token indexes in
+    #   its out ref
     def do_stitch():
         local_start = prefill_offset - decode_offset
         local_split = decode_tokens - prefill_offset
@@ -952,7 +295,7 @@ def inner_kernel(
         iota = jax.lax.broadcasted_iota(jnp.int32, (sublanesize, ), 0)
         is_decode_mask = (iota < local_split).astype(jnp.int32)[:, None]
 
-        # 4. Merge the tensors
+        # 4. Merge
         merged_overlap = jnp.where(is_decode_mask, decode_overlap, prefill_arr)
 
         decode_output_ref[
@@ -971,7 +314,6 @@ def get_qkv_index_map_v2(
     schedule_table,
     valid_col,
     offset_col,
-    count_col,
     alignment=16,
     block_size=64,
     sink_offset=0,
@@ -1001,9 +343,8 @@ def create_block_specs(
     prefill_qkv_index_map = functools.partial(
         get_qkv_index_map_v2,
         schedule_table=schedule_table,
-        valid_col=0,
-        offset_col=1,
-        count_col=3,
+        valid_col=recurrent_scan_impl.COL_PREFILL_VALID,
+        offset_col=recurrent_scan_impl.COL_PREFILL_OFFSET,
         alignment=alignment,
         block_size=chunk_size,
         sink_offset=sink_offset,
@@ -1012,9 +353,8 @@ def create_block_specs(
     decode_qkv_index_map = functools.partial(
         get_qkv_index_map_v2,
         schedule_table=schedule_table,
-        valid_col=4,
-        offset_col=5,
-        count_col=7,
+        valid_col=recurrent_scan_impl.COL_DECODE_VALID,
+        offset_col=recurrent_scan_impl.COL_DECODE_OFFSET,
         alignment=alignment,
         block_size=BT,
         sink_offset=sink_offset,
@@ -1249,7 +589,7 @@ def recurrent_scan(
       each request in mixed_qkv.
     state_indices: jax.Array of shape [num_requests] or larger. Mapping from
       request ID to state index.
-    distribution: jax.Array of shape [2]. Contains [decode_tokens,
+    distribution: jax.Array of shape [3]. Contains [decode_tokens,
       total_tokens].
     n_kq: Number of query/key heads.
     n_v: Number of value heads.
@@ -1278,7 +618,7 @@ def recurrent_scan(
 
     # Default the scoped VMEM ceiling. This value could be tuned for different state cache numerics and chunk sizes.
     if vmem_limit_bytes is None:
-        vmem_limit_bytes = tpu_info.vmem_capacity_bytes
+        vmem_limit_bytes = int(tpu_info.vmem_capacity_bytes * 0.8)
 
     # Pad token dimension so invalid pipeline steps DMA into a safe sink area.
     # Sink offset must be aligned to sublanesize for Mosaic tile compatibility.

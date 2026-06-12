@@ -16,9 +16,56 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+from vllm.sampling_params import SamplingParams
 
+from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.persistent_batch_manager import \
     PersistentBatchManager
+
+
+def _create_cached_request(req_id: str) -> CachedRequestState:
+    return CachedRequestState(
+        req_id=req_id,
+        prompt_token_ids=[1, 2, 3],
+        mm_features=[],
+        sampling_params=SamplingParams(temperature=0.0),
+        pooling_params=None,
+        block_ids=[[1]],
+        num_computed_tokens=0,
+        lora_request=None,
+        output_token_ids=[],
+    )
+
+
+def _make_scheduler_output(*,
+                           scheduled_req_ids=(),
+                           preempted_req_ids=None,
+                           resumed_req_ids=(),
+                           new_block_ids=None):
+    scheduler_output = MagicMock()
+    req_data = MagicMock()
+    req_data.req_ids = list(scheduled_req_ids)
+    req_data.resumed_req_ids = set(resumed_req_ids)
+    req_data.num_computed_tokens = [0] * len(req_data.req_ids)
+    req_data.new_token_ids = [[] for _ in req_data.req_ids]
+    if new_block_ids is None:
+        req_data.new_block_ids = [None for _ in req_data.req_ids]
+    else:
+        req_data.new_block_ids = new_block_ids
+    req_data.num_output_tokens = [0] * len(req_data.req_ids)
+    scheduler_output.scheduled_cached_reqs = req_data
+    scheduler_output.scheduled_new_reqs = []
+    scheduler_output.scheduled_spec_decode_tokens = {}
+    scheduler_output.num_scheduled_tokens = {
+        req_id: 1
+        for req_id in scheduled_req_ids
+    }
+    scheduler_output.total_num_scheduled_tokens = len(scheduled_req_ids)
+    scheduler_output.finished_req_ids = set()
+    scheduler_output.free_encoder_mm_hashes = []
+    scheduler_output.preempted_req_ids = set(preempted_req_ids or ())
+    scheduler_output.assigned_dp_rank = {}
+    return scheduler_output
 
 
 class MockInputBatch:
@@ -127,6 +174,138 @@ class TestReorderBatch(unittest.TestCase):
 
 
 class TestPersistentBatchManager(unittest.TestCase):
+
+    def test_update_states_preserves_mamba_slot_for_unscheduled_request(self):
+        req = _create_cached_request("req-0")
+        requests = {req.req_id: req}
+        input_batch = InputBatch(
+            max_num_reqs=4,
+            max_model_len=16,
+            max_num_batched_tokens=16,
+            pin_memory=False,
+            vocab_size=128,
+            block_sizes=[16],
+        )
+        input_batch.add_request(req)
+        slot = int(input_batch.mamba_state_indices_cpu[0])
+
+        manager = PersistentBatchManager(requests,
+                                         input_batch,
+                                         encoder_cache={},
+                                         uses_mrope=False,
+                                         model_config=MagicMock(),
+                                         is_last_rank=True)
+
+        manager.update_states(_make_scheduler_output(), None)
+
+        self.assertEqual(req.mamba_state_slot, slot)
+        self.assertFalse(
+            any(slot in pool
+                for pool in input_batch._free_mamba_slots_per_rank))
+
+    def test_update_states_releases_mamba_slot_for_preempted_request(self):
+        req = _create_cached_request("req-0")
+        requests = {req.req_id: req}
+        input_batch = InputBatch(
+            max_num_reqs=4,
+            max_model_len=16,
+            max_num_batched_tokens=16,
+            pin_memory=False,
+            vocab_size=128,
+            block_sizes=[16],
+        )
+        input_batch.add_request(req)
+        slot = int(input_batch.mamba_state_indices_cpu[0])
+
+        manager = PersistentBatchManager(requests,
+                                         input_batch,
+                                         encoder_cache={},
+                                         uses_mrope=False,
+                                         model_config=MagicMock(),
+                                         is_last_rank=True)
+
+        manager.update_states(
+            _make_scheduler_output(preempted_req_ids={req.req_id}), None)
+
+        self.assertIsNone(req.mamba_state_slot)
+        self.assertTrue(
+            any(slot in pool
+                for pool in input_batch._free_mamba_slots_per_rank))
+
+    def test_update_states_releases_preserved_mamba_slot_when_preempted(self):
+        req = _create_cached_request("req-0")
+        requests = {req.req_id: req}
+        input_batch = InputBatch(
+            max_num_reqs=4,
+            max_model_len=16,
+            max_num_batched_tokens=16,
+            pin_memory=False,
+            vocab_size=128,
+            block_sizes=[16],
+        )
+        input_batch.add_request(req)
+        slot = int(input_batch.mamba_state_indices_cpu[0])
+
+        manager = PersistentBatchManager(requests,
+                                         input_batch,
+                                         encoder_cache={},
+                                         uses_mrope=False,
+                                         model_config=MagicMock(),
+                                         is_last_rank=True)
+
+        manager.update_states(_make_scheduler_output(), None)
+        self.assertEqual(req.mamba_state_slot, slot)
+        self.assertEqual(input_batch.num_reqs, 0)
+        self.assertFalse(
+            any(slot in pool
+                for pool in input_batch._free_mamba_slots_per_rank))
+
+        manager.update_states(
+            _make_scheduler_output(preempted_req_ids={req.req_id}), None)
+
+        self.assertIsNone(req.mamba_state_slot)
+        self.assertTrue(
+            any(slot in pool
+                for pool in input_batch._free_mamba_slots_per_rank))
+
+    def test_update_states_resets_preserved_mamba_slot_when_resumed(self):
+        req = _create_cached_request("req-0")
+        requests = {req.req_id: req}
+        input_batch = InputBatch(
+            max_num_reqs=4,
+            max_model_len=16,
+            max_num_batched_tokens=16,
+            pin_memory=False,
+            vocab_size=128,
+            block_sizes=[16],
+        )
+        input_batch.add_request(req)
+        slot = int(input_batch.mamba_state_indices_cpu[0])
+
+        manager = PersistentBatchManager(requests,
+                                         input_batch,
+                                         encoder_cache={},
+                                         uses_mrope=False,
+                                         model_config=MagicMock(),
+                                         is_last_rank=True)
+
+        manager.update_states(_make_scheduler_output(), None)
+        self.assertEqual(req.mamba_state_slot, slot)
+
+        with patch.object(input_batch,
+                          "release_mamba_slot",
+                          wraps=input_batch.release_mamba_slot) as release:
+            manager.update_states(
+                _make_scheduler_output(
+                    scheduled_req_ids=[req.req_id],
+                    resumed_req_ids={req.req_id},
+                    new_block_ids=[[[2]]],
+                ), None)
+
+        release.assert_called_with(slot)
+        self.assertEqual(input_batch.num_reqs, 1)
+        self.assertEqual(req.mamba_state_slot,
+                         int(input_batch.mamba_state_indices_cpu[0]))
 
     def test_update_states_pp_non_last_rank(self):
         """

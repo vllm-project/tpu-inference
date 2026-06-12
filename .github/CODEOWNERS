@@ -24,11 +24,13 @@
 # Kernel Implementations (Performance-critical)
 /tpu_inference/kernels/ @kyuyeunk @bythew3i @a1yssan13 @jrplatin
 /tpu_inference/kernels/mla/ @m-liu @gxd3 @gpolovets1 @kyuyeunk
+/tpu_inference/kernels/experimental/deepseek_v4/ @gxd3 @a1yssan13 @inucool12
 
 # Model layers
 /tpu_inference/layers/ @kyuyeunk @lk-chen @jrplatin @gxd3
-/tpu_inference/layers/jax/ @jrplatin @gpolovets1
+/tpu_inference/layers/jax/ @jrplatin @gpolovets1 @lk-chen
 /tpu_inference/layers/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
+/tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v4/ @gxd3 @a1yssan13 @inucool12
 
 # Model Implementations and wrappers
 /tpu_inference/models/ @kyuyeunk @lk-chen @jrplatin
@@ -63,7 +65,7 @@
 /docker/ @jrplatin @QiliangCui @yiw-wang
 
 # Tools (kernel tuner, etc.)
-/tools/ @vipannalla @kyuyeunk @patrickji2014
+/tools/ @vipannalla @kyuyeunk @patrickji2014 @yiw-wang @qiliangcui
 
 # Unowned: scripts, examples, and bot-updated support_matrices —
 # anyone can approve, no required CODEOWNER review. Bot pushes to

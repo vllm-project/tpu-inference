@@ -282,6 +282,31 @@ def test_mamba_state_indices_freed_on_remove(input_batch: InputBatch):
     assert int(input_batch.mamba_state_indices_cpu[0]) == slot_first
 
 
+def test_mamba_state_slot_preserved_when_request_unscheduled(
+        input_batch: InputBatch):
+    """Temporarily unscheduled requests must keep their physical mamba slot.
+
+    The recurrent state lives in the mamba cache slot, not in the moving
+    persistent-batch row. Freeing the slot for an unscheduled-but-not-finished
+    request lets another request overwrite that state before the original
+    request resumes.
+    """
+    req = create_dummy_request("req-0")
+    input_batch.add_request(req)
+    slot_first = int(input_batch.mamba_state_indices_cpu[0])
+
+    input_batch.remove_request("req-0", free_mamba_slot=False)
+
+    assert req.mamba_state_slot == slot_first
+    assert int(input_batch.mamba_state_indices_cpu[0]) == 0
+    assert all(slot_first not in pool
+               for pool in input_batch._free_mamba_slots_per_rank)
+
+    input_batch.add_request(req)
+
+    assert int(input_batch.mamba_state_indices_cpu[0]) == slot_first
+
+
 def test_mamba_state_indices_follow_condense(input_batch: InputBatch):
     """When condense moves a request to a different persistent-batch slot,
     its mamba state id must follow it — otherwise the GDN op reads stale
@@ -541,6 +566,19 @@ def test_dp_mamba_remove_returns_slot_to_correct_rank(
         dp_input_batch.remove_request(req.req_id)
         assert len(
             dp_input_batch._free_mamba_slots_per_rank[rank]) == pool_before
+
+
+def test_dp_mamba_release_ignores_rank_null_slots(dp_input_batch: InputBatch):
+    """Rank-local null slots must never enter the reusable mamba slot pools."""
+    local_slots = dp_input_batch._mamba_local_slots
+    pools_before = [
+        list(pool) for pool in dp_input_batch._free_mamba_slots_per_rank
+    ]
+
+    for rank in range(DP_SIZE):
+        dp_input_batch.release_mamba_slot(rank * local_slots)
+
+    assert dp_input_batch._free_mamba_slots_per_rank == pools_before
 
 
 def test_dp_mamba_slots_unique_across_ranks(dp_input_batch: InputBatch):

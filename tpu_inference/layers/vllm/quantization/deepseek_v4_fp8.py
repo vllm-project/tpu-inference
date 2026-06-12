@@ -16,7 +16,7 @@ from typing import Optional, Union
 
 import torch
 from vllm.model_executor.layers import linear as vllm_linear
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
@@ -65,7 +65,7 @@ class VllmDeepseekV4Fp8Config(DeepseekV4FP8Config, VllmQuantConfig):
                 ):
                     return VllmUnquantizedLinearMethod(linear_config)
                 return VllmFp8LinearMethod(self, linear_config)
-            case FusedMoE():
+            case RoutedExperts():
                 if is_layer_skipped(
                         prefix=prefix,
                         ignored_layers=self.ignored_layers,

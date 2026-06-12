@@ -374,8 +374,8 @@ def test_fused_moe(num_devices, num_tokens, intermediate_size, hidden_size,
             dp_size=1,
             quant_config=config,
             has_bias=has_bias,
+            activation=activation.value,
         )
-        moe_layer.activation = activation
 
     # Quantize w1 and w2 per-expert to NVFP4.
     group_size = NVFP4_GROUP_SIZE
@@ -383,36 +383,38 @@ def test_fused_moe(num_devices, num_tokens, intermediate_size, hidden_size,
         # w13 (gate+up fused).
         w1_packed, w1_scale, w1_gs = quantize_to_nvfp4(w1[e].float(),
                                                        group_size)
-        moe_layer.w13_weight.data[e] = w1_packed
-        moe_layer.w13_weight_scale.data[e] = w1_scale
-        moe_layer.w13_weight_scale_2.data[e] = w1_gs.item()
+        moe_layer.routed_experts.w13_weight.data[e] = w1_packed
+        moe_layer.routed_experts.w13_weight_scale.data[e] = w1_scale
+        moe_layer.routed_experts.w13_weight_scale_2.data[e] = w1_gs.item()
 
         # w2 (down).
         w2_packed, w2_scale, w2_gs = quantize_to_nvfp4(w2[e].float(),
                                                        group_size)
-        moe_layer.w2_weight.data[e] = w2_packed
-        moe_layer.w2_weight_scale.data[e] = w2_scale
-        moe_layer.w2_weight_scale_2.data[e] = w2_gs.item()
+        moe_layer.routed_experts.w2_weight.data[e] = w2_packed
+        moe_layer.routed_experts.w2_weight_scale.data[e] = w2_scale
+        moe_layer.routed_experts.w2_weight_scale_2.data[e] = w2_gs.item()
 
     if has_bias:
-        moe_layer.w13_bias.data = torch.randn(
+        moe_layer.routed_experts.w13_bias.data = torch.randn(
             (num_experts, 2 * intermediate_size), dtype=dtype) / 10
-        moe_layer.w2_bias.data = torch.randn(
+        moe_layer.routed_experts.w2_bias.data = torch.randn(
             (num_experts, hidden_size), dtype=dtype) / 10
 
-    w1_bias = moe_layer.w13_bias.data if has_bias else None
-    w2_bias = moe_layer.w2_bias.data if has_bias else None
+    w1_bias = moe_layer.routed_experts.w13_bias.data if has_bias else None
+    w2_bias = moe_layer.routed_experts.w2_bias.data if has_bias else None
 
     # Reference MoE computation.
     expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias, topk,
-                                  moe_layer.renormalize,
+                                  moe_layer.routed_experts.renormalize,
                                   moe_layer.activation.value)
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
-        assert isinstance(moe_layer.quant_method, VllmNvfp4MoEMethod)
+        assert isinstance(moe_layer.routed_experts.quant_method,
+                          VllmNvfp4MoEMethod)
         jax_a = a.to('jax')
         jax_score = score.to('jax')
-        moe_layer.quant_method.process_weights_after_loading(moe_layer)
+        moe_layer.routed_experts.quant_method.process_weights_after_loading(
+            moe_layer.routed_experts)
         actual = moe_layer(jax_a, jax_score)
 
         # FP4 quantization + requantization adds noise; use generous tolerance.

@@ -86,7 +86,16 @@ def get_kv_cache_shape(
     kv_dim,
     kv_dtype,
     kv_packing: int | None = None,
+    transpose_kv_cache: bool = False,
 ):
+    if transpose_kv_cache:
+        assert page_size % 128 == 0
+        return (
+            total_num_pages,
+            kv_dim,
+            page_size,
+        )
+
     if kv_packing is None:
         kv_packing = get_dtype_packing(kv_dtype)
     return (
@@ -206,10 +215,10 @@ def static_validate_inputs(
             kv_dim,
             _,
         ) = cache_kv.shape
-
-    if lkv_dim + r_dim != kv_dim:
+    aligned_kv_dim = align_to(kv_dim, 128)
+    if lkv_dim + r_dim != aligned_kv_dim:
         raise ValueError(
-            f"Expected {lkv_dim=} + {r_dim=} to be equal to {kv_dim=}")
+            f"Expected {lkv_dim=} + {r_dim=} to be equal to {aligned_kv_dim=}")
 
     if not (cache_kv.dtype == new_kv_c.dtype):
         raise ValueError(
@@ -347,7 +356,8 @@ def _mla_ragged_paged_attention_kernel(
         ) = cache_kv_hbm_ref.shape
         bkv_sz = bkv_p * page_size
         page_size_per_lane = page_size // 128
-    assert nope_dim + pe_dim == kv_dim
+    assert nope_dim + pe_dim == align_to(kv_dim, 128)
+    kv_r_dim = kv_dim - nope_dim
 
     max_num_seqs = kv_lens_ref.shape[0]
     num_page_indices = page_indices_ref.shape[0]
@@ -629,10 +639,13 @@ def _mla_ragged_paged_attention_kernel(
 
         if p_same_dtype_as_v:
             p = p.astype(v.dtype)
-        pv = jnp.einsum("nm,md->nd" if not transpose_kv_cache else "nm,dm->nd",
-                        p,
-                        v,
-                        preferred_element_type=jnp.float32)
+        if transpose_kv_cache:
+            v = v.transpose((1, 0))
+            # Bitcast trick to prevent transpose merge into vmatpush.xpose.
+            # It enforce transpose using XLUs (vxpose.xlu).
+            v = pltpu.bitcast(v, v.dtype)
+
+        pv = jnp.einsum("nm,md->nd", p, v, preferred_element_type=jnp.float32)
 
         if v_scale is not None:
             pv *= v_scale
@@ -754,7 +767,8 @@ def _mla_ragged_paged_attention_kernel(
                             nope_dim:,
                             pl.ds(0, copy_len),
                         ],
-                        bkvpe_vmem_ref.at[:, pl.ds(i * page_size, copy_len)],
+                        bkvpe_vmem_ref.at[:kv_r_dim,
+                                          pl.ds(i * page_size, copy_len)],
                         sem,
                         wait,
                     )
@@ -813,12 +827,12 @@ def _mla_ragged_paged_attention_kernel(
                     wait,
                 )
                 _async_copy(
-                    new_k_pe_hbm_ref.at[:,
+                    new_k_pe_hbm_ref.at[:kv_r_dim,
                                         pl.ds(
                                             aligned_new_kv_len_start,
                                             aligned_new_kv_len_size,
                                         )],
-                    bkvpe_vmem_ref.at[:,
+                    bkvpe_vmem_ref.at[:kv_r_dim,
                                       pl.ds(
                                           new_kv_start_idx,
                                           aligned_new_kv_len_size,
@@ -838,7 +852,7 @@ def _mla_ragged_paged_attention_kernel(
                     sem=sem,
                     wait=True,
                 )
-                dst_kvpe = bkvpe_vmem_ref.at[:, pl.ds(0, dma_sz)]
+                dst_kvpe = bkvpe_vmem_ref.at[:kv_r_dim, pl.ds(0, dma_sz)]
                 _async_copy(
                     src=dst_kvpe,
                     dst=dst_kvpe,
@@ -1310,7 +1324,7 @@ def _mla_ragged_paged_attention_kernel(
                 _async_copy(
                     # bkvpe_vmem_ref shape:
                     # [r_dim_per_kv_packing, kv_packing, bkv_sz]
-                    bkvpe_vmem_ref.at[...,
+                    bkvpe_vmem_ref.at[:kv_r_dim,
                                       pl.ds(curr_word_in_vmem * 128, sz_words *
                                             128)],
                     updated_cache_kv_hbm_ref.at[page_idx, nope_dim:,
@@ -1341,7 +1355,7 @@ def _mla_ragged_paged_attention_kernel(
                 sem=sem,
                 wait=True,
             )
-            dst_kv_pe = bkvpe_vmem_ref.at[..., pl.ds(0, dma_sz_words)]
+            dst_kv_pe = bkvpe_vmem_ref.at[:kv_r_dim, pl.ds(0, dma_sz_words)]
             _async_copy(
                 src=dst_kv_pe,
                 dst=dst_kv_pe,

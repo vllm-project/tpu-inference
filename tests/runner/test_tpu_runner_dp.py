@@ -48,6 +48,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         }
         self.runner.input_batch.num_computed_tokens_cpu = np.array(
             [10, 20, 5, 15])
+        self.runner.input_batch.num_prompt_tokens = np.array([10, 20, 5, 15])
         self.runner.input_batch.token_ids_cpu = np.random.randint(
             0, 1000, (8, 64), dtype=np.int32)
 
@@ -828,7 +829,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Setup test data
         req_ids_dp = {0: ["req1", "req2"], 1: ["req3"]}
-        scheduled_tokens_per_dp_rank = {0: [3, 2], 1: [4]}
+        scheduled_tokens_per_dp_rank = {0: [1, 2], 1: [1]}
         padded_num_scheduled_tokens_per_dp_rank = 8
         dp_size = 2
 
@@ -848,14 +849,14 @@ class TestTPUJaxRunnerDPInputsLightweight:
          token_in_tpu_pre_next_tokens_indices_dp) = result
 
         # Verify DP rank 0
-        # req1: token_offset=0, acc_cur_len starts at 0, after 3 tokens: 3, so last token at 2
+        # req1: token_offset=0, acc_cur_len starts at 0, after 1 tokens: 1, so last token at 0
         # req2: not a placeholder, should be skipped
-        assert token_in_tpu_cur_input_indices_dp[0] == [2]
+        assert token_in_tpu_cur_input_indices_dp[0] == [0]
         assert token_in_tpu_pre_next_tokens_indices_dp[0] == [0]
 
         # Verify DP rank 1
-        # req3: token_offset=8, acc_cur_len starts at 8, after 4 tokens: 12, so last token at 11
-        assert token_in_tpu_cur_input_indices_dp[1] == [11]
+        # req3: token_offset=8, acc_cur_len starts at 8, after 1 tokens: 9, so last token at 8
+        assert token_in_tpu_cur_input_indices_dp[1] == [8]
         assert token_in_tpu_pre_next_tokens_indices_dp[1] == [2]
 
     @patch('jax.device_put', side_effect=lambda x, y: x)
@@ -870,7 +871,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         """Test when no requests are placeholders."""
 
         req_ids_dp = {0: ["req1", "req2"], 1: ["req3"]}
-        scheduled_tokens_per_dp_rank = {0: [3, 2], 1: [4]}
+        scheduled_tokens_per_dp_rank = {0: [1, 2], 1: [1]}
         padded_num_scheduled_tokens_per_dp_rank = 8
         dp_size = 2
 
@@ -1060,12 +1061,14 @@ class TestTPUJaxRunnerDPInputsLightweight:
         mock_named_sharding.return_value = MagicMock()
 
         # Setup test data
-        num_scheduled_tokens = {"req1": 3, "req2": 2}
+        num_scheduled_tokens = {"req1": 1, "req2": 1}
         assigned_dp_ranks = {"req1": 0, "req2": 1}
 
         self.runner.input_batch.num_reqs = 2
         self.runner.input_batch.req_ids = ["req1", "req2"]
         self.runner.input_batch.num_computed_tokens_cpu = np.array([4, 6])
+        self.runner.input_batch.num_prompt_tokens = np.array(
+            [4, 6])  # Make them decode (not prefill)
         self.runner.input_batch.token_ids_cpu = np.zeros((8, 64),
                                                          dtype=np.int32)
 
@@ -1198,13 +1201,18 @@ class TestTPUJaxRunnerPadding:
 
 class TestSamplingMetadataPassthrough:
 
-    def test_sample_tokens_passes_sampling_metadata_from_state(self):
+    @patch('jax.set_mesh')
+    def test_sample_tokens_passes_sampling_metadata_from_state(
+            self, mock_set_mesh):
         """sample_tokens() should pass execute_model_state.sampling_metadata to _sample_from_logits."""
+        mock_set_mesh.return_value.__enter__ = MagicMock(return_value=None)
+        mock_set_mesh.return_value.__exit__ = MagicMock(return_value=False)
         runner = MagicMock()
         mock_sampling_metadata = MagicMock()
         # Set the specific field we want to trace; other fields are auto-mocked.
         runner.execute_model_state.sampling_metadata = mock_sampling_metadata
         runner._sample_from_logits = MagicMock(return_value=MagicMock())
+        runner._continue_decode_output = None
 
         TPUModelRunner.sample_tokens(runner, grammar_output=None)
 

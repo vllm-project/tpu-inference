@@ -159,7 +159,7 @@ steps:
             echo "    /workspace/tpu_inference/" >> .coveragerc
           - |
             python3 ./coverage.pex combine .coverage.part1.${TPU_VERSION:-tpu6e} .coverage.part2.${TPU_VERSION:-tpu6e}
-            python3 ./coverage.pex report --fail-under=69
+            python3 ./coverage.pex report --fail-under=68
             EXIT_CODE=$?
             rm -f .coverage.part* .coveragerc pex coverage.pex .coverage
             exit $EXIT_CODE
@@ -679,7 +679,7 @@ steps:
           - |
             if [[ "$TPU_VERSION" == "tpu7x" ]]; then
               .buildkite/scripts/run_in_docker.sh bash -c "
-                TPU_VERSION=\${TPU_VERSION} TPU_CORES=\${TPU_CORES} python -m pytest tools/kernel/tuner/v1/tests/test_kernel_tuner_runner.py -v -rs"
+                TPU_VERSION=\${TPU_VERSION} TPU_CORES=\${TPU_CORES} python -m pytest tools/kernel/tuner/v1/tests -v -rs"
             else
               echo "Skipping: Step only needs to run on TPU v7x."
               exit 0

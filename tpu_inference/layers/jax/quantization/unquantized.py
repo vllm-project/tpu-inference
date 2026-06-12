@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import gc
 from typing import Optional
 
@@ -27,13 +28,16 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
     shard_moe_weights)
 from tpu_inference.layers.common.quantization import unquantized as jax_common
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
+from tpu_inference.layers.common.utils import cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import (JaxEinsum,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.weight_utils import shard_put
+from tpu_inference.models.jax.utils.weight_utils import (
+    assign_and_shard_param, jax_array_from_reshaped_torch, shard_put)
 
 logger = init_logger(__name__)
 
@@ -58,6 +62,105 @@ class UnquantizedLinearMethod(QuantizeMethodBase,
                     "Non-fused matmuls not implemented yet.")
 
         return out
+
+
+class UnquantizedMergedLinearMethod(UnquantizedLinearMethod):
+    """Unquantized method for JaxMerged*Linear layers.
+
+    A merged column-parallel linear (e.g. fused gate_up_proj) holds the weights
+    of several logical projections concatenated along the output dim of a single
+    kernel. The checkpoint, however, ships each projection as a separate tensor
+    (``gate_proj.weight``, ``up_proj.weight``).
+
+    ``UnquantizedLinearMethod._apply_fused`` already un-interleaves the fused
+    output back into the per-projection pieces via
+    ``slice_sharded_tensor_for_concatenation(out, output_sizes, n_shards)``,
+    which reshapes the output dim as ``(n_shards, -1)`` and reads each
+    projection's per-shard slice. For that to be correct the kernel must be
+    stored *interleaved* by shard: shard ``i`` holds
+    ``[proj0_slice_i, proj1_slice_i, ...]``.
+
+    ``create_weights_jax`` attaches a ``weight_loader`` that accumulates each
+    projection's checkpoint tensor (by ``shard_id``) and, once all are present,
+    builds that interleaved layout — the inverse of the slicing done at apply
+    time, so loading and forward stay consistent (and TP-co-located whenever
+    ``n_shards`` matches the model-parallel degree).
+    """
+
+    def create_weights_jax(self, layer: JaxEinsum, *weight_args, rngs,
+                           **extra_weight_attrs):
+        # The fused kernel (shape `(in, sum(output_sizes))` with the output
+        # dim sharded) is already created by `JaxEinsum.__init__`. Keep that
+        # param (so its partition metadata survives) and attach:
+        #   * a per-projection accumulation buffer, and
+        #   * a weight_loader that stashes each projection's tensor and fuses
+        #     them once all shards have arrived.
+        assert isinstance(layer, JaxEinsum)
+        n_proj = len(self.linear_config.output_sizes)
+        layer.weight.set_metadata("_merged_shards", [None] * n_proj)
+        layer.weight.set_metadata(
+            "weight_loader",
+            functools.partial(self._load_merged_weight,
+                              n_shards=self.linear_config.n_shards,
+                              output_sizes=self.linear_config.output_sizes,
+                              param_name=layer.prefix + ".weight"))
+
+    @staticmethod
+    def _load_merged_weight(param: nnx.Param, torch_weight, shard_id: int, *,
+                            n_shards: int, output_sizes: list,
+                            param_name: str):
+        """Accumulate one projection's checkpoint tensor, fuse when complete.
+
+        Called once per fused projection with ``shard_id`` selecting the slot
+        (e.g. gate=0, up=1). ``torch_weight`` has the HF layout ``(out_i, in)``.
+        The projections may arrive across multiple files, so the fuse only runs
+        once every slot is filled.
+        """
+        shards = param.get_metadata("_merged_shards")
+        shards[shard_id] = torch_weight
+        if any(s is None for s in shards):
+            return
+
+        # The per-projection tensors are converted on the host (CPU); the
+        # interleaving reshape/concat must run in the same CPU mesh context,
+        # otherwise it conflicts with the ambient TPU mesh active during weight
+        # loading. assign_and_shard_param then places the result on device.
+        with cpu_mesh_context():
+            interleaved_pieces = []
+            for out_size, torch_w in zip(output_sizes, shards):
+                assert out_size % n_shards == 0, (
+                    f"Output size {out_size} not divisible by n_shards "
+                    f"{n_shards}")
+                # HF (out_i, in) -> (in, out_i) to match the kernel's
+                # contracting-last layout, then split the output dim across
+                # shards.
+                w = jax_array_from_reshaped_torch(torch_w, permute_dims=(1, 0))
+                in_size = w.shape[0]
+                interleaved_pieces.append(
+                    w.reshape(in_size, n_shards, out_size // n_shards))
+
+            # Concatenate within each shard block so shard i ends up holding
+            # [proj0_slice_i, proj1_slice_i, ...], then flatten to (in, total).
+            # E.g. with gate and up weights (2,6)x2,
+            #
+            #     GGGGGG UUUUUU
+            #     GGGGGG UUUUUU
+            #
+            # reshaped to (2,2,3)x2
+            #     GGG GGG UUU UUU
+            #     GGG GGG UUU UUU
+            #
+            # concatenated to (2,2,6)
+            #     GGGUUU GGGUUU
+            #     GGGUUU GGGUUU
+            #
+            # reshaped to (2,12)
+            #     GGGUUUGGGUUU
+            #     GGGUUUGGGUUU
+            fused = jnp.concatenate(interleaved_pieces, axis=2)
+            fused = fused.reshape(fused.shape[0], -1)
+
+        assign_and_shard_param(param, fused, param_name=param_name)
 
 
 class UnquantizedFusedMoEMethod(QuantizeMethodBase):
@@ -235,6 +338,17 @@ class UnquantizedConfig(QuantizationConfig):
 
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
+        # JaxMergedColumnParallelLinear is a JaxEinsum subclass whose single
+        # kernel fuses several projections; it must report each projection's
+        # size via output_sizes so the forward (and weight loading) can
+        # interleave/de-interleave per shard. Checked before the generic
+        # JaxEinsum branch. Imported locally to avoid an import cycle
+        # (linear.py imports this quantization package).
+        if isinstance(layer, JaxMergedColumnParallelLinear):
+            linear_config = QuantLinearConfig(enable_sp=False,
+                                              output_sizes=list(
+                                                  layer.output_sizes))
+            return UnquantizedMergedLinearMethod(linear_config)
         if isinstance(layer, JaxEinsum):
             # Derive output's last dim from the einsum string.
             einsum_str = layer.einsum_str.replace(" ", "")

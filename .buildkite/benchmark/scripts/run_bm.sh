@@ -55,10 +55,13 @@ TARGET_CASE_NAME=${2:-""}
 VLLM_PID=""
 CLEANUP_DONE="false"
 
-if [ -z "$CASE_FILE" ]; then
-    echo "Usage: $0 <case.json> [TARGET_CASE_NAME]"
+if [ -z "$CASE_FILE" ] || [ -z "$TARGET_CASE_NAME" ]; then
+    echo "Usage: $0 <case.json> <TARGET_CASE_NAME>"
     exit 1
 fi
+
+export TARGET_CASE_NAME
+echo "TARGET_CASE_NAME: $TARGET_CASE_NAME"
 
 # shellcheck disable=SC2317
 cleanup() {
@@ -273,7 +276,7 @@ fi
 DATASET_DIR="$ARTIFACT_FOLDER/dataset"
 mkdir -p "$DATASET_DIR"
 
-DATASETS=("custom" "custom-token" "mmlu" "mlperf" "math500" "sharegpt")
+DATASETS=("custom" "custom-token" "mmlu" "mlperf" "math500" "sharegpt" "mmmu-pro")
 # shellcheck disable=SC2153
 if contains_element "$DATASET" "${DATASETS[@]}"; then
   if [[ -z "${GCS_BUCKET:-}" ]]; then
@@ -298,6 +301,9 @@ if contains_element "$DATASET" "${DATASETS[@]}"; then
         ;;
       "sharegpt")
         gsutil -m cp -r gs://"$GCS_BUCKET"/sharegpt/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+        ;;
+      "mmmu-pro")
+        gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/mmmu-pro/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
         ;;
     esac
   else

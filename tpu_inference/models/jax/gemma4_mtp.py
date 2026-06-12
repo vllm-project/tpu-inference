@@ -26,13 +26,13 @@ from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
-from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
+from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear, JaxLmHead
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.gemma4 import Gemma4MLP
+from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM, Gemma4MLP
 from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
                                                          StandardWeightLoader)
 
@@ -87,13 +87,25 @@ class Gemma4MTPMaskedEmbedder(JaxModule):
     ) -> Tuple[jax.Array, jax.Array]:
         """Centroid selection + sparse dot product."""
         num_tokens = hidden_states.shape[0]
+
+        # Handle transposed lm_head_weight if necessary.
+        # lm_head.weight is (hidden_size, vocab_size) due to weight loader permutation.
+        # embed_tokens.weight is (vocab_size, hidden_size).
+        if lm_head_weight.shape == (self.hidden_size, self.vocab_size):
+            lm_head_weight = lm_head_weight.T
+        elif lm_head_weight.shape != (self.vocab_size, self.hidden_size):
+            raise ValueError(
+                f"Unexpected lm_head_weight shape: {lm_head_weight.shape}, "
+                f"expected ({self.hidden_size}, {self.vocab_size}) or ({self.vocab_size}, {self.hidden_size})"
+            )
+
         centroid_logits = self.centroids(
             hidden_states)  # (num_tokens, num_centroids)
         _, top_k_indices = jax.lax.top_k(
             centroid_logits,
             k=self.centroid_intermediate_top_k)  # (num_tokens, top_k)
 
-        clusters = self.token_ordering.value.reshape(
+        clusters = self.token_ordering.get_value().reshape(
             self.num_centroids, self.vocab_size_per_centroid)
         selected = clusters[
             top_k_indices]  # (num_tokens, top_k, vocab_size_per_centroid)
@@ -234,6 +246,10 @@ class Gemma4MTPAttention(JaxModule):
         )
 
         self.is_kv_shared_layer = True
+        self.kv_cache_quantized_dtype = None
+        if kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                kv_cache_dtype)
 
     def __call__(
         self,
@@ -255,10 +271,11 @@ class Gemma4MTPAttention(JaxModule):
         )
 
         num_tokens = q.shape[0]
+        dummy_dtype = self.kv_cache_quantized_dtype or q.dtype
         dummy_k = jnp.zeros((num_tokens, self.num_kv_heads, self.head_dim),
-                            dtype=q.dtype)
+                            dtype=dummy_dtype)
         dummy_v = jnp.zeros((num_tokens, self.num_kv_heads, self.head_dim),
-                            dtype=q.dtype)
+                            dtype=dummy_dtype)
 
         new_kv_cache, outputs = attention(
             kv_cache,
@@ -382,7 +399,7 @@ class Gemma4MTPDecoderLayer(JaxModule):
         mlp_output = self.post_feedforward_layernorm(hidden_states)
         outputs = residual + mlp_output
 
-        outputs = outputs * self.layer_scalar.value
+        outputs = outputs * self.layer_scalar.get_value()
 
         return kv_cache, outputs, None
 
@@ -476,7 +493,6 @@ class Gemma4MultiTokenPredictor(JaxModule):
         hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
         layer_name_to_kv_cache: Optional[dict] = None,
-        spec_step_idx: int = 0,
     ) -> Tuple[List[jax.Array], jax.Array, jax.Array]:
         inputs_embeds = self.embed_input_ids(input_ids)
 
@@ -484,7 +500,7 @@ class Gemma4MultiTokenPredictor(JaxModule):
         hidden_states = self.pre_projection(combined)
 
         for i, layer in enumerate(self.layers):
-            layer_name = f"layer.{i}"
+            layer_name = f"draft_layer.{i}"
             if layer_name_to_kv_cache and layer_name in layer_name_to_kv_cache:
                 cache_idx = layer_name_to_kv_cache[layer_name]
             else:
@@ -505,6 +521,7 @@ class Gemma4MultiTokenPredictor(JaxModule):
 
 
 class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
+    packed_modules_mapping = Gemma4ForCausalLM.packed_modules_mapping
     WeightLoader = StandardWeightLoader
 
     def __init__(
@@ -532,15 +549,13 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
         self.final_logit_softcapping = getattr(text_config,
                                                "final_logit_softcapping", None)
 
-        if not getattr(draft_config, "tie_word_embeddings", True):
-            self.lm_head = JaxEinsum(
-                einsum_str="TD,DV->TV",
-                kernel_shape=(text_config.hidden_size, text_config.vocab_size),
-                dtype=dtype,
-                rngs=rng,
-                quant_config=vllm_config.quant_config,
-                prefix="lm_head",
-            )
+        self.lm_head = JaxLmHead(
+            text_config.hidden_size,
+            text_config.vocab_size,
+            rngs=rng,
+            dtype=dtype,
+            prefix="lm_head",
+        )
 
         if getattr(draft_config, "use_ordered_embeddings", False):
             num_centroids = getattr(draft_config, "num_centroids", 2048)
@@ -576,6 +591,12 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
                     ("model.", "lm_head", "masked_embedding")):
                     loaded_keys.add(clean_name)
                     yield clean_name, tensor
+                    if clean_name == "model.embed_tokens.weight" and getattr(
+                            self.vllm_config.speculative_config.
+                            draft_model_config.hf_config,
+                            "tie_word_embeddings", True):
+                        loaded_keys.add("lm_head.weight")
+                        yield "lm_head.weight", tensor
 
             if getattr(self, "masked_embedding", None) is not None:
                 for key in [
@@ -621,7 +642,6 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
         attention_metadata: AttentionMetadata,
         layer_name_to_kvcache_index: Optional[Sequence[Tuple[str,
                                                              int]]] = None,
-        spec_step_idx: int = 0,
         *args,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
                Optional[jax.Array]]:
@@ -634,16 +654,15 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
             hidden_states,
             attention_metadata,
             layer_name_to_kv_cache=layer_name_to_kv_cache,
-            spec_step_idx=spec_step_idx,
         )
 
         return kv_caches, draft_hidden_states, [backbone_hidden_states], None
 
     def _get_full_lm_head_weight(self) -> jax.Array:
         if hasattr(self, "lm_head"):
-            return self.lm_head.kernel.value
+            return self.lm_head.weight.get_value()
         else:
-            return self.model.embed_tokens.embedding.value
+            return self.model.embed_tokens.embedding.get_value()
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.masked_embedding is not None:
