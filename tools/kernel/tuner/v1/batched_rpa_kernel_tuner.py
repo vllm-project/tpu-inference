@@ -119,7 +119,7 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
         (num_page_indices, page_size, cdiv(
             num_kv_heads * 2, kv_packing), kv_packing, head_dim), kv_dtype)
 
-    max_input_len = 1024  # (TODO): This depends on the bench serve command line input-len flag
+    max_input_len = 8192  # (TODO): This depends on the bench serve command line input-len flag
     max_prefill_seqs = min(num_seqs, total_q_tokens // max_input_len)
     remaining_tokens = total_q_tokens - max_prefill_seqs * max_input_len
     max_decode_seqs = min(num_seqs - max_prefill_seqs, remaining_tokens)
@@ -202,7 +202,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                                                    is_baseline=True)
             # We setup this for tuning Gemme4's rpa block sizes. When total_q_tokens is smaller than sequence input length,
             # it cannot be used for scheduling prefill case. We only tuned for prefill case at this moment.
-            if serve_config.total_q_tokens < 1024:
+            if serve_config.total_q_tokens < 8192:
                 continue
             tuning_cases.append(
                 TuningCase(tuning_key=prefill_tuning_key,
@@ -213,11 +213,11 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             n_buffer = prefill_tunable_params.n_buffer
 
             for prefill_batch_size in [1, 2]:
-                for bq_sz in range(128, 1025, 128):
-                    for bq_c_sz in range(16, bq_sz + 1, 16):
+                for bq_sz in range(512, 8193, 512):
+                    for bq_c_sz in range(128, bq_sz + 1, 128):
                         if bq_sz % bq_c_sz != 0:
                             continue
-                        for bkv_sz in range(256, 1025, 256):
+                        for bkv_sz in range(512, 8193, 512):
                             if bkv_sz % prefill_tuning_key.page_size != 0:  # requirement from scheduler
                                 continue
                             for n_buffer in [2, 3]:
