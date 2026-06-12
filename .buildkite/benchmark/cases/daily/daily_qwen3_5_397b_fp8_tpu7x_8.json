@@ -173,7 +173,7 @@
       "server_command_options": {
         "command_type": "vllm_serve",
         "env": {
-          "__COMMENT__": "Shardy disabled due to b/517297815#comment9",
+          "__COMMENT__": "Shardy disabled due to b/517297815#comment9 ",
           "VLLM_USE_V1": "1",
           "MODEL_IMPL_TYPE": "vllm",
           "JAX_USE_SHARDY_PARTITIONER": "false",

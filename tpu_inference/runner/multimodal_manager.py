@@ -426,21 +426,29 @@ class MultiModalManager:
             )
 
             # Greedy packing into batches.
+            # NOTE: conditions must be inline in the while predicate, not
+            # pre-evaluated into a list. A frozen list like
+            #   has_space = [count < max_batch_size, used + x < max_budget]
+            # evaluates both booleans once and never updates them, so the inner
+            # loop would consume all items regardless of budget, causing `used`
+            # to exceed max_budget and get_fit_val to return None.
             max_budget = manager.token_budgets[-1]
             idx = 0
             while idx < num_items:
                 indexes: list[int] = []
                 count = 0
                 used = 0
-                has_space = [
-                    count < manager.max_batch_size,
-                    used + out_tokens[sorted_indices[idx]] < max_budget
-                ]
-                while (idx < num_items and all(has_space)):
+                while (idx < num_items and count < manager.max_batch_size and
+                       used + out_tokens[sorted_indices[idx]] <= max_budget):
                     count += 1
                     used += out_tokens[sorted_indices[idx]]
                     indexes.append(sorted_indices[idx])
+                    idx += 1
 
+                if not indexes:
+                    # Single item exceeds max_budget; force it into its own batch.
+                    indexes.append(sorted_indices[idx])
+                    used = out_tokens[sorted_indices[idx]]
                     idx += 1
 
                 budget = get_fit_val(manager.token_budgets, used)
