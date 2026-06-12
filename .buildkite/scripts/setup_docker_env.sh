@@ -104,7 +104,8 @@ setup_environment() {
     DOCKERFILE_NAME="Dockerfile.pypi"
     echo "Building from PyPI packages. Using docker/${DOCKERFILE_NAME}"
   else
-    echo "Building from source. Using docker/${DOCKERFILE_NAME}"
+    DOCKERFILE_NAME="Dockerfile.custom_whl"
+    echo "Building from custom whl. Using docker/${DOCKERFILE_NAME}"
   fi
 
   if ! grep -q "^HF_TOKEN=" /etc/environment; then
