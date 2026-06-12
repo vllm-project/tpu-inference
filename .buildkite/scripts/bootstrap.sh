@@ -342,4 +342,16 @@ upload_with_priority .buildkite/pipeline_build.yml "$JOB_PRIORITY"
 
 # echo "--- Buildkite Bootstrap Finished"
 
+echo "--- Starting Buildkite Bootstrap (COMBO TEST MODE)"
+
+# Upload Combo Test pipeline for v6
+set_jax_envs v6
 upload_with_priority .buildkite/pipeline_combo_test.yml 10
+set_jax_envs unset
+
+# Upload Combo Test pipeline for v7
+set_jax_envs v7
+upload_with_priority .buildkite/pipeline_combo_test.yml 10
+set_jax_envs unset
+
+echo "--- Buildkite Bootstrap Finished"
