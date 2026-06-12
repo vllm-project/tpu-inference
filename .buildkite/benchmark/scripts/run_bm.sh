@@ -276,7 +276,7 @@ fi
 DATASET_DIR="$ARTIFACT_FOLDER/dataset"
 mkdir -p "$DATASET_DIR"
 
-DATASETS=("custom" "custom-token" "mmlu" "mlperf" "math500" "sharegpt")
+DATASETS=("custom" "custom-token" "mmlu" "mlperf" "math500" "sharegpt" "mmmu-pro")
 # shellcheck disable=SC2153
 if contains_element "$DATASET" "${DATASETS[@]}"; then
   if [[ -z "${GCS_BUCKET:-}" ]]; then
@@ -301,6 +301,9 @@ if contains_element "$DATASET" "${DATASETS[@]}"; then
         ;;
       "sharegpt")
         gsutil -m cp -r gs://"$GCS_BUCKET"/sharegpt/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+        ;;
+      "mmmu-pro")
+        gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/mmmu-pro/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
         ;;
     esac
   else

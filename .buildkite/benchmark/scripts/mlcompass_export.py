@@ -56,8 +56,11 @@ def read_metrics_file(file_path: str) -> dict[str, float]:
             # Skip empty lines and ensure the line contains '='
             if line and '=' in line:
                 key, value = line.split('=', 1)
+                key = key.strip()
+                if key == 'AccuracyMetrics':
+                    continue
                 # Strip extra spaces from key/value and convert value to float
-                metrics_dict[key.strip()] = float(value.strip())
+                metrics_dict[key] = float(value.strip())
     return metrics_dict
 
 
@@ -83,8 +86,9 @@ def export(metrics: dict[str, float]) -> None:
         'github_commit': env_commit_map['tpu-inference']['commit'],
         'commit_branch_name': env_commit_map['tpu-inference']['branch'],
     }
-    mlcompass_tracking_id = os.getenv('MLCOMPASS_TRACKING_ID', row_id)
-    mlcompass_execution_mode = os.getenv('MLCOMPASS_EXECUTION_MODE', 'oneshot')
+    mlcompass_tracking_id = os.getenv('MLCOMPASS_TRACKING_ID') or row_id
+    mlcompass_execution_mode = os.getenv(
+        'MLCOMPASS_EXECUTION_MODE') or 'oneshot'
 
     row = {
         'entry_id': row_id,

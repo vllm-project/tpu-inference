@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
                                         MLAAttentionSpec, SlidingWindowSpec)
 
+from tpu_inference import envs as tpu_envs
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -459,9 +460,12 @@ class KVCacheManager:
                 qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
                 padded_kv_lora_rank = common_utils.align_to(
                     text_config.kv_lora_rank, 128)
-                padded_qk_rope_head_dim = common_utils.align_to(
-                    qk_rope_head_dim, 128)
-                mla_head_size = padded_kv_lora_rank + padded_qk_rope_head_dim
+                if tpu_envs.MLA_TRANSPOSE_KV_CACHE:
+                    mla_qk_rope_head_dim = qk_rope_head_dim
+                else:
+                    mla_qk_rope_head_dim = common_utils.align_to(
+                        qk_rope_head_dim, 128)
+                mla_head_size = padded_kv_lora_rank + mla_qk_rope_head_dim
 
         if len(self.runner.vllm_config.compilation_config.
                static_forward_context) == 0:

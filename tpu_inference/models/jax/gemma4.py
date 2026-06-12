@@ -32,7 +32,8 @@ from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
-from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear, JaxLmHead
+from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear, JaxLmHead,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
@@ -69,25 +70,15 @@ class Gemma4MLP(JaxModule):
         # config.intermediate_size. The caller computes this in
         # Gemma4DecoderLayer and passes it in explicitly.
 
-        self.gate_proj = JaxLinear(
+        self.gate_up_proj = JaxMergedColumnParallelLinear(
             hidden_size,
-            intermediate_size,
+            [intermediate_size] * 2,
             use_bias=False,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".gate_proj",
-        )
-        self.up_proj = JaxLinear(
-            hidden_size,
-            intermediate_size,
-            use_bias=False,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
-            rngs=rng,
-            quant_config=quant_config,
-            prefix=prefix + ".up_proj",
         )
         self.down_proj = JaxLinear(
             intermediate_size,
@@ -102,8 +93,9 @@ class Gemma4MLP(JaxModule):
         self.act_fn = partial(nnx.gelu, approximate=True)
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        gate = self.act_fn(self.gate_proj(x))
-        up = self.up_proj(x)
+        gate_up = self.gate_up_proj(x)
+        gate, up = jnp.split(gate_up, 2, axis=-1)
+        gate = self.act_fn(gate)
         fuse = gate * up
         result = self.down_proj(fuse)
         return result
@@ -162,7 +154,7 @@ class Gemma4Router(JaxModule):
         """Returns raw router logits [T, E]."""
         x = self.norm(x)
         x = x * self.root_size
-        x = x * self.scale.value.astype(x.dtype)
+        x = x * self.scale.get_value().astype(x.dtype)
         router_logits = self.proj(x)
         return router_logits
 
@@ -235,8 +227,8 @@ class Gemma4MoE(JaxMoE):
                 self.kernel_down_proj_EFD._weights_to_load.clear()
                 # Other MoE models store expert weights in shape (D, F) and permute in *FusedMoEMethod.process_weights_after_loading.
                 # For compatibility, we permute here then expect another permute in process_weights_after_loading.
-                self.kernel_down_proj_EFD.value = jnp.swapaxes(
-                    self.kernel_down_proj_EFD.value, 1, 2)
+                self.kernel_down_proj_EFD.set_value(
+                    jnp.swapaxes(self.kernel_down_proj_EFD.get_value(), 1, 2))
             elif name.endswith("gate_up_proj"):
                 F = tensor.shape[1] // 2
                 load_nnx_param_from_reshaped_torch(self.kernel_gating_EDF,
@@ -253,10 +245,10 @@ class Gemma4MoE(JaxMoE):
                 self.kernel_gating_EDF._weights_to_load.clear()
                 # Other MoE models store expert weights in shape (F, D) and permute in *FusedMoEMethod.process_weights_after_loading.
                 # For compatibility, we permute here then expect another permute in process_weights_after_loading.
-                self.kernel_up_proj_EDF.value = jnp.swapaxes(
-                    self.kernel_up_proj_EDF.value, 1, 2)
-                self.kernel_gating_EDF.value = jnp.swapaxes(
-                    self.kernel_gating_EDF.value, 1, 2)
+                self.kernel_up_proj_EDF.set_value(
+                    jnp.swapaxes(self.kernel_up_proj_EDF.get_value(), 1, 2))
+                self.kernel_gating_EDF.set_value(
+                    jnp.swapaxes(self.kernel_gating_EDF.get_value(), 1, 2))
         return loaded
 
 
@@ -772,7 +764,7 @@ class Gemma4DecoderLayer(JaxModule):
                 per_layer_contribution)
             outputs = outputs + per_layer_contribution
 
-        outputs = outputs * self.layer_scalar.value
+        outputs = outputs * self.layer_scalar.get_value()
 
         return kv_cache, outputs, expert_ids
 
@@ -1040,6 +1032,7 @@ class Gemma4Model(JaxModule):
 
 
 class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     WeightLoader = StandardWeightLoader
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,

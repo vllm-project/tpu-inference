@@ -32,7 +32,7 @@ from tpu_inference.layers.jax.pp_utils import make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.gemma4 import Gemma4MLP
+from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM, Gemma4MLP
 from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
                                                          StandardWeightLoader)
 
@@ -105,7 +105,7 @@ class Gemma4MTPMaskedEmbedder(JaxModule):
             centroid_logits,
             k=self.centroid_intermediate_top_k)  # (num_tokens, top_k)
 
-        clusters = self.token_ordering.value.reshape(
+        clusters = self.token_ordering.get_value().reshape(
             self.num_centroids, self.vocab_size_per_centroid)
         selected = clusters[
             top_k_indices]  # (num_tokens, top_k, vocab_size_per_centroid)
@@ -246,6 +246,10 @@ class Gemma4MTPAttention(JaxModule):
         )
 
         self.is_kv_shared_layer = True
+        self.kv_cache_quantized_dtype = None
+        if kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = utils.get_jax_dtype_from_str_dtype(
+                kv_cache_dtype)
 
     def __call__(
         self,
@@ -267,10 +271,11 @@ class Gemma4MTPAttention(JaxModule):
         )
 
         num_tokens = q.shape[0]
+        dummy_dtype = self.kv_cache_quantized_dtype or q.dtype
         dummy_k = jnp.zeros((num_tokens, self.num_kv_heads, self.head_dim),
-                            dtype=q.dtype)
+                            dtype=dummy_dtype)
         dummy_v = jnp.zeros((num_tokens, self.num_kv_heads, self.head_dim),
-                            dtype=q.dtype)
+                            dtype=dummy_dtype)
 
         new_kv_cache, outputs = attention(
             kv_cache,
@@ -394,7 +399,7 @@ class Gemma4MTPDecoderLayer(JaxModule):
         mlp_output = self.post_feedforward_layernorm(hidden_states)
         outputs = residual + mlp_output
 
-        outputs = outputs * self.layer_scalar.value
+        outputs = outputs * self.layer_scalar.get_value()
 
         return kv_cache, outputs, None
 
@@ -516,6 +521,7 @@ class Gemma4MultiTokenPredictor(JaxModule):
 
 
 class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
+    packed_modules_mapping = Gemma4ForCausalLM.packed_modules_mapping
     WeightLoader = StandardWeightLoader
 
     def __init__(
@@ -654,9 +660,9 @@ class Gemma4MTPForCausalLM(JaxModule, LoadableWithIterator):
 
     def _get_full_lm_head_weight(self) -> jax.Array:
         if hasattr(self, "lm_head"):
-            return self.lm_head.weight.value
+            return self.lm_head.weight.get_value()
         else:
-            return self.model.embed_tokens.embedding.value
+            return self.model.embed_tokens.embedding.get_value()
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         if self.masked_embedding is not None:
