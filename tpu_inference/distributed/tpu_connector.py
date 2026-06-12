@@ -685,6 +685,10 @@ class TPUConnectorWorker:
         """
         Get the KV transfer stats for the worker.
         """
+        self.transfer_stats.record_queue_lengths(
+            num_requests_being_pulled=len(self.reqs_pulling),
+            num_requests_waiting_pull=len(self.reqs_wait_pull),
+        )
         # Clear stats for next iteration
         if not self.transfer_stats.is_empty():
             return self.transfer_stats.clone_and_reset()

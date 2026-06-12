@@ -566,6 +566,8 @@ class TestTPUConnectorStats(unittest.TestCase):
             "transfer_time": [1200.0, 5400.0, 12000.0],
             "mb_transferred": [128.0, 256.0, 2048.0],
             "num_failed_transfers": [0, 1, 2],
+            "num_requests_being_pulled": [1, 2, 5],
+            "num_requests_waiting_pull": [2, 3, 4],
         }
 
         self.metrics.observe(mock_data, engine_idx=0)
@@ -642,6 +644,23 @@ class TestTPUConnectorStats(unittest.TestCase):
         assert sum(reduced["Num failed transfers"]) == 10
         assert stats.is_empty() is False
 
+    def test_tpu_stats_aggregation_queue_lengths(self):
+        stats = TpuKVConnectorStats()
+
+        reduced = stats.reduce()
+        assert reduced["Avg requests being pulled"] == 0.0
+        assert reduced["Avg requests waiting to be pulled"] == 0.0
+        assert stats.is_empty() is True
+
+        for i in range(5):
+            stats.record_queue_lengths(num_requests_being_pulled=2 + i,
+                                       num_requests_waiting_pull=1 + i)
+        reduced = stats.reduce()
+
+        assert reduced["Avg requests being pulled"] == 4.0
+        assert reduced["Avg requests waiting to be pulled"] == 3.0
+        assert stats.is_empty() is False
+
     def test_prometheus_histogram_d2h_slice_time(self):
         hist = self.metrics.tpu_histogram_d2h_slice_time[0]
         assert hist._sum.get() == 60.0
@@ -702,6 +721,14 @@ class TestTPUConnectorStats(unittest.TestCase):
     def test_prometheus_counter_num_failed_transfers(self):
         counter = self.metrics.counter_tpu_num_failed_transfers[0]
         assert counter._value.get() == 3.0
+
+    def test_prometheus_gauge_requests_being_pulled(self):
+        gauge = self.metrics.gauge_tpu_num_requests_being_pulled[0]
+        assert gauge._value.get() == 5.0
+
+    def test_prometheus_gauge_requests_waiting_pull(self):
+        gauge = self.metrics.gauge_tpu_num_requests_waiting_pull[0]
+        assert gauge._value.get() == 4.0
 
 
 if __name__ == "__main__":
