@@ -473,7 +473,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker.process_send_load(meta)
 
         self.all_mocks['insert_kv_chunks'].assert_called_once_with(
-            original_kv_caches, "kv_data", [1], "mock_mesh", "mock_spec")
+            original_kv_caches, "kv_data", [1], "mock_mesh", "mock_spec", None, 0)
         self.assertEqual(worker.runner.kv_caches, "new_kv_caches")
         self.assertNotIn("req1", worker.reqs_pulling)
         worker._maybe_build_notif_socket.assert_called_once_with(load_meta)

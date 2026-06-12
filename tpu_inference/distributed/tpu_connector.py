@@ -506,6 +506,7 @@ class TPUConnectorWorker:
         self.vllm_config = vllm_config
         self.config = vllm_config.kv_transfer_config
         self.is_producer = self.config.is_kv_producer
+        self.dp_size = vllm_config.sharding_config.total_dp_size
 
         self.runner: TPUModelRunner = None
         self.mesh: Mesh = None
@@ -581,8 +582,22 @@ class TPUConnectorWorker:
         self.shape = list(kv_layer.shape)
         self.dtype = kv_layer.dtype
         self.sharding = kv_layer.sharding
+        
+        # Build local sub-mesh for host-local JAX P2P transfers
+        dp_rank = self.node_id
+        import numpy as np
+        from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
+        
+        if hasattr(self.mesh, "devices") and not isinstance(self.mesh, str):
+            local_devices_np = np.asarray(self.mesh.devices)[:, dp_rank:dp_rank+1, :, :, :, :]
+            self.local_mesh = jax.sharding.Mesh(local_devices_np, MESH_AXIS_NAMES)
+            self.local_sharding = jax.sharding.NamedSharding(self.local_mesh, self.sharding.spec)
+        else:
+            self.local_mesh = self.mesh
+            self.local_sharding = self.sharding
+
         self.host_sharding = jax.sharding.NamedSharding(
-            self.sharding.mesh,
+            self.local_mesh,
             self.sharding.spec,
             memory_kind='pinned_host',
         )
@@ -665,6 +680,9 @@ class TPUConnectorWorker:
         This is called in runner before calling model forward,
         whenever the scheduler_output.total_num_scheduled_tokens is empty or not.
         """
+        logger.info(
+            f"[multihost-dp-debug] Worker {self.node_id} process_send_load: metadata.reqs_to_send={metadata.reqs_to_send if metadata else None} | metadata.reqs_to_load={metadata.reqs_to_load if metadata else None}"
+        )
         reqs = metadata.reqs_to_send
         if reqs:
             assert self.is_producer
@@ -700,11 +718,28 @@ class TPUConnectorWorker:
                 if req_id in self.reqs_pulling:
                     assert self.reqs_pulling[req_id][1] is not None
                     _, kv, block_numbers = self.reqs_pulling.pop(req_id)
+                    insert_src_spec = None
+                    if self.dp_size > 1:
+                        global_kv = []
+                        from jax.sharding import PartitionSpec as P
+                        # Create a sharding spec where the DP axis is not sharded (replicated)
+                        src_spec = P(None, *self.sharding.spec[1:])
+                        src_sharding = jax.sharding.NamedSharding(self.mesh, src_spec)
+                        for x in kv:
+                            global_x = jax.make_array_from_single_device_arrays(
+                                x.shape, src_sharding,
+                                [shard.data for shard in x.addressable_shards]
+                            )
+                            global_kv.append(global_x)
+                        kv = global_kv
+                        insert_src_spec = src_spec
+
                     if len(block_numbers) > 0:
                         start_time = time.perf_counter()
                         self.runner.kv_caches = insert_kv_chunks(
                             self.runner.kv_caches, kv, block_numbers,
-                            self.mesh, self.sharding.spec)
+                            self.mesh, self.sharding.spec, insert_src_spec,
+                            self.node_id)
                         end_time = time.perf_counter()
                         logger.info(
                             f"TPUConnector Worker {self.node_id} --> req_id={req_id}, takes {(end_time - start_time)*1000:.2f}ms for insert_kv_chunks"
@@ -732,6 +767,18 @@ class TPUConnectorWorker:
         # TODO(xiang): pad block_ids to avoid recompilation
         indices = device_array(self.mesh, np.array(local_block_ids))
         kv = select_from_kv_caches(self.runner.kv_caches, indices)
+        dp_size = self.vllm_config.sharding_config.total_dp_size
+        # Convert kv to local mesh sharding
+        if dp_size > 1:
+            local_kv = []
+            for x in kv:
+                local_x = jax.make_array_from_single_device_arrays(
+                    x.shape, self.local_sharding,
+                    [shard.data for shard in x.addressable_shards]
+                )
+                local_kv.append(local_x)
+            kv = local_kv
+
         if dist_utils.get_enable_d2h_transfer() and not self.multi_host:
             self.kv_d2h_executor.submit(self._async_d2h_and_transfer, req_id,
                                         req_meta, kv, len(local_block_ids))
@@ -782,7 +829,7 @@ class TPUConnectorWorker:
         for src_layer, dest_layer in zip(kv_src, sliced_dest_buffer):
             updated_dest = copy_to_host(src=src_layer,
                                         dest=dest_layer,
-                                        mesh=self.mesh,
+                                        mesh=self.local_mesh,
                                         sharding_spec=self.sharding.spec)
             updated_dest_buffer.append(updated_dest)
 
@@ -865,6 +912,19 @@ class TPUConnectorWorker:
         # if partial prefix cache hit now.
         assert len(local_block_ids) == len(remote_block_ids)
 
+        if self.node_id != req_meta.consumer_dp_rank:
+            import jax.numpy as jnp
+            shape = copy.copy(self.shape)
+            shape[0] = len(remote_block_ids)
+            kv = [
+                jax.device_put(jnp.zeros(shape, dtype=self.dtype), self.local_sharding)
+                for _ in range(self.num_layers)
+            ]
+            logger.info(
+                f"Worker {self.node_id} --> kv transfer | non-assigned rank skipped pull and created dummy arrays | req_id={req_id}"
+            )
+            return kv
+
         kv_spec = self._get_kv_spec(len(remote_block_ids))
         logger.info(
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
@@ -923,7 +983,7 @@ class TPUConnectorWorker:
         shape = copy.copy(self.shape)
         shape[0] = num_blocks
         return [
-            jax.ShapeDtypeStruct(shape, self.dtype, sharding=self.sharding)
+            jax.ShapeDtypeStruct(shape, self.dtype, sharding=self.local_sharding)
         ] * self.num_layers
 
     def _maybe_build_notif_socket(self, req_meta: LoadMeta) -> zmq.Socket:
@@ -1011,16 +1071,33 @@ def select_from_kv_caches(kv_caches: list[jax.Array],
 
 def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
                      block_numbers: list[int], mesh: jax.sharding.Mesh,
-                     spec) -> list[jax.Array]:
+                     dest_spec, src_spec=None, node_id: int = 0) -> list[jax.Array]:
+    if src_spec is None:
+        src_spec = dest_spec
+    
+    local_blocks_per_rank = kv_caches[0].shape[0]
+    if isinstance(local_blocks_per_rank, int):
+        owner_dp_rank = block_numbers[0] // local_blocks_per_rank
+        local_block_numbers = [b % local_blocks_per_rank for b in block_numbers]
+        
+        # Select current cache values collectively to prevent JAX deadlock
+        from tpu_inference.utils import device_array
+        indices_arr = device_array(mesh, np.array(local_block_numbers, dtype=np.int32))
+        backup_slices = select_from_kv_caches(kv_caches, indices_arr)
+        
+        if node_id != owner_dp_rank:
+            kv_slices = backup_slices
+    else:
+        local_block_numbers = block_numbers
+
     src_offsets = []
     dest_offsets = []
     chunk_sizes = []
 
     start_idx = 0
-    for i in range(1, len(block_numbers) + 1):
-        if i == len(block_numbers) or block_numbers[i] != block_numbers[i -
-                                                                        1] + 1:
-            start_block = block_numbers[start_idx]
+    for i in range(1, len(local_block_numbers) + 1):
+        if i == len(local_block_numbers) or local_block_numbers[i] != local_block_numbers[i - 1] + 1:
+            start_block = local_block_numbers[start_idx]
             chunk_size = i - start_idx
 
             src_offsets.append(start_idx)
@@ -1030,7 +1107,7 @@ def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
             start_idx = i
 
     num_chunks = len(src_offsets)
-    total_len = len(block_numbers)
+    total_len = len(local_block_numbers)
 
     # Pad to total_len to avoid recompilation
     while len(src_offsets) < total_len:
@@ -1053,7 +1130,7 @@ def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
         chunk_sizes=chunk_sizes_arr,
         num_chunks=num_chunks_arr,
         mesh=mesh,
-        src_sharding_spec=spec,
-        dest_sharding_spec=spec,
+        src_sharding_spec=src_spec,
+        dest_sharding_spec=dest_spec,
         replicated_sharding_spec=replicated_spec,
     )
