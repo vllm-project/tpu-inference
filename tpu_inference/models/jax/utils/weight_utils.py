@@ -993,16 +993,18 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                                       strict=False)
                     if not isinstance(param, nnx.Param):
                         continue
-                    _res = param.weight_loader(param, weight, shard_id)
-                    assert isinstance(_res, bool), \
-                        f"weight_loader for {fused_param_name} should return a bool indicating whether the shard has been loaded, but got {_res} of type {type(_res)}"
-                    if _res:
-                        # If weight_loader returns True, it means the shard has
-                        # been stashed and the fused param is ready to be loaded,
-                        # so we mark it as loaded and break to avoid yielding this
-                        # shard to the recursive loader.
+                    _all_shards_loaded = param.weight_loader(
+                        param, weight, shard_id)
+                    assert isinstance(_all_shards_loaded, bool), \
+                        f"weight_loader for {fused_param_name} should return a " \
+                        "bool indicating whether the shard has been loaded, but " \
+                        f"got {_all_shards_loaded} of type {type(_all_shards_loaded)}"
+                    if _all_shards_loaded:
+                        # True means all projections for this fused param are
+                        # ready; mark it so the caller knows it was loaded.
                         routed_loaded.add(fused_param_name)
-                        break
+                    # shard was accepted (stashed or complete); don't pass to recursive loader
+                    break
                 else:
                     yield name, weight
             # release it before returning so we don't retain a whole-model
