@@ -14,7 +14,7 @@
 
 ARG BASE_IMAGE="python:3.12-slim-bookworm"
 # The latest main will be used if arg unspecified
-ARG VLLM_COMMIT_HASH=""
+ARG VLLM_COMMIT_HASH="v0.22.0"
 
 FROM $BASE_IMAGE
 
@@ -77,7 +77,7 @@ WORKDIR /workspace
 ARG GCS_WHL_PATH="gs://vllm-bm-bk-storage/test_whl/v0.22.0_whl/vllm_tpu-0.22.0-py3-none-any.whl"
 RUN mkdir -p /workspace/whl_dir
 RUN gsutil cp ${GCS_WHL_PATH} /workspace/whl_dir/
-RUN VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir /workspace/whl_dir/*.whl
+RUN VLLM_TARGET_DEVICE="tpu" pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu /workspace/whl_dir/*.whl
 # =========================================================================
 
 # Install tpu_inference test/benchmarking requirements ONLY
