@@ -581,6 +581,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
+        vllm_config.sharding_config.apply_vision_sharding()
+
         self.model = Gemma4Model(
             vllm_config=vllm_config,
             rng=rng,
