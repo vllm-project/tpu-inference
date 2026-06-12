@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import partial
 from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import torch
 from flax import nnx
 
 from tpu_inference.layers.common.utils import \
@@ -24,6 +26,8 @@ from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.utils.weight_utils import \
+    load_nnx_param_from_reshaped_torch
 
 logger = init_logger(__name__)
 
@@ -174,6 +178,45 @@ class JaxLmHead(nnx.Einsum, JaxModule):
         return jax.numpy.einsum(self.einsum_str, inputs, self.weight.value)
 
 
+class JaxMergedColumnParallelLinear(JaxLinear):
+    """Merged version of JaxLinear. This is used to fuse multiple
+    JaxLinear layers into one for better efficiency.
+
+    The einsum string is the same as JaxLinear, but the weight is expected to
+    have multiple output dimensions concatenated together, and the output will
+    be split accordingly.
+
+    Args:
+        input_size: input dimension of the linear layer.
+        output_sizes: a list of output dimensions for each fused linear layer.
+        use_bias: If false, skip adding bias.
+        param_dtype: Data type for the parameters.
+        quant_config: Quantization configuration.
+        prefix: Prefix for parameter names.
+    """
+
+    def __init__(self,
+                 input_size: int,
+                 output_sizes: list[int],
+                 rngs,
+                 *,
+                 use_bias: bool = True,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "",
+                 **kwargs):
+        # Must be set before super().__init__(): JaxEinsum.__init__ calls
+        # quant_config.get_quant_method(self), which reads self.output_sizes to
+        # build the merged linear's QuantLinearConfig.
+        self.output_sizes = output_sizes
+        super().__init__(input_size=input_size,
+                         output_size=sum(output_sizes),
+                         rngs=rngs,
+                         use_bias=use_bias,
+                         quant_config=quant_config,
+                         prefix=prefix,
+                         **kwargs)
+
+
 class JaxQKVParallelLinear(JaxModule):
     """Fused QKV Parallel Linear layer for JAX-native models.
 
@@ -221,7 +264,6 @@ class JaxQKVParallelLinear(JaxModule):
             prefix=prefix + ".qkv_proj",
         )
 
-        from functools import partial
         self.proj.weight.set_metadata(
             "weight_loader",
             partial(self._weight_loader,
@@ -238,10 +280,6 @@ class JaxQKVParallelLinear(JaxModule):
                        shard_id: Optional[int] = None,
                        *,
                        param_name: str = "Unknown"):
-        import torch
-
-        from tpu_inference.models.jax.utils.weight_utils import \
-            load_nnx_param_from_reshaped_torch
 
         if shard_id is not None:
             shards_to_load = param.get_metadata().get("_shards_to_load")
@@ -322,42 +360,3 @@ class JaxQKVParallelLinear(JaxModule):
                            (self.num_kv_heads, self.head_dim))
 
         return q, k, v
-
-
-class JaxMergedColumnParallelLinear(JaxLinear):
-    """Merged version of JaxLinear. This is used to fuse multiple
-    JaxLinear layers into one for better efficiency.
-
-    The einsum string is the same as JaxLinear, but the weight is expected to
-    have multiple output dimensions concatenated together, and the output will
-    be split accordingly.
-
-    Args:
-        input_size: input dimension of the linear layer.
-        output_sizes: a list of output dimensions for each fused linear layer.
-        use_bias: If false, skip adding bias.
-        param_dtype: Data type for the parameters.
-        quant_config: Quantization configuration.
-        prefix: Prefix for parameter names.
-    """
-
-    def __init__(self,
-                 input_size: int,
-                 output_sizes: list[int],
-                 rngs,
-                 *,
-                 use_bias: bool = True,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = "",
-                 **kwargs):
-        # Must be set before super().__init__(): JaxEinsum.__init__ calls
-        # quant_config.get_quant_method(self), which reads self.output_sizes to
-        # build the merged linear's QuantLinearConfig.
-        self.output_sizes = output_sizes
-        super().__init__(input_size=input_size,
-                         output_size=sum(output_sizes),
-                         rngs=rngs,
-                         use_bias=use_bias,
-                         quant_config=quant_config,
-                         prefix=prefix,
-                         **kwargs)
