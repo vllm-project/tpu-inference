@@ -60,7 +60,7 @@ esac
 # Save the results using the hardware-specific prefix.
 SAFE_TARGET=$(echo "$CI_TARGET" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
 SAFE_STAGE=$(echo "$CI_STAGE" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
-SAFE_META_KEY="${CI_TPU_VERSION}_${MODEL_IMPL_TYPE}_${SAFE_TARGET}_${SAFE_STAGE}"
+SAFE_META_KEY="result_${CI_TPU_VERSION}_${MODEL_IMPL_TYPE}_${SAFE_TARGET}_${SAFE_STAGE}"
 
 buildkite-agent meta-data set "${CI_TPU_VERSION}_${SAFE_TARGET}_category" "${CI_CATEGORY}"
 buildkite-agent meta-data set "${SAFE_META_KEY}" "${message}"

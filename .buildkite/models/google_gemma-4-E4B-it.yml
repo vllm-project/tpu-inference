@@ -49,7 +49,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${BK_KEY}_google_gemma-4-E4B-it_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for google/gemma-4-E4B-it"
-    key: "${BK_KEY}_google_gemma-4-E4B-it_Accuracy"
+    key: "${BK_KEY}_google_gemma-4-E4B-it_Accuracy_Correctness"
     depends_on: "${BK_KEY}_record_google_gemma-4-E4B-it_UnitTest"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
@@ -72,8 +72,8 @@ steps:
         .buildkite/scripts/run_in_docker.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record integration test result for google/gemma-4-E4B-it"
-    key: "${BK_KEY}_record_google_gemma-4-E4B-it_Accuracy"
-    depends_on: "${BK_KEY}_google_gemma-4-E4B-it_Accuracy"
+    key: "${BK_KEY}_record_google_gemma-4-E4B-it_Accuracy_Correctness"
+    depends_on: "${BK_KEY}_google_gemma-4-E4B-it_Accuracy_Correctness"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -84,11 +84,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${BK_KEY}_google_gemma-4-E4B-it_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_google_gemma-4-E4B-it_Accuracy_Correctness
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for google/gemma-4-E4B-it"
     key: "${BK_KEY}_google_gemma-4-E4B-it_Benchmark"
-    depends_on: "${BK_KEY}_record_google_gemma-4-E4B-it_Accuracy"
+    depends_on: "${BK_KEY}_record_google_gemma-4-E4B-it_Accuracy_Correctness"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     soft_fail: true

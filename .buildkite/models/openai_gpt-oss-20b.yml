@@ -39,7 +39,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${BK_KEY}_openai_gpt-oss-20b_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for openai/gpt-oss-20b"
-    key: "${BK_KEY}_openai_gpt-oss-20b_Accuracy"
+    key: "${BK_KEY}_openai_gpt-oss-20b_Accuracy_Correctness"
     depends_on: "${BK_KEY}_record_openai_gpt-oss-20b_UnitTest"
     soft_fail: true
     agents:
@@ -51,10 +51,10 @@ steps:
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |
-        buildkite-agent meta-data set "${BK_KEY}_openai_gpt-oss-20b_Accuracy" "unverified"
+        buildkite-agent meta-data set "${BK_KEY}_openai_gpt-oss-20b_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for openai/gpt-oss-20b"
-    key: "${BK_KEY}_record_openai_gpt-oss-20b_Accuracy"
-    depends_on: "${BK_KEY}_openai_gpt-oss-20b_Accuracy"
+    key: "${BK_KEY}_record_openai_gpt-oss-20b_Accuracy_Correctness"
+    depends_on: "${BK_KEY}_openai_gpt-oss-20b_Accuracy_Correctness"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -65,11 +65,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${BK_KEY}_openai_gpt-oss-20b_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_openai_gpt-oss-20b_Accuracy_Correctness
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for openai/gpt-oss-20b"
     key: "${BK_KEY}_openai_gpt-oss-20b_Benchmark"
-    depends_on: "${BK_KEY}_record_openai_gpt-oss-20b_Accuracy"
+    depends_on: "${BK_KEY}_record_openai_gpt-oss-20b_Accuracy_Correctness"
     soft_fail: true
     agents:
       queue: cpu  # TODO: replace with execution environment

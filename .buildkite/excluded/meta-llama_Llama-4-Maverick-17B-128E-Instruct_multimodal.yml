@@ -39,7 +39,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${BK_KEY}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
-    key: "${BK_KEY}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
+    key: "${BK_KEY}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy_Correctness"
     depends_on: "${BK_KEY}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_UnitTest"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
@@ -48,10 +48,10 @@ steps:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     commands:
       - |
-        buildkite-agent meta-data set "${BK_KEY}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy" "unverified"
+        buildkite-agent meta-data set "${BK_KEY}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
-    key: "${BK_KEY}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
-    depends_on: "${BK_KEY}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
+    key: "${BK_KEY}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy_Correctness"
+    depends_on: "${BK_KEY}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy_Correctness"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -62,11 +62,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${BK_KEY}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy_Correctness
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal"
     key: "${BK_KEY}_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Benchmark"
-    depends_on: "${BK_KEY}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy"
+    depends_on: "${BK_KEY}_record_meta-llama_Llama-4-Maverick-17B-128E-Instruct_multimodal_Accuracy_Correctness"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
