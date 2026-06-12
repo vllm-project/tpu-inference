@@ -59,25 +59,33 @@ steps:
         # remove the existing generated pipeline YAML in the temp dir on the host. 
         rm -f "/tmp/kernel_tuning/generated_pipeline.yml"
       - |
-        .buildkite/scripts/run_in_docker.sh bash -c "
-          if [ -z \"\${KERNEL_TUNING_RUN_ID}\" ] || [ -z \"\${KERNEL_TUNING_CASE_SET_ID}\" ]; then
-            echo \"Error: KERNEL_TUNING_RUN_ID or KERNEL_TUNING_CASE_SET_ID not set\"
-            exit 1
-          fi && \
-          pip install --upgrade google-cloud-spanner && \
-          pip install --upgrade google-api-core && \
-          pip install --upgrade google-auth && \
-          pip install --upgrade absl-py && \
-          python -m tools.kernel.tuner.v1.kernel_tuner_runner \
-          --kernel_tuner_name=\${KERNEL_TUNING_KERNEL_NAME} \
-          --case_set_desc=\${KERNEL_TUNING_CASE_SET_DESC} \
-          --generate_buildkite_pipeline=True \
-          --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
-          --run_id=\${KERNEL_TUNING_RUN_ID} \
-          --tpu_cores=\${KERNEL_TUNING_TPU_CORES} \
-          --job_priority=\${KERNEL_TUNING_JOB_PRIORITY:--10} \
-          --max_execution_minutes=\${KERNEL_TUNING_MAX_EXECUTION_MINUTES:-20} \
-          --tpu_version=\${TPU_VERSION} "
+        .buildkite/scripts/run_in_docker.sh bash -c '
+          set -e
+          
+          # Combine pip installs to save time
+          pip install --upgrade google-cloud-spanner google-api-core google-auth absl-py
+          
+          # Start with the arguments that do not follow the KERNEL_TUNING_ pattern
+          PYTHON_ARGS=( 
+            "--generate_buildkite_pipeline=True"
+            "--tpu_version=${TPU_VERSION}"
+          )
+          
+          # Dynamically gather all KERNEL_TUNING_ variables
+          for key in "${!KERNEL_TUNING_@}"; do
+            # ${!key} gets the value of the variable name stored in $key (indirect expansion)
+            value="${!key}"
+            
+            # Remove "KERNEL_TUNING_" prefix and convert to lowercase
+            arg_name=$(echo "${key#KERNEL_TUNING_}" | tr "[:upper:]" "[:lower:]")
+            
+            # Add to our arguments array
+            PYTHON_ARGS+=("--${arg_name}=${value}")
+          done
+          
+          # Run the python script with the dynamically built array
+          python -m tools.kernel.tuner.v1.kernel_tuner_runner "${PYTHON_ARGS[@]}"
+        '
       - |
         # Upload the generated pipeline YAML from the temp dir on the host.
         buildkite-agent artifact upload "/tmp/kernel_tuning/generated_pipeline.yml"
