@@ -1086,7 +1086,19 @@ def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
         backup_slices = select_from_kv_caches(kv_caches, indices_arr)
         
         if node_id != owner_dp_rank:
-            kv_slices = backup_slices
+            from jax.sharding import PartitionSpec as P
+            if src_spec is not None and isinstance(src_spec, P):
+                src_sharding = jax.sharding.NamedSharding(mesh, src_spec)
+                global_backup = []
+                for x in backup_slices:
+                    global_x = jax.make_array_from_single_device_arrays(
+                        x.shape, src_sharding,
+                        [shard.data for shard in x.addressable_shards]
+                    )
+                    global_backup.append(global_x)
+                kv_slices = global_backup
+            else:
+                kv_slices = backup_slices
     else:
         local_block_numbers = block_numbers
 
