@@ -459,10 +459,7 @@ class Gemma4Attention(JaxModule):
             q, k, v = self.qkv_proj(x)
         else:
             k = self.k_proj(x)
-            if self.v_proj is None:
-                v = k
-            else:
-                v = self.v_proj(x)
+            v = k
             # q: (T, N, H)
             q = self.q_proj(x)
         # Q norm (always applied)
