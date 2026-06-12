@@ -38,7 +38,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest
 
   - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Accuracy for {MODEL_NAME}/{CATEGORY}"
-    key: "${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
+    key: "${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy_Correctness"
     depends_on: "${{BK_KEY}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
     agents:
       queue: "{QUEUE}"
@@ -53,8 +53,8 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
   - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Record accuracy result for {MODEL_NAME}/{CATEGORY}"
-    key: "${{BK_KEY}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
-    depends_on: "${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
+    key: "${{BK_KEY}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy_Correctness"
+    depends_on: "${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy_Correctness"
     env:
       MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
       CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
@@ -65,4 +65,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy
+        .buildkite/scripts/record_step_result.sh ${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy_Correctness
