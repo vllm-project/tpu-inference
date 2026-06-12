@@ -348,6 +348,8 @@ class UnquantizedConfig(QuantizationConfig):
             linear_config = QuantLinearConfig(enable_sp=False,
                                               output_sizes=list(
                                                   layer.output_sizes))
+            if hasattr(layer, "tp_size"):
+                linear_config.n_shards = layer.tp_size
             return UnquantizedMergedLinearMethod(linear_config)
         if isinstance(layer, JaxEinsum):
             # Derive output's last dim from the einsum string.

@@ -323,9 +323,9 @@ class TestJaxLinear(unittest.TestCase):
                     rngs=rngs,
                     tp_size=tp_size,
                 )
-                qkv_proj.proj.weight.value = rearranged_w
+                qkv_proj.weight.value = rearranged_w
                 if use_bias:
-                    qkv_proj.proj.bias.value = rearranged_b
+                    qkv_proj.bias.value = rearranged_b
 
                 # 4. Run forward pass
                 x = jax.random.normal(k7, (seq_len, hidden_size))

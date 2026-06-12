@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import partial
 from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import torch
 from flax import nnx
 
 from tpu_inference.layers.common.utils import \
@@ -24,6 +26,8 @@ from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.utils.weight_utils import \
+    load_nnx_param_from_reshaped_torch
 
 logger = init_logger(__name__)
 
@@ -260,7 +264,6 @@ class JaxQKVParallelLinear(JaxModule):
             prefix=prefix + ".qkv_proj",
         )
 
-        from functools import partial
         self.proj.weight.set_metadata(
             "weight_loader",
             partial(self._weight_loader,
@@ -277,10 +280,6 @@ class JaxQKVParallelLinear(JaxModule):
                        shard_id: Optional[int] = None,
                        *,
                        param_name: str = "Unknown"):
-        import torch
-
-        from tpu_inference.models.jax.utils.weight_utils import \
-            load_nnx_param_from_reshaped_torch
 
         if shard_id is not None:
             shards_to_load = param.get_metadata().get("_shards_to_load")
