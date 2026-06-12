@@ -265,7 +265,9 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
 
 else
   # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
-  VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
+  # VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
+  # For Test specific version of vllm
+  VLLM_COMMIT_HASH="v0.22.0"
   buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
   echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     
