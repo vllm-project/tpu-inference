@@ -14,57 +14,74 @@
 
 steps:
   # -----------------------------------------------------------------
-  # Centralized Build Step
+  # Centralized Build Step (Runs on the CPU queue)
   # -----------------------------------------------------------------
-  - label: ":docker: Build and Push Base Image"
-    key: "build_docker_combo"
+  - label: ":docker: Build and Push Base Image (${TPU_VERSION:-tpu6e})"
+    key: "${TPU_VERSION:-tpu6e}_build_docker_combo"
     agents:
       queue: cpu_64_core
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     commands:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
-  # TPU v6e Tests
+  # TPU Combo E2E Tests
   # -----------------------------------------------------------------
-  - label: "[v6e] {{matrix.test_file}}"
-    depends_on: "build_docker_combo"
-    matrix:
-      setup:
-        test_file:
-          - "test_combo_chunked_offload_spec.py"
-          - "test_combo_hybrid_kv_cache_prefix.py"
-          - "test_combo_offload_prefix_spec.py"
-          - "test_combo_sampling_params_prefix.py"
-          - "test_combo_structured_sampling_params.py"
-    agents:
-      queue: "tpu_v6e_8_queue"
-    env:
-      USE_PREBUILT_IMAGE: "1"
-    soft_fail: true
-    commands:
-      - |
-        .buildkite/scripts/run_in_docker.sh \
-          bash -c 'python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/combo/{{matrix.test_file}}'
+  - group: "[${TPU_VERSION:-tpu6e}] Combo E2E Tests"
+    depends_on: "${TPU_VERSION:-tpu6e}_build_docker_combo"
+    steps:
+      - label: "${TPU_VERSION:-tpu6e} test_combo_chunked_offload_spec.py"
+        agents:
+          queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+        commands:
+          - |
+            .buildkite/scripts/run_in_docker.sh \
+              bash -c 'python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/combo/test_combo_chunked_offload_spec.py'
 
-  # -----------------------------------------------------------------
-  # TPU v7x Tests
-  # -----------------------------------------------------------------
-  - label: "[v7x] {{matrix.test_file}}"
-    depends_on: "build_docker_combo"
-    matrix:
-      setup:
-        test_file:
-          - "test_combo_chunked_offload_spec.py"
-          - "test_combo_hybrid_kv_cache_prefix.py"
-          - "test_combo_offload_prefix_spec.py"
-          - "test_combo_sampling_params_prefix.py"
-          - "test_combo_structured_sampling_params.py"
-    agents:
-      queue: "tpu_v7x_8_queue"
-    env:
-      USE_PREBUILT_IMAGE: "1"
-    soft_fail: true
-    commands:
-      - |
-        .buildkite/scripts/run_in_docker.sh \
-          bash -c 'python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/combo/{{matrix.test_file}}'
+      - label: "${TPU_VERSION:-tpu6e} test_combo_hybrid_kv_cache_prefix.py"
+        agents:
+          queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+        commands:
+          - |
+            .buildkite/scripts/run_in_docker.sh \
+              bash -c 'python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/combo/test_combo_hybrid_kv_cache_prefix.py'
+
+      - label: "${TPU_VERSION:-tpu6e} test_combo_offload_prefix_spec.py"
+        agents:
+          queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+        commands:
+          - |
+            .buildkite/scripts/run_in_docker.sh \
+              bash -c 'python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/combo/test_combo_offload_prefix_spec.py'
+
+      - label: "${TPU_VERSION:-tpu6e} test_combo_sampling_params_prefix.py"
+        agents:
+          queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+        commands:
+          - |
+            .buildkite/scripts/run_in_docker.sh \
+              bash -c 'python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/combo/test_combo_sampling_params_prefix.py'
+
+      - label: "${TPU_VERSION:-tpu6e} test_combo_structured_sampling_params.py"
+        agents:
+          queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+        commands:
+          - |
+            .buildkite/scripts/run_in_docker.sh \
+              bash -c 'python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/combo/test_combo_structured_sampling_params.py'

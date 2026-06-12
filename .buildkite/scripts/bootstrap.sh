@@ -129,31 +129,31 @@ source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 # # Store changed files in metadata for sub-pipelines (newlines to commas)
 # echo "$FILES_CHANGED" | tr '\n' ',' | buildkite-agent meta-data set "changed_files"
 
-# # Handles the environment state for different TPU generations.
-# set_jax_envs() {
-#     case $1 in
-#         v6)
-#             export TESTS_GROUP_LABEL="[jax] TPU6e Tests Group"
-#             export TPU_VERSION="tpu6e"
-#             export TPU_QUEUE_SINGLE="tpu_v6e_queue"
-#             export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
-#             export TENSOR_PARALLEL_SIZE_SINGLE=1
-#             export TENSOR_PARALLEL_SIZE_MULTI=8
-#             ;;
-#         v7)
-#             export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
-#             export TPU_VERSION="tpu7x"
-#             export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
-#             export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
-#             export TENSOR_PARALLEL_SIZE_SINGLE=2
-#             export TENSOR_PARALLEL_SIZE_MULTI=8
-#             export COV_FAIL_UNDER="67"
-#             ;;
-#         unset)
-#             unset TESTS_GROUP_LABEL TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI TENSOR_PARALLEL_SIZE_SINGLE TENSOR_PARALLEL_SIZE_MULTI COV_FAIL_UNDER
-#             ;;
-#     esac
-# }
+# Handles the environment state for different TPU generations.
+set_jax_envs() {
+    case $1 in
+        v6)
+            export TESTS_GROUP_LABEL="[jax] TPU6e Tests Group"
+            export TPU_VERSION="tpu6e"
+            export TPU_QUEUE_SINGLE="tpu_v6e_queue"
+            export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
+            export TENSOR_PARALLEL_SIZE_SINGLE=1
+            export TENSOR_PARALLEL_SIZE_MULTI=8
+            ;;
+        v7)
+            export TESTS_GROUP_LABEL="[jax] TPU7x Tests Group"
+            export TPU_VERSION="tpu7x"
+            export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
+            export TPU_QUEUE_MULTI="tpu_v7x_8_queue"
+            export TENSOR_PARALLEL_SIZE_SINGLE=2
+            export TENSOR_PARALLEL_SIZE_MULTI=8
+            export COV_FAIL_UNDER="67"
+            ;;
+        unset)
+            unset TESTS_GROUP_LABEL TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI TENSOR_PARALLEL_SIZE_SINGLE TENSOR_PARALLEL_SIZE_MULTI COV_FAIL_UNDER
+            ;;
+    esac
+}
 
 # upload_pipeline() {
 #     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
@@ -320,4 +320,16 @@ source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 
 # echo "--- Buildkite Bootstrap Finished"
 
+echo "--- Starting Buildkite Bootstrap (COMBO TEST MODE)"
+
+# Upload Combo Test pipeline for v6
+set_jax_envs v6
 upload_with_priority .buildkite/pipeline_combo_test.yml 10
+set_jax_envs unset
+
+# Upload Combo Test pipeline for v7
+set_jax_envs v7
+upload_with_priority .buildkite/pipeline_combo_test.yml 10
+set_jax_envs unset
+
+echo "--- Buildkite Bootstrap Finished"
