@@ -166,7 +166,7 @@
       "env": {
         "MODELTAG": "NEW",
         "EXPECTED_ETEL": 43200000,
-        "INPUT_LEN": 0,
+        "INPUT_LEN": "mmmu_pro",
         "OUTPUT_LEN": 1,
         "DATASET": "mmmu-pro"
       },
