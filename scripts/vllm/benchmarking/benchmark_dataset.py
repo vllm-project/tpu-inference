@@ -650,28 +650,26 @@ class MMMUProDataset(BenchmarkDataset):
 
     OPTION_LETTERS = "ABCDEFGHIJ"
 
-    PROMPT_FOOTER = (
+    DEFAULT_PROMPT_FOOTER = (
         "Try to reason about the question step by step. Don't give a final"
         " answer without reasoning. Output the final answer in the format"
         " 'Final Answer: (X)' where X is the correct letter choice. Answer:")
 
-    QUERY_TEMPLATE_VISION = """{options_text}
-
-""" + PROMPT_FOOTER
-
-    QUERY_TEMPLATE_STANDARD = """{question}
-
-{options_text}
-
-""" + PROMPT_FOOTER
-
     def __init__(
         self,
         subset: str = "vision",
+        prompt_footer: str = DEFAULT_PROMPT_FOOTER,
+        strip_reasoning: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.subset = subset
+        self.prompt_footer = prompt_footer
+        self.strip_reasoning = strip_reasoning
+
+        self.query_template_vision = "{options_text}\n\n" + self.prompt_footer
+        self.query_template_standard = "{question}\n\n{options_text}\n\n" + self.prompt_footer
+
         self.load_data()
 
     def load_data(self) -> None:
@@ -699,20 +697,29 @@ class MMMUProDataset(BenchmarkDataset):
 
             answer = row.get("answer", "A")
 
-            # Collect images (image_1 through image_7).
+            # Collect images.
+            # MMMU-Pro 'vision' subset uses 'image' key.
+            # 'standard' subset uses 'image_1' through 'image_7'.
             images = []
-            for i in range(1, 8):
-                img = row.get(f"image_{i}")
-                if img is not None:
-                    images.append(img)
+            if "image" in row and row["image"] is not None:
+                images.append(row["image"])
+            else:
+                for i in range(1, 8):
+                    img = row.get(f"image_{i}")
+                    if img is not None:
+                        images.append(img)
 
             if self.subset == "vision":
-                question_text = self.QUERY_TEMPLATE_VISION.format(
+                question_text = self.query_template_vision.format(
                     options_text=options_text)
             else:
-                question_text = self.QUERY_TEMPLATE_STANDARD.format(
-                    question=row.get("question", ""),
-                    options_text=options_text)
+                question = row.get("question", "")
+                if self.strip_reasoning:
+                    question = question.replace(
+                        "Please reason step-by-step and then provide the answer options.",
+                        "").strip()
+                question_text = self.query_template_standard.format(
+                    question=question, options_text=options_text)
 
             mmmu_pro_data.append((question_text, answer, images))
 
@@ -743,6 +750,7 @@ class MMMUProDataset(BenchmarkDataset):
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
         output_len: Optional[int] = None,
+        chat_template_system_prompt: Optional[str] = None,
         **kwargs,
     ) -> list:
         samples: list = []
@@ -753,12 +761,46 @@ class MMMUProDataset(BenchmarkDataset):
             mm_content = self._images_to_mm_content(images or [])
 
             # Build message content: images first, then question text.
-            content: list = mm_content
-            content.append({"type": "text", "text": question_text})
-            messages = [{
+            user_content: list = list(mm_content)
+            user_content.append({"type": "text", "text": question_text})
+
+            messages = []
+            if chat_template_system_prompt is not None:
+                messages.append({
+                    "role": "system",
+                    "content": chat_template_system_prompt
+                })
+
+            messages.append({
                 "role": "user",
-                "content": content,
-            }]
+                "content": user_content,
+            })
+
+            # Debug: Print the first request's messages to verify system prompt and image presence
+            if len(samples) == 0:
+                debug_messages = []
+                for m in messages:
+                    debug_content = []
+                    content_list = m["content"] if isinstance(
+                        m["content"], list) else [{
+                            "type": "text",
+                            "text": m["content"]
+                        }]
+                    for c in content_list:
+                        if c["type"] == "image_url":
+                            debug_content.append({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,..."
+                                }
+                            })
+                        else:
+                            debug_content.append(c)
+                    debug_messages.append({
+                        "role": m["role"],
+                        "content": debug_content
+                    })
+                print(f"DEBUG: First request messages: {debug_messages}")
 
             new_output_len = output_len if output_len is not None else 16
 

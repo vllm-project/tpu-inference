@@ -573,10 +573,13 @@ def main(args: argparse.Namespace):
                 random_seed=args.seed,
                 dataset_path=args.dataset_path,
                 subset=args.mmmu_pro_subset,
+                prompt_footer=args.mmmu_pro_prompt_footer,
+                strip_reasoning=args.mmmu_pro_strip_reasoning,
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 output_len=args.mmmu_pro_output_len,
+                chat_template_system_prompt=args.chat_template_system_prompt,
             ),
             "random":
             lambda: RandomDataset(random_seed=args.seed,
@@ -902,6 +905,21 @@ if __name__ == "__main__":
         type=int,
         default=16,
         help="Output length for each request. Default is 16 (single-letter answer).",
+    )
+    mmmu_pro_group.add_argument(
+        "--mmmu-pro-prompt-footer",
+        type=str,
+        default=(
+            "Try to reason about the question step by step. Don't give a final"
+            " answer without reasoning. Output the final answer in the format"
+            " 'Final Answer: (X)' where X is the correct letter choice. Answer:"
+        ),
+        help="Custom footer to append to the end of MMMU-pro prompts.",
+    )
+    mmmu_pro_group.add_argument(
+        "--mmmu-pro-strip-reasoning",
+        action="store_true",
+        help="Whether to strip 'Please reason step-by-step' instructions from the dataset.",
     )
 
     sonnet_group = parser.add_argument_group("sonnet dataset options")
