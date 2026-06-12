@@ -117,6 +117,7 @@ class SendMeta:
     # `list[list[int]]` used for HMA connector (per-kv-cache-group)
     local_block_ids: list[int] | list[list[int]]
     expiration_time: float
+    producer_dp_rank: int = 0
 
 
 @dataclass
@@ -128,6 +129,9 @@ class LoadMeta:
     remote_block_ids: list[int] | list[list[int]] | None
     remote_host: str | list[str]
     remote_port: int | list[int]
+    producer_dp_rank: int = 0
+    consumer_dp_rank: int = 0
+
 
 
 # The metadata used for communicating between scheduler and worker connectors.
@@ -147,7 +151,7 @@ class TPUConnector(KVConnectorBase_V1):
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = \
-                TPUConnectorScheduler(vllm_config)
+                TPUConnectorScheduler(vllm_config, kv_cache_config)
             self.connector_worker = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
@@ -261,7 +265,7 @@ class TPUConnector(KVConnectorBase_V1):
 
 class TPUConnectorScheduler():
 
-    def __init__(self, vllm_config: "VllmConfig"):
+    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig" = None):
         self.vllm_config = vllm_config
         self.config = vllm_config.kv_transfer_config
         self.is_producer = self.config.is_kv_producer
@@ -278,9 +282,27 @@ class TPUConnectorScheduler():
 
         self.kv_ip = dist_utils.get_kv_ips()
         self.kv_port = dist_utils.get_kv_ports()
+
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.dp_size = vllm_config.sharding_config.total_dp_size
+        self.num_blocks_per_rank = 0
+        if kv_cache_config is not None:
+            self.num_blocks_per_rank = kv_cache_config.num_blocks
+
         logger.info(
-            f"TPUConnectorScheduler --> kv_ip={self.kv_ip} | kv_port={self.kv_port}"
+            f"[multihost-dp-debug] TPUConnectorScheduler [Rank {self.dp_rank}/{self.dp_size}] --> kv_ip={self.kv_ip} | kv_port={self.kv_port} | blocks_per_rank={self.num_blocks_per_rank}"
         )
+
+    def _to_global_block_ids(self, block_ids: list[int] | list[list[int]]) -> list[int] | list[list[int]]:
+        if not block_ids:
+            return block_ids
+        offset = self.dp_rank * self.num_blocks_per_rank
+        logger.info(f"[multihost-dp-debug] _to_global_block_ids: rank={self.dp_rank}, offset={offset}, inputs={block_ids[:10]}")
+        if isinstance(block_ids[0], list):
+            return [[b + offset for b in sublist] for sublist in block_ids]
+        else:
+            return [b + offset for b in block_ids]
+
 
     def get_num_new_matched_tokens(
         self,
@@ -342,9 +364,11 @@ class TPUConnectorScheduler():
             return
 
         params = request.kv_transfer_params
+        producer_dp_rank = params.get("producer_dp_rank", 0)
         if num_external_tokens > 0:
             # We need to load KV-cache from remote (partial prefix cache hit).
             local_block_ids = blocks.get_block_ids()[0]
+            global_local_block_ids = self._to_global_block_ids(local_block_ids)
 
             # NOTE(xiang): D needs to pull the whole prefill blocks from the remote
             # regardless how much ratio the prefix cache hits.
@@ -358,30 +382,39 @@ class TPUConnectorScheduler():
 
             self.reqs_to_load[request.request_id] = LoadMeta(
                 uuid=params["uuid"],
-                local_block_ids=local_block_ids,
+                local_block_ids=global_local_block_ids,
                 remote_block_ids=params["remote_block_ids"],
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
+                producer_dp_rank=producer_dp_rank,
+                consumer_dp_rank=self.dp_rank,
             )
+            logger.info(f"[multihost-dp-debug] Scheduler: added load metadata for req_id={request.request_id} (partial prefix cache hit): load_meta={self.reqs_to_load[request.request_id]}")
         else:
             # This branch means two cases:
             # 1. We don't need to load KV-cache from remote because of full local cache.
             # 2. The async pulling is done.
             # In both cases we need to send notification to let P free memory.
+            local_block_ids = blocks.get_block_ids()[0]
+            global_local_block_ids = self._to_global_block_ids(local_block_ids)
             self.reqs_to_load[request.request_id] = LoadMeta(
                 uuid=params["uuid"],
-                local_block_ids=blocks.get_block_ids()[0],
+                local_block_ids=global_local_block_ids,
                 remote_block_ids=None,
                 remote_host=params["remote_host"],
                 remote_port=params["remote_port"],
+                producer_dp_rank=producer_dp_rank,
+                consumer_dp_rank=self.dp_rank,
             )
+            logger.info(f"[multihost-dp-debug] Scheduler: added load metadata for req_id={request.request_id} (no load or done): load_meta={self.reqs_to_load[request.request_id]}")
 
         # Only trigger 1 KV transfer per request.
         params["do_remote_prefill"] = False
 
         logger.info(
-            f"TPUConnector Scheduler update_state_after_alloc -->  reqs_to_load={self.reqs_to_load}"
+            f"[multihost-dp-debug] TPUConnector Scheduler update_state_after_alloc -->  reqs_to_load={self.reqs_to_load}"
         )
+
 
     def build_connector_meta(self) -> TPUConnectorMetadata:
         """
@@ -446,19 +479,23 @@ class TPUConnectorScheduler():
             uuid = get_uuid()
             expiration_time = time.perf_counter(
             ) + dist_utils.get_p2p_wait_pull_timeout()
+            global_computed_block_ids = self._to_global_block_ids(computed_block_ids)
             self.reqs_to_send[request.request_id] = SendMeta(
                 uuid=uuid,
-                local_block_ids=computed_block_ids,
-                expiration_time=expiration_time)
+                local_block_ids=global_computed_block_ids,
+                expiration_time=expiration_time,
+                producer_dp_rank=self.dp_rank)
             kv_transfer_params = dict(uuid=uuid,
-                                      remote_block_ids=computed_block_ids,
+                                      remote_block_ids=global_computed_block_ids,
                                       remote_host=self.kv_ip,
-                                      remote_port=self.kv_port)
+                                      remote_port=self.kv_port,
+                                      producer_dp_rank=self.dp_rank)
             logger.info(
-                f"TPUConnector Scheduler ---->  generated reqs_to_send={self.reqs_to_send} | "
+                f"[multihost-dp-debug] TPUConnector Scheduler request_finished ---->  generated reqs_to_send={self.reqs_to_send} | "
                 f"kv_transfer_params={kv_transfer_params}")
         else:
             kv_transfer_params = {}
+
 
         return delay_free_blocks, kv_transfer_params
 
@@ -788,10 +825,23 @@ class TPUConnectorWorker:
             self.kv_transfer_server.await_pull(req_meta.uuid,
                                                updated_dest_buffer)
 
+    def _get_target_prefill_host_index(self, req_meta: LoadMeta) -> int:
+        num_hosts = len(req_meta.remote_host)
+        dp_size = self.vllm_config.sharding_config.total_dp_size
+        if dp_size < num_hosts:
+            logger.info(f"[multihost-dp-debug] _get_target_prefill_host_index: dp_size ({dp_size}) < num_hosts ({num_hosts}), returning self.node_id ({self.node_id})")
+            return self.node_id
+        ranks_per_host = dp_size // num_hosts
+        target_idx = req_meta.producer_dp_rank // ranks_per_host
+        logger.info(f"[multihost-dp-debug] _get_target_prefill_host_index: producer_dp_rank={req_meta.producer_dp_rank}, ranks_per_host={ranks_per_host}, target_host_index={target_idx}")
+        return target_idx
+
+
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
             assert len(req_meta.remote_host) == len(req_meta.remote_port)
-            remote_addr = f"{req_meta.remote_host[self.node_id]}:{req_meta.remote_port[self.node_id]}"
+            target_prefill_host_index = self._get_target_prefill_host_index(req_meta)
+            remote_addr = f"{req_meta.remote_host[target_prefill_host_index]}:{req_meta.remote_port[target_prefill_host_index]}"
         else:
             remote_addr = f"{req_meta.remote_host}:{req_meta.remote_port}"
 
@@ -801,9 +851,10 @@ class TPUConnectorWorker:
             conn = self.kv_transfer_server.connect(remote_addr)
             self.pull_conns[remote_addr] = conn
             logger.info(
-                f"Worker {self.node_id} --> kv transfer | connect={remote_addr}"
+                f"[multihost-dp-debug] Worker {self.node_id} (consumer_dp_rank={req_meta.consumer_dp_rank}) --> building connection | remote_addr={remote_addr} (target_host_idx={target_prefill_host_index if isinstance(req_meta.remote_host, list) else 0}, producer_dp_rank={req_meta.producer_dp_rank})"
             )
         return conn
+
 
     def _pull_kv(self, req_id: str, conn: Any, req_meta: LoadMeta):
         # The local allocated blocks which don't hit prefix caching.
@@ -878,7 +929,8 @@ class TPUConnectorWorker:
     def _maybe_build_notif_socket(self, req_meta: LoadMeta) -> zmq.Socket:
         remote_host = req_meta.remote_host
         if isinstance(req_meta.remote_host, list):
-            remote_host = req_meta.remote_host[self.node_id]
+            target_prefill_host_index = self._get_target_prefill_host_index(req_meta)
+            remote_host = req_meta.remote_host[target_prefill_host_index]
 
         sock_path = make_zmq_path("tcp", remote_host, self.side_channel_port)
         if sock_path in self.notif_sockets:
@@ -890,13 +942,13 @@ class TPUConnectorWorker:
                                    bind=False)
             self.notif_sockets[sock_path] = sock
             logger.info(
-                f"Worker {self.node_id} --> notify make_zmq_socket | sock_path={sock_path}"
+                f"[multihost-dp-debug] Worker {self.node_id} (consumer_dp_rank={req_meta.consumer_dp_rank}) --> building notification socket | remote_host={remote_host} (target_host_idx={target_prefill_host_index if isinstance(req_meta.remote_host, list) else 0}, producer_dp_rank={req_meta.producer_dp_rank}) | sock_path={sock_path}"
             )
         return sock
 
     def _notify_pull_done(self, sock: zmq.Socket, req_id: str, uuid: int):
         logger.info(
-            f"Worker {self.node_id} --> zmq notify | req_id={req_id} | uuid={uuid}"
+            f"[multihost-dp-debug] Worker {self.node_id} --> zmq notify | req_id={req_id} | uuid={uuid}"
         )
         sock.send_string(str(uuid))
         # The response is not really needed.

@@ -145,6 +145,9 @@ def _scheduler_worker_process(
 ):
     """Worker process that manages a single scheduler instance."""
     # Initialize the scheduler in this process
+    vllm_config = copy.deepcopy(vllm_config)
+    vllm_config.parallel_config.data_parallel_rank = rank
+    logger.info(f"[multihost-dp-debug] _scheduler_worker_process: initialized worker configuration with parallel_config.data_parallel_rank={rank}")
     import inspect
     sig = inspect.signature(original_scheduler_cls)
     scheduler_kwargs = {
@@ -394,6 +397,15 @@ class DPScheduler(SchedulerInterface):
         self.hash_block_size = hash_block_size if hash_block_size is not None else block_size
         self.log_stats = log_stats
         self.connector = None
+        if self.vllm_config.kv_transfer_config is not None:
+            from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+            from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+            self.connector = KVConnectorFactory.create_connector(
+                config=self.vllm_config,
+                role=KVConnectorRole.SCHEDULER,
+                kv_cache_config=kv_cache_config,
+            )
+            logger.info(f"[multihost-dp-debug] DPScheduler: created SCHEDULER connector on DP rank={self.vllm_config.parallel_config.data_parallel_rank}")
         self.structured_output_manager = structured_output_manager
 
         # DP state
@@ -1586,6 +1598,9 @@ class DPScheduler(SchedulerInterface):
 
         # Restore original pickle
         _disable_cloudpickle()
+
+    def get_kv_connector(self) -> Any:
+        return self.connector
 
 
 def update_vllm_config_for_dp_scheduler(vllm_config: Any) -> None:
