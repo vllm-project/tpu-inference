@@ -1080,24 +1080,24 @@ def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
         owner_dp_rank = block_numbers[0] // local_blocks_per_rank
         local_block_numbers = [b % local_blocks_per_rank for b in block_numbers]
         
-        # Select current cache values collectively to prevent JAX deadlock
-        from tpu_inference.utils import device_array
-        indices_arr = device_array(mesh, np.array(local_block_numbers, dtype=np.int32))
-        backup_slices = select_from_kv_caches(kv_caches, indices_arr)
-        
         if node_id != owner_dp_rank:
             from jax.sharding import PartitionSpec as P
             if src_spec is not None and isinstance(src_spec, P):
                 src_sharding = jax.sharding.NamedSharding(mesh, src_spec)
-                global_backup = []
-                for x in backup_slices:
-                    global_x = jax.make_array_from_single_device_arrays(
-                        x.shape, src_sharding,
-                        [shard.data for shard in x.addressable_shards]
+                backup_slices = []
+                for cache in kv_caches:
+                    local_selected_shards = []
+                    for shard in cache.addressable_shards:
+                        local_device_indices = jax.device_put(jnp.array(local_block_numbers, dtype=jnp.int32), shard.device)
+                        selected_local = shard.data[local_device_indices]
+                        local_selected_shards.append(selected_local)
+                    
+                    global_backup_layer = jax.make_array_from_single_device_arrays(
+                        (len(local_block_numbers), *cache.shape[1:]),
+                        src_sharding,
+                        local_selected_shards
                     )
-                    global_backup.append(global_x)
-                kv_slices = global_backup
-            else:
+                    backup_slices.append(global_backup_layer)
                 kv_slices = backup_slices
     else:
         local_block_numbers = block_numbers
