@@ -965,22 +965,21 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
     def load_weights(self, weights: Iterable, **kwargs) -> set:
         """Route packed (e.g. fused gate_up_proj) checkpoint weights, then
         delegate the rest to the standard recursive auto-loader.
-
-        For each checkpoint weight whose name contains a packed sub-module
-        (e.g. ``gate_proj``), rename it to the fused param (``gate_up_proj``)
-        and hand it to that param's ``weight_loader`` together with the
-        ``shard_id``; the merged linear's quant method accumulates the shards
-        and fuses them. Weights whose fused param does not exist (e.g. the
-        vision tower's unfused gate/up projections) fall through unchanged.
         """
         remap = self._packed_remap()
         if not remap:
             # No packed/fused params to route; go straight to the streaming
             # recursive loader.
             return super().load_weights(weights, **kwargs)
-        routed_loaded: set = set()
+        routed_loaded: set[str] = set()
 
         def _route(weights_iter):
+            # For each checkpoint weight whose name contains a packed sub-module
+            # (e.g. ``gate_proj``), rename it to the fused param (``gate_up_proj``)
+            # and hand the shard to that param's ``weight_loader``, which stashes it
+            # into the temporary buffer by ``shard_id`` and fuses the merged kernel
+            # once every shard has arrived. Weights whose fused param does not exist
+            # (e.g. the vision tower's unfused gate/up projections) fall through unchanged.
             param_state = nnx.state(self.module)
             for name, weight in weights_iter:
                 for fused_name, shard_name, shard_id in remap:
@@ -994,9 +993,16 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                                       strict=False)
                     if not isinstance(param, nnx.Param):
                         continue
-                    param.weight_loader(param, weight, shard_id)
-                    routed_loaded.add(fused_param_name)
-                    break
+                    _res = param.weight_loader(param, weight, shard_id)
+                    assert isinstance(_res, bool), \
+                        f"weight_loader for {fused_param_name} should return a bool indicating whether the shard has been loaded, but got {_res} of type {type(_res)}"
+                    if _res:
+                        # If weight_loader returns True, it means the shard has
+                        # been stashed and the fused param is ready to be loaded,
+                        # so we mark it as loaded and break to avoid yielding this
+                        # shard to the recursive loader.
+                        routed_loaded.add(fused_param_name)
+                        break
                 else:
                     yield name, weight
             # release it before returning so we don't retain a whole-model
@@ -1114,8 +1120,9 @@ class JaxDummyModelLoader(DummyModelLoader):
 
         def _load_dummy_weight_on_thread(param_name, param: nnx.Param):
             with cpu_mesh_context():
-                is_moe = hasattr(param, "_weights_to_load")
                 param_shape = param.get_value().shape
+                is_moe = hasattr(param,
+                                 "_weights_to_load") and len(param_shape) == 3
 
                 if is_moe:
                     # For MoE parameters, the normal loading flow reads PyTorch
