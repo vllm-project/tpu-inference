@@ -81,11 +81,21 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 try:
-    from api.jax.transfer_engine import TransferEngine as RaidenTransferEngine
+    # Preferred: package-qualified import. Requires ${WORKSPACE_DIR}/.pypath
+    # (which holds a tpu_raiden -> ../tpu-raiden symlink) on PYTHONPATH.
+    from tpu_raiden.api.jax.transfer_engine import \
+        TransferEngine as RaidenTransferEngine
     _RAIDEN_IMPORT_ERROR = None
-except Exception as _exc:  # pylint: disable=broad-except
-    RaidenTransferEngine = None
-    _RAIDEN_IMPORT_ERROR = _exc
+except Exception:  # pylint: disable=broad-except
+    try:
+        # Fallback: bare import, works when ${WORKSPACE_DIR}/tpu-raiden itself
+        # is on PYTHONPATH (api/frameworks/core as top-level namespace pkgs).
+        from api.jax.transfer_engine import \
+            TransferEngine as RaidenTransferEngine
+        _RAIDEN_IMPORT_ERROR = None
+    except Exception as _exc:  # pylint: disable=broad-except
+        RaidenTransferEngine = None
+        _RAIDEN_IMPORT_ERROR = _exc
 
 import tpu_inference.distributed.utils as dist_utils
 from tpu_inference import envs
@@ -560,6 +570,13 @@ class TPUConnectorWorker:
             # Replaces select_from_kv_caches + kv_transfer_server.await_pull.
             self.engine.notify_for_read(req_id, req_meta.uuid,
                                         req_meta.local_block_ids)
+            # KV-transfer timing: producer start (prefill registers blocks for
+            # pull). Correlate with the consumer's cons_done by req_id. t is
+            # epoch wall-clock (time.time) so it is comparable across hosts;
+            # take the MIN prod_start per req_id in post-processing (this may
+            # fire on repeated scheduler steps until the pull completes).
+            logger.info(f"KVXFER event=prod_start req_id={req_id} "
+                        f"uuid={req_meta.uuid} t={time.time():.6f}")
 
         reqs = metadata.reqs_to_load
         if reqs:
@@ -627,6 +644,10 @@ class TPUConnectorWorker:
             logger.info(
                 f"TPUConnector Worker {self.node_id} -->  done_recving={done_recving}"
             )
+            # NOTE: the consumer cons_done timestamp for the Raiden path is
+            # emitted inside the engine (core/transfer_engine_base.cc,
+            # "KVXFER event=cons_done") at the actual H2D-completion point,
+            # which is more accurate than this complete_read() polling point.
         return set(done_sending), set(done_recving)
 
 

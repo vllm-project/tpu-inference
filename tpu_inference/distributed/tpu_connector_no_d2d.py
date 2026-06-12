@@ -59,6 +59,7 @@ D workflow:
 """
 
 import copy
+import functools
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -96,6 +97,8 @@ from tpu_inference.distributed.tpu_connector_stats import (
     TpuKVConnectorPromMetrics, TpuKVConnectorStats)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
+from tpu_inference.runner.utils import (get_kv_transfer_metadata,
+                                        trim_request_id_suffix)
 from tpu_inference.utils import device_array
 
 ReqId = str
@@ -663,19 +666,24 @@ class TPUConnectorWorker:
                     _, kv, block_numbers = self.reqs_pulling.pop(req_id)
                     if len(block_numbers) > 0:
                         start_time = time.perf_counter()
-                        self.runner.kv_caches = insert_kv_chunks(
-                            self.runner.kv_caches, kv, block_numbers,
-                            self.mesh, self.sharding.spec)
+                        indices = device_array(self.mesh,
+                                               np.array(block_numbers))
+                        self.runner.kv_caches = scatter_kv_slices(
+                            self.runner.kv_caches, kv, indices)
+
                         # jax.block_until_ready(self.runner.kv_caches)
+
+                        # self.runner.kv_caches = insert_kv_chunks(
+                        #     self.runner.kv_caches, kv, block_numbers,
+                        #     self.mesh, self.sharding.spec)
                         end_time = time.perf_counter()
                         logger.info(
                             f"TPUConnector Worker {self.node_id} --> req_id={req_id}, takes {(end_time - start_time)*1000:.2f}ms for insert_kv_chunks"
                         )
-                        # KV-transfer timing: consumer done -- KV is now landed
-                        # in runner.kv_caches (after insert_kv_chunks). Correlate
-                        # with the producer prod_start by req_id; the delta
-                        # (cons_done - prod_start) is the end-to-end KV-transfer
-                        # time. t is epoch wall-clock (comparable across hosts).
+                        # KV-transfer timing: consumer done -- KV landed in
+                        # runner.kv_caches (after scatter_kv_slices). Delta vs
+                        # the producer prod_start (by req_id) is the end-to-end
+                        # KV-transfer time. t is epoch wall-clock.
                         logger.info(
                             f"KVXFER event=cons_done req_id={req_id} "
                             f"uuid={req_meta.uuid} t={time.time():.6f}")
@@ -723,7 +731,19 @@ class TPUConnectorWorker:
                 kv, req_meta.expiration_time, buffer_idx
             ]
             self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-            self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+
+            if jax.profiler.TraceAnnotation.is_enabled():
+                dims_str, kv_size_bytes = get_kv_transfer_metadata(kv)
+
+                with jax.profiler.TraceAnnotation(
+                        "KV_Cache_Await_Pull",
+                        uuid=req_meta.uuid,
+                        request_id=trim_request_id_suffix(req_id),
+                        bytes=kv_size_bytes,
+                        dimensions=dims_str):
+                    self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+            else:
+                self.kv_transfer_server.await_pull(req_meta.uuid, kv)
 
     def _async_d2h_and_transfer(self, req_id: str, req_meta: SendMeta,
                                 kv_src: list[jax.Array],
@@ -773,7 +793,22 @@ class TPUConnectorWorker:
             dest_buffer, req_meta.expiration_time, buffer_idx
         ]
         self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-        self.kv_transfer_server.await_pull(req_meta.uuid, updated_dest_buffer)
+
+        if jax.profiler.TraceAnnotation.is_enabled():
+            dims_str, kv_size_bytes = get_kv_transfer_metadata(
+                updated_dest_buffer)
+
+            with jax.profiler.TraceAnnotation(
+                    "KV_Cache_Await_Pull",
+                    uuid=req_meta.uuid,
+                    request_id=trim_request_id_suffix(req_id),
+                    bytes=kv_size_bytes,
+                    dimensions=dims_str):
+                self.kv_transfer_server.await_pull(req_meta.uuid,
+                                                   updated_dest_buffer)
+        else:
+            self.kv_transfer_server.await_pull(req_meta.uuid,
+                                               updated_dest_buffer)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
@@ -806,7 +841,18 @@ class TPUConnectorWorker:
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
         )
         start_time = time.perf_counter()
-        kv = conn.pull(req_meta.uuid, kv_spec)
+        if jax.profiler.TraceAnnotation.is_enabled():
+            dims_str, expected_bytes = get_kv_transfer_metadata(kv_spec)
+            with jax.profiler.TraceAnnotation(
+                    "KV_Cache_Pull",
+                    uuid=req_meta.uuid,
+                    request_id=trim_request_id_suffix(req_id),
+                    bytes=expected_bytes,
+                    dimensions=dims_str,
+                    source=f"{req_meta.remote_host}:{req_meta.remote_port}"):
+                kv = conn.pull(req_meta.uuid, kv_spec)
+        else:
+            kv = conn.pull(req_meta.uuid, kv_spec)
         kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
         end_time_0, end_time_1 = time.perf_counter(), None
         prepare_time_ms = (end_time_0 - start_time) * 1000
@@ -933,11 +979,25 @@ def select_from_kv_caches(kv_caches: list[jax.Array],
     return selected
 
 
-# Debug: track the distinct JIT shape signatures insert_kv_chunks has fed to
-# multi_layer_copy. A NEW signature => XLA (re)compiles _async_copy_jit (the ~2 s
-# spike). The jit keys on ARRAY SHAPES/DTYPES, not on the num_chunks *value*
-# (that is traced), so the signature deliberately excludes num_chunks.
-_INSERT_KV_SHAPE_SIGS: dict = {}
+@functools.partial(
+    jax.jit,
+    donate_argnames=("kv_caches", ),
+)
+def scatter_kv_slices(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
+                      indices: list[jax.Array]) -> list[jax.Array]:
+    num_indices = indices.shape[0]
+    num_slices = kv_slices[0].shape[0]
+    # indices might be padded
+    assert num_slices <= num_indices
+
+    new_kv_caches = []
+    for cache, slice in zip(kv_caches, kv_slices):
+        if num_slices < num_indices:
+            slice = jnp.pad(slice, ((0, num_indices - num_slices), (0, 0),
+                                    (0, 0), (0, 0)))
+        new_cache = cache.at[indices].set(slice)
+        new_kv_caches.append(new_cache)
+    return new_kv_caches
 
 
 def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
@@ -962,34 +1022,12 @@ def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
 
     num_chunks = len(src_offsets)
     total_len = len(block_numbers)
-    real_chunk_sizes = list(chunk_sizes)  # before padding, for logging
 
     # Pad to total_len to avoid recompilation
     while len(src_offsets) < total_len:
         src_offsets.append(0)
         dest_offsets.append(0)
         chunk_sizes.append(0)
-
-    # --- recompile / chunk-shape debug ---------------------------------------
-    # The compile signature is exactly what _async_copy_jit traces on: the offset
-    # array length (total_len), the per-layer slice shape, layer count, and dtype.
-    # If total_len (=num blocks) or the slice shape ever changes, jit recompiles.
-    slice_shape = tuple(kv_slices[0].shape) if kv_slices else ()
-    n_layers = len(kv_slices)
-    dtype_str = str(kv_slices[0].dtype) if kv_slices else "?"
-    sig = (total_len, slice_shape, n_layers, dtype_str)
-    is_new_sig = sig not in _INSERT_KV_SHAPE_SIGS
-    if is_new_sig:
-        _INSERT_KV_SHAPE_SIGS[sig] = 0
-    _INSERT_KV_SHAPE_SIGS[sig] += 1
-    logger.info(
-        f"KVRECOMPILE insert_kv_chunks NEW_SHAPE={is_new_sig} "
-        f"(distinct_sigs={len(_INSERT_KV_SHAPE_SIGS)} seen_count={_INSERT_KV_SHAPE_SIGS[sig]}) "
-        f"| num_blocks={total_len} num_chunks={num_chunks} "
-        f"contiguous={num_chunks == 1} "
-        f"slice_shape={slice_shape} n_layers={n_layers} dtype={dtype_str} "
-        f"chunk_sizes={real_chunk_sizes}")
-    # -------------------------------------------------------------------------
 
     src_offsets_arr = jnp.array(src_offsets, dtype=jnp.int32)
     dest_offsets_arr = jnp.array(dest_offsets, dtype=jnp.int32)
