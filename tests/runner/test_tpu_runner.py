@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -24,7 +25,7 @@ from vllm.config.multimodal import BaseDummyOptions
 
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
-from tpu_inference.runner.tpu_runner import TPUModelRunner
+from tpu_inference.runner.tpu_runner import AsyncPreResults, TPUModelRunner
 
 
 class TestTPUJaxRunner:
@@ -597,6 +598,47 @@ class TestTPUJaxRunner:
         assert req_mock1.output_token_ids == [1, 2, 3, 101, 102, 999]
         assert req_mock2.output_token_ids == [4, 201, 202, 203, 204, 999]
         assert req_mock3.output_token_ids == [5, 6, 301, 302, 303, 304, 305]
+
+
+def test_flush_prev_async_results_returns_pending_output_and_clears_state():
+    runner = object.__new__(TPUModelRunner)
+    runner.max_model_len = 16
+    runner.scheduler_config = SimpleNamespace(async_scheduling=True)
+    runner.input_batch = SimpleNamespace(
+        req_id_to_index={"req1": 0},
+        token_ids_cpu=np.zeros((1, 16), dtype=np.int32),
+        num_tokens_no_spec=np.array([2], dtype=np.int32),
+        num_tokens=np.array([2], dtype=np.int32),
+    )
+    runner.requests = {}
+
+    req_state = SimpleNamespace(req_id="req1", output_token_ids=[0, 0])
+    runner.requests["req1"] = req_state
+    runner._pre_async_results = AsyncPreResults(
+        req_ids=["req1"],
+        next_tokens=np.array([7], dtype=np.int32),
+        request_seq_lens=[(0, req_state, 2)],
+        discard_sampled_tokens_req_indices=[],
+        placeholder_req_id_to_index={"req1": 0},
+        scheduler_output=SimpleNamespace(
+            scheduled_spec_decode_tokens={"req1": [0]},
+        ),
+    )
+
+    with patch(
+            "tpu_inference.runner.tpu_runner.runner_utils.host_extract_sampled_tokens",
+            return_value=[[7]],
+    ) as mock_extract:
+        output = runner._flush_prev_async_results()
+
+    mock_extract.assert_called_once()
+    assert runner._pre_async_results is None
+    assert output.req_ids == ["req1"]
+    assert output.sampled_token_ids == [[7]]
+    assert req_state.output_token_ids == [7]
+    assert runner.input_batch.token_ids_cpu[0, 0] == 7
+    assert runner.input_batch.num_tokens_no_spec[0] == 1
+    assert runner.input_batch.num_tokens[0] == 1
 
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
