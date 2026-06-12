@@ -1069,6 +1069,14 @@ def select_from_kv_caches(kv_caches: list[jax.Array],
     return selected
 
 
+@jax.jit
+def select_local_backup_slices(kv_caches: list[jax.Array],
+                               global_indices: jax.Array) -> list[jax.Array]:
+    # global_indices has shape (dp_size, num_blocks), sharded on DP axis.
+    # cache has shape (total_blocks, ...), sharded on DP axis.
+    return [cache[global_indices] for cache in kv_caches]
+
+
 def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
                      block_numbers: list[int], mesh: jax.sharding.Mesh,
                      dest_spec, src_spec=None, node_id: int = 0) -> list[jax.Array]:
@@ -1083,21 +1091,32 @@ def insert_kv_chunks(kv_caches: list[jax.Array], kv_slices: list[jax.Array],
         if node_id != owner_dp_rank:
             from jax.sharding import PartitionSpec as P
             if src_spec is not None and isinstance(src_spec, P):
+                dp_axis = dest_spec[0]
+                dp_size = mesh.shape[dp_axis]
+                
+                my_global_indices = [b + node_id * local_blocks_per_rank for b in local_block_numbers]
+                indices_sharding = jax.sharding.NamedSharding(mesh, dest_spec[:1])
+                local_indices_shards = []
+                for device in mesh.local_devices:
+                    local_indices_shards.append(jax.device_put(np.array(my_global_indices, dtype=np.int32), device))
+                
+                global_indices = jax.make_array_from_single_device_arrays(
+                    (dp_size, len(local_block_numbers)),
+                    indices_sharding,
+                    local_indices_shards
+                )
+                
+                backup_layers = select_local_backup_slices(kv_caches, global_indices)
+                
                 src_sharding = jax.sharding.NamedSharding(mesh, src_spec)
                 backup_slices = []
-                for cache in kv_caches:
-                    local_selected_shards = []
-                    for shard in cache.addressable_shards:
-                        local_device_indices = jax.device_put(jnp.array(local_block_numbers, dtype=jnp.int32), shard.device)
-                        selected_local = shard.data[local_device_indices]
-                        local_selected_shards.append(selected_local)
-                    
-                    global_backup_layer = jax.make_array_from_single_device_arrays(
-                        (len(local_block_numbers), *cache.shape[1:]),
+                for x in backup_layers:
+                    global_x = jax.make_array_from_single_device_arrays(
+                        (len(local_block_numbers), *x.shape[2:]),
                         src_sharding,
-                        local_selected_shards
+                        [shard.data for shard in x.addressable_shards]
                     )
-                    backup_slices.append(global_backup_layer)
+                    backup_slices.append(global_x)
                 kv_slices = backup_slices
     else:
         local_block_numbers = block_numbers
