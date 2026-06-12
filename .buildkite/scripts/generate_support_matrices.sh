@@ -163,7 +163,7 @@ process_models() {
                         safe_model_name=$(sanitize_name "$model")
                         local safe_stage_name
                         safe_stage_name=$(sanitize_name "$stage")
-                        local meta_key="${ci_tpu_version}_${framework}_${safe_model_name}_${safe_stage_name}"
+                        local meta_key="result_${ci_tpu_version}_${framework}_${safe_model_name}_${safe_stage_name}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
                     fi
                     
@@ -253,7 +253,7 @@ process_features() {
                         safe_feature=$(sanitize_name "$feature")
                         local safe_stage
                         safe_stage=$(sanitize_name "$stage")
-                        local meta_key="${ci_tpu_version}_${framework}_${safe_feature}_${safe_stage}"
+                        local meta_key="result_${ci_tpu_version}_${framework}_${safe_feature}_${safe_stage}"
                         result=$(buildkite-agent meta-data get "${meta_key}" --default "❓ Untested")
 
                         # Format any remaining custom strings from upstream configs

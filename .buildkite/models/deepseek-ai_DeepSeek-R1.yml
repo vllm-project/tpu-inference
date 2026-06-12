@@ -52,7 +52,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${BK_KEY}_deepseek-ai_DeepSeek-R1_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for deepseek-ai/DeepSeek-R1"
-    key: "${BK_KEY}_deepseek-ai_DeepSeek-R1_Accuracy"
+    key: "${BK_KEY}_deepseek-ai_DeepSeek-R1_Accuracy_Correctness"
     depends_on: "${BK_KEY}_record_deepseek-ai_DeepSeek-R1_UnitTest"
     soft_fail: true
     agents:
@@ -70,14 +70,14 @@ steps:
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${BK_KEY}_deepseek-ai_DeepSeek-R1_Accuracy" "not enough HBM"
+          buildkite-agent meta-data set "${BK_KEY}_deepseek-ai_DeepSeek-R1_Accuracy_Correctness" "not enough HBM"
         else
           .buildkite/scripts/run_in_docker.sh \
             bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/deepseek/r1" -n 14042 -l 4
         fi
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for deepseek-ai/DeepSeek-R1"
-    key: "${BK_KEY}_record_deepseek-ai_DeepSeek-R1_Accuracy"
-    depends_on: "${BK_KEY}_deepseek-ai_DeepSeek-R1_Accuracy"
+    key: "${BK_KEY}_record_deepseek-ai_DeepSeek-R1_Accuracy_Correctness"
+    depends_on: "${BK_KEY}_deepseek-ai_DeepSeek-R1_Accuracy_Correctness"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -88,11 +88,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${BK_KEY}_deepseek-ai_DeepSeek-R1_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_deepseek-ai_DeepSeek-R1_Accuracy_Correctness
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for deepseek-ai/DeepSeek-R1"
     key: "${BK_KEY}_deepseek-ai_DeepSeek-R1_Benchmark"
-    depends_on: "${BK_KEY}_record_deepseek-ai_DeepSeek-R1_Accuracy"
+    depends_on: "${BK_KEY}_record_deepseek-ai_DeepSeek-R1_Accuracy_Correctness"
     soft_fail: true
     agents:
       queue: cpu  # TODO: replace with execution environment

@@ -40,7 +40,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-30B-A3B_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for Qwen/Qwen3-30B-A3B"
-    key: "${BK_KEY}_Qwen_Qwen3-30B-A3B_Accuracy"
+    key: "${BK_KEY}_Qwen_Qwen3-30B-A3B_Accuracy_Correctness"
     depends_on: "${BK_KEY}_record_Qwen_Qwen3-30B-A3B_UnitTest"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
@@ -54,8 +54,8 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for Qwen/Qwen3-30B-A3B"
-    key: "${BK_KEY}_record_Qwen_Qwen3-30B-A3B_Accuracy"
-    depends_on: "${BK_KEY}_Qwen_Qwen3-30B-A3B_Accuracy"
+    key: "${BK_KEY}_record_Qwen_Qwen3-30B-A3B_Accuracy_Correctness"
+    depends_on: "${BK_KEY}_Qwen_Qwen3-30B-A3B_Accuracy_Correctness"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -66,11 +66,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-30B-A3B_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-30B-A3B_Accuracy_Correctness
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for Qwen/Qwen3-30B-A3B"
     key: "${BK_KEY}_Qwen_Qwen3-30B-A3B_Benchmark"
-    depends_on: "${BK_KEY}_record_Qwen_Qwen3-30B-A3B_Accuracy"
+    depends_on: "${BK_KEY}_record_Qwen_Qwen3-30B-A3B_Accuracy_Correctness"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"

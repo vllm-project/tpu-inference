@@ -39,7 +39,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${BK_KEY}_deepseek-ai_DeepSeek-Math-V2_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for deepseek-ai/DeepSeek-Math-V2"
-    key: "${BK_KEY}_deepseek-ai_DeepSeek-Math-V2_Accuracy"
+    key: "${BK_KEY}_deepseek-ai_DeepSeek-Math-V2_Accuracy_Correctness"
     depends_on: "${BK_KEY}_record_deepseek-ai_DeepSeek-Math-V2_UnitTest"
     soft_fail: true
     agents:
@@ -51,10 +51,10 @@ steps:
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |
-        buildkite-agent meta-data set "${BK_KEY}_deepseek-ai_DeepSeek-Math-V2_Accuracy" "unverified"
+        buildkite-agent meta-data set "${BK_KEY}_deepseek-ai_DeepSeek-Math-V2_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for deepseek-ai/DeepSeek-Math-V2"
-    key: "${BK_KEY}_record_deepseek-ai_DeepSeek-Math-V2_Accuracy"
-    depends_on: "${BK_KEY}_deepseek-ai_DeepSeek-Math-V2_Accuracy"
+    key: "${BK_KEY}_record_deepseek-ai_DeepSeek-Math-V2_Accuracy_Correctness"
+    depends_on: "${BK_KEY}_deepseek-ai_DeepSeek-Math-V2_Accuracy_Correctness"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -65,11 +65,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${BK_KEY}_deepseek-ai_DeepSeek-Math-V2_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_deepseek-ai_DeepSeek-Math-V2_Accuracy_Correctness
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for deepseek-ai/DeepSeek-Math-V2"
     key: "${BK_KEY}_deepseek-ai_DeepSeek-Math-V2_Benchmark"
-    depends_on: "${BK_KEY}_record_deepseek-ai_DeepSeek-Math-V2_Accuracy"
+    depends_on: "${BK_KEY}_record_deepseek-ai_DeepSeek-Math-V2_Accuracy_Correctness"
     soft_fail: true
     agents:
       queue: cpu  # TODO: replace with execution environment

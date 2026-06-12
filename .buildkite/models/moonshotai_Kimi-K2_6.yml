@@ -51,7 +51,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${BK_KEY}_moonshotai_Kimi-K2_6_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for moonshotai/Kimi-K2.6"
-    key: "${BK_KEY}_moonshotai_Kimi-K2_6_Accuracy"
+    key: "${BK_KEY}_moonshotai_Kimi-K2_6_Accuracy_Correctness"
     depends_on: "${BK_KEY}_record_moonshotai_Kimi-K2_6_UnitTest"
     soft_fail: true
     agents:
@@ -71,14 +71,14 @@ steps:
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${BK_KEY}_moonshotai_Kimi-K2_6_Accuracy" "not enough HBM"
+          buildkite-agent meta-data set "${BK_KEY}_moonshotai_Kimi-K2_6_Accuracy_Correctness" "not enough HBM"
         else
           .buildkite/scripts/run_in_docker.sh \
             bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/moonshootai/kimi/2.6" -n 14042 -l 4
         fi
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for moonshotai/Kimi-K2_6"
-    key: "${BK_KEY}_record_moonshotai_Kimi-K2_6_Accuracy"
-    depends_on: "${BK_KEY}_moonshotai_Kimi-K2_6_Accuracy"
+    key: "${BK_KEY}_record_moonshotai_Kimi-K2_6_Accuracy_Correctness"
+    depends_on: "${BK_KEY}_moonshotai_Kimi-K2_6_Accuracy_Correctness"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -89,11 +89,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${BK_KEY}_moonshotai_Kimi-K2_6_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_moonshotai_Kimi-K2_6_Accuracy_Correctness
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for moonshotai/Kimi-K2.6"
     key: "${BK_KEY}_moonshotai_Kimi-K2_6_Benchmark"
-    depends_on: "${BK_KEY}_record_moonshotai_Kimi-K2_6_Accuracy"
+    depends_on: "${BK_KEY}_record_moonshotai_Kimi-K2_6_Accuracy_Correctness"
     soft_fail: true
     agents:
       queue: cpu  # TODO: replace with execution environment

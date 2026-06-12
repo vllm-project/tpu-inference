@@ -44,7 +44,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-Coder-480B-A35B-Instruct_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for Qwen/Qwen3-Coder-480B-A35B-Instruct"
-    key: "${BK_KEY}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy"
+    key: "${BK_KEY}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy_Correctness"
     depends_on: "${BK_KEY}_record_Qwen_Qwen3-Coder-480B-A35B-Instruct_UnitTest"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
@@ -54,13 +54,13 @@ steps:
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${BK_KEY}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy" "not enough HBM"
+          buildkite-agent meta-data set "${BK_KEY}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy_Correctness" "not enough HBM"
         else
           .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" --use_moe_ep_kernel 0 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.85 --strict_threshold 0.70
         fi
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record integration test result for Qwen/Qwen3-Coder-480B-A35B-Instruct"
-    key: "${BK_KEY}_record_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy"
-    depends_on: "${BK_KEY}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy"
+    key: "${BK_KEY}_record_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy_Correctness"
+    depends_on: "${BK_KEY}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy_Correctness"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -71,11 +71,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy_Correctness
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for Qwen/Qwen3-Coder-480B-A35B-Instruct"
     key: "${BK_KEY}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Benchmark"
-    depends_on: "${BK_KEY}_record_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy"
+    depends_on: "${BK_KEY}_record_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy_Correctness"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:

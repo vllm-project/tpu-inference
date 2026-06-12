@@ -39,7 +39,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    key: "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
+    key: "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness"
     depends_on: "${BK_KEY}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
@@ -48,10 +48,10 @@ steps:
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy" "unverified"
+        buildkite-agent meta-data set "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness" "unverified"
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    key: "${BK_KEY}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
-    depends_on: "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
+    key: "${BK_KEY}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness"
+    depends_on: "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -62,11 +62,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness
 
   - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for Qwen/Qwen3-Omni-30B-A3B-Instruct"
     key: "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark"
-    depends_on: "${BK_KEY}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
+    depends_on: "${BK_KEY}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness"
     env:
       MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
