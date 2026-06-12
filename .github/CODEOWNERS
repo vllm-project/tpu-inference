@@ -28,7 +28,7 @@
 
 # Model layers
 /tpu_inference/layers/ @kyuyeunk @lk-chen @jrplatin @gxd3
-/tpu_inference/layers/jax/ @jrplatin @gpolovets1
+/tpu_inference/layers/jax/ @jrplatin @gpolovets1 @lk-chen
 /tpu_inference/layers/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
 /tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v4/ @gxd3 @a1yssan13 @inucool12
 

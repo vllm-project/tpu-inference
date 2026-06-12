@@ -35,7 +35,7 @@ from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import make_layers
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.gemma4 import Gemma4Model
+from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM, Gemma4Model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.multi_modal_utils import \
@@ -295,7 +295,7 @@ class Gemma4VisionPatchEmbedder(JaxModule):
                               dtype=dtype))
 
     def _factorized_posemb(self, pixel_position_ids: jax.Array) -> jax.Array:
-        posemb = self.position_embedding_table.value
+        posemb = self.position_embedding_table.get_value()
         one_hot = jax.nn.one_hot(pixel_position_ids,
                                  posemb.shape[0],
                                  dtype=posemb.dtype)
@@ -522,7 +522,8 @@ class Gemma4VisionModel(JaxModule):
 
         if self.standardize:
             pooled_x, mask = outputs[0]
-            pooled_x = (pooled_x - self.std_bias.value) * self.std_scale.value
+            pooled_x = (pooled_x - self.std_bias.get_value()
+                        ) * self.std_scale.get_value()
             outputs = ((pooled_x, mask), )
 
         return outputs
@@ -568,7 +569,7 @@ class Gemma4MultimodalEmbedder(JaxModule):
 
 
 class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
-    packed_modules_mapping = {"__no_packing__": []}
+    packed_modules_mapping = Gemma4ForCausalLM.packed_modules_mapping
     WeightLoader = StandardWeightLoader
     supports_multimodal = True
     supports_encoder_tp_data = True
@@ -579,8 +580,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         self.vllm_config = vllm_config
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
-
-        vllm_config.sharding_config.apply_vision_sharding()
 
         self.model = Gemma4Model(
             vllm_config=vllm_config,
