@@ -37,6 +37,7 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.linear import JaxLmHead
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer
+from tpu_inference.layers.jax.rope_interface import get_rope_scaling
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -215,7 +216,7 @@ class Qwen2_5_VisionAttention(nnx.Module):
         self.num_kv_heads = self.num_heads
         set_default_rope_theta(config, default_theta=1000000)
         self.rope_theta = config.rope_parameters["rope_theta"]
-        self.rope_scaling = getattr(config, "rope_scaling", None)
+        self.rope_scaling = get_rope_scaling(config)
         self.head_dim_original = self.hidden_size // self.num_heads
 
         sharding_size = mesh.shape["model"]
