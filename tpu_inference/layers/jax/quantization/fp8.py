@@ -33,17 +33,19 @@ from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.utils import cpu_mesh, cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import (JaxEinsum,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import (QuantizationConfig,
                                                            QuantLinearConfig)
 from tpu_inference.layers.jax.quantization.unquantized import (
-    UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
+    UnquantizedFusedMoEMethod, UnquantizedLinearMethod,
+    UnquantizedMergedLinearMethod)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch,
-    shard_put)
+    assign_and_shard_param, jax_array_from_reshaped_torch,
+    load_nnx_param_from_reshaped_torch, shard_put)
 from tpu_inference.utils import t2j
 
 logger = init_logger(__name__)
@@ -335,6 +337,81 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         out = self._apply_fused(x, weight, scale, bias=bias)
         out = out.reshape(out.shape[:-1] + self.out_features)
         return out
+
+
+class Fp8BlockwiseMergedLinearMethod(Fp8BlockwiseLinearMethod):
+    """Block-wise FP8 for a merged (fused) JaxMergedColumnParallelLinear.
+
+    The checkpoint ships each projection separately (``gate_proj.weight`` +
+    ``.weight_scale_inv``, ``up_proj`` ...). ``create_weights_jax`` builds the
+    fused FP8 params (output dim = ``sum(output_sizes)``) and attaches stash
+    loaders to both the weight and its block scale.
+    ``process_weights_after_loading`` concatenates the per-projection shards
+    along the output dim, then hands them to the inherited blockwise
+    dequant/requant + shard-reorder path (which is already ``output_sizes``
+    aware), so the result is identical to loading a pre-fused checkpoint.
+    """
+
+    def create_weights_jax(self, layer: JaxEinsum, *weight_args, rngs,
+                           **extra_weight_attrs):
+        if self.batch_features:
+            raise NotImplementedError(
+                "Merged block-wise FP8 is not supported for batched weights.")
+        # Build the fused weight + block-scale params (output dim already
+        # sums the projections, since layer.weight is the fused kernel).
+        super().create_weights_jax(layer,
+                                   *weight_args,
+                                   rngs=rngs,
+                                   **extra_weight_attrs)
+        n_proj = len(self.linear_config.output_sizes)
+        for param in (layer.weight, layer.weight_scale_inv):
+            param.set_metadata(_weights_to_load=[None] * n_proj)
+            param.set_metadata(weight_loader=self._weight_loader)
+
+    @staticmethod
+    def _weight_loader(param: nnx.Param, torch_weight, shard_id: int) -> bool:
+        param._weights_to_load[shard_id] = torch_weight
+        return all(s is not None for s in param._weights_to_load)
+
+    def process_weights_after_loading(self, layer: JaxEinsum) -> bool:
+        assert isinstance(layer, JaxMergedColumnParallelLinear)
+        weight_shards = layer.weight._weights_to_load
+        scale_shards = layer.weight_scale_inv._weights_to_load
+        if (layer.weight.get_metadata("_is_loaded", False)
+                and layer.weight_scale_inv.get_metadata("_is_loaded", False)):
+            return super().process_weights_after_loading(layer)
+        if any(s is None for s in weight_shards) or any(s is None
+                                                        for s in scale_shards):
+            # Projections may span multiple files; wait for the rest.
+            return False
+
+        # Assemble the fused (in, sum_out) weight and (in_blocks, sum_out_blocks)
+        # scale by transposing each projection to contracting-first and
+        # concatenating along the output dim — the plain-concat layout the
+        # inherited blockwise path expects (it slices per projection via
+        # output_sizes and reorders for sharding itself).
+        with cpu_mesh_context():
+            weight = jnp.concatenate([
+                jax_array_from_reshaped_torch(w, permute_dims=(1, 0))
+                for w in weight_shards
+            ],
+                                     axis=1)
+            scale = jnp.concatenate([
+                jax_array_from_reshaped_torch(s, permute_dims=(1, 0))
+                for s in scale_shards
+            ],
+                                    axis=1)
+        assign_and_shard_param(layer.weight,
+                               weight,
+                               param_name=layer.prefix + ".weight")
+        assign_and_shard_param(layer.weight_scale_inv,
+                               scale,
+                               param_name=layer.prefix + ".weight_scale_inv")
+        # Release the per-projection torch tensors now that they're fused.
+        layer.weight._weights_to_load[:] = [None] * len(weight_shards)
+        layer.weight_scale_inv._weights_to_load[:] = [None] * len(scale_shards)
+        # Now requantize/fuse exactly as the non-merged blockwise path does.
+        return super().process_weights_after_loading(layer)
 
 
 class Fp8FusedMoEMethod(QuantizeMethodBase):
@@ -673,12 +750,22 @@ class Fp8Config(QuantizationConfig):
                          prefix: str) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, JaxEinsum):
             linear_config = QuantLinearConfig(layer, enable_sp=False)
+            is_merged = isinstance(layer, JaxMergedColumnParallelLinear)
             if self.is_layer_skipped(prefix,
                                      ignored_layers=self.ignored_layers):
+                if is_merged:
+                    return UnquantizedMergedLinearMethod(linear_config)
                 return UnquantizedLinearMethod(linear_config)
             if self.weight_block_size is not None:
+                if is_merged:
+                    return Fp8BlockwiseMergedLinearMethod(
+                        self, layer, linear_config)
                 return Fp8BlockwiseLinearMethod(self, layer, linear_config)
             else:
+                if is_merged:
+                    raise NotImplementedError(
+                        "Tensor-wise FP8 does not support merged (fused) "
+                        "linears yet.")
                 return Fp8TensorwiseLinearMethod(layer, linear_config)
         elif isinstance(layer, JaxMoE):
             if self.is_layer_skipped(prefix,

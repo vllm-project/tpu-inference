@@ -93,8 +93,8 @@ def load_dummy_weights_jax(model, mesh: Mesh) -> None:
         sharding = NamedSharding(
             mesh, spec if isinstance(spec, PartitionSpec) else PartitionSpec())
 
-        is_moe = hasattr(param, "_weights_to_load")
         param_shape = param.value.shape
+        is_moe = hasattr(param, "_weights_to_load") and len(param_shape) == 3
 
         if is_moe:
             # MoE: downstream post-loading fusion expects transposed shape
