@@ -1036,7 +1036,8 @@ class Gemma4Model(JaxModule):
 
 class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
     packed_modules_mapping = {
-        "qkv_proj.proj": [
+        "qkv_proj.proj":
+        [  # TODO: once JaxQKVParallelLinear inherits from column linear, you might not need .proj
             "q_proj",
             "k_proj",
             "v_proj",

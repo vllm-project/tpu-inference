@@ -106,9 +106,14 @@ class UnquantizedMergedLinearMethod(UnquantizedLinearMethod):
                               param_name=layer.prefix + ".weight"))
 
     @staticmethod
-    def _load_merged_weight(param: nnx.Param, torch_weight, shard_id: int, *,
-                            n_shards: int, output_sizes: list,
-                            param_name: str):
+    def _load_merged_weight(
+            param: nnx.Param,
+            torch_weight,
+            shard_id: int = -1,
+            *,  # TODO: add default values accordingly to acommodate shard_id default
+            n_shards: int,
+            output_sizes: list,
+            param_name: str):
         """Accumulate one projection's checkpoint tensor, fuse when complete.
 
         Called once per fused projection with ``shard_id`` selecting the slot
@@ -116,6 +121,13 @@ class UnquantizedMergedLinearMethod(UnquantizedLinearMethod):
         The projections may arrive across multiple files, so the fuse only runs
         once every slot is filled.
         """
+        if shard_id == -1:
+            raise ValueError(
+                "shard_id must be provided to load merged weights"
+            )  #TODO: do the special case for consolidated QKV weight
+            # TODO: split QKV and assign to shards
+            # rearranging is handled already in cpu_mesh_context() part below
+
         shards = param.get_metadata("_merged_shards")
         shards[shard_id] = torch_weight
         if any(s is None for s in shards):
@@ -348,8 +360,6 @@ class UnquantizedConfig(QuantizationConfig):
             linear_config = QuantLinearConfig(enable_sp=False,
                                               output_sizes=list(
                                                   layer.output_sizes))
-            if hasattr(layer, "tp_size"):
-                linear_config.n_shards = layer.tp_size
             return UnquantizedMergedLinearMethod(linear_config)
         if isinstance(layer, JaxEinsum):
             # Derive output's last dim from the einsum string.
