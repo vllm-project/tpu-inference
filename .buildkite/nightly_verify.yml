@@ -17,7 +17,7 @@ x-run-condition: &run-on-nightly-or-tag
 
 steps:
    - label: "Upload Tests for Models & Features (${MODEL_IMPL_TYPE:-vllm})"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
      agents:
        queue: cpu
      commands:
@@ -28,7 +28,7 @@ steps:
 
    - label: "Check Metadata Health"
      key: "check_metadata_health"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
      agents: 
        queue: cpu 
      commands: |
@@ -39,7 +39,7 @@ steps:
         echo "✅ Metadata healthy. Proceeding..."
     
    - label: "Generate all support matrices"
-     <<: *run-on-nightly-or-tag
+    #  <<: *run-on-nightly-or-tag
      key: "generate_matrices"
      depends_on: "check_metadata_health"
      agents: { queue: cpu }

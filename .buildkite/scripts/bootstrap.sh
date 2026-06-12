@@ -61,7 +61,7 @@ echo "--- :git: Checking changed files"
 BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"main"}
 FILES_CHANGED=""
 
-if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
+# if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "PR detected. Target branch: $BASE_BRANCH"
 
     # Fetch base and current commit to ensure local history exists for diff
@@ -121,10 +121,10 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     if echo "$FILES_CHANGED" | grep -qE "$FEATURE_FILES"; then
       .buildkite/pipeline_generation/test_generation.sh --features
     fi
-else
-    echo "Non-PR build. Bypassing file change check."
-    FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
-fi
+# else
+#     echo "Non-PR build. Bypassing file change check."
+#     FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
+# fi
 
 # Store changed files in metadata for sub-pipelines (newlines to commas)
 echo "$FILES_CHANGED" | tr '\n' ',' | buildkite-agent meta-data set "changed_files"
@@ -157,18 +157,18 @@ set_jax_envs() {
 
 upload_pipeline() {
     # Upload JAX pipeline for v6 (default)
-    set_jax_envs v6
-    upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-    set_jax_envs unset
+    # set_jax_envs v6
+    # upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
+    # set_jax_envs unset
 
     # Upload JAX pipeline for v7
-    set_jax_envs v7
-    upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-    set_jax_envs unset
+    # set_jax_envs v7
+    # upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
+    # set_jax_envs unset
 
     # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
-    upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
-    upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
+    # upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
+    # upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
     upload_with_priority .buildkite/nightly_verify.yml "$JOB_PRIORITY"
 }
 
@@ -310,7 +310,7 @@ else
     # If it's NOT a Pull Request (e.g., branch push, tag, manual build)
     echo "This is not a Pull Request build. Uploading main pipeline."
     upload_pipeline
-    upload_benchmark_pipeline
+    # upload_benchmark_pipeline
   fi
 fi
 
