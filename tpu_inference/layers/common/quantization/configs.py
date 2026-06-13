@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Optional
+
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference import envs
@@ -20,7 +22,11 @@ from tpu_inference.utils import to_jax_dtype
 
 class QuantLinearConfig:
 
-    def __init__(self, *, enable_sp: bool, output_sizes: list[int]):
+    def __init__(self,
+                 *,
+                 enable_sp: bool,
+                 output_sizes: list[int],
+                 n_shards: Optional[int] = None):
         # Output size across all TP ranks.
         self.output_sizes = output_sizes
         self.weight_sharding = P(None, None)
@@ -31,7 +37,7 @@ class QuantLinearConfig:
         self.mesh = None
 
         self.bias_sharding = P(self.weight_sharding[1])
-        self.n_shards = len(output_sizes)
+        self.n_shards = n_shards if n_shards is not None else len(output_sizes)
         self.enable_quantized_matmul_kernel = envs.ENABLE_QUANTIZED_MATMUL_KERNEL
         self.requant_block_size = envs.REQUANTIZE_BLOCK_SIZE
         self.requant_weight_dtype = to_jax_dtype(envs.REQUANTIZE_WEIGHT_DTYPE)
