@@ -876,6 +876,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.embed_input_ids_fn = model.multimodal_fns.embed_input_ids_fn
         self.get_mrope_input_positions_fn = model.multimodal_fns.get_mrope_input_positions_fn
 
+        (
+            self.embed_multimodal_fn,
+            self.precompile_vision_encoder_fn,
+        ) = self.mm_manager.optional_encoder_graph_optimization(
+            self.embed_multimodal_fn,
+            self.precompile_vision_encoder_fn,
+        )
+
         rng_key = nnx.Rngs(jax.random.key(self.model_config.seed)).params()
         self.rng_params_for_sampling = device_array(self.mesh,
                                                     rng_key,
@@ -2382,6 +2390,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.input_batch,
             padded_num_reqs,
             sharding=data_parallel_attn_sharding,
+            req_indices_dp=req_indices_dp,
         )
 
         if self.uses_mrope:

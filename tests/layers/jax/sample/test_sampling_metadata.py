@@ -57,9 +57,13 @@ def test_from_input_batch_all_greedy(mesh: Mesh):
     """
     mock_batch = MockInputBatch(all_greedy=True)
     padded_num_reqs = 4
+    req_indices_dp = {0: []}
 
     metadata = TPUSupportedSamplingMetadata.from_input_batch(
-        mesh=mesh, input_batch=mock_batch, padded_num_reqs=padded_num_reqs)
+        mesh=mesh,
+        input_batch=mock_batch,
+        padded_num_reqs=padded_num_reqs,
+        req_indices_dp=req_indices_dp)
 
     assert not metadata.do_sampling, "do_sampling should be False for greedy requests"
     assert metadata.temperature is None
@@ -88,8 +92,29 @@ def test_from_input_batch_with_sampling_and_padding(mesh: Mesh):
         top_p_cpu=top_p_tensor,
     )
 
+    req_indices_dp = {0: [0, 1]}
+
+    expected_temp = np.array([
+        0.7, 0.8, DEFAULT_SAMPLING_PARAMS["temperature"],
+        DEFAULT_SAMPLING_PARAMS["temperature"]
+    ],
+                             dtype=np.float32)
+    expected_top_k = np.array([
+        10, 20, DEFAULT_SAMPLING_PARAMS["top_k"],
+        DEFAULT_SAMPLING_PARAMS["top_k"]
+    ],
+                              dtype=np.int32)
+    expected_top_p = np.array([
+        0.9, 0.95, DEFAULT_SAMPLING_PARAMS["top_p"],
+        DEFAULT_SAMPLING_PARAMS["top_p"]
+    ],
+                              dtype=np.float32)
+
     metadata = TPUSupportedSamplingMetadata.from_input_batch(
-        mesh=mesh, input_batch=mock_batch, padded_num_reqs=padded_num_reqs)
+        mesh=mesh,
+        input_batch=mock_batch,
+        padded_num_reqs=padded_num_reqs,
+        req_indices_dp=req_indices_dp)
 
     # 1. Check metadata flags and types
     assert metadata.do_sampling, "do_sampling should be True"
@@ -108,28 +133,115 @@ def test_from_input_batch_with_sampling_and_padding(mesh: Mesh):
     assert metadata.top_k.sharding == expected_sharding
     assert metadata.top_p.sharding == expected_sharding
 
-    # 4. Check that values were correctly padded
-    expected_temp = np.array(
-        [
-            0.7, 0.8, DEFAULT_SAMPLING_PARAMS["temperature"],
-            DEFAULT_SAMPLING_PARAMS["temperature"]
-        ],
-        dtype=np.float32,
+    # 4. Check that values were correctly padded and sharded
+    np.testing.assert_allclose(np.asarray(metadata.temperature), expected_temp)
+    np.testing.assert_array_equal(np.asarray(metadata.top_k), expected_top_k)
+    np.testing.assert_allclose(np.asarray(metadata.top_p), expected_top_p)
+
+
+def test_from_input_batch_with_dp_sharding(mesh: Mesh):
+    """
+    Tests TPUSupportedSamplingMetadata.from_input_batch with dp_size > 1.
+    This specifically verifies that active requests are routed to the correct
+    DP rank padded slices, ensuring temp > 0 isn't swallowed by padding.
+    """
+    num_reqs = 2
+    padded_num_reqs = 4
+
+    temp_tensor = np.array([0.7, 0.8, 0.0, 0.0], dtype=np.float32)
+    top_k_tensor = np.array([10, 20, 0, 0], dtype=np.int32)
+    top_p_tensor = np.array([0.9, 0.95, 0.0, 0.0], dtype=np.float32)
+
+    mock_batch = MockInputBatch(
+        all_greedy=False,
+        num_reqs=num_reqs,
+        temperature_cpu=temp_tensor,
+        top_k_cpu=top_k_tensor,
+        top_p_cpu=top_p_tensor,
     )
-    expected_top_k = np.array(
-        [
-            10, 20, DEFAULT_SAMPLING_PARAMS["top_k"],
-            DEFAULT_SAMPLING_PARAMS["top_k"]
-        ],
-        dtype=np.int32,
+
+    # Simulate dp_size = 2. Rank 0 gets req 0, Rank 1 gets req 1
+    req_indices_dp = {0: [0], 1: [1]}
+
+    # dp_size = 2 -> padded_num_reqs_per_dp_rank = 2
+    # rank 0 gets indices [0] -> 0.7, followed by padding
+    # rank 1 gets indices [1] -> 0.8, followed by padding
+    expected_temp = np.array([
+        0.7, DEFAULT_SAMPLING_PARAMS["temperature"], 0.8,
+        DEFAULT_SAMPLING_PARAMS["temperature"]
+    ],
+                             dtype=np.float32)
+    expected_top_k = np.array([
+        10, DEFAULT_SAMPLING_PARAMS["top_k"], 20,
+        DEFAULT_SAMPLING_PARAMS["top_k"]
+    ],
+                              dtype=np.int32)
+    expected_top_p = np.array([
+        0.9, DEFAULT_SAMPLING_PARAMS["top_p"], 0.95,
+        DEFAULT_SAMPLING_PARAMS["top_p"]
+    ],
+                              dtype=np.float32)
+
+    metadata = TPUSupportedSamplingMetadata.from_input_batch(
+        mesh=mesh,
+        input_batch=mock_batch,
+        padded_num_reqs=padded_num_reqs,
+        req_indices_dp=req_indices_dp)
+
+    np.testing.assert_allclose(np.asarray(metadata.temperature), expected_temp)
+    np.testing.assert_array_equal(np.asarray(metadata.top_k), expected_top_k)
+    np.testing.assert_allclose(np.asarray(metadata.top_p), expected_top_p)
+
+
+def test_from_input_batch_with_dp_sharding_empty_rank(mesh: Mesh):
+    """
+    Tests TPUSupportedSamplingMetadata.from_input_batch with an empty DP rank.
+    This simulates when num_reqs < dp_size, meaning some DP ranks receive 0 active requests
+    and must be filled entirely with padding.
+    """
+    num_reqs = 1
+    padded_num_reqs = 4
+
+    temp_tensor = np.array([0.7, 0.0, 0.0, 0.0], dtype=np.float32)
+    top_k_tensor = np.array([10, 0, 0, 0], dtype=np.int32)
+    top_p_tensor = np.array([0.9, 0.0, 0.0, 0.0], dtype=np.float32)
+
+    mock_batch = MockInputBatch(
+        all_greedy=False,
+        num_reqs=num_reqs,
+        temperature_cpu=temp_tensor,
+        top_k_cpu=top_k_tensor,
+        top_p_cpu=top_p_tensor,
     )
-    expected_top_p = np.array(
-        [
-            0.9, 0.95, DEFAULT_SAMPLING_PARAMS["top_p"],
-            DEFAULT_SAMPLING_PARAMS["top_p"]
-        ],
-        dtype=np.float32,
-    )
+
+    # Simulate dp_size = 2. Rank 0 gets req 0, Rank 1 gets NO requests.
+    req_indices_dp = {0: [0], 1: []}
+
+    # dp_size = 2 -> padded_num_reqs_per_dp_rank = 2
+    # rank 0 gets indices [0] -> 0.7, followed by padding
+    # rank 1 gets no active requests -> padding, padding
+    expected_temp = np.array([
+        0.7, DEFAULT_SAMPLING_PARAMS["temperature"],
+        DEFAULT_SAMPLING_PARAMS["temperature"],
+        DEFAULT_SAMPLING_PARAMS["temperature"]
+    ],
+                             dtype=np.float32)
+    expected_top_k = np.array([
+        10, DEFAULT_SAMPLING_PARAMS["top_k"], DEFAULT_SAMPLING_PARAMS["top_k"],
+        DEFAULT_SAMPLING_PARAMS["top_k"]
+    ],
+                              dtype=np.int32)
+    expected_top_p = np.array([
+        0.9, DEFAULT_SAMPLING_PARAMS["top_p"],
+        DEFAULT_SAMPLING_PARAMS["top_p"], DEFAULT_SAMPLING_PARAMS["top_p"]
+    ],
+                              dtype=np.float32)
+
+    metadata = TPUSupportedSamplingMetadata.from_input_batch(
+        mesh=mesh,
+        input_batch=mock_batch,
+        padded_num_reqs=padded_num_reqs,
+        req_indices_dp=req_indices_dp)
 
     np.testing.assert_allclose(np.asarray(metadata.temperature), expected_temp)
     np.testing.assert_array_equal(np.asarray(metadata.top_k), expected_top_k)
@@ -155,8 +267,13 @@ def test_from_input_batch_id_padding_needed(mesh: Mesh):
         top_p_cpu=top_p_tensor,
     )
 
+    req_indices_dp = {0: [0, 1, 2, 3]}
+
     metadata = TPUSupportedSamplingMetadata.from_input_batch(
-        mesh=mesh, input_batch=mock_batch, padded_num_reqs=padded_num_reqs)
+        mesh=mesh,
+        input_batch=mock_batch,
+        padded_num_reqs=padded_num_reqs,
+        req_indices_dp=req_indices_dp)
 
     assert metadata.do_sampling
     # Check that values are identical to the input, since no padding was needed
@@ -201,6 +318,8 @@ def test_from_input_batch_with_logprobs(mesh: Mesh):
     """
     Tests that the `logprobs` flag is correctly set based on `max_num_logprobs`.
     """
+    req_indices_dp = {0: []}
+
     # Case 1: Logprobs are requested
     mock_batch_with_logprobs = MockInputBatch(all_greedy=True,
                                               max_num_logprobs=5)
@@ -208,6 +327,7 @@ def test_from_input_batch_with_logprobs(mesh: Mesh):
         mesh=mesh,
         input_batch=mock_batch_with_logprobs,
         padded_num_reqs=4,
+        req_indices_dp=req_indices_dp,
     )
     assert metadata_with.logprobs, "logprobs should be True when max_num_logprobs > 0"
 
@@ -218,6 +338,7 @@ def test_from_input_batch_with_logprobs(mesh: Mesh):
         mesh=mesh,
         input_batch=mock_batch_id_logprobs_zero,
         padded_num_reqs=4,
+        req_indices_dp=req_indices_dp,
     )
     assert not metadata_without_zero.logprobs, "logprobs should be False when max_num_logprobs is 0"
 
@@ -228,6 +349,7 @@ def test_from_input_batch_with_logprobs(mesh: Mesh):
         mesh=mesh,
         input_batch=mock_batch_id_logprobs_none,
         padded_num_reqs=4,
+        req_indices_dp=req_indices_dp,
     )
     assert not metadata_without_none.logprobs, "logprobs should be False when max_num_logprobs is None"
 
@@ -247,8 +369,13 @@ def test_from_input_batch_sampling_with_logprobs(mesh: Mesh):
         max_num_logprobs=10,
     )
 
+    req_indices_dp = {0: [0, 1]}
+
     metadata = TPUSupportedSamplingMetadata.from_input_batch(
-        mesh=mesh, input_batch=mock_batch, padded_num_reqs=padded_num_reqs)
+        mesh=mesh,
+        input_batch=mock_batch,
+        padded_num_reqs=padded_num_reqs,
+        req_indices_dp=req_indices_dp)
 
     assert metadata.do_sampling, "do_sampling should be True"
     assert metadata.logprobs, "logprobs should be True"
