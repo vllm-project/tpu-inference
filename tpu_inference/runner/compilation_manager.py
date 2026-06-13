@@ -1740,6 +1740,8 @@ class CompilationManager:
                      is_last_rank=is_last_rank,
                      dp_size=dp_size,
                      collect_expert_indices=collect_expert_indices,
+                     max_logprobs=self.runner.model_config.max_logprobs,
+                     logprobs_mode=self.runner.model_config.logprobs_mode,
                  )
                 self.runner.kv_caches = final_kv_caches
                 return generated_tokens
