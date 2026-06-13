@@ -1196,6 +1196,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs,
             req_ids_dp,
             padded_num_scheduled_tokens_per_dp_rank,
+            _,
         ) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
@@ -1355,6 +1356,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs,
             _,
             _,
+            tokens_indices_selector,
         ) = self._prepare_inputs(scheduler_output)
 
         init_tokens = input_ids
@@ -1464,22 +1466,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Expose request dimension as axis 0 after transpose: shape (batch_size, actual_steps)
         generated_tokens_cpu = generated_tokens_cpu.T
-        if logits_indices_selector is not None:
+        if tokens_indices_selector is not None:
             # Realign physical rows back to logical input batch order upfront
             generated_tokens_cpu = generated_tokens_cpu[
-                logits_indices_selector]
+                tokens_indices_selector]
 
-        if all_expert_indices_cpu is not None and logits_indices_selector is not None:
+        if all_expert_indices_cpu is not None and tokens_indices_selector is not None:
             # Shape: (steps, layers, batch, top_k) -> realign batch dimension
             all_expert_indices_cpu = all_expert_indices_cpu[:, :,
-                                                            logits_indices_selector, :]
+                                                            tokens_indices_selector, :]
 
         if lp_token_ids_cpu is not None:
-            if logits_indices_selector is not None:
+            if tokens_indices_selector is not None:
                 lp_token_ids_cpu = lp_token_ids_cpu[:,
-                                                    logits_indices_selector, :]
-                lp_vals_cpu = lp_vals_cpu[:, logits_indices_selector, :]
-                lp_ranks_cpu = lp_ranks_cpu[:, logits_indices_selector]
+                                                    tokens_indices_selector, :]
+                lp_vals_cpu = lp_vals_cpu[:, tokens_indices_selector, :]
+                lp_ranks_cpu = lp_ranks_cpu[:, tokens_indices_selector]
 
         num_reqs = self.input_batch.num_reqs
         sampled_token_ids = []
@@ -2063,15 +2065,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             ])
             sorted_indices = np.argsort(all_req_indices)
             logits_indices_selector = all_positions[sorted_indices]
+
+            tokens_indices_selector = None
+            if self.enable_continue_decode:
+                all_token_positions = np.concatenate([
+                    np.arange(len(req_indices_dp[dp_rank])) +
+                    padded_num_scheduled_tokens_per_dp_rank * dp_rank
+                    for dp_rank in range(dp_size)
+                ])
+                tokens_indices_selector = all_token_positions[sorted_indices]
         else:
             logits_indices_selector = None
+            tokens_indices_selector = None
 
         return (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
                 scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
                 padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
                 attn_padded_num_reqs, padded_total_num_scheduled_tokens,
                 padded_num_reqs_per_dp_rank, logits_indices_selector,
-                max_num_reqs_per_dp_rank)
+                tokens_indices_selector, max_num_reqs_per_dp_rank)
 
     def _prepare_async_token_substitution_indices(
             self, req_ids_dp, scheduled_tokens_per_dp_rank,
@@ -2240,7 +2252,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
          padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
          attn_padded_num_reqs, padded_total_num_scheduled_tokens,
          padded_num_reqs_per_dp_rank, logits_indices_selector,
-         max_num_reqs_per_dp_rank
+         tokens_indices_selector, max_num_reqs_per_dp_rank
          ) = self._prepare_input_metadata(scheduler_output)
         # Multi-modal support
         # Calculate M-RoPE positions.
@@ -2623,6 +2635,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs,
             req_ids_dp,
             padded_num_scheduled_tokens_per_dp_rank,
+            tokens_indices_selector,
         )
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
