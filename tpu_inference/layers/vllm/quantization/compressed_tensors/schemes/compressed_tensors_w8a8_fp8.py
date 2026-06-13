@@ -65,10 +65,12 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
 
         # Monkeypatch expose_input_quant_key to handle None kernel on TPU/non-GPU platforms
         original_expose = vllm_ct_fp8.expose_input_quant_key
+
         def safe_expose_input_quant_key(layer, kernel):
             if kernel is None:
                 return
             original_expose(layer, kernel)
+
         vllm_ct_fp8.expose_input_quant_key = safe_expose_input_quant_key
 
         CompressedTensorsW8A8Fp8.__init__(
