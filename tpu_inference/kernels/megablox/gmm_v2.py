@@ -398,11 +398,27 @@ def inner_kernel(
         if cfgs.rhs_cfgs.should_dequantize_before_matmul:
             tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(acc_ref.dtype)
             num_blocks = cfgs.num_quant_blocks_per_tile_k
-            tiled_rhs_dequant = tiled_rhs.astype(acc_ref.dtype).reshape(
+
+            # Pad tiled_rhs along K dimension if tile_k is not a multiple of quant_block_size,
+            # to avoid shape mismatch during reshape. For example, if tile_k = 256
+            # and quant_block_size = 160 (num_blocks = 2), pad 64 rows to reach 320.
+            pad_len = num_blocks * rhs_qbs - cfgs.tiles.tile_k
+            if pad_len > 0:
+                zeros = jnp.zeros((pad_len, rhs_tile_n), dtype=tiled_rhs.dtype)
+                padded_rhs = jnp.concatenate([tiled_rhs, zeros], axis=0)
+            else:
+                padded_rhs = tiled_rhs
+
+            tiled_rhs_dequant = padded_rhs.astype(acc_ref.dtype).reshape(
                 num_blocks, rhs_qbs, rhs_tile_n)
             tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
-            tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
-                                                  rhs_tile_n)
+
+            # Flatten the block-dequantized weights back to 2D and slice off
+            # the zero-padding rows to restore the original tile_k dimension
+            # (e.g., flatten 320 rows back to 2D and slice [:256, :] to trim 64 rows).
+            tiled_rhs = tiled_rhs_dequant.reshape(-1, rhs_tile_n)
+            if pad_len > 0:
+                tiled_rhs = tiled_rhs[:cfgs.tiles.tile_k, :]
             rhs_step_k = cfgs.tiles.tile_k
         else:
             rhs_step_k = rhs_qbs

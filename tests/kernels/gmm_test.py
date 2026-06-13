@@ -738,6 +738,49 @@ class GmmTest(jtu.JaxTestCase):
 
         self.assertArraysAllClose(actual, expected, atol=atol, rtol=rtol)
 
+    def test_gmm_weight_quantized_tile_k_not_divisible_by_block_size(self):
+        """Test GMM with tile_k not a multiple of block_size."""
+        batch_size = 128
+        in_size = 320
+        out_size = 512
+        num_groups = 8
+        weight_dtype = jnp.int8
+        block_size = 160
+        tile_k = 256
+
+        num_local_groups = num_groups
+        key = jax.random.key(0)
+
+        lhs = jax.random.uniform(key, (batch_size, in_size), jnp.bfloat16, -1,
+                                 1)
+        rhs = jax.random.uniform(key, (num_local_groups, in_size, out_size),
+                                 jnp.bfloat16, -1, 1)
+        rhs_q, rhs_scale = quantize_tensor(rhs,
+                                           weight_dtype,
+                                           axis=1,
+                                           block_size=block_size)
+        rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
+
+        group_sizes = get_group_sizes(batch_size, num_groups)
+        group_offset = jnp.array(0, dtype=jnp.int32)
+
+        tile_info = TileSizes(tile_m=128, tile_k=tile_k, tile_n=out_size)
+
+        # Trace the kernel using jax.make_jaxpr to verify it compiles/traces without shape mismatch.
+        # This is safe to run on any backend (CPU/GPU/TPU) because it doesn't execute or lower.
+        try:
+            jax.make_jaxpr(lambda lhs_in, rhs_in, gs_in, rs_in, go_in: gmm_v2(
+                lhs_in,
+                rhs_in,
+                gs_in,
+                rhs_scale=rs_in,
+                group_offset=go_in,
+                tile_info=tile_info,
+                maybe_quantize_lhs=False,
+            ))(lhs, rhs_q, group_sizes, rhs_scale, group_offset)
+        except TypeError as e:
+            self.fail(f"gmm_v2 failed to trace: {e}")
+
 
 if __name__ == "__main__":
     absltest.main(testLoader=jtu.JaxTestLoader())
