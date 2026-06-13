@@ -135,7 +135,7 @@ setup_environment() {
       TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"
   fi
  
-  local CACHE_TAG="${TPU_INFERENCE_HASH}-${LOCAL_TPU_VERSION}"
+  local CACHE_TAG="${TPU_INFERENCE_HASH}"
 
   # ==========================================
   # Pull-Only Mode for TPU execution nodes
