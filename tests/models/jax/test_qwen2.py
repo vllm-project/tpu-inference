@@ -160,8 +160,9 @@ class TestQwen2ForCausalLM:
         assert attn.o_proj.weight.shape == (num_heads, head_dim, hidden_size)
 
         mlp = layers[0].mlp
-        assert mlp.gate_proj.weight.shape == (hidden_size, intermediate_size)
-        assert mlp.up_proj.weight.shape == (hidden_size, intermediate_size)
+        # gate_proj and up_proj are fused into a single merged linear.
+        assert mlp.gate_up_proj.weight.shape == (hidden_size,
+                                                 2 * intermediate_size)
         assert mlp.down_proj.weight.shape == (intermediate_size, hidden_size)
 
         # Test model load

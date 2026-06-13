@@ -319,6 +319,7 @@ class Qwen3Model(Qwen2Model):
 
 
 class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:

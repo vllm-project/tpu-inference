@@ -153,7 +153,7 @@ class TestJaxMergedColumnParallelLinear:
         assert cfg.fuse_matmuls
         # The weight_loader is attached at create_weights_jax time and the
         # per-projection accumulation slots start empty.
-        assert layer.weight.get_metadata("_merged_shards") == [None, None]
+        assert layer.weight.get_metadata("_weights_to_load") == [None, None]
 
     @pytest.mark.parametrize("in_size,gate_out,up_out,batch", [
         (4, 6, 6, 2),
@@ -178,6 +178,9 @@ class TestJaxMergedColumnParallelLinear:
         weight_loader = layer.weight.weight_loader
         weight_loader(layer.weight, g, 0)  # gate -> shard_id 0
         weight_loader(layer.weight, u, 1)  # up   -> shard_id 1
+        # Assembly is deferred to process_weights_after_loading (called by the
+        # weight-loading infrastructure after all shards have been streamed).
+        layer.quant_method.process_weights_after_loading(layer)
         assert layer.weight.value.shape == (in_size, gate_out + up_out)
 
         x = jax.random.uniform(rngs.params(), (batch, in_size))
@@ -200,7 +203,7 @@ class TestJaxMergedColumnParallelLinear:
         weight_loader = layer.weight.weight_loader
 
         weight_loader(layer.weight, torch.randn(6, 4), 0)
-        shards = layer.weight.get_metadata("_merged_shards")
+        shards = layer.weight.get_metadata("_weights_to_load")
         assert shards[0] is not None and shards[1] is None
 
 

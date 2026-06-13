@@ -118,7 +118,8 @@ class QuantLinearConfig(CommonQuantLinearConfig):
 
     def __init__(self, layer, *, enable_sp: bool):
         # Avoid circular import.
-        from tpu_inference.layers.jax.linear import JaxEinsum
+        from tpu_inference.layers.jax.linear import (
+            JaxEinsum, JaxMergedColumnParallelLinear)
         assert isinstance(layer, JaxEinsum)
         # Update config attributes by parsing einsum string and weight sharding.
         # Parse the einsum string to classify axes:
@@ -165,7 +166,14 @@ class QuantLinearConfig(CommonQuantLinearConfig):
         self.in_features_sharding = (next(iter(in_sharding), None), )
         self.batch_sharding = tuple(batch_sharding_set)
 
-        output_sizes = [math.prod(self.out_features)]
+        # A merged column-parallel linear fuses several projections into one
+        # kernel; expose each projection's size (and hence n_shards =
+        # len(output_sizes)) so requant/fusion and the shard reorder operate
+        # per projection. A plain linear has a single output.
+        if isinstance(layer, JaxMergedColumnParallelLinear):
+            output_sizes = list(layer.output_sizes)
+        else:
+            output_sizes = [math.prod(self.out_features)]
         super().__init__(enable_sp=enable_sp, output_sizes=output_sizes)
 
         # Update weight_sharding and bias_sharding for 2D matmul compatibility

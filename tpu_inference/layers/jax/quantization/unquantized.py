@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 import gc
 from typing import Optional
 
@@ -80,47 +79,37 @@ class UnquantizedMergedLinearMethod(UnquantizedLinearMethod):
     stored *interleaved* by shard: shard ``i`` holds
     ``[proj0_slice_i, proj1_slice_i, ...]``.
 
-    ``create_weights_jax`` attaches a ``weight_loader`` that accumulates each
-    projection's checkpoint tensor (by ``shard_id``) and, once all are present,
-    builds that interleaved layout — the inverse of the slicing done at apply
-    time, so loading and forward stay consistent (and TP-co-located whenever
-    ``n_shards`` matches the model-parallel degree).
+    ``_weight_loader`` stashes each projection's checkpoint tensor by
+    ``shard_id``. ``process_weights_after_loading`` assembles the interleaved
+    layout once all projections are present — the inverse of the slicing done at
+    apply time.
     """
 
-    def create_weights_jax(self, layer: JaxEinsum, *weight_args, rngs,
-                           **extra_weight_attrs):
-        # The fused kernel (shape `(in, sum(output_sizes))` with the output
-        # dim sharded) is already created by `JaxEinsum.__init__`. Keep that
-        # param (so its partition metadata survives) and attach:
-        #   * a per-projection accumulation buffer, and
-        #   * a weight_loader that stashes each projection's tensor and fuses
-        #     them once all shards have arrived.
-        assert isinstance(layer, JaxEinsum)
+    def create_weights_jax(self, layer: JaxMergedColumnParallelLinear,
+                           *weight_args, rngs, **extra_weight_attrs):
+        assert isinstance(layer, JaxMergedColumnParallelLinear)
         n_proj = len(self.linear_config.output_sizes)
-        layer.weight.set_metadata("_merged_shards", [None] * n_proj)
         layer.weight.set_metadata(
-            "weight_loader",
-            functools.partial(self._load_merged_weight,
-                              n_shards=self.linear_config.n_shards,
-                              output_sizes=self.linear_config.output_sizes,
-                              param_name=layer.prefix + ".weight"))
+            _weights_to_load=[None for _ in range(n_proj)])
+        layer.weight.set_metadata(weight_loader=self._weight_loader)
 
     @staticmethod
-    def _load_merged_weight(param: nnx.Param, torch_weight, shard_id: int, *,
-                            n_shards: int, output_sizes: list,
-                            param_name: str):
-        """Accumulate one projection's checkpoint tensor, fuse when complete.
+    def _weight_loader(param: nnx.Param, torch_weight, shard_id: int) -> bool:
+        param._weights_to_load[shard_id] = torch_weight
+        return all(s is not None for s in param._weights_to_load)
 
-        Called once per fused projection with ``shard_id`` selecting the slot
-        (e.g. gate=0, up=1). ``torch_weight`` has the HF layout ``(out_i, in)``.
-        The projections may arrive across multiple files, so the fuse only runs
-        once every slot is filled.
-        """
-        shards = param.get_metadata("_merged_shards")
-        shards[shard_id] = torch_weight
+    def process_weights_after_loading(
+            self, layer: JaxMergedColumnParallelLinear) -> bool:
+        assert isinstance(layer, JaxMergedColumnParallelLinear)
+        # Dummy loader places the fused weight directly via assign_and_shard_param;
+        # nothing to assemble.
+        if layer.weight.get_metadata("_is_loaded", False):
+            return True
+        shards = layer.weight._weights_to_load
         if any(s is None for s in shards):
-            return
-
+            return False
+        n_shards = self.linear_config.n_shards
+        output_sizes = self.linear_config.output_sizes
         # The per-projection tensors are converted on the host (CPU); the
         # interleaving reshape/concat must run in the same CPU mesh context,
         # otherwise it conflicts with the ambient TPU mesh active during weight
@@ -160,7 +149,11 @@ class UnquantizedMergedLinearMethod(UnquantizedLinearMethod):
             fused = jnp.concatenate(interleaved_pieces, axis=2)
             fused = fused.reshape(fused.shape[0], -1)
 
-        assign_and_shard_param(param, fused, param_name=param_name)
+        assign_and_shard_param(layer.weight,
+                               fused,
+                               param_name=layer.prefix + ".weight")
+        layer.weight._weights_to_load[:] = [None] * len(shards)
+        return True
 
 
 class UnquantizedFusedMoEMethod(QuantizeMethodBase):
