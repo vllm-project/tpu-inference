@@ -195,6 +195,7 @@ upload_pipeline() {
 }
 
 upload_benchmark_pipeline() {
+    export BM_INFRA="true"
     VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH")
     TPU_COMMIT_HASH=$(git rev-parse HEAD)
     CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_COMMIT_HASH}-"
@@ -336,5 +337,8 @@ else
   fi
 fi
 
+# Since Buildkite inserts steps in reverse order, uploading this last 
+# ensures the Docker build steps appear at the very top of the UI.
+upload_with_priority .buildkite/pipeline_build.yml "$JOB_PRIORITY"
 
 echo "--- Buildkite Bootstrap Finished"
