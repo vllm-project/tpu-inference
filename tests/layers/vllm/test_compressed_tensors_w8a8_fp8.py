@@ -50,6 +50,9 @@ from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
 
 P = PartitionSpec
+
+torch.manual_seed(42)
+
 MODELS = [
     "RedHatAI/Llama-3.2-1B-Instruct-FP8-dynamic",
     "RedHatAI/Llama-3.2-1B-Instruct-FP8"
