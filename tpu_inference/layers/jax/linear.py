@@ -12,22 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import partial
 from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import torch
 from flax import nnx
 
-from tpu_inference.layers.common.utils import \
-    slice_sharded_tensor_for_causal_lm
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.weight_utils import \
-    load_nnx_param_from_reshaped_torch
 
 logger = init_logger(__name__)
 
@@ -217,7 +211,7 @@ class JaxMergedColumnParallelLinear(JaxLinear):
                          **kwargs)
 
 
-class JaxQKVParallelLinear(JaxModule):
+class JaxQKVParallelLinear(JaxMergedColumnParallelLinear):
     """Fused QKV Parallel Linear layer for JAX-native models.
 
     Performs fused Q, K, and V projections in a single HBM read pass and
@@ -236,7 +230,6 @@ class JaxQKVParallelLinear(JaxModule):
                  tp_size: int,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
-        super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -249,114 +242,42 @@ class JaxQKVParallelLinear(JaxModule):
         self.v_size = num_kv_heads * head_dim
         self.total_output_dim = self.q_size + self.k_size + self.v_size
 
-        # Output dimension is sharded along the "model" (TP) axis
-        self.proj = JaxEinsum(
-            "TD,DA->TA",
-            (hidden_size, self.total_output_dim),
-            bias_shape=(self.total_output_dim, ) if use_bias else None,
+        output_sizes = [self.q_size, self.k_size, self.v_size]
+
+        super().__init__(
+            input_size=hidden_size,
+            output_sizes=output_sizes,
+            rngs=rngs,
+            use_bias=use_bias,
+            quant_config=quant_config,
+            prefix=prefix,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(nnx.initializers.uniform(),
                                               (None, "model")),
             bias_init=nnx.with_partitioning(nnx.initializers.uniform(),
                                             ("model", )) if use_bias else None,
-            rngs=rngs,
-            quant_config=quant_config,
-            prefix=prefix + ".qkv_proj",
         )
-
-        self.proj.weight.set_metadata(
-            "weight_loader",
-            partial(self._weight_loader,
-                    param_name=prefix + ".qkv_proj.proj.weight"))
-        if use_bias:
-            self.proj.bias.set_metadata(
-                "weight_loader",
-                partial(self._weight_loader,
-                        param_name=prefix + ".qkv_proj.proj.bias"))
-
-    def _weight_loader(self,
-                       param: nnx.Param,
-                       loaded_weight,
-                       shard_id: Optional[int] = None,
-                       *,
-                       param_name: str = "Unknown"):
-
-        if shard_id is not None:
-            shards_to_load = param.get_metadata().get("_shards_to_load")
-            if shards_to_load is None:
-                shards_to_load = [None, None, None]
-                param.set_metadata("_shards_to_load", shards_to_load)
-            shards_to_load[shard_id] = loaded_weight
-
-            if all(w is not None for w in shards_to_load):
-                q_weight, k_weight, v_weight = shards_to_load
-                param.set_metadata("_shards_to_load", None)
-
-                tp_size = self.tp_size
-                q_shards = torch.chunk(q_weight, tp_size, dim=0)
-                k_shards = torch.chunk(k_weight, tp_size, dim=0)
-                v_shards = torch.chunk(v_weight, tp_size, dim=0)
-
-                rearranged = []
-                for i in range(tp_size):
-                    rearranged.append(q_shards[i])
-                    rearranged.append(k_shards[i])
-                    rearranged.append(v_shards[i])
-                rearranged_tensor = torch.cat(rearranged, dim=0)
-
-                load_nnx_param_from_reshaped_torch(
-                    param,
-                    rearranged_tensor,
-                    param_name=param_name,
-                )
-        else:
-            tp_size = self.tp_size
-            num_heads = self.num_heads
-            num_kv_heads = self.num_kv_heads
-            head_dim = self.head_dim
-
-            q_len = num_heads * head_dim
-            kv_len = num_kv_heads * head_dim
-
-            q_weight = loaded_weight[:q_len]
-            k_weight = loaded_weight[q_len:q_len + kv_len]
-            v_weight = loaded_weight[q_len + kv_len:]
-
-            q_shards = torch.chunk(q_weight, tp_size, dim=0)
-            k_shards = torch.chunk(k_weight, tp_size, dim=0)
-            v_shards = torch.chunk(v_weight, tp_size, dim=0)
-
-            rearranged = []
-            for i in range(tp_size):
-                rearranged.append(q_shards[i])
-                rearranged.append(k_shards[i])
-                rearranged.append(v_shards[i])
-            rearranged_tensor = torch.cat(rearranged, dim=0)
-
-            load_nnx_param_from_reshaped_torch(
-                param,
-                rearranged_tensor,
-                param_name=param_name,
-            )
 
     def __call__(self, x: jax.Array) -> Tuple[jax.Array, jax.Array, jax.Array]:
         # Single projection operation (loads inputs from HBM once)
-        outs = self.proj(
-            x)  # Shape: [T, total_output_dim] sharded on "model" axis
+        outs = super().__call__(x)
 
-        # Call the consolidated common SRAM slicing JAX helper.
-        # This is located under layers/common/utils.py, but contains only primitive math ops
-        # with zero abstract-mesh tracking or shard_map calls. This ensures JAX traces and inlines
-        # it as a pure metadata-only zero-copy slice and reshape with 100% optimal HLO speed.
-        # TODO(jiries): Add support for cases where the v projection is optional.
-        outs_q, outs_k, outs_v = slice_sharded_tensor_for_causal_lm(
-            outs, self.q_size, self.k_size, self.v_size, self.tp_size)
+        # Slice the concatenated [Q, K, V] output directly into individual Q, K, V components.
+        # This is safe and 100% correct because super().__call__ (via apply_jax/_apply_fused)
+        # has already un-interleaved the TP-sharded outputs and concatenated them into
+        # a continuous [Q, K, V] layout across features.
+        q_sz = self.q_size
+        k_sz = self.k_size
+
+        q_flat = outs[..., :q_sz]
+        k_flat = outs[..., q_sz:q_sz + k_sz]
+        v_flat = outs[..., q_sz + k_sz:]
 
         # Reshape directly to their global multi-head shapes (metadata change under JAX!)
-        q = outs_q.reshape(outs.shape[:-1] + (self.num_heads, self.head_dim))
-        k = outs_k.reshape(outs.shape[:-1] +
+        q = q_flat.reshape(outs.shape[:-1] + (self.num_heads, self.head_dim))
+        k = k_flat.reshape(outs.shape[:-1] +
                            (self.num_kv_heads, self.head_dim))
-        v = outs_v.reshape(outs.shape[:-1] +
+        v = v_flat.reshape(outs.shape[:-1] +
                            (self.num_kv_heads, self.head_dim))
 
         return q, k, v
