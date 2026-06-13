@@ -13,17 +13,20 @@
 # limitations under the License.
 
 steps:
-  - label: "${{TPU_VERSION:-tpu6e}} Unit tests for {MODEL_NAME}/{CATEGORY}"
-    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
+  - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Unit tests for {MODEL_NAME}/{CATEGORY}"
+    key: "${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
+    env:
+      MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
     agents:
       queue: "{QUEUE}"
     soft_fail: true
     commands:
       - echo "placeholder"  # TODO: replace with your unit test command
-  - label: "${{TPU_VERSION:-tpu6e}} Record unit test result for {MODEL_NAME}/{CATEGORY}"
-    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
+  - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Record unit test result for {MODEL_NAME}/{CATEGORY}"
+    key: "${{BK_KEY}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
+    depends_on: "${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
     env:
+      MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
       CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
       CI_TARGET: "{MODEL_NAME}/{CATEGORY}"
       CI_STAGE: "UnitTest"
@@ -32,11 +35,11 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest
+        .buildkite/scripts/record_step_result.sh ${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest
 
-  - label: "${{TPU_VERSION:-tpu6e}} Accuracy for {MODEL_NAME}/{CATEGORY}"
-    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
+  - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Accuracy for {MODEL_NAME}/{CATEGORY}"
+    key: "${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy_Correctness"
+    depends_on: "${{BK_KEY}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
     agents:
       queue: "{QUEUE}"
     soft_fail: true
@@ -45,13 +48,15 @@ steps:
       # The default values are for tpu6e. For tpu7x, the CI procedure will export TENSOR_PARALLEL_SIZE_SINGLE=2, TENSOR_PARALLEL_SIZE_MULTI=8 automatically
       TENSOR_PARALLEL_SIZE: "{TP_SIZE}"
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
+      MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
-  - label: "${{TPU_VERSION:-tpu6e}} Record accuracy result for {MODEL_NAME}/{CATEGORY}"
-    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
+  - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Record accuracy result for {MODEL_NAME}/{CATEGORY}"
+    key: "${{BK_KEY}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy_Correctness"
+    depends_on: "${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy_Correctness"
     env:
+      MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
       CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
       CI_TARGET: "{MODEL_NAME}/{CATEGORY}"
       CI_STAGE: "Accuracy/Correctness"
@@ -60,4 +65,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy
+        .buildkite/scripts/record_step_result.sh ${{BK_KEY}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy_Correctness

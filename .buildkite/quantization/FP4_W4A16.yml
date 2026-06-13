@@ -13,18 +13,21 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for FP4 W4A16"
-    key: "${TPU_VERSION:-tpu6e}_FP4_W4A16_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for FP4 W4A16"
+    key: "${BK_KEY}_FP4_W4A16_CorrectnessTest"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_FP4_W4A16_CorrectnessTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for FP4 W4A16"
-    key: "${TPU_VERSION:-tpu6e}_record_FP4_W4A16_CorrectnessTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_FP4_W4A16_CorrectnessTest"
+        buildkite-agent meta-data set "${BK_KEY}_FP4_W4A16_CorrectnessTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for FP4 W4A16"
+    key: "${BK_KEY}_record_FP4_W4A16_CorrectnessTest"
+    depends_on: "${BK_KEY}_FP4_W4A16_CorrectnessTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "FP4 W4A16"
       CI_STAGE: "CorrectnessTest"
@@ -33,21 +36,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_FP4_W4A16_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_FP4_W4A16_CorrectnessTest
 
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for FP4 W4A16"
-    key: "${TPU_VERSION:-tpu6e}_FP4_W4A16_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_FP4_W4A16_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for FP4 W4A16"
+    key: "${BK_KEY}_FP4_W4A16_PerformanceTest"
+    depends_on: "${BK_KEY}_record_FP4_W4A16_CorrectnessTest"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_FP4_W4A16_PerformanceTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for FP4 W4A16"
-    key: "${TPU_VERSION:-tpu6e}_record_FP4_W4A16_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_FP4_W4A16_PerformanceTest"
+        buildkite-agent meta-data set "${BK_KEY}_FP4_W4A16_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for FP4 W4A16"
+    key: "${BK_KEY}_record_FP4_W4A16_PerformanceTest"
+    depends_on: "${BK_KEY}_FP4_W4A16_PerformanceTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "FP4 W4A16"
       CI_STAGE: "PerformanceTest"
@@ -56,4 +62,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_FP4_W4A16_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_FP4_W4A16_PerformanceTest

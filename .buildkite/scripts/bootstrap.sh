@@ -156,22 +156,19 @@ set_jax_envs() {
 }
 
 upload_pipeline() {
-    if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
-      # Upload JAX pipeline for v6 (default)
-      set_jax_envs v6
-      upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-      set_jax_envs unset
+    # Upload JAX pipeline for v6 (default)
+    set_jax_envs v6
+    upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
+    set_jax_envs unset
 
-      # Upload JAX pipeline for v7
-      set_jax_envs v7
-      upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-      set_jax_envs unset
+    # Upload JAX pipeline for v7
+    set_jax_envs v7
+    upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
+    set_jax_envs unset
 
-      # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
-      upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
-      upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
-    fi
-
+    # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
+    upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
+    upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
     upload_with_priority .buildkite/nightly_verify.yml "$JOB_PRIORITY"
 }
 

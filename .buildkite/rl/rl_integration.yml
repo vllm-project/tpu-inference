@@ -19,17 +19,20 @@ steps:
   # ------------------------------------------------------------------
   # Correctness tests
   # ------------------------------------------------------------------
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for rl_integration"
-    key: "${TPU_VERSION:-tpu6e}_rl_integration_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for rl_integration"
+    key: "${BK_KEY}_rl_integration_CorrectnessTest"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestDeleteReinitializeHBM /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestLogprobsNoRecompilation
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for rl_integration"
-    key: "${TPU_VERSION:-tpu6e}_record_rl_integration_CorrectnessTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_rl_integration_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for rl_integration"
+    key: "${BK_KEY}_record_rl_integration_CorrectnessTest"
+    depends_on: "${BK_KEY}_rl_integration_CorrectnessTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "rl_integration"
       CI_STAGE: "CorrectnessTest"
@@ -38,23 +41,26 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_rl_integration_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_rl_integration_CorrectnessTest
 
   # ------------------------------------------------------------------
   # Performance tests
   # ------------------------------------------------------------------
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for rl_integration"
-    key: "${TPU_VERSION:-tpu6e}_rl_integration_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_rl_integration_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for rl_integration"
+    key: "${BK_KEY}_rl_integration_PerformanceTest"
+    depends_on: "${BK_KEY}_record_rl_integration_CorrectnessTest"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     commands:
       - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_rl_integration.py::TestLogprobsLatency
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for rl_integration"
-    key: "${TPU_VERSION:-tpu6e}_record_rl_integration_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_rl_integration_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for rl_integration"
+    key: "${BK_KEY}_record_rl_integration_PerformanceTest"
+    depends_on: "${BK_KEY}_rl_integration_PerformanceTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "rl_integration"
       CI_STAGE: "PerformanceTest"
@@ -63,17 +69,17 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_rl_integration_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_rl_integration_PerformanceTest
 
-  - label: "${TPU_VERSION:-tpu6e} E2E MMLU for Llama-3.1-8B continue_decode"
-    key: "${TPU_VERSION:-tpu6e}_rl_integration_continue_decode_mmlu"
-    depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} E2E MMLU for Llama-3.1-8B continue_decode"
+    key: "${BK_KEY}_rl_integration_continue_decode_mmlu"
+    depends_on: "${BK_KEY}_build_docker"
     soft_fail: true
     env:
       USE_PREBUILT_IMAGE: "1"
       NEW_MODEL_DESIGN: "1"
       SKIP_ACCURACY_TESTS: "False"
-      MODEL_IMPL_TYPE: "vllm"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       EXTRA_SERVE_ARGS: "--additional-config='{\"enable_continue_decode\": true}'"
     agents:
