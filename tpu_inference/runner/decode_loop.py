@@ -14,10 +14,11 @@
 
 import functools
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import jax
 import jax.numpy as jnp
+from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 
@@ -108,6 +109,8 @@ def _split_rngs(rng, static_size, dynamic_size):
         "layer_name_to_kvcache_index",
         "is_first_rank",
         "is_last_rank",
+        "max_logprobs",
+        "logprobs_mode",
     ),
     donate_argnames=("kv_caches", ),
     # Hoisted here from the model's step_fun: JAX forbids compiler_options on
@@ -152,7 +155,10 @@ def _decode_core(
     layer_name_to_kvcache_index,
     is_first_rank,
     is_last_rank,
+    max_logprobs,
+    logprobs_mode,
 ):
+    has_logprobs = sampling_metadata.logprobs
 
     def _run_one_step(step_idx, ct, am, pos, sl, kvc):
         step_rng = step_rngs[step_idx]
@@ -179,7 +185,8 @@ def _decode_core(
         )
         logits = compute_logits_fn(state, hidden_states, None)
         logits = logits.astype(jnp.float32)
-        next_tokens, _ = sample_fn(step_rng, mesh, logits, sampling_metadata)
+        next_tokens, processed_logits = sample_fn(step_rng, mesh, logits,
+                                                  sampling_metadata)
         (new_active_mask, next_input_ids, new_positions, new_seq_lens,
          step_record_tokens, any_hit_eos) = _update_loop_state(
              next_tokens,
@@ -191,8 +198,24 @@ def _decode_core(
              dp_size,
              pad_len,
          )
+
+        lp_ids_step = None
+        lp_val_step = None
+        lp_ranks_step = None
+        if has_logprobs:
+            logprobs_logits = (processed_logits if logprobs_mode
+                               == "processed_logprobs" else logits)
+            from tpu_inference.layers.jax.sample.sampling import \
+                compute_and_gather_logprobs
+            step_logprobs = compute_and_gather_logprobs(
+                logprobs_logits, next_tokens, max_logprobs)
+            lp_ids_step = step_logprobs.logprob_token_ids
+            lp_val_step = step_logprobs.logprobs
+            lp_ranks_step = step_logprobs.selected_token_ranks
+
         return (next_input_ids, new_active_mask, new_positions, new_seq_lens,
-                kvc, step_record_tokens, expert_indices_step, any_hit_eos)
+                kvc, step_record_tokens, expert_indices_step, lp_ids_step,
+                lp_val_step, lp_ranks_step, any_hit_eos)
 
     batch_size = current_tokens.shape[0]
     token_buffer = jnp.full((static_max_decode_steps, batch_size),
@@ -203,15 +226,47 @@ def _decode_core(
         expert_buffer = jnp.zeros((static_max_decode_steps, ) + expert_shape,
                                   dtype=expert_dtype)
 
-    def _pack(i, ct, am, pos, sl, kvc, tb, eb, eos):
-        base = (i, ct, am, pos, sl, kvc, tb)
-        return base + (eb, eos) if has_experts else base + (eos, )
+    logprob_token_ids_buffer = None
+    logprobs_buffer = None
+    selected_token_ranks_buffer = None
+    if has_logprobs:
+        logprob_token_ids_buffer = jnp.zeros(
+            (static_max_decode_steps, batch_size, max_logprobs + 1),
+            dtype=jnp.int32)
+        logprobs_buffer = jnp.zeros(
+            (static_max_decode_steps, batch_size, max_logprobs + 1),
+            dtype=jnp.float32)
+        selected_token_ranks_buffer = jnp.zeros(
+            (static_max_decode_steps, batch_size), dtype=jnp.int32)
+
+    def _pack(i, ct, am, pos, sl, kvc, tb, eb, lp_ids, lp_val, lp_ranks, eos):
+        base = [i, ct, am, pos, sl, kvc, tb]
+        if has_experts:
+            base.append(eb)
+        if has_logprobs:
+            base.extend([lp_ids, lp_val, lp_ranks])
+        base.append(eos)
+        return tuple(base)
 
     def _unpack(carry):
         i, ct, am, pos, sl, kvc, tb = carry[:7]
+        idx = 7
+        eb = None
         if has_experts:
-            return i, ct, am, pos, sl, kvc, tb, carry[7], carry[8]
-        return i, ct, am, pos, sl, kvc, tb, None, carry[7]
+            eb = carry[idx]
+            idx += 1
+
+        lp_ids = None
+        lp_val = None
+        lp_ranks = None
+        if has_logprobs:
+            lp_ids = carry[idx]
+            lp_val = carry[idx + 1]
+            lp_ranks = carry[idx + 2]
+            idx += 3
+
+        eos = carry[idx]
+        return i, ct, am, pos, sl, kvc, tb, eb, lp_ids, lp_val, lp_ranks, eos
 
     def cond_fn(carry):
         i = carry[0]
@@ -220,13 +275,20 @@ def _decode_core(
         return jnp.logical_and(not_done, jnp.logical_not(eos_flag))
 
     def body_fn(carry):
-        i, ct, am, pos, sl, kvc, tb, eb, eos_flag = _unpack(carry)
+        (i, ct, am, pos, sl, kvc, tb, eb, lp_ids_buf, lp_val_buf, lp_ranks_buf,
+         eos_flag) = _unpack(carry)
         (next_ct, new_mask, new_pos, new_sl, kvc, rec_tokens, experts,
+         lp_ids_step, lp_val_step, lp_ranks_step,
          hit) = _run_one_step(i, ct, am, pos, sl, kvc)
         tb = tb.at[i].set(rec_tokens)
         if has_experts:
             eb = eb.at[i].set(experts)
+        if has_logprobs:
+            lp_ids_buf = lp_ids_buf.at[i].set(lp_ids_step)
+            lp_val_buf = lp_val_buf.at[i].set(lp_val_step)
+            lp_ranks_buf = lp_ranks_buf.at[i].set(lp_ranks_step)
         return _pack(i + 1, next_ct, new_mask, new_pos, new_sl, kvc, tb, eb,
+                     lp_ids_buf, lp_val_buf, lp_ranks_buf,
                      jnp.logical_or(eos_flag, hit))
 
     init_carry = _pack(
@@ -238,14 +300,19 @@ def _decode_core(
         kv_caches,
         token_buffer,
         expert_buffer if has_experts else None,
+        logprob_token_ids_buffer,
+        logprobs_buffer,
+        selected_token_ranks_buffer,
         jnp.array(False),
     )
     final_carry = jax.lax.while_loop(cond_fn, body_fn, init_carry)
     (step_idx_final, current_tokens, active_mask, positions, seq_lens,
-     kv_caches, token_buffer, expert_buffer, _) = _unpack(final_carry)
+     kv_caches, token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
+     lp_ranks_buffer, _) = _unpack(final_carry)
 
     return (step_idx_final, current_tokens, active_mask, positions, seq_lens,
-            kv_caches, token_buffer, expert_buffer)
+            kv_caches, token_buffer, expert_buffer, lp_ids_buffer,
+            lp_val_buffer, lp_ranks_buffer)
 
 
 def continue_decode(
@@ -271,7 +338,10 @@ def continue_decode(
     is_last_rank: bool = True,
     dp_size: int = 1,
     collect_expert_indices: bool = False,
-) -> tuple[jax.Array, Any, TpuSamplingState, jax.Array, jax.Array | None]:
+    max_logprobs: int = 0,
+    logprobs_mode: str = "raw",
+) -> tuple[jax.Array, Any, TpuSamplingState, jax.Array, jax.Array | None,
+           Optional["LogprobsTensors"]]:
     """Run the TPU decode loop as one fused, kv-cache-donating program.
 
     Args:
@@ -303,10 +373,12 @@ def continue_decode(
         vllm_config.model_config.enable_return_routed_experts). When True the
         expert-indices shape is discovered via jax.eval_shape (no execution)
         to presize the accumulation buffer.
+      max_logprobs: Minimum number of logprobs to retain per token.
+      logprobs_mode: Logprobs mode from model config ("raw" or "processed_logprobs").
 
     Returns:
       Tuple of (generated_tokens, final_kv_caches, final_state, final_rng,
-      all_expert_indices). generated_tokens is a fixed-size
+      all_expert_indices, logprobs_tensors). generated_tokens is a fixed-size
       (max_decode_steps, batch_size) array and all_expert_indices, when not
       None, is (max_decode_steps, ...); rows beyond final_state.step_counter
       are padding (early EOS exit may stop before max_decode_steps), so the
@@ -369,7 +441,8 @@ def continue_decode(
             expert_dtype = expert_struct.dtype
 
     (step_counter, current_tokens, active_mask, positions, seq_lens, kv_caches,
-     token_buffer, expert_buffer) = _decode_core(
+     token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
+     lp_ranks_buffer) = _decode_core(
          state=state,
          kv_caches=kv_caches,
          step_rngs=step_rngs,
@@ -401,6 +474,8 @@ def continue_decode(
          layer_name_to_kvcache_index=layer_name_to_kvcache_index,
          is_first_rank=is_first_rank,
          is_last_rank=is_last_rank,
+         max_logprobs=max_logprobs,
+         logprobs_mode=logprobs_mode,
      )
 
     final_state = TpuSamplingState(
@@ -418,4 +493,14 @@ def continue_decode(
     )
 
     all_expert_indices = expert_buffer if has_experts else None
-    return token_buffer, kv_caches, final_state, current_rng, all_expert_indices
+
+    logprobs_tensors = None
+    if sampling_metadata.logprobs:
+        logprobs_tensors = LogprobsTensors(
+            logprob_token_ids=lp_ids_buffer,
+            logprobs=lp_val_buffer,
+            selected_token_ranks=lp_ranks_buffer,
+        )
+
+    return (token_buffer, kv_caches, final_state, current_rng,
+            all_expert_indices, logprobs_tensors)
