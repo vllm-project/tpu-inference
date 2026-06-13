@@ -1479,13 +1479,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             generated_tokens_cpu = generated_tokens_cpu[
                 tokens_indices_selector]
 
-        if all_expert_indices_cpu is not None and tokens_indices_selector is not None:
-            # Shape: (steps, layers, batch, top_k) -> realign batch dimension
-            all_expert_indices_cpu = all_expert_indices_cpu[:, :,
-                                                            tokens_indices_selector, :]
+            if all_expert_indices_cpu is not None:
+                # Shape: (steps, layers, batch, top_k) -> realign batch dimension
+                all_expert_indices_cpu = all_expert_indices_cpu[:, :,
+                                                                tokens_indices_selector, :]
 
-        if lp_token_ids_cpu is not None:
-            if tokens_indices_selector is not None:
+            if lp_token_ids_cpu is not None:
                 lp_token_ids_cpu = lp_token_ids_cpu[:,
                                                     tokens_indices_selector, :]
                 lp_vals_cpu = lp_vals_cpu[:, tokens_indices_selector, :]
