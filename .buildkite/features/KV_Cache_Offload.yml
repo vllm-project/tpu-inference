@@ -15,6 +15,7 @@
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for KV Cache Offload"
     key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest"
+    depends_on: "build_docker"
     soft_fail: true
     env:
       USE_V6E8_QUEUE: "True"
@@ -40,7 +41,9 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} Performance tests for KV Cache Offload"
     key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
+    depends_on:
+      - "build_docker"
+      - "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
     soft_fail: true
     agents:
       queue: tpu_v6e_8_queue

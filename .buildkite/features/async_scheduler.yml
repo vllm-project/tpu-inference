@@ -15,6 +15,7 @@
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for async scheduler"
     key: "${TPU_VERSION:-tpu6e}_async_scheduler_CorrectnessTest"
+    depends_on: "build_docker"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
@@ -36,7 +37,9 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} Performance tests for async scheduler"
     key: "${TPU_VERSION:-tpu6e}_async_scheduler_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_async_scheduler_CorrectnessTest"
+    depends_on:
+      - "build_docker"
+      - "${TPU_VERSION:-tpu6e}_record_async_scheduler_CorrectnessTest"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"

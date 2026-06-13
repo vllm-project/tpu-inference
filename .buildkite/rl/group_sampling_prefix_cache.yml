@@ -21,6 +21,7 @@ steps:
   # ------------------------------------------------------------------
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for group_sampling_prefix_cache"
     key: "${TPU_VERSION:-tpu6e}_group_sampling_prefix_cache_CorrectnessTest"
+    depends_on: "build_docker"
     soft_fail: true
     if: build.env("NIGHTLY") == "1"
     agents:
@@ -46,7 +47,9 @@ steps:
   # ------------------------------------------------------------------
   - label: "${TPU_VERSION:-tpu6e} Performance tests for group_sampling_prefix_cache"
     key: "${TPU_VERSION:-tpu6e}_group_sampling_prefix_cache_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_group_sampling_prefix_cache_CorrectnessTest"
+    depends_on:
+      - "build_docker"
+      - "${TPU_VERSION:-tpu6e}_record_group_sampling_prefix_cache_CorrectnessTest"
     soft_fail: true
     if: build.env("NIGHTLY") == "1"
     agents:

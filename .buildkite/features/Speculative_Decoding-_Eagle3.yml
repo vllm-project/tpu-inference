@@ -15,6 +15,7 @@
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for Speculative Decoding: Eagle3"
     key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_CorrectnessTest"
+    depends_on: "build_docker"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
@@ -40,7 +41,9 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} Performance tests for Speculative Decoding: Eagle3"
     key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Eagle3_CorrectnessTest"
+    depends_on:
+      - "build_docker"
+      - "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Eagle3_CorrectnessTest"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"

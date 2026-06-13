@@ -20,6 +20,7 @@
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer JAX UniProcExecutor"
     key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_jax_uniproc"
+    depends_on: "build_docker"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
@@ -40,6 +41,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_jax_uniproc
   - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax UniProcExecutor"
     key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_uniproc"
+    depends_on: "build_docker"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
@@ -60,6 +62,7 @@ steps:
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_uniproc
   - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax RayDistributedExecutor"
     key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_ray_distributed"
+    depends_on: "build_docker"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}" # Using a queue with more devices for distributed tests

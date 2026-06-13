@@ -15,6 +15,7 @@
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for Out-of-tree model support"
     key: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_CorrectnessTest"
+    depends_on: "build_docker"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
@@ -40,7 +41,9 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} Performance tests for Out-of-tree model support"
     key: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_out_of_tree_model_support_CorrectnessTest"
+    depends_on:
+      - "build_docker"
+      - "${TPU_VERSION:-tpu6e}_record_out_of_tree_model_support_CorrectnessTest"
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     soft_fail: true

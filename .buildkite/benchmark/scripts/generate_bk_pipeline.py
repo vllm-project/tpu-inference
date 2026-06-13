@@ -223,7 +223,10 @@ def create_benchmark_steps(case_data: Dict[str, Any],
     mlcompass_select_tests = _get_mlcompass_select_tests()
     for agent in ci_queues:
         # Build the environment for this specific step
-        step_env = {**combined_env, "ci_queue": agent}
+        step_env = {
+            **combined_env, "ci_queue": agent,
+            "USE_PREBUILT_IMAGE": "1"
+        }
 
         step_env["TARGET_CASE_NAME"] = case_name
         # Include parent_dir in label for uniqueness
@@ -256,9 +259,11 @@ def create_benchmark_steps(case_data: Dict[str, Any],
             f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
         }
 
-        # Add dependency on global case name validation if it was uploaded in bootstrap
+        # Add dependency on build_docker and optionally on global case name validation
+        dependencies = ["build_docker"]
         if os.environ.get("BENCHMARK_VALIDATION_UPLOADED") == "true":
-            step["depends_on"] = "validate_benchmark_case_name"
+            dependencies.append("validate_benchmark_case_name")
+        step["depends_on"] = dependencies
 
         child_steps.append(step)
 

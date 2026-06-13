@@ -15,6 +15,7 @@
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-31B-it"
     key: "${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_UnitTest"
+    depends_on: "build_docker"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
@@ -45,7 +46,9 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} Accuracy for google/gemma-4-31B-it"
     key: "${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_UnitTest"
+    depends_on:
+      - "build_docker"
+      - "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_UnitTest"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
@@ -73,7 +76,9 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for google/gemma-4-31B-it"
     key: "${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_Accuracy"
+    depends_on:
+      - "build_docker"
+      - "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_Accuracy"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true

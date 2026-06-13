@@ -19,6 +19,7 @@
 steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for structured_decoding"
     key: "${TPU_VERSION:-tpu6e}_structured_decoding_CorrectnessTest"
+    depends_on: "build_docker"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"

@@ -16,6 +16,7 @@ steps:
   # --- Single-Host Tests ---
   - label: "${{TPU_VERSION:-tpu6e}} Correctness tests for {FEATURE_NAME} (single-host)"
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
+    depends_on: "build_docker"
     soft_fail: true
     agents:
       queue: "{QUEUE}"
@@ -38,7 +39,9 @@ steps:
 
   - label: "${{TPU_VERSION:-tpu6e}} Performance tests for {FEATURE_NAME} (single-host)"
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
+    depends_on:
+      - "build_docker"
+      - "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
     soft_fail: true
     agents:
       queue: "{QUEUE}"
@@ -62,6 +65,7 @@ steps:
   # --- Multi-Host Tests ---
   - label: "${{TPU_VERSION:-tpu6e}} Correctness tests for {FEATURE_NAME} (multi-host)"
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
+    depends_on: "build_docker"
     soft_fail: true
     agents:
       queue: "{QUEUE}"
@@ -84,7 +88,9 @@ steps:
 
   - label: "${{TPU_VERSION:-tpu6e}} Performance tests for {FEATURE_NAME} (multi-host)"
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
+    depends_on:
+      - "build_docker"
+      - "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
     soft_fail: true
     agents:
       queue: "{QUEUE}"

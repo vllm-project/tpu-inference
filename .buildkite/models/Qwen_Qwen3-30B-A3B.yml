@@ -15,6 +15,7 @@
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3-30B-A3B"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_UnitTest"
+    depends_on: "build_docker"
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     soft_fail: true
@@ -38,7 +39,9 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3-30B-A3B"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-30B-A3B_UnitTest"
+    depends_on:
+      - "build_docker"
+      - "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-30B-A3B_UnitTest"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     soft_fail: true
@@ -66,7 +69,9 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3-30B-A3B"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-30B-A3B_Accuracy"
+    depends_on:
+      - "build_docker"
+      - "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-30B-A3B_Accuracy"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"

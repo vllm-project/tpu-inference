@@ -16,24 +16,13 @@ steps:
   - group: "${TESTS_GROUP_LABEL:-[jax] TPU6e Tests Group}"
     steps:
 
-      # -----------------------------------------------------------------
-      # Centralized Build Step (Runs on the CPU queue)
-      # -----------------------------------------------------------------
-      - label: ":docker: Build and Push Base Image (${TPU_VERSION:-tpu6e})"
-        key: "${TPU_VERSION:-tpu6e}_build_docker"
-        agents:
-          queue: cpu_64_core
-        env:
-          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-        commands:
-          - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
       # -----------------------------------------------------------------
       # TEST STEPS - Calling wrapper
       # -----------------------------------------------------------------
       - label: "${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX models"
         key: "${TPU_VERSION:-tpu6e}_test_0"
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -69,7 +58,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX + vLLM models on single chip"
         key: ${TPU_VERSION:-tpu6e}_test_3
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -95,7 +84,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E speculative decoding test"
         key: ${TPU_VERSION:-tpu6e}_test_6
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -109,7 +98,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part1"
         key: ${TPU_VERSION:-tpu6e}_test_7_1
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         artifact_paths: ".coverage.part1.${TPU_VERSION:-tpu6e}"
         env:
@@ -125,7 +114,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part2"
         key: ${TPU_VERSION:-tpu6e}_test_7_2
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         artifact_paths: ".coverage.part2.${TPU_VERSION:-tpu6e}"
         env:
@@ -166,7 +155,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests - kernels"
         key: ${TPU_VERSION:-tpu6e}_test_8
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -193,7 +182,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests - collective kernels"
         key: ${TPU_VERSION:-tpu6e}_test_9
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -238,7 +227,7 @@ steps:
       # TODO (jacobplatin): re-enable this after b/467105149 is fixed
       - label: "${TPU_VERSION:-tpu6e} E2E MLperf tests for DeepSeek-R1 (no accuracy, 5-decoder layers only)"
         key: ${TPU_VERSION:-tpu6e}_test_12
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -263,7 +252,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E MMLU for DeepSeek-R1 torchax backend"
         key: ${TPU_VERSION:-tpu6e}_test_14
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -287,7 +276,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} lora e2e tests for JAX + vLLM models multi chips"
         key: ${TPU_VERSION:-tpu6e}_test_13
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -301,7 +290,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} lora unit tests on single chip"
         key: ${TPU_VERSION:-tpu6e}_test_15
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -316,7 +305,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} lora unit tests on multi chips"
         key: ${TPU_VERSION:-tpu6e}_test_16
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -330,7 +319,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check qwen3 coder with fused moe."
         key: ${TPU_VERSION:-tpu6e}_test_17
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -348,7 +337,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check qwen3 coder with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_18
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -366,7 +355,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check gpt oss."
         key: ${TPU_VERSION:-tpu6e}_test_19
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -400,7 +389,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 8k 1k with fused moe kernel."
         key: ${TPU_VERSION:-tpu6e}_test_21
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -429,7 +418,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 8k 1k with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_23
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -444,7 +433,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Test EP recompilation."
         key: ${TPU_VERSION:-tpu6e}_test_24
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -459,7 +448,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E test for Multihost DCN-based P/D disaggregation"
         key: ${TPU_VERSION:-tpu6e}_test_25
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -509,7 +498,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer JAX UniProcExecutor"
         key: "${TPU_VERSION:-tpu6e}_test_27"
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -521,7 +510,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax UniProcExecutor"
         key: "${TPU_VERSION:-tpu6e}_test_28"
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -533,7 +522,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax RayDistributedExecutor"
         key: "${TPU_VERSION:-tpu6e}_test_29"
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -545,7 +534,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check Qwen3.5-397B-A17B with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_30
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -583,7 +572,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Perf regression test for Qwen3.5-397B-A17B 8k 1k with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_32
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -601,7 +590,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen2.5-VL-7B-Instruct"
         key: ${TPU_VERSION:-tpu6e}_test_33
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}          
         soft_fail: true
@@ -615,7 +604,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E test for Single Host DCN-based P/D disaggregation"
         key: ${TPU_VERSION:-tpu6e}_test_34
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -633,7 +622,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E test for MPMD data parallelism"
         key: ${TPU_VERSION:-tpu6e}_test_35
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -668,7 +657,7 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Test Kernel Tuner Runner"
         key: ${TPU_VERSION:-tpu6e}_test_36
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+        depends_on: "build_docker"
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"

@@ -21,6 +21,7 @@ steps:
   # ------------------------------------------------------------------
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for rl_integration"
     key: "${TPU_VERSION:-tpu6e}_rl_integration_CorrectnessTest"
+    depends_on: "build_docker"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
@@ -45,7 +46,9 @@ steps:
   # ------------------------------------------------------------------
   - label: "${TPU_VERSION:-tpu6e} Performance tests for rl_integration"
     key: "${TPU_VERSION:-tpu6e}_rl_integration_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_rl_integration_CorrectnessTest"
+    depends_on:
+      - "build_docker"
+      - "${TPU_VERSION:-tpu6e}_record_rl_integration_CorrectnessTest"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
@@ -67,7 +70,9 @@ steps:
 
   - label: "${TPU_VERSION:-tpu6e} E2E MMLU for Llama-3.1-8B continue_decode"
     key: "${TPU_VERSION:-tpu6e}_rl_integration_continue_decode_mmlu"
-    depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
+    depends_on:
+      - "build_docker"
+      - "build_docker"
     soft_fail: true
     env:
       USE_PREBUILT_IMAGE: "1"

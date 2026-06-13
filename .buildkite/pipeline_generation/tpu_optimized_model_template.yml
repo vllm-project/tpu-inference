@@ -15,6 +15,7 @@
 steps:
   - label: "${{TPU_VERSION:-tpu6e}} Unit tests for {MODEL_NAME}/{CATEGORY}"
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
+    depends_on: "build_docker"
     soft_fail: true
     agents:
       queue: "{QUEUE}"
@@ -36,7 +37,9 @@ steps:
 
   - label: "${{TPU_VERSION:-tpu6e}} Accuracy for {MODEL_NAME}/{CATEGORY}"
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
+    depends_on:
+      - "build_docker"
+      - "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
     soft_fail: true
     agents:
       queue: "{QUEUE}"
@@ -64,7 +67,9 @@ steps:
 
   - label: "${{TPU_VERSION:-tpu6e}} Performance benchmarks for {MODEL_NAME}/{CATEGORY}"
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_Benchmark"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
+    depends_on:
+      - "build_docker"
+      - "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_MODEL_NAME}_{CATEGORY}_Accuracy"
     soft_fail: true
     agents:
       queue: "{QUEUE}"
