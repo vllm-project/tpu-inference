@@ -1295,6 +1295,10 @@ class TPUOffloadConnectorWorker:
             self.device_sharding = kv_layer.sharding
             self.num_kv_blocks = self.shape[0]
 
+            # Group layers by shape for hybrid models
+            self.grouped_layer_indices = self._group_layers_by_shape(kv_caches)
+            self.grouped_layer_indices_tuple = tuple(tuple(group) for group in self.grouped_layer_indices)
+
             # Cache the kv sharding spec at initialization
             # to prevent recompilation. This avoids deriving
             # kv_caches[0].sharding.spec in update_kv_caches_one at runtime,
@@ -1361,6 +1365,19 @@ class TPUOffloadConnectorWorker:
         if self.use_bucketed_swap_ops:
             self._precompile_kv_swap_operations()
 
+    def _group_layers_by_shape(self, kv_caches: list[jax.Array]) -> list[list[int]]:
+        groups = {}  # shape_suffix -> list of layer indices
+        for i, cache in enumerate(kv_caches):
+            # Cache shape: (num_blocks, block_size, heads, packing, head_dim)
+            shape_suffix = cache.shape[2:]
+            if shape_suffix not in groups:
+                groups[shape_suffix] = []
+            groups[shape_suffix].append(i)
+        
+        # Sort shapes to be deterministic
+        sorted_shapes = sorted(groups.keys(), key=str)
+        return [groups[shape] for shape in sorted_shapes]
+
     def _decompose_into_buckets(self, block_ids: list[int]) -> list[list[int]]:
         """
         Decomposes a number into a sum of numbers from the BLOCK_SIZE_BUCKETS
@@ -1411,12 +1428,18 @@ class TPUOffloadConnectorWorker:
                         # 1. gather / stack (for save)
                         paged_kv_for_compilation, stacked_dummy_kv_caches_tpu = stack_kv_cache_cross_layers(
                             paged_kv_for_compilation, dummy_block_ids_arr,
-                            num_blocks)
-                        stacked_dummy_kv_caches_tpu = [
-                            jax.device_put(chunk,
-                                           self.expanded_device_sharding)
-                            for chunk in stacked_dummy_kv_caches_tpu
-                        ]
+                            num_blocks, self.grouped_layer_indices_tuple)
+                        if isinstance(stacked_dummy_kv_caches_tpu[0], list):
+                            stacked_dummy_kv_caches_tpu = [
+                                [jax.device_put(x, self.expanded_device_sharding) for x in group_chunks]
+                                for group_chunks in stacked_dummy_kv_caches_tpu
+                            ]
+                        else:
+                            stacked_dummy_kv_caches_tpu = [
+                                jax.device_put(chunk,
+                                               self.expanded_device_sharding)
+                                for chunk in stacked_dummy_kv_caches_tpu
+                            ]
                         jax.block_until_ready(stacked_dummy_kv_caches_tpu)
 
                         # 2. update / insert  kv (for load)
@@ -1424,7 +1447,8 @@ class TPUOffloadConnectorWorker:
                             paged_kv_for_compilation,
                             stacked_dummy_kv_caches_tpu, dummy_block_ids,
                             self.mesh, self.cached_kv_sharding_spec,
-                            self.indices_sharding)
+                            self.indices_sharding,
+                            self.grouped_layer_indices_tuple)
 
                         jax.block_until_ready(updated_kv_caches)
                         paged_kv_for_compilation = updated_kv_caches
@@ -1443,7 +1467,7 @@ class TPUOffloadConnectorWorker:
         self,
         kv_caches: list[jax.Array],
         block_ids: list[int],
-    ) -> tuple[list[jax.Array], list[jax.Array]]:
+    ) -> tuple[list[jax.Array], list[Any]]:
         """
         Gathers KV cache data for the given block_ids by breaking the operation
         into bucket-aligned chunks to leverage JIT compilation cache.
@@ -1454,7 +1478,7 @@ class TPUOffloadConnectorWorker:
         if num_blocks in BLOCK_SIZE_BUCKETS:
             block_ids_arr = jnp.array(block_ids)
             return stack_kv_cache_cross_layers(kv_caches, block_ids_arr,
-                                               num_blocks)
+                                               num_blocks, self.grouped_layer_indices_tuple)
 
         # 2. Report the latency of decomposed_block_sizes
         decomposed_block_buckets = self._decompose_into_buckets(block_ids)
@@ -1474,7 +1498,7 @@ class TPUOffloadConnectorWorker:
             block_slice = decomposed_block_slice_arr[i]
             # Update current_kv_caches with the latest valid handle
             current_kv_caches, gathered_chunk = stack_kv_cache_cross_layers(
-                current_kv_caches, block_slice, len(decomposed_block_bucket))
+                current_kv_caches, block_slice, len(decomposed_block_bucket), self.grouped_layer_indices_tuple)
             gathered_chunks.extend(gathered_chunk)
 
         return current_kv_caches, gathered_chunks
@@ -1482,7 +1506,7 @@ class TPUOffloadConnectorWorker:
     def _bucketed_update_kv_caches(
         self,
         kv_caches: list[jax.Array],
-        kv_cache_slices: list[list[jax.Array]],
+        kv_cache_slices: list[Any],
         dst_blocks: list[int],
     ) -> list[jax.Array]:
         """
@@ -1493,9 +1517,10 @@ class TPUOffloadConnectorWorker:
             return kv_caches
         if num_blocks in BLOCK_SIZE_BUCKETS:
             return update_kv_caches_one(kv_caches, kv_cache_slices, dst_blocks,
-                                        self.mesh,
-                                        self.cached_kv_sharding_spec,
-                                        self.indices_sharding)
+                                         self.mesh,
+                                         self.cached_kv_sharding_spec,
+                                         self.indices_sharding,
+                                         self.grouped_layer_indices_tuple)
 
         decomposed_block_buckets = self._decompose_into_buckets(dst_blocks)
         logger.debug(
@@ -1510,7 +1535,8 @@ class TPUOffloadConnectorWorker:
             slices_for_bucket = kv_cache_slices[block_offset:next_offset]
             updated_kv_caches = update_kv_caches_one(
                 updated_kv_caches, slices_for_bucket, decomposed_block_bucket,
-                self.mesh, self.cached_kv_sharding_spec, self.indices_sharding)
+                self.mesh, self.cached_kv_sharding_spec, self.indices_sharding,
+                self.grouped_layer_indices_tuple)
             block_offset = next_offset
 
         return updated_kv_caches
@@ -1618,12 +1644,19 @@ class TPUOffloadConnectorWorker:
         else:
             blocks_to_save_arr = jnp.array(blocks_to_save)
             kv_caches, gathered_kv_caches_tpu = stack_kv_cache_cross_layers(
-                self.runner.kv_caches, blocks_to_save_arr, num_blocks_to_save)
+                self.runner.kv_caches, blocks_to_save_arr, num_blocks_to_save,
+                self.grouped_layer_indices_tuple)
         self.runner.kv_caches = kv_caches
 
         if gathered_kv_caches_tpu is not None:
+            if isinstance(gathered_kv_caches_tpu[0], list):
+                shape_str = f"[{', '.join(str(x.shape) for x in gathered_kv_caches_tpu[0])}]"
+                sharding_str = f"[{', '.join(str(x.sharding) for x in gathered_kv_caches_tpu[0])}]"
+            else:
+                shape_str = str(gathered_kv_caches_tpu[0].shape)
+                sharding_str = str(gathered_kv_caches_tpu[0].sharding)
             logger.debug(
-                f"extracted_blocks_tpu: {gathered_kv_caches_tpu[0].shape}, {gathered_kv_caches_tpu[0].sharding}"
+                f"extracted_blocks_tpu: {shape_str}, {sharding_str}"
             )
 
         # We return the data needed for the next phase
@@ -1703,12 +1736,18 @@ class TPUOffloadConnectorWorker:
             all_src_blocks_arr = jnp.array(all_src_blocks)
             kv_caches, gathered_kv_caches_tpu = stack_kv_cache_cross_layers(
                 self.runner.kv_caches, all_src_blocks_arr,
-                total_num_blocks_to_save)
+                total_num_blocks_to_save, self.grouped_layer_indices_tuple)
         self.runner.kv_caches = kv_caches
 
         if gathered_kv_caches_tpu is not None:
+            if isinstance(gathered_kv_caches_tpu[0], list):
+                shape_str = f"[{', '.join(str(x.shape) for x in gathered_kv_caches_tpu[0])}]"
+                sharding_str = f"[{', '.join(str(x.sharding) for x in gathered_kv_caches_tpu[0])}]"
+            else:
+                shape_str = str(gathered_kv_caches_tpu[0].shape)
+                sharding_str = str(gathered_kv_caches_tpu[0].sharding)
             logger.debug(
-                f"extracted_blocks_tpu (batch): {gathered_kv_caches_tpu[0].shape}, {gathered_kv_caches_tpu[0].sharding}"
+                f"extracted_blocks_tpu (batch): {shape_str}, {sharding_str}"
             )
 
         return gathered_kv_caches_tpu, manifest, total_num_blocks_to_save
@@ -1761,9 +1800,15 @@ class TPUOffloadConnectorWorker:
         # D2H
         chunks_on_cpu = []
         for i in range(total_num_blocks_to_save):
-            chunks_on_cpu.append(
-                jax.device_put(flat_kv_caches_tpu[i],
-                               self.expanded_host_sharding))
+            tpu_chunk = flat_kv_caches_tpu[i]
+            if isinstance(tpu_chunk, list):
+                cpu_chunk = [
+                    jax.device_put(x, self.expanded_host_sharding)
+                    for x in tpu_chunk
+                ]
+            else:
+                cpu_chunk = jax.device_put(tpu_chunk, self.expanded_host_sharding)
+            chunks_on_cpu.append(cpu_chunk)
         jax.block_until_ready(chunks_on_cpu)
         # no split
 
@@ -2123,6 +2168,7 @@ class TPUOffloadConnectorWorker:
                     self.mesh,
                     self.cached_kv_sharding_spec,
                     self.indices_sharding,
+                    self.grouped_layer_indices_tuple,
                 )
             jax.block_until_ready(self.runner.kv_caches)
             update_duration = time.time() - update_kv_start

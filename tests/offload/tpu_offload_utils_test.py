@@ -216,6 +216,196 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
 
         print("\nTest passed: update_kv_caches correctly updated the cache.")
 
+    def test_stack_kv_cache_cross_layers_hybrid(self):
+        """
+        Verify stacking KV blocks across layers with different shapes (hybrid).
+        """
+        num_blocks_to_gather = 16
+        src_blocks = [
+            1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31
+        ]
+
+        # Define 2 groups of layers with different shapes
+        # Group 0: layers [0, 2], Group 1: layers [1, 3]
+        grouped_indices = ((0, 2), (1, 3))
+
+        # Heads for group A and B
+        heads_A = self.num_kv_heads * 2
+        heads_B = self.num_kv_heads
+
+        shape_A = (self.num_blocks, self.block_size, heads_A, 2, self.head_dim)
+        shape_B = (self.num_blocks, self.block_size, heads_B, 2, self.head_dim)
+
+        # Shardings
+        sharding_A = NamedSharding(self.mesh, self.partition_spec, memory_kind="device")
+        sharding_B = NamedSharding(self.mesh, self.partition_spec, memory_kind="device")
+
+        initial_kv_caches = []
+        for i in range(4): # 4 layers
+            if i in grouped_indices[0]:
+                shape = shape_A
+                sharding = sharding_A
+            else:
+                shape = shape_B
+                sharding = sharding_B
+
+            layer_data = jax.random.normal(jax.random.key(i),
+                                           shape=shape,
+                                           dtype=self.cache_dtype)
+            initial_kv_caches.append(
+                jax.device_put(layer_data, sharding))
+
+        jax.block_until_ready(initial_kv_caches)
+
+        initial_kv_caches_baseline = [
+            np.array(cache) for cache in initial_kv_caches
+        ]
+
+        src_blocks_array = jnp.array(src_blocks)
+
+        _, output = stack_kv_cache_cross_layers(initial_kv_caches,
+                                                src_blocks_array,
+                                                num_blocks_to_gather,
+                                                grouped_indices)
+        jax.block_until_ready(output)
+
+        # --- Verification ---
+        # Output should be nested list: [block_idx][group_idx]
+        self.assertEqual(len(output), num_blocks_to_gather)
+
+        for b in range(num_blocks_to_gather):
+            self.assertEqual(len(output[b]), len(grouped_indices))
+
+            # Group 0
+            # Shape should be (1, num_layers_in_group, block_size, heads_A, 2, head_dim)
+            self.assertEqual(output[b][0].shape, (1, 2, self.block_size, heads_A, 2, self.head_dim))
+            # Group 1
+            self.assertEqual(output[b][1].shape, (1, 2, self.block_size, heads_B, 2, self.head_dim))
+
+            block_id = src_blocks[b]
+            # Verify data
+            for g_idx, group in enumerate(grouped_indices):
+                for local_layer_idx, global_layer_idx in enumerate(group):
+                    output_np = np.array(output[b][g_idx])
+                    initial_np = np.array(initial_kv_caches_baseline[global_layer_idx])
+                    np.testing.assert_array_equal(output_np[0, local_layer_idx],
+                                                  initial_np[block_id])
+
+        print("\nTest passed: hybrid stack_kv_cache_cross_layers correctly gathered and grouped.")
+
+    def test_update_kv_caches_hybrid(self):
+        """
+        Verify update_kv_caches function with hybrid shapes.
+        """
+        num_blocks_to_update = 2
+        update_indices = [1, 3]
+
+        grouped_indices = ((0, 2), (1, 3))
+        heads_A = self.num_kv_heads * 2
+        heads_B = self.num_kv_heads
+
+        shape_A = (self.num_blocks, self.block_size, heads_A, 2, self.head_dim)
+        shape_B = (self.num_blocks, self.block_size, heads_B, 2, self.head_dim)
+
+        sharding_A = NamedSharding(self.mesh, self.partition_spec, memory_kind="device")
+        sharding_B = NamedSharding(self.mesh, self.partition_spec, memory_kind="device")
+
+        # Initial KV caches (zeros)
+        initial_kv_caches = []
+        for i in range(4):
+            if i in grouped_indices[0]:
+                shape = shape_A
+                sharding = sharding_A
+            else:
+                shape = shape_B
+                sharding = sharding_B
+            initial_kv_caches.append(
+                jax.device_put(jnp.zeros(shape, dtype=self.cache_dtype), sharding)
+            )
+
+        # Create update data
+        expand_sharding_A = NamedSharding(self.mesh, PartitionSpec(None, None, None, "model"), memory_kind="device")
+        expand_sharding_B = NamedSharding(self.mesh, PartitionSpec(None, None, None, "model"), memory_kind="device")
+
+        stacked_blocks = []
+        for b in range(num_blocks_to_update):
+            block_groups = []
+            # Group 0
+            block_groups.append(
+                jax.device_put(
+                    jax.random.uniform(jax.random.PRNGKey(b * 2),
+                                       shape=(1, 2, self.block_size, heads_A, 2, self.head_dim),
+                                       dtype=self.cache_dtype),
+                    expand_sharding_A
+                )
+            )
+            # Group 1
+            block_groups.append(
+                jax.device_put(
+                    jax.random.uniform(jax.random.PRNGKey(b * 2 + 1),
+                                       shape=(1, 2, self.block_size, heads_B, 2, self.head_dim),
+                                       dtype=self.cache_dtype),
+                    expand_sharding_B
+                )
+            )
+            stacked_blocks.append(block_groups)
+
+        stacked_blocks_backup = [
+            [jnp.copy(g) for g in block_groups] for block_groups in stacked_blocks
+        ]
+        jax.block_until_ready(stacked_blocks)
+        jax.block_until_ready(stacked_blocks_backup)
+
+        src_offsets, dest_offsets, chunk_sizes, num_chunks = pre_update_kv_caches(
+            update_indices, self.mesh, self.replicated_device_sharding)
+
+        num_warmup = 2
+        for _ in range(num_warmup):
+            updated_caches = update_kv_caches(
+                initial_kv_caches, stacked_blocks, src_offsets, dest_offsets,
+                chunk_sizes, num_chunks, self.mesh, self.partition_spec,
+                self.partition_spec, self.replicated_device_sharding.spec,
+                grouped_indices)
+
+            jax.block_until_ready(updated_caches)
+            initial_kv_caches = updated_caches
+
+        updated_caches = update_kv_caches(initial_kv_caches, stacked_blocks,
+                                          src_offsets, dest_offsets,
+                                          chunk_sizes, num_chunks, self.mesh,
+                                          self.partition_spec,
+                                          self.partition_spec,
+                                          self.replicated_device_sharding.spec,
+                                          grouped_indices)
+
+        jax.block_until_ready(updated_caches)
+
+        # Verification
+        for g_idx, group in enumerate(grouped_indices):
+            heads = heads_A if g_idx == 0 else heads_B
+            for local_layer_idx, global_layer_idx in enumerate(group):
+                layer_cache = np.array(updated_caches[global_layer_idx])
+
+                # Check updated blocks
+                for b, block_idx in enumerate(update_indices):
+                    expected_block = stacked_blocks_backup[b][g_idx][0, local_layer_idx]
+                    actual_block = layer_cache[block_idx]
+                    np.testing.assert_allclose(actual_block,
+                                               expected_block,
+                                               rtol=1e-2,
+                                               atol=1e-2)
+
+                # Check non-updated blocks (should be zero)
+                for block_idx in range(self.num_blocks):
+                    if block_idx not in update_indices:
+                        np.testing.assert_allclose(layer_cache[block_idx],
+                                                   0,
+                                                   rtol=1e-2,
+                                                   atol=1e-2)
+
+        print("\nTest passed: hybrid update_kv_caches correctly updated the cache.")
+
 
 if __name__ == "__main__":
     unittest.main()
+
