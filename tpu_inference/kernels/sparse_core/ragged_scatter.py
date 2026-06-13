@@ -353,26 +353,26 @@ def ragged_scatter(x: jax.Array, indices: jax.Array, start: jax.Array,
                    end: jax.Array) -> jax.Array:
     """Gathers rows from `x` according to `indices` within a specified range.
 
-    This function performs a gather operation equivalent to `x[indices]` for
-    indices that fall within the range `[start, end)`. For indices outside this
-    range, the behavior is undefined.
+  This function performs a gather operation equivalent to `x[indices]` for
+  indices that fall within the range `[start, end)`. For indices outside this
+  range, the behavior is undefined.
 
-    Args:
-        x: A 2D JAX array to gather data from, with shape `(num_rows, hidden_size)`.
-        indices: A 1D JAX array of indices to gather, with shape `(output_size,)`.
-        start: A scalar or 1D array of size 1 containing the start index (inclusive)
-            to process.
-        end: A scalar or 1D array of size 1 containing the end index (exclusive) to
-            process.
+  Args:
+    x: A 2D JAX array to gather data from, with shape `(num_rows, hidden_size)`.
+    indices: A 1D JAX array of indices to gather, with shape `(output_size,)`.
+    start: A scalar or 1D array of size 1 containing the start index (inclusive)
+      to process.
+    end: A scalar or 1D array of size 1 containing the end index (exclusive) to
+      process.
 
-    Returns:
-        A 2D JAX array of gathered data with shape `(output_size, hidden_size)`.
+  Returns:
+    A 2D JAX array of gathered data with shape `(output_size, hidden_size)`.
 
-    The typical usage of this kernel is "unpermute" after GMM of the MOE layers.
-    That is, replace `gmm2_res[topk_argsort_revert_indices]` with
-    `ragged_scatter(x, topk_argsort_revert_indices, ..)` in
-    tpu_inference/layers/common/fused_moe_gmm.py.
-    """
+  The typical usage of this kernel is "unpermute" after GMM of the MOE layers.
+  That is, replace `gmm2_res[topk_argsort_revert_indices]` with
+  `ragged_scatter(x, topk_argsort_revert_indices, ..)` in
+  tpu_inference/layers/common/fused_moe_gmm.py.
+  """
 
     assert x.ndim == 2, "Ragged scatter only supports 2d inputs."
     assert indices.ndim == 1, "Ragged scatter only supports 1d indices."
@@ -432,19 +432,19 @@ def ragged_scatter(x: jax.Array, indices: jax.Array, start: jax.Array,
             core_axis_name=vector_mesh.core_axis_name,
             subcore_axis_name=vector_mesh.subcore_axis_name,
         ),
-        out_type=jax.ShapeDtypeStruct(
+        out_shape=jax.ShapeDtypeStruct(
             (out_size + out_pad_size, aligned_hidden_size), dtype),
         compiler_params=pltpu.CompilerParams(
             use_tc_tiling_on_sc=True,
             disable_bounds_checks=True,
         ),
-        scratch_types=dict(
-            total_num_rows_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-            src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            sem_ref=pltpu.SemaphoreType.DMA((2, )),
-        ),
+        scratch_shapes=[
+            pltpu.VMEM((num_simd_lanes, ), jnp.int32),  # total_num_rows
+            pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+            pltpu.VMEM((num_simd_lanes, ), jnp.int32),  # src_indices
+            pltpu.VMEM((num_simd_lanes, ), jnp.int32),  # dst_indices
+            pltpu.SemaphoreType.DMA((2, )),
+        ],
         mesh=vector_mesh,
         name="sc_ragged_scatter",
     )(total_num_rows, x, src_indices, dst_indices)[:out_size, :hidden_size]

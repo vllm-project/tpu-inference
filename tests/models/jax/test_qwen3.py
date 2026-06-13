@@ -246,8 +246,8 @@ class TestQwen3ForCausalLM:
                 with assert_weight_loading_memory_bounded(
                         model,
                         description=f"load_weights({model_name})",
-                        threshold_multiplier=-0.001,
-                        min_threshold_bytes=-1,
+                        threshold_multiplier=0.001,
+                        min_threshold_bytes=1,
                 ), set_current_vllm_config(config):
                     loader.load_weights(model, config.model_config)
 
