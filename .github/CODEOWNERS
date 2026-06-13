@@ -29,6 +29,7 @@
 # Model layers
 /tpu_inference/layers/ @kyuyeunk @lk-chen @jrplatin @gxd3
 /tpu_inference/layers/jax/ @jrplatin @gpolovets1 @lk-chen
+/tpu_inference/layers/jax/gemma* @jrplatin @gpolovets1 @lk-chen @kwang3939
 /tpu_inference/layers/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
 /tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v4/ @gxd3 @a1yssan13 @inucool12
 
@@ -40,6 +41,8 @@
 
 # Runner and Execution
 /tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang @gxd3 @a1yssan13
+/tpu_inference/runner/mm_encoder_jit_manager.py @lk-chen @kwang3939 @jrplatin
+/tpu_inference/runner/multimodal_manager.py @lk-chen @kwang3939 @jrplatin
 /tpu_inference/runner/tpu_runner.py @jrplatin @kyuyeunk @wenxindongwork @sixiang-google
 /tpu_inference/runner/persistent_batch_manager.py @jrplatin @wenxindongwork
 /tpu_inference/executors/ @sixiang-google @mrjunwan-lang @Lumosis
