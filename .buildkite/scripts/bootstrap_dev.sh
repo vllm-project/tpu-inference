@@ -41,4 +41,7 @@ echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH"
 echo "--- :pipeline: Uploading pipeline_dev.yml"
 buildkite-agent pipeline upload .buildkite/pipeline_dev.yml
 
+echo "--- :pipeline: Uploading pipeline_build.yml"
+buildkite-agent pipeline upload .buildkite/pipeline_build.yml
+
 echo "--- Buildkite Dev Bootstrap Finished"

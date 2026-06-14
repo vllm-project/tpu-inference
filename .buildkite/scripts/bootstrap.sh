@@ -176,6 +176,7 @@ upload_pipeline() {
 }
 
 upload_benchmark_pipeline() {
+    export BM_INFRA="true"
     VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH")
     TPU_COMMIT_HASH=$(git rev-parse HEAD)
     CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_COMMIT_HASH}-"
@@ -317,5 +318,7 @@ else
   fi
 fi
 
+# Upload the shared Docker build step at the very end so it's inserted at the top of the Buildkite build graph
+upload_with_priority .buildkite/pipeline_build.yml "$JOB_PRIORITY"
 
 echo "--- Buildkite Bootstrap Finished"
