@@ -22,9 +22,10 @@ the rest of the model in eager mode.
 
 import functools
 import importlib
-from typing import TYPE_CHECKING, Sequence
+from typing import Sequence
 
 import jax
+import torch
 import torchax
 from torchax.interop import JittableModule, torch_view
 
@@ -35,19 +36,16 @@ from tpu_inference.models.vllm.experimental.qwen3_omni_patcher import \
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
     maybe_apply_qwen3_vl_patches
 
-if TYPE_CHECKING:
-    from tpu_inference.models.vllm.vllm_model_wrapper import _VllmRunner
-
 logger = init_logger(__name__)
 
 
 def patch_mm_model(
-    model: "_VllmRunner",
+    model: torch.nn.Module,
     params_and_buffers: dict[str, torchax.torch.Tensor],
     *,
     jitted_mm_module_keys: Sequence[str],
     register_mm_module_custom_pytree_classes: Sequence[str],
-) -> tuple["_VllmRunner", dict[str, torchax.torch.Tensor]]:
+) -> tuple[torch.nn.Module, dict[str, torchax.torch.Tensor]]:
     """Jit some modules in the multimodal.
 
     We add a wrapper to change the submodule call,
@@ -157,7 +155,7 @@ def patch_mm_model(
         # module_key expect to be start with model
         # eg. "model.vision_tower.encoder" -> "vllm_model.vision_tower.encoder"
 
-        cur_module = model.vllm_model
+        cur_module = model
         module_names = module_key.split('.')
         if len(module_names) <= 1:
             raise ValueError(
