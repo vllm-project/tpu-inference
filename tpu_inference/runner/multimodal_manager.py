@@ -18,7 +18,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
@@ -26,7 +25,6 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     sanity_check_mm_encoder_outputs
-from tpu_inference.runner.mm_encoder_jit_manager import MMEncoderJITManager
 
 logger = init_logger(__name__)
 
@@ -38,53 +36,6 @@ class MultiModalManager:
 
     def __init__(self, runner: "TPUModelRunner"):
         self.runner = runner
-        # Per-budget JIT manager for the vision encoder, enabled via
-        # vLLM's compilation_config.cudagraph_mm_encoder (same flag the GPU
-        # EncoderCudaGraphManager uses), when the model implements the
-        # SupportsEncoderCudaGraph protocol. Lazy-init on first scheduled MM
-        # batch (the runner's params_and_buffers aren't fully bound until
-        # after weights load).
-        self._mm_encoder_jit_manager = None
-        self._mm_encoder_jit_init_attempted = False
-
-    def _maybe_init_mm_encoder_jit_manager(self):
-        """Lazy-init the per-budget JIT manager. No-op unless
-        ``compilation_config.cudagraph_mm_encoder`` is set and the model
-        implements the SupportsEncoderCudaGraph protocol. Runs at most once
-        per process. Mirrors the GPU runner's setup gate.
-        https://github.com/vllm-project/vllm/blob/53b88d1dfc1f43cc9c7ead2cdc1586fb01ce89a9/vllm/v1/worker/gpu_model_runner.py#L6526
-        """
-        if self._mm_encoder_jit_init_attempted:
-            return
-        self._mm_encoder_jit_init_attempted = True
-
-        comp_config = self.runner.vllm_config.compilation_config
-        if not comp_config.cudagraph_mm_encoder:
-            return
-        else:
-            from tpu_inference.models.vllm.vllm_model_wrapper import \
-                VllmModelWrapper
-            assert isinstance(self.runner.model, VllmModelWrapper), \
-                ("cudagraph_mm_encoder is only supported for vLLM models,"
-                " flax_nnx implementation is already JIT-friendly.")
-
-        vllm_model = getattr(getattr(self.runner.model, "model", None),
-                             "vllm_model", None)
-        if vllm_model is None:
-            return
-        if not supports_encoder_cudagraph(vllm_model):
-            return
-
-        self._mm_encoder_jit_manager = MMEncoderJITManager(
-            vllm_config=self.runner.vllm_config,
-            vllm_runner=self.runner.model.model,  # _VllmRunner
-            vllm_model=vllm_model,
-            params_and_buffers=self.runner.state_leaves,
-        )
-        logger.info(
-            "[mm_encoder_jit] manager initialized — budgets=%s "
-            "max_batch_size=%d", self._mm_encoder_jit_manager.token_budgets,
-            self._mm_encoder_jit_manager.max_batch_size)
 
     def calc_mrope_positions(
         self,
@@ -183,7 +134,6 @@ class MultiModalManager:
         # in the same batch while still being able to benefit from batching
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
-        self._maybe_init_mm_encoder_jit_manager()
         encoder_outputs = []
         for modality, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
@@ -194,13 +144,8 @@ class MultiModalManager:
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            if (self._mm_encoder_jit_manager is not None and
-                    self._mm_encoder_jit_manager.supports_modality(modality)):
-                curr_group_outputs = self._mm_encoder_jit_manager.execute(
-                    mm_kwargs_group)
-            else:
-                curr_group_outputs = self.runner.embed_multimodal_fn(
-                    self.runner.state_leaves, **mm_kwargs_group)
+            curr_group_outputs = self.runner.embed_multimodal_fn(
+                self.runner.state_leaves, modality=modality, **mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
