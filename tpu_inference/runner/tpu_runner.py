@@ -572,6 +572,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding_config.tp_size,
             sharding_config.decode_cp_size,
         )
+        return np.array(self.devices).reshape(mesh_shape)
 
         # Attempt to create a physically optimized mesh. Fall back to a simple
         # logical reshape for non-power-of-two device counts (e.g., DP=6) to
