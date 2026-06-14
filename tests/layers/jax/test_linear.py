@@ -163,6 +163,139 @@ class TestJaxLinear(unittest.TestCase):
         self.assertEqual(f"{jax.typeof(jax_linear.weight.value)}",
                          "float32[16,32]")
 
+    def test_jax_qkv_parallel_linear_correctness(self):
+        """Tests JaxQKVParallelLinear correctness against separate JaxEinsum projections."""
+        from jax import numpy as jnp
+
+        from tpu_inference.layers.common.utils import \
+            reorder_concatenated_tensor_for_sharding
+        from tpu_inference.layers.jax.linear import (JaxEinsum,
+                                                     JaxQKVParallelLinear)
+
+        hidden_size = 32
+        num_heads = 4
+        num_kv_heads = 2
+        head_dim = 8
+        seq_len = 3
+        use_bias = True
+
+        num_devices = len(jax.devices('cpu'))
+        tp_sizes = [1]
+        if num_devices >= 2:
+            tp_sizes.append(2)
+
+        for tp_size in tp_sizes:
+            mesh = Mesh(jax.devices('cpu')[:tp_size], ("model", ))
+            with jax.set_mesh(mesh):
+                rngs = nnx.Rngs(0)
+
+                # 1. Create separate projections
+                q_proj = JaxEinsum(
+                    "TD,DNH->TNH",
+                    (hidden_size, num_heads, head_dim),
+                    bias_shape=(num_heads, head_dim) if use_bias else None,
+                    param_dtype=jnp.float32,
+                    rngs=rngs,
+                )
+                k_proj = JaxEinsum(
+                    "TD,DKH->TKH",
+                    (hidden_size, num_kv_heads, head_dim),
+                    bias_shape=(num_kv_heads, head_dim) if use_bias else None,
+                    param_dtype=jnp.float32,
+                    rngs=rngs,
+                )
+                v_proj = JaxEinsum(
+                    "TD,DKH->TKH",
+                    (hidden_size, num_kv_heads, head_dim),
+                    bias_shape=(num_kv_heads, head_dim) if use_bias else None,
+                    param_dtype=jnp.float32,
+                    rngs=rngs,
+                )
+
+                # Assign random weights to separate projections
+                key = jax.random.PRNGKey(42)
+                k1, k2, k3, k4, k5, k6, k7 = jax.random.split(key, 7)
+
+                q_w = jax.random.normal(k1, (hidden_size, num_heads, head_dim))
+                k_w = jax.random.normal(k2,
+                                        (hidden_size, num_kv_heads, head_dim))
+                v_w = jax.random.normal(k3,
+                                        (hidden_size, num_kv_heads, head_dim))
+
+                q_proj.weight.value = q_w
+                k_proj.weight.value = k_w
+                v_proj.weight.value = v_w
+
+                if use_bias:
+                    q_b = jax.random.normal(k4, (num_heads, head_dim))
+                    k_b = jax.random.normal(k5, (num_kv_heads, head_dim))
+                    v_b = jax.random.normal(k6, (num_kv_heads, head_dim))
+                    q_proj.bias.value = q_b
+                    k_proj.bias.value = k_b
+                    v_proj.bias.value = v_b
+
+                # 2. Prepare raw sequential weights/biases
+                raw_w = jnp.concatenate([
+                    q_w.reshape(hidden_size, -1),
+                    k_w.reshape(hidden_size, -1),
+                    v_w.reshape(hidden_size, -1),
+                ],
+                                        axis=-1)
+
+                if use_bias:
+                    raw_b = jnp.concatenate([
+                        q_b.reshape(-1),
+                        k_b.reshape(-1),
+                        v_b.reshape(-1),
+                    ],
+                                            axis=-1)
+
+                # Rearrange using reorder_concatenated_tensor_for_sharding
+                split_sizes = [
+                    num_heads * head_dim, num_kv_heads * head_dim,
+                    num_kv_heads * head_dim
+                ]
+                rearranged_w = reorder_concatenated_tensor_for_sharding(
+                    raw_w, split_sizes, tp_size, dim=-1)
+                if use_bias:
+                    rearranged_b = reorder_concatenated_tensor_for_sharding(
+                        raw_b, split_sizes, tp_size, dim=-1)
+
+                # 3. Initialize JaxQKVParallelLinear and set the rearranged weights
+                qkv_proj = JaxQKVParallelLinear(
+                    hidden_size=hidden_size,
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=head_dim,
+                    use_bias=use_bias,
+                    dtype=jnp.float32,
+                    rngs=rngs,
+                    tp_size=tp_size,
+                )
+                qkv_proj.weight.value = rearranged_w
+                if use_bias:
+                    qkv_proj.bias.value = rearranged_b
+
+                # 4. Run forward pass
+                x = jax.random.normal(k7, (seq_len, hidden_size))
+
+                q_expected = q_proj(x)
+                k_expected = k_proj(x)
+                v_expected = v_proj(x)
+
+                q_actual, k_actual, v_actual = qkv_proj(x)
+
+                # 5. Assert equality
+                self.assertTrue(
+                    jnp.allclose(q_expected, q_actual, atol=1e-5),
+                    f"Q projection output mismatch for tp_size={tp_size}")
+                self.assertTrue(
+                    jnp.allclose(k_expected, k_actual, atol=1e-5),
+                    f"K projection output mismatch for tp_size={tp_size}")
+                self.assertTrue(
+                    jnp.allclose(v_expected, v_actual, atol=1e-5),
+                    f"V projection output mismatch for tp_size={tp_size}")
+
     def test_merged_column_parallel_fuses_projections(self):
         """JaxMergedColumnParallelLinear exposes a single fused kernel sized to
         the sum of its projection widths (no separate gate/up params) and

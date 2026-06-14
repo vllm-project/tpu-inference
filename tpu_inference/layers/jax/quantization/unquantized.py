@@ -106,8 +106,12 @@ class UnquantizedMergedLinearMethod(UnquantizedLinearMethod):
                               param_name=layer.prefix + ".weight"))
 
     @staticmethod
-    def _load_merged_weight(param: nnx.Param, torch_weight, shard_id: int, *,
-                            n_shards: int, output_sizes: list,
+    def _load_merged_weight(param: nnx.Param,
+                            torch_weight,
+                            shard_id: int = -1,
+                            *,
+                            n_shards: int,
+                            output_sizes: list,
                             param_name: str):
         """Accumulate one projection's checkpoint tensor, fuse when complete.
 
@@ -117,7 +121,15 @@ class UnquantizedMergedLinearMethod(UnquantizedLinearMethod):
         once every slot is filled.
         """
         shards = param.get_metadata("_merged_shards")
-        shards[shard_id] = torch_weight
+        if shard_id == -1:  #TODO: Ensure this is the right logic for splitting
+            # Handle consolidated weights by splitting along the output dimension (dim 0)
+            start = 0
+            for i, out_size in enumerate(output_sizes):
+                shards[i] = torch_weight[start:start + out_size]
+                start += out_size
+        else:
+            shards[shard_id] = torch_weight
+
         if any(s is None for s in shards):
             return
 

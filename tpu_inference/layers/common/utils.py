@@ -17,7 +17,10 @@ from contextlib import nullcontext
 import jax
 import jax.numpy as jnp
 from jax.experimental.layout import Format, Layout
-from jax.sharding import Mesh, Sharding
+from jax.experimental.shard_map import shard_map
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
+from jax.sharding import Sharding
 
 from tpu_inference import envs
 
@@ -178,3 +181,108 @@ def cpu_mesh() -> Mesh:
 def cpu_mesh_context():
     """A context to enforce using CPU mesh, used for loading weights on CPU."""
     return jax.set_mesh(cpu_mesh())
+
+
+def slice_qkv_merge_projection_output(
+    out_jax: jax.Array,
+    output_sizes: list[int],
+    tp_size: int,
+    num_kv_head_replicas: int = 1,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Consolidated JAX/SPMD kernel that reorders, slices, and replicates sharded KV heads."""
+    # 1. Reorder concatenated tensor along the sharded axis
+    out_jax = reorder_concatenated_tensor_for_sharding(
+        out_jax,
+        output_sizes,
+        tp_size,
+        dim=-1,
+    )
+
+    # 2. Slice sharded tensor into Q, K, and V
+    q_jax, k_jax, v_jax = slice_sharded_tensor_for_concatenation(
+        out_jax,
+        output_sizes,
+        tp_size,
+    )
+
+    # 3. Handle KV head replication if replicas > 1
+    if num_kv_head_replicas > 1:
+        from tpu_inference.layers.common.sharding import ShardingAxisName
+        from tpu_inference.utils import get_mesh_shape_product
+
+        mesh = jax.sharding.get_abstract_mesh()
+        kv_head_axis = None
+        for a in reversed(mesh.axis_names):
+            if a in ShardingAxisName.ATTN_HEAD and get_mesh_shape_product(
+                    mesh, a) >= num_kv_head_replicas:
+                kv_head_axis = a
+                break
+
+        if kv_head_axis is None:
+            raise ValueError(
+                f"Cannot find a mesh axis to split for KV-head replication: "
+                f"no axis in {mesh.axis_names} contains "
+                f"{ShardingAxisName.ATTN_HEAD} and has size >= {num_kv_head_replicas}"
+            )
+
+        replica_axis = 'replica'
+        data_axis = ShardingAxisName.ATTN_DATA
+        head_axis = ShardingAxisName.ATTN_HEAD
+
+        i = mesh.axis_names.index(kv_head_axis)
+        kv_size = mesh.axis_sizes[i]
+        kv_type = mesh.axis_types[i]
+
+        # Split the `kv_head` mesh axis (size kv_size) into a pair
+        # `(kv_head, replica)` of sizes `(kv_size // replicas, replicas)`.
+        # The `replica` sub-axis is later replicated via `shard_map` with no
+        # data movement, since `_tile_kv` already placed identical KV-head
+        # copies on each replica-group of devices when TP > total_num_kv_heads.
+        new_mesh = jax.sharding.AbstractMesh(
+            mesh.axis_sizes[:i] +
+            (kv_size // num_kv_head_replicas, num_kv_head_replicas) +
+            mesh.axis_sizes[i + 1:],
+            mesh.axis_names[:i] + (kv_head_axis, replica_axis) +
+            mesh.axis_names[i + 1:],
+            mesh.axis_types[:i] + (kv_type, kv_type) + mesh.axis_types[i + 1:],
+        )
+        if isinstance(head_axis, tuple):
+            in_head_axis = list(head_axis)
+            in_head_axis.insert(
+                in_head_axis.index(kv_head_axis) + 1, replica_axis)
+        else:
+            in_head_axis = (head_axis, replica_axis)
+
+        @shard_map(mesh=new_mesh,
+                   in_specs=P(data_axis, in_head_axis),
+                   out_specs=P(data_axis, head_axis),
+                   check_vma=False)
+        def _mark_kv_head_replicated(t):
+            return t
+
+        with jax.sharding.use_abstract_mesh(new_mesh):
+            k_jax = _mark_kv_head_replicated(k_jax)
+            v_jax = _mark_kv_head_replicated(v_jax)
+
+    return q_jax, k_jax, v_jax
+
+
+def slice_sharded_tensor_for_causal_lm(
+    outs: jax.Array,
+    q_size: int,
+    k_size: int,
+    v_size: int,
+    tp_size: int,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Direct, zero-copy SRAM slicing for JAX-native models. Bypasses flat layout constraints."""
+    new_shape = outs.shape[:-1] + (tp_size, -1)
+    sharded_outs = outs.reshape(new_shape)
+
+    q_sz = q_size // tp_size
+    k_sz = k_size // tp_size
+
+    outs_q = sharded_outs[..., :q_sz]
+    outs_k = sharded_outs[..., q_sz:q_sz + k_sz]
+    outs_v = sharded_outs[..., q_sz + k_sz:]
+
+    return outs_q, outs_k, outs_v

@@ -658,6 +658,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         def filter_weights(weights_iterator):
             import re
+
             for name, weight in weights_iterator:
                 mapped_name = map_name(name)
 
@@ -678,40 +679,37 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                         )):
                     continue
 
-                # Handle packed QKV weights for the text tower.
-                # Note: KV-shared layers DO have full Q/K/V weights in the
-                # checkpoint — vllm-pytorch's Gemma4Attention constructs
-                # qkv_proj unconditionally. K/V are still computed and used
-                # for the current step's attention; the kernel skips writing
-                # them to the cache via update_kv_cache=False.
-                if "qkv_proj" in mapped_name:
+                # Handle packed QKV weights for the text tower when the model uses separate projections (e.g. k_eq_v layers)
+                if "qkv_proj" in mapped_name and "model.layers." in mapped_name:
                     m = re.search(r"layers\.(\d+)\.", mapped_name)
                     if m:
                         layer_idx = int(m.group(1))
                         if self.model.start_layer <= layer_idx < self.model.end_layer:
                             jax_attn = self.model.layers[
-                                layer_idx - self.model.start_layer].self_attn
-                            q_size = jax_attn.num_heads * jax_attn.head_dim_original
-                            kv_size = jax_attn.num_kv_heads * jax_attn.head_dim_original
+                                layer_idx].self_attn  # Direct absolute indexing
 
-                            q_weight = weight[:q_size]
-                            k_weight = weight[q_size:q_size + kv_size]
-                            v_weight = weight[q_size + kv_size:q_size +
-                                              2 * kv_size]
+                            if jax_attn.qkv_proj is None:
+                                q_size = jax_attn.num_heads * jax_attn.head_dim_original
+                                kv_size = jax_attn.num_kv_heads * jax_attn.head_dim_original
 
-                            yield mapped_name.replace(
-                                "qkv_proj", "q_proj"), process_tensor(
-                                    mapped_name.replace("qkv_proj", "q_proj"),
-                                    q_weight)
-                            yield mapped_name.replace(
-                                "qkv_proj", "k_proj"), process_tensor(
-                                    mapped_name.replace("qkv_proj", "k_proj"),
-                                    k_weight)
-                            yield mapped_name.replace(
-                                "qkv_proj", "v_proj"), process_tensor(
-                                    mapped_name.replace("qkv_proj", "v_proj"),
-                                    v_weight)
-                            continue
+                                q_weight = weight[:q_size]
+                                k_weight = weight[q_size:q_size + kv_size]
+                                v_weight = weight[q_size + kv_size:q_size +
+                                                  2 * kv_size]
+
+                                yield mapped_name.replace(
+                                    "qkv_proj", "q_proj"), process_tensor(
+                                        mapped_name.replace(
+                                            "qkv_proj", "q_proj"), q_weight)
+                                yield mapped_name.replace(
+                                    "qkv_proj", "k_proj"), process_tensor(
+                                        mapped_name.replace(
+                                            "qkv_proj", "k_proj"), k_weight)
+                                yield mapped_name.replace(
+                                    "qkv_proj", "v_proj"), process_tensor(
+                                        mapped_name.replace(
+                                            "qkv_proj", "v_proj"), v_weight)
+                                continue
 
                 yield mapped_name, process_tensor(mapped_name, weight)
 
