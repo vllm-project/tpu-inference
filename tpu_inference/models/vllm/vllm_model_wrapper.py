@@ -367,9 +367,6 @@ class VllmModelWrapper:
                 REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES,
             )
 
-        # NOTE: Apply Qwen3-VL model specific patches
-        apply_model_specific_patches(self.model.vllm_model)
-
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
         # Warning: Please DO NOT remove the below logging line.
@@ -381,6 +378,7 @@ class VllmModelWrapper:
         params = jax_view(params_and_buffers)
         self._mm_encoder_jit_manager = self._maybe_create_mm_encoder_jit_manager(
             params)
+        apply_model_specific_patches(self.model.vllm_model)
         return params, lora_manager
 
     def jit_step_func(self):
