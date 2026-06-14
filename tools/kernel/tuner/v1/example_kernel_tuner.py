@@ -45,6 +45,9 @@ class TunableParams:
     param1: int
     param2: int
 
+    def __ge__(self, other) -> bool:
+        return self.param1 >= other.param1 and self.param2 >= other.param2
+
 
 class ExampleKernelTuner(KernelTunerBase):
     # This is a reference implementation of a KernelTuner for testing purposes.
