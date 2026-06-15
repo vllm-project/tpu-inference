@@ -28,6 +28,8 @@ from vllm.config import ModelConfig
 from vllm.model_executor.model_loader import LoadConfig, register_model_loader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 
+from tpu_inference.layers.common.sharding import (ShardingConfigManager,
+                                                  ShardingStrategy)
 from tpu_inference.layers.jax import JaxModule
 
 logger = logging.getLogger(__name__)
@@ -73,6 +75,7 @@ def mock_vllm_config():
             self.quant_config = None
             self.additional_config = {}
             self.parallel_config = None
+            self.sharding_config = ShardingConfigManager(ShardingStrategy())
 
     return MockVllmConfig
 

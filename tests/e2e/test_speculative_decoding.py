@@ -147,10 +147,7 @@ def _get_baseline_results(
         ref_llm = LLM(model=model_name, **kwargs)
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
-        del ref_llm
-
-        # Waiting for TPUs to be released.
-        time.sleep(10)
+        ref_llm.llm_engine.engine_core.shutdown()
         return ref_outputs
 
 
@@ -224,10 +221,7 @@ def _test_correctness_helper(
         print(
             f"All {matches} outputs match between reference LLM and speculative LLM."
         )
-        del spec_llm
-
-        # Waiting for TPUs to be released.
-        time.sleep(10)
+        spec_llm.llm_engine.engine_core.shutdown()
 
 
 def test_ngram_correctness_greedy(
@@ -690,6 +684,52 @@ def test_eagle3_logprobs_correctness(monkeypatch: pytest.MonkeyPatch, ):
                              enable_dp_attention=False)
 
 
+def test_eagle3_logprobs_correctness_random(monkeypatch: pytest.MonkeyPatch, ):
+    """Reproduction test for speculative decoding with logprobs enabled and temperature > 0."""
+    model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
+
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
+    speculative_config = {
+        'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
+        "num_speculative_tokens": 3,
+        "method": "eagle3",
+        "draft_tensor_parallel_size": 1
+    }
+
+    sampling_config = SamplingParams(temperature=0.8,
+                                     top_p=0.9,
+                                     max_tokens=8,
+                                     ignore_eos=True,
+                                     repetition_penalty=1,
+                                     frequency_penalty=0,
+                                     presence_penalty=0,
+                                     min_p=0,
+                                     logprobs=1)
+    test_prompts = [
+        "Predict the continuation of this sequence: 1 2 3 4 5 6 7 8"
+    ]
+
+    # Get baseline outputs with logprobs enabled
+    ref_outputs = _get_baseline_results(monkeypatch,
+                                        sampling_config,
+                                        model_name,
+                                        test_prompts,
+                                        max_num_seqs=2)
+
+    # Get speculative decoding outputs with logprobs enabled
+    _test_correctness_helper(monkeypatch,
+                             sampling_config,
+                             model_name,
+                             speculative_config,
+                             test_prompts,
+                             ref_outputs=ref_outputs,
+                             max_num_seqs=2,
+                             async_scheduling=True,
+                             enable_dp_attention=False)
+
+
 @pytest.fixture(scope="module")
 def gemma4_mtp_baseline():
     '''
@@ -705,6 +745,7 @@ def gemma4_mtp_baseline():
                                      presence_penalty=0,
                                      min_p=0,
                                      logprobs=None)
+
     extra_kwargs = {
         "seed": 42,
         "max_model_len": 128,
