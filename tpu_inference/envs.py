@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
+    MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
     LAYOUT_Q_PROJ_AS_NDH: bool = False
@@ -286,6 +287,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MOE_REQUANTIZE_BLOCK_SIZE":
     lambda: int(block_size)
     if (block_size := os.getenv("MOE_REQUANTIZE_BLOCK_SIZE")) else None,
+    # Clip outlier weights before requantization at the given percentile
+    # (e.g. 99.9). Reduces quantization error for large block sizes by
+    # preventing extreme outliers from inflating the per-block scale.
+    "MOE_REQUANTIZE_CLIP_PERCENTILE":
+    lambda: float(pct)
+    if (pct := os.getenv("MOE_REQUANTIZE_CLIP_PERCENTILE")) else None,
     # By default, it only use max_reqs for attentions. But if set true, it
     # will precompile max_reqs to power-of-twos between min and max reqs,
     # and attention will have the num_reqs closer to actual num_reqs. This
