@@ -119,6 +119,17 @@ class UnquantizedMergedLinearMethod(UnquantizedLinearMethod):
         (e.g. gate=0, up=1). ``torch_weight`` has the HF layout ``(out_i, in)``.
         The projections may arrive across multiple files, so the fuse only runs
         once every slot is filled.
+
+        Args:
+            param: The nnx parameter to load weights into.
+            torch_weight: The checkpoint tensor for a single projection,
+                or a consolidated tensor containing all projections.
+            shard_id: The index/slot of the projection being loaded (e.g., 0
+                for gate_proj, 1 for up_proj). If -1, indicates consolidated
+                weights that should be split into individual projection shards.
+            n_shards: Number of shards to split the parameter across for TP.
+            output_sizes: Output sizes of each projection.
+            param_name: The name of the parameter.
         """
         shards = param.get_metadata("_merged_shards")
         if shard_id == -1:
