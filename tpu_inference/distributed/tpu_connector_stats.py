@@ -52,8 +52,10 @@ class TpuKVConnectorStats(KVConnectorStats):
     def record_queue_lengths(self, num_requests_being_pulled: int,
                              num_requests_waiting_pull: int):
         """Record current queue lengths."""
-        self.data["num_requests_being_pulled"].append(num_requests_being_pulled)
-        self.data["num_requests_waiting_pull"].append(num_requests_waiting_pull)
+        self.data["num_requests_being_pulled"].append(
+            num_requests_being_pulled)
+        self.data["num_requests_waiting_pull"].append(
+            num_requests_waiting_pull)
 
     def reset(self):
         # Must be serializable
@@ -301,5 +303,3 @@ class TpuKVConnectorPromMetrics(KVConnectorPromMetrics):
             if gauge_item_key in transfer_stats_data:
                 for list_item in transfer_stats_data[gauge_item_key]:
                     gauge_obj[engine_idx].set(list_item)
-
-
