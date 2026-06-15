@@ -96,7 +96,7 @@ def get_kv_cache_shape(
             page_size,
         )
 
-    if kv_packing is None:
+    if kv_packing is None or kv_packing <=0:
         kv_packing = get_dtype_packing(kv_dtype)
     return (
         total_num_pages,

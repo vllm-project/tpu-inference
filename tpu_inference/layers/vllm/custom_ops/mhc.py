@@ -95,12 +95,19 @@ class VllmHCHeadOp(HCHeadOp):
         rms_norm_eps: float,
         hc_eps: float,
     ) -> torch.Tensor:
-        logger.error(
-            "VllmHCHeadOp.forward_tpu is not implemented, just a pass-through for now"
-        )
+        
         hc_mult, hidden_size = hidden_states.shape[-2:]
         outer_shape = hidden_states.shape[:-2]
-        return hidden_states[..., 0, :].reshape(*outer_shape, hidden_size)
+        residual = hidden_states.view(-1, hc_mult, hidden_size)
+
+        residual_flat = residual.flatten(-2).float()
+        residual_norm = residual_flat * torch.rsqrt(
+            residual_flat.square().mean(dim=-1, keepdim=True) + rms_norm_eps
+        )
+        pre_mix = torch.nn.functional.linear(residual_norm, hc_fn)
+        pre_mix = torch.sigmoid(pre_mix * hc_scale + hc_base) + hc_eps
+        out = torch.sum(pre_mix.unsqueeze(-1) * residual.float(), dim=-2).bfloat16()
+        return out.view(*outer_shape, hidden_size)
 
 
 @MHCFusedPostPreOp.register_oot

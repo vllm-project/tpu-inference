@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import dataclasses
+import os
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -450,22 +451,18 @@ class KVCacheManager:
         model_config = self.runner.model_config
         text_config = getattr(model_config, "hf_text_config",
                               getattr(model_config, "hf_config", None))
-        if self.use_mla:
+        if self.use_mla and "DeepseekV4ForCausalLM" not in (
+                self.runner.vllm_config.model_config.architectures):
             # Individually pad the RopE and latents
-            if "DeepseekV4ForCausalLM" in (
-                    self.runner.vllm_config.model_config.architectures):
-                mla_head_size = common_utils.align_to(text_config.head_dim,
-                                                      128)
+            qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
+            padded_kv_lora_rank = common_utils.align_to(
+                text_config.kv_lora_rank, 128)
+            if tpu_envs.MLA_TRANSPOSE_KV_CACHE:
+                mla_qk_rope_head_dim = qk_rope_head_dim
             else:
-                qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
-                padded_kv_lora_rank = common_utils.align_to(
-                    text_config.kv_lora_rank, 128)
-                if tpu_envs.MLA_TRANSPOSE_KV_CACHE:
-                    mla_qk_rope_head_dim = qk_rope_head_dim
-                else:
-                    mla_qk_rope_head_dim = common_utils.align_to(
-                        qk_rope_head_dim, 128)
-                mla_head_size = padded_kv_lora_rank + mla_qk_rope_head_dim
+                mla_qk_rope_head_dim = common_utils.align_to(
+                    qk_rope_head_dim, 128)
+            mla_head_size = padded_kv_lora_rank + mla_qk_rope_head_dim
 
         if len(self.runner.vllm_config.compilation_config.
                static_forward_context) == 0:
@@ -613,10 +610,8 @@ class KVCacheManager:
                 if is_cache_for_ds_v4(attn_module):
                     spec = attn_module.get_kv_cache_spec(
                         self.runner.vllm_config)
-                    assert spec is not None
-                    head_size = common_utils.align_to(spec.head_size, 128)
-                    kv_cache_spec[layer_name] = self._create_attention_spec(
-                        spec.block_size, 1, head_size)
+                    if spec is not None:
+                        kv_cache_spec[layer_name] = spec
                     continue
 
                 if disable_sliding_window:
@@ -823,6 +818,7 @@ class KVCacheManager:
 
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
                 layer_spec = layer_name_to_spec[layer_name]
+
                 if isinstance(layer_spec, MambaSpec):
                     mamba_states = []
                     for state_index, (shape, dtype) in enumerate(
@@ -872,19 +868,59 @@ class KVCacheManager:
                     # is True, we should init a new kv cache for each layer in shared_by
                     if j == 0 or duplicate_shared_layers:
                         # NOTE: we'll multiply the num_kv_heads by 2 in the function
-                        head_size = layer_spec.head_size
+                        block_size=layer_spec.storage_block_size
+
+                        if "DeepseekV4ForCausalLM" in (self.runner.vllm_config.model_config.architectures):
+                            # DSV4 does not support MLA_TRANSPOSE_KV_CACHE and MLA_KV_PACKING_SIZE
+                            # override.
+                            os.environ["MLA_TRANSPOSE_KV_CACHE"] = "False"
+                            os.environ["MLA_KV_PACKING_SIZE"] = "-1"
+
+                            contains_indexer_cache = any(
+                                "indexer" in layer
+                                for layer in kv_cache_tensor.shared_by)
+                            if contains_indexer_cache:
+                                # Indexer's compressor state cache kv cache must be overlay on
+                                # Indexer's compressed kv cache.
+                                #
+                                # Main attn's compressor state cache kv cache and sliding windor
+                                # cache must overlay on main attn's compressed kv cache.
+                                assert all(
+                                    "indexer" in layer
+                                    for layer in kv_cache_tensor.shared_by
+                                ), " kv_cache_tensor.shared_by: " + str(
+                                    kv_cache_tensor.shared_by)
+                                
+                            mla_spec = None
+                            for layer in kv_cache_tensor.shared_by:
+                                if isinstance(layer_name_to_spec[layer], MLAAttentionSpec):
+                                    # In DSV4, compressor-state-cache and sliding-window overlay
+                                    # on the same memory buffer as the main kv cache. 
+                                    # The created kv cache will based on the shape of the
+                                    # main kv cache's spec.
+                                    mla_spec  = layer_name_to_spec[layer]
+                                    break
+                            if mla_spec is not None:
+                                layer_spec = mla_spec
+                                block_size = layer_spec.storage_block_size
+                            if mla_spec is None:
+                                # edge case handling
+                                assert "swa_cache" in layer_name
+                                assert len(kv_cache_tensor.shared_by) == 1
+                                block_size = (kv_caches[-1].shape[1] * kv_caches[-1].shape[2])
 
                         kv_cache = create_kv_caches(
                             num_blocks=num_blocks,
-                            block_size=layer_spec.block_size,
+                            block_size=block_size,
                             num_kv_heads=layer_spec.num_kv_heads,
-                            head_size=head_size,
+                            head_size=layer_spec.head_size,
                             mesh=self.runner.mesh,
                             layer_names=[f'kv_cache_tensor.{i}'],
                             cache_dtype=t2j_dtype(layer_spec.dtype),
                             use_mla=self.use_mla,
                         )[0]
                         kv_caches.append(kv_cache)
+                        print("gxd kv_cache: ", str(kv_cache.shape) + " " + str(kv_cache.dtype))
 
                         # Update Regular Attention Metadata
                         metadata["regular_attn"].count += 1
@@ -909,6 +945,8 @@ class KVCacheManager:
                     layer_name] = self.runner.layer_name_to_kvcache_index[
                         target_layer_name]
 
+        print("gxd layer_name_to_kvcache_index: ", str(self.runner.layer_name_to_kvcache_index))
+        print("gxd kv_caches len: ", len(kv_caches))
         logger.info(
             "Hybrid KV cache layout: num_kv_cache_groups=%d, "
             "num_kv_cache_tensors=%d, kv_cache_config.num_blocks=%d, "

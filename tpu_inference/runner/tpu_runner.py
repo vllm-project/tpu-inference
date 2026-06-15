@@ -1319,6 +1319,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 lora_metadata,
             )
 
+        # DEBUG(gxd): flag NaN/Inf coming out of the model forward (set
+        # TPU_DSV4_NAN_PROBE=1). NaN on request 2+ but not request 1 confirms
+        # the stale recycled-KV-block corruption upstream of sampling.
+        # self._dsv4_nan_probe(logits, full_hidden_states)
+
         self.execute_model_state = ExecuteModelState(
             scheduler_output=scheduler_output,
             attn_metadata=attn_metadata,
@@ -2166,6 +2171,109 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens_subtract_indices, positions_subtract_indices)
         return seq_lens, positions
 
+    def _dsv4_nan_probe(self, logits, hidden_states) -> None:
+        """DEBUG: flag NaN/Inf in the post-forward logits / hidden states.
+
+        Enabled by setting env ``TPU_DSV4_NAN_PROBE=1``. Confirms the stale
+        physical-block hypothesis: request 1 reads zero-initialized KV blocks
+        (benign), but recycled blocks on later requests feed garbage into the
+        DSV4 compressor / MLA read path, where masked-but-non-finite values turn
+        into NaN (e.g. ``0 * Inf`` in ``pv = einsum(p, kv)``). NaN here ⇒ the
+        corruption is upstream in the model forward, not in sampling.
+
+        Forces a host sync (``np.asarray``), so keep it off in perf runs.
+        """
+        import os
+        if os.environ.get("TPU_DSV4_NAN_PROBE", "0") not in ("1", "true",
+                                                             "True"):
+            return
+        for name, arr in (("logits", logits), ("hidden_states", hidden_states)):
+            if arr is None:
+                continue
+            host = np.asarray(jax.device_get(arr))
+            n_nan = int(np.isnan(host).sum())
+            n_inf = int(np.isinf(host).sum())
+            if n_nan or n_inf:
+                # Per-row counts so we can tell which request(s) are corrupt;
+                # row 0 == first request in the (DP-flattened) batch.
+                bad_2d = host.reshape(host.shape[0], -1) if host.ndim > 1 \
+                    else host[:, None]
+                bad_rows = np.where(
+                    (np.isnan(bad_2d) | np.isinf(bad_2d)).any(axis=1))[0]
+                logger.error(
+                    "DSV4-NAN-PROBE %s: nan=%d inf=%d shape=%s bad_rows=%s",
+                    name, n_nan, n_inf, host.shape, bad_rows.tolist()[:32])
+            else:
+                logger.info("DSV4-NAN-PROBE %s: clean shape=%s", name,
+                            host.shape)
+
+    # The two layers whose groups we want to compare. The k-cache (main MLA)
+    # and the compressor state cache overlay the same physical buffer, so their
+    # block tables must hold disjoint live page ids.
+    _DSV4_DBG_KCACHE = "model.layers.3.attn"
+    _DSV4_DBG_STATE = "model.layers.3.attn.compressor.state_cache"
+
+    def _debug_dsv4_block_table_overlap(self, req_indices_dp,
+                                        num_req_per_dp_rank, dp_size) -> None:
+        """DEBUG: check the two specific groups for live page-id overlap.
+
+        Compares only the group containing ``model.layers.3.attn`` (k-cache)
+        with the group containing ``model.layers.3.attn.compressor.state_cache``
+        (state cache). Reads the raw per-group host block tables exactly as vLLM
+        allocated them, gathered to the same valid-request rows the device path
+        uses, per DP rank. Block 0 (null block) is ignored. An overlap here
+        proves the collision exists *before* any device transfer / sharding.
+        """
+        groups = self.kv_cache_config.kv_cache_groups
+
+        def _find_gid(layer_name):
+            for gid, g in enumerate(groups):
+                if layer_name in g.layer_names:
+                    return gid
+            return None
+
+        gid_k = _find_gid(self._DSV4_DBG_KCACHE)
+        gid_s = _find_gid(self._DSV4_DBG_STATE)
+        if gid_k is None or gid_s is None:
+            logger.warning(
+                "DSV4-DBG layer not found in any group: kcache(%s)->gid=%s "
+                "state(%s)->gid=%s", self._DSV4_DBG_KCACHE, gid_k,
+                self._DSV4_DBG_STATE, gid_s)
+            return
+        if gid_k == gid_s:
+            logger.error(
+                "DSV4-DBG kcache(%s) and state(%s) are in the SAME group "
+                "gid=%d -> they share one block table (guaranteed overlap).",
+                self._DSV4_DBG_KCACHE, self._DSV4_DBG_STATE, gid_k)
+            return
+
+        k_cpu = self.input_batch.block_table[gid_k].get_cpu_tensor()
+        s_cpu = self.input_batch.block_table[gid_s].get_cpu_tensor()
+
+        # Per DP rank (≈ per ATTN_DATA shard), mirroring the compressor guard.
+        found = False
+        for dp_rank in range(dp_size):
+            if num_req_per_dp_rank[dp_rank] == 0:
+                continue
+            rows_idx = req_indices_dp[dp_rank]
+            k_rows = k_cpu[rows_idx]
+            s_rows = s_cpu[rows_idx]
+            k_live = set(int(x) for x in np.unique(k_rows[k_rows > 0]))
+            s_live = set(int(x) for x in np.unique(s_rows[s_rows > 0]))
+            overlap = sorted(k_live & s_live)
+            if overlap:
+                found = True
+                logger.error(
+                    "DSV4-DBG RAW-CPU OVERLAP dp_rank=%d kcache(gid=%d) vs "
+                    "state(gid=%d) share live page ids %s | kcache_live=%s | "
+                    "state_live=%s", dp_rank, gid_k, gid_s, overlap[:32],
+                    sorted(k_live)[:48], s_live)
+        if not found:
+            logger.info(
+                "DSV4-DBG RAW-CPU kcache(gid=%d) and state(gid=%d) block "
+                "tables are DISJOINT for every DP rank (vLLM allocation clean; "
+                "collision must be downstream).", gid_k, gid_s)
+
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -2440,6 +2548,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             for gid, kv_cache_group in enumerate(
                     self.kv_cache_config.kv_cache_groups):
                 build_block_table_host(gid)
+            # DEBUG(gxd): bisect the DSV4 compressor block-table overlap.
+            # This inspects the *raw per-group CPU block tables* straight from
+            # vLLM's allocation (input_batch.block_table[gid]) BEFORE any device
+            # transfer / ATTN_DATA sharding / reshape. If overlapping live page
+            # ids show up here, the collision is in vLLM's per-group allocation
+            # (or how we feed request.block_ids into the MultiGroupBlockTable).
+            # If this is clean but the compressor guard still fires, the bug is
+            # downstream (device buffer pack/unpack, sharding, or the per-shard
+            # reshape in deepseek_v4_compressor._compress).
+            #self._debug_dsv4_block_table_overlap(req_indices_dp,
+            #                                      num_req_per_dp_rank, dp_size)
 
         metadata_blob, metadata_layout = self.device_buffer.build()
 

@@ -47,11 +47,23 @@ class BlockTable:
         self.block_table_cpu[row_idx, start:start + num_blocks] = block_ids
 
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
+        # Zero the whole row before (re)filling it. A persistent-batch row is
+        # reused across requests; `append_row` only writes `[:num_blocks]`, so
+        # without this a shorter new request would inherit the previous
+        # occupant's stale block ids in the tail `[num_blocks:]`. Those stale
+        # ids get copied to the device block table and, for caches that scan
+        # the full padded row (e.g. the DSV4 compressor's overlap check),
+        # collide with blocks the pool has since recycled to another group.
         self.num_blocks_per_row[row_idx] = 0
+        self.block_table_cpu[row_idx].fill(0)
         self.append_row(block_ids, row_idx)
 
     def move_row(self, src: int, tgt: int) -> None:
         num_blocks = self.num_blocks_per_row[src]
+        # Clear `tgt` first so it doesn't keep the stale tail of whatever
+        # request previously occupied that row (only `[:num_blocks]` is
+        # overwritten below). See `add_row` for why stale tails matter.
+        self.block_table_cpu[tgt].fill(0)
         self.block_table_cpu[tgt, :num_blocks] = self.block_table_cpu[
             src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
