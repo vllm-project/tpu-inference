@@ -20,6 +20,8 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
+from tpu_inference.kernels.sparse_core import core_map_helper
+
 
 def main_kernel(
     # Inputs.
@@ -426,7 +428,7 @@ def ragged_scatter(x: jax.Array, indices: jax.Array, start: jax.Array,
         core_axis_name="core",
         subcore_axis_name="subcore",
     )
-    return pl.kernel(
+    return core_map_helper.kernel(
         functools.partial(
             main_kernel,
             core_axis_name=vector_mesh.core_axis_name,
