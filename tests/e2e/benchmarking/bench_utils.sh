@@ -23,7 +23,7 @@ waitForServerReady() {
     local start_time=$(date +%s)
     echo "Waiting for server ready message: '$READY_MESSAGE'"
 
-    local fatal_error_patterns=(
+local fatal_error_patterns=(
         "RuntimeError:"
         "ValueError:"
         "FileNotFoundError:"
@@ -37,8 +37,22 @@ waitForServerReady() {
         "NVMLError:"
     )
 
+    # Add any substrings or warnings that shouldn't trigger a build failure here
+    local ignore_patterns=(
+        # This warning happens when JAX unable to read cache. If we have a GCSFuse
+        # folder to store cache, a race condition where the other build was creating
+        # the same cache enrty could produce this logs plus 
+        # "OSError: [Errno 116] Stale file handle", which contians the fatal logs ketwords. 
+        # However, this should not affect the server run as in this case, 
+        # JAX will just recompile the cache.
+        "UserWarning: Error reading persistent compilation cache entry"
+    )
+
     local error_regex
     error_regex=$(IFS=\|; echo "${fatal_error_patterns[*]}")
+
+    local ignore_regex
+    ignore_regex=$(IFS=\|; echo "${ignore_patterns[*]}")
 
     while true; do
         current_time=$(date +%s)
@@ -52,9 +66,9 @@ waitForServerReady() {
             exit 1
         fi
 
-        if grep -Eq "$error_regex" "$LOG_FILE"; then
+        # Filter out ignored patterns FIRST, then check what remains for fatals
+        if grep -Ev "$ignore_regex" "$LOG_FILE" | grep -Eq "$error_regex"; then
             echo "FATAL ERROR DETECTED: The server log contains a fatal error pattern."
-            # Call cleanup and exit (cleanup must be handled by the calling script's trap)
             exit 1
         fi
 
