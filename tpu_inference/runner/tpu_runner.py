@@ -1979,16 +1979,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         is_decode_only = (self.input_batch.request_distribution[0] ==
                           self.input_batch.num_reqs)
 
+        padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
+            self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
         if is_decode_only and self.enable_continue_decode:
-            padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
-                self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
             padded_num_scheduled_tokens_per_dp_rank = padded_num_reqs_per_dp_rank
         else:
             padded_num_scheduled_tokens_per_dp_rank = runner_utils.get_padded_token_len(
                 self.num_tokens_paddings_per_dp,
                 max_num_scheduled_tokens_across_dp)
-            padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
-                self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
 
         padded_total_num_scheduled_tokens = (
             padded_num_scheduled_tokens_per_dp_rank * dp_size)
