@@ -121,7 +121,7 @@ class UnquantizedMergedLinearMethod(UnquantizedLinearMethod):
         once every slot is filled.
         """
         shards = param.get_metadata("_merged_shards")
-        if shard_id == -1:  #TODO: Ensure this is the right logic for splitting
+        if shard_id == -1:
             # Handle consolidated weights by splitting along the output dimension (dim 0)
             start = 0
             for i, out_size in enumerate(output_sizes):
