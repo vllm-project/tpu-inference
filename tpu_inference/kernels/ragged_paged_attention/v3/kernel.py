@@ -426,7 +426,7 @@ def _ragged_paged_attention_kernel_loop(
             start_idx = jnp.maximum(start_idx, local_cache_len // bkv_sz)
         return start_idx
 
-    if cp_group_size != None:
+    if cp_group_size is not None:
         # Get cache length and new token length.
         kv_new_len = q_len
 
@@ -633,7 +633,7 @@ def _ragged_paged_attention_kernel_loop(
         _seq_q_len = _seq_q_end - _seq_q_start
         _seq_total_kv_len = kv_lens_ref[seq_idx]
 
-        if cp_group_size != None:
+        if cp_group_size is not None:
             _seq_kv_cache_len_local = get_kv_cache_len_local(seq_idx)
             _seq_kv_len_local = _seq_kv_cache_len_local + _seq_q_len
         else:
@@ -723,7 +723,7 @@ def _ragged_paged_attention_kernel_loop(
                 sem=sem,
                 wait=True,
             )
-        if cp_group_size != None:
+        if cp_group_size is not None:
             # NOTE(weiyulin): offset is global_idx of the first new kv token in this
             # bkv buffer, offset only matter when bkv_sz_frm_new > 0
             new_kv_len_start = _seq_q_len - kv_left_frm_new
@@ -739,7 +739,7 @@ def _ragged_paged_attention_kernel_loop(
                          update_sz,
                          *,
                          wait=False):
-        if cp_group_size != None:
+        if cp_group_size is not None:
             _update_kv_cache_partial(seq_idx,
                                      bkv_sem_idx,
                                      offset,
@@ -1139,7 +1139,7 @@ def _ragged_paged_attention_kernel_loop(
             next_bkv_idx = lax.select(is_last_bkv, next_bq_start_bkv_idx,
                                       next_bkv_idx)
 
-            if cp_group_size != None:
+            if cp_group_size is not None:
                 _next_seq_idx = jnp.minimum(seq_idx + 1, end_seq_idx - 1)
                 _next_seq_start_bkv_idx = get_start_bkv_idx(_next_seq_idx)
 
@@ -2200,6 +2200,11 @@ def ragged_paged_attention(
                 pltpu.HBM(shape=q.shape, dtype=q.dtype),
                 pltpu.HBM(shape=kv_cache.shape, dtype=kv_cache.dtype),
                 pltpu.HBM(shape=lse_hbm.shape, dtype=lse_hbm.dtype),
+            ] if tpu_version >= 7 else [
+                jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
+                jax.ShapeDtypeStruct(shape=kv_cache.shape,
+                                     dtype=kv_cache.dtype),
+                jax.shapeDtypeStruct(shape=lse.shape, dtype=lse_hbm.dtype)
             ],
             input_output_aliases={
                 len(scalar_prefetches): 0,  # q -> o
@@ -2209,15 +2214,22 @@ def ragged_paged_attention(
             name=scope_name,
         )
 
-        @jax.jit
-        def run(scalar_prefetches, q, kv, kv_cache, lse_hbm):
-            return kernel(
-                *scalar_prefetches,
-                pltpu.with_memory_space_constraint(q, pltpu.HBM),
-                pltpu.with_memory_space_constraint(kv, pltpu.HBM),
-                pltpu.with_memory_space_constraint(kv_cache, pltpu.HBM),
-                pltpu.with_memory_space_constraint(lse_hbm, pltpu.HBM),
-            )
+        if tpu_version >= 7:
+            # jit to color the memory since the q, kv are just preprocessed.
+            @jax.jit
+            def run(scalar_prefetches, q, kv, kv_cache, lse_hbm):
+                return kernel(
+                    *scalar_prefetches,
+                    pltpu.with_memory_space_constraint(q, pltpu.HBM),
+                    pltpu.with_memory_space_constraint(kv, pltpu.HBM),
+                    pltpu.with_memory_space_constraint(kv_cache, pltpu.HBM),
+                    pltpu.with_memory_space_constraint(lse_hbm, pltpu.HBM),
+                )
+        else:
+            # TODO(b/494285697): v6 has issues with pinning aliased memory.
+            def run(scalar_prefetches, q, kv, kv_cache, lse_hbm):
+                return kernel(*scalar_prefetches, q, kv, kv_cache, lse_hbm)
+
 
         q_out, kv_cache_out, lse_out = run(scalar_prefetches, q, kv, kv_cache,
                                            lse_hbm)
