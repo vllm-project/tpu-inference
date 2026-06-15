@@ -117,40 +117,80 @@ mkdir -p "$KERNEL_TUNING_TMP_DIR"
 
 # Try to cache the JAX compilations.
 declare -a JAX_CACHE_ARGS=()
-FUSE_MOUNT_DIR="/mnt/disks/persist/tpu_jax_cache"
+SHOULD_SYNC_BACK=0
+LOCAL_JAX_CACHE_DIR=""
+FINAL_CACHE_PATH=""
 
-# Probe JAX version from docker image (needed for both FUSE and direct GCS mode to separate namespaces)
+# Probe JAX version from docker image (needed for all cache modes to separate namespaces)
 echo "[INFO] Probing JAX version from docker image..."
 JAX_VERSION=$(docker run --rm "$FULL_IMAGE_TAG" python3 -c "import jax; print(jax.__version__)")
 echo "[INFO] Detected JAX Version: ${JAX_VERSION}"
 
-# Centralized namespace path
-CACHE_NAMESPACE="jax${JAX_VERSION}_tpu${TPU_VERSION:-tpu6e}"
+configure_jax_cache() {
+  local gcs_cache_base="gs://ullm-ci-cache/jax_cache"
+  local cache_namespace="jax${JAX_VERSION}_tpu${TPU_VERSION:-tpu6e}"
+  FINAL_CACHE_PATH="${gcs_cache_base}/${cache_namespace}"
 
-if [ "${CI_CACHE_FUSE_MOUNTED:-0}" = "1" ] && mountpoint -q "$FUSE_MOUNT_DIR"; then
-  # FUSE Mode: Use the host gcsfuse mount directly
-  FUSE_CACHE_DIR="${FUSE_MOUNT_DIR}/jax_cache/${CACHE_NAMESPACE}"
+  # If FUSE cache mount path is set:
+  if [ -n "${CI_CACHE_FUSE_MOUNT_PATH:-}" ]; then
+    if mountpoint -q "$CI_CACHE_FUSE_MOUNT_PATH"; then
+      # If provided and mounted, use the FUSE path directly
+      local fuse_cache_dir="${CI_CACHE_FUSE_MOUNT_PATH}/jax_cache/${cache_namespace}"
+      mkdir -p "$fuse_cache_dir"
+
+      echo "[INFO] Using GCS FUSE cache path: ${fuse_cache_dir}"
+      JAX_CACHE_ARGS+=(
+        -v "$CI_CACHE_FUSE_MOUNT_PATH":"$CI_CACHE_FUSE_MOUNT_PATH"
+        -e VLLM_XLA_CACHE_PATH="$fuse_cache_dir"
+        -e JAX_COMPILATION_CACHE_DIR="$fuse_cache_dir"
+      )
+    else
+      # If provided but not actually mounted, use direct GCS path as fallback
+      echo "[INFO] CI_CACHE_FUSE_MOUNT_PATH is set but not mounted. Falling back to direct GCS JAX cache path: ${FINAL_CACHE_PATH}"
+      JAX_CACHE_ARGS+=(
+        -e VLLM_XLA_CACHE_PATH="${FINAL_CACHE_PATH}"
+        -e JAX_COMPILATION_CACHE_DIR="${FINAL_CACHE_PATH}"
+      )
+    fi
+    return 0
+  fi
+
+  # If FUSE is not provided, check if the default local path is a mount point
+  local default_local_jax_cache_dir="/mnt/disks/persist/tpu_jax_cache"
   
-  # Ensure the subdirectory exists in GCS (FUSE creates folders dynamically)
-  mkdir -p "$FUSE_CACHE_DIR"
+  if [ -d "$default_local_jax_cache_dir" ] && mountpoint -q "$default_local_jax_cache_dir"; then
+    # If the default local path itself is a mount point (e.g. mounted to GCS via FUSE externally),
+    # running gsutil rsync would trigger slow and redundant GCS-to-GCS transfers. 
+    # Fall back to cold start (no cache env vars configured).
+    echo "[INFO] Default local JAX cache dir ${default_local_jax_cache_dir} is a mountpoint. Falling back to cold start (no cache)."
+    return 0
+  fi
 
-  echo "[INFO] Using GCS FUSE cache path: ${FUSE_CACHE_DIR}"
-  JAX_CACHE_ARGS+=(
-    -v "$FUSE_MOUNT_DIR":"$FUSE_MOUNT_DIR"
-    -e VLLM_XLA_CACHE_PATH="$FUSE_CACHE_DIR"
-    -e JAX_COMPILATION_CACHE_DIR="$FUSE_CACHE_DIR"
-  )
-else
-  # Direct GCS Mode: Write directly to GCS via gs:// bucket paths
-  GCS_CACHE_BASE="gs://ullm-ci-cache/jax_cache"
-  FINAL_CACHE_PATH="${GCS_CACHE_BASE}/${CACHE_NAMESPACE}"
+  # If default local path is not a mount point, do local disk rsync
+  local target_local_dir="${default_local_jax_cache_dir}/${cache_namespace}"
+  
+  if ! mkdir -p "$target_local_dir"; then
+    echo "[WARN] Failed to create local cache dir $target_local_dir on persistent disk. Falling back to cold start (no cache)."
+    return 0
+  fi
 
-  echo "[INFO] Direct GCS JAX cache path configured: ${FINAL_CACHE_PATH}"
+  echo "[INFO] Pulling JAX Cache from GCS to local directory..."
+  if ! gsutil -m rsync -d -r "$FINAL_CACHE_PATH" "$target_local_dir"; then
+    echo "[WARN] Failed to pull JAX Cache from GCS. Falling back to cold start (no cache)."
+    return 0
+  fi
+
+  LOCAL_JAX_CACHE_DIR="$target_local_dir"
+  echo "[INFO] Using local JAX cache directory with rsync: ${LOCAL_JAX_CACHE_DIR}"
   JAX_CACHE_ARGS+=(
-    -e VLLM_XLA_CACHE_PATH="${FINAL_CACHE_PATH}"
-    -e JAX_COMPILATION_CACHE_DIR="${FINAL_CACHE_PATH}"
+    -v "$LOCAL_JAX_CACHE_DIR":"$LOCAL_JAX_CACHE_DIR"
+    -e VLLM_XLA_CACHE_PATH="$LOCAL_JAX_CACHE_DIR"
+    -e JAX_COMPILATION_CACHE_DIR="$LOCAL_JAX_CACHE_DIR"
   )
-fi
+  SHOULD_SYNC_BACK=1
+}
+
+configure_jax_cache
 
 # ==========================================
 # 2. Run Docker Container
@@ -208,5 +248,10 @@ set -e
 # 3. Post-Docker Actions
 # ==========================================
 echo "[INFO] Docker finished with exit code ${DOCKER_EXIT_CODE}."
+
+if [ "${SHOULD_SYNC_BACK:-0}" = "1" ] && [ -n "${LOCAL_JAX_CACHE_DIR:-}" ]; then
+  echo "[INFO] Syncing local JAX Cache back to GCS..."
+  gsutil -m rsync -r "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" || echo "[WARN] Failed to sync JAX Cache back to GCS."
+fi
 
 exit $DOCKER_EXIT_CODE
