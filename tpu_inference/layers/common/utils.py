@@ -178,24 +178,3 @@ def cpu_mesh() -> Mesh:
 def cpu_mesh_context():
     """A context to enforce using CPU mesh, used for loading weights on CPU."""
     return jax.set_mesh(cpu_mesh())
-
-
-def slice_sharded_tensor_for_causal_lm(
-    outs: jax.Array,
-    q_size: int,
-    k_size: int,
-    v_size: int,
-    tp_size: int,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Direct, zero-copy SRAM slicing for JAX-native models. Bypasses flat layout constraints."""
-    new_shape = outs.shape[:-1] + (tp_size, -1)
-    sharded_outs = outs.reshape(new_shape)
-
-    q_sz = q_size // tp_size
-    k_sz = k_size // tp_size
-
-    outs_q = sharded_outs[..., :q_sz]
-    outs_k = sharded_outs[..., q_sz:q_sz + k_sz]
-    outs_v = sharded_outs[..., q_sz + k_sz:]
-
-    return outs_q, outs_k, outs_v
