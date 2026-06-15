@@ -23,7 +23,8 @@ from jax.sharding import PartitionSpec as P
 import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives import \
     hierarchical_reduce_scatter as hier_rs
-from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
+from tokamax._src.ops.ragged_dot.pallas_mosaic_tpu_v2 import \
+    PallasMosaicTpuV2RaggedDot
 from tpu_inference.kernels.sparse_core.ragged_gather import \
     ragged_gather as ragged_gather_v1
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce import \
@@ -126,15 +127,16 @@ def gmm_wrapper(lhs,
                 group_offset,
                 fuse_act=None,
                 preferred_element_type=None):
-    gmm_res = gmm_v2(
-        lhs=lhs,
-        rhs=rhs,
+    gmm_res = PallasMosaicTpuV2RaggedDot()(
+        lhs,
+        rhs,
+        group_sizes=group_sizes,
         rhs_scale=rhs_scale,
         rhs_bias=rhs_bias,
-        group_sizes=group_sizes,
         group_offset=group_offset[0],
         zero_initialize=False,
-        fuse_act=fuse_act,
+        fuse_gateup_activation=fuse_act,
+        maybe_quantize_lhs=True,
         preferred_element_type=preferred_element_type,
     )
     return gmm_res

@@ -25,3 +25,4 @@ hypothesis==6.151.9
 sortedcontainers==2.4.0
 # Upstream pins to 5.5.3 https://github.com/vllm-project/vllm/blob/de3fe8dc62f3d77eb8dab8125ca90436f606bccb/requirements/test/nightly-torch.txt#L32
 transformers>=5.8.0
+tokamax @ git+https://github.com/openxla/tokamax.git@df4f506d7e6936fae4c5fd29256ccf6f52288965

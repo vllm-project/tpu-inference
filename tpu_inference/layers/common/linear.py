@@ -17,7 +17,8 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
+from tokamax._src.ops.ragged_dot.pallas_mosaic_tpu_v2 import \
+    PallasMosaicTpuV2RaggedDot
 from tpu_inference.kernels.quantized_matmul.util import (
     quantize_tensor, xla_quantized_batched_matmul)
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -164,9 +165,9 @@ def sharded_quantized_matmul(x: jax.Array,
 
     def wrapper(x, w_q, w_s):
         if enable_quantized_matmul_kernel:
-            output = gmm_v2(
-                lhs=x,
-                rhs=jnp.expand_dims(w_q, 0),
+            output = PallasMosaicTpuV2RaggedDot()(
+                x,
+                jnp.expand_dims(w_q, 0),
                 group_sizes=jnp.array([x.shape[0]], dtype=jnp.int32),
                 rhs_scale=w_s if w_s.ndim == 4 else jnp.expand_dims(w_s, 0),
                 rhs_bias=None,
