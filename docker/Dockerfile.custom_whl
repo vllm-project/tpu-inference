@@ -93,6 +93,9 @@ RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then
     
 COPY . .
 
+# Skip vllm version checking
+RUN sed -i 's/version("vllm")/"0.22.0"/g' /usr/local/lib/python3.12/site-packages/lm_eval/models/vllm_causallms.py
+
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
