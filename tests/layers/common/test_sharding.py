@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# isort: skip_file
 import unittest
 from unittest.mock import MagicMock, patch
 
-from tpu_inference.layers.common.sharding import (LazyShardingAxisName,
-                                                  ShardingAxisName2D,
-                                                  ShardingAxisNameBase,
-                                                  ShardingConfigManager)
+from tpu_inference.layers.common.sharding import (
+    LazyShardingAxisName, ShardingAxisName, ShardingAxisName2D,
+    ShardingAxisNameBase, ShardingConfigManager, ShardingStrategy)
 
 
 class TestShardingConfigManager(unittest.TestCase):
@@ -364,6 +364,66 @@ class TestLazyShardingAxisName(unittest.TestCase):
                    False):
             _ = lazy.SEQUENCE  # initialized here, after env changed
             self.assertIs(lazy._cls, ShardingAxisNameBase)
+
+
+class TestApplyVisionSharding(unittest.TestCase):
+
+    def setUp(self):
+        ShardingAxisName.reset()
+        ShardingAxisName._cls = None
+
+    def tearDown(self):
+        ShardingAxisName.reset()
+        ShardingAxisName._cls = None
+
+    @patch("tpu_inference.layers.common.sharding.envs.USE_2D_TP", False)
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", False)
+    def test_data_mode_tp_gt1_2d_sharding(self):
+        manager = ShardingConfigManager(
+            ShardingStrategy(tensor_parallelism=4),
+            mm_encoder_tp_mode="data",
+        )
+        manager.apply_vision_sharding()
+        self.assertEqual(ShardingAxisName.VIT_BATCH, ('data', 'model'))
+        self.assertIsNone(ShardingAxisName.VIT_MODEL)
+
+    @patch("tpu_inference.layers.common.sharding.envs.USE_2D_TP", True)
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", False)
+    def test_data_mode_tp_gt1_base_sharding(self):
+        manager = ShardingConfigManager(
+            ShardingStrategy(tensor_parallelism=4),
+            mm_encoder_tp_mode="data",
+        )
+        manager.apply_vision_sharding()
+        self.assertEqual(ShardingAxisName.VIT_BATCH,
+                         ('data', 'attn_dp', 'attn_dp_expert', 'model'))
+        self.assertIsNone(ShardingAxisName.VIT_MODEL)
+
+    @patch("tpu_inference.layers.common.sharding.envs.USE_2D_TP", False)
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", False)
+    def test_weights_mode_does_not_override_axes(self):
+        manager = ShardingConfigManager(
+            ShardingStrategy(tensor_parallelism=4),
+            mm_encoder_tp_mode="weights",
+        )
+        manager.apply_vision_sharding()
+        self.assertEqual(ShardingAxisName.VIT_BATCH,
+                         ShardingAxisName2D.VIT_BATCH)
+        self.assertEqual(ShardingAxisName.VIT_MODEL,
+                         ShardingAxisName2D.VIT_MODEL)
+
+    @patch("tpu_inference.layers.common.sharding.envs.USE_2D_TP", False)
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", False)
+    def test_data_mode_tp1_does_not_override_axes(self):
+        manager = ShardingConfigManager(
+            ShardingStrategy(tensor_parallelism=1),
+            mm_encoder_tp_mode="data",
+        )
+        manager.apply_vision_sharding()
+        self.assertEqual(ShardingAxisName.VIT_BATCH,
+                         ShardingAxisName2D.VIT_BATCH)
+        self.assertEqual(ShardingAxisName.VIT_MODEL,
+                         ShardingAxisName2D.VIT_MODEL)
 
 
 if __name__ == "__main__":

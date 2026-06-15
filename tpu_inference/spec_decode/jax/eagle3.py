@@ -66,6 +66,8 @@ class Eagle3Proposer:
         self.rng_key = jax.random.key(self.vllm_config.model_config.seed)
         self.max_num_tokens = runner.max_num_tokens
         self.token_arange = jnp.arange(self.max_num_tokens)
+        self.constant_draft_positions = self.speculative_config.use_gemma4_mtp(
+        )
 
     def load_model(self, target_model: Any) -> None:
         """Loads the draft model."""
@@ -144,6 +146,11 @@ class Eagle3Proposer:
                 if not jnp.any(draft_embed_param.value):
                     logger.info(
                         "Draft model does not have embedding. Setting draft model's embed_tokens to target model's embed"
+                    )
+                    draft_embed_param.value = target_embed_param.value
+                elif self.speculative_config.use_gemma4_mtp():
+                    logger.info(
+                        "Setting draft model's embed_tokens to target model's embed unconditionally (Gemma4-MTP/KV-sharing layout)"
                     )
                     draft_embed_param.value = target_embed_param.value
                 elif jnp.array_equal(draft_embed_param.value,
@@ -257,6 +264,21 @@ class Eagle3Proposer:
                         data_spec),
          )(positions, seq_lens, block_tables)
         return positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables
+
+    def _get_loop_query_start_loc(self, positions: jax.Array) -> jax.Array:
+        """JIT-compiled helper for generating query_start_loc inside speculation loop."""
+
+        def _sharded_get(positions):
+            num_reqs = positions.shape[0]
+            return jnp.arange(num_reqs + 1)
+
+        data_spec = PartitionSpec(ShardingAxisName.ATTN_DATA)
+        return jax.shard_map(
+            _sharded_get,
+            mesh=self.mesh,
+            in_specs=(data_spec, ),
+            out_specs=data_spec,
+        )(positions)
 
     def _stack_draft_token_ids(
             self, draft_token_ids_list: list[jax.Array]) -> jnp.ndarray:
@@ -400,6 +422,7 @@ class Eagle3Proposer:
             # Offsets within each request window: [0,1,2, 0,1,2,3, ...]
             token_offsets = jnp.arange(total_num_tokens, dtype=np.int32)
             token_offsets -= expanded_new_query_start_loc
+
             # Map into old flat indices by adding original request starts.
             old_query_start_loc_expanded = jnp.repeat(
                 query_start_loc[:-1],
@@ -529,9 +552,12 @@ class Eagle3Proposer:
                 #    whereas Eagle uses intermediate residuals.
                 # 2. M-RoPE positions are 2D (3, total_tokens), requiring specific dim-1 slicing
                 #    which _select_inputs_for_loop_speculation does not support.
-                positions = positions[:, last_token_indices]
-                hidden_states = hidden_states[last_token_indices]
-                return positions, hidden_states
+                if positions.ndim == 2:
+                    positions = positions[:, last_token_indices]
+                else:
+                    positions = positions[last_token_indices]
+                residual = residual[last_token_indices]
+                return positions, residual
 
             positions = positions[last_token_indices]
             residual = residual[last_token_indices]
@@ -625,8 +651,17 @@ class Eagle3Proposer:
         for i in range(num_speculative_tokens - 1):
             input_ids_loop = draft_token_ids_list[-1]
 
-            positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables = self._update_inputs_for_loop_speculation(
-                positions, attn_metadata.seq_lens, attn_metadata.block_tables)
+            if self.constant_draft_positions:
+                # For Gemma4-MTP sharing verifier caches: positions, sequence lengths, and block tables remain constant.
+                clamped_positions = positions
+                new_seq_lens = attn_metadata.seq_lens
+                query_start_loc = self._get_loop_query_start_loc(positions)
+                new_block_tables = attn_metadata.block_tables
+            else:
+                # Eagle3: advance positions sequentially
+                positions, clamped_positions, new_seq_lens, query_start_loc, new_block_tables = self._update_inputs_for_loop_speculation(
+                    positions, attn_metadata.seq_lens,
+                    attn_metadata.block_tables)
 
             attn_metadata = replace(
                 attn_metadata,
@@ -644,8 +679,7 @@ class Eagle3Proposer:
                 layer_name_to_kvcache_index,
                 spec_step_idx=i + 1,
             )
-            hidden_states = new_hidden_states if self.method == "mtp" else residual[
-                0]
+            hidden_states = residual[0]
             draft_token_ids = self._get_draft_token_ids(
                 state_leaves, new_hidden_states)
             draft_token_ids_list.append(draft_token_ids)

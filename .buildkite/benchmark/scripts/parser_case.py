@@ -127,32 +127,26 @@ def main():
         print(f"echo 'Error reading JSON: {e}' >&2; exit 1")
         sys.exit(1)
 
-    is_multi_case = "benchmark_cases" in data
-
     # Resolve target case data
-    if is_multi_case:
-        if not target_case:
-            print(
-                "echo 'Error: TARGET_CASE_NAME required for multi-case config.' >&2; exit 1"
-            )
-            sys.exit(1)
+    if not target_case:
+        print(
+            "echo 'Error: TARGET_CASE_NAME required.' >&2; exit 1"
+        )
+        sys.exit(1)
 
-        cases = data.get("benchmark_cases", [])
-        case_data = next(
-            (c for c in cases if c.get("case_name") == target_case), None)
-        if not case_data:
-            print(
-                f"echo 'Error: Case \"{target_case}\" not found.' >&2; exit 1")
-            sys.exit(1)
+    cases = data.get("benchmark_cases", [])
+    case_data = next(
+        (c for c in cases if c.get("case_name") == target_case), None)
+    if not case_data:
+        print(
+            f"echo 'Error: Case \"{target_case}\" not found in \"{config_file}\".' >&2; exit 1")
+        sys.exit(1)
 
-        merged_env = data.get("global_env", {}).copy()
-        merged_env.update(case_data.get("env", {}))
+    merged_env = data.get("global_env", {}).copy()
+    merged_env.update(case_data.get("env", {}))
 
-        # Inject global_env into case_data so it will be included in the DB `Config`
-        case_data["global_env"] = data.get("global_env", {})
-    else:
-        case_data = data
-        merged_env = case_data.get("env", {})
+    # Inject global_env into case_data so it will be included in the DB `Config`
+    case_data["global_env"] = data.get("global_env", {})
 
     config_json_str = json.dumps(case_data)
     print(f"export CASE_CONFIG_JSON={shlex.quote(config_json_str)}")
@@ -165,7 +159,8 @@ def main():
     cli_opts = case_data.get("client_command_options", {})
 
     # Export specific environment for insert to db
-    export_env_if_valid(cli_opts, "dataset-name", "DATASET")
+    if "DATASET" not in merged_env:
+        export_env_if_valid(cli_opts, "dataset-name", "DATASET")
     export_env_if_valid(cli_opts, "num-prompts", "NUM_PROMPTS")
     export_env_if_valid(srv_opts, "additional-config", "ADDITIONAL_CONFIG")
     model = srv_opts.get("args", {}).get("model")
