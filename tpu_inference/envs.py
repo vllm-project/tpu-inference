@@ -74,6 +74,8 @@ if TYPE_CHECKING:
     PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
+    TPU_MESH_SORT_BY_COORDS: bool = False
+
 
 
 def env_with_choices(
@@ -427,6 +429,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES", "auto"),
     "MLA_TRANSPOSE_KV_CACHE":
     env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
+    # Sort devices by coords and core_on_chip when constructing single slice mesh
+    "TPU_MESH_SORT_BY_COORDS":
+    env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
 }
 
 

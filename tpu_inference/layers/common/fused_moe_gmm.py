@@ -322,42 +322,27 @@ def moe_gmm_local(x: jax.Array,
             cur_masked = jnp.where(cur_mask, cur_weighted, 0.0)
             chunk_hidden = cur_masked.sum(axis=-2)
 
-        if enable_rs_kernel:
-            # Fallback to psum-scatter for small token sizes to avoid Mosaic compilation.
-            # The threshold is chosen based on the tile dimension (8) in the
-            # hierarchical reduce-scatter kernel.
-            if chunk_hidden.shape[0] // scatter_axis_size < 8:
-                out = jax.lax.psum_scatter(chunk_hidden,
-                                           axis_name=reduction_axis,
-                                           scatter_dimension=0,
-                                           tiled=True).astype(x.dtype)
-            else:
-                # Determine the number of micro-batches
-                # Use 4 for large inputs to improve efficiency by maximizing the number of
-                # concurrent reduction streams, and 2 for smaller inputs to fit in ~32MB VMEM
-                num_mb = 2
-                if chunk_hidden.shape[0] // scatter_axis_size > 600:
-                    num_mb = 4
-                rs_out = hier_rs.hierarchical_reduce_scatter_local(
-                    chunk_hidden,
-                    num_devices=scatter_axis_size,
-                    num_micro_batches=num_mb,
-                    axis_name=reduction_axis)
-                out = rs_out.astype(x.dtype)
-        elif scatter_results:
-            if reduce_axes:
-                chunk_hidden = jax.lax.psum(chunk_hidden,
-                                            axis_name=reduce_axes)
-            if scatter_axes:
-                out = jax.lax.psum_scatter(chunk_hidden,
-                                           axis_name=scatter_axes,
-                                           scatter_dimension=0,
-                                           tiled=True).astype(x.dtype)
-            else:
-                out = chunk_hidden.astype(x.dtype)
+    # Then global reduction on all ranks for all tokens and all experts
+    if enable_rs_kernel:
+        reduction_axes = reduction_axis if isinstance(
+            reduction_axis, tuple) else (reduction_axis, )
+        num_devices = 1
+        for axis in reduction_axes:
+            num_devices *= jax.lax.axis_size(axis)
+        out = hier_rs.hierarchical_reduce_scatter_local(
+            out,
+            num_devices=num_devices,
+            axis_name=reduction_axis).astype(x.dtype)
+    elif scatter_results:
+        dp_axes = ShardingAxisName.ATTN_DATA
+        if isinstance(reduction_axis, tuple):
+            reduce_axes = tuple(a for a in reduction_axis if a not in dp_axes)
+            scatter_axes = tuple(a for a in reduction_axis if a in dp_axes)
         else:
-            out = jax.lax.psum(chunk_hidden,
-                               axis_name=reduction_axis).astype(x.dtype)
+            reduce_axes = () if reduction_axis in dp_axes else (
+                reduction_axis, )
+            scatter_axes = (
+                reduction_axis, ) if reduction_axis in dp_axes else ()
 
         out_list.append(out)
 
