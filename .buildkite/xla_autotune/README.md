@@ -12,7 +12,7 @@ benchmark it with `benchmark_serving`, record the target metric (default
 ├── autotuner.py             OFAT driver
 ├── vllm_test_framework.py   vllm serve + benchmark_serving runner + MODELS registry
 ├── flags.txt                Candidate flags, one per line
-├── pipeline.yml             Buildkite pipeline definition (4-shard matrix)
+├── pipeline.yml             Buildkite pipeline definition (matrix-sharded)
 └── README.md
 ```
 
@@ -28,6 +28,9 @@ shard: starts the watcher that ships results to Buildkite as they land,
 For a flag list of length `F` over `N` shards:
 
 * Shard `k` (1-based) processes `flags[(k-1) * ceil(F/N) : k * ceil(F/N)]`.
+* To run `N` shards, list `N` entries in `matrix` and set
+  `AUTOTUNE_TOTAL_SHARDS` to the same `N` in `pipeline.yml` (single source of
+  truth — the shard script reads it; `matrix` is the only list to grow).
 * Every shard also runs `AUTOTUNE_BASELINE_RUNS` baselines (no extra
   `LIBTPU_INIT_ARGS`) so the per-VM noise floor can be re-estimated.
 * Per `(input_len, output_len)` shape, every trial runs `warmup_runs`
@@ -69,6 +72,8 @@ Add any of the `AUTOTUNE_*` knobs below to the same `env` block.
 | `AUTOTUNE_SKIP_CANDIDATES` | `0`                                | Drop the first N candidates from this shard (resume).  Baselines always re-run. |
 | `AUTOTUNE_CONFIG`        | _(unset)_                            | Optional JSON of `VLLMTestParam` field overrides.                |
 | `AUTOTUNE_DRY_RUN`       | _(unset)_                            | If set, passes `--dry-run` (no `vllm serve` or benchmark).       |
+| `AUTOTUNE_TOTAL_SHARDS`  | `1`                                  | Shard count; keep equal to the `matrix` length in `pipeline.yml`. |
+| `AUTOTUNE_SERVER_STARTUP_TIMEOUT_S` | `7200`                    | Max wait for `vllm serve` to open its port before failing the trial (generous: a new flag set cold-compiles). |
 
 ### Resuming after a cancelled build
 

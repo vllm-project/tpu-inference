@@ -15,14 +15,16 @@
 #
 # Run one shard of the XLA autotune sweep.
 #
-# Args (positional):   <slice_index> <slice_count>     1-based
+# Args:   <slice_index>        1-based; the shard this job runs.
+# Shard count comes from AUTOTUNE_TOTAL_SHARDS (single source of truth, kept
+# next to `matrix` in pipeline.yml); an optional 2nd positional arg overrides it.
 # Env (all optional):  AUTOTUNE_{MODEL,TARGET_METRIC,BASELINE_RUNS,FLAGS,
 #                                SKIP_CANDIDATES,CONFIG,DRY_RUN}    see README
 
 set -euo pipefail
 
-SLICE_INDEX="${1:?usage: $0 <slice_index> <slice_count>}"
-SLICE_COUNT="${2:?usage: $0 <slice_index> <slice_count>}"
+SLICE_INDEX="${1:?usage: $0 <slice_index> [slice_count]}"
+SLICE_COUNT="${2:-${AUTOTUNE_TOTAL_SHARDS:-1}}"
 
 MODEL="${AUTOTUNE_MODEL:-Qwen/Qwen3.5-397B-A17B-FP8}"
 METRIC="${AUTOTUNE_TARGET_METRIC:-total_token_throughput}"
@@ -77,9 +79,13 @@ set +e
   set -euo pipefail
   cd /workspace/tpu_inference
   # Shared benchmark_serving harness — same source as tests/e2e/benchmarking.
+  # Pinned so the benchmark semantics can't silently change between builds and
+  # invalidate the OFAT comparison; bump deliberately when the harness changes.
+  BENCH_SERVING_SHA=ee867231de0b268e2810a6e31751b23cf5903fc5
   if [ ! -e bench_serving ]; then
     git clone https://github.com/kimbochen/bench_serving.git
   fi
+  git -C bench_serving checkout --quiet \"\${BENCH_SERVING_SHA}\"
   echo \"bench_serving commit: \$(git -C bench_serving rev-parse HEAD)\"
   python3 .buildkite/xla_autotune/autotuner.py \
     --flag-list-file '${FLAGS}' \

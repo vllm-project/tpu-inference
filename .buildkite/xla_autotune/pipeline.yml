@@ -17,8 +17,8 @@
 # The autotuner slices the candidate-flag list into contiguous chunks, one
 # per shard, and every shard additionally runs AUTOTUNE_BASELINE_RUNS
 # baselines so per-VM noise can be characterised.  To parallelise across N
-# shards, list N entries in `matrix` and pass N as the slice-count arg —
-# both must agree (e.g. matrix ["1","2","3","4"] with "{{matrix}} 4").
+# shards, list N entries in `matrix` and set AUTOTUNE_TOTAL_SHARDS to the same
+# N (e.g. matrix ["1","2","3","4"] with AUTOTUNE_TOTAL_SHARDS "4").
 #
 # See .buildkite/xla_autotune/README.md for trigger instructions.
 
@@ -32,7 +32,7 @@ steps:
     commands:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
-  - label: "tpu7x [xla-autotune] shard {{matrix}}/1"
+  - label: "tpu7x [xla-autotune] shard {{matrix}}"
     key: tpu7x_xla_autotune
     depends_on: tpu7x_build_docker
     env:
@@ -42,8 +42,11 @@ steps:
       AUTOTUNE_TARGET_METRIC: "total_token_throughput"
       AUTOTUNE_BASELINE_RUNS: "2"
       AUTOTUNE_FLAGS: ".buildkite/xla_autotune/flags.txt"
+      # Shard count: keep this in sync with the length of `matrix` below.
+      # The shard script reads it, so it is the only number to change.
+      AUTOTUNE_TOTAL_SHARDS: "1"
     matrix: ["1"]
     agents:
       queue: tpu_v7x_8_queue
     commands:
-      - .buildkite/scripts/run_xla_autotune_shard.sh {{matrix}} 1
+      - .buildkite/scripts/run_xla_autotune_shard.sh {{matrix}}

@@ -29,6 +29,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+# Upper bound on how long `vllm serve` may take to open its port.  This only
+# guards against a genuine hang (process alive but never serving); a new flag
+# set cold-compiles the full graph on first run, which on the 397B model can
+# take well over an hour, so the bound is deliberately generous and overridable.
+_STARTUP_TIMEOUT_S = int(
+    os.environ.get("AUTOTUNE_SERVER_STARTUP_TIMEOUT_S", "7200"))
+
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -137,16 +144,23 @@ class VLLMTestFramework:
         self.exp_dir = os.path.join(base, folder)
         os.makedirs(self.exp_dir, exist_ok=True)
 
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s %(levelname)s %(message)s",
-            handlers=[
+        # A per-trial logger with its own handlers.  `basicConfig` is a no-op
+        # once the root logger has handlers, so a shared logger would route
+        # every trial's output to the first trial's file; key the logger on the
+        # trial tag and attach fresh handlers instead.
+        self.log = logging.getLogger(f"{__name__}.{param.tag or id(self)}")
+        self.log.setLevel(logging.INFO)
+        self.log.propagate = False
+        for handler in list(self.log.handlers):
+            self.log.removeHandler(handler)
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        for handler in (
                 logging.FileHandler(
                     os.path.join(self.exp_dir, "framework_main.log")),
                 logging.StreamHandler(),
-            ],
-        )
-        self.log = logging.getLogger(__name__)
+        ):
+            handler.setFormatter(fmt)
+            self.log.addHandler(handler)
         self.log.info("Experiment dir: %s", self.exp_dir)
 
     def run_benchmark(self) -> TrialResult:
@@ -230,6 +244,10 @@ class VLLMTestFramework:
                 raise RuntimeError(
                     f"vllm serve exited during startup (rc={self._server.poll()})"
                 )
+            if time.time() - t0 > _STARTUP_TIMEOUT_S:
+                raise RuntimeError(
+                    f"vllm serve did not open port {self.param.port} within "
+                    f"{_STARTUP_TIMEOUT_S}s")
             try:
                 with socket.create_connection(("127.0.0.1", self.param.port),
                                               timeout=1):
@@ -284,7 +302,12 @@ class VLLMTestFramework:
 
                 cmd = ["python3", self.param.benchmark_script_path]
                 for k, v in self.param.benchmark_args.items():
-                    cmd.append(k if isinstance(v, bool) and v else f"{k}={v}")
+                    if isinstance(v, bool):
+                        if v:
+                            cmd.append(k)  # store_true flag, e.g. --ignore-eos
+                        # False → omit; passing --flag=False errors store_true
+                    else:
+                        cmd.append(f"{k}={v}")
                 cmd.extend([
                     f"--random-input-len={input_len}",
                     f"--random-output-len={output_len}",
