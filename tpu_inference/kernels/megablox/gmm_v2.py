@@ -399,26 +399,21 @@ def inner_kernel(
             tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(acc_ref.dtype)
             num_blocks = cfgs.num_quant_blocks_per_tile_k
 
-            # Pad tiled_rhs along K dimension if tile_k is not a multiple of quant_block_size,
-            # to avoid shape mismatch during reshape. For example, if tile_k = 256
-            # and quant_block_size = 160 (num_blocks = 2), pad 64 rows to reach 320.
-            pad_len = num_blocks * rhs_qbs - cfgs.tiles.tile_k
-            if pad_len > 0:
-                zeros = jnp.zeros((pad_len, rhs_tile_n), dtype=tiled_rhs.dtype)
-                padded_rhs = jnp.concatenate([tiled_rhs, zeros], axis=0)
-            else:
-                padded_rhs = tiled_rhs
+            # Squeeze out the middle singleton dimension (axis 1) from the BlockSpec layout
+            # so that tiled_rhs_scale becomes a clean 2D matrix
+            if tiled_rhs_scale.ndim == 3:
+                tiled_rhs_scale = jnp.squeeze(tiled_rhs_scale, axis=1)
 
-            tiled_rhs_dequant = padded_rhs.astype(acc_ref.dtype).reshape(
-                num_blocks, rhs_qbs, rhs_tile_n)
-            tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
+            # Determine the exact safe upper bound for the K dimension
+            k_bound = min(num_blocks * rhs_qbs, cfgs.tiles.tile_k)
 
-            # Flatten the block-dequantized weights back to 2D and slice off
-            # the zero-padding rows to restore the original tile_k dimension
-            # (e.g., flatten 320 rows back to 2D and slice [:256, :] to trim 64 rows).
-            tiled_rhs = tiled_rhs_dequant.reshape(-1, rhs_tile_n)
-            if pad_len > 0:
-                tiled_rhs = tiled_rhs[:cfgs.tiles.tile_k, :]
+            # Stretch the small scale matrix along the K axis to match the blocks,
+            # then slice it to match the weight matrix tile size exactly.
+            expanded_scale = jnp.repeat(tiled_rhs_scale, rhs_qbs,
+                                        axis=0)[:k_bound, :]
+
+            # Dequantize directly—no padding, no weight reshaping, zero VMEM allocation overhead
+            tiled_rhs = tiled_rhs.astype(acc_ref.dtype) * expanded_scale
             rhs_step_k = cfgs.tiles.tile_k
         else:
             rhs_step_k = rhs_qbs

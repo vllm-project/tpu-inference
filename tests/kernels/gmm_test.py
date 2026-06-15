@@ -767,7 +767,6 @@ class GmmTest(jtu.JaxTestCase):
         tile_info = TileSizes(tile_m=128, tile_k=tile_k, tile_n=out_size)
 
         # Trace the kernel using jax.make_jaxpr to verify it compiles/traces without shape mismatch.
-        # This is safe to run on any backend (CPU/GPU/TPU) because it doesn't execute or lower.
         try:
             jax.make_jaxpr(lambda lhs_in, rhs_in, gs_in, rs_in, go_in: gmm_v2(
                 lhs_in,
