@@ -74,8 +74,7 @@ class BlockSizes:
         )
 
 
-@functools.partial(
-    jax.jit,
+@jax.jit(
     static_argnames=(
         "causal",
         "sm_scale",
