@@ -40,8 +40,8 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import (DraftTokenIds, LogprobsLists, ModelRunnerOutput,
-                             RoutedExpertsLists)
+from vllm.v1.outputs import (DraftTokenIds, KVConnectorOutput, LogprobsLists,
+                             ModelRunnerOutput, RoutedExpertsLists)
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -145,6 +145,9 @@ def _scheduler_worker_process(
 ):
     """Worker process that manages a single scheduler instance."""
     # Initialize the scheduler in this process
+    vllm_config = copy.deepcopy(vllm_config)
+    vllm_config.parallel_config.data_parallel_rank = rank
+    logger.info(f"[multihost-dp-debug] _scheduler_worker_process: initialized worker configuration with parallel_config.data_parallel_rank={rank}")
     import inspect
     sig = inspect.signature(original_scheduler_cls)
     scheduler_kwargs = {
@@ -394,6 +397,15 @@ class DPScheduler(SchedulerInterface):
         self.hash_block_size = hash_block_size if hash_block_size is not None else block_size
         self.log_stats = log_stats
         self.connector = None
+        if self.vllm_config.kv_transfer_config is not None:
+            from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+            from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+            self.connector = KVConnectorFactory.create_connector(
+                config=self.vllm_config,
+                role=KVConnectorRole.SCHEDULER,
+                kv_cache_config=kv_cache_config,
+            )
+            logger.info(f"[multihost-dp-debug] DPScheduler: created SCHEDULER connector on DP rank={self.vllm_config.parallel_config.data_parallel_rank}")
         self.structured_output_manager = structured_output_manager
 
         # DP state
@@ -876,6 +888,9 @@ class DPScheduler(SchedulerInterface):
         for rank, output in enumerate(rank_outputs):
             req_ids_per_rank[rank] = list(output.num_scheduled_tokens.keys())
 
+        combined_kv_connector_metadata = self._combine_kv_connector_metadata(
+            rank_outputs)
+
         return DPSchedulerOutput(
             scheduled_new_reqs=all_new_reqs,
             scheduled_cached_reqs=combined_cached_data,
@@ -889,7 +904,70 @@ class DPScheduler(SchedulerInterface):
             assigned_dp_rank=assigned_dp_rank,
             max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
             req_ids_per_rank=req_ids_per_rank,
+            kv_connector_metadata=combined_kv_connector_metadata,
         )
+
+    def _combine_kv_connector_metadata(
+            self, rank_outputs: List[SchedulerOutput]) -> Any:
+        """Combine KV connector metadata from all DP rank schedulers."""
+        metadata_list = [
+            out.kv_connector_metadata for out in rank_outputs
+            if out.kv_connector_metadata is not None
+        ]
+        if not metadata_list:
+            return None
+
+        if len(metadata_list) == 1:
+            return metadata_list[0]
+
+        first = metadata_list[0]
+
+        try:
+            from tpu_inference.distributed.tpu_connector import \
+                TPUConnectorMetadata
+        except ImportError:
+            TPUConnectorMetadata = None
+
+        try:
+            from tpu_inference.offload.tpu_offload_connector import \
+                TPUOffloadConnectorMetadata
+        except ImportError:
+            TPUOffloadConnectorMetadata = None
+
+        if TPUConnectorMetadata is not None and isinstance(
+                first, TPUConnectorMetadata):
+            combined_reqs_to_send = {}
+            combined_reqs_to_load = {}
+            for m in metadata_list:
+                if not isinstance(m, TPUConnectorMetadata):
+                    logger.warning(
+                        "Mixing metadata types in DP merge: %s and %s",
+                        type(first), type(m))
+                    continue
+                combined_reqs_to_send.update(m.reqs_to_send)
+                combined_reqs_to_load.update(m.reqs_to_load)
+            return TPUConnectorMetadata(
+                reqs_to_send=combined_reqs_to_send,
+                reqs_to_load=combined_reqs_to_load,
+            )
+        elif TPUOffloadConnectorMetadata is not None and isinstance(
+                first, TPUOffloadConnectorMetadata):
+            combined_requests_meta = []
+            for m in metadata_list:
+                if not isinstance(m, TPUOffloadConnectorMetadata):
+                    logger.warning(
+                        "Mixing metadata types in DP merge: %s and %s",
+                        type(first), type(m))
+                    continue
+                combined_requests_meta.extend(m.requests_meta)
+            return TPUOffloadConnectorMetadata(
+                requests_meta=combined_requests_meta, )
+        else:
+            logger.warning(
+                "Unknown or unmergeable KVConnectorMetadata type: %s",
+                type(first),
+            )
+            return first
 
     def _combine_cached_request_data(
             self, rank_outputs: List[SchedulerOutput]) -> CachedRequestData:
@@ -1171,12 +1249,49 @@ class DPScheduler(SchedulerInterface):
                 current_token_offset = end_idx
                 req_id_to_routed_experts_range[req_id] = (start_idx, end_idx)
 
+        if g.kv_connector_output is not None:
+            assert not g.kv_connector_output.invalid_block_ids, (
+                "invalid_block_ids is not supported in DP mode because block IDs "
+                "are not globally unique and can collide across ranks. "
+                "The driver cannot filter them by rank without block allocation tables."
+            )
+
         for rank in range(self.dp_size):
             req_ids = scheduler_output.req_ids_per_rank.get(rank, [])
 
             # Map each rank-local index to the corresponding global index.
             global_indices = [g.req_id_to_index[rid] for rid in req_ids]
             rank_req_id_to_index = {rid: i for i, rid in enumerate(req_ids)}
+            # Filter KV connector output for this rank
+            global_kv = g.kv_connector_output
+            rank_kv_connector_output = None
+            if global_kv is not None:
+                finished_sending = None
+                if global_kv.finished_sending is not None:
+                    finished_sending = {
+                        rid
+                        for rid in global_kv.finished_sending
+                        if self.assigned_dp_rank.get(rid) == rank
+                    }
+
+                finished_recving = None
+                if global_kv.finished_recving is not None:
+                    finished_recving = {
+                        rid
+                        for rid in global_kv.finished_recving
+                        if self.assigned_dp_rank.get(rid) == rank
+                    }
+
+                rank_kv_connector_output = KVConnectorOutput(
+                    finished_sending=finished_sending,
+                    finished_recving=finished_recving,
+                    kv_connector_stats=global_kv.kv_connector_stats,
+                    kv_cache_events=global_kv.kv_cache_events,
+                    kv_connector_worker_meta=global_kv.
+                    kv_connector_worker_meta,
+                    invalid_block_ids=global_kv.invalid_block_ids,
+                    expected_finished_count=global_kv.expected_finished_count,
+                )
 
             rank_model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
@@ -1196,7 +1311,7 @@ class DPScheduler(SchedulerInterface):
                     rid: g.num_nans_in_logits[rid]
                     for rid in req_ids if rid in g.num_nans_in_logits
                 } if g.num_nans_in_logits else None),
-                kv_connector_output=g.kv_connector_output,
+                kv_connector_output=rank_kv_connector_output,
             )
 
             if routed_experts is not None:
@@ -1483,6 +1598,9 @@ class DPScheduler(SchedulerInterface):
 
         # Restore original pickle
         _disable_cloudpickle()
+
+    def get_kv_connector(self) -> Any:
+        return self.connector
 
 
 def update_vllm_config_for_dp_scheduler(vllm_config: Any) -> None:

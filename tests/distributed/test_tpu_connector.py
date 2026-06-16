@@ -39,6 +39,9 @@ class MockVllmConfig:
         self.cache_config = MagicMock()
         self.cache_config.block_size = 16
         self.parallel_config = MagicMock()
+        self.parallel_config.data_parallel_rank = 0
+        self.sharding_config = MagicMock()
+        self.sharding_config.total_dp_size = 1
 
 
 @patch("tpu_inference.distributed.tpu_connector.TPUConnectorWorker")
@@ -53,10 +56,12 @@ class TestTPUConnector(unittest.TestCase):
         Tests that TPUConnector initializes the scheduler connector for the
         SCHEDULER role.
         """
+        kv_cache_config = _make_test_kv_cache_config()
         connector = tpu_connector.TPUConnector(self.vllm_config,
                                                KVConnectorRole.SCHEDULER,
-                                               _make_test_kv_cache_config())
-        mock_scheduler_cls.assert_called_once_with(self.vllm_config)
+                                               kv_cache_config)
+        mock_scheduler_cls.assert_called_once_with(self.vllm_config, kv_cache_config)
+
         mock_worker_cls.assert_not_called()
         self.assertIsNotNone(connector.connector_scheduler)
         self.assertIsNone(connector.connector_worker)
@@ -468,7 +473,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
         worker.process_send_load(meta)
 
         self.all_mocks['insert_kv_chunks'].assert_called_once_with(
-            original_kv_caches, "kv_data", [1], "mock_mesh", "mock_spec")
+            original_kv_caches, "kv_data", [1], "mock_mesh", "mock_spec", None, 0)
         self.assertEqual(worker.runner.kv_caches, "new_kv_caches")
         self.assertNotIn("req1", worker.reqs_pulling)
         worker._maybe_build_notif_socket.assert_called_once_with(load_meta)
@@ -512,6 +517,7 @@ class TestTPUConnectorWorker(unittest.TestCase):
 
 class TestTPUConnectorUtils(unittest.TestCase):
 
+    @patch("tpu_inference.distributed.tpu_connector.jnp.array", np.array)
     @patch("tpu_inference.distributed.tpu_connector.multi_layer_copy")
     def test_insert_kv_chunks_unmocked_contiguous(self, mock_multi_layer_copy):
         """
@@ -704,5 +710,242 @@ class TestTPUConnectorStats(unittest.TestCase):
         assert counter._value.get() == 3.0
 
 
+class TestTPUConnectorHostMapping(unittest.TestCase):
+
+    def setUp(self):
+        import os
+        self.env_patcher = patch.dict(os.environ, {"NEW_MODEL_DESIGN": "True"})
+        self.env_patcher.start()
+
+    def tearDown(self):
+        self.env_patcher.stop()
+
+    def _create_vllm_config(self, tensor_parallel_size, data_parallel_size, enable_dp_attention, attn_dp_size, expert_parallelism):
+        vllm_config = MagicMock()
+        vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.tensor_parallel_size = tensor_parallel_size
+        vllm_config.parallel_config.data_parallel_size = data_parallel_size
+        vllm_config.parallel_config.enable_dp_attention = enable_dp_attention
+        vllm_config.parallel_config.attn_dp_size = attn_dp_size
+        vllm_config.parallel_config.expert_parallelism = expert_parallelism
+        vllm_config.parallel_config.data_parallel_rank = 0
+        vllm_config.sharding_config = MagicMock()
+        vllm_config.sharding_config.total_dp_size = 1
+
+        vllm_config.model_config = MagicMock()
+        vllm_config.model_config.max_model_len = 2048
+        vllm_config.model_config.dtype = 'bfloat16'
+        vllm_config.cache_config = MagicMock()
+        vllm_config.cache_config.cache_dtype = 'auto'
+        vllm_config.lora_config = None
+
+        vllm_config.additional_config = {
+            "sharding": {
+                "tensor_parallel_size": tensor_parallel_size,
+                "data_parallel_size": data_parallel_size,
+                "enable_dp_attention": enable_dp_attention,
+                "attn_dp_size": attn_dp_size,
+                "expert_parallelism": expert_parallelism
+            }
+        }
+        
+        if enable_dp_attention:
+            vllm_config.sharding_config.total_dp_size = attn_dp_size * expert_parallelism
+        else:
+            vllm_config.sharding_config.total_dp_size = data_parallel_size * expert_parallelism
+            
+        return vllm_config
+
+    @patch("tpu_inference.distributed.tpu_connector.start_transfer_server")
+    @patch("tpu_inference.distributed.tpu_connector.zmq")
+    def test_host_mapping_dp_size_8_two_hosts(self, mock_zmq, mock_start_transfer_server):
+        # Case 1: dp_size = 8, 2 hosts (ranks_per_host = 4)
+        vllm_config = self._create_vllm_config(
+            tensor_parallel_size=4,
+            data_parallel_size=1,
+            enable_dp_attention=True,
+            attn_dp_size=8,
+            expert_parallelism=1
+        )
+        self.assertEqual(vllm_config.sharding_config.total_dp_size, 8)
+
+        worker = tpu_connector.TPUConnectorWorker(vllm_config)
+        worker.pull_conns = {}
+        worker.kv_transfer_server = MagicMock()
+
+        def check_mapping(node_id, consumer_dp_rank, producer_dp_rank, expected_host_idx):
+            worker.node_id = node_id
+            req_meta = tpu_connector.LoadMeta(
+                uuid=1,
+                local_block_ids=[],
+                remote_block_ids=[],
+                remote_host=["1.1.1.1", "2.2.2.2"],
+                remote_port=[1000, 2000],
+                producer_dp_rank=producer_dp_rank,
+                consumer_dp_rank=consumer_dp_rank
+            )
+            conn = worker._maybe_build_kv_connection(req_meta)
+            expected_addr = f"{req_meta.remote_host[expected_host_idx]}:{req_meta.remote_port[expected_host_idx]}"
+            worker.kv_transfer_server.connect.assert_called_with(expected_addr)
+
+        # Worker 0 (Host 0), consumer rank 5, producer rank 1 -> maps to host 0
+        # 1 // 4 = 0
+        check_mapping(node_id=0, consumer_dp_rank=5, producer_dp_rank=1, expected_host_idx=0)
+
+        # Worker 1 (Host 1), consumer rank 5, producer rank 1 -> maps to host 0
+        # 1 // 4 = 0
+        check_mapping(node_id=1, consumer_dp_rank=5, producer_dp_rank=1, expected_host_idx=0)
+
+        # Worker 0 (Host 0), consumer rank 0, producer rank 2 -> maps to host 0
+        # 2 // 4 = 0
+        check_mapping(node_id=0, consumer_dp_rank=0, producer_dp_rank=2, expected_host_idx=0)
+
+        # Worker 1 (Host 1), consumer rank 0, producer rank 2 -> maps to host 0
+        # 2 // 4 = 0
+        check_mapping(node_id=1, consumer_dp_rank=0, producer_dp_rank=2, expected_host_idx=0)
+
+        # Worker 0 (Host 0), consumer rank 6, producer rank 7 -> maps to host 1
+        # 7 // 4 = 1
+        check_mapping(node_id=0, consumer_dp_rank=6, producer_dp_rank=7, expected_host_idx=1)
+
+        # Worker 1 (Host 1), consumer rank 6, producer rank 7 -> maps to host 1
+        # 7 // 4 = 1
+        check_mapping(node_id=1, consumer_dp_rank=6, producer_dp_rank=7, expected_host_idx=1)
+
+        # Worker 0 (Host 0), consumer rank 2, producer rank 7 -> maps to host 1
+        # 7 // 4 = 1
+        check_mapping(node_id=0, consumer_dp_rank=2, producer_dp_rank=7, expected_host_idx=1)
+
+        # Worker 1 (Host 1), consumer rank 2, producer rank 7 -> maps to host 1
+        # 7 // 4 = 1
+        check_mapping(node_id=1, consumer_dp_rank=2, producer_dp_rank=7, expected_host_idx=1)
+
+        # Worker 0 (Host 0), consumer rank 3, producer rank 4 -> maps to host 1
+        # 4 // 4 = 1
+        check_mapping(node_id=0, consumer_dp_rank=3, producer_dp_rank=4, expected_host_idx=1)
+
+        # Worker 1 (Host 1), consumer rank 3, producer rank 4 -> maps to host 1
+        # 4 // 4 = 1
+        check_mapping(node_id=1, consumer_dp_rank=3, producer_dp_rank=4, expected_host_idx=1)
+
+    @patch("tpu_inference.distributed.tpu_connector.start_transfer_server")
+    @patch("tpu_inference.distributed.tpu_connector.zmq")
+    def test_host_mapping_dp_size_2_two_hosts(self, mock_zmq, mock_start_transfer_server):
+        # Case 2: dp_size = 2, 2 hosts (ranks_per_host = 1)
+        vllm_config = self._create_vllm_config(
+            tensor_parallel_size=4,
+            data_parallel_size=1,
+            enable_dp_attention=True,
+            attn_dp_size=2,
+            expert_parallelism=1
+        )
+        self.assertEqual(vllm_config.sharding_config.total_dp_size, 2)
+        worker = tpu_connector.TPUConnectorWorker(vllm_config)
+        worker.pull_conns = {}
+        worker.kv_transfer_server = MagicMock()
+
+        def check_mapping(node_id, consumer_dp_rank, producer_dp_rank, expected_host_idx):
+            worker.node_id = node_id
+            req_meta = tpu_connector.LoadMeta(
+                uuid=2,
+                local_block_ids=[],
+                remote_block_ids=[],
+                remote_host=["1.1.1.1", "2.2.2.2"],
+                remote_port=[1000, 2000],
+                producer_dp_rank=producer_dp_rank,
+                consumer_dp_rank=consumer_dp_rank
+            )
+            conn = worker._maybe_build_kv_connection(req_meta)
+            expected_addr = f"{req_meta.remote_host[expected_host_idx]}:{req_meta.remote_port[expected_host_idx]}"
+            worker.kv_transfer_server.connect.assert_called_with(expected_addr)
+
+        # Worker 1 (Host 1), consumer rank 1, producer rank 0 -> maps to host 0
+        # (ranks_per_host=1)
+        check_mapping(node_id=1, consumer_dp_rank=1, producer_dp_rank=0, expected_host_idx=0)
+
+        # Worker 0 (Host 0), consumer rank 0, producer rank 1 -> maps to host 1 (ranks_per_host=1)
+        check_mapping(node_id=0, consumer_dp_rank=0, producer_dp_rank=1, expected_host_idx=1)
+
+    @patch("tpu_inference.distributed.tpu_connector.start_transfer_server")
+    @patch("tpu_inference.distributed.tpu_connector.zmq")
+    def test_host_mapping_dp_size_4_two_hosts(self, mock_zmq, mock_start_transfer_server):
+        # Case: dp_size = 4, 2 hosts (ranks_per_host = 2)
+        vllm_config = self._create_vllm_config(
+            tensor_parallel_size=4,
+            data_parallel_size=1,
+            enable_dp_attention=True,
+            attn_dp_size=2,
+            expert_parallelism=2
+        )
+        self.assertEqual(vllm_config.sharding_config.total_dp_size, 4)
+        worker = tpu_connector.TPUConnectorWorker(vllm_config)
+        worker.pull_conns = {}
+        worker.kv_transfer_server = MagicMock()
+
+        def check_mapping(node_id, consumer_dp_rank, producer_dp_rank, expected_host_idx):
+            worker.node_id = node_id
+            req_meta = tpu_connector.LoadMeta(
+                uuid=4,
+                local_block_ids=[],
+                remote_block_ids=[],
+                remote_host=["1.1.1.1", "2.2.2.2"],
+                remote_port=[1000, 2000],
+                producer_dp_rank=producer_dp_rank,
+                consumer_dp_rank=consumer_dp_rank
+            )
+            conn = worker._maybe_build_kv_connection(req_meta)
+            expected_addr = f"{req_meta.remote_host[expected_host_idx]}:{req_meta.remote_port[expected_host_idx]}"
+            worker.kv_transfer_server.connect.assert_called_with(expected_addr)
+
+        # Worker 0 (Host 0), consumer rank 0, producer rank 1 -> maps to host 0
+        check_mapping(node_id=0, consumer_dp_rank=0, producer_dp_rank=1, expected_host_idx=0)
+
+        # Worker 1 (Host 1), consumer rank 0, producer rank 1 -> maps to host 0
+        check_mapping(node_id=1, consumer_dp_rank=0, producer_dp_rank=1, expected_host_idx=0)
+
+        # Worker 0 (Host 0), consumer rank 3, producer rank 1 -> maps to host 0
+        check_mapping(node_id=0, consumer_dp_rank=3, producer_dp_rank=1, expected_host_idx=0)
+
+        # Worker 1 (Host 1), consumer rank 3, producer rank 1 -> maps to host 0
+        check_mapping(node_id=1, consumer_dp_rank=3, producer_dp_rank=1, expected_host_idx=0)
+
+    @patch("tpu_inference.distributed.tpu_connector.start_transfer_server")
+    @patch("tpu_inference.distributed.tpu_connector.zmq")
+    def test_host_mapping_dp_off_two_hosts(self, mock_zmq, mock_start_transfer_server):
+        # Case 3: dp_size = 1, 2 hosts (DP OFF)
+        vllm_config = self._create_vllm_config(
+            tensor_parallel_size=16,
+            data_parallel_size=1,
+            enable_dp_attention=False,
+            attn_dp_size=1,
+            expert_parallelism=1
+        )
+        self.assertEqual(vllm_config.sharding_config.total_dp_size, 1)
+        worker = tpu_connector.TPUConnectorWorker(vllm_config)
+        worker.pull_conns = {}
+        worker.kv_transfer_server = MagicMock()
+
+        def check_mapping(node_id, expected_host_idx):
+            worker.node_id = node_id
+            req_meta = tpu_connector.LoadMeta(
+                uuid=3,
+                local_block_ids=[],
+                remote_block_ids=[],
+                remote_host=["1.1.1.1", "2.2.2.2"],
+                remote_port=[1000, 2000],
+                producer_dp_rank=0,
+                consumer_dp_rank=0
+            )
+            conn = worker._maybe_build_kv_connection(req_meta)
+            expected_addr = f"{req_meta.remote_host[expected_host_idx]}:{req_meta.remote_port[expected_host_idx]}"
+            worker.kv_transfer_server.connect.assert_called_with(expected_addr)
+
+        # Worker 0 (Host 0) -> maps to host 0
+        check_mapping(node_id=0, expected_host_idx=0)
+        # Worker 1 (Host 1) -> maps to host 1
+        check_mapping(node_id=1, expected_host_idx=1)
+
+
 if __name__ == "__main__":
     unittest.main()
+
