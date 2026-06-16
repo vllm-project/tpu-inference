@@ -223,70 +223,118 @@ class TestJaxLinear(unittest.TestCase):
 class TestJaxQKVParallelLinear:
     """Tests for JaxQKVParallelLinear using pytest parametrize."""
 
+    hidden_size = 32
+    num_heads = 4
+    num_kv_heads = 2
+    head_dim = 8
+    seq_len = 3
+
+    def setup_method(self):
+        # Use values in [-0.5, 0.5) so matmul output magnitude stays small
+        # and bfloat16 accumulation errors fit within atol=1e-2.
+        torch.manual_seed(42)
+        self.q_w = torch.rand(self.num_heads * self.head_dim,
+                              self.hidden_size) - 0.5
+        self.k_w = torch.rand(self.num_kv_heads * self.head_dim,
+                              self.hidden_size) - 0.5
+        self.v_w = torch.rand(self.num_kv_heads * self.head_dim,
+                              self.hidden_size) - 0.5
+        self.x_t = torch.rand(self.seq_len, self.hidden_size) - 0.5
+        self.q_b = torch.rand(self.num_heads * self.head_dim) - 0.5
+        self.k_b = torch.rand(self.num_kv_heads * self.head_dim) - 0.5
+        self.v_b = torch.rand(self.num_kv_heads * self.head_dim) - 0.5
+
+        # Expected outputs for both with and without bias.
+        self.q_exp = (self.x_t @ self.q_w.T + self.q_b).reshape(
+            self.seq_len, self.num_heads, self.head_dim).numpy()
+        self.k_exp = (self.x_t @ self.k_w.T + self.k_b).reshape(
+            self.seq_len, self.num_kv_heads, self.head_dim).numpy()
+        self.v_exp = (self.x_t @ self.v_w.T + self.v_b).reshape(
+            self.seq_len, self.num_kv_heads, self.head_dim).numpy()
+        self.q_exp_nb = (self.x_t @ self.q_w.T).reshape(
+            self.seq_len, self.num_heads, self.head_dim).numpy()
+        self.k_exp_nb = (self.x_t @ self.k_w.T).reshape(
+            self.seq_len, self.num_kv_heads, self.head_dim).numpy()
+        self.v_exp_nb = (self.x_t @ self.v_w.T).reshape(
+            self.seq_len, self.num_kv_heads, self.head_dim).numpy()
+
     @pytest.mark.parametrize("tp_size", [1, jax.local_device_count()])
     @pytest.mark.parametrize("use_bias", [True, False])
     def test_consolidated_weight_correctness(self, tp_size, use_bias):
-        """Tests JaxQKVParallelLinear correctness against separate torch projections."""
-        hidden_size = 32
-        num_heads = 4
-        num_kv_heads = 2
-        head_dim = 8
-        seq_len = 3
-
-        # Use torch to generate random weights and inputs in [-0.5, 0.5).
-        # Small values keep the matmul output magnitude low so bfloat16
-        # accumulation errors stay within a tight atol.
-        torch.manual_seed(42)
-        q_w = torch.rand(num_heads * head_dim, hidden_size) - 0.5
-        k_w = torch.rand(num_kv_heads * head_dim, hidden_size) - 0.5
-        v_w = torch.rand(num_kv_heads * head_dim, hidden_size) - 0.5
-        x_t = torch.rand(seq_len, hidden_size) - 0.5
-        q_b = torch.rand(num_heads * head_dim) - 0.5 if use_bias else None
-        k_b = torch.rand(num_kv_heads * head_dim) - 0.5 if use_bias else None
-        v_b = torch.rand(num_kv_heads * head_dim) - 0.5 if use_bias else None
-
-        def _ref(x, w, b, *shape):
-            out = x @ w.T
-            if b is not None:
-                out = out + b
-            return out.reshape(*shape).numpy()
-
-        q_exp = _ref(x_t, q_w, q_b, seq_len, num_heads, head_dim)
-        k_exp = _ref(x_t, k_w, k_b, seq_len, num_kv_heads, head_dim)
-        v_exp = _ref(x_t, v_w, v_b, seq_len, num_kv_heads, head_dim)
-
-        # Concatenate weights in HF format (total_out, in) for weight loading.
-        qkv_w = torch.cat([q_w, k_w, v_w], dim=0)
-        qkv_b = torch.cat([q_b, k_b, v_b], dim=0) if use_bias else None
+        """Loads QKV as a single consolidated (total_out, in) tensor."""
+        qkv_w = torch.cat([self.q_w, self.k_w, self.v_w], dim=0)
+        q_exp, k_exp, v_exp = (self.q_exp, self.k_exp, self.v_exp) if use_bias \
+            else (self.q_exp_nb, self.k_exp_nb, self.v_exp_nb)
 
         mesh = Mesh(jax.devices()[:tp_size], ("model", ))
         with jax.set_mesh(mesh):
-            # Build the layer and load weights via JaxAutoWeightsLoader.
-            # The loader auto-transposes the (total_out, in) HF weights to
-            # the (in, total_out) JAX kernel layout.
             qkv_proj = JaxQKVParallelLinear(
-                hidden_size=hidden_size,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
+                hidden_size=self.hidden_size,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim,
                 use_bias=use_bias,
                 dtype=jnp.float32,
                 rngs=nnx.Rngs(0),
             )
             checkpoint = [("weight", qkv_w)]
             if use_bias:
-                checkpoint.append(("bias", qkv_b))
+                checkpoint.append(
+                    ("bias", torch.cat([self.q_b, self.k_b, self.v_b], dim=0)))
             JaxAutoWeightsLoader(qkv_proj).load_weights(checkpoint)
 
-            # Run forward pass and compare against torch float32 reference.
-            # atol=1e-2 covers the ~0.003 gap between CPU float32 matmul and
-            # TPU float32 matmul (which uses bfloat16 accumulators internally).
-            x = jnp.array(x_t.numpy())
+            x = jnp.array(self.x_t.numpy())
             q_actual, k_actual, v_actual = qkv_proj(x)
 
-            assert jnp.allclose(jnp.array(q_exp), q_actual,
-                                atol=1e-2), f"Q mismatch for tp_size={tp_size}"
-            assert jnp.allclose(jnp.array(k_exp), k_actual,
-                                atol=1e-2), f"K mismatch for tp_size={tp_size}"
-            assert jnp.allclose(jnp.array(v_exp), v_actual,
-                                atol=1e-2), f"V mismatch for tp_size={tp_size}"
+        assert jnp.allclose(jnp.array(q_exp), q_actual, atol=1e-2), \
+            f"Q mismatch for tp_size={tp_size}"
+        assert jnp.allclose(jnp.array(k_exp), k_actual, atol=1e-2), \
+            f"K mismatch for tp_size={tp_size}"
+        assert jnp.allclose(jnp.array(v_exp), v_actual, atol=1e-2), \
+            f"V mismatch for tp_size={tp_size}"
+
+    @pytest.mark.parametrize("tp_size", [1, jax.local_device_count()])
+    @pytest.mark.parametrize("use_bias", [True, False])
+    def test_split_weight_correctness(self, tp_size, use_bias):
+        """Loads Q, K, V as separate tensors via JaxAutoWeightsLoader routing.
+        """
+        q_exp, k_exp, v_exp = (self.q_exp, self.k_exp, self.v_exp) if use_bias \
+            else (self.q_exp_nb, self.k_exp_nb, self.v_exp_nb)
+
+        mesh = Mesh(jax.devices()[:tp_size], ("model", ))
+        with jax.set_mesh(mesh):
+            qkv_proj = JaxQKVParallelLinear(
+                hidden_size=self.hidden_size,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim,
+                use_bias=use_bias,
+                dtype=jnp.float32,
+                rngs=nnx.Rngs(0),
+            )
+            qkv_proj.packed_modules_mapping = {
+                "weight": ["q_proj.weight", "k_proj.weight", "v_proj.weight"],
+                "bias": ["q_proj.bias", "k_proj.bias", "v_proj.bias"],
+            }
+            checkpoint = [
+                ("q_proj.weight", self.q_w),
+                ("k_proj.weight", self.k_w),
+                ("v_proj.weight", self.v_w),
+            ]
+            if use_bias:
+                checkpoint += [
+                    ("q_proj.bias", self.q_b),
+                    ("k_proj.bias", self.k_b),
+                    ("v_proj.bias", self.v_b),
+                ]
+            JaxAutoWeightsLoader(qkv_proj).load_weights(checkpoint)
+
+            x = jnp.array(self.x_t.numpy())
+            q_actual, k_actual, v_actual = qkv_proj(x)
+
+        assert jnp.allclose(jnp.array(q_exp), q_actual, atol=1e-2), \
+            f"Q mismatch for tp_size={tp_size}"
+        assert jnp.allclose(jnp.array(k_exp), k_actual, atol=1e-2), \
+            f"K mismatch for tp_size={tp_size}"
+        assert jnp.allclose(jnp.array(v_exp), v_actual, atol=1e-2), \
+            f"V mismatch for tp_size={tp_size}"
