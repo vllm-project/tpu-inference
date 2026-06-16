@@ -86,7 +86,12 @@ class VllmAWQConfig(AWQConfig, VllmQuantConfig):
                 return VllmAWQLinearMethod(self, linear_config)
             case RoutedExperts():
                 layer.moe_config = self.get_moe_config(layer)
-                return VllmAWQMoEMethod(self, layer, self.mesh)
+                enable_hybrid_moe = getattr(self.vllm_config.sharding_config,
+                                            "enable_hybrid_moe", False)
+                return VllmAWQMoEMethod(self,
+                                        layer,
+                                        self.mesh,
+                                        enable_hybrid_moe=enable_hybrid_moe)
             case _:
                 return None
 
@@ -244,12 +249,14 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         quant_config: VllmAWQConfig,
         layer: torch.nn.Module,
         mesh: Mesh,
+        enable_hybrid_moe: bool = False,
         ep_axis_name: str = "model",
     ):
         FusedMoEMethodBase.__init__(self, layer.moe_config)
         self.quant_config = quant_config
         self.mesh = mesh
-        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(
+            self.moe, enable_hybrid_moe=enable_hybrid_moe)
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name)
