@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional, Tuple
-import functools
 
 import jax
 import jax.numpy as jnp
@@ -18,6 +17,7 @@ from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl,
                                        CommonAttentionMetadata)
 from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
                                                  register_backend)
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention, encoder_only_attention
@@ -32,17 +32,19 @@ logger = init_logger(__name__)
 def get_tpu_head_size_alignment() -> int:
     try:
         return pltpu.get_tpu_info().num_lanes
-    except Exception:
-        # Fallback to default if JAX/TPU info is not initialized
-        return 128
+    except Exception as e:
+        raise AssertionError(
+            "TPU hardware info is not available. Ensure you are running on a TPU."
+        ) from e
 
 
 def get_half_smem_capacity_bytes() -> int:
     try:
         return pltpu.get_tpu_info().smem_capacity_bytes // 2
-    except Exception:
-        # Fallback to default 512KB (v6e and earlier)
-        return 512 * 1024
+    except Exception as e:
+        raise AssertionError(
+            "TPU hardware info is not available. Ensure you are running on a TPU."
+        ) from e
 
 
 class PallasAttentionMetadataBuilder(AttentionMetadataBuilder[AttentionMetadata]):
