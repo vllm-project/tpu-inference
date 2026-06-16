@@ -9,6 +9,9 @@ jax==0.10.1
 jaxlib==0.10.1
 libtpu==0.0.41
 jaxtyping
+# Temporarily restrict fastapi version due to https://github.com/vllm-project/vllm/pull/45629
+# TODO(lk-chen): remove once LKG moves past above commit
+fastapi[standard]<0.137.0
 flax==0.12.4
 torchax==0.0.11
 qwix==0.1.2
