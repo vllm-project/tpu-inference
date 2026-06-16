@@ -189,7 +189,10 @@ docker system prune -a --volumes -f || true
 # Source the environment setup script
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/setup_docker_env.sh"
-# Pass "true" to enable pushing to GCR
+# If running in Buildkite CI, we only want to pull the prebuilt image
+if [ -n "${BUILDKITE:-}" ]; then
+  export USE_PREBUILT_IMAGE="1"
+fi
 setup_environment "${IMAGE_NAME}" "true"
 
 DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
