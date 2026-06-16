@@ -629,6 +629,7 @@ class TestTPUJaxRunner:
         self.runner.input_batch = MagicMock()
         self.runner.input_batch.request_distribution = [0]
         self.runner.input_batch.num_reqs = 1
+        self.runner.input_batch.num_prompt_logprobs = 0
 
         self.runner.get_mrope_input_positions_fn = MagicMock()
         self.runner.state_leaves = MagicMock()
@@ -697,6 +698,7 @@ class TestTPUJaxRunner:
 
         runner._get_min_remaining_slots.return_value = 5
         runner.vllm_config.additional_config = {"max_decode_steps": 10}
+        runner.static_max_decode_steps = 10
         runner.model_config.get_vocab_size.return_value = 1000
         runner.eos_token_id = 999
         runner.pad_token_id = 0
