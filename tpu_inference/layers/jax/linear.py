@@ -236,26 +236,18 @@ class JaxQKVParallelLinear(JaxMergedColumnParallelLinear):
                  use_bias: bool,
                  dtype: jnp.dtype,
                  rngs: nnx.Rngs,
-                 tp_size: int,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
-        self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
-        self.use_bias = use_bias
-        self.tp_size = tp_size
 
         self.q_size = num_heads * head_dim
         self.k_size = num_kv_heads * head_dim
         self.v_size = num_kv_heads * head_dim
-        self.total_output_dim = self.q_size + self.k_size + self.v_size
-
-        output_sizes = [self.q_size, self.k_size, self.v_size]
-
         super().__init__(
             input_size=hidden_size,
-            output_sizes=output_sizes,
+            output_sizes=[self.q_size, self.k_size, self.v_size],
             rngs=rngs,
             use_bias=use_bias,
             quant_config=quant_config,
