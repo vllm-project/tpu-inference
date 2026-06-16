@@ -4,15 +4,15 @@ Feature,CorrectnessTest,PerformanceTest
 "KV Cache Offload",✅ Passing,✅ Passing
 "LoRA_Torch",✅ Passing,❌ Failing
 "Multimodal Inputs",✅ Passing,✅ Passing
-"Out-of-tree model support",✅ Passing,❌ Failing
+"Out-of-tree model support",✅ Passing,✅ Passing
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
-"Speculative Decoding: Eagle3",❌ Failing,❓ Untested
-"Speculative Decoding: Ngram",❌ Failing,❓ Untested
+"Speculative Decoding: Eagle3",✅ Passing,✅ Passing
+"Speculative Decoding: Ngram",✅ Passing,✅ Passing
 "Step Pooling (Embedding)",✅ Passing,❓ Untested
 "async scheduler",❌ Failing,❓ Untested
 "hybrid kv cache",✅ Passing,❓ Untested
-"multi-host",❌ Failing,❓ Untested
-"runai_model_streamer_loader",❌ Failing,❓ Untested
+"multi-host",✅ Passing,❓ Untested
+"runai_model_streamer_loader",✅ Passing,❓ Untested
 "sampling_params",✅ Passing,❓ Untested
 "structured_decoding",✅ Passing,❓ Untested
