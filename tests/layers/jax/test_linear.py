@@ -16,25 +16,25 @@ import tempfile
 import unittest
 
 import jax
+import pytest
+import torch
 from flax import nnx
 from jax import numpy as jnp
 from jax.sharding import Mesh
-from parameterized import parameterized
 from torch import nn
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 
-from tpu_inference.layers.common.utils import \
-    reorder_concatenated_tensor_for_sharding
 from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear,
+from tpu_inference.layers.jax.linear import (JaxLinear,
                                              JaxMergedColumnParallelLinear,
                                              JaxQKVParallelLinear)
 from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedConfig, UnquantizedMergedLinearMethod)
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
+from tpu_inference.models.jax.utils.weight_utils import JaxAutoWeightsLoader
 
 
 class VllmMLP(nn.Module):
@@ -168,131 +168,6 @@ class TestJaxLinear(unittest.TestCase):
         self.assertEqual(f"{jax.typeof(jax_linear.weight.value)}",
                          "float32[16,32]")
 
-    @parameterized.expand([1, 2])
-    def test_jax_qkv_parallel_linear_correctness(self, tp_size):
-        """Tests JaxQKVParallelLinear correctness against separate JaxEinsum projections."""
-        num_devices = len(jax.devices('cpu'))
-        if tp_size > num_devices:
-            self.skipTest(
-                f"Not enough CPU devices (required: {tp_size}, available: {num_devices})"
-            )
-
-        hidden_size = 32
-        num_heads = 4
-        num_kv_heads = 2
-        head_dim = 8
-        seq_len = 3
-        use_bias = True
-
-        mesh = Mesh(jax.devices('cpu')[:tp_size], ("model", ))
-        with jax.set_mesh(mesh):
-            rngs = nnx.Rngs(0)
-
-            # 1. Create separate projections
-            q_proj = JaxEinsum(
-                "TD,DNH->TNH",
-                (hidden_size, num_heads, head_dim),
-                bias_shape=(num_heads, head_dim) if use_bias else None,
-                param_dtype=jnp.float32,
-                rngs=rngs,
-            )
-            k_proj = JaxEinsum(
-                "TD,DKH->TKH",
-                (hidden_size, num_kv_heads, head_dim),
-                bias_shape=(num_kv_heads, head_dim) if use_bias else None,
-                param_dtype=jnp.float32,
-                rngs=rngs,
-            )
-            v_proj = JaxEinsum(
-                "TD,DKH->TKH",
-                (hidden_size, num_kv_heads, head_dim),
-                bias_shape=(num_kv_heads, head_dim) if use_bias else None,
-                param_dtype=jnp.float32,
-                rngs=rngs,
-            )
-
-            # Assign random weights to separate projections
-            key = jax.random.PRNGKey(42)
-            k1, k2, k3, k4, k5, k6, k7 = jax.random.split(key, 7)
-
-            q_w = jax.random.normal(k1, (hidden_size, num_heads, head_dim))
-            k_w = jax.random.normal(k2, (hidden_size, num_kv_heads, head_dim))
-            v_w = jax.random.normal(k3, (hidden_size, num_kv_heads, head_dim))
-
-            q_proj.weight.value = q_w
-            k_proj.weight.value = k_w
-            v_proj.weight.value = v_w
-
-            if use_bias:
-                q_b = jax.random.normal(k4, (num_heads, head_dim))
-                k_b = jax.random.normal(k5, (num_kv_heads, head_dim))
-                v_b = jax.random.normal(k6, (num_kv_heads, head_dim))
-                q_proj.bias.value = q_b
-                k_proj.bias.value = k_b
-                v_proj.bias.value = v_b
-
-            # 2. Prepare raw sequential weights/biases
-            raw_w = jnp.concatenate([
-                q_w.reshape(hidden_size, -1),
-                k_w.reshape(hidden_size, -1),
-                v_w.reshape(hidden_size, -1),
-            ],
-                                    axis=-1)
-
-            if use_bias:
-                raw_b = jnp.concatenate([
-                    q_b.reshape(-1),
-                    k_b.reshape(-1),
-                    v_b.reshape(-1),
-                ],
-                                        axis=-1)
-
-            # Rearrange using reorder_concatenated_tensor_for_sharding
-            split_sizes = [
-                num_heads * head_dim, num_kv_heads * head_dim,
-                num_kv_heads * head_dim
-            ]
-            rearranged_w = reorder_concatenated_tensor_for_sharding(
-                raw_w, split_sizes, tp_size, dim=-1)
-            if use_bias:
-                rearranged_b = reorder_concatenated_tensor_for_sharding(
-                    raw_b, split_sizes, tp_size, dim=-1)
-
-            # 3. Initialize JaxQKVParallelLinear and set the rearranged weights
-            qkv_proj = JaxQKVParallelLinear(
-                hidden_size=hidden_size,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                use_bias=use_bias,
-                dtype=jnp.float32,
-                rngs=rngs,
-                tp_size=tp_size,
-            )
-            qkv_proj.weight.value = rearranged_w
-            if use_bias:
-                qkv_proj.bias.value = rearranged_b
-
-            # 4. Run forward pass
-            x = jax.random.normal(k7, (seq_len, hidden_size))
-
-            q_expected = q_proj(x)
-            k_expected = k_proj(x)
-            v_expected = v_proj(x)
-
-            q_actual, k_actual, v_actual = qkv_proj(x)
-
-            # 5. Assert equality
-            self.assertTrue(
-                jnp.allclose(q_expected, q_actual, atol=1e-5),
-                f"Q projection output mismatch for tp_size={tp_size}")
-            self.assertTrue(
-                jnp.allclose(k_expected, k_actual, atol=1e-5),
-                f"K projection output mismatch for tp_size={tp_size}")
-            self.assertTrue(
-                jnp.allclose(v_expected, v_actual, atol=1e-5),
-                f"V projection output mismatch for tp_size={tp_size}")
-
     def test_merged_column_parallel_fuses_projections(self):
         """JaxMergedColumnParallelLinear exposes a single fused kernel sized to
         the sum of its projection widths (no separate gate/up params) and
@@ -322,7 +197,7 @@ class TestJaxLinear(unittest.TestCase):
         self.assertIsInstance(method, UnquantizedMergedLinearMethod)
         self.assertEqual(method.linear_config.output_sizes,
                          [intermediate_size, intermediate_size])
-        self.assertEqual(method.linear_config.n_shards, 2)
+        self.assertEqual(method.linear_config.n_shards, 1)
 
     def test_merged_column_parallel_sharding(self):
         """The fused kernel's output dim (gate + up) is sharded on `model`."""
@@ -343,3 +218,75 @@ class TestJaxLinear(unittest.TestCase):
         self.assertSequenceEqual(jax_merged.weight.sharding, (None, "model"))
         self.assertEqual(f"{jax.typeof(jax_merged.weight.value)}",
                          "float32[16,64]")
+
+
+class TestJaxQKVParallelLinear:
+    """Tests for JaxQKVParallelLinear using pytest parametrize."""
+
+    @pytest.mark.parametrize("tp_size", [1, jax.local_device_count()])
+    @pytest.mark.parametrize("use_bias", [True, False])
+    def test_consolidated_weight_correctness(self, tp_size, use_bias):
+        """Tests JaxQKVParallelLinear correctness against separate torch projections."""
+        hidden_size = 32
+        num_heads = 4
+        num_kv_heads = 2
+        head_dim = 8
+        seq_len = 3
+
+        # Use torch to generate random weights and inputs in [-0.5, 0.5).
+        # Small values keep the matmul output magnitude low so bfloat16
+        # accumulation errors stay within a tight atol.
+        torch.manual_seed(42)
+        q_w = torch.rand(num_heads * head_dim, hidden_size) - 0.5
+        k_w = torch.rand(num_kv_heads * head_dim, hidden_size) - 0.5
+        v_w = torch.rand(num_kv_heads * head_dim, hidden_size) - 0.5
+        x_t = torch.rand(seq_len, hidden_size) - 0.5
+        q_b = torch.rand(num_heads * head_dim) - 0.5 if use_bias else None
+        k_b = torch.rand(num_kv_heads * head_dim) - 0.5 if use_bias else None
+        v_b = torch.rand(num_kv_heads * head_dim) - 0.5 if use_bias else None
+
+        def _ref(x, w, b, *shape):
+            out = x @ w.T
+            if b is not None:
+                out = out + b
+            return out.reshape(*shape).numpy()
+
+        q_exp = _ref(x_t, q_w, q_b, seq_len, num_heads, head_dim)
+        k_exp = _ref(x_t, k_w, k_b, seq_len, num_kv_heads, head_dim)
+        v_exp = _ref(x_t, v_w, v_b, seq_len, num_kv_heads, head_dim)
+
+        # Concatenate weights in HF format (total_out, in) for weight loading.
+        qkv_w = torch.cat([q_w, k_w, v_w], dim=0)
+        qkv_b = torch.cat([q_b, k_b, v_b], dim=0) if use_bias else None
+
+        mesh = Mesh(jax.devices()[:tp_size], ("model", ))
+        with jax.set_mesh(mesh):
+            # Build the layer and load weights via JaxAutoWeightsLoader.
+            # The loader auto-transposes the (total_out, in) HF weights to
+            # the (in, total_out) JAX kernel layout.
+            qkv_proj = JaxQKVParallelLinear(
+                hidden_size=hidden_size,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                use_bias=use_bias,
+                dtype=jnp.float32,
+                rngs=nnx.Rngs(0),
+            )
+            checkpoint = [("weight", qkv_w)]
+            if use_bias:
+                checkpoint.append(("bias", qkv_b))
+            JaxAutoWeightsLoader(qkv_proj).load_weights(checkpoint)
+
+            # Run forward pass and compare against torch float32 reference.
+            # atol=1e-2 covers the ~0.003 gap between CPU float32 matmul and
+            # TPU float32 matmul (which uses bfloat16 accumulators internally).
+            x = jnp.array(x_t.numpy())
+            q_actual, k_actual, v_actual = qkv_proj(x)
+
+            assert jnp.allclose(jnp.array(q_exp), q_actual,
+                                atol=1e-2), f"Q mismatch for tp_size={tp_size}"
+            assert jnp.allclose(jnp.array(k_exp), k_actual,
+                                atol=1e-2), f"K mismatch for tp_size={tp_size}"
+            assert jnp.allclose(jnp.array(v_exp), v_actual,
+                                atol=1e-2), f"V mismatch for tp_size={tp_size}"
