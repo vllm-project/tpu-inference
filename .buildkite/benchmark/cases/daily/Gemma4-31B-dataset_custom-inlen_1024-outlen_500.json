@@ -25,7 +25,7 @@
           "VLLM_USE_V1": "1",
           "MODEL_IMPL_TYPE": "flax_nnx",
           "USE_BATCHED_RPA_KERNEL": "1",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "1800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "3600"
         },
         "args": {
           "model": "google/gemma-4-31B-it",
@@ -82,7 +82,7 @@
           "VLLM_USE_V1": "1",
           "MODEL_IMPL_TYPE": "flax_nnx",
           "USE_BATCHED_RPA_KERNEL": "1",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "1800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "3600"
         },
         "args": {
           "model": "google/gemma-4-31B-it",
