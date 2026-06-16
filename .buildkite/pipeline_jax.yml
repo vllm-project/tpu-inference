@@ -93,11 +93,10 @@ steps:
         commands:
           - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
-      - label: "${TPU_VERSION:-tpu6e} E2E speculative decoding test (Ngram)"
-        key: ${TPU_VERSION:-tpu6e}_test_6_ngram
+      - label: "${TPU_VERSION:-tpu6e} E2E speculative decoding test"
+        key: ${TPU_VERSION:-tpu6e}_test_6
         depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
-        timeout_in_minutes: 240
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -106,52 +105,7 @@ steps:
         commands:
           - |
               .buildkite/scripts/run_in_docker.sh \
-                bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py -k "ngram"'
-
-      - label: "${TPU_VERSION:-tpu6e} E2E speculative decoding test (Eagle3)"
-        key: ${TPU_VERSION:-tpu6e}_test_6_eagle3
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
-        soft_fail: true
-        timeout_in_minutes: 240
-        env:
-          USE_PREBUILT_IMAGE: "1"
-          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-        agents:
-          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
-        commands:
-          - |
-              .buildkite/scripts/run_in_docker.sh \
-                bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py -k "eagle3"'
-
-      - label: "${TPU_VERSION:-tpu6e} E2E speculative decoding test (MTP)"
-        key: ${TPU_VERSION:-tpu6e}_test_6_mtp
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
-        soft_fail: true
-        timeout_in_minutes: 240
-        env:
-          USE_PREBUILT_IMAGE: "1"
-          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-        agents:
-          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
-        commands:
-          - |
-              .buildkite/scripts/run_in_docker.sh \
-                bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py -k "mtp"'
-
-      - label: "${TPU_VERSION:-tpu6e} E2E speculative decoding test (Catch-all)"
-        key: ${TPU_VERSION:-tpu6e}_test_6_catchall
-        depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
-        soft_fail: true
-        timeout_in_minutes: 240
-        env:
-          USE_PREBUILT_IMAGE: "1"
-          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-        agents:
-          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
-        commands:
-          - |
-              .buildkite/scripts/run_in_docker.sh \
-                bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py -k "not ngram and not eagle3 and not mtp" || [[ $? -eq 5 ]]'
+                bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py'
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part1"
         key: ${TPU_VERSION:-tpu6e}_test_7_1
@@ -173,7 +127,6 @@ steps:
         key: ${TPU_VERSION:-tpu6e}_test_7_2
         depends_on: "${TPU_VERSION:-tpu6e}_build_docker"
         soft_fail: true
-        timeout_in_minutes: 240
         artifact_paths: ".coverage.part2.${TPU_VERSION:-tpu6e}"
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -743,10 +696,7 @@ steps:
           - ${TPU_VERSION:-tpu6e}_test_2
           - ${TPU_VERSION:-tpu6e}_test_3
           - ${TPU_VERSION:-tpu6e}_test_4
-          - ${TPU_VERSION:-tpu6e}_test_6_ngram
-          - ${TPU_VERSION:-tpu6e}_test_6_eagle3
-          - ${TPU_VERSION:-tpu6e}_test_6_mtp
-          - ${TPU_VERSION:-tpu6e}_test_6_catchall
+          - ${TPU_VERSION:-tpu6e}_test_6
           - ${TPU_VERSION:-tpu6e}_test_7_1
           - ${TPU_VERSION:-tpu6e}_test_7_2
           - ${TPU_VERSION:-tpu6e}_test_7_3
@@ -784,4 +734,4 @@ steps:
         commands:
           - |
             .buildkite/scripts/check_results.sh \
-              "TPU JAX Tests Failed" ${TPU_VERSION:-tpu6e}_test_0 ${TPU_VERSION:-tpu6e}_test_1 ${TPU_VERSION:-tpu6e}_test_2 ${TPU_VERSION:-tpu6e}_test_3 ${TPU_VERSION:-tpu6e}_test_4 ${TPU_VERSION:-tpu6e}_test_6_ngram ${TPU_VERSION:-tpu6e}_test_6_eagle3 ${TPU_VERSION:-tpu6e}_test_6_mtp ${TPU_VERSION:-tpu6e}_test_6_catchall ${TPU_VERSION:-tpu6e}_test_7_1 ${TPU_VERSION:-tpu6e}_test_7_2 ${TPU_VERSION:-tpu6e}_test_7_3 ${TPU_VERSION:-tpu6e}_test_8 ${TPU_VERSION:-tpu6e}_test_9 ${TPU_VERSION:-tpu6e}_test_10 ${TPU_VERSION:-tpu6e}_test_11 ${TPU_VERSION:-tpu6e}_test_12 ${TPU_VERSION:-tpu6e}_test_13 ${TPU_VERSION:-tpu6e}_test_14 ${TPU_VERSION:-tpu6e}_test_15 ${TPU_VERSION:-tpu6e}_test_16 ${TPU_VERSION:-tpu6e}_test_17 ${TPU_VERSION:-tpu6e}_test_18 ${TPU_VERSION:-tpu6e}_test_19 ${TPU_VERSION:-tpu6e}_test_20 ${TPU_VERSION:-tpu6e}_test_21 ${TPU_VERSION:-tpu6e}_test_22 ${TPU_VERSION:-tpu6e}_test_23 ${TPU_VERSION:-tpu6e}_test_24 ${TPU_VERSION:-tpu6e}_test_25 ${TPU_VERSION:-tpu6e}_test_26 ${TPU_VERSION:-tpu6e}_test_27 ${TPU_VERSION:-tpu6e}_test_28 ${TPU_VERSION:-tpu6e}_test_29 ${TPU_VERSION:-tpu6e}_test_30 ${TPU_VERSION:-tpu6e}_test_31 ${TPU_VERSION:-tpu6e}_test_32 ${TPU_VERSION:-tpu6e}_test_33 ${TPU_VERSION:-tpu6e}_test_34 ${TPU_VERSION:-tpu6e}_test_35
+              "TPU JAX Tests Failed" ${TPU_VERSION:-tpu6e}_test_0 ${TPU_VERSION:-tpu6e}_test_1 ${TPU_VERSION:-tpu6e}_test_2 ${TPU_VERSION:-tpu6e}_test_3 ${TPU_VERSION:-tpu6e}_test_4 ${TPU_VERSION:-tpu6e}_test_6 ${TPU_VERSION:-tpu6e}_test_7_1 ${TPU_VERSION:-tpu6e}_test_7_2 ${TPU_VERSION:-tpu6e}_test_7_3 ${TPU_VERSION:-tpu6e}_test_8 ${TPU_VERSION:-tpu6e}_test_9 ${TPU_VERSION:-tpu6e}_test_10 ${TPU_VERSION:-tpu6e}_test_11 ${TPU_VERSION:-tpu6e}_test_12 ${TPU_VERSION:-tpu6e}_test_13 ${TPU_VERSION:-tpu6e}_test_14 ${TPU_VERSION:-tpu6e}_test_15 ${TPU_VERSION:-tpu6e}_test_16 ${TPU_VERSION:-tpu6e}_test_17 ${TPU_VERSION:-tpu6e}_test_18 ${TPU_VERSION:-tpu6e}_test_19 ${TPU_VERSION:-tpu6e}_test_20 ${TPU_VERSION:-tpu6e}_test_21 ${TPU_VERSION:-tpu6e}_test_22 ${TPU_VERSION:-tpu6e}_test_23 ${TPU_VERSION:-tpu6e}_test_24 ${TPU_VERSION:-tpu6e}_test_25 ${TPU_VERSION:-tpu6e}_test_26 ${TPU_VERSION:-tpu6e}_test_27 ${TPU_VERSION:-tpu6e}_test_28 ${TPU_VERSION:-tpu6e}_test_29 ${TPU_VERSION:-tpu6e}_test_30 ${TPU_VERSION:-tpu6e}_test_31 ${TPU_VERSION:-tpu6e}_test_32 ${TPU_VERSION:-tpu6e}_test_33 ${TPU_VERSION:-tpu6e}_test_34 ${TPU_VERSION:-tpu6e}_test_35
