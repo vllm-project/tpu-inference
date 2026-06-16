@@ -398,11 +398,22 @@ def inner_kernel(
         if cfgs.rhs_cfgs.should_dequantize_before_matmul:
             tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(acc_ref.dtype)
             num_blocks = cfgs.num_quant_blocks_per_tile_k
-            tiled_rhs_dequant = tiled_rhs.astype(acc_ref.dtype).reshape(
-                num_blocks, rhs_qbs, rhs_tile_n)
-            tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
-            tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
-                                                  rhs_tile_n)
+
+            # Squeeze out the middle singleton dimension (axis 1) from the BlockSpec layout
+            # so that tiled_rhs_scale becomes a clean 2D matrix
+            if tiled_rhs_scale.ndim == 3:
+                tiled_rhs_scale = jnp.squeeze(tiled_rhs_scale, axis=1)
+
+            # Determine the exact safe upper bound for the K dimension
+            k_bound = min(num_blocks * rhs_qbs, cfgs.tiles.tile_k)
+
+            # Stretch the small scale matrix along the K axis to match the blocks,
+            # then slice it to match the weight matrix tile size exactly.
+            expanded_scale = jnp.repeat(tiled_rhs_scale, rhs_qbs,
+                                        axis=0)[:k_bound, :]
+
+            # Dequantize directly—no padding, no weight reshaping, zero VMEM allocation overhead
+            tiled_rhs = tiled_rhs.astype(acc_ref.dtype) * expanded_scale
             rhs_step_k = cfgs.tiles.tile_k
         else:
             rhs_step_k = rhs_qbs
