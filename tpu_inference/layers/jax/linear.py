@@ -202,6 +202,15 @@ class JaxMergedColumnParallelLinear(JaxLinear):
         # quant_config.get_quant_method(self), which reads self.output_sizes to
         # build the merged linear's QuantLinearConfig.
         self.output_sizes = output_sizes
+        if quant_config is None:
+            # When no quant_config is provided, UnquantizedConfig is inserted
+            # to ensure quant_method is hooked up, which is necessary to properly
+            # fuse sharded weights.
+            # Imported locally to avoid an import cycle (the quantization
+            # package imports this module).
+            from tpu_inference.layers.jax.quantization.unquantized import \
+                UnquantizedConfig
+            quant_config = UnquantizedConfig({})
         super().__init__(input_size=input_size,
                          output_size=sum(output_sizes),
                          rngs=rngs,
