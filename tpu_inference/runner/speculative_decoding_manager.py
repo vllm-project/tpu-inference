@@ -94,6 +94,7 @@ class SpeculativeDecodingManager:
                 logits_indices_selector, discard_sampled_tokens_req_indices,
                 self.runner.input_batch.num_reqs)
             self._draft_token_ids = self.runner.drafter.propose(
+                self.runner.speculative_config.num_speculative_tokens,
                 valid_sampled_token_ids[:self.runner.input_batch.num_reqs],
                 self.runner.input_batch.num_tokens_no_spec,
                 self.runner.input_batch.token_ids_cpu)
