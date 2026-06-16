@@ -100,7 +100,7 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.9,
           "async-scheduling": true,
-          "additional-config": "{\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}}"
+          "additional-config": "{\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": \"float8_e4m3fn\", \"act_qtype\": \"float8_e4m3fn\"}]}}, \"mm-encoder-tp-mode\": \"data\"}"
         }
       },
       "client_command_options": {
