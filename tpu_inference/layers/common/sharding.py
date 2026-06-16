@@ -356,6 +356,17 @@ class ShardingConfigManager:
         return self.sharding_strategy.sequence_parallelism
 
     @property
+    def enable_hybrid_moe(self) -> bool:
+        if not envs.USE_HYBRID_MOE:
+            return False
+
+        has_tp = self.tp_size > 1
+        has_ep = (self.expert_size > 1 or self.attn_dp_expert_size > 1
+                  or self.attn_dp_size > 1)
+
+        return has_tp and has_ep
+
+    @property
     def decode_cp_size(self) -> int:
         return self.sharding_strategy.decode_context_parallelism
 
@@ -755,3 +766,34 @@ class ShardingInfo:
     #TODO a sharding info class for visualizing & debugging the sharding performance
     # Will implement it for the next version
     pass
+
+
+def get_hybrid_moe_axes(mesh: Mesh) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Resolves the active TP and EP axes for Hybrid MoE from the mesh.
+
+    Returns:
+        A tuple of (tp_axis, ep_axis) where each is a tuple of strings.
+    """
+
+    def to_tuple(x):
+        return (x, ) if isinstance(x, str) else tuple(x)
+
+    tp_axes_all = to_tuple(ShardingAxisName.MLP_TENSOR)
+    expert_axes = to_tuple(ShardingAxisName.EXPERT)
+    dp_axes = to_tuple(ShardingAxisName.MLP_DATA)
+
+    ep_axis_list = []
+    for a in expert_axes:
+        if (a in mesh.axis_names and utils.get_mesh_shape_product(mesh, a) > 1
+                and a not in dp_axes and a != ShardingAxisName.MODEL):
+            ep_axis_list.append(a)
+    ep_axis = tuple(ep_axis_list)
+
+    tp_axis_list = []
+    for a in tp_axes_all:
+        if (a in mesh.axis_names and utils.get_mesh_shape_product(mesh, a) > 1
+                and a not in ep_axis):
+            tp_axis_list.append(a)
+    tp_axis = tuple(tp_axis_list)
+
+    return tp_axis, ep_axis
