@@ -10,7 +10,7 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "google/gemma-4-E2B-it",Multimodal,✅ Passing,❌ Failing,❓ Untested
 "google/gemma-4-E4B-it",Multimodal,✅ Passing,❌ Failing,❓ Untested
 "MiniMaxAI/MiniMax-M2.5",Text,❓ Untested,❓ Untested,❓ Untested
-"Qwen/Qwen3-30B-A3B",Text,✅ Passing,✅ Passing,❌ Failing
+"Qwen/Qwen3-30B-A3B",Text,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-32B",Text,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-4B",Text,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-Coder-480B-A35B-Instruct",Text,✅ Passing,✅ Passing,✅ Passing
