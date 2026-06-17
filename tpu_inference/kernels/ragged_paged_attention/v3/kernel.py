@@ -365,7 +365,7 @@ def _ragged_paged_attention_kernel_loop(
 
     # Unpack based on return_lse.
     if return_lse:
-        lse_hbm_in_ref = refs[idx]
+        _lse_hbm_in_ref = refs[idx]
         idx += 1
 
     # 3. Unpack Outputs
@@ -466,7 +466,7 @@ def _ragged_paged_attention_kernel_loop(
             start_idx = jnp.maximum(start_idx, local_cache_len // bkv_sz)
         return start_idx
 
-    if cp_group_size != None:
+    if cp_group_size is not None:
         # Get cache length and new token length.
         kv_new_len = q_len
 
@@ -772,7 +772,7 @@ def _ragged_paged_attention_kernel_loop(
                 sem=sem,
                 wait=True,
             )
-        if cp_group_size != None:
+        if cp_group_size is not None:
             # NOTE(weiyulin): offset is global_idx of the first new kv token in this
             # bkv buffer, offset only matter when bkv_sz_frm_new > 0
             new_kv_len_start = _seq_q_len - kv_left_frm_new
