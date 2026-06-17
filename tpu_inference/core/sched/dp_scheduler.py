@@ -192,7 +192,8 @@ def _scheduler_worker_process(
                     _send_result(None)  # Signal completion
 
                 case SchedulerCommand.SCHEDULE:
-                    output = scheduler.schedule()
+                    args, kwargs = data if data is not None else ((), {})
+                    output = scheduler.schedule(*args, **kwargs)
                     _cached_scheduler_outputs.append(output)
                     _send_result(output)
 
@@ -785,7 +786,7 @@ class DPScheduler(SchedulerInterface):
             return
 
     @time_function
-    def schedule(self) -> DPSchedulerOutput:
+    def schedule(self, *args, **kwargs) -> DPSchedulerOutput:
         """
         Main scheduling method that coordinates all DP rank schedulers.
 
@@ -808,7 +809,7 @@ class DPScheduler(SchedulerInterface):
 
         # Run each scheduler independently
         for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.SCHEDULE)
+            self._send_command(rank, SchedulerCommand.SCHEDULE, (args, kwargs))
 
         # Collect outputs from all workers (unordered to avoid HOL blocking)
         rank_outputs = self._collect_results_unordered(
