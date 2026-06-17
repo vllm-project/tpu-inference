@@ -21,6 +21,8 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
+from tpu_inference.kernels.sparse_core import core_map_helper
+
 
 def calculate_col_size(hidden_size: int, packing: int) -> int:
     """Calculates the max column size bounded by VMEM limits and hidden_size divisibility."""
@@ -266,7 +268,7 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
         core_axis_name="core",
         subcore_axis_name="subcore",
     )
-    return pl.kernel(
+    return core_map_helper.kernel(
         functools.partial(
             main_kernel_v2,
             core_axis_name=vector_mesh.core_axis_name,
