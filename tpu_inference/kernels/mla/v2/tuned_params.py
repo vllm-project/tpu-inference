@@ -384,7 +384,7 @@ def get_tuned_params(tuning_key: TuningKey) -> TunableParams:
             f"No tuned parameters found for the given tuning key: {tuning_key}, using default parameters"
         )
         return TunableParams(
-            decode_batch_size=4,
+            decode_batch_size=8,
             num_kv_pages_per_block=3,
             num_queries_per_block=1,
             vmem_limit_bytes=62914560,

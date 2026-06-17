@@ -773,16 +773,19 @@ class DPScheduler(SchedulerInterface):
             return
 
         n = len(self._pending_new_requests)
+        time_ms = int(time() * 1000.0)
+        logger.info("_try_flush_pending (%d.%d) : %d >= %d", time_ms // 1000,
+                    time_ms % 1000, n, self._batch_prefill_threshold)
         if n >= self._batch_prefill_threshold:
             self._flush_pending()
             return
-        elapsed_ms = (time() - self._batch_prefill_last_flush) * 1000.0
-        if elapsed_ms >= self._batch_prefill_flush_timeout_ms:
-            self._flush_pending()
-            return
-        if self._count_idle_ranks() >= n:
-            self._flush_pending()
-            return
+        # elapsed_ms = (time() - self._batch_prefill_last_flush) * 1000.0
+        # if elapsed_ms >= self._batch_prefill_flush_timeout_ms:
+        #     self._flush_pending()
+        #     return
+        # if self._count_idle_ranks() >= n:
+        #     self._flush_pending()
+        #     return
 
     @time_function
     def schedule(self) -> DPSchedulerOutput:
