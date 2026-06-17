@@ -158,7 +158,7 @@ def _decode_core(
     max_logprobs,
     logprobs_mode,
 ):
-    has_logprobs = sampling_metadata.logprobs
+    has_logprobs = False if sampling_metadata is None else sampling_metadata.logprobs
 
     def _run_one_step(step_idx, ct, am, pos, sl, kvc):
         step_rng = step_rngs[step_idx]
@@ -495,7 +495,7 @@ def continue_decode(
     all_expert_indices = expert_buffer if has_experts else None
 
     logprobs_tensors = None
-    if sampling_metadata.logprobs:
+    if sampling_metadata is not None and sampling_metadata.logprobs:
         logprobs_tensors = LogprobsTensors(
             logprob_token_ids=lp_ids_buffer,
             logprobs=lp_val_buffer,
