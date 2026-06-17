@@ -13,20 +13,18 @@
 # limitations under the License.
 """DFlash draft model for speculative decoding on JAX/TPU."""
 
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from jax import lax
 from jax.sharding import Mesh
 from transformers import Qwen3Config
 from vllm.config import VllmConfig
 
 from tpu_inference import utils
-from tpu_inference.kernels.flash_attention.kernel import (BlockSizes,
-                                                          SegmentIds,
-                                                          flash_attention)
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
+    ragged_paged_attention
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.logger import init_logger
@@ -135,123 +133,91 @@ class DFlashAttention(nnx.Module):
         self,
         x_noise: jax.Array,
         target_hidden: jax.Array,
-        noise_positions: jax.Array,
-        ctx_positions: jax.Array,
-        kv_cache_k: jax.Array,
-        kv_cache_v: jax.Array,
-        cache_len: jax.Array,
-        actual_ctx_count: jax.Array,
-    ) -> Tuple[jax.Array, jax.Array, jax.Array]:
-        """Non-causal attention with on-device KV cache.
-
-        Uses a two-phase cache write to handle padded context correctly:
-          Phase A: write context K/V (with padding zeroed) at ``cache_len``.
-          Phase B: write noise K/V at ``cache_len + actual_ctx_count``,
-                   overwriting any padding zeros from Phase A.
-
-        Args:
-            x_noise: (T_noise, D) noise hidden states.
-            target_hidden: (T_padded, D) padded context features.
-            noise_positions: (T_noise,) position ids for noise tokens.
-            ctx_positions: (T_padded,) position ids for context tokens.
-            kv_cache_k: (1, N_heads, max_kv_len, H) pre-allocated K cache.
-            kv_cache_v: (1, N_heads, max_kv_len, H) pre-allocated V cache.
-            cache_len: scalar int, valid entries already in cache.
-            actual_ctx_count: scalar int, real (non-padding) context tokens.
-
-        Returns:
-            (output, new_kv_cache_k, new_kv_cache_v)
-        """
+        attention_metadata: Any,
+        target_query_start_loc: jax.Array,
+        target_positions: jax.Array,
+        kv_cache: jax.Array,
+    ) -> Tuple[jax.Array, jax.Array]:
+        """Non-causal attention with on-device paged KV cache."""
+        md = attention_metadata
         T_noise = x_noise.shape[0]
-        T_padded = target_hidden.shape[0]
+        T_target = target_hidden.shape[0]
 
-        q = self.q_proj(x_noise)
-        q = self.q_norm(q)
-        q = apply_rope(
-            q,
-            noise_positions,
-            self.head_dim_original,
-            self.rope_theta,
-            self.rope_scaling,
-        )
+        q_noise = self.q_norm(self.q_proj(x_noise))
+        k_noise = self.k_norm(self.k_proj(x_noise))
+        v_noise = self.v_proj(x_noise)
 
-        x_new = jnp.concatenate([target_hidden, x_noise], axis=0)
-        k_new = self.k_proj(x_new)
-        v_new = self.v_proj(x_new)
-        k_new = self.k_norm(k_new)
-
-        new_positions = jnp.concatenate([ctx_positions, noise_positions],
-                                        axis=0)
-        k_new = apply_rope(
-            k_new,
-            new_positions,
-            self.head_dim_original,
-            self.rope_theta,
-            self.rope_scaling,
-        )
+        # Apply RoPE to noise K
+        k_noise = apply_rope(k_noise, md.input_positions,
+                             self.head_dim_original, self.rope_theta,
+                             self.rope_scaling)
 
         if self.num_kv_groups > 1:
-            k_new = jnp.repeat(k_new, self.num_kv_groups, axis=1)
-            v_new = jnp.repeat(v_new, self.num_kv_groups, axis=1)
+            k_noise = jnp.repeat(k_noise, self.num_kv_groups, axis=1)
+            v_noise = jnp.repeat(v_noise, self.num_kv_groups, axis=1)
 
-        k_ctx = k_new[:T_padded]
-        v_ctx = v_new[:T_padded]
-        k_noise = k_new[T_padded:]
-        v_noise = v_new[T_padded:]
+        q_noise = q_noise.reshape(T_noise, self.num_heads, self.head_dim)
+        k_noise = k_noise.reshape(T_noise, self.num_kv_heads, self.head_dim)
+        v_noise = v_noise.reshape(T_noise, self.num_kv_heads, self.head_dim)
 
-        ctx_mask = (jnp.arange(T_padded) < actual_ctx_count)  # (T_padded,)
-        ctx_mask_kv = ctx_mask[:, jnp.newaxis, jnp.newaxis]  # (T_padded, 1, 1)
-        k_ctx = jnp.where(ctx_mask_kv, k_ctx, 0.0)
-        v_ctx = jnp.where(ctx_mask_kv, v_ctx, 0.0)
+        # Process target hidden tokens (newly accepted tokens)
+        k_target = self.k_norm(self.k_proj(target_hidden))
+        v_target = self.v_proj(target_hidden)
 
-        k_ctx_4d = k_ctx.transpose(1, 0, 2)[jnp.newaxis, :, :, :]
-        v_ctx_4d = v_ctx.transpose(1, 0, 2)[jnp.newaxis, :, :, :]
-        kv_cache_k = lax.dynamic_update_slice(kv_cache_k, k_ctx_4d,
-                                              (0, 0, cache_len, 0))
-        kv_cache_v = lax.dynamic_update_slice(kv_cache_v, v_ctx_4d,
-                                              (0, 0, cache_len, 0))
+        # Apply RoPE to target K
+        k_target = apply_rope(k_target, target_positions,
+                              self.head_dim_original, self.rope_theta,
+                              self.rope_scaling)
 
-        noise_start = cache_len + actual_ctx_count
-        k_noise_4d = k_noise.transpose(1, 0, 2)[jnp.newaxis, :, :, :]
-        v_noise_4d = v_noise.transpose(1, 0, 2)[jnp.newaxis, :, :, :]
-        kv_cache_k = lax.dynamic_update_slice(kv_cache_k, k_noise_4d,
-                                              (0, 0, noise_start, 0))
-        kv_cache_v = lax.dynamic_update_slice(kv_cache_v, v_noise_4d,
-                                              (0, 0, noise_start, 0))
+        if self.num_kv_groups > 1:
+            k_target = jnp.repeat(k_target, self.num_kv_groups, axis=1)
+            v_target = jnp.repeat(v_target, self.num_kv_groups, axis=1)
 
-        new_cache_len = cache_len + actual_ctx_count + T_noise
-        max_kv_len = kv_cache_k.shape[2]
+        k_target = k_target.reshape(T_target, self.num_kv_heads, self.head_dim)
+        v_target = v_target.reshape(T_target, self.num_kv_heads, self.head_dim)
 
-        q_4d = q.transpose(1, 0, 2)[jnp.newaxis, :, :, :]
-        kv_ids = (jnp.arange(max_kv_len) < new_cache_len).astype(jnp.int32)
-        q_ids = jnp.ones(T_noise, dtype=jnp.int32)
-        seg_ids = SegmentIds(
-            q=q_ids[jnp.newaxis, :],
-            kv=kv_ids[jnp.newaxis, :],
+        q_target = jnp.zeros((T_target, self.num_heads, self.head_dim),
+                             dtype=q_noise.dtype)
+        # Step 1: Write target tokens to KV cache
+        # kv_lens is the length AFTER appending target tokens. This is EXACTLY md.seq_lens.
+        kv_cache = ragged_paged_attention(
+            queries=q_target,
+            keys=k_target,
+            values=v_target,
+            kv_cache=kv_cache,
+            kv_lens=md.seq_lens,
+            page_indices=md.block_tables,
+            cu_q_lens=target_query_start_loc,
+            distribution=md.request_distribution,
+            use_causal_mask=True,
+            update_kv_cache=True,
+            sm_scale=self.head_dim_original**-0.5,
         )
 
-        sm_scale = self.head_dim_original**-0.5
-        block_sizes = BlockSizes(
-            block_q=T_noise,
-            block_k_major=max_kv_len,
-            block_k=max_kv_len,
-            block_b=1,
-        )
-        attn_out = flash_attention(
-            q_4d,
-            kv_cache_k,
-            kv_cache_v,
-            segment_ids=seg_ids,
-            causal=False,
-            sm_scale=sm_scale,
-            block_sizes=block_sizes,
-            vmem_limit_bytes=_FA_VMEM_LIMIT,
+        # Step 2: Write noise tokens to KV cache and compute attention
+        # kv_lens is the length AFTER appending noise tokens.
+        num_reqs = md.seq_lens.shape[0]
+        block_size = T_noise // num_reqs
+        seq_lens_noise = md.seq_lens + block_size
+        attn_out, kv_cache = ragged_paged_attention(
+            queries=q_noise,
+            keys=k_noise,
+            values=v_noise,
+            kv_cache=kv_cache,
+            kv_lens=seq_lens_noise,
+            page_indices=md.block_tables,
+            cu_q_lens=md.query_start_loc,
+            distribution=md.request_distribution,
+            use_causal_mask=False,  # Noise tokens attend to all KV tokens
+            update_kv_cache=True,
+            sm_scale=self.head_dim_original**-0.5,
         )
 
-        attn_out = attn_out[0].transpose(1, 0, 2)
-        output = self.o_proj(attn_out)
+        # Reshape output back
+        attn_out = attn_out.reshape(T_noise, self.num_heads * self.head_dim)
+        out = self.o_proj(attn_out)
 
-        return output, kv_cache_k, kv_cache_v
+        return out, kv_cache
 
 
 class DFlashMLP(nnx.Module):
@@ -329,25 +295,21 @@ class DFlashDecoderLayer(nnx.Module):
         self,
         x: jax.Array,
         target_hidden: jax.Array,
-        noise_positions: jax.Array,
-        ctx_positions: jax.Array,
-        kv_cache_k: jax.Array,
-        kv_cache_v: jax.Array,
-        cache_len: jax.Array,
-        actual_ctx_count: jax.Array,
-    ) -> Tuple[jax.Array, jax.Array, jax.Array]:
-        """Returns (hidden_states, new_kv_cache_k, new_kv_cache_v)."""
+        attention_metadata: Any,
+        target_query_start_loc: jax.Array,
+        target_positions: jax.Array,
+        kv_cache: jax.Array,
+    ) -> Tuple[jax.Array, jax.Array]:
+        """Returns (hidden_states, new_kv_cache)."""
         residual = x
         x = self.input_layernorm(x)
-        x, kv_cache_k, kv_cache_v = self.self_attn(
-            x,
-            target_hidden,
-            noise_positions,
-            ctx_positions,
-            kv_cache_k,
-            kv_cache_v,
-            cache_len,
-            actual_ctx_count,
+        x, kv_cache = self.self_attn(
+            x_noise=x,
+            target_hidden=target_hidden,
+            attention_metadata=attention_metadata,
+            target_query_start_loc=target_query_start_loc,
+            target_positions=target_positions,
+            kv_cache=kv_cache,
         )
         x = residual + x
 
@@ -355,7 +317,7 @@ class DFlashDecoderLayer(nnx.Module):
         x = self.post_attention_layernorm(x)
         x = self.mlp(x)
         x = residual + x
-        return x, kv_cache_k, kv_cache_v
+        return x, kv_cache
 
 
 class DFlashModel(nnx.Module):
@@ -499,53 +461,30 @@ class DFlashForCausalLM(nnx.Module):
         self,
         kv_caches: List[jax.Array],
         input_ids: jax.Array,
-        target_hidden_states: jax.Array,
+        target_hidden_states: Any,
         attention_metadata,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         """Forward pass for the DFlash draft model.
 
-        ``target_hidden_states`` is a 3-tuple:
-            (ctx_hidden, cache_len_arr, actual_ctx_count_arr)
-        where:
-            ctx_hidden: (T_padded, D) — padded context features.
-            cache_len_arr: (1,) int32 — valid entries already in KV cache.
-            actual_ctx_count_arr: (1,) int32 — real (non-padding) context count.
-
-        ``kv_caches`` is a flat list of length ``2 * num_layers``:
-            [k_cache_0, v_cache_0, k_cache_1, v_cache_1, ...]
-        Each cache has shape ``(1, num_heads, max_kv_len, head_dim)``.
-
-        Returns:
-            (kv_caches, hidden_states, [target_hidden_states])
+        ``target_hidden_states`` is a tuple (target_hidden, target_query_start_loc, target_positions).
+        ``kv_caches`` is the framework's global paged kv caches.
         """
-        ctx_hidden, cache_len_arr, actual_ctx_count_arr = target_hidden_states
-        cache_len = cache_len_arr[0]  # scalar
-        actual_ctx_count = actual_ctx_count_arr[0]  # scalar
+        target_hidden, target_query_start_loc, target_positions = target_hidden_states
 
         noise_emb = self.model.embed_tokens(input_ids)
-        pos_offset = cache_len if self._position_scheme == "incremental" else 0
-        T_padded = ctx_hidden.shape[0]
-        T_noise = input_ids.shape[0]
-        ctx_positions = jnp.arange(T_padded, dtype=jnp.int32) + pos_offset
-        noise_positions = (jnp.arange(T_noise, dtype=jnp.int32) + pos_offset +
-                           actual_ctx_count)
-
         x = noise_emb
+
         for i, layer in enumerate(self.model.layers):
-            kv_k = kv_caches[2 * i]
-            kv_v = kv_caches[2 * i + 1]
-            x, kv_k, kv_v = layer(
+            kv_cache = kv_caches[i]
+            x, kv_cache = layer(
                 x,
-                ctx_hidden,
-                noise_positions,
-                ctx_positions,
-                kv_k,
-                kv_v,
-                cache_len,
-                actual_ctx_count,
+                target_hidden=target_hidden,
+                attention_metadata=attention_metadata,
+                target_query_start_loc=target_query_start_loc,
+                target_positions=target_positions,
+                kv_cache=kv_cache,
             )
-            kv_caches[2 * i] = kv_k
-            kv_caches[2 * i + 1] = kv_v
+            kv_caches[i] = kv_cache
 
         x = self.model.norm(x)
 
