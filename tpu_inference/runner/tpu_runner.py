@@ -1185,6 +1185,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 #     "Should not schedule a request that does nothing!")
             return EMPTY_MODEL_RUNNER_OUTPUT
 
+        shard_lens = {}
+        for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items(
+        ):
+            rank = scheduler_output.assigned_dp_rank[req_id]
+            num_tokens_int = int(num_tokens)
+            if rank not in shard_lens:
+                shard_lens[rank] = []
+            shard_lens[rank].append(num_tokens_int)
+        # logger.info(f"shard_lens = {shard_lens}")
+
         # Check if the entire batch is in the decode phase.
         # request_distribution[0] tracks the number of decode requests.
         is_decode_only = self.input_batch.request_distribution[
@@ -2339,12 +2349,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             # Calculate batch composition statistics for active hardware profilers
             # and/or continuous batch logging.
+        # batch_composition_stats = runner_utils.get_batch_composition_stats(
+        #     self.batch_counter, self.input_batch, total_num_scheduled_tokens,
+        #     num_reqs, padded_total_num_scheduled_tokens, scheduler_output)
+        # print(batch_composition_stats)
         if self.phase_based_profiler or self.aggregated_stats_logger:
             self.batch_counter += 1
-            batch_composition_stats = runner_utils.get_batch_composition_stats(
-                self.batch_counter, self.input_batch,
-                total_num_scheduled_tokens, num_reqs,
-                padded_total_num_scheduled_tokens, scheduler_output)
 
             if self.phase_based_profiler:
                 self.phase_based_profiler.step(batch_composition_stats)
