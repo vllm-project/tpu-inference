@@ -58,9 +58,11 @@ import torch
 import torchax
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
+from vllm.ir import enable_torch_wrap
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import to_jax_dtype
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -161,8 +163,6 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
           params_and_buffers: The model's loaded weights as a pytree of
               JAX arrays. Bound into ``functional_call`` per request.
         """
-        from tpu_inference.utils import to_jax_dtype
-
         self.vllm_runner = vllm_runner
         self.params_and_buffers = params_and_buffers
         self._jax_dtype = to_jax_dtype(vllm_config.model_config.dtype)
@@ -321,8 +321,6 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         by the inherited ``capture()`` loop (optional — the cache also fills
         lazily on first ``execute``).
         """
-        from vllm.ir import enable_torch_wrap
-
         template = self.budget_templates[token_budget]
         with torchax.default_env(), enable_torch_wrap(False):
             values_jax = {
@@ -348,8 +346,6 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         the adapter's jax-friendly ``postprocess_encoder_output`` — no outer
         torchax env required.
         """
-        from vllm.ir import enable_torch_wrap
-
         num_items = len(self._get_item_specs(mm_kwargs))
         if token_budget not in self.budget_templates:
             # No template for this budget (shouldn't happen — budget comes
@@ -382,13 +378,10 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         result is already a ``list[jax.Array]`` — matching what the caller
         expects from ``runner.embed_multimodal_fn(...)``.
         """
-        assert not self.use_dp, (
-            "[mm_encoder_jit] data-parallel encoder path uses torch "
-            "collectives and is unsupported on the TPU manager")
         return self._execute_local(mm_kwargs)
 
 
-def _t2j_if_tensor(v):
+def _t2j_if_tensor(v: torch.Tensor | jax.Array) -> jax.Array:
     """Tree-map helper — convert leaf torch.Tensors to jax.Array."""
     if isinstance(v, torch.Tensor):
         return t2j(v, use_dlpack=False)
