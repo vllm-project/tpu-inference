@@ -51,7 +51,6 @@ this avoids).
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any, Callable
 
 import jax
@@ -212,12 +211,6 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         # on this instance and accumulates per-shape entries from here).
         self._jit_forward = jax.jit(self._build_forward_closure())
 
-        # Per-shape plain-torch metadata cache used when
-        # ``USE_ENCODER_METADATA_CACHE=1``. Maps cache_key -> {key:
-        # torch.Tensor} for all keys EXCEPT pixel_values. See
-        # _prepare_padded_torch for the cache_key construction.
-        self._cache_metadata_torch: dict[Any, dict] = {}
-
     # ----- JIT forward closure -----
 
     def _build_forward_closure(self) -> Callable:
@@ -307,47 +300,15 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         normal torch, not through torchax. The t2j conversion to jax happens
         later, inside ``_run_budget_graph``'s env block.
 
-        Optional metadata cache (``USE_ENCODER_METADATA_CACHE=1``): skip the
-        expensive replay-buffer prep (fast_pos_embed_interpolate + rot_pos_emb
-        host CPU work) when we have seen this (budget, grid_thw) before. Only
-        the (h,w)-derived METADATA tensors are cached; ``pixel_values`` always
-        comes fresh from the real call to avoid the stale-input bug from
-        earlier probe versions.
+        TODO(lk-chen): cache the non-pixel metadata tensors keyed on
+        (token_budget, grid_thw) to skip the expensive
+        fast_pos_embed_interpolate + rot_pos_emb host CPU work on repeated
+        requests with the same resolution. pixel_values must always come from
+        a fresh call. Invalidate when token_budget or grid_thw changes.
         """
-        use_cache = os.environ.get("USE_ENCODER_METADATA_CACHE", "0") == "1"
-        _grid = self.vllm_model._get_grid_thw_by_modality(mm_kwargs)
-        # grid_thw arrives as list[list[int]] or torch.Tensor; lift to nested
-        # tuple so it can hash as a dict key.
-        cache_key = (token_budget,
-                     tuple(
-                         tuple(g) if isinstance(g, list) else g
-                         for g in _grid))
-
-        if use_cache and cache_key in self._cache_metadata_torch:
-            cached = self._cache_metadata_torch[cache_key]
-            # Build (fresh pixel_values) + (cached metadata).
-            fresh_pv = self.vllm_model._get_pixel_values_by_modality(mm_kwargs)
-            tmpl_pv = self.budget_templates[token_budget].get("pixel_values")
-            if tmpl_pv is not None and fresh_pv.shape != tmpl_pv.shape:
-                buf = torch.zeros_like(tmpl_pv)
-                buf[:fresh_pv.shape[0]] = fresh_pv.to(dtype=tmpl_pv.dtype,
-                                                      device=tmpl_pv.device)
-                pv_padded = buf
-            else:
-                pv_padded = fresh_pv
-            return {**cached, "pixel_values": pv_padded}
-
         replay = self.model.prepare_encoder_cudagraph_replay_buffers(
             mm_kwargs, self.max_batch_size, self.max_frames_per_batch)
-        padded_torch = self._pad_to_template(replay.values, token_budget)
-        if use_cache:
-            # Cache ONLY metadata; pixel_values is replaced by a fresh
-            # extraction next time.
-            self._cache_metadata_torch[cache_key] = {
-                k: v
-                for k, v in padded_torch.items() if k != "pixel_values"
-            }
-        return padded_torch
+        return self._pad_to_template(replay.values, token_budget)
 
     # ----- Overrides of the CUDA-graph device hooks -----
 
