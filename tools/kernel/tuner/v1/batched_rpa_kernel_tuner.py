@@ -257,32 +257,33 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         try:
             start_ns = time.perf_counter_ns()
             for _ in range(iters):
-                _, input_cache['kv_cache'] = jax.block_until_ready(
-                    ragged_paged_attention(
-                        queries=input_cache['queries'],
-                        keys=input_cache['keys'],
-                        values=input_cache['values'],
-                        kv_cache=input_cache['kv_cache'],
-                        kv_lens=input_cache['kv_lens'],
-                        page_indices=input_cache['page_indices'],
-                        cu_q_lens=input_cache['cu_q_lens'],
-                        distribution=input_cache['distribution'],
-                        sm_scale=input_cache['sm_scale'],
-                        sliding_window=input_cache['sliding_window'],
-                        soft_cap=input_cache['soft_cap'],
-                        mask_value=input_cache['mask_value'],
-                        q_scale=input_cache['q_scale'],
-                        k_scale=input_cache['k_scale'],
-                        v_scale=input_cache['v_scale'],
-                        chunk_prefill_size=None,  # not used inside
-                        decode_block_sizes=None,
-                        prefill_block_sizes=prefill_block_sizes,
-                        vmem_limit_bytes=
-                        None,  # use default vmem limit from the wrapper
-                        out_dtype=input_cache['out_dtype'],
-                        use_causal_mask=input_cache['use_causal_mask'],
-                        update_kv_cache=input_cache['update_kv_cache'],
-                    ))
+                input_cache['queries'], input_cache[
+                    'kv_cache'] = jax.block_until_ready(
+                        ragged_paged_attention(
+                            input_cache['queries'],
+                            input_cache['keys'],
+                            input_cache['values'],
+                            input_cache['kv_cache'],
+                            input_cache['kv_lens'],
+                            input_cache['page_indices'],
+                            input_cache['cu_q_lens'],
+                            input_cache['distribution'],
+                            sm_scale=input_cache['sm_scale'],
+                            sliding_window=input_cache['sliding_window'],
+                            soft_cap=input_cache['soft_cap'],
+                            mask_value=input_cache['mask_value'],
+                            q_scale=input_cache['q_scale'],
+                            k_scale=input_cache['k_scale'],
+                            v_scale=input_cache['v_scale'],
+                            chunk_prefill_size=None,  # not used inside
+                            decode_block_sizes=None,
+                            prefill_block_sizes=prefill_block_sizes,
+                            vmem_limit_bytes=
+                            None,  # use default vmem limit from the wrapper
+                            out_dtype=input_cache['out_dtype'],
+                            use_causal_mask=input_cache['use_causal_mask'],
+                            update_kv_cache=input_cache['update_kv_cache'],
+                        ))
             end_ns = time.perf_counter_ns()
             latency_ns = (end_ns - start_ns)
             if iters > 1:

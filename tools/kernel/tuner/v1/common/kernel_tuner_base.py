@@ -53,6 +53,7 @@ class TunableParams:
 class TuningStatus(Enum):
     SUCCESS = 'SUCCESS'
     FAILED_OOM = 'FAILED_OOM'
+    XPROF_MEASUREMENT_ERROR = 'XPROF_MEASUREMENT_ERROR'
     UNKNOWN_ERROR = 'UNKNOWN_ERROR'
     SKIPPED = 'SKIPPED'
 
@@ -695,12 +696,15 @@ class KernelTunerBase(ABC):
                 from tools.kernel.tuner.v1.common.utils import find_events_by_pattern
                 matching_events, average_latency_us = find_events_by_pattern(
                     self.xprof_dir, self.tuner_config.jit_kernel_pattern)
-                assert len(
-                    matching_events
-                ) == measurement_iters, f"The number of matching events {len(matching_events)} is different from the measurement iters {measurement_iters} for Case {cid}."
-                logger.info(
-                    f'Case {cid} average latency is {average_latency_us}us from xprof'
-                )
+                if len(matching_events) != measurement_iters:
+                    logger.fatal(
+                        f"Expected {measurement_iters} matching events for pattern {self.tuner_config.jit_kernel_pattern} in xprof, but found {len(matching_events)}. This may indicate an issue with the profiling or the pattern matching."
+                    )
+                    status = TuningStatus.XPROF_MEASUREMENT_ERROR
+                else:
+                    logger.info(
+                        f'Case {cid} average latency is {average_latency_us}us from xprof'
+                    )
             else:
                 average_latency_us = int(average_latency_ns // 1000)
                 logger.info(
