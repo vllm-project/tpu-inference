@@ -63,6 +63,16 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             compressed_tensors_w8a8_fp8 as vllm_ct_fp8
         vllm_ct_fp8.init_fp8_linear_kernel = lambda *args, **kwargs: None
 
+        # Monkeypatch expose_input_quant_key to handle None kernel on TPU/non-GPU platforms
+        original_expose = vllm_ct_fp8.expose_input_quant_key
+
+        def safe_expose_input_quant_key(layer, kernel):
+            if kernel is None:
+                return
+            original_expose(layer, kernel)
+
+        vllm_ct_fp8.expose_input_quant_key = safe_expose_input_quant_key
+
         CompressedTensorsW8A8Fp8.__init__(
             self,
             weight_quant=weight_quant,

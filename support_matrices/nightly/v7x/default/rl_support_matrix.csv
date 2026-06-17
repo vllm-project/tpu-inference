@@ -1,6 +1,6 @@
 Feature,CorrectnessTest,PerformanceTest
-"Group sampling prefix cache",❌ Failing,❓ Untested
-"MoE Expert IDs",❌ Failing,❓ Untested
-"async_logprobs",❌ Failing,❓ Untested
+"Group sampling prefix cache",✅ Passing,✅ Passing
+"MoE Expert IDs",✅ Passing,❓ Untested
+"async_logprobs",✅ Passing,❓ Untested
 "processed_logprobs",❌ Failing,❓ Untested
-"rl_integration",❌ Failing,❓ Untested
+"rl_integration",✅ Passing,✅ Passing

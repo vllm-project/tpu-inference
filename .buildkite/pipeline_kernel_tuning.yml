@@ -32,23 +32,12 @@
 
 steps:
 
-  # -----------------------------------------------------------------
-  # Build Step
-  # -----------------------------------------------------------------
-  - label: ":docker: Build and Push Base Image (${TPU_VERSION:-tpu6e})"
-    key: ${TPU_VERSION:-tpu6e}_build_docker
-    agents:
-      queue: cpu_64_core 
-    env:
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-    commands:
-      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
   # -----------------------------------------------------------------
   - label: ":docker: Tuning Cases Generation and Pipeline Upload (${TPU_VERSION:-tpu6e})"
     key: generate_tuning_cases_and_yml
-    depends_on: ${TPU_VERSION:-tpu6e}_build_docker
+    depends_on: build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"

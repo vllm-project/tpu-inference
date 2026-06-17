@@ -147,10 +147,7 @@ def _get_baseline_results(
         ref_llm = LLM(model=model_name, **kwargs)
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
-        del ref_llm
-
-        # Waiting for TPUs to be released.
-        time.sleep(10)
+        ref_llm.llm_engine.engine_core.shutdown()
         return ref_outputs
 
 
@@ -224,10 +221,7 @@ def _test_correctness_helper(
         print(
             f"All {matches} outputs match between reference LLM and speculative LLM."
         )
-        del spec_llm
-
-        # Waiting for TPUs to be released.
-        time.sleep(10)
+        spec_llm.llm_engine.engine_core.shutdown()
 
 
 def test_ngram_correctness_greedy(
