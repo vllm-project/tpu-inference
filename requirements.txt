@@ -13,7 +13,7 @@ jaxtyping
 # TODO(lk-chen): remove once LKG moves past above commit
 fastapi[standard]<0.137.0
 flax==0.12.4
-torchax==0.0.11
+torchax==0.0.13
 qwix==0.1.2
 torchvision==0.25.0
 pathwaysutils
