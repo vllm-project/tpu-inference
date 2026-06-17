@@ -12,17 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import tempfile
 from unittest.mock import MagicMock
+from unittest.mock import patch as mock_patch
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
+from torchax.interop import jax_view
 from vllm.config import (CompilationConfig, ModelConfig, MultiModalConfig,
-                         VllmConfig)
+                         VllmConfig, set_current_vllm_config)
+from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
+                                             init_distributed_environment)
+from vllm.engine.arg_utils import EngineArgs
+from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs, EncoderCudaGraphConfig,
     EncoderCudaGraphReplayBuffers)
 
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
+from tpu_inference.layers.common.utils import cpu_mesh_context
+from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
+    shard_model_to_tpu
+from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
+from tpu_inference.models.vllm.vllm_model_wrapper import _VllmRunner
 from tpu_inference.runner.mm_encoder_jit_manager import (
     MMEncoderJITManager, _TorchaxEncoderModelAdapter)
 
@@ -247,3 +263,138 @@ class TestMMEncoderJITManagerInit:
         """_jit_forward is a callable built once at init (not per-call)."""
         manager = _make_manager()
         assert callable(manager._jit_forward)
+
+
+def _image_mm_kwargs(t=1, h=4, w=4):
+    """Build minimal image mm_kwargs for a t×h×w grid.
+
+    With the defaults (1×4×4) output_tokens = 1*(4/2)*(4/2) = 4, which fits
+    comfortably inside the smallest budget (64) produced by the model's
+    auto-infer range.
+    """
+    # Derived from Qwen3.5-0.8B vision_config:
+    #   patch_size=16, temporal_patch_size=2, in_channels=3,
+    _PATCH_FEAT = 2 * 16 * 16 * 3  # temporal_patch_size * patch_size^2 * in_channels
+    return {
+        "pixel_values": torch.randn(t * h * w,
+                                    _PATCH_FEAT,
+                                    dtype=torch.bfloat16),
+        "image_grid_thw": [(t, h, w)],
+    }
+
+
+@pytest.fixture(scope="module")
+def qwen35_mm_encoder():
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3.5-0.8B",
+        max_model_len=256,
+        max_num_batched_tokens=256,
+        max_num_seqs=4,
+        dtype="bfloat16",
+        load_format="dummy",
+        limit_mm_per_prompt={"image": 1},
+    )
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.device_config.device = "cpu"
+    vllm_config.compilation_config.cudagraph_mm_encoder = True
+
+    # sharded_flash_attention uses batch_axis="data" and head_axis="model";
+    # both axes must be present. With one device both are size-1 (replicated).
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:1]).reshape((1, 1)), ("data", "model"))
+    vllm_config.quant_config = get_tpu_quantization_config(vllm_config, mesh)
+
+    init_pp_distributed_environment(ip="",
+                                    rank=0,
+                                    world_size=1,
+                                    device=jax.devices()[0],
+                                    need_pp=False)
+
+    with (cpu_mesh_context(), mock_patch("torch._sync", return_value=None),
+          set_current_vllm_config(vllm_config)):
+        temp_file = tempfile.mkstemp()[1]
+        init_distributed_environment(
+            1,
+            0,
+            local_rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            backend="gloo")
+        ensure_model_parallel_initialized(1, 1)
+        vllm_model = vllm_get_model(vllm_config=vllm_config)
+
+    vllm_runner = _VllmRunner(vllm_model)
+    params_jax = jax_view(shard_model_to_tpu(vllm_runner, mesh))
+    manager = MMEncoderJITManager(
+        vllm_config=vllm_config,
+        vllm_runner=vllm_runner,
+        vllm_model=vllm_model,
+        params_and_buffers=params_jax,
+    )
+    yield manager, mesh
+
+
+class TestMMEncoderJITManagerIntegration:
+    """Integration tests using a real Qwen3.5-0.8B model on TPU.
+
+    The qwen35_mm_encoder fixture loads the model once per module with random
+    weights (load_format=dummy), shards it onto the first TPU device, and
+    builds a live MMEncoderJITManager. Tests cover the three device-bound paths
+    that unit tests cannot reach with mocks alone.
+    """
+
+    def test_prepare_padded_torch_real_model(self, qwen35_mm_encoder):
+        """_prepare_padded_torch produces correctly-shaped outputs for every
+        template key when driven by the real model's replay-buffer method."""
+        manager, _ = qwen35_mm_encoder
+        mm_kwargs = _image_mm_kwargs()
+        smallest_budget = manager.token_budgets[0]
+        padded = manager._prepare_padded_torch(mm_kwargs, smallest_budget)
+
+        template = manager.budget_templates[smallest_budget]
+        assert set(padded.keys()) == set(template.keys())
+        for key, tmpl in template.items():
+            if hasattr(tmpl, "shape"):
+                assert padded[key].shape == tmpl.shape, (
+                    f"key={key}: padded {padded[key].shape} != tmpl {tmpl.shape}"
+                )
+        n_patches = _image_mm_kwargs()["pixel_values"].shape[0]
+        assert padded["pixel_values"].shape[0] >= n_patches
+
+    def test_capture_budget_graph(self, qwen35_mm_encoder):
+        """_capture_budget_graph primes the XLA cache for the smallest budget
+        and records it in budget_graphs so capture()/get_cumulative_stats work."""
+        manager, mesh = qwen35_mm_encoder
+        smallest_budget = manager.token_budgets[0]
+        manager.budget_graphs.pop(smallest_budget, None)
+
+        # shard_map inside the vision attention kernel reads get_abstract_mesh(),
+        # which requires an active jax.set_mesh context.
+        with jax.set_mesh(mesh):
+            manager._capture_budget_graph(smallest_budget)
+
+        assert smallest_budget in manager.budget_graphs
+
+    def test_execute_within_budget(self, qwen35_mm_encoder):
+        """execute() runs the full encoder path for a single within-budget image
+        and returns a per-item list of jax.Array with the expected shape."""
+        # Derived from Qwen3.5-0.8B vision_config:
+        #   spatial_merge_size=2, out_hidden_size=1024
+        _SPATIAL_MERGE = 2
+        _OUT_HIDDEN = 1024
+        manager, mesh = qwen35_mm_encoder
+        mm_kwargs = _image_mm_kwargs(t=1, h=4, w=4)
+        # 1×4×4 grid → output_tokens = 1*(4/2)*(4/2) = 4
+        expected_tokens = 1 * (4 // _SPATIAL_MERGE) * (4 // _SPATIAL_MERGE)
+
+        hits_before = manager.graph_hits
+        with jax.set_mesh(mesh):
+            result = manager.execute(mm_kwargs)
+        jax.block_until_ready(result)
+
+        assert len(result) == 1, "one image → one output entry"
+        assert isinstance(result[0], jax.Array)
+        assert result[0].shape == (expected_tokens, _OUT_HIDDEN), (
+            f"expected ({expected_tokens}, {_OUT_HIDDEN}), got {result[0].shape}"
+        )
+        assert manager.graph_hits > hits_before, (
+            "graph_hits must increment for a within-budget image")
