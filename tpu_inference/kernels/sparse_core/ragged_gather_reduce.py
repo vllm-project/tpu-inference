@@ -21,6 +21,8 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
+from tpu_inference.kernels.sparse_core import core_map_helper
+
 
 # ceil up to the nearest multiple of b.
 def _align_to(a, b):
@@ -545,7 +547,7 @@ def ragged_gather_reduce(
     )
     # Each output row from `main_kernel` will be of type float32, and then casted
     # to the input dtype when doing the filter operation.
-    out = pl.kernel(
+    out = core_map_helper.kernel(
         functools.partial(
             main_kernel,
             core_axis_name=vector_mesh.core_axis_name,
