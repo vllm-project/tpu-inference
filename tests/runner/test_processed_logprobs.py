@@ -48,6 +48,7 @@ def llm():
         model=MODEL_NAME,
         max_model_len=MAX_MODEL_LEN,
         max_num_seqs=MAX_NUM_SEQS,
+        logprobs_mode="processed_logprobs",
     )
     yield engine
     engine.llm_engine.engine_core.shutdown()
