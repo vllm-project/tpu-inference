@@ -318,54 +318,19 @@ class Gemma4Attention(JaxModule):
 
         self.mesh = mesh
 
-        # Shard k/v projections along the kv-heads dimension when num_kv_heads
-        # is divisible by tp_size — this matches the ragged-paged-attention
-        # kernel's expected sharding (P(ATTN_DATA, ATTN_HEAD, None)) and avoids
-        # XLA inserting all-to-all reshuffles every layer. When num_kv_heads <
-        # tp_size (e.g. global layers with k_eq_v + num_global_key_value_heads
-        # = 4 at TP=8), fall back to sharding the head_dim axis; the kernel
-        # replicates kv-heads internally for that case.
-        _tp_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.MODEL)
-        _shard_kv_on_k = (_tp_size <= 1) or (self.num_kv_heads % _tp_size == 0)
-        if not _shard_kv_on_k:
-            logger.warning_once(
-                f"num_kv_heads={self.num_kv_heads} is not divisible by TP size {_tp_size}, "
-                "sharding k/v projections on head_dim instead of kv-heads. This may cause "
-                "all-to-all communication overhead.")
-        _kv_kernel_spec = (None, "model",
-                           None) if _shard_kv_on_k else (None, None, "model")
-        _kv_bias_spec = ("model", None) if _shard_kv_on_k else (None, "model")
-
-        if use_k_eq_v:  # TODO: Add QKV fusion logic for k == v case.
+        if use_k_eq_v:
             self.qkv_proj = None
-            self.q_proj = JaxEinsum(
-                "TD,DNH->TNH",
-                (self.hidden_size, self.num_heads, self.head_dim),
-                bias_shape=(self.num_heads,
-                            self.head_dim) if config.attention_bias else None,
-                param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(init_fn,
-                                                  (None, "model", None)),
-                bias_init=nnx.with_partitioning(init_fn, ("model", None))
-                if config.attention_bias else None,
+            q_size = self.num_heads * self.head_dim
+            k_size = self.num_kv_heads * self.head_dim
+            self.qk_proj = JaxMergedColumnParallelLinear(
+                input_size=self.hidden_size,
+                output_sizes=[q_size, k_size],
                 rngs=rng,
+                use_bias=config.attention_bias,
                 quant_config=quant_config,
-                prefix=prefix + ".q_proj",
-            )
-            self.k_proj = JaxEinsum(
-                "TD,DKH->TKH",
-                (self.hidden_size, self.num_kv_heads, self.head_dim),
-                bias_shape=(self.num_kv_heads,
-                            self.head_dim) if config.attention_bias else None,
+                prefix=prefix + ".qk_proj",
                 param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(init_fn, _kv_kernel_spec),
-                bias_init=nnx.with_partitioning(init_fn, _kv_bias_spec)
-                if config.attention_bias else None,
-                rngs=rng,
-                quant_config=quant_config,
-                prefix=prefix + ".k_proj",
             )
-            self.v_proj = None
         else:
             self.qkv_proj = JaxQKVParallelLinear(
                 hidden_size=self.hidden_size,
@@ -378,9 +343,7 @@ class Gemma4Attention(JaxModule):
                 quant_config=quant_config,
                 prefix=prefix,
             )
-            self.q_proj = None
-            self.k_proj = None
-            self.v_proj = None
+            self.qk_proj = None
 
         self.q_norm = JaxRmsNorm(
             self.head_dim,
@@ -458,10 +421,15 @@ class Gemma4Attention(JaxModule):
         if self.qkv_proj is not None:
             q, k, v = self.qkv_proj(x)
         else:
-            k = self.k_proj(x)
+            outs = self.qk_proj(x)
+            q_sz = self.num_heads * self.head_dim
+            q_flat = outs[..., :q_sz]
+            k_flat = outs[..., q_sz:]
+            q = q_flat.reshape(outs.shape[:-1] +
+                               (self.num_heads, self.head_dim))
+            k = k_flat.reshape(outs.shape[:-1] +
+                               (self.num_kv_heads, self.head_dim))
             v = k
-            # q: (T, N, H)
-            q = self.q_proj(x)
         # Q norm (always applied)
         q = self.q_norm(q)
 
@@ -1041,6 +1009,10 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
             "k_proj",
             "v_proj",
         ],
+        "qk_proj": [
+            "q_proj",
+            "k_proj",
+        ],
         "gate_up_proj": [
             "gate_proj",
             "up_proj",
@@ -1082,18 +1054,46 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                 self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
+        import re
         allowed_layers = set(f"layers.{i}."
                              for i in range(len(self.model.layers)))
-        stripped_weights = (
-            (clean_name, tensor) for name, tensor in weights
-            if (clean_name := name.replace("language_model.", "")).startswith((
-                "model.", "lm_head")) and
-            "vision" not in clean_name  # Exclude vision tower weights for now
-        )
-        return super().load_weights(
-            (name, tensor) for name, tensor in stripped_weights
-            if not ("layers." in name and not any(
-                layer_prefix in name for layer_prefix in allowed_layers)))
+
+        def filter_weights(weights_iterator):
+            for name, tensor in weights_iterator:
+                clean_name = name.replace("language_model.", "")
+                if not clean_name.startswith(("model.", "lm_head")):
+                    continue
+                if "vision" in clean_name:
+                    continue
+                if "layers." in clean_name and not any(
+                        layer_prefix in clean_name
+                        for layer_prefix in allowed_layers):
+                    continue
+
+                # Handle packed QKV weights for global layers when k_eq_v is True
+                if "qkv_proj" in clean_name and "layers." in clean_name:
+                    m = re.search(r"layers\.(\d+)\.", clean_name)
+                    if m:
+                        layer_idx = int(m.group(1))
+                        if self.model.start_layer <= layer_idx < self.model.end_layer:
+                            jax_attn = self.model.layers[
+                                layer_idx - self.model.start_layer].self_attn
+                            if jax_attn.qkv_proj is None:
+                                q_size = jax_attn.num_heads * jax_attn.head_dim_original
+                                kv_size = jax_attn.num_kv_heads * jax_attn.head_dim_original
+
+                                q_weight = tensor[:q_size]
+                                k_weight = tensor[q_size:q_size + kv_size]
+
+                                yield clean_name.replace("qkv_proj",
+                                                         "q_proj"), q_weight
+                                yield clean_name.replace("qkv_proj",
+                                                         "k_proj"), k_weight
+                                continue
+
+                yield clean_name, tensor
+
+        return super().load_weights(filter_weights(weights))
 
     def __call__(
         self,
