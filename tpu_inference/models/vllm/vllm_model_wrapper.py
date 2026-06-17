@@ -16,6 +16,7 @@ import copy
 import time
 from collections.abc import Sequence
 from contextlib import contextmanager, nullcontext
+from functools import partial
 from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
@@ -116,8 +117,8 @@ def _maybe_patch_for_deepseek_v4(vllm_config: VllmConfig):
     _ml_utils._MODEL_ARCH_BY_HASH.clear()
     _try_load_model_cls.cache_clear()
 
-    # DeepseekV4MLA is a plain nn.Module instantiated directly in
-    # amd/model.py (not CustomOp/register_oot hook).
+    # DeepseekV4ROCMAiterMLAAttention is a plain nn.Module instantiated directly
+    # in amd/model.py (not CustomOp/register_oot hook).
     # Swap the class symbol for the TPU subclass before the
     # model is built.
     from tpu_inference.layers.vllm.custom_ops.deepseek_v4_attention import \
@@ -330,10 +331,16 @@ class VllmModelWrapper:
             for name, param in vllm_model.named_parameters():
                 full_name = f"vllm_model.{name}"
                 if full_name in shared_params:
+                    target_param = shared_params[full_name]
+                    if param.shape != target_param.shape:
+                        logger.warning(
+                            f"Shape mismatch for shared parameter {full_name}: "
+                            f"draft {param.shape} vs target {target_param.shape}. "
+                            "Skipping sharing.")
+                        continue
                     logger.info(f"Sharing parameter: {full_name}")
                     # torch_view creates a torchax tensor sharing memory with the JAX array
-                    param.data = torchax.interop.torch_view(
-                        shared_params[full_name])
+                    param.data = torchax.interop.torch_view(target_param)
 
         if self.vllm_config.speculative_config and self.vllm_config.speculative_config.method == "eagle3" and not self.is_draft_model:
             set_eagle3_aux_hidden_state_layers(
@@ -379,7 +386,6 @@ class VllmModelWrapper:
             "post_spmd_conservative",
             "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
         }
-
         sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
         if sc_offload_bytes > 0:
             threshold_bytes = str(sc_offload_bytes)
@@ -390,23 +396,7 @@ class VllmModelWrapper:
                 "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
                     threshold_bytes)
 
-        @jax.jit(
-            donate_argnames=("kv_caches", ),
-            out_shardings=(
-                None,  # kv_caches - keep original sharding
-                NamedSharding(self.mesh,
-                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
-                None,  # empty list
-                None,  # expert ids
-            ),
-            compiler_options=compiler_options,
-            static_argnames=(
-                "layer_name_to_kvcache_index",
-                "is_first_rank",
-                "is_last_rank",
-            ),
-        )
-        def step_fun(
+        def step_fun_impl(
             params_and_buffers,  # This has been wrapped into torchax TorchValue
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
@@ -473,18 +463,7 @@ class VllmModelWrapper:
                 expert_indices = None
             return new_kv_caches, output, aux_hidden_states, expert_indices
 
-        @jax.jit(
-            donate_argnames=("kv_caches", ),
-            out_shardings=(
-                None,  # kv_caches - keep original sharding
-                NamedSharding(self.mesh,
-                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
-                None,  # list of aux hidden states
-                None,  # expert ids
-            ),
-            static_argnames=("layer_name_to_kvcache_index", "spec_step_idx"),
-        )
-        def draft_step_fun(
+        def draft_step_fun_impl(
             params_and_buffers,
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
@@ -526,7 +505,49 @@ class VllmModelWrapper:
                 hidden_states, hidden_prenorm = jax_view(output_from_torch)
             return new_kv_caches, hidden_states, [hidden_prenorm], None
 
-        return draft_step_fun if self.is_draft_model else step_fun
+        draft_step_fun = jax.jit(
+            draft_step_fun_impl,
+            donate_argnames=("kv_caches", ),
+            out_shardings=(
+                None,  # kv_caches - keep original sharding
+                NamedSharding(self.mesh,
+                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+                None,  # list of aux hidden states
+                None,  # expert ids
+            ),
+            static_argnames=("layer_name_to_kvcache_index", "spec_step_idx"),
+        )
+
+        step_fun_jit = partial(
+            jax.jit,
+            donate_argnames=("kv_caches", ),
+            out_shardings=(
+                None,  # kv_caches - keep original sharding
+                NamedSharding(self.mesh,
+                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+                None,  # empty list
+                None,  # expert ids
+            ),
+            static_argnames=(
+                "layer_name_to_kvcache_index",
+                "is_first_rank",
+                "is_last_rank",
+            ),
+        )
+
+        step_fun_no_options = step_fun_jit(step_fun_impl)
+
+        step_fun_with_options = step_fun_jit(
+            step_fun_impl,
+            compiler_options=compiler_options,
+        )
+
+        if self.is_draft_model:
+            self.step_fn_no_options = draft_step_fun
+            return draft_step_fun
+        else:
+            self.step_fn_no_options = step_fun_no_options
+            return step_fun_with_options
 
     def wrap_precompile_vision_encoder_fn(
         self,

@@ -4,10 +4,26 @@ import os
 import random
 from typing import TYPE_CHECKING, Optional, Tuple, Union
 
+import jax
 import jax.numpy as jnp
 import numpy
 import torch
 import vllm.envs as vllm_envs
+
+# Monkeypatch torch.accelerator.empty_cache to ignore device_allocator error on TPU.
+if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "empty_cache"):
+    _orig_empty_cache = torch.accelerator.empty_cache
+
+    def _patched_empty_cache(*args, **kwargs):
+        try:
+            _orig_empty_cache(*args, **kwargs)
+        except RuntimeError as e:
+            if "Allocator for jax is not a DeviceAllocator" in str(e):
+                pass
+            else:
+                raise e
+
+    torch.accelerator.empty_cache = _patched_empty_cache
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -90,7 +106,8 @@ class TpuPlatform(Platform):
     dispatch_key: str = "XLA"
     ray_device_key: str = "TPU"
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
-    simple_compile_backend: str = "openxla"
+    # Bypass torch.compile; torchax defers all compilation to JAX
+    simple_compile_backend: str = "eager"
 
     supported_quantization: list[str] = [
         "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4", "modelopt_fp4",
@@ -157,6 +174,24 @@ class TpuPlatform(Platform):
                 "Automatically using fp8_e5m2 for FP8 KV cache on TPU v6e.")
             return torch.float8_e5m2
         return torch.float8_e4m3fn
+
+    @classmethod
+    def mem_get_info(cls) -> Tuple[int, int]:
+        """
+        Returns (free_memory, total_memory) in bytes for the specified TPU device.
+        """
+        # Fetch TPU memory statistics via JAX
+        # On TPU SPMD, we need to aggregate both the limit and usage across all
+        # local devices because global tensor dimensions are used for budget calculations.
+        total_memory = 0
+        bytes_in_use = 0
+        for d in jax.local_devices():
+            stats = d.memory_stats()
+            total_memory += stats.get('bytes_limit', 0)
+            bytes_in_use += stats.get('bytes_in_use', 0)
+
+        free_memory = total_memory - bytes_in_use
+        return free_memory, total_memory
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -244,18 +279,6 @@ class TpuPlatform(Platform):
                 )
         cls._initialize_sharding_config(vllm_config)
 
-        from vllm.config import CompilationMode
-
-        compilation_config = vllm_config.compilation_config
-
-        # TPU only supports DYNAMO_TRACE_ONCE compilation level
-        # NOTE(xiang): the compilation_config is not used by jax.
-        if compilation_config.mode != CompilationMode.DYNAMO_TRACE_ONCE:
-            compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
-
-        if compilation_config.backend == "":
-            compilation_config.backend = "openxla"
-
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
         if cache_config and not cache_config.user_specified_block_size:
@@ -329,10 +352,32 @@ class TpuPlatform(Platform):
                     f"Unsupported kv_connector "
                     f"'{kv_transfer_config.kv_connector}' for the TPU "
                     f"platform. Expected one of {allowed}.")
+
+        enable_continue_decode = vllm_config.additional_config.get(
+            "enable_continue_decode", False)
+        is_pooling_model = vllm_config.model_config.runner_type == "pooling"
+        async_scheduling = vllm_config.scheduler_config.async_scheduling
+
         # Late initialization to avoid circular import.
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
+
+        if enable_continue_decode:
+            if parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "continue_decode is not supported with pipeline parallelism"
+                )
+            if is_pooling_model:
+                raise ValueError(
+                    "continue_decode is not supported for pooling models")
+            if async_scheduling:
+                raise ValueError(
+                    "continue_decode is not supported with async scheduling")
+
+            from tpu_inference.core.sched.utils import \
+                patch_vllm_scheduler_for_continue_decode
+            patch_vllm_scheduler_for_continue_decode()
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:

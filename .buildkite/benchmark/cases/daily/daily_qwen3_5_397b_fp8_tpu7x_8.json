@@ -157,6 +157,64 @@
           "ignore-eos": true
         }
       }
+    },
+    {
+      "case_name": "Qwen3_5-397B-A17B-FP8-dataset_mmmu-pro-outlen_1",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "MODELTAG": "NEW",
+        "EXPECTED_ETEL": 43200000,
+        "INPUT_LEN": 0,
+        "OUTPUT_LEN": 1,
+        "DATASET": "mmmu-pro"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "__COMMENT__": "Shardy disabled due to b/517297815#comment9",
+          "VLLM_USE_V1": "1",
+          "MODEL_IMPL_TYPE": "vllm",
+          "JAX_USE_SHARDY_PARTITIONER": "false",
+          "LIBTPU_INIT_ARGS": "--xla_use_shardy=false --xla_tpu_scoped_vmem_limit_kib=131072"
+        },
+        "args": {
+          "model": "Qwen/Qwen3.5-397B-A17B-FP8",
+          "max-num-seqs": 256,
+          "max-num-batched-tokens": 8192,
+          "tensor-parallel-size": {
+            "v7x-8": 8
+          },
+          "max-model-len": 8192,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.85,
+          "block-size": 256,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true,
+          "limit-mm-per-prompt": "{\"image\":8,\"video\":0}",
+          "allowed-local-media-path": "/workspace/tpu_inference/artifacts/dataset",
+          "disable-chunked-mm-input": true,
+          "mm-processor-kwargs": "{\"size\": {\"longest_edge\": 262144, \"shortest_edge\": 3136}}",
+          "compilation-config": "{\"cudagraph_mm_encoder\": true}"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3.5-397B-A17B-FP8",
+          "backend": "openai-chat",
+          "endpoint": "/v1/chat/completions",
+          "dataset-name": "custom_image",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/mmmu_pro_custom_image.jsonl",
+          "num-prompts": 1730,
+          "output-len": 1,
+          "max-concurrency": 320,
+          "request-rate": "inf",
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
     }
   ]
 }

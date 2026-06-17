@@ -78,6 +78,8 @@ def apply_act_fn(acc: jax.Array, fuse_act: str | None):
             return jax.nn.silu(acc_gate) * acc_up
         case "gelu":
             return jax.nn.gelu(acc_gate) * acc_up
+        case "gelu_tanh":
+            return jax.nn.gelu(acc_gate, approximate=True) * acc_up
         case "swigluoai":
             return swigluoai(acc_gate, acc_up)
         case "silu_and_mul_with_clamp":

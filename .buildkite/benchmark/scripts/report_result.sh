@@ -258,6 +258,29 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
     echo "--- run_bm.sh failed with exit code $EXIT_CODE. Skipping DB reporting."
     exit 0
   fi
+
+  MANDATORY_VARS=(
+    "RECORD_ID"
+    "DEVICE"
+    "MODEL"
+    "CODE_HASH"
+    "TARGET_CASE_NAME"
+    "DATASET"
+    "TENSOR_PARALLEL_SIZE"
+    "INPUT_LEN"
+    "OUTPUT_LEN"
+    "MAX_NUM_SEQS"
+    "MAX_NUM_BATCHED_TOKENS"
+    "MAX_MODEL_LEN"
+  )
+
+  for var_name in "${MANDATORY_VARS[@]}"; do
+    if [[ -z "${!var_name:-}" ]]; then
+      echo "Error: Environment variable $var_name is not set or empty. This is mandatory for database reporting." >&2
+      exit 1
+    fi
+  done
+
   BUILDKITE_AGENT_NAME="${BUILDKITE_AGENT_NAME:-local-test}"
 
   # Parse metric assignments for dynamic columns
@@ -311,16 +334,17 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
   SQL_ADDITIONAL_CONFIG=$(prepare_sql_val "${ADDITIONAL_CONFIG:-}" "'{}'")
   SQL_EXTRA_ARGS=$(prepare_sql_val "${EXTRA_ARGS:-}" "''")
   SQL_EXTRA_ENVS=$(prepare_sql_val "${EXTRA_ENVS:-}" "''")
-  SQL_RECORD_ID=$(prepare_sql_val "$RECORD_ID" "")
+  SQL_RECORD_ID=$(prepare_sql_val "$RECORD_ID" "''")
   SQL_STATUS=$(prepare_sql_val "$FINAL_STATUS" "FAILED")
   SQL_USER=$(prepare_sql_val "${USER:-buildkite-agent}" "buildkite-agent")
-  SQL_JOB_REFERENCE=$(prepare_sql_val "${JOB_REFERENCE:-}" "")
-  SQL_AGENT_NAME=$(prepare_sql_val "${BUILDKITE_AGENT_NAME:-}" "")
-  SQL_DEVICE=$(prepare_sql_val "${DEVICE:-}" "")
-  SQL_MODEL=$(prepare_sql_val "${MODEL:-}" "")
+  SQL_JOB_REFERENCE=$(prepare_sql_val "${JOB_REFERENCE:-}" "''")
+  SQL_AGENT_NAME=$(prepare_sql_val "${BUILDKITE_AGENT_NAME:-}" "''")
+  SQL_DEVICE=$(prepare_sql_val "${DEVICE:-}" "''")
+  SQL_MODEL=$(prepare_sql_val "${MODEL:-}" "''")
   SQL_RUN_TYPE=$(prepare_sql_val "${RUN_TYPE:-DAILY}" "DAILY")
-  SQL_CODE_HASH=$(prepare_sql_val "${CODE_HASH:-}" "")
-  SQL_DATASET=$(prepare_sql_val "${DATASET:-}" "")
+  SQL_CODE_HASH=$(prepare_sql_val "${CODE_HASH:-}" "''")
+  SQL_CASE_NAME=$(prepare_sql_val "${TARGET_CASE_NAME:-}" "''")
+  SQL_DATASET=$(prepare_sql_val "${DATASET:-}" "''")
   SQL_MODELTAG=$(prepare_sql_val "${MODELTAG:-PROD}" "PROD")
   SQL_CONFIG=$(prepare_sql_val "${CASE_CONFIG_JSON:-}" "{}")
 
@@ -338,6 +362,7 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
   SQL="INSERT INTO RunRecord (
       RecordId, Status, CreatedTime, LastUpdate, CreatedBy, JobReference, RunBy,
       Device, Model, RunType, CodeHash,
+      CaseName,
       MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
       Dataset, InputLen, OutputLen,
       ExpectedETEL, NumPrompts, ModelTag, PrefixLen,
@@ -345,6 +370,7 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
     ) VALUES (
       $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_JOB_REFERENCE, $SQL_AGENT_NAME,
       $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH,
+      $SQL_CASE_NAME,
       $SQL_MAX_NUM_SEQS, $SQL_MAX_NUM_BATCHED_TOKENS, $SQL_TENSOR_PARALLEL_SIZE, $SQL_MAX_MODEL_LEN,
       $SQL_DATASET, $SQL_INPUT_LEN, $SQL_OUTPUT_LEN,
       $SQL_EXPECTED_ETEL, $SQL_NUM_PROMPTS, $SQL_MODELTAG, $SQL_PREFIX_LEN,
@@ -374,4 +400,11 @@ else
   else
     echo "Warning: $RESULT_FILE not found. No results to display."
   fi
+fi
+
+if [[ "${MLCOMPASS_EXPORT_ENABLED:-false}" == "true" ]]; then
+  echo "--- Reporting to MLCompass"
+  python3 "$(dirname "${BASH_SOURCE[0]}")/mlcompass_export.py" --result_file="$RESULT_FILE"
+else
+  echo "--- Reporting to MLCompass (skipped)"
 fi

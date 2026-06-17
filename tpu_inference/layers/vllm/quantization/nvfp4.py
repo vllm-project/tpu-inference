@@ -36,7 +36,8 @@ from jax.sharding import Mesh
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
+                                                  RoutedExperts)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import (
     QuantizationMethods, register_quantization_config)
@@ -99,7 +100,7 @@ class VllmNvfp4Config(ModelOptNvFp4Config, VllmQuantConfig):
             if self.is_layer_excluded(prefix):
                 return VllmUnquantizedLinearMethod(linear_config)
             return VllmNvfp4LinearMethod(self, linear_config)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             if self.is_layer_excluded(prefix):
                 return VllmUnquantizedFusedMoEMethod(layer.moe_config)
             layer.moe_config = self.get_moe_config(layer)
@@ -121,8 +122,21 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
 
     def __init__(self, quant_config: 'VllmNvfp4Config',
                  linear_config: VllmQuantLinearConfig):
+        # Monkeypatch expose_input_quant_key in modelopt module safely on TPU
+        from vllm.model_executor.layers.quantization import \
+            modelopt as vllm_modelopt
+        original_expose = vllm_modelopt.expose_input_quant_key
+
+        def safe_expose_input_quant_key(layer, kernel):
+            if kernel is None:
+                return
+            original_expose(layer, kernel)
+
+        vllm_modelopt.expose_input_quant_key = safe_expose_input_quant_key
+
         VllmUnquantizedLinearMethod.__init__(self, linear_config)
         self.quant_config = quant_config
+        self.kernel = None
 
     def create_weights(self, layer, input_size_per_partition,
                        output_partition_sizes, input_size, output_size,
@@ -320,7 +334,7 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         # the scale params are registered, so vLLM's MoE weight loader does
         # not see `quant_method` on them and rejects the load. Set them
         # explicitly here.
-        from vllm.model_executor.layers.fused_moe.layer import \
+        from vllm.model_executor.layers.fused_moe import \
             FusedMoeWeightScaleSupported
         for name in ("w13_weight_scale", "w2_weight_scale"):
             set_weight_attrs(
@@ -351,7 +365,7 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         return None
 
     def process_weights_after_loading(self, layer):
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
         # Drop unused activation-quant scales registered by upstream.
         for attr in ('w13_input_scale', 'w2_input_scale'):
             if hasattr(layer, attr):

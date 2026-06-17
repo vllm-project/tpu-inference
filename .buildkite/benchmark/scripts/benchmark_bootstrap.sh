@@ -47,7 +47,7 @@ buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
 upload_benchmark_pipeline() {
     local target_case_type="$BM_CASE_TYPE"
 
-    VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
+    VLLM_COMMIT_HASH=${VLLM_COMMIT_HASH:-$(get_vllm_commit_hash)}
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     TPU_COMMIT_HASH=$(git rev-parse HEAD)
     CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_COMMIT_HASH}-"

@@ -20,6 +20,11 @@
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
 
+# Centrally default to using prebuilt image when running in Buildkite CI
+if [ -n "${BUILDKITE:-}" ]; then
+  export USE_PREBUILT_IMAGE="${USE_PREBUILT_IMAGE:-1}"
+fi
+
 if [ "$#" -eq 0 ]; then
   echo "ERROR: Usage: $0 <command_and_args_to_run_in_docker...>"
   exit 1
@@ -64,6 +69,7 @@ ENV_VARS=(
   -e KERNEL_TUNING_JOB_PRIORITY="${PRIORITY_KERNEL_TUNING:--10}"
   -e KERNEL_TUNING_MAX_EXECUTION_MINUTES="${KERNEL_TUNING_MAX_EXECUTION_MINUTES:-20}"
   -e HOST_NAME="${HOST_NAME:-}"
+  -e GCS_BUCKET="${GCS_BUCKET:-}"
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
@@ -182,6 +188,7 @@ docker run \
   ${USE_V7X8_QUEUE:+-e USE_V7X8_QUEUE="$USE_V7X8_QUEUE"} \
   ${MOE_REQUANTIZE_BLOCK_SIZE:+-e MOE_REQUANTIZE_BLOCK_SIZE="$MOE_REQUANTIZE_BLOCK_SIZE"} \
   ${MOE_REQUANTIZE_WEIGHT_DTYPE:+-e MOE_REQUANTIZE_WEIGHT_DTYPE="$MOE_REQUANTIZE_WEIGHT_DTYPE"} \
+  -e NUM_PRECOMPILE_WORKERS="${NUM_PRECOMPILE_WORKERS:-1}" \
    "${BENCHMARK_DOCKER_ARGS[@]}" \
   "$FULL_IMAGE_TAG" \
   "$@" # Pass all script arguments as the command to run in the container

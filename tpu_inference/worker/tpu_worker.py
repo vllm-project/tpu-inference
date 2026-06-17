@@ -573,6 +573,7 @@ class TPUWorker(WorkerBase):
                  and self.model_runner.model_config.enforce_eager)):
             self.model_runner.compilation_manager._precompile_sampling()
             self.model_runner.compilation_manager._precompile_gather_logprobs()
+            self.model_runner.compilation_manager._flush_compilations()
 
         # Init kv cache connector here, because it requires `kv_cache_config`.
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
