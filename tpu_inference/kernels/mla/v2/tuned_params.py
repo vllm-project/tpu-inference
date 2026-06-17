@@ -59,6 +59,9 @@ class TunableParams:
     def __ge__(self, other) -> bool:
         return self.decode_batch_size >= other.decode_batch_size and self.num_kv_pages_per_block >= other.num_kv_pages_per_block and self.num_queries_per_block >= other.num_queries_per_block and self.vmem_limit_bytes <= other.vmem_limit_bytes
 
+    def __le__(self, other) -> bool:
+        return self.decode_batch_size <= other.decode_batch_size and self.num_kv_pages_per_block <= other.num_kv_pages_per_block and self.num_queries_per_block <= other.num_queries_per_block and self.vmem_limit_bytes >= other.vmem_limit_bytes
+
 
 tuned_params_mapping: dict[TuningKey, TunableParams] = {
     TuningKey(

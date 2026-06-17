@@ -86,7 +86,10 @@ class TunableParams:
 
     # Define comparison operators for skipping tuning case when smaller block sizes hit OOM already
     def __ge__(self, other) -> bool:
-        return self.bq_sz >= other.bq_sz and self.bq_c_sz >= other.bq_c_sz and self.bkv_sz >= other.bkv_sz and self.batch_size >= other.batch_size
+        return self.bq_sz >= other.bq_sz and self.bq_c_sz >= other.bq_c_sz and self.bkv_sz >= other.bkv_sz and self.batch_size >= other.batch_size and self.n_buffer >= other.n_buffer
+
+    def __le__(self, other) -> bool:
+        return self.bq_sz <= other.bq_sz and self.bq_c_sz <= other.bq_c_sz and self.bkv_sz <= other.bkv_sz and self.batch_size <= other.batch_size and self.n_buffer <= other.n_buffer
 
 
 def get_tuned_params(
