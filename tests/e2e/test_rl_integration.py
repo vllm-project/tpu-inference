@@ -63,8 +63,7 @@ def llm():
         enable_prefix_caching=True,
     )
     yield engine
-    del engine
-    time.sleep(5)
+    engine.llm_engine.engine_core.shutdown()
 
 
 @pytest.fixture
