@@ -75,7 +75,7 @@ steps:
     key: tpu7x_verify_2915_async
     depends_on: tpu7x_build_docker
     agents:
-      queue: tpu_v7x_8_queue
+      queue: tpu_v7x_2_queue
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
@@ -86,7 +86,7 @@ steps:
     key: tpu7x_verify_2915_lora
     depends_on: tpu7x_build_docker
     agents:
-      queue: tpu_v7x_8_queue
+      queue: tpu_v7x_2_queue
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
