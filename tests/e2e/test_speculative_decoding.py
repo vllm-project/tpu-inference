@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import random
 import string
-import time
 
 import pytest
 from vllm import LLM, SamplingParams
@@ -352,9 +351,7 @@ def _test_performance_helper(
             print("num_accepted_tokens:" + str(num_accepted_tokens))
             print("num_draft_tokens:" + str(num_draft_tokens))
 
-        del spec_llm
-        # Waiting for TPUs to be released
-        time.sleep(30)
+        spec_llm.llm_engine.engine_core.shutdown()
 
         assert acceptance_rate >= min_acceptance_rate, f"Expected at least {min_acceptance_rate:.2%} acceptance rate for {speculative_config['method']}, got {acceptance_rate:.2%}"
 

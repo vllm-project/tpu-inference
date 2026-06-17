@@ -62,9 +62,8 @@ def _run_inference_and_return_outputs(
         latency = time.time() - start_time
         return outputs, latency
     finally:
-        del llm
+        llm.llm_engine.engine_core.shutdown()
         gc.collect()
-        time.sleep(15)
 
 
 def _check_correctness(test_name: str, baseline_outputs: list,
