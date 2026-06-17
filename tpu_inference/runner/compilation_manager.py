@@ -1166,11 +1166,13 @@ class CompilationManager:
                 self._run_compilation(
                     f"worker{self.runner.rank} extract_draft_token_ids",
                     self.runner._extract_draft_token_ids,
+                    self.runner,
                     input_ids,
                     final_logits_indices,
                     target_logits_indices,
                     num_tokens=num_tokens,
                     num_logits=num_logits,
+                    warmup_handler=self._skip_self_arg_warmup_handler,
                 )
 
     def _precompile_extract_last_sampled_tokens(self) -> None:
