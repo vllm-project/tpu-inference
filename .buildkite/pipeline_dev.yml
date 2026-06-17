@@ -14,7 +14,8 @@
 
 # Dev pipeline: verify #2915 (explicit engine_core.shutdown() instead of del+sleep)
 # resolves the "TPU already in use / libtpu lockfile" contention seen in nightlies.
-# Runs the contention-affected e2e tests (DP/EP/TP/SP/async), 3x to catch flakiness.
+# Each contention-affected e2e test runs in its own step/container, mirroring how the
+# nightly runs them (one `pytest -s -v -x <file>` per job).
 
 steps:
   - label: ":docker: Build base image (tpu7x)"
@@ -26,21 +27,57 @@ steps:
     commands:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
-  - label: "tpu7x verify #2915 — contention e2e tests (run {{matrix}})"
-    key: tpu7x_verify_2915
+  - label: "tpu7x verify #2915 — DP"
+    key: tpu7x_verify_2915_dp
     depends_on: tpu7x_build_docker
     agents:
       queue: tpu_v7x_8_queue
-    matrix: ["1", "2", "3"]
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
     commands:
-      - |
-        .buildkite/scripts/run_in_docker.sh bash -c '
-          python3 -m pytest -s -v \
-            /workspace/tpu_inference/tests/e2e/test_data_parallel.py \
-            /workspace/tpu_inference/tests/e2e/test_expert_parallel.py \
-            /workspace/tpu_inference/tests/e2e/test_tensor_parallel.py \
-            /workspace/tpu_inference/tests/e2e/test_sequence_parallelism.py \
-            /workspace/tpu_inference/tests/e2e/test_async_scheduler.py'
+      - .buildkite/scripts/run_in_docker.sh bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py'
+
+  - label: "tpu7x verify #2915 — EP"
+    key: tpu7x_verify_2915_ep
+    depends_on: tpu7x_build_docker
+    agents:
+      queue: tpu_v7x_8_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_expert_parallel.py'
+
+  - label: "tpu7x verify #2915 — TP"
+    key: tpu7x_verify_2915_tp
+    depends_on: tpu7x_build_docker
+    agents:
+      queue: tpu_v7x_8_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_tensor_parallel.py'
+
+  - label: "tpu7x verify #2915 — SP"
+    key: tpu7x_verify_2915_sp
+    depends_on: tpu7x_build_docker
+    agents:
+      queue: tpu_v7x_8_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_sequence_parallelism.py'
+
+  - label: "tpu7x verify #2915 — async scheduler"
+    key: tpu7x_verify_2915_async
+    depends_on: tpu7x_build_docker
+    agents:
+      queue: tpu_v7x_8_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_async_scheduler.py'
