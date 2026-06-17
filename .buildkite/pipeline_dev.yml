@@ -81,3 +81,14 @@ steps:
       TPU_VERSION: "tpu7x"
     commands:
       - .buildkite/scripts/run_in_docker.sh bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_async_scheduler.py'
+
+  - label: "tpu7x verify #2915 — LoRA_Torch perf"
+    key: tpu7x_verify_2915_lora
+    depends_on: tpu7x_build_docker
+    agents:
+      queue: tpu_v7x_8_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora_perf.py'
