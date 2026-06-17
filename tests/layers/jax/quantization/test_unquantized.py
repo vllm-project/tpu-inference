@@ -147,9 +147,8 @@ class TestJaxMergedColumnParallelLinear:
         assert isinstance(layer.quant_method, UnquantizedMergedLinearMethod)
         cfg = layer.quant_method.linear_config
         assert cfg.output_sizes == [6, 6]
-        # n_shards == number of fused projections; required for the
-        # interleave (load) / de-interleave (forward) to be inverses.
-        assert cfg.n_shards == 2
+        # n_shards is the TP degree from the active mesh (1 when no mesh set).
+        assert cfg.n_shards == 1
         assert cfg.fuse_matmuls
         # The weight_loader is attached at create_weights_jax time and the
         # per-projection accumulation slots start empty.
