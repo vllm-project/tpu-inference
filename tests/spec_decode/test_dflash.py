@@ -13,7 +13,7 @@
 # limitations under the License.
 """Unit tests for the JAX DFlash speculative decoding proposer."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import jax
 import jax.numpy as jnp
@@ -220,4 +220,3 @@ def test_build_noise_block_batched():
     np.testing.assert_array_equal(
         np.asarray(noise_positions),
         np.array([10, 11, 12, 20, 21, 22], dtype=np.int32))
-
