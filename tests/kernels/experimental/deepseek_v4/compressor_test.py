@@ -11,20 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for the DeepSeek-V4 KV compressor orchestrator (Milestone 3).
-
-``compressor_forward`` chains a projection GEMM, ``save_partial_states``
-(Milestone 1) and ``compress_norm_rope_store`` (Milestone 2) over a single
-shared ``uint8`` cache buffer (state + compressed KV overlaid).
-
-Rather than re-running the JAX kernels, these tests compare against a naive
-NumPy end-to-end reference: plain-fp32 projection, a plain-Python state
-scatter, then a local NumPy boundary ground truth. We compare the dequantized
-compressed-KV at the slots the boundary store actually wrote.
-
-    .venv/bin/python -m pytest \
-        tests/kernels/experimental/deepseek_v4/compressor_test.py -v
-"""
+"""Tests for the DeepSeek-V4 KV compressor """
 
 import jax
 import jax.numpy as jnp
@@ -260,12 +247,7 @@ def _dequant(nope, rope, scale, kw):
 
 
 def _naive_reference(kw):
-    """Naive end-to-end NumPy ground truth for the whole compressor.
-
-    Mirrors ``compressor_forward`` in plain NumPy: an fp32 projection GEMM, the
-    partial-state scatter, then ``_boundary_store_ref``. Returns the
-    dequantized compressed-KV per flat KV slot (``num_pages * PAGE_SIZE`` rows).
-    """
+    """Naive end-to-end np ground truth for the whole compressor."""
     coff = 1 + int(kw["overlap"])
     state_width = coff * kw["head_dim"]
 
@@ -330,8 +312,7 @@ def test_compressor_forward_matches_reference(
     act_deq = _dequant_written(act_cache, kw)
 
     # Compare the dequantized compressed-KV at the boundary slots actually
-    # written. The tolerance absorbs the projection GEMM's fp32 rounding; a
-    # wiring bug (wrong split / slot mapping / state round-trip) is gross.
+    # written.
     slots = _written_slots(kw)
     assert slots.size > 0
     np.testing.assert_allclose(
