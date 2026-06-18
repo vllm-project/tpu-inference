@@ -110,8 +110,8 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "eager"
 
     supported_quantization: list[str] = [
-        "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4", "modelopt_fp4",
-        "deepseek_v4_fp8"
+        "compressed-tensors", "auto_awq", "fp8", "gpt_oss_mxfp4",
+        "modelopt_fp4", "deepseek_v4_fp8"
     ]
 
     def set_device(self, device: torch.device) -> None:
