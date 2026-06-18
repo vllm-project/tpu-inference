@@ -782,7 +782,7 @@ def mla_ragged_paged_attention(
     head_dim = q.shape[-1]
     attention_sinks = jnp.pad(
         attention_sinks,
-        (0, align_to(actual_num_q_heads, 128) - actual_num_q_heads),
+        (0, q.shape[1] - actual_num_q_heads),
         constant_values=-jnp.inf,
     )
     assert swa_accumution.dtype == q.dtype

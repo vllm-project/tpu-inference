@@ -220,7 +220,7 @@ class CorrectnessTest(parameterized.TestCase):
 
         # Configuration (Smaller for correctness test)
         batch_size = 12
-        num_heads = 128
+        num_heads = 64
         head_dim = 512
         page_size = 16
 
