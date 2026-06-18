@@ -31,6 +31,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference.kernels.mamba2.jagged_ssd import HBG_SIZE, ssd_candidate
 from tpu_inference.layers.common.ragged_conv1d_jax import ragged_conv1d
 from tpu_inference.layers.common.sharding import ShardingAxisName
 
@@ -107,6 +108,56 @@ def ragged_mamba2_ssd(
     return new_state, y  # (num_blocks, H, P, N), (num_tokens, H, P)
 
 
+def prefill_ssd_jagged(x, B_g, C_g, dt, A, dt_bias, D, cu_seqlens, *, n_groups):
+    """Fresh-state prefill via the jagged chunked SSD Pallas kernel.
+
+    Much faster than the token-by-token scan for prefill (the kernel is chunked /
+    parallel; the scan is O(T) serial). The kernel emits only y, so the
+    per-sequence final ssm_state is computed in closed form (no scan):
+        state_s = sum_{t in seq s} exp(cumA_last_s - cumA_t) * dt_t * (x_t (x) B_t)
+    where cumA is the per-segment cumulative sum of log(a), a = exp(dt * A).
+
+    Only valid for fresh prefill (no initial state). Returns
+    (y (T,H,P), final_states (num_seqs,H,P,N)).
+    """
+    T, H, P_dim = x.shape
+    hpg = H // n_groups
+    B = jnp.repeat(B_g, hpg, axis=1)  # (T,H,N)
+    C = jnp.repeat(C_g, hpg, axis=1)
+    A_f = A.astype(jnp.float32)
+    dt_sp = jax.nn.softplus(dt.astype(jnp.float32) + dt_bias[None, :])  # (T,H)
+
+    # y via the kernel (pad heads H -> HBG_SIZE; the kernel hardcodes H=128).
+    # The kernel's A_log arg is the coefficient in log(a)=A_log*dt, i.e. A itself
+    # (already -exp(A_log_ckpt), negative) — pass A directly. Padded heads carry
+    # x=B=0 so they contribute 0; sliced off afterwards.
+    hp = HBG_SIZE - H
+    xk = jnp.pad(x, ((0, 0), (0, hp), (0, 0)))
+    dtk = jnp.pad(dt_sp.astype(jnp.bfloat16), ((0, 0), (0, hp)))
+    Bk = jnp.pad(B, ((0, 0), (0, hp), (0, 0)))
+    Ck = jnp.pad(C, ((0, 0), (0, hp), (0, 0)))
+    A_log_k = jnp.pad(A_f, ((0, hp), ), constant_values=-1.0)
+    yk = ssd_candidate(xk, dtk, A_log_k, Bk, Ck, cu_seqlens)  # (T,128,P)
+    y = yk[:, :H, :].astype(jnp.float32) + D[None, :, None] * x.astype(
+        jnp.float32)  # + D skip
+
+    # Per-sequence final state, closed form (segment-wise weighted sum).
+    log_a = dt_sp * A_f  # (T,H)
+    idx = jnp.arange(T)
+    seg = jnp.searchsorted(cu_seqlens[1:], idx, side="right")  # token -> seg id
+    S = cu_seqlens.shape[0] - 1
+    seg_start = cu_seqlens[seg]
+    pref = jnp.cumsum(log_a, axis=0)  # global inclusive prefix
+    start_pref = (pref - log_a)[seg_start]  # exclusive prefix at segment start
+    cumA = pref - start_pref  # per-segment inclusive cumsum
+    cumA_last = cumA[cu_seqlens[1:] - 1]  # (S,H) at each segment's last token
+    w = jnp.exp(cumA_last[seg] - cumA) * dt_sp  # (T,H)
+    wx = w[:, :, None] * x.astype(jnp.float32)  # (T,H,P)
+    onehot = (seg[:, None] == jnp.arange(S)[None, :]).astype(jnp.float32)
+    states = jnp.einsum("ts,thp,thn->shpn", onehot, wx, B.astype(jnp.float32))
+    return y.astype(x.dtype), states
+
+
 def _run_local(x_l, B_l, C_l, dt, conv_state, ssm_state, cw_x, cw_B, cw_C, cb_x,
                cb_B, cb_C, A, dt_bias, D, query_start_loc, state_indices,
                distribution, seq_lens, *, n_groups, n_heads, head_dim, ssm_n,
@@ -146,19 +197,46 @@ def _run_local(x_l, B_l, C_l, dt, conv_state, ssm_state, cw_x, cw_B, cw_C, cb_x,
     B = out_xBC[:, inter:inter + groups_ssm].reshape(-1, n_groups, ssm_n)
     C = out_xBC[:, inter + groups_ssm:].reshape(-1, n_groups, ssm_n)
 
-    new_ssm, y = ragged_mamba2_ssd(x,
-                                   B,
-                                   C,
-                                   dt,
-                                   ssm_state,
-                                   A,
-                                   dt_bias,
-                                   D,
-                                   query_start_loc,
-                                   state_indices,
-                                   distribution,
-                                   has_initial_state,
-                                   n_groups=n_groups)
+    # Pure fresh prefill (no decode tokens, no prior state) takes the chunked
+    # jagged kernel; decode / mixed / continuation batches take the token scan.
+    num_valid = distribution[2]
+    valid_seq = jnp.arange(seq_lens.shape[0]) < num_valid
+    use_jagged = (distribution[0] == 0) & jnp.logical_not(
+        jnp.where(valid_seq, has_initial_state, False).any())
+
+    def _jagged():
+        y_j, states = prefill_ssd_jagged(x,
+                                         B,
+                                         C,
+                                         dt,
+                                         A,
+                                         dt_bias,
+                                         D,
+                                         query_start_loc,
+                                         n_groups=n_groups)
+        # Write final states for valid sequences only (padding reqs keep theirs).
+        cur = ssm_state[state_indices]
+        new_ssm_j = ssm_state.at[state_indices].set(
+            jnp.where(valid_seq[:, None, None, None],
+                      states.astype(ssm_state.dtype), cur))
+        return new_ssm_j, y_j
+
+    def _scan():
+        return ragged_mamba2_ssd(x,
+                                 B,
+                                 C,
+                                 dt,
+                                 ssm_state,
+                                 A,
+                                 dt_bias,
+                                 D,
+                                 query_start_loc,
+                                 state_indices,
+                                 distribution,
+                                 has_initial_state,
+                                 n_groups=n_groups)
+
+    new_ssm, y = jax.lax.cond(use_jagged, _jagged, _scan)
     y = y.reshape(-1, n_heads * head_dim)
     return (new_conv_state, new_ssm), y
 
