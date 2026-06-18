@@ -19,12 +19,12 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from tokamax._src.ops.ragged_dot.pallas_mosaic_tpu_v2 import \
+    PallasMosaicTpuV2RaggedDot
 
 import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives import \
     hierarchical_reduce_scatter as hier_rs
-from tokamax._src.ops.ragged_dot.pallas_mosaic_tpu_v2 import \
-    PallasMosaicTpuV2RaggedDot
 from tpu_inference.kernels.sparse_core.ragged_gather import \
     ragged_gather as ragged_gather_v1
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce import \

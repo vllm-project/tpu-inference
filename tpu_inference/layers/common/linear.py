@@ -16,9 +16,9 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-
 from tokamax._src.ops.ragged_dot.pallas_mosaic_tpu_v2 import \
     PallasMosaicTpuV2RaggedDot
+
 from tpu_inference.kernels.quantized_matmul.util import (
     quantize_tensor, xla_quantized_batched_matmul)
 from tpu_inference.layers.common.sharding import ShardingAxisName
