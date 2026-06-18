@@ -95,6 +95,7 @@ declare -a BENCHMARK_DOCKER_ARGS=(
   "-v" "$ARTIFACT_FOLDER:/workspace/tpu_inference/artifacts"
   "-e" "ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts"
   "-e" "DEVICE=$DEVICE"
+  "-e" "ENABLE_KERNEL_AUTO_TUNING=${ENABLE_KERNEL_AUTO_TUNING:-false}"
   "-e" "RECORD_ID=$RECORD_ID"
   "-e" "RUN_TYPE=$RUN_TYPE"
   "-e" "CODE_HASH=${CODE_HASH}"
@@ -121,6 +122,10 @@ BM_JOB_STATUS=$EXIT_SUCCESS
 export BM_INFRA="true"
 
 .buildkite/scripts/run_in_docker.sh bash -c "
+  if [ \"\$ENABLE_KERNEL_AUTO_TUNING\" = \"true\" ]; then
+    chmod +x .buildkite/benchmark/scripts/kernel_auto_tune.sh && \
+    .buildkite/benchmark/scripts/kernel_auto_tune.sh || exit 1
+  fi && \
   echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
   chmod +x .buildkite/benchmark/scripts/run_bm.sh && \
   .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME" || {

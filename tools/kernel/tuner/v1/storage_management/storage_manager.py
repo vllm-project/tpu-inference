@@ -247,3 +247,26 @@ class StorageManager:
         """
         raise NotImplementedError(
             "Subclasses must implement get_timestamp_sec")
+
+    def close(self):
+        """Closes any open connections or resources held by the storage manager."""
+        raise NotImplementedError("Subclasses must implement close")
+
+    def add_auto_tune_case(self,
+                           case_set_id: str,
+                           case_str: str,
+                           kernel_tuner_name: str,
+                           tpu: str = None):
+        """Adds a tuning case to the AutoTuneCase table for logging purposes.
+
+        Called by the autotuning pipeline to log the tuning key and tuned params
+        for each case.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            case_str: String encoding of the tuning case (e.g. in 'key:value' format).
+            kernel_tuner_name: Name of the kernel tuner.
+            tpu: Optional TPU identifier.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement add_auto_tune_case")

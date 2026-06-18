@@ -43,7 +43,14 @@ class SpannerStorageManager(StorageManager):
             self.instance = self.client.instance(spanner_instance_id)
             self.database = self.instance.database(spanner_database_id)
         else:
+            self.client = None
             self.database = None
+
+    def close(self):
+        """Safely closes the Spanner client connection."""
+        if not self.dry_run and self.client:
+            self.client.close()
+            self.client = None
 
     def init_case_set(self, case_set_id, scan_space, desc):
         """Initializes the CaseSet row."""
@@ -307,3 +314,30 @@ class SpannerStorageManager(StorageManager):
             Current timestamp in seconds.
         """
         return spanner.COMMIT_TIMESTAMP
+
+    def add_auto_tune_case(self, case_set_id: str, case_str: str,
+                           kernel_tuner_name: str, tpu: str):
+        """Adds a tuning case to the AutoTuneCase table for logging purposes.
+
+        Called by the autotuning pipeline to log the tuning key and tuned params
+        for each case.
+
+        This table will be used to build all tuning cases for an auto tune job.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            case_str: String encoding of the tuning case (e.g. in 'key:value' format).
+            kernel_tuner_name: Name of the kernel tuner that generated this case.
+            tpu: TPU identifier where this case was generated or will be executed.
+        """
+        assert isinstance(
+            case_set_id, str
+        ), f'param case_set_id should be a string but got {type(case_set_id)}'
+        assert isinstance(
+            case_str,
+            str), f'param case_str should be a string but got {type(case_str)}'
+        with self.database.batch() as b:
+            b.insert(table='KernelAutoTuneCases',
+                     columns=('CaseSetId', 'CaseKeyValue', 'KernelTunerName',
+                              'TPU'),
+                     values=[(case_set_id, case_str, kernel_tuner_name, tpu)])
