@@ -38,8 +38,12 @@ fi
 buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
 echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
 
-echo "--- :pipeline: Uploading pipeline_dev.yml"
-buildkite-agent pipeline upload .buildkite/pipeline_dev.yml
+# Which pipeline to upload.  Defaults to the demo pipeline_dev.yml; set
+# DEV_PIPELINE_FILE in the build's env to run a different dev pipeline
+# (e.g. .buildkite/xla_autotune/pipeline.yml) without editing this file.
+DEV_PIPELINE_FILE="${DEV_PIPELINE_FILE:-.buildkite/pipeline_dev.yml}"
+echo "--- :pipeline: Uploading ${DEV_PIPELINE_FILE}"
+buildkite-agent pipeline upload "${DEV_PIPELINE_FILE}"
 
 echo "--- :pipeline: Uploading pipeline_build.yml"
 buildkite-agent pipeline upload .buildkite/pipeline_build.yml
