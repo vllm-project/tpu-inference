@@ -211,7 +211,7 @@ class CorrectnessTest(parameterized.TestCase):
     @parameterized.parameters(True, False)
     def test_correctness(self, is_csa: bool = False):
         if is_csa:
-            topk = 64
+            topk = 512
         else:
             topk = None
         rng = np.random.default_rng(1234)

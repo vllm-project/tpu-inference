@@ -97,7 +97,7 @@ def _mla_ragged_paged_attention_kernel(
     swa_accumution_hbm_ref,  # [max_num_tokens, num_q_heads, head_dim]
     swa_l_hbm_ref,  # [max_num_tokens, num_l_heads]
     swa_m_hbm_ref,  # [max_num_tokens, num_l_heads]
-    topk_indices_ref,  # [max_num_tokens, topk]
+    topk_indices_ref,  # [max_num_tokens, topk // 128, 128]
     # Output
     o_hbm_ref,  # [max_num_tokens, num_q_heads, head_dim]
     # Scratch
@@ -107,7 +107,7 @@ def _mla_ragged_paged_attention_kernel(
     bl_x2_ref,  # [2, bq_sz, num_l_heads]
     bm_x2_ref,  # [2, bq_sz, num_l_heads]
     swa_acc_x2_ref,  # [2, bq_sz, num_q_heads, head_dim]
-    topk_indices_x2_ref,  # [2, bq_sz, csa_topk]
+    topk_indices_x2_ref,  # [2, bq_sz, topk // 128, 128]
     sems,  # [7, 2]
     l_ref,  # [bq_sz * num_q_heads, 128],
     m_ref,  # [bq_sz * num_q_heads, 128],
@@ -401,7 +401,7 @@ def _mla_ragged_paged_attention_kernel(
         return _fetch_topk_indices(seq_idx, bq_idx, bq_sem_idx, wait=True)
 
     def load_topk_indices(bq_sem_idx):
-        return topk_indices_x2_ref[bq_sem_idx, ...]
+        return topk_indices_x2_ref[bq_sem_idx, ...].reshape(bq_sz, -1)
 
     def start_send_bo(seq_idx, bo_idx, bo_sem_idx):
         bo_ids_ref[bo_sem_idx] = seq_idx
@@ -799,6 +799,10 @@ def mla_ragged_paged_attention(
     is_csa = topk_indices is not None
     if is_csa:
         assert kv_lens_to_attend is None
+        assert topk_indices is not None
+        assert topk_indices.shape[1] % 128 == 0
+        topk_indices = topk_indices.reshape(topk_indices.shape[0],
+                                            topk_indices.shape[1] // 128, 128)
     else:
         # HCA
         assert kv_lens_to_attend is not None
@@ -809,7 +813,8 @@ def mla_ragged_paged_attention(
         Array,  # [total_num_pages, page_size_per_kv_packing, kv_packing, lkv_dim]
         kv_lens: jax.Array,  # i32[max_num_seqs]
         kv_lens_to_attend: jax.Array | None,  # i32[max_num_tokens]
-        topk_indices: jax.Array | None,  # i32[max_num_tokens, csa_topk]
+        topk_indices: jax.Array
+        | None,  # i32[max_num_tokens, topk // 128, 128]
         page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
         cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
         attention_sinks: jax.Array,  # float32[num_q_heads]
@@ -873,9 +878,8 @@ def mla_ragged_paged_attention(
         )
 
         if topk_indices is not None:
-            csa_topk = topk_indices.shape[1]
             topk_indices_double_buf = pltpu.VMEM(
-                (2, bq_sz, csa_topk),
+                (2, bq_sz, topk_indices.shape[1], topk_indices.shape[2]),
                 jnp.int32,
             )
         else:
