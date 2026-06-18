@@ -255,7 +255,7 @@ def moe_gmm_local(x: jax.Array,
         # Fallback to psum-scatter for small token sizes to avoid Mosaic compilation.
         # The threshold is chosen based on the tile dimension (8) in the
         # hierarchical reduce-scatter kernel.
-        if out.shape[0] // num_devices < 8:
+        if out.shape[0] // num_devices < 1:
             out = jax.lax.psum_scatter(out,
                                        axis_name=reduction_axis,
                                        scatter_dimension=0,
@@ -264,13 +264,9 @@ def moe_gmm_local(x: jax.Array,
             # Determine the number of micro-batches
             # Use 4 for large inputs to improve efficiency by maximizing the number of
             # concurrent reduction streams, and 2 for smaller inputs to fit in ~32MB VMEM
-            num_mb = 2
-            if out.shape[0] // num_devices > 600:
-                num_mb = 4
             rs_out = hier_rs.hierarchical_reduce_scatter_local(
                 out,
                 num_devices=num_devices,
-                num_micro_batches=num_mb,
                 axis_name=reduction_axis)
             out = rs_out.astype(x.dtype)
     elif scatter_results:
