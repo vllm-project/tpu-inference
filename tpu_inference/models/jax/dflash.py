@@ -152,10 +152,6 @@ class DFlashAttention(nnx.Module):
                              self.head_dim_original, self.rope_theta,
                              self.rope_scaling)
 
-        if self.num_kv_groups > 1:
-            k_noise = jnp.repeat(k_noise, self.num_kv_groups, axis=1)
-            v_noise = jnp.repeat(v_noise, self.num_kv_groups, axis=1)
-
         q_noise = q_noise.reshape(T_noise, self.num_heads, self.head_dim)
         k_noise = k_noise.reshape(T_noise, self.num_kv_heads, self.head_dim)
         v_noise = v_noise.reshape(T_noise, self.num_kv_heads, self.head_dim)
@@ -169,10 +165,6 @@ class DFlashAttention(nnx.Module):
                               self.head_dim_original, self.rope_theta,
                               self.rope_scaling)
 
-        if self.num_kv_groups > 1:
-            k_target = jnp.repeat(k_target, self.num_kv_groups, axis=1)
-            v_target = jnp.repeat(v_target, self.num_kv_groups, axis=1)
-
         k_target = k_target.reshape(T_target, self.num_kv_heads, self.head_dim)
         v_target = v_target.reshape(T_target, self.num_kv_heads, self.head_dim)
 
@@ -180,7 +172,7 @@ class DFlashAttention(nnx.Module):
                              dtype=q_noise.dtype)
         # Step 1: Write target tokens to KV cache
         # kv_lens is the length AFTER appending target tokens. This is EXACTLY md.seq_lens.
-        kv_cache = ragged_paged_attention(
+        _, kv_cache = ragged_paged_attention(
             queries=q_target,
             keys=k_target,
             values=v_target,
@@ -213,8 +205,7 @@ class DFlashAttention(nnx.Module):
             sm_scale=self.head_dim_original**-0.5,
         )
 
-        # Reshape output back
-        attn_out = attn_out.reshape(T_noise, self.num_heads * self.head_dim)
+        # attn_out is already (T_noise, num_heads, head_dim)
         out = self.o_proj(attn_out)
 
         return out, kv_cache
