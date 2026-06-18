@@ -599,6 +599,7 @@ class PhasedBasedProfiler:
 
         self.worker_rank = worker_rank
         self.aggregated_stats_logger = None
+        self.last_batch_time: Optional[float] = None
 
         logger.info(
             "Phased-based profiler enabled. Traces will be saved to: %s",
@@ -829,6 +830,13 @@ class PhasedBasedProfiler:
                     pass
             logger.info(
                 f"Successfully merged profile directories into: {dst_ts_dir}")
+
+            # Remove the canonical ts marker file so subsequent profiling sessions can generate a new one
+            marker = os.path.join(phase_dir, f".canonical_ts_{os.getppid()}")
+            try:
+                os.remove(marker)
+            except OSError:
+                pass
         except Exception as e:
             logger.warning("Failed to merge profile directories: %s", e)
 
@@ -847,6 +855,31 @@ class PhasedBasedProfiler:
                     num_reqs: The number of requests in the batch.
                     phase: The phase of the inference the batch is in.
         """
+        current_time = time.monotonic()
+        if self.last_batch_time is not None:
+            elapsed = current_time - self.last_batch_time
+            # Reset profiler if idle for more than the threshold (default 5.0s)
+            reset_timeout = float(
+                os.getenv("PHASED_PROFILER_RESET_TIMEOUT", "5.0"))
+            if elapsed > reset_timeout:
+                logger.info(
+                    "Detected idle time of %.2f seconds (threshold %.2f). "
+                    "Resetting phased-based profiler for a new workload.",
+                    elapsed, reset_timeout)
+                if self.current_phase != "":
+                    try:
+                        jax.profiler.stop_trace()
+                        self._merge_profile_directories()
+                    except Exception as e:
+                        logger.warning("Failed to stop trace during reset: %s",
+                                       e)
+                for phase in self.inference_phase_seen:
+                    self.inference_phase_seen[phase] = False
+                self.decode_steps_skipped = 0
+                self.current_phase = ""
+                self.profiling_n_steps_left = 0
+
+        self.last_batch_time = current_time
 
         have_seen_all_phases = all(self.inference_phase_seen.values())
         # We want to start profiling only after the first trial request

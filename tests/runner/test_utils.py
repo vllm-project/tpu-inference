@@ -844,3 +844,60 @@ def test_merge_profile_directories_ignores_stale_prior_run_data(tmp_path):
     # New data lands in its own canonical dir.
     new_dst = phase_dir / "plugins" / "profile" / "2026_05_06_04_47_36"
     assert (new_dst / "new.xplane.pb").read_text() == "NEW"
+
+
+def test_phased_profiler_reset_on_idle_timeout(profiler_fixture):
+    """Tests that the phased profiler resets its state when idle time exceeds the timeout."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
+
+    # 1. First step at t=100.0 (no reset triggered yet, last_batch_time gets set)
+    with patch("time.monotonic", return_value=100.0):
+        mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
+        profiler.step(stats)
+
+    assert profiler.inference_phase_seen[InferencePhase.PREFILL_HEAVY] is True
+    assert mock_start.call_count == 1
+
+    # 2. Step at t=102.0 (elapsed is 2.0s, which is under the 5.0s default reset threshold)
+    with patch("time.monotonic", return_value=102.0):
+        mock_determine_phase.return_value = InferencePhase.DECODE_HEAVY
+        profiler.step(stats)
+
+    # Since there was no reset, the new DECODE_HEAVY phase is ignored because we are currently profiling PREFILL_HEAVY
+    assert profiler.inference_phase_seen[InferencePhase.DECODE_HEAVY] is False
+    assert mock_start.call_count == 1
+
+    # 3. Step at t=110.0 (elapsed is 8.0s, which is greater than the 5.0s reset threshold)
+    with patch("time.monotonic", return_value=110.0):
+        mock_determine_phase.return_value = InferencePhase.DECODE_HEAVY
+        profiler.step(stats)
+
+    # State should have been reset, and the new DECODE_HEAVY phase should start profiling
+    assert profiler.inference_phase_seen[InferencePhase.DECODE_HEAVY] is True
+    assert mock_start.call_count == 2
+
+
+def test_merge_profile_directories_cleans_up_marker(tmp_path):
+    """Verifies that the canonical ts marker file is deleted when merge completes."""
+    profiler = PhasedBasedProfiler(profile_dir=str(tmp_path), worker_rank=0)
+    phase_dir = tmp_path / "prefill_heavy"
+    rank_dir = phase_dir / "dp_rank_0"
+    rank_dir.mkdir(parents=True)
+    profiler.profile_dir_with_phase_suffix = str(rank_dir)
+    profiler._canonical_dst_ts = "2026_05_06_04_47_36"
+    _stage_dp_rank_capture(rank_dir, "2026_05_06_04_47_36_jax",
+                           "t1v-n-host-w-0.xplane.pb", "data_0")
+
+    # Create dummy canonical ts marker file
+    marker = phase_dir / f".canonical_ts_{os.getppid()}"
+    marker.write_text("2026_05_06_04_47_36")
+    assert marker.exists()
+
+    profiler._merge_profile_directories()
+
+    # The marker file should be cleaned up
+    assert not marker.exists()
