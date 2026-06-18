@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 import os
-import time
 
 import pytest
 from vllm import LLM, SamplingParams
@@ -52,8 +51,7 @@ def llm():
         logprobs_mode="processed_logprobs",
     )
     yield engine
-    del engine
-    time.sleep(5)
+    engine.llm_engine.engine_core.shutdown()
 
 
 class TestProcessedLogprobs:
