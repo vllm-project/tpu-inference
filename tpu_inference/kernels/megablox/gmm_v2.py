@@ -908,15 +908,11 @@ def calculate_tiling(
     lhs_bits = jax.dtypes.itemsize_bits(lhs_dtype)
     rhs_bits = jax.dtypes.itemsize_bits(rhs_dtype)
 
-    # When using bf16 for lhs and rhs, 128 is the largest tile_m value that is
-    # safe to use for most scenarios. But if lower bitwidth is used, we need
-    # to tweak tile_m to account for using faster hardware unit.
-    # TODO(kyuyeunk): Account for different TPU hardware specs.
-    bf16_bf16_tile_m = 128
-    lhs_mod = min(pl.cdiv(16, lhs_bits), 2)
-    rhs_mod = min(pl.cdiv(16, rhs_bits), 2)
-    tile_m = bf16_bf16_tile_m * lhs_mod // rhs_mod
-    tile_m = min(tile_m, dims.size_m)
+    # Initialize tile_m to the load-balanced tokens per expert (size_m // size_group)
+    # to maximize weight reuse. We align and bound it to respect the sublane size.
+    tile_m = dims.size_m // dims.size_lhs_group
+    tile_m = 1 << (tile_m - 1).bit_length() if tile_m > 0 else 1
+    tile_m = min(max(tile_m, dims.size_lhs_sublane), dims.size_m)
 
     # To avoid stalling MXU, we add some buffer room where tile_n cannot go
     # smaller than 2x of mxu_column_size.
