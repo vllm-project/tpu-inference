@@ -37,6 +37,17 @@
 
 steps:
 
+  # -----------------------------------------------------------------
+  # Build Step (required by all demo steps below)
+  # -----------------------------------------------------------------
+  - label: ":docker: Build and Push Base Image (tpu7x)"
+    key: tpu7x_build_docker
+    agents:
+      queue: cpu_64_core
+    env:
+      TPU_VERSION: "tpu7x"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
   # Demo 1: offline_inference.py
@@ -45,6 +56,7 @@ steps:
   # -----------------------------------------------------------------
   - label: "tpu7x [demo] offline_inference.py"
     key: tpu7x_demo_offline_inference
+    depends_on: tpu7x_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
@@ -69,6 +81,7 @@ steps:
   # -----------------------------------------------------------------
   - label: "tpu7x [demo] vllm serve + vllm bench serve"
     key: tpu7x_demo_serve_bench
+    depends_on: tpu7x_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
@@ -88,6 +101,7 @@ steps:
   # -----------------------------------------------------------------
   - label: "tpu7x [demo] E2E disaggregation (DCN P/D)"
     key: tpu7x_demo_disagg
+    depends_on: tpu7x_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"

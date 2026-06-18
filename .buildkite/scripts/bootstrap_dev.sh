@@ -45,7 +45,4 @@ DEV_PIPELINE_FILE="${DEV_PIPELINE_FILE:-.buildkite/pipeline_dev.yml}"
 echo "--- :pipeline: Uploading ${DEV_PIPELINE_FILE}"
 buildkite-agent pipeline upload "${DEV_PIPELINE_FILE}"
 
-echo "--- :pipeline: Uploading pipeline_build.yml"
-buildkite-agent pipeline upload .buildkite/pipeline_build.yml
-
 echo "--- Buildkite Dev Bootstrap Finished"
