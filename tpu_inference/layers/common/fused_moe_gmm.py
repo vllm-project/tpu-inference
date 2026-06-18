@@ -154,12 +154,12 @@ def valid_rows_mask(batch_size: int, group_sizes: jax.Array,
                      True, False)
 
 
-def _permute_tokens_for_tiled_rs(x: jax.Array, dp_size: int,
-                                 num_chunks: int) -> jax.Array:
-    """Permutes tokens along the first dimension to correct for tiled reduce-scatter.
+def _permute_tokens_for_chunked_rs(x: jax.Array, dp_size: int,
+                                   num_chunks: int) -> jax.Array:
+    """Permutes tokens to correct for chunked reduce-scatter.
 
     This reordering ensures that when we slice the tokens into chunks and run
-    tiled reduce-scatter on each chunk locally, the resulting scattered outputs
+    reduce-scatter on each chunk locally, the resulting scattered outputs
     end up in the correct non-interleaved global sequence order after concatenation.
     """
     num_tokens = x.shape[0]
@@ -266,15 +266,15 @@ def moe_gmm_local(x: jax.Array,
         actual_chunk_size = num_tokens
 
     is_pipelined = actual_chunk_size < num_tokens
-    if is_pipelined:
+    if is_pipelined and scatter_axis_size > 1:
         num_chunks = num_tokens // actual_chunk_size
-        topk_weights = _permute_tokens_for_tiled_rs(topk_weights,
-                                                    scatter_axis_size,
-                                                    num_chunks)
+        topk_weights = _permute_tokens_for_chunked_rs(topk_weights,
+                                                      scatter_axis_size,
+                                                      num_chunks)
 
         revert_indices_2d = topk_argsort_revert_indices.reshape(
             num_tokens, topk)
-        revert_indices_2d = _permute_tokens_for_tiled_rs(
+        revert_indices_2d = _permute_tokens_for_chunked_rs(
             revert_indices_2d, scatter_axis_size, num_chunks)
         topk_argsort_revert_indices = revert_indices_2d.flatten()
 
