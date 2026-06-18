@@ -332,6 +332,7 @@ for model_name in $model_list; do
     --dataset-path "$dataset_path" \
     --num-prompts "$num_prompts" \
     --mmlu-output-len "${mmlu_output_len}" \
+    --trust-remote-code \
     --run-eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
     checkThroughputAndAccuracy
