@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import random
 import string
-import time
 
 import pytest
 from vllm import LLM, SamplingParams
@@ -147,10 +146,7 @@ def _get_baseline_results(
         ref_llm = LLM(model=model_name, **kwargs)
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
-        del ref_llm
-
-        # Waiting for TPUs to be released.
-        time.sleep(10)
+        ref_llm.llm_engine.engine_core.shutdown()
         return ref_outputs
 
 
@@ -224,10 +220,7 @@ def _test_correctness_helper(
         print(
             f"All {matches} outputs match between reference LLM and speculative LLM."
         )
-        del spec_llm
-
-        # Waiting for TPUs to be released.
-        time.sleep(10)
+        spec_llm.llm_engine.engine_core.shutdown()
 
 
 def test_ngram_correctness_greedy(
@@ -358,9 +351,7 @@ def _test_performance_helper(
             print("num_accepted_tokens:" + str(num_accepted_tokens))
             print("num_draft_tokens:" + str(num_draft_tokens))
 
-        del spec_llm
-        # Waiting for TPUs to be released
-        time.sleep(30)
+        spec_llm.llm_engine.engine_core.shutdown()
 
         assert acceptance_rate >= min_acceptance_rate, f"Expected at least {min_acceptance_rate:.2%} acceptance rate for {speculative_config['method']}, got {acceptance_rate:.2%}"
 
@@ -688,3 +679,174 @@ def test_eagle3_logprobs_correctness(monkeypatch: pytest.MonkeyPatch, ):
                              max_num_seqs=2,
                              async_scheduling=True,
                              enable_dp_attention=False)
+
+
+def test_eagle3_logprobs_correctness_random(monkeypatch: pytest.MonkeyPatch, ):
+    """Reproduction test for speculative decoding with logprobs enabled and temperature > 0."""
+    model_name = 'meta-llama/Meta-Llama-3-8B-Instruct'
+
+    model_impl = os.environ.get("MODEL_IMPL_TYPE", "auto")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", model_impl)
+
+    speculative_config = {
+        'model': "unkmaster/EAGLE3-LLaMA3.1-Instruct-8B",
+        "num_speculative_tokens": 3,
+        "method": "eagle3",
+        "draft_tensor_parallel_size": 1
+    }
+
+    sampling_config = SamplingParams(temperature=0.8,
+                                     top_p=0.9,
+                                     max_tokens=8,
+                                     ignore_eos=True,
+                                     repetition_penalty=1,
+                                     frequency_penalty=0,
+                                     presence_penalty=0,
+                                     min_p=0,
+                                     logprobs=1)
+    test_prompts = [
+        "Predict the continuation of this sequence: 1 2 3 4 5 6 7 8"
+    ]
+
+    # Get baseline outputs with logprobs enabled
+    ref_outputs = _get_baseline_results(monkeypatch,
+                                        sampling_config,
+                                        model_name,
+                                        test_prompts,
+                                        max_num_seqs=2)
+
+    # Get speculative decoding outputs with logprobs enabled
+    _test_correctness_helper(monkeypatch,
+                             sampling_config,
+                             model_name,
+                             speculative_config,
+                             test_prompts,
+                             ref_outputs=ref_outputs,
+                             max_num_seqs=2,
+                             async_scheduling=True,
+                             enable_dp_attention=False)
+
+
+@pytest.fixture(scope="module")
+def gemma4_mtp_baseline():
+    '''
+    Compute the gemma4 mtp reference prompts, baseline outputs and the LLM extra_kwargs
+    once and share them across all parameterized test_gemma4_mtp_correctness cases.
+    '''
+    model_name = "google/gemma-4-E2B-it"
+    sampling_config = SamplingParams(temperature=0,
+                                     max_tokens=32,
+                                     ignore_eos=True,
+                                     repetition_penalty=1,
+                                     frequency_penalty=0,
+                                     presence_penalty=0,
+                                     min_p=0,
+                                     logprobs=None)
+
+    extra_kwargs = {
+        "seed": 42,
+        "max_model_len": 128,
+        "max_num_batched_tokens": 1024,
+        "block_size": 256,
+        "enable_prefix_caching": False,
+        "gpu_memory_utilization": 0.8,
+    }
+    test_prompts = get_eagle3_test_prompts()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("MODEL_IMPL_TYPE", "flax_nnx")
+        ref_outputs = _get_baseline_results(
+            mp,
+            sampling_config,
+            model_name,
+            test_prompts,
+            max_num_seqs=10,
+            extra_kwargs=extra_kwargs,
+        )
+    return test_prompts, ref_outputs, extra_kwargs
+
+
+@pytest.mark.parametrize(
+    "async_scheduling, enable_dp_attention",
+    [
+        (False, False),
+        (True, False),
+        (True, True),
+    ],
+)
+def test_gemma4_mtp_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    async_scheduling: bool,
+    enable_dp_attention: bool,
+    gemma4_mtp_baseline: tuple,
+):
+    '''
+    Compare the outputs of an original LLM and a speculative LLM;
+    they should be the same when using Gemma-4 MTP speculative decoding.
+    '''
+    model_name = "google/gemma-4-E2B-it"
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "flax_nnx")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "flax_nnx")
+
+    speculative_config = {
+        "model": "google/gemma-4-E2B-it-assistant",
+        "num_speculative_tokens": 4,
+    }
+    test_prompts, ref_outputs, extra_kwargs = gemma4_mtp_baseline
+
+    _test_correctness_helper(
+        monkeypatch,
+        sampling_config,
+        model_name,
+        speculative_config=speculative_config,
+        test_prompts=test_prompts,
+        ref_outputs=ref_outputs,
+        max_num_seqs=10,
+        async_scheduling=async_scheduling,
+        enable_dp_attention=enable_dp_attention,
+        extra_kwargs=extra_kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    "max_num_seqs,async_scheduling, enable_dp_attention",
+    [(1, False, False), (20, True, False), (20, True, True)],
+)
+def test_gemma4_mtp_performance(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    max_num_seqs: int,
+    async_scheduling: bool,
+    enable_dp_attention: bool,
+):
+    '''
+    Test that Gemma-4 MTP speculative decoding achieves the expected acceptance rate.
+    '''
+    model_name = "google/gemma-4-E2B-it"
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "flax_nnx")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "flax_nnx")
+
+    extra_kwargs = {
+        "seed": 42,
+        "max_model_len": 128,
+        "max_num_batched_tokens": 1024,
+        "block_size": 256,
+        "enable_prefix_caching": False,
+        "gpu_memory_utilization": 0.8,
+    }
+
+    _test_performance_helper(
+        monkeypatch,
+        sampling_config,
+        speculative_config={
+            "model": "google/gemma-4-E2B-it-assistant",
+            "num_speculative_tokens": 4,
+            "method": "mtp",
+        },
+        min_acceptance_rate=0.80,
+        max_num_seqs=max_num_seqs,
+        async_scheduling=async_scheduling,
+        enable_dp_attention=enable_dp_attention,
+        model_name=model_name,
+        extra_kwargs=extra_kwargs,
+    )

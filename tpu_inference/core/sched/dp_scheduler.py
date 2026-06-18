@@ -145,16 +145,32 @@ def _scheduler_worker_process(
 ):
     """Worker process that manages a single scheduler instance."""
     # Initialize the scheduler in this process
-    scheduler = original_scheduler_cls(
-        vllm_config=vllm_config,
-        kv_cache_config=kv_cache_config,
-        structured_output_manager=structured_output_manager,
-        block_size=block_size,
-        hash_block_size=hash_block_size,
-        mm_registry=mm_registry,
-        include_finished_set=include_finished_set,
-        log_stats=log_stats,
-    )
+    import inspect
+    sig = inspect.signature(original_scheduler_cls)
+    scheduler_kwargs = {
+        "vllm_config": vllm_config,
+        "kv_cache_config": kv_cache_config,
+        "structured_output_manager": structured_output_manager,
+        "block_size": block_size,
+        "mm_registry": mm_registry,
+        "include_finished_set": include_finished_set,
+        "log_stats": log_stats,
+    }
+    if "hash_block_size" in sig.parameters:
+        scheduler_kwargs["hash_block_size"] = hash_block_size
+
+    import os
+
+    enable_continue_decode = False
+    if hasattr(vllm_config, "additional_config"):
+        enable_continue_decode = vllm_config.additional_config.get(
+            "enable_continue_decode", False)
+
+    if enable_continue_decode:
+        from tpu_inference.core.sched.utils import \
+            patch_vllm_scheduler_for_continue_decode
+        patch_vllm_scheduler_for_continue_decode()
+    scheduler = original_scheduler_cls(**scheduler_kwargs)
 
     _cached_scheduler_outputs: deque[SchedulerOutput] = deque()
 
@@ -176,7 +192,8 @@ def _scheduler_worker_process(
                     _send_result(None)  # Signal completion
 
                 case SchedulerCommand.SCHEDULE:
-                    output = scheduler.schedule()
+                    args, kwargs = data if data is not None else ((), {})
+                    output = scheduler.schedule(*args, **kwargs)
                     _cached_scheduler_outputs.append(output)
                     _send_result(output)
 
@@ -769,7 +786,7 @@ class DPScheduler(SchedulerInterface):
             return
 
     @time_function
-    def schedule(self) -> DPSchedulerOutput:
+    def schedule(self, *args, **kwargs) -> DPSchedulerOutput:
         """
         Main scheduling method that coordinates all DP rank schedulers.
 
@@ -792,7 +809,7 @@ class DPScheduler(SchedulerInterface):
 
         # Run each scheduler independently
         for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.SCHEDULE)
+            self._send_command(rank, SchedulerCommand.SCHEDULE, (args, kwargs))
 
         # Collect outputs from all workers (unordered to avoid HOL blocking)
         rank_outputs = self._collect_results_unordered(
@@ -860,6 +877,53 @@ class DPScheduler(SchedulerInterface):
         for rank, output in enumerate(rank_outputs):
             req_ids_per_rank[rank] = list(output.num_scheduled_tokens.keys())
 
+        # Combine kv_connector_metadata from all DP rank outputs
+        combined_kv_connector_metadata = None
+        if rank_outputs:
+            num_blocks_per_rank = self.per_rank_kv_cache_configs[0].num_blocks
+
+        for rank, output in enumerate(rank_outputs):
+            meta = output.kv_connector_metadata
+            if meta is not None:
+                if combined_kv_connector_metadata is None:
+                    combined_kv_connector_metadata = type(meta)()
+
+                # Dynamically merge fields depending on the active connector type
+                if hasattr(meta, "requests_meta"):
+                    # Translate local block IDs to global logical block IDs
+                    rank_offset = rank * num_blocks_per_rank
+                    for req_meta in meta.requests_meta:
+                        if hasattr(req_meta, "local_block_ids"
+                                   ) and req_meta.local_block_ids:
+                            req_meta.local_block_ids = [
+                                b + rank_offset
+                                for b in req_meta.local_block_ids
+                            ]
+                        if hasattr(req_meta, "save_spec"
+                                   ) and req_meta.save_spec is not None:
+                            if hasattr(req_meta.save_spec, "src_blocks"
+                                       ) and req_meta.save_spec.src_blocks:
+                                req_meta.save_spec.src_blocks = [
+                                    b + rank_offset
+                                    for b in req_meta.save_spec.src_blocks
+                                ]
+                        if hasattr(req_meta, "load_spec"
+                                   ) and req_meta.load_spec is not None:
+                            if hasattr(req_meta.load_spec, "dst_blocks"
+                                       ) and req_meta.load_spec.dst_blocks:
+                                req_meta.load_spec.dst_blocks = [
+                                    b + rank_offset
+                                    for b in req_meta.load_spec.dst_blocks
+                                ]
+                    combined_kv_connector_metadata.requests_meta.extend(
+                        meta.requests_meta)
+                if hasattr(meta, "reqs_to_send"):
+                    combined_kv_connector_metadata.reqs_to_send.update(
+                        meta.reqs_to_send)
+                if hasattr(meta, "reqs_to_load"):
+                    combined_kv_connector_metadata.reqs_to_load.update(
+                        meta.reqs_to_load)
+
         return DPSchedulerOutput(
             scheduled_new_reqs=all_new_reqs,
             scheduled_cached_reqs=combined_cached_data,
@@ -873,6 +937,7 @@ class DPScheduler(SchedulerInterface):
             assigned_dp_rank=assigned_dp_rank,
             max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
             req_ids_per_rank=req_ids_per_rank,
+            kv_connector_metadata=combined_kv_connector_metadata,
         )
 
     def _combine_cached_request_data(

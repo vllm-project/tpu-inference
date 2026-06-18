@@ -37,11 +37,9 @@ def llm_enabled():
         enable_return_routed_experts=True,
     )
     yield engine
-    del engine
+    engine.llm_engine.engine_core.shutdown()
     import gc
     gc.collect()
-    import time
-    time.sleep(10)
 
 
 @pytest.fixture(scope="function")
@@ -62,11 +60,9 @@ def llm_disabled():
         enable_return_routed_experts=False,
     )
     yield engine
-    del engine
+    engine.llm_engine.engine_core.shutdown()
     import gc
     gc.collect()
-    import time
-    time.sleep(10)
 
 
 class TestMoEExpertIds:

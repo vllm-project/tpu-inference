@@ -14,7 +14,6 @@
 
 # https://github.com/vllm-project/vllm/blob/ed10f3cea199a7a1f3532fbe367f5c5479a6cae9/tests/tpu/lora/test_lora.py
 import os
-import time
 
 import pytest
 import vllm
@@ -72,8 +71,7 @@ def test_single_lora(tp):
     assert answer.isdigit()
     assert int(answer) == 2
 
-    del llm
-    time.sleep(10)
+    llm.llm_engine.engine_core.shutdown()
 
 
 @pytest.mark.parametrize("tp", TP)
@@ -107,8 +105,7 @@ def test_lora_hotswapping(tp):
         assert answer.isdigit()
         assert int(answer) == i + 1, f"Expected {i + 1}, got {answer}"
 
-    del llm
-    time.sleep(10)
+    llm.llm_engine.engine_core.shutdown()
 
 
 @pytest.mark.parametrize("tp", TP)
@@ -144,5 +141,4 @@ def test_multi_lora(tp):
             output.strip()
             [0]) == i + 1, f"Expected {i + 1}, got {int(output.strip()[0])}"
 
-    del llm
-    time.sleep(10)
+    llm.llm_engine.engine_core.shutdown()

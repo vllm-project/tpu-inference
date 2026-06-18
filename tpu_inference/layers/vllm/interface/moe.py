@@ -13,7 +13,8 @@
 # limitations under the License.
 import torch
 from torchax.interop import jax_view, torch_view
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
+                                                  RoutedExperts)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 
 from tpu_inference import envs
@@ -59,7 +60,7 @@ def select_moe_backend_from_fused_moe_config(
     return MoEBackend.GMM_TP
 
 
-def vllm_moe_apply(layer: FusedMoE,
+def vllm_moe_apply(layer: RoutedExperts,
                    weights: FusedMoEWeights,
                    quant_method_instance: FusedMoEMethodBase,
                    x: torch.Tensor,
@@ -78,7 +79,7 @@ def vllm_moe_apply(layer: FusedMoE,
     Returns:
         The output tensor from the MoE fowrard pass.
     """
-    assert isinstance(layer, FusedMoE)
+    assert isinstance(layer, RoutedExperts)
     assert isinstance(quant_method_instance, FusedMoEMethodBase)
     assert isinstance(weights, FusedMoEWeights)
 

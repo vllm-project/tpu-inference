@@ -879,10 +879,21 @@ def _requant_expert_batch_fn(
     else:
         w2_s_batch = None
 
-    w13_fp32 = dequantize_tensor(w13_batch,
-                                 w13_s_batch, (1, 2),
-                                 jnp.float32,
-                                 block_size=weight_block_size)
+    if weight_block_size is None and w13_s_batch is not None and w13_s_batch.ndim == 2 and w13_s_batch.shape[
+            -1] == 2:
+        # Mistral Small 4 manual splitting for fused per-channel scales during TPU scan
+        w1 = w13_batch[:, :orig_intermediate_size, :]
+        w3 = w13_batch[:, orig_intermediate_size:, :]
+        s1 = w13_s_batch[:, 0]
+        s3 = w13_s_batch[:, 1]
+        w1_fp32 = dequantize_tensor(w1, s1, (1, 2), jnp.float32)
+        w3_fp32 = dequantize_tensor(w3, s3, (1, 2), jnp.float32)
+        w13_fp32 = jnp.concatenate([w1_fp32, w3_fp32], axis=1)
+    else:
+        w13_fp32 = dequantize_tensor(w13_batch,
+                                     w13_s_batch, (1, 2),
+                                     jnp.float32,
+                                     block_size=weight_block_size)
     w2_fp32 = dequantize_tensor(w2_batch,
                                 w2_s_batch, (1, 2),
                                 jnp.float32,
@@ -901,6 +912,19 @@ def _requant_expert_batch_fn(
 
     w2_pad_widths = ((0, 0), (0, hidden_pad), (0, inter_pad))
     w2_fp32 = jnp.pad(w2_fp32, w2_pad_widths)
+
+    if envs.MOE_REQUANTIZE_CLIP_PERCENTILE is not None:
+        percentile_val = envs.MOE_REQUANTIZE_CLIP_PERCENTILE
+
+        for arr_name in ('w13', 'w2'):
+            arr = w13_fp32 if arr_name == 'w13' else w2_fp32
+
+            clip_val = jnp.percentile(jnp.abs(arr), percentile_val)
+
+            if arr_name == 'w13':
+                w13_fp32 = jnp.clip(w13_fp32, -clip_val, clip_val)
+            else:
+                w2_fp32 = jnp.clip(w2_fp32, -clip_val, clip_val)
 
     w13_q_b, w13_s_new_b = quantize_tensor(desired_quant_dtype, w13_fp32, 2,
                                            w13_block_size)

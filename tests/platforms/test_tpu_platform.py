@@ -47,9 +47,12 @@ class TestTpuPlatform:
         vllm_config.scheduler_config = MagicMock(is_multimodal_model=False)
         vllm_config.parallel_config = MagicMock()
         vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.pipeline_parallel_size = 1
         vllm_config.sharding_config = MagicMock()
         vllm_config.compilation_config = MagicMock(backend="eager")
         vllm_config.kv_transfer_config = None
+        vllm_config.additional_config = {}
+        vllm_config.scheduler_config.async_scheduling = False
         return vllm_config
 
     @pytest.mark.parametrize("chip_name,expected_dtype", [
@@ -88,6 +91,25 @@ class TestTpuPlatform:
     def test_get_device_total_memory(self):
         with pytest.raises(NotImplementedError):
             TpuPlatform.get_device_total_memory()
+
+    @patch('tpu_inference.platforms.tpu_platform.jax.local_devices')
+    def test_mem_get_info(self, mock_local_devices):
+        mock_dev1 = MagicMock()
+        mock_dev1.memory_stats.return_value = {
+            'bytes_limit': 1000,
+            'bytes_in_use': 200
+        }
+        mock_dev2 = MagicMock()
+        mock_dev2.memory_stats.return_value = {
+            'bytes_limit': 1000,
+            'bytes_in_use': 300
+        }
+        mock_local_devices.return_value = [mock_dev1, mock_dev2]
+
+        free_mem, total_mem = TpuPlatform.mem_get_info()
+
+        assert total_mem == 2000
+        assert free_mem == 1500
 
     def test_get_infinity_values(self):
         min_val, max_val = TpuPlatform.get_infinity_values(jnp.float32)
@@ -503,3 +525,61 @@ class TestTpuPlatform:
                                       api_process_rank=0)
 
         TpuPlatform._resolve_multiprocess_dp(vllm_config)  # must not raise
+
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_continue_decode"
+    )
+    def test_check_and_update_config_continue_decode_success(
+            self, mock_patch, mock_dp_update, mock_sharding, vllm_config):
+        vllm_config.additional_config = {"enable_continue_decode": True}
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.model_config.runner_type = "generate"  # not pooling
+        vllm_config.scheduler_config.async_scheduling = False
+        vllm_config.cache_config = None
+
+        TpuPlatform.check_and_update_config(vllm_config)
+
+        mock_patch.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "pp_size, runner_type, async_sched, expected_error",
+        [
+            (2, "generate", False,
+             "continue_decode is not supported with pipeline parallelism"),
+            (1, "pooling", False,
+             "continue_decode is not supported for pooling models"),
+            (1, "generate", True,
+             "continue_decode is not supported with async scheduling"),
+        ],
+    )
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_continue_decode"
+    )
+    def test_check_and_update_config_continue_decode_errors(
+        self,
+        mock_patch,
+        mock_dp_update,
+        mock_sharding,
+        vllm_config,
+        pp_size,
+        runner_type,
+        async_sched,
+        expected_error,
+    ):
+        vllm_config.additional_config = {"enable_continue_decode": True}
+        vllm_config.parallel_config.pipeline_parallel_size = pp_size
+        vllm_config.model_config.runner_type = runner_type
+        vllm_config.scheduler_config.async_scheduling = async_sched
+        vllm_config.cache_config = None
+
+        with pytest.raises(ValueError, match=expected_error):
+            TpuPlatform.check_and_update_config(vllm_config)
+        mock_patch.assert_not_called()

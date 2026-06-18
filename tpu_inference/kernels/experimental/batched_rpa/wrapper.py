@@ -32,7 +32,6 @@ Note: batched_rpa is build on top / derived from RPA3.
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
-from jax.experimental.layout import Layout, with_layout_constraint
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.batched_rpa import (configs, kernel,
@@ -89,59 +88,22 @@ def prepare_inputs(
     assert num_kv_heads_x2_aligned % 2 == 0, (
         f"kv_packing={kv_packing} produces an odd aligned head count "
         f"{num_kv_heads_x2_aligned}")
-    if actual_num_kv_heads >= 4:
-        # XLA generates {2, 1, 0} minor-to-major layout for K, V with
-        # num_kv_heads=4 ex: gemma4, needing the layout constraint below.
-        num_kv_heads_aligned = num_kv_heads_x2_aligned // 2
-
-        # `jnp.stack` introduces the K/V axis as a fresh axis, keeping
-        # the data 4D `[T, H_kv, 2, D]` through the pad. The final reshape
-        # `[T, H_kv, 2, D] -> [T, A/P, P, D]` becomes a pure factor merge of
-        # axes (h, kv) -> packed_dim with no head_dim involvement, which is a
-        # clean bitcast for the layout assigner.
-        kv_stacked = jnp.stack([k, v], axis=2)  # [T, H_kv, 2, D]
-        # `with_layout_constraint` on `kv_padded` pins the pad output
-        # to major-to-minor (0, 1, 2, 3) — i.e., T majormost, head_dim minor.
-        # Without it XLA's auto-layout placed the pad in VMEM with a
-        # transposed dim order, requiring a layout-changing copy to reach the
-        # kernel's required HBM layout — and the LLO emitter cannot lower
-        # that simultaneous axis-swap + tile-resize + memory-space migration.
-        kv_padded = with_layout_constraint(
-            jnp.pad(
-                kv_stacked,
-                (
-                    (0, 0),
-                    (0, num_kv_heads_aligned - actual_num_kv_heads),
-                    (0, 0),
-                    (0, aligned_head_dim - actual_head_dim),
-                ),
-                constant_values=0,
-            ), Layout(major_to_minor=(0, 1, 2, 3)))
-        new_kv_hbm = kv_padded.reshape(
-            total_q_tokens,
-            num_kv_heads_x2_aligned // kv_packing,
-            kv_packing,
-            aligned_head_dim,
-        )
-    else:
-        # Most performant for {2,0,1} minor-to-major layout
-        # avoiding copies from the layout constraint above.
-        new_kv_hbm = jnp.pad(
-            jnp.concatenate([k, v], axis=-1).reshape(total_q_tokens,
-                                                     actual_num_kv_heads_x2,
-                                                     actual_head_dim),
-            (
-                (0, 0),
-                (0, num_kv_heads_x2_aligned - actual_num_kv_heads_x2),
-                (0, aligned_head_dim - actual_head_dim),
-            ),
-            constant_values=0,
-        ).reshape(
-            total_q_tokens,
-            num_kv_heads_x2_aligned // kv_packing,
-            kv_packing,
-            aligned_head_dim,
-        )
+    new_kv_hbm = jnp.pad(
+        jnp.concatenate([k, v], axis=-1).reshape(total_q_tokens,
+                                                 actual_num_kv_heads_x2,
+                                                 actual_head_dim),
+        (
+            (0, 0),
+            (0, num_kv_heads_x2_aligned - actual_num_kv_heads_x2),
+            (0, aligned_head_dim - actual_head_dim),
+        ),
+        constant_values=0,
+    ).reshape(
+        total_q_tokens,
+        num_kv_heads_x2_aligned // kv_packing,
+        kv_packing,
+        aligned_head_dim,
+    )
 
     return o_hbm_alias_q_hbm, new_kv_hbm
 

@@ -18,8 +18,9 @@ import torch
 from compressed_tensors.quantization import QuantizationArgs
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
-                                                  FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe import (FusedMoEConfig,
+                                                  FusedMoeWeightScaleSupported,
+                                                  RoutedExperts)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import \
@@ -193,7 +194,7 @@ class VllmCompressedTensorsW4A8MoEMethod(CompressedTensorsMoEMethod,
         :param layer: The source PyTorch layer containing the raw, un-sharded weights from the loaded checkpoint.
         :type layer: torch.nn.Module
         """
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
 
         # N.B
         # layer.w13_weight: [num_experts, 2*moe_intermediate_size, hidden_size]
@@ -304,7 +305,7 @@ class VllmCompressedTensorsW4A8MoEMethod(CompressedTensorsMoEMethod,
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
