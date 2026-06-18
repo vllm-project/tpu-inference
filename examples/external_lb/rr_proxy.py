@@ -66,7 +66,10 @@ async def on_cleanup(app: web.Application) -> None:
 
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
-    app = web.Application()
+    # Default aiohttp client_max_size is 1MB; multimodal (image) request
+    # bodies can exceed that and get reset mid-benchmark. Disable the cap --
+    # this proxy only ever forwards trusted local benchmark traffic.
+    app = web.Application(client_max_size=0)
     app.router.add_route("*", "/{path:.*}", round_robin)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
