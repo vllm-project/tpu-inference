@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Launch vLLM with --data-parallel-external-lb: one independent vllm-serve
-# process per DP rank (ports BASE_PORT..BASE_PORT+DP_SIZE-1), plus
+# Launch N fully independent vllm-serve instances (ports BASE_PORT..
+# BASE_PORT+DP_SIZE-1), each pinned to its own slice of TPU chips, plus
 # rr_proxy.py as a pure round-robin reverse proxy on top (PROXY_PORT,
 # default 8080).
 #
@@ -26,16 +26,18 @@
 # context.
 #
 # Usage:
+#   [ENV_VAR=...] ./run_dp_external_lb.sh [serve] <model> [extra vllm serve flags...]
+# Example (Gemma-4 26B-A4B MoE):
 #   MOE_REQUANTIZE_WEIGHT_DTYPE=float8_e4m3fn \
 #   VLLM_ENGINE_READY_TIMEOUT_S=6000 \
 #   USE_BATCHED_RPA_KERNEL=1 \
 #   MODEL_IMPL_TYPE=flax_nnx \
 #   ./run_dp_external_lb.sh google/gemma-4-26B-A4B-it \
-#       --max-model-len=1524 --max-num-seqs=1024
-# Any env vars set before the command are inherited as-is (this script does
-# not hardcode model-specific ones like USE_BATCHED_RPA_KERNEL --
-# only TPU_MULTIPROCESS_DP=1 is forced, since that's required for
-# --data-parallel-external-lb itself, not model-specific).
+#       --max-model-len=1524 --max-num-seqs=1024 --data-parallel-size 4 \
+#       --tensor-parallel-size 2
+# --data-parallel-size is read to know how many ranks to launch, then
+# stripped (along with any other --data-parallel-* flag) before forwarding
+# to vllm serve.
 
 set -ue
 
@@ -55,32 +57,83 @@ fi
 
 MODEL=$1
 shift
-EXTRA_ARGS=("$@")
+RAW_ARGS=("$@")
 
-# Pull --data-parallel-size out of the passed-through flags (this script
-# needs it to know how many ranks to launch); falls back to DP_SIZE env var
-# / 4 if the caller didn't pass it explicitly.
+# Pull --data-parallel-size and --tensor-parallel-size out of the passed
+# flags: DP_SIZE tells this script how many ranks to launch, TP_SIZE feeds
+# the chip-pinning math below. Both fall back to env-var / hardcoded
+# defaults if the caller didn't pass them explicitly.
 DP_SIZE=${DP_SIZE:-4}
-for ((i = 0; i < ${#EXTRA_ARGS[@]}; i++)); do
-  arg=${EXTRA_ARGS[$i]}
+TP_SIZE=${TP_SIZE:-2}
+for ((i = 0; i < ${#RAW_ARGS[@]}; i++)); do
+  arg=${RAW_ARGS[$i]}
   case "$arg" in
     --data-parallel-size=*)
       DP_SIZE=${arg#--data-parallel-size=}
       ;;
     --data-parallel-size)
-      DP_SIZE=${EXTRA_ARGS[$((i + 1))]}
+      DP_SIZE=${RAW_ARGS[$((i + 1))]}
+      ;;
+    --tensor-parallel-size=*)
+      TP_SIZE=${arg#--tensor-parallel-size=}
+      ;;
+    --tensor-parallel-size)
+      TP_SIZE=${RAW_ARGS[$((i + 1))]}
       ;;
   esac
 done
 
-BASE_PORT=${BASE_PORT:-8000}
-PROXY_PORT=${PROXY_PORT:-8080}
+# Strip every --data-parallel-* flag (and its value, if space-separated) --
+# each rank below is a fully independent, non-DP-aware vllm serve instance.
+# See "Why no --data-parallel-* flags" above. Also strip
+# --tensor-parallel-size since it's re-added explicitly below (already
+# parsed into TP_SIZE above) -- stripping just avoids passing it twice.
+EXTRA_ARGS=()
+skip_next=false
+for arg in "${RAW_ARGS[@]}"; do
+  if $skip_next; then
+    skip_next=false
+    continue
+  fi
+  case "$arg" in
+    # Boolean (store_true) data-parallel flags take no value -- don't skip
+    # the next arg for these.
+    --data-parallel-hybrid-lb | --data-parallel-external-lb | \
+    --data-parallel-multi-port-external-lb)
+      ;;
+    --data-parallel-*=*)
+      ;;
+    --data-parallel-*)
+      skip_next=true
+      ;;
+    --tensor-parallel-size=*)
+      ;;
+    --tensor-parallel-size)
+      skip_next=true
+      ;;
+    *)
+      EXTRA_ARGS+=("$arg")
+      ;;
+  esac
+done
+
+# Physical TPU cores per chip (v7x = 2). Each rank needs
+# ceil(TP_SIZE / CORES_PER_CHIP) whole chips; with TP_SIZE=2 and
+# CORES_PER_CHIP=2 that's exactly 1 chip per rank.
+CORES_PER_CHIP=${CORES_PER_CHIP:-2}
+CHIPS_PER_RANK=$(( (TP_SIZE + CORES_PER_CHIP - 1) / CORES_PER_CHIP ))
+
+# PROXY_PORT defaults to 8000 (vllm bench serve's own default --port) so
+# benchmark clients need no extra --port flag; rank servers start above it.
+BASE_PORT=${BASE_PORT:-8100}
+PROXY_PORT=${PROXY_PORT:-8000}
 STAGGER_S=${STAGGER_S:-20}
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 LOG_DIR=${LOG_DIR:-dp_external_lb_$(date +%Y%m%d_%H%M%S)}
 mkdir -p "$LOG_DIR"
 echo "--- Logs -> $LOG_DIR ---"
+echo "--- DP_SIZE=${DP_SIZE} TP_SIZE=${TP_SIZE} CORES_PER_CHIP=${CORES_PER_CHIP} CHIPS_PER_RANK=${CHIPS_PER_RANK} ---"
 
 RANK_PORTS=()
 RANK_PIDS=()
@@ -128,27 +181,25 @@ trap print_logs_on_exit EXIT
 
 cleanup_instances
 
-echo "--- Starting ${DP_SIZE} external-LB ranks (staggered ${STAGGER_S}s apart) ---"
+echo "--- Starting ${DP_SIZE} independent ranks (staggered ${STAGGER_S}s apart) ---"
 for ((rank = 0; rank < DP_SIZE; rank++)); do
   port=$((BASE_PORT + rank))
+  chip_start=$((rank * CHIPS_PER_RANK))
+  chip_end=$((chip_start + CHIPS_PER_RANK - 1))
+  visible_chips=$(seq -s, "$chip_start" "$chip_end")
 
-  # Requires TPU_MULTIPROCESS_DP=1 forced per child -- without it,
-  # tpu_inference's tpu_worker.py::_setup_dp_chip_isolation never runs
-  # (because dp_supervisor-style external-lb children never get
-  # _api_process_rank=-1, so TpuPlatform._resolve_multiprocess_dp's
-  # online_serving heuristic resolves to False) and the processes either
-  # collide on /tmp/libtpu_lockfile or hit a chip-topology mismatch.
-  TPU_MULTIPROCESS_DP=1 \
+  TPU_VISIBLE_CHIPS="${visible_chips}" \
+  TPU_CHIPS_PER_PROCESS_BOUNDS="1,${CHIPS_PER_RANK},1" \
+  TPU_PROCESS_BOUNDS=1,1,1 \
   vllm serve "${MODEL}" \
     "${EXTRA_ARGS[@]}" \
     --port "${port}" \
-    --data-parallel-rank "${rank}" \
-    --data-parallel-external-lb \
+    --tensor-parallel-size "${TP_SIZE}" \
     > "$LOG_DIR/rank${rank}.txt" 2>&1 &
 
   RANK_PORTS+=("$port")
   RANK_PIDS+=("$!")
-  echo "rank=${rank} port=${port} pid=$!"
+  echo "rank=${rank} port=${port} chips=${visible_chips} pid=$!"
 
   if ((rank < DP_SIZE - 1)); then
     sleep "${STAGGER_S}"
