@@ -28,8 +28,9 @@ from tpu_inference.utils import get_mesh_shape_product
 logger = init_logger(__name__)
 
 
-def select_moe_backend_from_fused_moe_config(
-        moe: FusedMoEConfig) -> MoEBackend:
+def select_moe_backend_from_fused_moe_config(moe: FusedMoEConfig,
+                                             enable_hybrid_moe: bool = False
+                                             ) -> MoEBackend:
     """
     Select the MoE backend based on the FusedMoEConfig.
 
@@ -38,10 +39,14 @@ def select_moe_backend_from_fused_moe_config(
 
     Args:
         moe: The FusedMoEConfig.
+      enable_hybrid_moe: Whether to use hybrid MoE parallelism.
 
     Returns:
         The selected MoE backend.
     """
+    if enable_hybrid_moe:
+        logger.info_once("[MoE]: Using Hybrid MoE EP/TP kernel")
+        return MoEBackend.GMM_HYBRID
 
     if envs.USE_MOE_EP_KERNEL:
         if moe.use_ep:

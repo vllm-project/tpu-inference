@@ -25,7 +25,8 @@ import tpu_inference.envs as envs
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import (dequantize_tensor,
                                                       quantize_tensor)
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import (ShardingAxisName,
+                                                  get_hybrid_moe_axes)
 from tpu_inference.layers.common.utils import (
     general_device_put, reorder_concatenated_tensor_for_sharding)
 from tpu_inference.logger import init_logger
@@ -420,7 +421,7 @@ def process_moe_weights(
                     ((0, 0), (0, 0), (0, pad_width_hidden_size)),
                 )
 
-        case MoEBackend.GMM_TP:
+        case MoEBackend.GMM_TP | MoEBackend.GMM_HYBRID:
             assert w13_reorder_size is not None
             assert intermediate_size % w13_reorder_size == 0
 
@@ -605,6 +606,32 @@ def _get_moe_weight_shardings(
                     P(None, None, None),
                 ),  # (num_experts, 1, out_dim)
             )
+        case MoEBackend.GMM_HYBRID:
+            tp_axis, ep_axis = get_hybrid_moe_axes(mesh)
+            num_blocks = (1 if weights.w2_weight_scale is None else
+                          weights.w2_weight_scale.shape[1])
+            w1_scale_spec = (None if weights.w13_weight_scale is None else P(
+                ep_axis, None, None, tp_axis))
+
+            if weights.w2_weight_scale is None:
+                w2_scale_spec = None
+            elif num_blocks == 1:
+                w2_scale_spec = P(ep_axis, None, None, None)
+            else:
+                w2_scale_spec = P(ep_axis, tp_axis, None, None)
+
+            return FusedMoEWeights(
+                w13_weight=NamedSharding(mesh, P(ep_axis, None, tp_axis)),
+                w13_weight_scale=NamedSharding(mesh, w1_scale_spec)
+                if w1_scale_spec else None,
+                w13_bias=NamedSharding(mesh, P(ep_axis, None, tp_axis))
+                if weights.w13_bias is not None else None,
+                w2_weight=NamedSharding(mesh, P(ep_axis, tp_axis, None)),
+                w2_weight_scale=NamedSharding(mesh, w2_scale_spec)
+                if w2_scale_spec else None,
+                w2_bias=NamedSharding(mesh, P(ep_axis, None, None))
+                if weights.w2_bias is not None else None,
+            )
 
 
 def shard_moe_weights(
@@ -625,7 +652,7 @@ def shard_moe_weights(
                 w2_weight_scale=Layout((0, 1, 2, 3)),
                 w2_bias=Layout((0, 1, 2)),
             )
-        case MoEBackend.GMM_TP | MoEBackend.GMM_EP:
+        case MoEBackend.GMM_TP | MoEBackend.GMM_EP | MoEBackend.GMM_HYBRID:
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2)),
                 w13_weight_scale=Layout((0, 1, 2, 3)),
