@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
@@ -71,7 +71,7 @@ class MoEBackend(Enum):
 
 
 def moe_apply(
-    layer: Union[FusedMoE, JaxMoE],
+    layer: Union[RoutedExperts, JaxMoE],
     x: jax.Array,
     gating_output: Union[jax.Array, Tuple[jax.Array, jax.Array]],
     weights: Union[FusedMoEWeights, UnfusedMoEWeights],
@@ -86,6 +86,10 @@ def moe_apply(
     with jax.named_scope(layer._get_name()):
         activation = layer.activation if isinstance(
             layer.activation, str) else layer.activation.value
+        if activation == "silu":
+            swiglu_limit = getattr(layer, "swiglu_limit", None)
+            if swiglu_limit is not None and swiglu_limit > 0:
+                activation = "silu_and_mul_with_clamp"
         match moe_backend:
             case MoEBackend.FUSED_MOE:
                 subc_quant_w1_sz = None
@@ -153,6 +157,10 @@ def moe_apply(
                     onehot_moe_permute_threshold=envs.
                     ONEHOT_MOE_PERMUTE_THRESHOLD,
                     scatter_results=scatter_results,
+                    hash_based_topk_indices=extra_backend_kwargs.get(
+                        "hash_based_topk_indices", None),
+                    expert_score_correction_bias=extra_backend_kwargs.get(
+                        "e_score_correction_bias", None),
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import torch
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -44,14 +43,3 @@ class VllmMoERunner(MoERunner):
             return states[..., :trunc_size]
 
         return super()._maybe_reduce_final_output(states, trunc_size)
-
-
-@FusedMoE.register_oot
-class VllmFusedMoE(FusedMoE):
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super().forward(hidden_states, router_logits)

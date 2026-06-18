@@ -15,7 +15,8 @@
 import copy
 import time
 from collections.abc import Sequence
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from functools import partial
 from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
 
@@ -37,6 +38,7 @@ from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.model_executor.models.interfaces_base import is_pooling_model
+from vllm.platforms import current_platform
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import \
@@ -66,6 +68,104 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import (
 from tpu_inference.runner.lora_utils import replace_lora_metadata
 
 logger = init_logger(__name__)
+
+
+def _get_sc_allreduce_allgather_offload_min_size_bytes() -> int:
+    """Returns the SparseCore all-reduce/all-gather offload minimum size in bytes.
+
+    Returns 0 if we use default XLA offload threshold.
+    """
+    sc_threshold_val = envs.SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES
+    sc_threshold_bytes = 0
+    if sc_threshold_val == "auto":
+        from tpu_inference.tpu_info import get_tpu_vmem_size_bytes
+        sc_threshold_bytes = get_tpu_vmem_size_bytes()
+    else:
+        try:
+            sc_threshold_bytes = int(sc_threshold_val)
+        except ValueError:
+            logger.warning(
+                f"Invalid value for SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: "
+                f"'{sc_threshold_val}'. Defaulting to 0 (always offload).")
+            sc_threshold_bytes = 0
+    return sc_threshold_bytes
+
+
+@contextmanager
+def _maybe_patch_for_deepseek_v4(vllm_config: VllmConfig):
+    architectures = getattr(vllm_config.model_config.hf_config,
+                            "architectures", None) or []
+    is_ds_v4 = any("DeepseekV4ForCausalLM" in arch for arch in architectures)
+    if not is_ds_v4:
+        yield
+        return
+
+    # There is two model.py, one NVIDIA variant, one AMD variant.
+    # NVIDIA variant is the default one picked by vLLM's registry.
+    # NVIDIA variant has CUDA/cutedsl ops do not run on TPU.
+    # And the AMD variant uses more extensible, e.g. allows us to
+    # swap in custom MHCPreOp, MHCPostOp etc.
+    # Therefore, we patch the registry to resolve to AMD variant.
+    import vllm.models.deepseek_v4 as ds_v4
+    from vllm.models.deepseek_v4.amd.model import \
+        DeepseekV4ForCausalLM as _AmdDeepseekV4ForCausalLM
+    ds_v4.DeepseekV4ForCausalLM = _AmdDeepseekV4ForCausalLM
+
+    # Clear cached resolved architecture so the AMD model.py are picked up.
+    from vllm.model_executor.model_loader import utils as _ml_utils
+    from vllm.model_executor.models.registry import _try_load_model_cls
+    _ml_utils._MODEL_ARCH_BY_HASH.clear()
+    _try_load_model_cls.cache_clear()
+
+    # DeepseekV4ROCMAiterMLAAttention is a plain nn.Module instantiated directly
+    # in amd/model.py (not CustomOp/register_oot hook).
+    # Swap the class symbol for the TPU subclass before the
+    # model is built.
+    from tpu_inference.layers.vllm.custom_ops.deepseek_v4_attention import \
+        patch_deepseek_v4_mla_cls
+    patch_deepseek_v4_mla_cls()
+
+    # DeepSeek-V4 builds CUDA streams (``torch.cuda.Stream``) at construction
+    # which is unavailable on TPU. Mock it to return None.
+    _orig_cuda_stream = torch.cuda.Stream
+    torch.cuda.Stream = lambda *args, **kwargs: None
+    try:
+        # DeepSeek-V4's implementation use sth like:
+        # torch.zeros(.. device=device). Pass `cpu``
+        # instead of tpu to avoid error. Those buffer won't
+        # be used in the forward anyway.
+        with patch.object(current_platform, "device_type", "cpu"):
+            yield
+    finally:
+        torch.cuda.Stream = _orig_cuda_stream
+
+
+def _disable_ds_v4_mtp_buffer(vllm_config: VllmConfig,
+                              vllm_model: torch.nn.Module):
+
+    class _NoOpBuffer:
+        """Sentinel that absorbs ``buf[:n].copy_(x)`` as a no-op.
+        """
+
+        def __getitem__(self, idx):
+            return self
+
+        def copy_(self, *args, **kwargs):
+            return self
+
+    architectures = getattr(vllm_config.model_config.hf_config,
+                            "architectures", None) or []
+    is_ds_v4 = any("DeepseekV4ForCausalLM" in arch for arch in architectures)
+    if not is_ds_v4:
+        return
+
+    # self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1)) in
+    # DS V4 causes error on torchax path. Mock it out as DS V4 MTP is not yet
+    # supported in tpu-inference.
+    inner = getattr(vllm_model, "model", None)
+    if inner is not None and getattr(inner, "_mtp_hidden_buffer",
+                                     None) is not None:
+        inner._mtp_hidden_buffer = _NoOpBuffer()
 
 
 class _VllmRunner(torch.nn.Module):
@@ -201,11 +301,14 @@ class VllmModelWrapper:
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
 
-        with load_context, jax_context, set_current_vllm_config(
+        with _maybe_patch_for_deepseek_v4(
+                vllm_config_for_load
+        ), load_context, jax_context, set_current_vllm_config(
                 self.vllm_config):
             model_config_for_load = vllm_config_for_load.speculative_config.draft_model_config if self.is_draft_model else vllm_config_for_load.model_config
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
                                         model_config=model_config_for_load)
+        _disable_ds_v4_mtp_buffer(vllm_config_for_load, vllm_model)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
             # Replace layers in the model with LoRA layers.
@@ -228,10 +331,16 @@ class VllmModelWrapper:
             for name, param in vllm_model.named_parameters():
                 full_name = f"vllm_model.{name}"
                 if full_name in shared_params:
+                    target_param = shared_params[full_name]
+                    if param.shape != target_param.shape:
+                        logger.warning(
+                            f"Shape mismatch for shared parameter {full_name}: "
+                            f"draft {param.shape} vs target {target_param.shape}. "
+                            "Skipping sharing.")
+                        continue
                     logger.info(f"Sharing parameter: {full_name}")
                     # torch_view creates a torchax tensor sharing memory with the JAX array
-                    param.data = torchax.interop.torch_view(
-                        shared_params[full_name])
+                    param.data = torchax.interop.torch_view(target_param)
 
         if self.vllm_config.speculative_config and self.vllm_config.speculative_config.method == "eagle3" and not self.is_draft_model:
             set_eagle3_aux_hidden_state_layers(
@@ -270,29 +379,24 @@ class VllmModelWrapper:
 
     def jit_step_func(self):
 
-        @jax.jit(
-            donate_argnames=("kv_caches", ),
-            out_shardings=(
-                None,  # kv_caches - keep original sharding
-                NamedSharding(self.mesh,
-                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
-                None,  # empty list
-                None,  # expert ids
-            ),
-            compiler_options={
-                "xla_tpu_all_gather_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_reduce_scatter_collective_matmul_mode":
-                "post_spmd_conservative",
-                "xla_tpu_use_minor_sharding_for_major_trivial_input": "true"
-            },
-            static_argnames=(
-                "layer_name_to_kvcache_index",
-                "is_first_rank",
-                "is_last_rank",
-            ),
-        )
-        def step_fun(
+        compiler_options = {
+            "xla_tpu_all_gather_collective_matmul_mode":
+            "post_spmd_conservative",
+            "xla_tpu_reduce_scatter_collective_matmul_mode":
+            "post_spmd_conservative",
+            "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
+        }
+        sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
+        if sc_offload_bytes > 0:
+            threshold_bytes = str(sc_offload_bytes)
+            compiler_options[
+                "xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes"] = (
+                    threshold_bytes)
+            compiler_options[
+                "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
+                    threshold_bytes)
+
+        def step_fun_impl(
             params_and_buffers,  # This has been wrapped into torchax TorchValue
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
@@ -359,18 +463,7 @@ class VllmModelWrapper:
                 expert_indices = None
             return new_kv_caches, output, aux_hidden_states, expert_indices
 
-        @jax.jit(
-            donate_argnames=("kv_caches", ),
-            out_shardings=(
-                None,  # kv_caches - keep original sharding
-                NamedSharding(self.mesh,
-                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
-                None,  # list of aux hidden states
-                None,  # expert ids
-            ),
-            static_argnames=("layer_name_to_kvcache_index", "spec_step_idx"),
-        )
-        def draft_step_fun(
+        def draft_step_fun_impl(
             params_and_buffers,
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
@@ -412,7 +505,49 @@ class VllmModelWrapper:
                 hidden_states, hidden_prenorm = jax_view(output_from_torch)
             return new_kv_caches, hidden_states, [hidden_prenorm], None
 
-        return draft_step_fun if self.is_draft_model else step_fun
+        draft_step_fun = jax.jit(
+            draft_step_fun_impl,
+            donate_argnames=("kv_caches", ),
+            out_shardings=(
+                None,  # kv_caches - keep original sharding
+                NamedSharding(self.mesh,
+                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+                None,  # list of aux hidden states
+                None,  # expert ids
+            ),
+            static_argnames=("layer_name_to_kvcache_index", "spec_step_idx"),
+        )
+
+        step_fun_jit = partial(
+            jax.jit,
+            donate_argnames=("kv_caches", ),
+            out_shardings=(
+                None,  # kv_caches - keep original sharding
+                NamedSharding(self.mesh,
+                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+                None,  # empty list
+                None,  # expert ids
+            ),
+            static_argnames=(
+                "layer_name_to_kvcache_index",
+                "is_first_rank",
+                "is_last_rank",
+            ),
+        )
+
+        step_fun_no_options = step_fun_jit(step_fun_impl)
+
+        step_fun_with_options = step_fun_jit(
+            step_fun_impl,
+            compiler_options=compiler_options,
+        )
+
+        if self.is_draft_model:
+            self.step_fn_no_options = draft_step_fun
+            return draft_step_fun
+        else:
+            self.step_fn_no_options = step_fun_no_options
+            return step_fun_with_options
 
     def wrap_precompile_vision_encoder_fn(
         self,

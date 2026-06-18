@@ -24,15 +24,35 @@ import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives import \
     hierarchical_reduce_scatter as hier_rs
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
-from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
+from tpu_inference.kernels.sparse_core.ragged_gather import \
+    ragged_gather as ragged_gather_v1
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce import \
-    ragged_gather_reduce
+    ragged_gather_reduce as ragged_gather_reduce_v1
+from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
+    ragged_gather_reduce as ragged_gather_reduce_v2
+from tpu_inference.kernels.sparse_core.ragged_gather_v2 import ragged_gather_v2
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
+
+# Select the SparseCore MoE gather and gather-reduce kernels independently at
+# import time, driven by the RAGGED_GATHER_VERSION / RAGGED_GATHER_REDUCE_VERSION
+# env vars (set in the server process before boot, so they are fixed for the
+# server's lifetime). Both default to "v2" (the new kernels); set either to "v1"
+# to fall back to the legacy kernel. Call sites below use the bound names.
+if envs.RAGGED_GATHER_VERSION == "v1":
+    ragged_gather = ragged_gather_v1
+else:
+    ragged_gather = ragged_gather_v2
+if envs.RAGGED_GATHER_REDUCE_VERSION == "v1":
+    ragged_gather_reduce = ragged_gather_reduce_v1
+else:
+    ragged_gather_reduce = ragged_gather_reduce_v2
+logger.info("fused_moe_gmm SparseCore kernels: gather=%s gather_reduce=%s",
+            envs.RAGGED_GATHER_VERSION, envs.RAGGED_GATHER_REDUCE_VERSION)
 
 # Target chunk size of 2048 slots was found empirically to be optimal
 # for MoE workloads (e.g., Qwen) to hide ICI/DMA latency during AllReduce.
@@ -91,6 +111,8 @@ def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
             return jax.nn.softmax(x, axis=-1)
         case "sigmoid":
             return jax.nn.sigmoid(x)
+        case "sqrtsoftplus":
+            return jnp.sqrt(jax.nn.softplus(x))
         case _:
             raise NotImplementedError(
                 f"FusedMoE does not support {scoring_fn} scoring function")
@@ -494,6 +516,8 @@ def fused_moe_func(
     enable_rs_kernel: bool = False,
     onehot_moe_permute_threshold: int = 0,
     scatter_results: bool = False,
+    hash_based_topk_indices: jax.Array | None = None,
+    expert_score_correction_bias: jax.Array | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -528,13 +552,23 @@ def fused_moe_func(
     assert gating_output.shape == (num_tokens, global_num_experts)
 
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
-    if envs.MOE_APPROX_TOPK:
+    if hash_based_topk_indices is not None:
+        topk_indices = hash_based_topk_indices
+        topk_weights = jnp.take_along_axis(topk_weights, topk_indices, axis=-1)
+    elif envs.MOE_APPROX_TOPK:
         topk_weights, topk_indices = jax.lax.approx_max_k(
             topk_weights,
             k=topk,
             recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
     else:
-        topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+        if expert_score_correction_bias is not None:
+            _, topk_indices = jax.lax.top_k(
+                topk_weights + expert_score_correction_bias[None, :], k=topk)
+            topk_weights = jnp.take_along_axis(topk_weights,
+                                               topk_indices,
+                                               axis=-1)
+        else:
+            topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
     # All gathering topk_indices and topk_weights if attention dp is used.

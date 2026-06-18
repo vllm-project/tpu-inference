@@ -39,6 +39,17 @@ def swigluoai(gate: jax.Array,
     return (up + 1.0) * glu
 
 
+def silu_and_mul_with_clamp(gate: jax.Array,
+                            up: jax.Array,
+                            limit: float = 10.0) -> jax.Array:
+    """Activation used in some models DeepSeek V4."""
+    # The limit value is from DSV4's config.
+    # TODO: pass limit from model config, instead of hardcoding here.
+    gate = jnp.clip(gate, max=limit)
+    up = jnp.clip(up, min=-limit, max=limit)
+    return jax.nn.silu(gate) * up
+
+
 def apply_act_fn(acc: jax.Array, fuse_act: str | None):
     """Applies a fused activation function to the accumulator.
 
@@ -67,8 +78,12 @@ def apply_act_fn(acc: jax.Array, fuse_act: str | None):
             return jax.nn.silu(acc_gate) * acc_up
         case "gelu":
             return jax.nn.gelu(acc_gate) * acc_up
+        case "gelu_tanh":
+            return jax.nn.gelu(acc_gate, approximate=True) * acc_up
         case "swigluoai":
             return swigluoai(acc_gate, acc_up)
+        case "silu_and_mul_with_clamp":
+            return silu_and_mul_with_clamp(acc_gate, acc_up)
         case _:
             raise NotImplementedError(
                 f"Unsupported activation function: {fuse_act}")
@@ -381,9 +396,10 @@ def inner_kernel(
         # the scales and thus we need to dequantize inside VMEM to avoid small
         # contracting dimmensions
         if cfgs.rhs_cfgs.should_dequantize_before_matmul:
-            tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(acc_ref.dtype)
+            tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(
+                cfgs.lhs_cfgs.dtype)
             num_blocks = cfgs.num_quant_blocks_per_tile_k
-            tiled_rhs_dequant = tiled_rhs.astype(acc_ref.dtype).reshape(
+            tiled_rhs_dequant = tiled_rhs.astype(cfgs.lhs_cfgs.dtype).reshape(
                 num_blocks, rhs_qbs, rhs_tile_n)
             tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
             tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
