@@ -32,7 +32,8 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import (apply_rope,
-                                                     get_rope_scaling)
+                                                     get_rope_scaling,
+                                                     get_rope_theta)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -97,7 +98,7 @@ class LlamaAttention(nnx.Module):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.rope_theta = config.rope_parameters["rope_theta"]
+        self.rope_theta = get_rope_theta(config, default=500000.0)
         self.rope_scaling = get_rope_scaling(config)
 
         self.head_dim_original = getattr(config, "head_dim",

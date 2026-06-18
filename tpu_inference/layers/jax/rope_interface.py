@@ -38,6 +38,13 @@ def get_rope_scaling(config: Any) -> Optional[Dict[str, Any]]:
     return normalize_rope_scaling(rope_scaling)
 
 
+def get_rope_theta(config: Any, default: float = 10000.0) -> float:
+    rope_parameters = getattr(config, "rope_parameters", None)
+    if rope_parameters is not None and "rope_theta" in rope_parameters:
+        return float(rope_parameters["rope_theta"])
+    return float(getattr(config, "rope_theta", default))
+
+
 def apply_rope(
     # (seq_len, num_heads, head_dim)
     inputs: jax.Array,
