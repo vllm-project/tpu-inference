@@ -176,12 +176,11 @@ class TPUWorker(WorkerBase):
 
         self.mlrun = None
 
-        # Old vllm use env variable while new supply dir by vllm config.
-        conf_profile_dir = vllm_envs.VLLM_TORCH_PROFILER_DIR
-        if not conf_profile_dir and vllm_config.profiler_config:
-            conf_profile_dir = vllm_config.profiler_config.torch_profiler_dir
+        # IMPORTANT: PLEASE EDIT THIS - Hardcoded Diagon configurations
+        enable_diagon = True  # IMPORTANT: PLEASE EDIT THIS
+        conf_profile_dir = "gs://vllm-profiles/iteration-one"  # IMPORTANT: PLEASE EDIT THIS
 
-        if os.getenv("ENABLE_GOOGLE_DIAGON_ML_DIAGNOSTICS", None) and conf_profile_dir:
+        if enable_diagon and conf_profile_dir:
             logger.info("Initializing mldiagnostics")
             try:
                 from google_cloud_mldiagnostics import machinelearning_run
@@ -192,9 +191,9 @@ class TPUWorker(WorkerBase):
                 # start mlrun for machinelearning diagnostics
                 self.mlrun = machinelearning_run(
                     name=f"vllm-{hostname}-{now}",
-                    environment=os.getenv("ML_DIAGNOSTICS_ENVIRONMENT", "prod"),
+                    environment="prod",  # IMPORTANT: PLEASE EDIT THIS
                     gcs_path=conf_profile_dir,
-                    region=os.getenv("ML_DIAGNOSTICS_REGION", None),
+                    region="us-central1",  # IMPORTANT: PLEASE EDIT THIS
                 )
                 self.profile_dir = f"{self.mlrun.gcs_path}/{self.mlrun.name}"
                 logger.info(f"Mldiagnostics init profile dir {self.profile_dir}")
