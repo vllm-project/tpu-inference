@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import replace
-
 from tools.kernel.tuner.v1.common.kernel_tuner_base import TuningCase
 from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
     SpannerStorageManager
@@ -28,8 +26,7 @@ def get_tuned_params(tuning_key: TuningKey) -> TunableParams:
     # log the tuning key and the tuned params to a gcp database
     # Id(CaseSetId), CaseKeyValue, KernelTunerName, TPU
     # This case set will use to build all tuning cases later.
-    tuning_case = TuningCase(tuning_key,
-                             replace(tunable_params, is_baseline=True))
+    tuning_case = TuningCase(tuning_key, tunable_params, is_baseline=True)
     storage_manager = SpannerStorageManager()
     storage_manager.add_auto_tune_case(CASE_SET_ID, str(tuning_case),
                                        KERNEL_TUNER_NAME, TPU)

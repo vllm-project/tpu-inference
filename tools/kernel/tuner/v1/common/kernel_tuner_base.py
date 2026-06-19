@@ -64,11 +64,13 @@ class TuningCase:
     def __init__(self, tuning_key: TuningKey, tunable_params: TunableParams):
         self.tuning_key = tuning_key
         self.tunable_params = tunable_params
+        self.is_baseline = False  # can be used to mark whether this case is the baseline case for the tuning key, which can be used for comparison in the analysis.
 
     def __str__(self):
         return json.dumps({
             'tuning_key': asdict(self.tuning_key),
-            'tunable_params': asdict(self.tunable_params)
+            'tunable_params': asdict(self.tunable_params),
+            'is_baseline': self.is_baseline
         })
 
     @classmethod
@@ -77,7 +79,8 @@ class TuningCase:
         tuning_key = tuning_key_class(**data['tuning_key'])
         tunable_params = tunable_params_class(**data['tunable_params'])
         case = TuningCase(tuning_key, tunable_params)
-        return case.tuning_key, case.tunable_params
+        case.is_baseline = data.get('is_baseline', False)
+        return case.tuning_key, case.tunable_params, case.is_baseline
 
 
 @dataclass
@@ -464,7 +467,7 @@ class KernelTunerBase(ABC):
                 continue
             assert cid in all_configs, f"CaseId {cid} is missing in the configs retrieved from storage manager for CaseSetId {self.run_config.case_set_id}. This should not happen as the configs should have been generated and stored in the storage manager before."
             _, _, case_key_value = all_configs[cid]
-            tuning_key, tunable_params = TuningCase.from_string(
+            tuning_key, tunable_params, is_baseline = TuningCase.from_string(
                 case_key_value, self.tuner_config.tuning_key_class,
                 self.tuner_config.tunable_params_class)
 
