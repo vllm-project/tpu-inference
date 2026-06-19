@@ -177,7 +177,7 @@ class TPUWorker(WorkerBase):
         self.mlrun = None
 
         # IMPORTANT: PLEASE EDIT THIS - Hardcoded Diagon configurations
-        enable_diagon = True  # IMPORTANT: PLEASE EDIT THIS
+        enable_diagon = os.getenv("ENABLE_GOOGLE_DIAGON_ML_DIAGNOSTICS", None)  # IMPORTANT: PLEASE EDIT THIS
         conf_profile_dir = "gs://vllm-profiles/iteration-one"  # IMPORTANT: PLEASE EDIT THIS
 
         if enable_diagon and conf_profile_dir:
