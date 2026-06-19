@@ -708,10 +708,16 @@ class Fp8Config(QuantizationConfig):
                                             ["ignored_layers"], None)
         weight_block_size = self.get_from_keys(hf_quant_config,
                                                ["weight_block_size"], None)
+        # `ignored_layers` lists exact leaf module names (exact match);
+        # `modules_to_not_convert` lists container/module names meant to
+        # skip everything nested under them (needs substring match) — see
+        # `QuantizationConfig.is_layer_skipped`.
+        self.skip_with_substr = False
         if not ignored_layers:
             ignored_layers = self.get_from_keys(hf_quant_config,
                                                 ["modules_to_not_convert"],
                                                 None)
+            self.skip_with_substr = True
 
         if activation_scheme not in self.ACTIVATION_SCHEMES:
             raise ValueError(
@@ -738,7 +744,8 @@ class Fp8Config(QuantizationConfig):
         if isinstance(layer, JaxEinsum):
             linear_config = QuantLinearConfig(layer, enable_sp=False)
             if self.is_layer_skipped(prefix,
-                                     ignored_layers=self.ignored_layers):
+                                     ignored_layers=self.ignored_layers,
+                                     skip_with_substr=self.skip_with_substr):
                 return UnquantizedLinearMethod(linear_config)
             if self.weight_block_size is not None:
                 if isinstance(layer, JaxMergedColumnParallelLinear):
@@ -749,7 +756,8 @@ class Fp8Config(QuantizationConfig):
                 return Fp8TensorwiseLinearMethod(layer, linear_config)
         elif isinstance(layer, (JaxRoutedExperts, JaxMoE)):
             if self.is_layer_skipped(prefix,
-                                     ignored_layers=self.ignored_layers):
+                                     ignored_layers=self.ignored_layers,
+                                     skip_with_substr=self.skip_with_substr):
                 return UnquantizedFusedMoEMethod()
             return Fp8FusedMoEMethod(self.weight_block_size)
         return None
