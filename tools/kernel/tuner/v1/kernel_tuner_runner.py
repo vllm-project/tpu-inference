@@ -157,7 +157,12 @@ def main(argv):
                            tpu_queue_multi=tpu_queue_multi,
                            run_locally=_RUN_LOCALLY.value,
                            job_priority=_JOB_PRIORITY.value,
-                           max_execution_minutes=_MAX_EXECUTION_MINUTES.value)
+                           max_execution_minutes=_MAX_EXECUTION_MINUTES.value,
+                           gcp_project_id=_GCP_PROJECT_ID.value,
+                           spanner_instance_id=_SPANNER_INSTANCE_ID.value,
+                           spanner_database_id=_SPANNER_DATABASE_ID.value,
+                           worker_id=_WORKER_ID.value,
+                           debug=_DEBUG.value)
     kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
     kernel_tuner = kernel_tuner_cls(run_config=run_config)
 

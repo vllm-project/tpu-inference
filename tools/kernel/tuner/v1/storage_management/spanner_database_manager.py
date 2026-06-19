@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from absl import flags
 from google.api_core import retry
 from google.cloud import spanner
 
@@ -20,8 +19,6 @@ from tools.kernel.tuner.v1.storage_management.storage_manager import \
     StorageManager
 
 BATCH_SIZE = 1000
-
-FLAGS = flags.FLAGS
 
 
 class SpannerStorageManager(StorageManager):
@@ -31,9 +28,9 @@ class SpannerStorageManager(StorageManager):
     def __init__(self,
                  worker_id=None,
                  dry_run=False,
-                 gcp_project_id=FLAGS.gcp_project_id,
-                 spanner_instance_id=FLAGS.spanner_instance_id,
-                 spanner_database_id=FLAGS.spanner_database_id):
+                 gcp_project_id=None,
+                 spanner_instance_id=None,
+                 spanner_database_id=None):
         gcp_project_id = gcp_project_id
         spanner_instance_id = spanner_instance_id
         spanner_database_id = spanner_database_id
