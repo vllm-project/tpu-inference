@@ -67,7 +67,10 @@ steps:
       fi
   
    - label: "Commit support matrices if is nightly build or release tag specified"
-     <<: *run-on-nightly-or-tag
+     # commit_support_matrices and record_verified_commit_hashes push to the repo via
+     # GITHUB_PAT, which is only provisioned for main / release tags. Gate them off
+     # release-branch nightlies (branch != main, no tag) to avoid a "secrets" failure.
+     if: (build.env("NIGHTLY") == "1" && build.branch == "main") || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
      key: commit_support_matrices
      depends_on:
        - "v6_generate_matrices"
@@ -89,7 +92,8 @@ steps:
        - bash .buildkite/scripts/notify_test_results.sh
 
    - label: "Record verified commit hashes"
-     if: build.env("NIGHTLY") == "1"
+     # GITHUB_PAT is main/tag-only - see commit_support_matrices above.
+     if: build.env("NIGHTLY") == "1" && build.branch == "main"
      key: record_verified_commit_hashes
      depends_on:
        - notify_test_results
