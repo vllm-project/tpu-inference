@@ -33,6 +33,7 @@ class MockVllmConfig:
     def __init__(self, block_size=_DEFAULT_BLOCK_SIZE):
         self.model_config = self.Model()
         self.cache_config = self.Cache(block_size)
+        self.parallel_config = self.Parallel()
 
     class Model:
         model = "test-model"
@@ -41,6 +42,11 @@ class MockVllmConfig:
 
         def __init__(self, block_size):
             self.block_size = block_size
+
+    class Parallel:
+
+        def __init__(self, pipeline_parallel_size=1):
+            self.pipeline_parallel_size = pipeline_parallel_size
 
 
 def create_request(

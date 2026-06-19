@@ -46,8 +46,19 @@ def create_parser():
     parser = FlexibleArgumentParser()
     # Add engine args, which includes the --seed parameter
     EngineArgs.add_cli_args(parser)
-    parser.set_defaults(model="meta-llama/Llama-3.1-8B")
-    parser.set_defaults(max_model_len=1024)
+
+    is_multihost = os.environ.get('IS_TPU_MULTIHOST',
+                                  'false').lower() in ('true', '1')
+    default_model = "meta-llama/Llama-3.1-8B"
+    default_tp = 16 if is_multihost else 8
+    default_backend = os.environ.get(
+        'TPU_MULTIHOST_BACKEND') if is_multihost else None
+    parser.set_defaults(
+        model=default_model,
+        tensor_parallel_size=default_tp,
+        distributed_executor_backend=default_backend,
+        max_model_len=1024,
+    )
 
     # Add sampling params
     sampling_group = parser.add_argument_group("Sampling parameters")

@@ -61,6 +61,7 @@ class MockVllmConfig:
         self.model_config = self.Model()
         self.cache_config = self.Cache(block_size)
         self.kv_transfer_config = self.KVTransferConfig()
+        self.parallel_config = self.Parallel()
 
     class Model:
         model = "test-model"
@@ -73,6 +74,11 @@ class MockVllmConfig:
     class KVTransferConfig:
         ip = "ip"
         port = 1234
+
+    class Parallel:
+
+        def __init__(self, pipeline_parallel_size=1):
+            self.pipeline_parallel_size = pipeline_parallel_size
 
 
 class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):

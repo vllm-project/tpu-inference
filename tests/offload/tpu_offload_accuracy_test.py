@@ -72,11 +72,22 @@ def _test_kv_cache_cpu_offloading_accuracy(
         os.environ['TPU_OFFLOAD_DECODE_SAVE'] = decode_save
         os.environ['TPU_OFFLOAD_BATCHED_SAVE'] = batched_save
         os.environ['TPU_OFFLOAD_NUM_CPU_CHUNKS'] = cpu_chunks
-        llm = LLM(model="Qwen/Qwen3-14B",
+
+        tensor_parallel_size = 8
+        distributed_executor_backend = None
+        # Get LLM configuration based on the environment (single-host vs multi-host)
+        is_multihost = os.environ.get('IS_TPU_MULTIHOST',
+                                      'false').lower() in ('true', '1')
+        if is_multihost:
+            distributed_executor_backend = os.environ['TPU_MULTIHOST_BACKEND']
+            tensor_parallel_size = 16
+
+        llm = LLM(model="meta-llama/Llama-3.1-8B",
                   max_model_len=8192,
                   async_scheduling=True,
-                  tensor_parallel_size=8,
-                  kv_transfer_config=kv_transfer_config)
+                  tensor_parallel_size=tensor_parallel_size,
+                  kv_transfer_config=kv_transfer_config,
+                  distributed_executor_backend=distributed_executor_backend)
 
         # 1st generate
         print(f"\n--- Pass 1: Generating for {num_requests} requests ---")
@@ -166,10 +177,10 @@ def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
             decode_save,
             batched_save,
             # The total CPU RAM size = # cpu chunks * cpu_chunk_size. cpu_chunk_size represent the number of tokens can fit into a single CPU RAM chunk.
-            # cpu_chunk_size for llama-3.2-3B(used above in test)= 256
+            # cpu_chunk_size for meta-llama/Llama-3.1-8B(used above in test)= 256
             # CPU RAM size = 4*256=1024 tokens
             "4",  # TPU_OFFLOAD_NUM_CPU_CHUNKS
-            # Prompt length/#tokens: 246 tokens
+            # Prompt length/#tokens: 346 tokens. The prompt length should be larger than hbm block size (256 for Llama-3.1-8B) to make sure prefix match at least one block
             prompts,
         )
 
@@ -194,7 +205,7 @@ def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
             decode_save,
             batched_save,
             # The total CPU RAM size = # cpu chunks * cpu_chunk_size. cpu_chunk_size represent the number of tokens can fit into a single CPU RAM chunk.
-            # cpu_chunk_size for llama-3.2-3B(used above in test)= 256
+            # cpu_chunk_size for meta-llama/Llama-3.1-8B(used above in test)= 256
             # CPU RAM size = 4*256=1024 tokens
             "10",  # TPU_OFFLOAD_NUM_CPU_CHUNKS
             # Large prompt details: 2042 tokens
