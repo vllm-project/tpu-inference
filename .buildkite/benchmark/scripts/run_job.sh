@@ -123,6 +123,10 @@ export BM_INFRA="true"
 
 .buildkite/scripts/run_in_docker.sh bash -c "
   if [ \"\$ENABLE_KERNEL_AUTO_TUNING\" = \"true\" ]; then
+    pip install --upgrade google-cloud-spanner && \
+    pip install --upgrade google-api-core && \
+    pip install --upgrade google-auth && \
+    pip install --upgrade absl-py && \
     chmod +x .buildkite/benchmark/scripts/kernel_auto_tune.sh && \
     .buildkite/benchmark/scripts/kernel_auto_tune.sh || exit 1
   fi && \
