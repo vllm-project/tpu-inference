@@ -215,42 +215,42 @@ class Gemma4MoE(JaxMoE):
     def load_weights(self, weights: Iterable):
         """Load weights for Gemma4 MoE layer.
 
-        Unlike other MoE, Gemma4 didn't provide per-expert weights, but already fuse projection weight in the checkpoint.
+        Unlike other MoE, Gemma4 didn't provide per-expert weights, but
+        already consolidates each projection weights into a single tensor
+        stacked along the expert axis
+        — e.g. `down_proj` is `(E, D, F)` rather than separate
+        per-expert `(D, F)` tensors in. The generic per-expert loader
+        (`JaxMoE._load_weights` / `Fp8FusedMoEMethod.load_weights`) expects
+        the latter, keyed as `"<expert_id>.<param_name>"`. Slice each stacked
+        tensor into per-expert pieces and synthesize that naming, then
+        delegate to super().
+
+        Per-expert slices are handed over as-is (no transpose): the generic
+        loader does no permute itself (just adds the expert dim back via
+        reshape), and `*FusedMoEMethod.process_weights_after_loading`
+        concatenates gate/up scale halves along the same axis it
+        concatenates the gate/up weight halves — so the checkpoint's native
+        per-expert orientation already lines up for both weights and their
+        scales, for the same reason the un-permuted raw weights do.
         """
-        loaded = set()
+
+        def per_expert_slice(stacked_tensor, param_name: str):
+            return ((f"{i}.{param_name}", expert_tensor)
+                    for i, expert_tensor in enumerate(stacked_tensor))
+
+        synthesized = []
         for name, tensor in weights:
             if name.endswith("down_proj"):
-                load_nnx_param_from_reshaped_torch(self.kernel_down_proj_EFD,
-                                                   tensor,
-                                                   permute_dims=(0, 2, 1),
-                                                   param_name=name)
-                loaded.add("kernel_down_proj_EFD")
-                self.kernel_down_proj_EFD._weights_to_load.clear()
-                # Other MoE models store expert weights in shape (D, F) and permute in *FusedMoEMethod.process_weights_after_loading.
-                # For compatibility, we permute here then expect another permute in process_weights_after_loading.
-                self.kernel_down_proj_EFD.set_value(
-                    jnp.swapaxes(self.kernel_down_proj_EFD.get_value(), 1, 2))
+                synthesized.extend(per_expert_slice(tensor,
+                                                    "down_proj.weight"))
             elif name.endswith("gate_up_proj"):
                 F = tensor.shape[1] // 2
-                load_nnx_param_from_reshaped_torch(self.kernel_gating_EDF,
-                                                   tensor[:, :F, :],
-                                                   permute_dims=(0, 2, 1),
-                                                   param_name=name)
-                load_nnx_param_from_reshaped_torch(self.kernel_up_proj_EDF,
-                                                   tensor[:, F:, :],
-                                                   permute_dims=(0, 2, 1),
-                                                   param_name=name)
-                loaded.add("kernel_up_proj_EDF")
-                self.kernel_up_proj_EDF._weights_to_load.clear()
-                loaded.add("kernel_gating_EDF")
-                self.kernel_gating_EDF._weights_to_load.clear()
-                # Other MoE models store expert weights in shape (F, D) and permute in *FusedMoEMethod.process_weights_after_loading.
-                # For compatibility, we permute here then expect another permute in process_weights_after_loading.
-                self.kernel_up_proj_EDF.set_value(
-                    jnp.swapaxes(self.kernel_up_proj_EDF.get_value(), 1, 2))
-                self.kernel_gating_EDF.set_value(
-                    jnp.swapaxes(self.kernel_gating_EDF.get_value(), 1, 2))
-        return loaded
+                synthesized.extend(
+                    per_expert_slice(tensor[:, :F, :], "gate_proj.weight"))
+                synthesized.extend(
+                    per_expert_slice(tensor[:, F:, :], "up_proj.weight"))
+
+        return super().load_weights(synthesized)
 
 
 class Gemma4Attention(JaxModule):
