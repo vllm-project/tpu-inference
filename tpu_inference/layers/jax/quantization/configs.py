@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -127,7 +128,8 @@ class QuantLinearConfig(CommonQuantLinearConfig):
 
     def __init__(self, layer, *, enable_sp: bool):
         # Avoid circular import.
-        from tpu_inference.layers.jax.linear import JaxEinsum
+        from tpu_inference.layers.jax.linear import (
+            JaxEinsum, JaxMergedColumnParallelLinear)
         assert isinstance(layer, JaxEinsum)
         # Update config attributes by parsing einsum string and weight sharding.
         # Parse the einsum string to classify axes:
@@ -163,7 +165,7 @@ class QuantLinearConfig(CommonQuantLinearConfig):
         assert len(in_sharding) <= 1 and len(out_sharding) <= 1, \
             f"Cannot fuse sharding {getattr(weight, 'sharding', ())=} into 2D weight sharding for {einsum_str}"
 
-        self.out_features = list(
+        self.out_features = tuple(
             weight.shape[i] for i, c in enumerate(w_axis)
             if c not in contracting_axes and c not in batch_axes)
         self.batch_features = tuple(weight.shape[i]
@@ -174,7 +176,16 @@ class QuantLinearConfig(CommonQuantLinearConfig):
         self.in_features_sharding = (next(iter(in_sharding), None), )
         self.batch_sharding = tuple(batch_sharding_set)
 
-        super().__init__(enable_sp=enable_sp, output_sizes=self.out_features)
+        # For merged linears (e.g. gate_up_proj), output_sizes must preserve
+        # the per-projection split — needed to fuse/split checkpoint shards.
+        # For everything else, out_features's axes are all part of one
+        # projection (e.g. k_proj's num_kv_heads, head_dim) and must be
+        # multiplied, not summed, to get the true total output size.
+        if isinstance(layer, JaxMergedColumnParallelLinear):
+            output_sizes = layer.output_sizes
+        else:
+            output_sizes = [math.prod(self.out_features)]
+        super().__init__(enable_sp=enable_sp, output_sizes=output_sizes)
 
         # Update weight_sharding and bias_sharding for 2D matmul compatibility
         if self.batch_features:
