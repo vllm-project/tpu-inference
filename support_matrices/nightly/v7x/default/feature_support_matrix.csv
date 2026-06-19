@@ -2,7 +2,7 @@ Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅ Passing,✅ Passing
 "DCN-based P/D disaggregation",✅ Passing,✅ Passing
 "KV Cache Offload",✅ Passing,✅ Passing
-"LoRA_Torch",✅ Passing,❌ Failing
+"LoRA_Torch",✅ Passing,✅ Passing
 "Multimodal Inputs",✅ Passing,✅ Passing
 "Out-of-tree model support",✅ Passing,✅ Passing
 "Prefix Caching",✅ Passing,✅ Passing
@@ -10,7 +10,7 @@ Feature,CorrectnessTest,PerformanceTest
 "Speculative Decoding: Eagle3",✅ Passing,✅ Passing
 "Speculative Decoding: Ngram",✅ Passing,✅ Passing
 "Step Pooling (Embedding)",✅ Passing,❓ Untested
-"async scheduler",❌ Failing,❓ Untested
+"async scheduler",✅ Passing,✅ Passing
 "hybrid kv cache",✅ Passing,❓ Untested
 "multi-host",✅ Passing,❓ Untested
 "runai_model_streamer_loader",✅ Passing,❓ Untested
