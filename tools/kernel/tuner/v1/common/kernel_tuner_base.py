@@ -21,9 +21,6 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 
 import yaml
-from absl import flags
-
-FLAGS = flags.FLAGS
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -105,6 +102,11 @@ class RunConfig:
     job_priority: int = -10
     max_execution_minutes: int = 20
     job_bucket_size: int = 100
+    gcp_project_id: str = None
+    spanner_instance_id: str = None
+    spanner_database_id: str = None
+    worker_id: str = None
+    debug: bool = False
 
 
 class KernelTunerBase(ABC):
@@ -140,11 +142,15 @@ class KernelTunerBase(ABC):
         else:
             from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
                 SpannerStorageManager
-            self.storage_manager = SpannerStorageManager()
+            self.storage_manager = SpannerStorageManager(
+                gcp_project_id=run_config.gcp_project_id,
+                spanner_instance_id=run_config.spanner_instance_id,
+                spanner_database_id=run_config.spanner_database_id)
         self._kernel_inputs_cache = {}
         self._tuning_key = None
         self.tuner_config = tuner_config
         self.run_config = run_config
+        self.worker_id = run_config.worker_id or 'unknown_worker'
 
     def _init_case_set(self) -> bool:
         """Initialize the case set which will be used for tuning. The case set will be written to the storage manager. This will be called when the caseset_id is new.
@@ -431,9 +437,10 @@ class KernelTunerBase(ABC):
             begin_case_id: Start of the case_id range (inclusive) within the caseset to measure.
             end_case_id: End of the case_id range (exclusive) within the caseset to measure.
         """
+        worker_id = self.worker_id
         bucket_id = begin_case_id // self.run_config.job_bucket_size
         logger.info(
-            f"Worker [{FLAGS.worker_id}] Claimed CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}, Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for processing."
+            f"Worker [{worker_id}] Claimed CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}, Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for processing."
         )
         self.storage_manager.mark_bucket_in_progress(
             self.run_config.case_set_id, self.run_config.run_id, bucket_id)
@@ -452,13 +459,13 @@ class KernelTunerBase(ABC):
             time_elapsed_minutes = (time.perf_counter() -
                                     bucket_start_perf) / 60
             logger.info(
-                f"Worker [{FLAGS.worker_id}] Processing CaseId: {cid} in Bucket {bucket_id}, [{begin_case_id}-{end_case_id}) with elapsed time {time_elapsed_minutes:.2f} minutes."
+                f"Worker [{worker_id}] Processing CaseId: {cid} in Bucket {bucket_id}, [{begin_case_id}-{end_case_id}) with elapsed time {time_elapsed_minutes:.2f} minutes."
             )
             if not self.run_config.run_locally and (
                     time_elapsed_minutes
                     > self.run_config.max_execution_minutes):
                 logger.warning(
-                    f"Worker [{FLAGS.worker_id}] has been processing bucket {bucket_id} for {time_elapsed_minutes:.2f} minutes, which exceeds the limit of {self.run_config.max_execution_minutes} minutes. Stopping processing more cases in this bucket to allow other jobs(like CICD jobs) in the queue to proceed."
+                    f"Worker [{worker_id}] has been processing bucket {bucket_id} for {time_elapsed_minutes:.2f} minutes, which exceeds the limit of {self.run_config.max_execution_minutes} minutes. Stopping processing more cases in this bucket to allow other jobs(like CICD jobs) in the queue to proceed."
                 )
                 parent_step_key = f'{self.tuner_config.kernel_tuner_name}_{self.run_config.case_set_id}_{self.run_config.run_id}_{begin_case_id}_{end_case_id}'
                 self.generate_buildkite_pipeline_subbucket(
@@ -482,7 +489,7 @@ class KernelTunerBase(ABC):
             if status != TuningStatus.SUCCESS:
                 results_buffer.append(
                     (self.run_config.case_set_id, self.run_config.run_id, cid,
-                     status.value, FLAGS.worker_id, 0, 0, 0,
+                     status.value, worker_id, 0, 0, 0,
                      self.storage_manager.get_timestamp_sec(),
                      self.run_config.tpu_queue_multi))
                 logger.warning(
@@ -499,7 +506,7 @@ class KernelTunerBase(ABC):
             if status != TuningStatus.SUCCESS:
                 results_buffer.append(
                     (self.run_config.case_set_id, self.run_config.run_id, cid,
-                     status.value, FLAGS.worker_id, warmup_us, 0, 0,
+                     status.value, worker_id, warmup_us, 0, 0,
                      self.storage_manager.get_timestamp_sec(),
                      self.run_config.tpu_queue_multi))
                 logger.warning(
@@ -511,11 +518,11 @@ class KernelTunerBase(ABC):
             total_time_us = int(total_time // 1000)
             results_buffer.append(
                 (self.run_config.case_set_id, self.run_config.run_id, cid,
-                 status.value, FLAGS.worker_id, average_latency_us, warmup_us,
+                 status.value, worker_id, average_latency_us, warmup_us,
                  total_time_us, self.storage_manager.get_timestamp_sec(),
                  self.run_config.tpu_queue_multi))
 
-            if FLAGS.debug:
+            if self.run_config.debug:
                 logger.info(
                     f"Case {cid} completed with AvgLat={average_latency_us}us, Warmup={warmup_us}us, Total={total_time_us}us"
                 )
@@ -535,5 +542,5 @@ class KernelTunerBase(ABC):
             self.storage_manager.mark_bucket_completed(
                 self.run_config.case_set_id, self.run_config.run_id, bucket_id)
         logger.info(
-            f"Worker [{FLAGS.worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
+            f"Worker [{worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
         )
