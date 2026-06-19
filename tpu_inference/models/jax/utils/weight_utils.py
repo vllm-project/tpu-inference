@@ -1003,28 +1003,6 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 if quant_method is not None:
                     quant_method.process_weights_after_loading(module)
         jax.clear_caches()
-
-        # Routed weights are written directly into their fused param via
-        # `weight_loader` above and never re-enter the streaming weights
-        # iterator, so the recursive `_load_module` (which normally fires a
-        # module's `quant_method.process_weights_after_loading` right after
-        # its own weights are consumed, see override below) never visits
-        # these fused modules. Trigger that post-load step explicitly here
-        # (e.g. FP8 blockwise requant of a merged gate_up_proj/qkv_proj).
-        if routed_loaded:
-            modules_by_name = dict(self.module.named_modules())
-            processed_modules: set = set()
-            for fused_param_name in routed_loaded:
-                module_name = fused_param_name.rsplit(".", 1)[0]
-                if module_name in processed_modules:
-                    continue
-                processed_modules.add(module_name)
-                module = modules_by_name.get(module_name)
-                quant_method = getattr(module, "quant_method", None)
-                if quant_method is not None:
-                    quant_method.process_weights_after_loading(module)
-                    jax.clear_caches()
-
         return autoloaded | routed_loaded
 
     def _add_loadable_non_param_tensors(self, module: JaxModule,

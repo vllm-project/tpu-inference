@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -164,7 +165,7 @@ class QuantLinearConfig(CommonQuantLinearConfig):
         assert len(in_sharding) <= 1 and len(out_sharding) <= 1, \
             f"Cannot fuse sharding {getattr(weight, 'sharding', ())=} into 2D weight sharding for {einsum_str}"
 
-        self.out_features = list(
+        self.out_features = tuple(
             weight.shape[i] for i, c in enumerate(w_axis)
             if c not in contracting_axes and c not in batch_axes)
         self.batch_features = tuple(weight.shape[i]
