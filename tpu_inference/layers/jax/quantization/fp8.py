@@ -292,13 +292,22 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                               None) is not None else None
             if bias is not None:
                 bias = bias.reshape(-1)
+            # `linear_config.output_sizes` is always a single collapsed entry
+            # (derived purely from the kernel shape/einsum string by
+            # `QuantLinearConfig`, see `create_weights_jax`). For merged
+            # linears (gate_up_proj, qkv_proj) the real per-projection split
+            # lives on the layer itself, and is required here so the
+            # TP-shard interleaving below operates on projection boundaries
+            # instead of treating the whole merged blob as one projection.
+            output_sizes = getattr(layer, "output_sizes",
+                                   self.linear_config.output_sizes)
             weights = common_fp8.process_blockwise_fp8_linear_weights(
                 weight,
                 weight_scale_inv,
                 bias=bias,
                 weight_block_size=tuple(self.quant_config.weight_block_size),
                 requant_block_size=self.linear_config.requant_block_size,
-                output_sizes=tuple(self.linear_config.output_sizes),
+                output_sizes=tuple(output_sizes),
                 requant_weight_dtype=self.linear_config.requant_weight_dtype,
                 fuse_matmuls=self.linear_config.fuse_matmuls,
                 n_shards=self.linear_config.n_shards,
