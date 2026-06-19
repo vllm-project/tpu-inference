@@ -33,7 +33,8 @@ from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.utils import cpu_mesh, cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import (JaxEinsum,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import (QuantizationConfig,
@@ -42,8 +43,8 @@ from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch,
-    shard_put)
+    assign_and_shard_param, jax_array_from_reshaped_torch,
+    load_nnx_param_from_reshaped_torch, shard_put)
 from tpu_inference.utils import t2j
 
 logger = init_logger(__name__)
@@ -280,13 +281,22 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                                               None) is not None else None
             if bias is not None:
                 bias = bias.reshape(-1)
+            # `linear_config.output_sizes` is always a single collapsed entry
+            # (derived purely from the kernel shape/einsum string by
+            # `QuantLinearConfig`, see `create_weights_jax`). For merged
+            # linears (gate_up_proj, qkv_proj) the real per-projection split
+            # lives on the layer itself, and is required here so the
+            # TP-shard interleaving below operates on projection boundaries
+            # instead of treating the whole merged blob as one projection.
+            output_sizes = getattr(layer, "output_sizes",
+                                   self.linear_config.output_sizes)
             weights = common_fp8.process_blockwise_fp8_linear_weights(
                 weight,
                 weight_scale_inv,
                 bias=bias,
                 weight_block_size=tuple(self.quant_config.weight_block_size),
                 requant_block_size=self.linear_config.requant_block_size,
-                output_sizes=tuple(self.linear_config.output_sizes),
+                output_sizes=tuple(output_sizes),
                 requant_weight_dtype=self.linear_config.requant_weight_dtype,
                 fuse_matmuls=self.linear_config.fuse_matmuls,
                 n_shards=self.linear_config.n_shards,
@@ -335,6 +345,71 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         out = self._apply_fused(x, weight, scale, bias=bias)
         out = out.reshape(out.shape[:-1] + self.out_features)
         return out
+
+
+class Fp8BlockwiseMergedLinearMethod(Fp8BlockwiseLinearMethod):
+    """Block-wise Fp8 method for ``JaxMergedColumnParallelLinear`` layers.
+
+    Mirrors ``UnquantizedMergedLinearMethod`` (see unquantized.py): a merged
+    column-parallel linear (e.g. fused ``gate_up_proj``) holds one kernel,
+    but a checkpoint that ships native (unfused) FP8 weights still stores
+    each projection (``gate_proj``, ``up_proj``) as a separate tensor with
+    its own block-wise scale. ``create_weights_jax`` attaches a
+    ``weight_loader`` that accumulates each projection's ``weight`` and
+    ``weight_scale_inv`` tensor (by ``shard_id``) and, once all projections
+    for a given param have arrived, concatenates them in declaration order.
+
+    Unlike the unquantized merge loader, this does not interleave shards for
+    TP sharding here: ``process_weights_after_loading``
+    (``process_blockwise_fp8_linear_weights``, inherited unchanged from
+    ``Fp8BlockwiseLinearMethod``) consumes the plain concatenated
+    ``[proj0, proj1, ...]`` layout and performs the requant + interleave
+    itself, given ``output_sizes``/``n_shards``.
+    """
+
+    @staticmethod
+    def _load_merged_shard(param: nnx.Param,
+                           torch_tensor,
+                           shard_id: int = -1,
+                           *,
+                           permute_dims,
+                           param_name: str):
+        shards = param.get_metadata("_merged_shards")
+        with cpu_mesh_context():
+            if shard_id == -1:
+                merged = jax_array_from_reshaped_torch(
+                    torch_tensor, permute_dims=permute_dims)
+            else:
+                shards[shard_id] = torch_tensor
+                if any(s is None for s in shards):
+                    return
+                merged = jnp.concatenate([
+                    jax_array_from_reshaped_torch(t, permute_dims=permute_dims)
+                    for t in shards
+                ],
+                                         axis=-1)
+        assign_and_shard_param(param, merged, param_name=param_name)
+
+    def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
+                           **extra_weight_attrs):
+        assert isinstance(layer, JaxMergedColumnParallelLinear)
+        super().create_weights_jax(layer,
+                                   *weight_args,
+                                   rngs=rngs,
+                                   **extra_weight_attrs)
+        n_proj = len(layer.output_sizes)
+        layer.weight.set_metadata("_merged_shards", [None] * n_proj)
+        layer.weight.set_metadata(
+            "weight_loader",
+            functools.partial(self._load_merged_shard,
+                              permute_dims=(1, 0),
+                              param_name=layer.prefix + ".weight"))
+        layer.weight_scale_inv.set_metadata("_merged_shards", [None] * n_proj)
+        layer.weight_scale_inv.set_metadata(
+            "weight_loader",
+            functools.partial(self._load_merged_shard,
+                              permute_dims=(1, 0),
+                              param_name=layer.prefix + ".weight_scale_inv"))
 
 
 class Fp8FusedMoEMethod(QuantizeMethodBase):
@@ -666,6 +741,9 @@ class Fp8Config(QuantizationConfig):
                                      ignored_layers=self.ignored_layers):
                 return UnquantizedLinearMethod(linear_config)
             if self.weight_block_size is not None:
+                if isinstance(layer, JaxMergedColumnParallelLinear):
+                    return Fp8BlockwiseMergedLinearMethod(
+                        self, layer, linear_config)
                 return Fp8BlockwiseLinearMethod(self, layer, linear_config)
             else:
                 return Fp8TensorwiseLinearMethod(layer, linear_config)
