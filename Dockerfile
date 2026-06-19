@@ -15,7 +15,7 @@ WORKDIR /app/vllm
 # Remove tpu-inference from requirements to avoid pulling from PyPI
 RUN sed -i '/tpu-inference/d' requirements/tpu.txt
 RUN pip install -r requirements/tpu.txt -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-RUN VLLM_TARGET_DEVICE=tpu pip install -e .
+RUN VLLM_TARGET_DEVICE=tpu pip install --no-build-isolation -e .
 
 # 4. Install Diagon SDK & the TPU Plugin (Install tpu-inference after)
 RUN pip install google-cloud-mldiagnostics google-cloud-logging
