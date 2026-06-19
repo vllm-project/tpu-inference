@@ -127,6 +127,9 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
     from vllm.forward_context import ForwardContext
 
+import ray
+from vllm.platforms import current_platform
+
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
 from tpu_inference.offload.cpu_backend import LocalCPUBackend
@@ -365,6 +368,9 @@ class KVOffloadConnectorStats(KVConnectorStats):
             KVConnectorStats: The updated instance (self) containing the aggregated stats.
         """
         if isinstance(other, KVOffloadConnectorStats):
+            logger.debug(
+                f"Before Aggregating KVOffloadConnectorStats: self.data={self.data}, other.data={other.data}"
+            )
             other_saves = other.data.get("finished_save_chunks", {})
             for k, v in other_saves.items():
                 if k not in self.data["finished_save_chunks"]:
@@ -376,6 +382,10 @@ class KVOffloadConnectorStats(KVConnectorStats):
                 if k not in self.data["finished_load_chunks"]:
                     self.data["finished_load_chunks"][k] = []
                 self.data["finished_load_chunks"][k].extend(v)
+
+            logger.debug(
+                f"After Aggregating KVOffloadConnectorStats: self.data={self.data}"
+            )
 
         return self
 
@@ -600,6 +610,15 @@ class TPUOffloadConnectorScheduler():
         self._reqs_being_saved = defaultdict[ReqId, set[CpuChunkId]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[CpuChunkId]](set)
 
+        # The number of TP (Tensor Parallel) worker actors inside the last pipeline parallel stage.
+        self.num_tp_workers = self._get_num_tp_workers()
+
+        # Persistent counters tracking how many workers have finished a chunk.
+        # Staging slots are only freed when the count reaches `self.num_tp_workers`.
+        # Format: {chunk_id: completed_worker_count}
+        self._save_chunk_completion_counts = defaultdict(int)
+        self._load_chunk_completion_counts = defaultdict(int)
+
         model_name = self.vllm_config.model_config.model
 
         self.decode_save = envs.TPU_OFFLOAD_DECODE_SAVE
@@ -630,6 +649,48 @@ class TPUOffloadConnectorScheduler():
             f"decode_save={self.decode_save}, "
             f"partial_block_save_behavior={self.partial_block_save_behavior}, "
             f"num_staging_blocks={self.num_staging_blocks}.")
+
+    def _get_num_tp_workers(self) -> int:
+        """Calculates the number of Tensor Parallel (TP) workers in the last pipeline stage.
+
+        Terminology & Architecture Notes:
+        1. Ray Actor (Worker Actor): In vLLM, distributed workers are instantiated
+           as remote Ray Actors (processes running `RayWorkerWrapper`).
+        2. TPU Worker: In a multi-host TPU environment executing in SPMD mode, there is
+           exactly one worker actor process (Ray Actor) per host node. Thus, the total
+           number of worker actors in the cluster equals `num_nodes`.
+        3. TP (Tensor Parallel) Worker: Under Pipeline Parallelism (PP), the worker actors
+           are divided into `pp_size` stages. Within each stage, they run in a tensor-parallel
+           fashion. Therefore, each stage contains `num_nodes // pp_size` worker actors,
+           representing the TP size per stage.
+
+        In multi-host TPU setups, the KV cache tensors are partitioned across these TP
+        workers. During save or load operations, every TP worker independently processes its
+        slice of the KV cache chunk and reports completion to the driver.
+
+        Since only the workers in the last pipeline parallel (PP) stage return execution
+        outputs and offload statistics to the driver, the driver will receive exactly
+        `num_nodes // pp_size` completion notifications for each saved or loaded chunk.
+        To prevent race conditions and data corruption, the driver tracks these completion
+        counts per chunk and only frees staging buffer slots (or marks chunks as ready)
+        once the count reaches this target number of TP workers.
+
+        Returns:
+            int: The target number of TP workers in the last pipeline stage (representing
+                 the number of expected completion stats per chunk).
+        """
+        num_nodes = 1
+        if ray.is_initialized():
+            device_str = current_platform.ray_device_key
+            num_nodes = len([
+                n for n in ray.nodes() if device_str in n.get("Resources", {})
+            ])
+        pp_size = self.vllm_config.parallel_config.pipeline_parallel_size
+        num_tp_workers = num_nodes // pp_size
+        logger.debug(
+            f"Calculated num_tp_workers: {num_tp_workers} (num_nodes={num_nodes}, pp_size={pp_size})"
+        )
+        return num_tp_workers
 
     def _get_request_block_hashes(self, req: "Request") -> list[BlockHash]:
         # request's original block_hashes do not include the last partial block
@@ -1196,57 +1257,98 @@ class TPUOffloadConnectorScheduler():
             assert "finished_save_chunks" in connector_output.kv_connector_stats.data
             assert "finished_load_chunks" in connector_output.kv_connector_stats.data
 
-            for req_id, saved_chunk_ids in connector_output.kv_connector_stats.data[
-                    "finished_save_chunks"].items():
-                if req_id not in self._reqs_being_saved:
-                    continue
-                num_saved_chunks = len(saved_chunk_ids)
-                logger.debug(
-                    f"  finished_save_chunks for {req_id}: {saved_chunk_ids}")
-                # free staging blocks
-                self.staging_buffer_manager.free(
-                    req_id, usage="save", num_finished_blocks=num_saved_chunks)
+            # 1. Process Saves
+            save_stats = connector_output.kv_connector_stats.data.get(
+                "finished_save_chunks", {})
+            for req_id, saved_chunk_ids in save_stats.items():
+                fully_completed_save_chunks = []
 
-                # update in-flight save
-                # NOTE(jcgu):  there might be in-flight savings,
-                # even if the requests has been finished.
-                for saved_chunk_id in saved_chunk_ids:
-                    assert saved_chunk_id in self._reqs_being_saved[req_id]
-                    self._reqs_being_saved[req_id].remove(saved_chunk_id)
-                if len(self._reqs_being_saved[req_id]) == 0:
-                    self._reqs_being_saved.pop(req_id, None)
-                else:
+                # Accumulate completions for each chunk ID.
+                # Since list aggregation uses .extend(), duplicate entries from separate workers are preserved.
+                for chunk_id in saved_chunk_ids:
+                    self._save_chunk_completion_counts[chunk_id] += 1
                     logger.debug(
-                        f"  remaining_saving_blocks:{req_id}, {self._reqs_being_saved[req_id]}."
+                        f"Save chunk completion update: req_id={req_id}, "
+                        f"chunk_id={chunk_id}, "
+                        f"completion_count={self._save_chunk_completion_counts[chunk_id]}"
                     )
 
-                # update the status of occupied cpu chunks
-                self.offload_manager.mark_completion(saved_chunk_ids, "save")
+                    # Only mark the chunk complete when all expected last-stage workers have reported it.
+                    if self._save_chunk_completion_counts[
+                            chunk_id] == self.num_tp_workers:
+                        fully_completed_save_chunks.append(chunk_id)
+                        del self._save_chunk_completion_counts[chunk_id]
 
-            for req_id, loaded_chunk_ids in connector_output.kv_connector_stats.data[
-                    "finished_load_chunks"].items():
-                if req_id not in self._reqs_being_loaded:
-                    continue
-                num_loaded_chunks = len(loaded_chunk_ids)
-                logger.debug(
-                    f"  finished_load_chunks for {req_id}: {num_loaded_chunks}"
-                )
-                self.staging_buffer_manager.free(
-                    req_id,
-                    usage="load",
-                    num_finished_blocks=num_loaded_chunks)
-                # update in-flight save
-                for loaded_chunk_id in loaded_chunk_ids:
-                    assert loaded_chunk_id in self._reqs_being_loaded[req_id]
-                    self._reqs_being_loaded[req_id].remove(loaded_chunk_id)
-                if len(self._reqs_being_loaded[req_id]) == 0:
-                    self._reqs_being_loaded.pop(req_id, None)
-                else:
+                if fully_completed_save_chunks:
+                    num_saved_chunks = len(fully_completed_save_chunks)
                     logger.debug(
-                        f"  remaining_loading_blocks:{req_id}, {self._reqs_being_loaded[req_id]}."
+                        f"  fully_completed_save_chunks for {req_id}: {fully_completed_save_chunks}"
                     )
-                # update the status of occupied cpu chunks
-                self.offload_manager.mark_completion(loaded_chunk_ids, "load")
+                    # free staging blocks
+                    self.staging_buffer_manager.free(
+                        req_id,
+                        usage="save",
+                        num_finished_blocks=num_saved_chunks)
+
+                    # update in-flight save
+                    for saved_chunk_id in fully_completed_save_chunks:
+                        assert saved_chunk_id in self._reqs_being_saved[req_id]
+                        self._reqs_being_saved[req_id].remove(saved_chunk_id)
+                    if len(self._reqs_being_saved[req_id]) == 0:
+                        self._reqs_being_saved.pop(req_id, None)
+                    else:
+                        logger.debug(
+                            f"  remaining_saving_blocks:{req_id}, {self._reqs_being_saved[req_id]}."
+                        )
+
+                    # update the status of occupied cpu chunks to 'ready_to_load' in LRU Cache Manager
+                    self.offload_manager.mark_completion(
+                        fully_completed_save_chunks, "save")
+
+            # 2. Process Loads
+            load_stats = connector_output.kv_connector_stats.data.get(
+                "finished_load_chunks", {})
+            for req_id, loaded_chunk_ids in load_stats.items():
+                fully_completed_load_chunks = []
+
+                # Accumulate completions for each chunk ID.
+                for chunk_id in loaded_chunk_ids:
+                    self._load_chunk_completion_counts[chunk_id] += 1
+                    logger.debug(
+                        f"Load chunk completion update: req_id={req_id}, "
+                        f"chunk_id={chunk_id}, "
+                        f"completion_count={self._load_chunk_completion_counts[chunk_id]}"
+                    )
+
+                    # Only mark the chunk complete when all expected last-stage workers have reported it.
+                    if self._load_chunk_completion_counts[
+                            chunk_id] == self.num_tp_workers:
+                        fully_completed_load_chunks.append(chunk_id)
+                        del self._load_chunk_completion_counts[chunk_id]
+
+                if fully_completed_load_chunks:
+                    num_loaded_chunks = len(fully_completed_load_chunks)
+                    logger.debug(
+                        f"  fully_completed_load_chunks for {req_id}: {fully_completed_load_chunks}"
+                    )
+                    self.staging_buffer_manager.free(
+                        req_id,
+                        usage="load",
+                        num_finished_blocks=num_loaded_chunks)
+                    # update in-flight load
+                    for loaded_chunk_id in fully_completed_load_chunks:
+                        assert loaded_chunk_id in self._reqs_being_loaded[
+                            req_id]
+                        self._reqs_being_loaded[req_id].remove(loaded_chunk_id)
+                    if len(self._reqs_being_loaded[req_id]) == 0:
+                        self._reqs_being_loaded.pop(req_id, None)
+                    else:
+                        logger.debug(
+                            f"  remaining_loading_blocks:{req_id}, {self._reqs_being_loaded[req_id]}."
+                        )
+                    # release chunk pins in the LRU Cache Manager (ready for eviction if needed)
+                    self.offload_manager.mark_completion(
+                        fully_completed_load_chunks, "load")
 
     def request_finished(
         self,
@@ -1845,13 +1947,14 @@ class TPUOffloadConnectorWorker:
         return gathered_kv_caches_tpu, manifest, total_num_blocks_to_save
 
     def _transfer_and_register_cpu_chunks(self,
-                                          flat_kv_caches_tpu: Any,
+                                          chunks_on_cpu: Any,
                                           total_num_blocks_to_save: int,
                                           manifest: list[SaveReqInfo],
                                           is_batched: bool = False):
         """
-        Asynchronously transfers KV blocks from TPU to CPU, unstitches them,
-        and registers them with the CPU RAM backend store.
+        Asynchronously waits for KV blocks to finish transfer to CPU,
+        unstitches them, and registers them with the CPU RAM backend store.
+        Note: The transfer (`jax.device_put`) is initiated in the main thread.
 
         Unstitching Mechanism:
         1. Unified Transfer: A single large swap operation moves total_num_blocks_to_save
@@ -1886,22 +1989,7 @@ class TPUOffloadConnectorWorker:
         +---------------------------------------+
         """
         start_time = time.time()
-
         # 1. Swap Out the buffer
-        chunks_on_cpu = None
-        # D2H
-        chunks_on_cpu = []
-        for i in range(total_num_blocks_to_save):
-            tpu_chunk = flat_kv_caches_tpu[i]
-            if isinstance(tpu_chunk, list):
-                cpu_chunk = [
-                    jax.device_put(x, self.expanded_host_sharding)
-                    for x in tpu_chunk
-                ]
-            else:
-                cpu_chunk = jax.device_put(tpu_chunk,
-                                           self.expanded_host_sharding)
-            chunks_on_cpu.append(cpu_chunk)
         jax.block_until_ready(chunks_on_cpu)
         # no split
 
@@ -1979,8 +2067,21 @@ class TPUOffloadConnectorWorker:
         # Note: We use manifest for the pending future tracking.
         # record_save will be handled in the main thread by _process_completed_saves.
 
+        chunks_on_cpu = []
+        for i in range(total_num_blocks_to_save):
+            tpu_chunk = flat_kv_caches_tpu[i]
+            if isinstance(tpu_chunk, list):
+                cpu_chunk = [
+                    jax.device_put(x, self.expanded_host_sharding)
+                    for x in tpu_chunk
+                ]
+            else:
+                cpu_chunk = jax.device_put(tpu_chunk,
+                                           self.expanded_host_sharding)
+            chunks_on_cpu.append(cpu_chunk)
+
         future = self.save_executor.submit(_async_batch_transfer_task,
-                                           flat_kv_caches_tpu,
+                                           chunks_on_cpu,
                                            total_num_blocks_to_save,
                                            manifest,
                                            is_batched=True)
@@ -2092,9 +2193,21 @@ class TPUOffloadConnectorWorker:
                 # 2. ASYNC NON-BLOCKING: Transfer to CPU and Register
                 logger.debug(
                     f"Submitting transfer task for request {meta.req_id}")
+                chunks_on_cpu = []
+                for i in range(num_blocks_to_save):
+                    tpu_chunk = flat_kv_caches_tpu[i]
+                    if isinstance(tpu_chunk, list):
+                        cpu_chunk = [
+                            jax.device_put(x, self.expanded_host_sharding)
+                            for x in tpu_chunk
+                        ]
+                    else:
+                        cpu_chunk = jax.device_put(tpu_chunk,
+                                                   self.expanded_host_sharding)
+                    chunks_on_cpu.append(cpu_chunk)
+
                 future = self.save_executor.submit(_async_transfer_task,
-                                                   meta.req_id,
-                                                   flat_kv_caches_tpu,
+                                                   meta.req_id, chunks_on_cpu,
                                                    num_blocks_to_save, [info],
                                                    False)
 
