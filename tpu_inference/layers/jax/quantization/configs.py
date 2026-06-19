@@ -50,21 +50,31 @@ class QuantizationConfig(ABC):
         raise KeyError(f"None of the keys {keys} found in config.")
 
     @classmethod
-    def is_layer_skipped(
-        cls,
-        prefix: str,
-        *,
-        ignored_layers: list[str],
-        fused_mapping: dict = dict()) -> bool:
+    def is_layer_skipped(cls,
+                         prefix: str,
+                         *,
+                         ignored_layers: list[str],
+                         fused_mapping: dict = dict(),
+                         skip_with_substr: bool = False) -> bool:
         """Check if a layer should be skipped from quantization.
 
-        Follows: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/utils/quant_utils.py#L418
+        Follows: https://github.com/vllm-project/vllm/blob/3f53e2138f09843c5bddb4611df58e11bed01500/vllm/model_executor/layers/quantization/utils/quant_utils.py#L504-L509
+
+        `ignored_layers` sourced from a checkpoint's `ignored_layers` key
+        lists exact leaf module names (e.g. `self_attn.q_proj`), needing an
+        exact match. `modules_to_not_convert` instead lists container/module
+        names (e.g. `model.vision_tower`) meant to skip everything nested
+        under them, needing `skip_with_substr=True` for a prefix-style match.
         """
 
         def prefix_full_match(prefix: str, ignored_layers: list[str]) -> bool:
             return prefix in ignored_layers
 
-        match_func = prefix_full_match
+        # For case like: ignored_layers = ["model.vision_tower"]
+        def substr_match(prefix: str, ignored_layers: list[str]) -> bool:
+            return any(layer in prefix for layer in ignored_layers)
+
+        match_func = substr_match if skip_with_substr else prefix_full_match
 
         proj_name = prefix.split(".")[-1]
 
