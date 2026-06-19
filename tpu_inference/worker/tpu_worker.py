@@ -193,7 +193,7 @@ class TPUWorker(WorkerBase):
                     name=f"vllm-{hostname}-{now}",
                     environment="prod",  # IMPORTANT: PLEASE EDIT THIS
                     gcs_path=conf_profile_dir,
-                    region="us-central1",  # IMPORTANT: PLEASE EDIT THIS
+                    region="us-central2",  # IMPORTANT: PLEASE EDIT THIS
                 )
                 self.profile_dir = f"{self.mlrun.gcs_path}/{self.mlrun.name}"
                 logger.info(f"Mldiagnostics init profile dir {self.profile_dir}")
