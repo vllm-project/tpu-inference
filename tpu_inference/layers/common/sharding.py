@@ -774,6 +774,9 @@ def get_hybrid_moe_axes(mesh: Mesh) -> tuple[tuple[str, ...], tuple[str, ...]]:
     for a in expert_axes:
         if (a in mesh.axis_names and utils.get_mesh_shape_product(mesh, a) > 1
                 and a not in dp_axes and a != ShardingAxisName.MODEL):
+            if (a == "attn_dp" and "attn_dp_expert" in mesh.axis_names and
+                    utils.get_mesh_shape_product(mesh, "attn_dp_expert") > 1):
+                continue
             ep_axis_list.append(a)
     ep_axis = tuple(ep_axis_list)
 
