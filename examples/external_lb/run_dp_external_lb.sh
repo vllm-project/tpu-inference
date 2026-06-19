@@ -188,6 +188,18 @@ for ((rank = 0; rank < DP_SIZE; rank++)); do
   chip_end=$((chip_start + CHIPS_PER_RANK - 1))
   visible_chips=$(seq -s, "$chip_start" "$chip_end")
 
+  # Each rank is a fully independent process (not an MPMD worker), so
+  # without this every rank would write the same default xplane/trace
+  # filename into the shared PHASED_PROFILING_DIR -- later ranks overwriting
+  # earlier ones. Give each rank its own subdirectory instead. Always set
+  # (even to "" when PHASED_PROFILING_DIR is unset) to override whatever
+  # this script's own environment would otherwise pass through unchanged.
+  rank_phased_profiling_dir=""
+  if [ -n "${PHASED_PROFILING_DIR:-}" ]; then
+    rank_phased_profiling_dir="${PHASED_PROFILING_DIR%/}/dp_rank_${rank}"
+  fi
+
+  PHASED_PROFILING_DIR="${rank_phased_profiling_dir}" \
   TPU_VISIBLE_CHIPS="${visible_chips}" \
   TPU_CHIPS_PER_PROCESS_BOUNDS="1,${CHIPS_PER_RANK},1" \
   TPU_PROCESS_BOUNDS=1,1,1 \
