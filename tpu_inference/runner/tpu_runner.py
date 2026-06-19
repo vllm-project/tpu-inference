@@ -465,6 +465,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         rank: int = 0,
         is_first_rank: bool = True,
         is_last_rank: bool = True,
+        mlrun: Any = None,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -477,6 +478,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
+        self.mlrun = mlrun
 
         self.devices = devices
         self.dtype = self.model_config.dtype
@@ -656,7 +658,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # overwrites another's.
             dp_rank = self.parallel_config.data_parallel_index if envs.TPU_MULTIPROCESS_DP else 0
             self.phase_based_profiler = runner_utils.PhasedBasedProfiler(
-                self.phased_profiling_dir, worker_rank=dp_rank)
+                self.phased_profiling_dir, worker_rank=dp_rank, mlrun=self.mlrun)
 
     def _init_aggregated_stats_logging(self) -> None:
         self.aggregated_stats_dir = envs.AGGREGATED_STATS_DIR

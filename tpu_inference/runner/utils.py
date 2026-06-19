@@ -4,9 +4,11 @@ Implements a few utility functions for the various runners.
 """
 import atexit
 import bisect
+import copy
 import datetime
 import functools
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -559,9 +561,11 @@ class PhasedBasedProfiler:
     def __init__(self,
                  profile_dir: str,
                  worker_rank: int = 0,
-                 flush_interval: int = 100):
+                 flush_interval: int = 100,
+                 mlrun: Any = None):
         self.profiling_n_steps_left: int = 0
         self.profile_dir_with_phase_suffix: str = None
+        self.mlrun = mlrun
         self.num_steps_to_profile_for: int = int(
             os.getenv("PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR",
                       PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR))
@@ -620,12 +624,17 @@ class PhasedBasedProfiler:
         now = datetime.datetime.now()
         date_string_in_profiler_format = now.strftime("%Y_%m_%d_%H_%M_%S_%f")
 
+        def default_encoder(o):
+            if hasattr(o, "item"):
+                return o.item()
+            raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
         with open(
                 os.path.join(
                     self.profile_dir_with_phase_suffix,
                     f"batch_composition_stats_{date_string_in_profiler_format}.json"
                 ), "w") as f:
-            f.write(json.dumps(batch_composition_stats) + "\n")
+            f.write(json.dumps(batch_composition_stats, default=default_encoder) + "\n")
 
     def _start_profiling(self, batch_composition_stats: dict) -> None:
         """
@@ -674,7 +683,13 @@ class PhasedBasedProfiler:
 
             logger.info(f"Starting profiling for {self.current_phase} phase")
             logger.info(f"Batch composition stats: {batch_composition_stats}")
-            phase_dir = os.path.join(self.profile_dir, self.current_phase)
+            if self.mlrun:
+                base_dir = f"{self.mlrun.gcs_path}/{self.mlrun.name}"
+                logger.info(f"mldiagnostics enabled, base profiler dir: {base_dir}")
+            else:
+                base_dir = self.profile_dir
+
+            phase_dir = os.path.join(base_dir, self.current_phase)
             os.makedirs(phase_dir, exist_ok=True)
 
             # Resolve the canonical destination ts before start_trace so all
