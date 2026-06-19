@@ -50,6 +50,51 @@ def pytest_configure(config):
         "markers",
         "disable_jax_cache: explicitly bypass the global JAX compilation cache for this test."
     )
+    config.addinivalue_line(
+        "markers",
+        "bvt: per-push smoke case. Selected when BVT_ONLY=1; otherwise all tests run."
+    )
+
+
+def partition_bvt_only(items):
+    """Split collected items into (keep, drop) for a BVT_ONLY run.
+
+    For any module that declares at least one ``@pytest.mark.bvt`` item, keep
+    only the bvt-marked items from that module; modules that do not use the
+    marker are kept in full. So enabling BVT_ONLY only ever narrows files that
+    opted in -- it can never empty an unrelated suite. Pure helper so the logic
+    can be unit-tested directly.
+    """
+    bvt_modules = {
+        item.nodeid.split("::")[0]
+        for item in items if item.get_closest_marker("bvt")
+    }
+    if not bvt_modules:
+        return list(items), []
+    keep, drop = [], []
+    for item in items:
+        in_bvt_module = item.nodeid.split("::")[0] in bvt_modules
+        if in_bvt_module and not item.get_closest_marker("bvt"):
+            drop.append(item)
+        else:
+            keep.append(item)
+    return keep, drop
+
+
+def pytest_collection_modifyitems(config, items):
+    """Gate the per-push BVT subset.
+
+    Only narrows collection when BVT_ONLY=1 (set by the "- bvt" pipeline step).
+    By default (BVT_ONLY unset) every test runs, so nightly, feature
+    support-matrix, and release-tag builds -- none of which set BVT_ONLY -- run
+    the full set with no extra configuration.
+    """
+    if os.environ.get("BVT_ONLY") != "1":
+        return
+    keep, drop = partition_bvt_only(items)
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+        items[:] = keep
 
 
 @pytest.fixture(scope="session", autouse=True)
