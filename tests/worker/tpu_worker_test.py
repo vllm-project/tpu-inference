@@ -256,7 +256,7 @@ class TestTPUWorker:
          mock_mlrun.gcs_path = "gs://gs-path"
          mock_machinelearning_run.return_value = mock_mlrun
          monkeypatch.setenv("ML_DIAGNOSTICS_ENVIRONMENT", "staging")
-         monkeypatch.setenv("ML_DIAGNOSTICS_REGION", "us-central1")
+         monkeypatch.setenv("ML_DIAGNOSTICS_REGION", "us-central2")
          monkeypatch.setenv("ENABLE_GOOGLE_DIAGON_ML_DIAGNOSTICS", "true")
          mock_envs.VLLM_TORCH_PROFILER_DIR = "gs://gs-path"
 
@@ -271,7 +271,7 @@ class TestTPUWorker:
              name="vllm-host1-2020-01-02 03:04:00",
              environment="staging",
              gcs_path="gs://gs-path",
-             region="us-central1",
+             region="us-central2",
          )
 
     @patch('socket.gethostname')
