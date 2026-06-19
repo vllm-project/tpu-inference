@@ -215,6 +215,16 @@ class Gemma4MoE(JaxRoutedExperts):
         per-expert orientation already lines up for both weights and their
         scales, for the same reason the un-permuted raw weights do.
         """
+        # `weight_scale_name` ("weight_scale_inv"/"weight_scale") names the
+        # JAX param attribute (`Fp8FusedMoEMethod.create_weights_jax` does
+        # `setattr(layer, f"{param_name}_{weight_scale_name}", ...)`), but
+        # the checkpoint's own key uses a shorter "_scale_inv"/"_scale"
+        # suffix without the "weight_" infix (e.g. `down_proj_scale_inv`,
+        # vs. the dense per-layer `down_proj.weight_scale_inv`).
+        weight_scale_name = getattr(self.quant_method, "weight_scale_name",
+                                    None)
+        scale_suffix = (weight_scale_name.removeprefix("weight_")
+                        if weight_scale_name else None)
 
         def per_expert_slice(stacked_tensor, param_name: str):
             return ((f"{i}.{param_name}", expert_tensor)
@@ -231,6 +241,18 @@ class Gemma4MoE(JaxRoutedExperts):
                     per_expert_slice(tensor[:, :F, :], "gate_proj.weight"))
                 synthesized.extend(
                     per_expert_slice(tensor[:, F:, :], "up_proj.weight"))
+            elif scale_suffix and name.endswith(f"down_proj_{scale_suffix}"):
+                synthesized.extend(
+                    per_expert_slice(tensor, f"down_proj.{weight_scale_name}"))
+            elif scale_suffix and name.endswith(
+                    f"gate_up_proj_{scale_suffix}"):
+                F = tensor.shape[1] // 2
+                synthesized.extend(
+                    per_expert_slice(tensor[:, :F, :],
+                                     f"gate_proj.{weight_scale_name}"))
+                synthesized.extend(
+                    per_expert_slice(tensor[:, F:, :],
+                                     f"up_proj.{weight_scale_name}"))
 
         return super().load_weights(synthesized)
 

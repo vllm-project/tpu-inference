@@ -133,6 +133,8 @@ class TestGemma4ForConditionalGeneration:
     @pytest.mark.parametrize("model_name", [
         "google/gemma-4-31B-it",
         "google/gemma-4-26B-A4B-it",
+        "hugg1ngfac3/gemma-4-31B-it-FP8",
+        "hugg1ngfac3/gemma-4-26B-A4B-it-FP8",
     ])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
