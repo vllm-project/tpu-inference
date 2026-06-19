@@ -127,12 +127,16 @@ class TestGemma4ForConditionalGeneration:
             )
         assert jax_output is not None
 
+    # BVT: per-push CI sets BVT_ONLY=1, narrowing this file to @pytest.mark.bvt
+    # cases (see tests/conftest.py). Only the single-host (0,1) pp combo is
+    # marked; nightly runs the full pp-shard matrix.
     @pytest.mark.parametrize("model_name", [
         "google/gemma-4-31B-it",
         "google/gemma-4-26B-A4B-it",
     ])
-    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
-                                                       (3, 4)])
+    @pytest.mark.parametrize(
+        "pp_rank,pp_world_size",
+        [pytest.param(0, 1, marks=pytest.mark.bvt), (0, 4), (1, 4), (3, 4)])
     @pytest.mark.parametrize(
         "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
     def test_model_loading(
@@ -160,6 +164,7 @@ class TestGemma4ForConditionalGeneration:
             mock_vllm_config=mock_vllm_config,
         )
 
+    @pytest.mark.bvt
     @pytest.mark.parametrize("model_name", [
         "google/gemma-4-E2B-it",
         "google/gemma-4-E4B-it",

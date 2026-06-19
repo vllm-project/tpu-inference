@@ -108,6 +108,12 @@ def mock_get_pp_group():
         yield
 
 
+# BVT convention: per-push CI sets BVT_ONLY=1, which makes the conftest
+# collection gate (tests/conftest.py) keep only @pytest.mark.bvt cases in any
+# file that marks at least one. The pipeline-parallel shard variants
+# (0,4)/(1,4)/(3,4) are the expensive part of these model tests, so only the
+# single-host (0,1) combo is marked bvt; nightly (BVT_ONLY unset) runs the full
+# pp matrix.
 class TestQwen3ForCausalLM:
 
     @pytest.mark.parametrize("model_name", ["Qwen/Qwen3-0.6B"])
@@ -120,8 +126,9 @@ class TestQwen3ForCausalLM:
             "act_qtype": "float8_e4m3fn"
         }]
     ])
-    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
-                                                       (3, 4)])
+    @pytest.mark.parametrize(
+        "pp_rank,pp_world_size",
+        [pytest.param(0, 1, marks=pytest.mark.bvt), (0, 4), (1, 4), (3, 4)])
     def test_qwen3_600M(self, model_name, kv_cache_type, qwix_rules, rng, mesh,
                         mock_model_inputs, pp_rank, pp_world_size):
         """Tests model init and model forward for the 0.6B model variant."""
@@ -217,6 +224,7 @@ class TestQwen3ForCausalLM:
         logits = model.compute_logits(hidden_states)
         assert logits.shape == (1, hf_config.vocab_size)
 
+    @pytest.mark.bvt
     def test_expected_error_with_tight_threshold(
             self, rng, mesh, mock_vllm_config,
             assert_weight_loading_memory_bounded):
@@ -253,8 +261,9 @@ class TestQwen3ForCausalLM:
 
     @pytest.mark.parametrize("model_name",
                              ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-0.6B-FP8"])
-    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
-                                                       (3, 4)])
+    @pytest.mark.parametrize(
+        "pp_rank,pp_world_size",
+        [pytest.param(0, 1, marks=pytest.mark.bvt), (0, 4), (1, 4), (3, 4)])
     @pytest.mark.parametrize(
         "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
     def test_model_loading(self, model_name, pp_rank, pp_world_size,
@@ -355,6 +364,7 @@ class TestQwen3ForCausalLM:
                 atol=1e-2,
             )
 
+    @pytest.mark.bvt
     def test_vocab_padding_for_sharding(self, rng, mesh):
         """Verify that embed_tokens shape is rounded up when tensor_parallel_size > 1."""
         from tpu_inference.distributed.jax_parallel_state import \

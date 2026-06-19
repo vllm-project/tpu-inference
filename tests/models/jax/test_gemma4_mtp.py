@@ -70,11 +70,15 @@ class DummyDraftConfig:
 
 class TestGemma4MTPForCausalLM:
 
+    # BVT: per-push CI sets BVT_ONLY=1, narrowing this file to @pytest.mark.bvt
+    # cases (see tests/conftest.py). Only the single-host (0,1) pp combo is
+    # marked; nightly runs the full pp-shard matrix.
     @pytest.mark.parametrize("model_name", [
         "google/gemma-4-31B-it",
     ])
-    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
-                                                       (3, 4)])
+    @pytest.mark.parametrize(
+        "pp_rank,pp_world_size",
+        [pytest.param(0, 1, marks=pytest.mark.bvt), (0, 4), (1, 4), (3, 4)])
     @pytest.mark.parametrize(
         "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
     @pytest.mark.parametrize("use_ordered_embeddings", [True, False])

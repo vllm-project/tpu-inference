@@ -31,14 +31,18 @@ from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
 
 class TestQwen3MoeForCausalLM:
 
-    @pytest.mark.parametrize(
-        "model_name,pp_rank,pp_world_size,load_format",
-        [(model, rank, world, fmt) for model in [
+    # BVT: per-push CI sets BVT_ONLY=1, narrowing this file to @pytest.mark.bvt
+    # cases (see tests/conftest.py). Only the single-host (world==1) combos are
+    # marked; nightly runs the full pp-shard matrix.
+    @pytest.mark.parametrize("model_name,pp_rank,pp_world_size,load_format", [
+        pytest.param(model, rank, world, fmt, marks=pytest.mark.bvt)
+        if world == 1 else (model, rank, world, fmt) for model in [
             "Qwen/Qwen3-30B-A3B-Instruct-2507",
             "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
         ] for rank, world in [(0, 1), (0, 4), (1, 4), (3, 4)]
-         for fmt in ["skip_layers_model_loader_for_test", "jax_dummy"]
-         if not (world == 1 and fmt == "jax_dummy")])
+        for fmt in ["skip_layers_model_loader_for_test", "jax_dummy"]
+        if not (world == 1 and fmt == "jax_dummy")
+    ])
     def test_model_loading(
             self,
             model_name,
