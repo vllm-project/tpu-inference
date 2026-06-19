@@ -54,7 +54,7 @@ def _pad_inputs_if_needed(
     num_simd_lanes: int,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Pads inputs if needed."""
-    input_size = x.shape[0]
+    input_size = indices.shape[0]
     hidden_size = x.shape[1]
     aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
     row_tile_size = num_simd_lanes
@@ -66,7 +66,7 @@ def _pad_inputs_if_needed(
 
     x = jnp.pad(
         x,
-        ((0, pad_input_size), (0, aligned_hidden_size - hidden_size)),
+        ((0, 0), (0, aligned_hidden_size - hidden_size)),
         constant_values=0,
     )
     indices = jnp.pad(indices, (0, pad_input_size), constant_values=0)
@@ -143,7 +143,7 @@ def main_kernel(
     )
     def inner_kernel():
         core_id = pl.program_id(0)
-        row_partition_size = in_hbm_ref.shape[0] // num_row_partitions
+        row_partition_size = indices_hbm_ref.shape[0] // num_row_partitions
         row_partition_id = core_id // num_column_partitions
         col_partition_id = core_id % num_column_partitions
 
@@ -556,7 +556,7 @@ def ragged_gather_reduce(
             num_column_partitions=num_column_partitions,
         ),
         out_type=jax.ShapeDtypeStruct(
-            (x.shape[0] // reduce_group_size, x.shape[1]),
+            (indices.shape[0] // reduce_group_size, x.shape[1]),
             jnp.float32,
         ),
         compiler_params=pltpu.CompilerParams(
