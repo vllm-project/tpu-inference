@@ -674,6 +674,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             prefix="model",
         )
         model_config = vllm_config.model_config
+        vision_config = model_config.hf_config.vision_config
         self.image_token_id = getattr(model_config.hf_config, "image_token_id",
                                       258880)
         self.pooling_kernel_size = vision_config.pooling_kernel_size

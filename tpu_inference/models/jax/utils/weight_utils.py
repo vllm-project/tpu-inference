@@ -982,7 +982,6 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                     yield name, weight
 
         autoloaded = super().load_weights(_route(weights), **kwargs)
-        jax.clear_caches()
 
         # Routed weights are written directly into their fused param via
         # `weight_loader` above and never re-enter the streaming weights
@@ -1003,8 +1002,7 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:
                     quant_method.process_weights_after_loading(module)
-                    jax.clear_caches()
-
+        jax.clear_caches()
         return autoloaded | routed_loaded
 
     def _add_loadable_non_param_tensors(self, module: JaxModule,
