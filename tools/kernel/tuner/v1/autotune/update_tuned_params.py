@@ -27,7 +27,10 @@ def get_tuned_params(tuning_key: TuningKey) -> TunableParams:
     # Id(CaseSetId), CaseKeyValue, KernelTunerName, TPU
     # This case set will use to build all tuning cases later.
     tuning_case = TuningCase(tuning_key, tunable_params, is_baseline=True)
-    storage_manager = SpannerStorageManager()
+    storage_manager = SpannerStorageManager(
+        gcp_project_id='cloud-tpu-inference-test',
+        spanner_instance_id='vllm-bm-inst',
+        spanner_database_id='tune-gmm')
     storage_manager.add_auto_tune_case(CASE_SET_ID, str(tuning_case),
                                        KERNEL_TUNER_NAME, TPU)
     storage_manager.close()

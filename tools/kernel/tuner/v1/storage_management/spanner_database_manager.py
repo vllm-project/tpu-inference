@@ -28,10 +28,15 @@ class SpannerStorageManager(StorageManager):
     # (TODO)For historical reason, the database_id is still tune-gmm, but it
     # actually contains tuning cases for different kernels, not just gmm. We
     # can consider to rename it in the future for better clarity.
-    def __init__(self, worker_id=None, dry_run=False):
-        gcp_project_id = FLAGS.gcp_project_id
-        spanner_instance_id = FLAGS.spanner_instance_id
-        spanner_database_id = FLAGS.spanner_database_id
+    def __init__(self,
+                 worker_id=None,
+                 dry_run=False,
+                 gcp_project_id=FLAGS.gcp_project_id,
+                 spanner_instance_id=FLAGS.spanner_instance_id,
+                 spanner_database_id=FLAGS.spanner_database_id):
+        gcp_project_id = gcp_project_id
+        spanner_instance_id = spanner_instance_id
+        spanner_database_id = spanner_database_id
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []

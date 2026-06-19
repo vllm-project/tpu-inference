@@ -61,7 +61,10 @@ class TuningStatus(Enum):
 
 class TuningCase:
 
-    def __init__(self, tuning_key: TuningKey, tunable_params: TunableParams, is_baseline: bool = False):
+    def __init__(self,
+                 tuning_key: TuningKey,
+                 tunable_params: TunableParams,
+                 is_baseline: bool = False):
         self.tuning_key = tuning_key
         self.tunable_params = tunable_params
         self.is_baseline = is_baseline  # can be used to mark whether this case is the baseline case for the tuning key, which can be used for comparison in the analysis.
