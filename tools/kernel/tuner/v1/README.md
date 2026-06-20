@@ -401,3 +401,78 @@ To support this, the framework could be extended with:
 - A `generate_inputs_for_context(tuning_key, context)` method on `KernelTunerBase` that produces realistic JAX arrays whose numeric statistics match the target workload (e.g. drawn from captured activation distributions or synthetic approximations).
 - Context-aware result storage and querying in the inspector CLI, so `query_min_latency` can be filtered by context to return the best `TunableParams` per `(TuningKey, context)` pair.
 - At serving time, the kernel dispatch layer would select the tuned parameters based on the current inference phase (prefill vs decode), rather than using a single static lookup.
+
+---
+
+## 6. Smart-search autotuning (Phase 0 + 1)
+
+`v1` ships a verifier-first, smart-search loop alongside the legacy grid path described above. It is selected via `--search_strategy={tpe,evolutionary}` on `kernel_tuner_runner`. Setting `--search_strategy=grid` (the default) is back-compatible with the existing flow.
+
+### What it adds
+
+- **Pluggable search** — `tools/kernel/tuner/v1/search/` ships `GridSearch`, `TpeSearch` (Optuna TPE), and `EvolutionarySearch` ((μ+λ)-EA with elitism + tournament selection). All implement a uniform `SearchStrategy` contract (`suggest`, `observe`, `done`, `best`).
+- **Verifier** — `tools/kernel/tuner/v1/verifier/` runs a multi-tier check (NaN/Inf, cosine ≥ 0.9999, dtype-aware `allclose`) against a reference oracle per candidate, plus an anti-cheat guard (zero/constant/input-aliased output) and an optional `pltpu.InterpretParams` off-TPU pre-check.
+- **Cost-model pre-filter** — `tools/kernel/tuner/v1/bench/cost_estimate.py` accepts a per-kernel feasibility estimator; the runner skips infeasible candidates before any TPU run.
+- **Bench harness** — `tools/kernel/tuner/v1/bench/harness.py` warms up, drops cold-start iters, reports p50/p95/mean, and blocks on all output leaves (fixes the "kernel returns before async work finishes" failure mode documented in the Sakana AI CUDA Engineer post-mortem).
+- **Optional outer eval gate** — `tools/kernel/tuner/v1/verifier/lm_eval_gate.py` runs `lm-eval-harness` against the winning config behind `--final_eval`.
+
+### Hooks subclasses opt into
+
+A kernel tuner participates in smart-search by overriding these hooks on `KernelTunerBase` (all default to `None` / no-op, so existing tuners remain back-compatible):
+
+```python
+def get_default_tuning_key(self): ...   # the TuningKey to explore
+def get_search_space(self):  ...        # dict[str, ParamRange]
+def get_oracle(self):        ...        # ReferenceOracle for verify()
+def get_cost_model(self):    ...        # CostModel for pre-filter
+def build_kernel_fn(self, tk, params, inputs): ...  # zero-arg callable timed by bench.harness.measure
+def run_with_outputs(self, tk, params, iters) -> RunResult: ...  # latency + outputs
+def verify(self, tk, params, output, *, inputs=None) -> NumericsReport: ...
+```
+
+`RpaV3KernelTuner` in `rpa_v3_kernel_tuner.py` is the reference consumer.
+
+### Running
+
+```bash
+# CPU smoke (synthetic kernel)
+python3 -m pytest tools/kernel/tuner/v1/tests/integration/test_smart_search_loop.py -v
+
+# Real-TPU RPA v3 tuning, TPE, small budget
+python -m tools.kernel.tuner.v1.kernel_tuner_runner \
+    --kernel_tuner_name=rpa_v3_kernel_tuner \
+    --case_set_id=rpa_v3_tpe_pilot --run_id=run0 \
+    --tpu_version=tpu6e --tpu_cores=1 --run_locally=True \
+    --search_strategy=tpe --trial_budget=100 \
+    --verifier_mode=fast --cost_model_prefilter=True
+
+# With strict verifier (second-seed cross-trial independence) + lm-eval gate
+python -m tools.kernel.tuner.v1.kernel_tuner_runner \
+    --kernel_tuner_name=rpa_v3_kernel_tuner \
+    --case_set_id=rpa_v3_ea_full --run_id=run0 \
+    --tpu_version=tpu6e --tpu_cores=1 --run_locally=True \
+    --search_strategy=evolutionary --trial_budget=500 \
+    --verifier_mode=strict \
+    --final_eval=True \
+    --final_eval_model_args="pretrained=Qwen/Qwen3-0.6B" \
+    --final_eval_tasks=gsm8k,mmlu_pro
+```
+
+Results are written as JSON to `/tmp/kernel_tuning/{case_set_id}_{run_id}.jsonl` (or `--results_path`), including a per-trial log with `status` ∈ `{SUCCESS, COST_MODEL_SKIP, NUMERICS_FAIL, ANTI_CHEAT_FAIL, INTERPRET_FAIL, CROSS_TRIAL_FAIL, FAILED_OOM, UNKNOWN_ERROR}` so failure modes are auditable.
+
+### Why this exists (the moat)
+
+Numerical correctness is the moat — Sakana AI's CUDA Engineer reported >100× speedups that collapsed within a weekend because their `allclose(atol=1e-2)` harness was exploited (output buffer reuse, dropped layers, async-incomplete returns). DeepReinforce's CUDA-L1 documented 33% of its candidate speedups as harness exploits. For LLM inference specifically, vLLM's FP8 KV-cache incident dropped needle-in-haystack from 91% to 13% with *passing* unit tests. The verifier here is designed to catch each of those failure modes by construction:
+
+- dtype-aware tolerance lifted from `tests/kernels/ragged_paged_attention_kernel_v3_test.py:185-193`,
+- cosine floor that fires on dropped layers / partial outputs even when `allclose` would pass,
+- anti-cheat guard for input-aliased / zero / constant outputs,
+- block-on-all-outputs in the bench harness,
+- optional second-seed cross-trial independence check in strict mode,
+- optional `lm-eval` outer gate.
+
+### What is NOT in scope (deferred)
+
+- LLM-based code mutation (AlphaEvolve-style) for *structural* kernel rewrites. The verifier and bench layers are designed to plug into such a loop later, but no orchestration code lands here.
+- Multi-key joint optimization. Smart-search tunes one `TuningKey` at a time; run it N times for N shapes.
+- Schema extension of the Spanner `CaseResults` table. Smart-search results live in JSONL artifacts until the format stabilizes.

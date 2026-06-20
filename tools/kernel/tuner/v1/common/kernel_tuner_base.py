@@ -17,8 +17,9 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
+from typing import Any, Callable
 
 import yaml
 from absl import flags
@@ -57,6 +58,23 @@ class TuningStatus(Enum):
     FAILED_OOM = 'FAILED_OOM'
     UNKNOWN_ERROR = 'UNKNOWN_ERROR'
     SKIPPED = 'SKIPPED'
+
+
+@dataclass
+class RunResult:
+    """Per-trial result from the smart-search path.
+
+    Carries the kernel output(s) alongside latency so the verifier can run
+    without a second kernel call. ``output`` is whatever the kernel returns
+    (single array or tuple); ``bench`` is the optional ``BenchResult`` from
+    ``bench.harness.measure``.
+    """
+    status: TuningStatus
+    avg_latency_ns: float
+    total_latency_ns: float
+    output: Any = None
+    bench: Any = None
+    aux: dict = field(default_factory=dict)
 
 
 class TuningCase:
@@ -417,6 +435,109 @@ class KernelTunerBase(ABC):
         raise NotImplementedError(
             "Specific kernel should implement this to call the kernl with the inputs from generate_inputs"
         )
+
+    # ------------------------------------------------------------------
+    # Smart-search extension points (Phase 0 + 1).
+    #
+    # Existing v1 subclasses are not required to override any of these;
+    # the legacy ``measure_latency`` grid loop above keeps working unchanged.
+    # Subclasses that opt into ``kernel_tuner_runner --search-strategy``
+    # override these hooks to plug into the new verifier/search pipeline.
+    # ------------------------------------------------------------------
+
+    def get_default_tuning_key(self):
+        """Return the ``TuningKey`` that smart-search should explore.
+
+        Smart-search tunes a single ``TuningKey`` at a time (the search space
+        is over ``TunableParams``). Subclasses return the canonical key for
+        their workload; the runner uses ``generate_inputs(key)`` to pin inputs.
+
+        Default returns ``None``; subclasses that haven't opted in cannot be
+        driven by the smart-search runner.
+        """
+        return None
+
+    def get_search_space(self):
+        """Return the typed ``SearchSpace`` for ``TunableParams``.
+
+        Mapping: each key matches a field of the subclass's ``TunableParams``
+        dataclass; each value is a ``ParamRange`` from
+        ``tools.kernel.tuner.v1.search.strategy``.
+        """
+        return None
+
+    def get_oracle(self):
+        """Return a ``ReferenceOracle`` for ``verify``. Default: ``None``."""
+        return None
+
+    def get_cost_model(self):
+        """Return a ``bench.cost_estimate.CostModel`` or ``None``."""
+        return None
+
+    def build_kernel_fn(
+        self,
+        tuning_key,
+        tunable_params,
+        inputs: dict,
+    ) -> Callable[[], Any] | None:
+        """Return a zero-arg callable that runs the kernel with given inputs.
+
+        The returned callable is fed to ``bench.harness.measure``. Capturing
+        ``inputs`` in a closure lets the harness time only the kernel call,
+        not Python overhead.
+
+        Default ``None`` means the smart-search loop falls back to the
+        subclass's ``run`` for timing (in which case ``output`` will not be
+        available for verification).
+        """
+        return None
+
+    def run_with_outputs(
+        self,
+        tuning_key,
+        tunable_params,
+        iters: int,
+    ) -> RunResult:
+        """Smart-search entry that returns latency *and* outputs.
+
+        Default implementation delegates to ``run`` and reports
+        ``output=None`` — useful for subclasses that haven't been ported but
+        still want to participate in the new search loop without verification.
+        """
+        status, avg, total = self.run(tuning_key, tunable_params, iters)
+        return RunResult(
+            status=status,
+            avg_latency_ns=avg,
+            total_latency_ns=total,
+            output=None,
+        )
+
+    def verify(self, tuning_key, tunable_params, output, *, inputs=None):
+        """Validate the kernel output against the oracle.
+
+        Returns a ``NumericsReport`` (truthy on success). Default uses
+        ``get_oracle()`` and ``check_many`` with dtype-tier tolerances.
+        Subclasses can override to inject custom semantic kwargs.
+        """
+        # Late import to avoid pulling the verifier package at v1 module load.
+        from tools.kernel.tuner.v1.verifier.numerics import (NumericsReport,
+                                                             check_many)
+
+        oracle = self.get_oracle()
+        if oracle is None or output is None or inputs is None:
+            return NumericsReport(
+                passed=True,
+                max_abs_diff=0.0,
+                cosine=1.0,
+                nan_count=0,
+                inf_count=0,
+            )
+        reference = oracle.compute(inputs)
+        actual = output if isinstance(output, (tuple, list)) else (output, )
+        reference = (reference if isinstance(reference, (tuple, list)) else
+                     (reference, ))
+        atol, rtol = oracle.dtype_tolerance(actual[0].dtype)
+        return check_many(actual, reference, atol=atol, rtol=rtol)
 
     def measure_latency(self, begin_case_id: int, end_case_id: int):
         """Measure the latency of cases in the caseset with case_id in [begin_case_id, end_case_id). The latency of each case will be persisted in local file or database using storage_management module.
