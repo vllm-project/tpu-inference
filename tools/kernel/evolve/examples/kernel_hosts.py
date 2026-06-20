@@ -222,64 +222,222 @@ def make_fused_moe_v1_host(
     topk: int = 2,
     seed: int = 0,
 ) -> GenericHost:
-    """Wire fused_moe v1 into the evolve loop, using the exported
-    ``ref_moe`` reference impl.
+    """Wire ``fused_ep_moe`` v1 into the evolve loop.
 
-    The exact signature varies; this stub uses a minimal harness — the
-    user may need to update ``call_kernel`` if the kernel signature drifts
-    in the production source.
+    The production kernel needs (a) a 2D JAX mesh with ``ep_axis_name``
+    axis (single-device mesh so EP=1 for the bench), (b) ``w1`` shaped
+    ``(num_experts, 2, hidden_size, intermediate_size)`` for fused
+    gate/up, (c) ``gating_output`` of shape ``(num_tokens, num_experts)``
+    — NOT top-k indices (those are computed inside).
+
+    Shape constraints asserted by the kernel:
+    * ``hidden_size % 128 == 0`` and ``intermediate_size % 128 == 0``
+    * ``num_tokens % ep_size == 0`` (we use ep_size=1)
     """
+    import jax
+    if hidden_size % 128 != 0 or intermediate_size % 128 != 0:
+        raise ValueError("fused_moe v1 requires hidden_size and "
+                         "intermediate_size divisible by 128")
     rng = np.random.default_rng(seed)
-    hidden = jnp.asarray(rng.normal(0, 0.1,
+    tokens = jnp.asarray(rng.normal(0, 0.1,
                                     size=(num_tokens,
                                           hidden_size)).astype(np.float32),
                          dtype=jnp.bfloat16)
-    w13 = jnp.asarray(rng.normal(0,
-                                 0.05,
-                                 size=(num_experts, hidden_size,
-                                       intermediate_size * 2)).astype(
-                                           np.float32),
-                      dtype=jnp.bfloat16)
+    # w1[expert][0]=gate, w1[expert][1]=up
+    w1 = jnp.asarray(rng.normal(0,
+                                0.05,
+                                size=(num_experts, 2, hidden_size,
+                                      intermediate_size)).astype(np.float32),
+                     dtype=jnp.bfloat16)
     w2 = jnp.asarray(rng.normal(0,
                                 0.05,
                                 size=(num_experts, intermediate_size,
                                       hidden_size)).astype(np.float32),
                      dtype=jnp.bfloat16)
-    topk_indices = jnp.asarray(
-        rng.integers(0, num_experts, size=(num_tokens, topk)).astype(np.int32))
-    topk_weights = jnp.asarray(rng.uniform(0, 1,
-                                           size=(num_tokens,
-                                                 topk)).astype(np.float32),
-                               dtype=jnp.bfloat16)
+    # gating_output must share dtype with tokens (the kernel's internal
+    # VMEM scratch for it is bf16 — DMA mismatch otherwise).
+    gating_output = jnp.asarray(rng.normal(
+        0, 1, size=(num_tokens, num_experts)).astype(np.float32),
+                                dtype=jnp.bfloat16)
+    # Single-device EP=1 mesh — ep_axis_name='model' matches the kernel
+    # default. The kernel asserts a 2D mesh, so we include 'data' too.
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:1]).reshape(1, 1), ("data", "model"))
 
     def build_inputs():
         return {
-            "hidden": hidden,
-            "w13": w13,
+            "tokens": tokens,
+            "w1": w1,
             "w2": w2,
-            "topk_indices": topk_indices,
-            "topk_weights": topk_weights
+            "gating_output": gating_output,
+            "top_k": topk,
+            "mesh": mesh,
         }
 
     def reference_fn(inputs):
-        # The exported ref_moe lives in the kernel module. We compute a
-        # simple gather-+-matmul-+-combine pure-JAX reference here so
-        # this Host doesn't depend on a specific export signature.
         from tpu_inference.kernels.fused_moe.v1.kernel import ref_moe
-        return ref_moe(inputs["hidden"], inputs["w13"], inputs["w2"],
-                       inputs["topk_indices"], inputs["topk_weights"])
+        return ref_moe(inputs["tokens"], inputs["w1"], inputs["w2"],
+                       inputs["gating_output"], inputs["top_k"])
 
     def call_kernel(kernel, inputs):
-        # Production kernel signature — adjust here if it changes.
-        return kernel(jnp.copy(inputs["hidden"]), jnp.copy(inputs["w13"]),
-                      jnp.copy(inputs["w2"]), inputs["topk_indices"],
-                      inputs["topk_weights"])
+        return kernel(inputs["mesh"], jnp.copy(inputs["tokens"]),
+                      jnp.copy(inputs["w1"]), jnp.copy(inputs["w2"]),
+                      inputs["gating_output"], inputs["top_k"])
 
     return GenericHost(
         kernel_name="fused_moe_v1",
-        kernel_symbol="fused_moe",
+        kernel_symbol="fused_ep_moe",
         baseline_path_rel="tpu_inference/kernels/fused_moe/v1/kernel.py",
         build_inputs=build_inputs,
         reference_fn=reference_fn,
         call_kernel=call_kernel,
+        # MoE with bf16 weights + per-token routing → wider tolerance
+        # because reference computes per-token loops while kernel batches.
+        tol_by_bits={
+            16: (0.5, 0.5),
+            32: (0.15, 0.15)
+        },
+    )
+
+
+def make_mla_v2_host(
+    *,
+    seq_lens: tuple[tuple[int, int], ...] = ((1, 128), (1, 256), (4, 384)),
+    num_heads: int = 8,
+    lkv_dim: int = 512,
+    r_dim: int = 64,
+    page_size: int = 64,
+    seed: int = 0,
+) -> GenericHost:
+    """Wire MLA v2 ``mla_ragged_paged_attention`` into the evolve loop.
+
+    MLA absorbs the up-projection into the attention computation so the
+    KV cache is a single low-rank latent (lkv_dim) plus a rotary part
+    (r_dim) rather than full k/v tensors. v2 also fuses cache writes
+    into the same Pallas kernel (#1971).
+
+    Reference is v1's ``ref_mla_ragged_paged_attention``. The v2 kernel
+    expects ``ql_nope`` transposed to (num_heads, total_q_len, lkv_dim)
+    while v1 takes (total_q_len, num_heads, lkv_dim) — we transpose at
+    call time so the inputs dict stays in the v1 layout.
+
+    DeepSeek V3 reference shapes: num_heads=128, lkv_dim=512, r_dim=64.
+    Defaults here use a smaller fixture suitable for bench.
+    """
+
+    rng = np.random.default_rng(seed)
+
+    def _cdiv(a, b):
+        return (a + b - 1) // b
+
+    def _align_to(x, a):
+        return _cdiv(x, a) * a
+
+    def gen(shape, dtype):
+        return jnp.asarray(rng.random(size=shape, dtype=np.float32),
+                           dtype=dtype)
+
+    q_dtype = jnp.bfloat16
+    kv_dtype = jnp.bfloat16
+    packing = jnp.dtype(kv_dtype).itemsize  # bytes
+    packing = max(1, 4 // packing)  # element packing for the cache layout
+    padded_lkv = _align_to(lkv_dim, 128)
+    padded_r = _align_to(r_dim, 128)
+    padded_kv = padded_lkv + padded_r
+    total_q = sum(s[0] for s in seq_lens)
+    kv_lens_list = [s[1] for s in seq_lens]
+    max_kv = max(kv_lens_list)
+    pages_per_seq = _cdiv(max_kv, page_size)
+
+    page_indices_list = []
+    page_count = 0
+    for kvl in kv_lens_list:
+        n_pg = _cdiv(kvl, page_size)
+        page_indices_list.extend(
+            list(range(page_count, page_count + n_pg)) + [-1] *
+            (pages_per_seq - n_pg))
+        page_count += n_pg
+    num_pages = max(64, page_count)
+
+    cu_q_list = [0]
+    for ql, _ in seq_lens:
+        cu_q_list.append(cu_q_list[-1] + ql)
+    num_decode = 0
+    for ql, _ in seq_lens:
+        if ql == 1:
+            num_decode += 1
+        else:
+            break
+    distribution = jnp.array(
+        [num_decode, num_decode, len(seq_lens)], dtype=jnp.int32)
+
+    ql_nope = gen((total_q, num_heads, lkv_dim), q_dtype)
+    q_pe = gen((total_q, num_heads, r_dim), q_dtype)
+    new_kv_c = gen((total_q, lkv_dim), kv_dtype)
+    new_k_pe = gen((total_q, r_dim), kv_dtype)
+    cache_kv = gen((num_pages, page_size // packing, packing, padded_kv),
+                   kv_dtype)
+    kv_lens = jnp.array(kv_lens_list, dtype=jnp.int32)
+    page_indices = jnp.array(page_indices_list, dtype=jnp.int32)
+    cu_q_lens = jnp.array(cu_q_list, dtype=jnp.int32)
+
+    def build_inputs():
+        return {
+            "ql_nope": ql_nope,
+            "q_pe": q_pe,
+            "new_kv_c": new_kv_c,
+            "new_k_pe": new_k_pe,
+            "cache_kv": cache_kv,
+            "kv_lens": kv_lens,
+            "page_indices": page_indices,
+            "cu_q_lens": cu_q_lens,
+            "distribution": distribution,
+        }
+
+    def reference_fn(inputs):
+        from tpu_inference.kernels.mla.v1.kernel import \
+            ref_mla_ragged_paged_attention
+
+        # v1 ref returns (out, updated_kv). The oracle compares the FIRST
+        # element of a returned tuple, so we return as-is.
+        return ref_mla_ragged_paged_attention(
+            inputs["ql_nope"],
+            inputs["q_pe"], inputs["new_kv_c"], inputs["new_k_pe"],
+            jnp.copy(inputs["cache_kv"]), inputs["kv_lens"],
+            inputs["page_indices"], inputs["cu_q_lens"],
+            inputs["distribution"])
+
+    def call_kernel(kernel, inputs):
+        # v2 expects ql_nope transposed to (num_heads, total_q, lkv_dim)
+        ql_nope_v2 = jnp.transpose(jnp.copy(inputs["ql_nope"]), (1, 0, 2))
+        # v2 output is (num_heads, total_q, lkv_dim) — transpose back so
+        # it matches the v1 reference's (total_q, num_heads, lkv_dim).
+        # v2 requires the bench to choose block sizes (no auto-default).
+        out, _ = kernel(ql_nope_v2,
+                        jnp.copy(inputs["q_pe"]),
+                        jnp.copy(inputs["new_kv_c"]),
+                        jnp.copy(inputs["new_k_pe"]),
+                        jnp.copy(inputs["cache_kv"]),
+                        inputs["kv_lens"],
+                        inputs["page_indices"],
+                        inputs["cu_q_lens"],
+                        inputs["distribution"],
+                        num_kv_pages_per_block=4,
+                        num_queries_per_block=8)
+        return jnp.transpose(out, (1, 0, 2))
+
+    return GenericHost(
+        kernel_name="mla_v2",
+        kernel_symbol="mla_ragged_paged_attention",
+        baseline_path_rel="tpu_inference/kernels/mla/v2/kernel.py",
+        build_inputs=build_inputs,
+        reference_fn=reference_fn,
+        call_kernel=call_kernel,
+        # cache_kv is in/out (fused update) — anti-cheat would flag the
+        # alias otherwise.
+        anti_cheat_skip=("cache_kv", ),
+        tol_by_bits={
+            16: (0.3, 0.3),
+            32: (0.15, 0.15)
+        },
     )
