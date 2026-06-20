@@ -7,7 +7,7 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "deepseek-ai/DeepSeek-OCR",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "google/gemma-4-26B-A4B-it",Multimodal,✅ Passing,✅ Passing,✅ Passing
 "google/gemma-4-31B-it",Multimodal,✅ Passing,✅ Passing,✅ Passing
-"google/gemma-4-E2B-it",Multimodal,❌ Failing,❓ Untested,❓ Untested
+"google/gemma-4-E2B-it",Multimodal,✅ Passing,✅ Passing,✅ Passing
 "google/gemma-4-E4B-it",Multimodal,✅ Passing,✅ Passing,✅ Passing
 "MiniMaxAI/MiniMax-M2.5",Text,❓ Untested,❓ Untested,❓ Untested
 "Qwen/Qwen3-30B-A3B",Text,✅ Passing,✅ Passing,✅ Passing
