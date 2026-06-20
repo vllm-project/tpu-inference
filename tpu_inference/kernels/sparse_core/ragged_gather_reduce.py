@@ -562,6 +562,12 @@ def ragged_gather_reduce(
         compiler_params=pltpu.CompilerParams(
             use_tc_tiling_on_sc=True,
             disable_bounds_checks=True,
+            # SparseCore bitcast (i32<->f32) is rejected by Mosaic's
+            # apply-vector-layout pass; disable layout passes so it lowers, as
+            # the v2 kernel already does. jax flipped the CompilerParams default
+            # to needs_layout_passes=True (jax commit 7ca29680b, in 0.10.2),
+            # which broke this kernel's vector.bitcast.
+            needs_layout_passes=False,
         ),
         scratch_types=dict(
             num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes, ),
