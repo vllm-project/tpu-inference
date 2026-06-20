@@ -344,10 +344,21 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         weight = layer.weight[...]
         scale = getattr(layer, self.weight_scale_name)[...]
         bias = layer.bias[...] if layer.bias is not None else None
+        # The fused matmul only accepts 2D input, so >2D callers (e.g.
+        # embed_vision's [B, L, D] features, or o_proj's [T, N, H] which
+        # contracts over *two* trailing axes [N, H]) get flattened here.
+        # Restore the leading dims afterward by stripping exactly as many
+        # trailing axes as `linear_config.in_features` has (the contracting
+        # axes), not just the last one -- `out.shape[:-1]` post-flatten is
+        # (B*L,), and even pre-flatten `x.shape[:-1]` is wrong whenever more
+        # than one trailing axis is being contracted (e.g. o_proj's H would
+        # get mistaken for a leading dim instead of part of the contraction).
+        num_contracting_axes = len(self.linear_config.in_features)
+        leading_shape = x.shape[:len(x.shape) - num_contracting_axes]
         if len(x.shape) > 2:
             x = x.reshape(-1, self.in_features)
         out = self._apply_fused(x, weight, scale, bias=bias)
-        out = out.reshape(out.shape[:-1] + self.out_features)
+        out = out.reshape(leading_shape + self.out_features)
         return out
 
 

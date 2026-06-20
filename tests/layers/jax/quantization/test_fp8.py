@@ -328,6 +328,82 @@ class TestFp8BlockwiseJaxLinear:
         expected_shape = (batch_size, N, H)
         assert output.shape == expected_shape
 
+    @pytest.mark.parametrize("kernel_shape", [(4, 8, 16), (8, 16, 32)])
+    @pytest.mark.parametrize("seq_len", [1, 4])
+    def test_two_contracting_axes_o_proj_pattern(self, kernel_shape, seq_len,
+                                                 rngs):
+        """Regression test: o_proj-style "TNH,NHD->TD" contracts over *two*
+        trailing input axes [N, H], not just the last one. apply_jax must
+        flatten/restore leading dims using the contracting axis count, not
+        assume `x.shape[:-1]` is always the leading/batch shape -- that
+        assumption silently mistook H for a leading dim and corrupted the
+        output reshape."""
+        hf_quant_config = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [8, 16],
+        }
+        quant_config = Fp8Config(hf_quant_config)
+
+        N, H, D = kernel_shape
+        layer = JaxEinsum(
+            einsum_str='TNH,NHD->TD',
+            kernel_shape=kernel_shape,
+            rngs=rngs,
+            quant_config=quant_config,
+            kernel_init=nnx.initializers.uniform(),
+        )
+
+        devices = jax.devices()
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(1, -1), ('data', 'model'))
+        with jax.set_mesh(mesh):
+            layer.weight.set_metadata("_is_loaded", True)
+            layer.weight_scale_inv.set_metadata("_is_loaded", True)
+            assert layer.quant_method.process_weights_after_loading(layer)
+
+            x = jax.random.normal(rngs.params(), (seq_len, N, H))
+            output = layer(x)
+
+        assert output.shape == (seq_len, D)
+
+    @pytest.mark.parametrize("kernel_shape", [(8, 16), (16, 32)])
+    @pytest.mark.parametrize("batch_size,seq_len", [(1, 1), (2, 4)])
+    def test_multiple_leading_batch_axes(self, kernel_shape, batch_size,
+                                         seq_len, rngs):
+        """Regression test: embed_vision-style "BLD,DH->BLH" has two leading
+        (batch, seq) axes ahead of a single contracting axis D. apply_jax
+        flattens [B, L, D] to [B*L, D] for the fused matmul and must restore
+        the *original* (B, L) leading shape afterward, not just whatever
+        `out.shape[:-1]` happens to be post-flatten ((B*L,), collapsing B
+        and L into one axis and producing a 2D instead of 3D result)."""
+        hf_quant_config = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [8, 16],
+        }
+        quant_config = Fp8Config(hf_quant_config)
+
+        D, H = kernel_shape
+        layer = JaxEinsum(
+            einsum_str='BLD,DH->BLH',
+            kernel_shape=kernel_shape,
+            rngs=rngs,
+            quant_config=quant_config,
+            kernel_init=nnx.initializers.uniform(),
+        )
+
+        devices = jax.devices()
+        mesh = jax.sharding.Mesh(np.array(devices).reshape(1, -1), ('data', 'model'))
+        with jax.set_mesh(mesh):
+            layer.weight.set_metadata("_is_loaded", True)
+            layer.weight_scale_inv.set_metadata("_is_loaded", True)
+            assert layer.quant_method.process_weights_after_loading(layer)
+
+            x = jax.random.normal(rngs.params(), (batch_size, seq_len, D))
+            output = layer(x)
+
+        assert output.shape == (batch_size, seq_len, H)
+
 
 class TestFp8TensorwiseJaxLinear:
 
