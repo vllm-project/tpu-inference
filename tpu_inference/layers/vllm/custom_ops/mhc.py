@@ -114,7 +114,7 @@ class VllmHCHeadOp(HCHeadOp):
 
         # Collapse multi-stream residuals into 1 stream via weighted sum.
         gates = gates.unsqueeze(-1)
-        out = (hidden_states * gates).sum(dim=-2)
+        out = (hidden_states * gates).sum(dim=-2).bfloat16()
 
         return out
 
