@@ -347,7 +347,7 @@ class SpannerStorageManager(StorageManager):
     def read_auto_tune_cases(self, case_set_id, kernel_tuner_name = None, tpu = None):
         """ Reads tuning cases from the KernelAutoTuneCases table for a given case set.
         """
-        query = "SELECT CaseKeyValue, KernelTunerName, TPU FROM KernelAutoTuneCases WHERE CaseSetId = @id"
+        query = "SELECT DISTINCT CaseKeyValue, KernelTunerName, TPU FROM KernelAutoTuneCases WHERE CaseSetId = @id"
         params = {'id': case_set_id}
         if kernel_tuner_name:
             query += " AND KernelTunerName = @ktn"

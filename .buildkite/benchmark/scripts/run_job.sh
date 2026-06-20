@@ -95,7 +95,6 @@ declare -a BENCHMARK_DOCKER_ARGS=(
   "-v" "$ARTIFACT_FOLDER:/workspace/tpu_inference/artifacts"
   "-e" "ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts"
   "-e" "DEVICE=$DEVICE"
-  "-e" "ENABLE_KERNEL_AUTO_TUNING=${ENABLE_KERNEL_AUTO_TUNING:-false}"
   "-e" "KERNEL_AUTOTUNE_ID=${KERNEL_AUTOTUNE_ID:-}"
   "-e" "RECORD_ID=$RECORD_ID"
   "-e" "RUN_TYPE=$RUN_TYPE"
@@ -123,7 +122,7 @@ BM_JOB_STATUS=$EXIT_SUCCESS
 export BM_INFRA="true"
 
 .buildkite/scripts/run_in_docker.sh bash -c "
-  if [ \"\$ENABLE_KERNEL_AUTO_TUNING\" = \"true\" ]; then
+  if [ -n \"\$KERNEL_AUTOTUNE_ID\" ]; then
     pip install --upgrade google-cloud-spanner && \
     pip install --upgrade google-api-core && \
     pip install --upgrade google-auth && \
