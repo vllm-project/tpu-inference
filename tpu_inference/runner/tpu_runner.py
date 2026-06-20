@@ -482,7 +482,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.dtype = self.model_config.dtype
         self.maybe_forbid_compile = runner_utils.ForbidCompile(
         ) if envs.VLLM_XLA_CHECK_RECOMPILATION else nullcontext()
-        self.dp_size = self.vllm_config.sharding_config.total_dp_size
+        self.dp_size = self.vllm_config.sharding_config.model_dp_size
         self.rank = rank
         self.is_first_rank = is_first_rank
         self.is_last_rank = is_last_rank

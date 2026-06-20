@@ -356,7 +356,7 @@ class CompilationManager:
             num_tokens = inputs_embeds.shape[0]
         assert num_tokens is not None
 
-        dp_size = self.runner.vllm_config.sharding_config.total_dp_size
+        dp_size = self.runner.vllm_config.sharding_config.model_dp_size
         dp_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
 
@@ -1560,7 +1560,7 @@ class CompilationManager:
     def _precompile_structured_decoding(self) -> None:
         logger.info(
             "Compiling structured_decoding with different input shapes.")
-        if self.runner.vllm_config.sharding_config.total_dp_size > 1:
+        if self.runner.vllm_config.sharding_config.model_dp_size > 1:
             logger.warning(
                 "Structured decoding precompilation skipped since structured decoding is not supported with DP."
             )
@@ -1592,7 +1592,7 @@ class CompilationManager:
 
     def _precompile_continue_decode(self) -> None:
         logger.info("Precompiling continue_decode loop.")
-        dp_size = self.runner.vllm_config.sharding_config.total_dp_size
+        dp_size = self.runner.vllm_config.sharding_config.model_dp_size
         dp_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
 
