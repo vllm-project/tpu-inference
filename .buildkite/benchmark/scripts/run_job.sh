@@ -96,6 +96,7 @@ declare -a BENCHMARK_DOCKER_ARGS=(
   "-e" "ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts"
   "-e" "DEVICE=$DEVICE"
   "-e" "ENABLE_KERNEL_AUTO_TUNING=${ENABLE_KERNEL_AUTO_TUNING:-false}"
+  "-e" "KERNEL_AUTOTUNE_ID=${KERNEL_AUTOTUNE_ID:-}"
   "-e" "RECORD_ID=$RECORD_ID"
   "-e" "RUN_TYPE=$RUN_TYPE"
   "-e" "CODE_HASH=${CODE_HASH}"

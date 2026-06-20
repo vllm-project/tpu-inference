@@ -17,14 +17,11 @@ set -Eeuo pipefail
 
 # Define the dictionary
 declare -A kernel_auto_tune_mapping
+# The key should be one of tools.kernel.tuner.v1.kernel_tuner_runner.KERNEL_TUNER_REGISTRY keys, and the value is the corresponding file path to be updated.
 kernel_auto_tune_mapping["mla_kernel_tuner"]="/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py"
 
 # Path to the script you want to append
 UPDATE_SCRIPT="/workspace/tpu_inference/tools/kernel/tuner/v1/autotune/update_tuned_params.py"
-
-# Step 4 prep: Generate the AUTOTUNE-YYYY-MM-DD-HH string
-TIMESTAMP=$(date +"%Y-%m-%d-%H")
-CASE_SET_ID="AUTOTUNE-${TIMESTAMP}"
 
 # Iterate over all keys in the dictionary
 for key in "${!kernel_auto_tune_mapping[@]}"; do
@@ -44,7 +41,7 @@ for key in "${!kernel_auto_tune_mapping[@]}"; do
     # Note: We use '|' as the sed delimiter instead of the standard '/' 
     # just in case your $DEVICE environment variable contains slashes.
     sed -i "s|KERNEL_TUNER_NAME_PLACEHOLDER|$key|g; \
-            s|CASE_SET_ID_PLACEHOLDER|$CASE_SET_ID|g; \
+            s|CASE_SET_ID_PLACEHOLDER|$KERNEL_AUTOTUNE_ID|g; \
             s|TPU_PLACEHOLDER|$DEVICE|g" "$target_file"
 
     echo "Successfully updated $target_file"
