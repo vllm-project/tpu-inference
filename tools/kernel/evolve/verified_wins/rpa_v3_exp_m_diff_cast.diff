@@ -1,0 +1,10 @@
+--- a/tpu_inference/kernels/ragged_paged_attention/v3/kernel.py
++++ b/tpu_inference/kernels/ragged_paged_attention/v3/kernel.py
+@@ -437,6 +437,7 @@ def _ragged_paged_attention_kernel_loop(
+         # if converting the type too early, there will be accuracy issue.
+         pv = pv.astype(out_dtype)
+         o_prev = o_ref[...]
++        exp_m_diff = exp_m_diff.astype(out_dtype)
+         o_ref[...] = broadcast_minor(exp_m_diff, o_prev.shape) * o_prev + pv
+ 
+     def _async_copy(src, dst, sem, wait):

@@ -1,0 +1,62 @@
+[
+  {
+    "name": "qwen3_0_6b_short",
+    "description": "Qwen3-0.6B-style, max_len=1024",
+    "baseline_p50_us": 502.305,
+    "candidate_p50_us": 497.7475,
+    "baseline_mean_ns": 499693.5,
+    "candidate_mean_ns": 488961.25,
+    "speedup": 1.02194908083207,
+    "p_value": 0.20490993856546852,
+    "cohens_d": -0.49415146983128405,
+    "ci_low_ns": -28889.406426599056,
+    "ci_high_ns": 7424.906426599056,
+    "significant": false,
+    "direction": "tie"
+  },
+  {
+    "name": "qwen3_0_6b_long",
+    "description": "Qwen3-0.6B-style, max_len=4096",
+    "baseline_p50_us": 513.838,
+    "candidate_p50_us": 504.5025,
+    "baseline_mean_ns": 518092.25,
+    "candidate_mean_ns": 502178.875,
+    "speedup": 1.0316886587473437,
+    "p_value": 0.013443863268510676,
+    "cohens_d": -1.160478094124286,
+    "ci_low_ns": -27377.54179565032,
+    "ci_high_ns": -4449.208204349681,
+    "significant": true,
+    "direction": "win"
+  },
+  {
+    "name": "llama3_8b_mid",
+    "description": "Llama-3-8B attention shape, max_len=2048",
+    "baseline_p50_us": 531.4325,
+    "candidate_p50_us": 503.4685,
+    "baseline_mean_ns": 528484.25,
+    "candidate_mean_ns": 502951.375,
+    "speedup": 1.05076609045954,
+    "p_value": 0.00477566285904874,
+    "cohens_d": -1.4374080032830576,
+    "ci_low_ns": -40383.22899872663,
+    "ci_high_ns": -10682.521001273371,
+    "significant": true,
+    "direction": "win"
+  },
+  {
+    "name": "qwen3_0_6b_fp8_kv",
+    "description": "Qwen3-0.6B with fp8 KV cache",
+    "baseline_p50_us": 497.919,
+    "candidate_p50_us": 510.164,
+    "baseline_mean_ns": 501616.5,
+    "candidate_mean_ns": 508613.5,
+    "speedup": 0.9862429919772087,
+    "p_value": 0.35079418058643475,
+    "cohens_d": 0.3534143639122576,
+    "ci_low_ns": -9554.78449423573,
+    "ci_high_ns": 23548.78449423573,
+    "significant": false,
+    "direction": "tie"
+  }
+]
