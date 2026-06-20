@@ -343,3 +343,18 @@ class SpannerStorageManager(StorageManager):
                      columns=('CaseSetId', 'CaseKeyValue', 'KernelTunerName',
                               'TPU'),
                      values=[(case_set_id, case_str, kernel_tuner_name, tpu)])
+
+    def read_auto_tune_cases(self, case_set_id, kernel_tuner_name = None, tpu = None):
+        """ Reads tuning cases from the KernelAutoTuneCases table for a given case set.
+        """
+        query = "SELECT CaseKeyValue, KernelTunerName, TPU FROM KernelAutoTuneCases WHERE CaseSetId = @id"
+        params = {'id': case_set_id}
+        if kernel_tuner_name:
+            query += " AND KernelTunerName = @ktn"
+            params['ktn'] = kernel_tuner_name
+        if tpu:
+            query += " AND TPU = @tpu"
+            params['tpu'] = tpu
+        with self.database.snapshot() as snp:
+            return [{"CaseKeyValue": row[0], "KernelTunerName": row[1], "TPU": row[2]} for row in snp.execute_sql(query, params=params)]
+        
