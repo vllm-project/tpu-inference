@@ -76,6 +76,8 @@ def _build_tuner_for_shape(shape) -> RpaV3KernelTuner:
     tuner.max_num_tokens = max(shape.max_model_len, 384)
     tuner.page_size = shape.page_size
     tuner.distribution_kind = shape.distribution_kind
+    if shape.seq_lens is not None:
+        tuner.seq_lens = list(shape.seq_lens)
     return tuner
 
 
@@ -128,19 +130,18 @@ class MultiShapeRpaV3Host:
 
     def build_kernel_fn(self, module: Any) -> Callable[[], Any]:
         per_shape_fns = [h.build_kernel_fn(module) for h in self._hosts]
+        # First shape's actual total_q_len. cu_q_lens is padded with zeros
+        # past the real seqs, so [-1] reads as 0. Take the max instead —
+        # that gives the actual prefix sum of all real q_lens.
+        first_cu_q_lens = self._hosts[0].inputs["cu_q_lens"]
+        import jax.numpy as _jnp
+        first_total_q = int(_jnp.max(first_cu_q_lens))
 
         def fn():
-            # Execute every shape; the bench harness times the whole call.
-            # Return the FIRST shape's output so the verifier can compare
-            # against the FIRST shape's reference (oracle uses inputs[0]).
-            # Per-shape numerics gate: if the kernel breaks on shape 2+,
-            # it'll raise during the call below (compile error / NaN /
-            # FAILED_RUN) — that still rejects the candidate. So all shapes
-            # are run; only one is numerics-checked downstream.
             first_out = per_shape_fns[0]()
             for f in per_shape_fns[1:]:
                 f()
-            return first_out
+            return first_out[:first_total_q]
 
         return fn
 

@@ -70,6 +70,13 @@ class ShapeSpec:
     max_model_len: int
     page_size: int = 16
     distribution_kind: str = "mixed"
+    # When set, overrides the tuner's default 3-seq toy fixture with a
+    # production-realistic workload. Format: list of (q_len, kv_len) per
+    # sequence. The default toy fixture (3 sequences totalling ~7 query
+    # tokens) underflows the kernel's dispatch overhead and makes
+    # roofline analysis meaningless — for any honest perf measurement
+    # the shape MUST provide a production-scale ``seq_lens``.
+    seq_lens: list[tuple[int, int]] | None = None
 
 
 # Production model archetypes. Distilled from the model configs deployed in
@@ -110,6 +117,91 @@ PRODUCTION_SHAPES: list[ShapeSpec] = [
               num_kv_heads=8,
               head_dim=128,
               max_model_len=4096),
+    # --- PRODUCTION-SCALE shapes (real conc, real seq_lens) ---
+    # The micro shapes above only fire ~7 query tokens against ~800 kv
+    # tokens — far too small for the kernel to amortize launch overhead.
+    # These shapes match real deployed configurations and produce honest
+    # roofline numbers (HBM at 40-80% of peak rather than <1%).
+    ShapeSpec(name="qwen3_0_6b_decode_conc256",
+              description="Qwen3-0.6B decode-heavy: 256 seqs × kv=2048",
+              q_dtype=jnp.bfloat16,
+              kv_dtype=jnp.bfloat16,
+              num_q_heads=16,
+              num_kv_heads=8,
+              head_dim=128,
+              max_model_len=2048,
+              distribution_kind="decode_heavy",
+              seq_lens=[(1, 2048)] * 256),
+    ShapeSpec(name="qwen3_0_6b_decode_conc64",
+              description="Qwen3-0.6B decode-heavy: 64 seqs × kv=1024",
+              q_dtype=jnp.bfloat16,
+              kv_dtype=jnp.bfloat16,
+              num_q_heads=16,
+              num_kv_heads=8,
+              head_dim=128,
+              max_model_len=1024,
+              distribution_kind="decode_heavy",
+              seq_lens=[(1, 1024)] * 64),
+    ShapeSpec(name="qwen3_0_6b_decode_conc16",
+              description="Qwen3-0.6B decode-heavy: 16 seqs × kv=512",
+              q_dtype=jnp.bfloat16,
+              kv_dtype=jnp.bfloat16,
+              num_q_heads=16,
+              num_kv_heads=8,
+              head_dim=128,
+              max_model_len=512,
+              distribution_kind="decode_heavy",
+              seq_lens=[(1, 512)] * 16),
+    ShapeSpec(name="llama3_8b_decode_conc16",
+              description="Llama-3-8B decode-heavy: 16 seqs × kv=512",
+              q_dtype=jnp.bfloat16,
+              kv_dtype=jnp.bfloat16,
+              num_q_heads=32,
+              num_kv_heads=8,
+              head_dim=128,
+              max_model_len=512,
+              distribution_kind="decode_heavy",
+              seq_lens=[(1, 512)] * 16),
+    ShapeSpec(name="llama3_8b_decode_conc64",
+              description="Llama-3-8B decode-heavy: 64 seqs × kv=1024",
+              q_dtype=jnp.bfloat16,
+              kv_dtype=jnp.bfloat16,
+              num_q_heads=32,
+              num_kv_heads=8,
+              head_dim=128,
+              max_model_len=1024,
+              distribution_kind="decode_heavy",
+              seq_lens=[(1, 1024)] * 64),
+    ShapeSpec(name="llama3_8b_decode_conc256",
+              description="Llama-3-8B decode-heavy: 256 seqs × kv=2048",
+              q_dtype=jnp.bfloat16,
+              kv_dtype=jnp.bfloat16,
+              num_q_heads=32,
+              num_kv_heads=8,
+              head_dim=128,
+              max_model_len=2048,
+              distribution_kind="decode_heavy",
+              seq_lens=[(1, 2048)] * 256),
+    ShapeSpec(name="qwen35_decode_conc128",
+              description="Qwen3.5-397B decode: 128 seqs × kv=4096 (q_h=64)",
+              q_dtype=jnp.bfloat16,
+              kv_dtype=jnp.bfloat16,
+              num_q_heads=64,
+              num_kv_heads=8,
+              head_dim=128,
+              max_model_len=4096,
+              distribution_kind="decode_heavy",
+              seq_lens=[(1, 4096)] * 128),
+    ShapeSpec(name="qwen3_0_6b_chunked_prefill",
+              description="Qwen3-0.6B chunked prefill: 8 seqs × q=512 kv=2048",
+              q_dtype=jnp.bfloat16,
+              kv_dtype=jnp.bfloat16,
+              num_q_heads=16,
+              num_kv_heads=8,
+              head_dim=128,
+              max_model_len=2048,
+              distribution_kind="prefill_heavy",
+              seq_lens=[(512, 2048)] * 8),
     # fp8 KV variants — important because the diff's casting interacts with
     # the KV dtype path.
     ShapeSpec(name="qwen3_0_6b_fp8_kv",
@@ -194,6 +286,8 @@ def _build_tuner_for_shape(shape: ShapeSpec) -> RpaV3KernelTuner:
     tuner.max_num_tokens = max(shape.max_model_len, 384)
     tuner.page_size = shape.page_size
     tuner.distribution_kind = shape.distribution_kind
+    if shape.seq_lens is not None:
+        tuner.seq_lens = list(shape.seq_lens)
     return tuner
 
 
