@@ -21,6 +21,7 @@ from tools.kernel.tuner.v1.common.kernel_tuner_base import RunConfig
 from tools.kernel.tuner.v1.example_kernel_tuner import ExampleKernelTuner
 from tools.kernel.tuner.v1.mla_kernel_tuner import MlaKernelTuner
 from tools.kernel.tuner.v1.rpa_v3_kernel_tuner import RpaV3KernelTuner
+from tools.kernel.tuner.v1.utils import get_tpu_queue_by_version_and_cores
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -30,6 +31,10 @@ _DEBUG = flags.DEFINE_bool(
 _RUN_LOCALLY = flags.DEFINE_bool(
     'run_locally', False,
     'If true, uses local storage instead of cloud storage.')
+_AUTOTUNE_MODE = flags.DEFINE_bool(
+    'autotune_mode', False,
+    'If true, runs the kernel tuner in auto-tune mode, which reads tuning cases from Spanner and generates Buildkite pipeline YAML for tuning jobs. '
+)
 _KERNEL_TUNER_NAME = flags.DEFINE_string('kernel_tuner_name',
                                          'example_kernel_tuner',
                                          'Name of the kernel tuner to run.')
@@ -104,24 +109,6 @@ KERNEL_TUNER_REGISTRY = {
     'mla_kernel_tuner': MlaKernelTuner,
 }
 
-
-# Keep in sync with the logic in bootstrap_kernel_tuning.sh:set_jax_envs
-def get_tpu_queue_by_version_and_cores(tpu_version, tpu_cores,
-                                       tpu_queue_multi):
-    """Gets and validates TPU queue based on version and core configuration."""
-    _queue_by_version_and_cores = {
-        ('tpu6e', 1): 'tpu_v6e_queue',
-        ('tpu6e', 8): 'tpu_v6e_8_queue',
-        ('tpu7x', 2): 'tpu_v7x_2_queue',
-        ('tpu7x', 8): 'tpu_v7x_8_queue',
-        ('tpu7x', 16): 'tpu_v7x_16_queue',
-    }
-    assert (
-        tpu_version, tpu_cores
-    ) in _queue_by_version_and_cores, f'Unsupported combination of TPU version {tpu_version} and cores {tpu_cores}. Supported combinations are: {list(_queue_by_version_and_cores.keys())}'
-    expected_queue = _queue_by_version_and_cores[(tpu_version, tpu_cores)]
-    assert not tpu_queue_multi or tpu_queue_multi == expected_queue, f'Inconsistent TPU queue {tpu_queue_multi} for version {tpu_version} and cores {tpu_cores}. Expected queue is {expected_queue}. Please check your flags.'
-    return tpu_queue_multi or expected_queue
 
 
 def main(argv):
