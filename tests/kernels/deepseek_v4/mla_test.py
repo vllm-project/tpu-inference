@@ -177,7 +177,7 @@ def ref_implementation(
         l_1_scaled = l_1 * jnp.exp(m_1 - m)
         l_2 = jnp.sum(jnp.exp(attn - m), axis=-1, keepdims=True)
         l_sinks = jnp.exp(attention_sinks[..., None, None] - m)
-        lse = l_1_scaled + l_2 + l_sinks
+        L = l_1_scaled + l_2 + l_sinks
 
         p_2 = jnp.exp(attn - m)
         acc_2 = jnp.einsum("nqk,kl->qnl", p_2, v_i)
@@ -185,7 +185,7 @@ def ref_implementation(
         acc_1_scaled = swa_accumution_i * exp_m1_diff
         acc = acc_1_scaled + acc_2
 
-        out_i = (acc / jnp.transpose(lse, (1, 0, 2))).astype(q_i.dtype)
+        out_i = (acc / jnp.transpose(L, (1, 0, 2))).astype(q_i.dtype)
         outputs.append(out_i)
 
     return jnp.concatenate(outputs, axis=0)
@@ -211,7 +211,7 @@ class CorrectnessTest(parameterized.TestCase):
     @parameterized.parameters(True, False)
     def test_correctness(self, is_csa: bool = False):
         if is_csa:
-            topk = 512
+            topk = 1024
         else:
             topk = None
         rng = np.random.default_rng(1234)

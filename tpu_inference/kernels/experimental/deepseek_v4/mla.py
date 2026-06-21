@@ -568,10 +568,10 @@ def _mla_ragged_paged_attention_kernel(
             attention_sinks = jnp.concat(
                 [attention_sinks_ref[...] for _ in range(bq_sz)])[..., None]
             exp_attention_sinks = jnp.exp(attention_sinks - m_ref[...])
-            lse = l_ref[...] + exp_attention_sinks
-            lse = broadcast_minor(lse, acc.shape)
-            out = (lax.div(acc, lse) if q_dtype == jnp.float32 else
-                   (acc * pl.reciprocal(lse, approx=True)).astype(q_dtype))
+            L = l_ref[...] + exp_attention_sinks
+            L = broadcast_minor(L, acc.shape)
+            out = (lax.div(acc, L) if q_dtype == jnp.float32 else
+                   (acc * pl.reciprocal(L, approx=True)).astype(q_dtype))
 
             # Wait for previous bo to be fully sent before storing new bo.
             bo_sem_idx = sem_ids_ref[2]
@@ -687,7 +687,7 @@ def prepare_outputs(
 
 
 # Main Attention kernel for DeepSeek V4 CSA and HCA.
-# Note that the compressed kv tokens of current batch (current forward pass)
+# Note that the compressed kv tokens of current batch (current fowward pass)
 # have been written to the `cache_kv` by the compressor module before calling
 # this function, `kv_lens` reflects the length after compressed kv cache write.
 @functools.partial(

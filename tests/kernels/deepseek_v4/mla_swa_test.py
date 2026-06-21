@@ -169,6 +169,7 @@ def ref_implementation(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    attention_sinks: jax.Array,  # float32[actual_num_q_heads]
     *,
     sliding_window: int,
     sm_scale: float = 1.0,
@@ -260,13 +261,15 @@ def ref_implementation(
             mask = jnp.logical_or(mask, q_span - sliding_window >= kv_span)
         attn = jnp.where(mask, mask_value, attn)
         m = jnp.max(attn, axis=-1, keepdims=True)
-        lse = jnp.sum(jnp.exp(attn - m), axis=-1, keepdims=True)
-        attn = jax.nn.softmax(attn, axis=-1).astype(v_i.dtype)
+        L = jnp.sum(jnp.exp(attn - m), axis=-1, keepdims=True)
+        l_sinks = jnp.exp(attention_sinks[..., None, None] - m)
+        l_final = L + l_sinks
+        attn = jnp.exp(attn - m) / l_final
 
         # out_i: [q_len, actual_num_q_heads, lkv_dim]
         out_i = jnp.einsum("nqk,kl->qnl", attn, v_i).astype(q_i.dtype)
         outputs.append(out_i)
-        ls.append(jnp.transpose(lse[..., 0]))
+        ls.append(jnp.transpose(L[..., 0]))
         ms.append(jnp.transpose(m[..., 0]))
 
     return (
@@ -295,6 +298,9 @@ class CorrectnessTest(parameterized.TestCase):
         self.lkv_dim = 640
         self.sliding_window = 32
         self.page_size = 12
+        self.attention_sinks = jnp.array(
+            self.rng.random(size=(self.num_heads, ), dtype=np.float32) *
+            300.0 + 200.0)
 
         self.ref_pages_per_seq = cdiv(self.sliding_window * 10, self.page_size)
         self.ref_page_indices = jnp.arange(self.batch_size *
@@ -374,11 +380,12 @@ class CorrectnessTest(parameterized.TestCase):
             self.ref_page_indices,
             cu_q_lens,
             distribution,
+            self.attention_sinks,
             sm_scale=1.0,
             sliding_window=self.sliding_window,
         )
 
-        out, self.swc_cache, lse, m = (
+        out, self.swc_cache, L, m = (
             mla_swa.mla_sliding_window_ragged_paged_attention(
                 q,
                 new_kv,
@@ -387,6 +394,7 @@ class CorrectnessTest(parameterized.TestCase):
                 self.swc_page_indices,
                 cu_q_lens,
                 distribution,
+                self.attention_sinks,
                 sm_scale=1.0,
                 sliding_window=self.sliding_window,
                 num_queries_per_block=8,
@@ -404,13 +412,13 @@ class CorrectnessTest(parameterized.TestCase):
         print(f"cu_q_lens: {cu_q_lens}")
         np.testing.assert_allclose(out_base, out, rtol=0.1, atol=0.1)
 
-        lse.block_until_ready()
+        L.block_until_ready()
         m.block_until_ready()
         l_base.block_until_ready()
         m_base.block_until_ready()
-        assert lse.shape == (total_tokens, self.num_heads)
+        assert L.shape == (total_tokens, self.num_heads)
         assert m.shape == (total_tokens, self.num_heads)
-        np.testing.assert_allclose(l_base, lse, rtol=0.1, atol=0.1)
+        np.testing.assert_allclose(l_base, L, rtol=0.1, atol=0.1)
         np.testing.assert_allclose(m_base, m, rtol=0.1, atol=0.1)
 
         # Cache comparison

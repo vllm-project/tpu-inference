@@ -76,6 +76,7 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
     bo_ids_ref,  # [4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
     bkv_update_ids_ref,  # [6] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz)
     # Input
+    attention_sinks_ref,  # float32[num_q_heads]
     q_hbm_ref,  # [max_num_tokens, num_q_heads, head_dim]
     new_kv_hbm_ref,  # [max_num_tokens_per_kv_packing, kv_packing, lkv_dim]
     cache_kv_hbm_ref,  # [total_num_pages, physical_page_size_per_kv_packing, kv_packing, lkv_dim]
@@ -773,13 +774,18 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
 
             # Load acc and calculate final output.
             acc = acc_ref[...]
-            l = broadcast_minor(l_ref[...], acc.shape)  # noqa
 
             if unnormalized_output:
                 out = acc.astype(q_dtype)
             else:
-                out = (lax.div(acc, l) if q_dtype == jnp.float32 else
-                       (acc * pl.reciprocal(l, approx=True)).astype(q_dtype))
+                attention_sinks = jnp.concat(
+                    [attention_sinks_ref[...] for _ in range(bq_sz)])[...,
+                                                                      None]
+                exp_attention_sinks = jnp.exp(attention_sinks - m_ref[...])
+                L = l_ref[...] + exp_attention_sinks
+                L = broadcast_minor(L, acc.shape)
+                out = (lax.div(acc, L) if q_dtype == jnp.float32 else
+                       (acc * pl.reciprocal(L, approx=True)).astype(q_dtype))
 
             # Wait for previous bo to be fully sent before storing new bo.
             bo_sem_idx = sem_ids_ref[2]
@@ -938,6 +944,7 @@ def mla_sliding_window_ragged_paged_attention(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    attention_sinks: jax.Array,  # float32[actual_num_q_heads]
     *,
     sm_scale: float = 1.0,
     sliding_window: int,
@@ -1009,6 +1016,11 @@ def mla_sliding_window_ragged_paged_attention(
     _, actual_num_q_heads, actual_head_dim = q.shape
 
     q = prepare_q_inputs(q)  # [max_num_tokens, num_q_heads, head_dim]
+    attention_sinks = jnp.pad(
+        attention_sinks,
+        (0, q.shape[1] - actual_num_q_heads),
+        constant_values=-jnp.inf,
+    )
     assert new_kv.dtype == jnp.bfloat16
     new_kv = quantize_kv_inputs(new_kv)
     assert new_kv.dtype == jnp.uint8
@@ -1043,6 +1055,7 @@ def mla_sliding_window_ragged_paged_attention(
         in_output: jax.Array,  # [max_num_tokens, actual_num_q_heads, head_dim]
         in_l: jax.Array,  # [max_num_tokens, num_l_heads]
         in_m: jax.Array,  # [max_num_tokens, num_l_heads]
+        attention_sinks: jax.Array,  # float32[num_q_heads]
         static_q_len: int | None,
         unnormalized_output: bool,
         num_kv_pages_per_block: int,
@@ -1076,6 +1089,7 @@ def mla_sliding_window_ragged_paged_attention(
         grid = (end_seq_idx - start_seq_idx, )
 
         in_specs = [
+            pl.BlockSpec(memory_space=pltpu.VMEM),  # attention_sinks
             pl.BlockSpec(memory_space=pltpu.HBM),  # q
             pl.BlockSpec(memory_space=pltpu.HBM),  # new_kv
             pl.BlockSpec(memory_space=pltpu.HBM),  # cache_kv
@@ -1184,15 +1198,16 @@ def mla_sliding_window_ragged_paged_attention(
                                          dtype=jnp.float32),
                 ],
                 input_output_aliases={
-                    10: 0,  # Alias output activation with in_output
-                    9: 1,  # Aliasing cache_kv with updated_cache_kv
-                    11: 2,  # Alias l with in_l
-                    12: 3,  # Alias m with in_m
+                    11: 0,  # Alias output activation with in_output
+                    10: 1,  # Aliasing cache_kv with updated_cache_kv
+                    12: 2,  # Alias l with in_l
+                    13: 3,  # Alias m with in_m
                 },
                 name=scope_name,
             ))
         return kernel(
             *scalar_prefetches,
+            attention_sinks,
             q,
             new_kv,
             cache_kv,
@@ -1203,7 +1218,7 @@ def mla_sliding_window_ragged_paged_attention(
 
     # Decode-only
     num_l_heads = align_to(num_q_heads, 128)
-    lse = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
+    L = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
     m = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
     output, updated_kv, out_l, out_m = run_mla_kernel(
         q,
@@ -1217,8 +1232,9 @@ def mla_sliding_window_ragged_paged_attention(
         start_seq_idx=jnp.array(0),
         end_seq_idx=distribution[0],
         in_output=jnp.zeros_like(q),
-        in_l=lse,
+        in_l=L,
         in_m=m,
+        attention_sinks=attention_sinks,
         static_q_len=1,
         unnormalized_output=unnormalized_output,
         case=MlaCase.DECODE,
@@ -1240,6 +1256,7 @@ def mla_sliding_window_ragged_paged_attention(
             in_output=output,
             in_l=out_l,
             in_m=out_m,
+            attention_sinks=attention_sinks,
             static_q_len=chunk_prefill_size,
             unnormalized_output=unnormalized_output,
             case=MlaCase.PREFILL,
@@ -1260,6 +1277,7 @@ def mla_sliding_window_ragged_paged_attention(
         in_output=output,
         in_l=out_l,
         in_m=out_m,
+        attention_sinks=attention_sinks,
         static_q_len=None,
         unnormalized_output=unnormalized_output,
         case=MlaCase.MIXED,
