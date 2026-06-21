@@ -40,9 +40,45 @@ from tpu_inference.models.jax.utils.weight_utils import assign_and_shard_param
 
 logger = init_logger(__name__)
 
+import functools
+import os
+
 _LOW = -1e-3
 _HIGH = 1e-3
 _SEED = 1234
+
+
+@functools.lru_cache(maxsize=None)
+def _get_jit_generator_cached(sharding, weight_shape, weight_dtype):
+    @jax.jit(out_shardings=sharding)
+    def _generate(key):
+        return jax.random.uniform(
+            key,
+            shape=weight_shape,
+            dtype=weight_dtype,
+            minval=_LOW,
+            maxval=_HIGH,
+        )
+    return _generate
+
+
+def _get_jit_generator_uncached(sharding, weight_shape, weight_dtype):
+    @jax.jit(out_shardings=sharding)
+    def _generate(key):
+        return jax.random.uniform(
+            key,
+            shape=weight_shape,
+            dtype=weight_dtype,
+            minval=_LOW,
+            maxval=_HIGH,
+        )
+    return _generate
+
+
+def _get_jit_generator(sharding, weight_shape, weight_dtype):
+    if os.environ.get("TPU_INF_ENABLE_JAX_CACHE", "1") == "0":
+        return _get_jit_generator_uncached(sharding, weight_shape, weight_dtype)
+    return _get_jit_generator_cached(sharding, weight_shape, weight_dtype)
 
 
 def is_pathways_dummy_load() -> bool:
@@ -62,17 +98,7 @@ def create_dummy_weights_on_tpu(
     The values are drawn uniformly from ``[_LOW, _HIGH]``.
     """
     key = jax.random.PRNGKey(_SEED)
-
-    @jax.jit(out_shardings=sharding)
-    def _generate(key):
-        return jax.random.uniform(
-            key,
-            shape=weight_shape,
-            dtype=weight_dtype,
-            minval=_LOW,
-            maxval=_HIGH,
-        )
-
+    _generate = _get_jit_generator(sharding, weight_shape, weight_dtype)
     tpu_array = _generate(key)
     return tpu_array
 
