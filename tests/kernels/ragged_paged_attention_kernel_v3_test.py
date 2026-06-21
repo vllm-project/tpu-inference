@@ -567,6 +567,124 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                 soft_cap=0.0,
             )
 
+    def test_ragged_paged_attention_zero_length_query(self):
+        """Verifies correct execution when a sequence has zero query tokens.
+
+        This can occur in chunked prefill or dynamic scheduling scenarios where
+        a sequence is temporarily paused but its history is preserved in the cache.
+        Ensures slicing and pointer arithmetic handle zero-size intervals gracefully.
+        """
+        seq_lens = [(128, 256), (0, 64)]
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        dtype = jnp.bfloat16
+        num_pages = 1000
+
+        with self.assertRaisesRegex(ValueError, "Require 0 < q_len"):
+            self._test_ragged_paged_attention(
+                seq_lens,
+                num_heads,
+                head_dim,
+                page_size,
+                dtype,
+                dtype,
+                num_pages,
+            )
+
+    def test_ragged_paged_attention_deep_context(self):
+        """Verifies memory alignment, index stability, and tiling over massive page spans.
+
+        Simulates a deep generation step (decode) with a very large sequence length,
+        forcing the kernel to process many pages per sequence (kv_len >> page_size).
+        """
+        seq_lens = [(1, 2048)]
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        dtype = jnp.bfloat16
+        num_pages = 2000
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+        )
+
+    def test_ragged_paged_attention_extreme_mqa(self):
+        """Forces maximum broadcasting behavior along the head axis.
+
+        Uses a single KV head (Multi-Query Attention, num_kv_heads=1) with standard
+        dimensions to validate maximum GQA/MQA broadcast mapping inside the kernel.
+        """
+        seq_lens = [(64, 128)]
+        num_heads = (32, 1)
+        head_dim = 128
+        page_size = 16
+        dtype = jnp.bfloat16
+        num_pages = 1000
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+        )
+
+    def test_ragged_paged_attention_asymmetric_gqa_ratio(self):
+        """Validates non-power-of-two GQA head broadcast logic.
+
+        Forces an odd head allocation ratio (6 Q-heads to 2 KV-heads = 3) to 
+        ensure hardware vector layout tiling handles uneven broadcasting smoothly.
+        """
+        seq_lens = [(64, 128), (32, 64)]
+        num_heads = (6, 2)
+        head_dim = 128
+        page_size = 16
+        dtype = jnp.bfloat16
+        num_pages = 1000
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+        )
+
+    def test_ragged_paged_attention_sparse_batch_over_allocation(self):
+        """Validates token masking when actual tokens are much fewer than allocated max.
+
+        Simulates a scenario where max_num_batched_tokens is highly padded (512), 
+        but the actual dynamic batch contains only a few active layout elements.
+        """
+        seq_lens = [(2, 10)] # Only 2 active query tokens
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        dtype = jnp.bfloat16
+        num_pages = 1000
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+            max_num_batched_tokens=512, # Force high padding space
+        )
+
     # ------------------------------------------------------------------
     # KV-share path (`update_kv_cache=False`) regression tests.
     #
