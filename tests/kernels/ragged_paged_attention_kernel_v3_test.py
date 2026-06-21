@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -26,6 +28,10 @@ from tpu_inference.kernels.ragged_paged_attention.v3.util import (
 
 jax.config.parse_flags_with_absl()
 
+
+def cdiv(a: int, b: int) -> int:
+    """Ceiling division."""
+    return (a + b - 1) // b
 
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
 class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
@@ -54,6 +60,12 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         v_scale: float | None = None,
         use_causal_mask: bool = True,
     ):
+        """Universal test execution harness.
+    
+        Generates structured test inputs, builds an artificial KV cache filled with NaN,
+        runs both the reference baseline and the TPU-accelerated kernel, and validates
+        that the resulting matrices and cache contents align within expected numeric margins.
+        """
         rng = np.random.default_rng(1234)
 
         def gen_random(shape, dtype):
@@ -149,6 +161,11 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         kv_lens = jnp.pad(kv_lens, (0, max_num_seq - kv_lens.shape[0]))
         distribution = jnp.array([0, 0, len(seq_lens)], dtype=jnp.int32)
 
+        page_indices = page_indices.astype(jnp.int32)
+        cu_q_lens = cu_q_lens.astype(jnp.int32)
+        kv_lens = kv_lens.astype(jnp.int32)
+        distribution = distribution.astype(jnp.int32)
+
         args = (
             q,
             k,
@@ -180,6 +197,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             m_block_sizes=(bq_sz, bkv_sz, bq_csz, bkv_csz),
             vmem_limit_bytes=vmem_limit_bytes,
         )
+
         output = output[:cu_q_lens[distribution[-1]]]
 
         dtype_bits = dtypes.itemsize_bits(jnp.dtype(kv_dtype))
@@ -395,8 +413,8 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
 
     @parameterized.product(
         num_seqs=[1, 17],
-        num_heads=[(32, 8), (12, 2), (5, 1), (3, 3)],
-        head_dim=[80, 240],
+        num_heads=[(32, 8), (12, 2), (5, 1), (3, 3), (32, 1)],
+        head_dim=[64, 80, 128, 240, 256],
         dtype=[jnp.float32, jnp.bfloat16],
     )
     def test_ragged_paged_attention_complex(
@@ -475,6 +493,31 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             dtype,
             num_pages,
             soft_cap=soft_cap,
+        )
+
+    @parameterized.product(
+        dtype=[jnp.float32, jnp.bfloat16],
+        seq_lens=[
+            [(1, 1)],  # extremely compact context
+            [(1, 1), (1, 1)],
+            [(1, 15)], # uneven structures where total context length evaluates to less than page_size=16
+            [(2, 5)],
+        ],
+    )
+    def test_ragged_paged_attention_boundary_seq_lens(self, dtype, seq_lens):
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        num_pages = 1000
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
         )
 
     def test_ragged_paged_attention_sliding_window_should_be_positive(self):
