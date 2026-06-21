@@ -61,6 +61,15 @@ upload_benchmark_pipeline() {
     local case_folder=".buildkite/benchmark/cases/${folder_name}"
     local generator_script="${SCRIPT_DIR}/generate_bk_pipeline.py"
     process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY"
+
+    # If the folder is not empty, upload the docker build pipeline.
+    if [ "$(ls -A "$case_folder" 2>/dev/null)" ]; then
+        # Since Buildkite inserts steps in reverse order, uploading this last 
+        # ensures the Docker build steps appear at the very top of the UI.
+        upload_with_priority .buildkite/pipeline_build.yml "$JOB_PRIORITY"
+    else
+        echo "No benchmark cases found in $case_folder. Skipping docker build."
+    fi
 }
 
 upload_benchmark_pipeline
