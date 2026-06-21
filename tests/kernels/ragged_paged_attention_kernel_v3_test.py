@@ -161,11 +161,6 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         kv_lens = jnp.pad(kv_lens, (0, max_num_seq - kv_lens.shape[0]))
         distribution = jnp.array([0, 0, len(seq_lens)], dtype=jnp.int32)
 
-        page_indices = page_indices.astype(jnp.int32)
-        cu_q_lens = cu_q_lens.astype(jnp.int32)
-        kv_lens = kv_lens.astype(jnp.int32)
-        distribution = distribution.astype(jnp.int32)
-
         args = (
             q,
             k,
