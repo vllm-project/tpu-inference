@@ -31,7 +31,8 @@ from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear, JaxLmHead
+from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear, JaxLmHead,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import apply_rope
@@ -60,25 +61,19 @@ class Qwen2MLP(JaxModule):
         intermediate_size = config.intermediate_size
         act = config.hidden_act
 
-        self.gate_proj = JaxLinear(
+        # gate_proj and up_proj are fused into a single merged linear so the
+        # two projections share one matmul; the loader splits the checkpoint's
+        # separate gate_proj/up_proj weights via packed_modules_mapping on the
+        # top-level model class.
+        self.gate_up_proj = JaxMergedColumnParallelLinear(
             hidden_size,
-            intermediate_size,
+            [intermediate_size] * 2,
             use_bias=False,
             dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".gate_proj",
-        )
-        self.up_proj = JaxLinear(
-            hidden_size,
-            intermediate_size,
-            use_bias=False,
-            dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
-            rngs=rng,
-            quant_config=quant_config,
-            prefix=prefix + ".up_proj",
         )
         self.down_proj = JaxLinear(
             intermediate_size,
@@ -93,9 +88,9 @@ class Qwen2MLP(JaxModule):
         self.act_fn = modeling_flax_utils.ACT2FN[act]
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        gate = self.act_fn(self.gate_proj(x))
-        up = self.up_proj(x)
-        fuse = gate * up
+        gate_up = self.gate_up_proj(x)
+        gate, up = jnp.split(gate_up, 2, axis=-1)
+        fuse = self.act_fn(gate) * up
         result = self.down_proj(fuse)
         return result
 
@@ -377,6 +372,7 @@ class Qwen2Model(JaxModule):
 
 
 class Qwen2ForCausalLM(JaxModule, LoadableWithIterator):
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     WeightLoader = StandardWeightLoader
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,

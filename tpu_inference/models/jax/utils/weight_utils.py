@@ -186,17 +186,37 @@ def model_weights_single_file_generator(
                 yield name, weight_tensor
 
 
-def get_param(params: nnx.State, path: str) -> nnx.State:
+def get_param(params: nnx.State,
+              path: str,
+              strict: bool = True) -> Optional[nnx.State]:
+    """Walk a dotted ``path`` into an ``nnx.State`` tree.
+
+    Integer segments index into list nodes; all others are key lookups.
+
+    Args:
+        params: the State tree to resolve against.
+        path: dotted path, e.g. ``"layers.0.mlp.gate_up_proj.weight"``.
+        strict: when True (default) an unresolvable path raises
+            ``ValueError``; when False it returns ``None`` (so callers can
+            probe for optional params).
+    """
     keys = path.split(".")
     plevel = params
     for key in keys:
         if key.isdigit():
-            plevel = plevel[int(key)]
+            try:
+                plevel = plevel[int(key)]
+            except (IndexError, KeyError, TypeError):
+                if strict:
+                    raise ValueError(f"{path} is not a valid param path")
+                return None
         else:
             if key in plevel:
                 plevel = plevel[key]
-            else:
+            elif strict:
                 raise ValueError(f"{path} is not a valid param path")
+            else:
+                return None
     return plevel
 
 
@@ -945,40 +965,51 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
     def load_weights(self, weights: Iterable, **kwargs) -> set:
         """Route packed (e.g. fused gate_up_proj) checkpoint weights, then
         delegate the rest to the standard recursive auto-loader.
-
-        For each checkpoint weight whose name contains a packed sub-module
-        (e.g. ``gate_proj``), rename it to the fused param (``gate_up_proj``)
-        and hand it to that param's ``weight_loader`` together with the
-        ``shard_id``; the merged linear's quant method accumulates the shards
-        and fuses them. Weights whose fused param does not exist (e.g. the
-        vision tower's unfused gate/up projections) fall through unchanged.
         """
         remap = self._packed_remap()
         if not remap:
-            # No packed/fused params to route. Skip building the full param
-            # dict: materializing the entire parameter tree up front
-            # transiently doubles device HBM, so go straight to the streaming
+            # No packed/fused params to route; go straight to the streaming
             # recursive loader.
             return super().load_weights(weights, **kwargs)
-        params_dict = dict(self.module.named_parameters())
-        routed_loaded: set = set()
+        routed_loaded: set[str] = set()
 
         def _route(weights_iter):
+            # For each checkpoint weight whose name contains a packed sub-module
+            # (e.g. ``gate_proj``), rename it to the fused param (``gate_up_proj``)
+            # and hand the shard to that param's ``weight_loader``, which stashes it
+            # into the temporary buffer by ``shard_id`` and fuses the merged kernel
+            # once every shard has arrived. Weights whose fused param does not exist
+            # (e.g. the vision tower's unfused gate/up projections) fall through unchanged.
+            param_state = nnx.state(self.module)
             for name, weight in weights_iter:
                 for fused_name, shard_name, shard_id in remap:
                     if shard_name not in name:
                         continue
+                    # fused_param_name is the name of the param in the model
+                    # that corresponds to this shard. E.g. "gate_up_proj" "qkv_proj"
                     fused_param_name = name.replace(shard_name, fused_name)
-                    param = params_dict.get(fused_param_name)
-                    if param is None:
-                        # No fused param at this path (e.g. vision tower keeps
-                        # gate_proj/up_proj separate) — load normally.
+                    param = get_param(param_state,
+                                      fused_param_name,
+                                      strict=False)
+                    if not isinstance(param, nnx.Param):
                         continue
-                    param.weight_loader(param, weight, shard_id)
-                    routed_loaded.add(fused_param_name)
+                    _all_shards_loaded = param.weight_loader(
+                        param, weight, shard_id)
+                    assert isinstance(_all_shards_loaded, bool), \
+                        f"weight_loader for {fused_param_name} should return a " \
+                        "bool indicating whether the shard has been loaded, but " \
+                        f"got {_all_shards_loaded} of type {type(_all_shards_loaded)}"
+                    if _all_shards_loaded:
+                        # True means all projections for this fused param are
+                        # ready; mark it so the caller knows it was loaded.
+                        routed_loaded.add(fused_param_name)
+                    # shard was accepted (stashed or complete); don't pass to recursive loader
                     break
                 else:
                     yield name, weight
+            # release it before returning so we don't retain a whole-model
+            # param structure post the load.
+            del param_state
 
         autoloaded = super().load_weights(_route(weights), **kwargs)
         return autoloaded | routed_loaded
@@ -1091,8 +1122,9 @@ class JaxDummyModelLoader(DummyModelLoader):
 
         def _load_dummy_weight_on_thread(param_name, param: nnx.Param):
             with cpu_mesh_context():
-                is_moe = hasattr(param, "_weights_to_load")
                 param_shape = param.get_value().shape
+                is_moe = hasattr(param,
+                                 "_weights_to_load") and len(param_shape) == 3
 
                 if is_moe:
                     # For MoE parameters, the normal loading flow reads PyTorch
