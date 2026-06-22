@@ -79,6 +79,7 @@
 /tests/distributed/ @mrjunwan-lang @sixiang-google
 /tests/executors/ @sixiang-google @mrjunwan-lang
 /tests/kernels/ @kyuyeunk @bythew3i @a1yssan13
+/tests/kernels/deepseek_v4 @gxd3 @a1yssan13 @inucool12
 /tests/layers/ @kyuyeunk @lk-chen
 /tests/lora/ @vanbasten23 @kyuyeunk
 /tests/models/ @kyuyeunk @lk-chen

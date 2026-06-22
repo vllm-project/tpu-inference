@@ -73,7 +73,10 @@ def main() -> None:
     app.router.add_route("*", "/{path:.*}", round_robin)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
-    web.run_app(app, host="0.0.0.0", port=port, print=None)
+    # Default backlog (128) is far too small for thousands of concurrent
+    # benchmark connections; the kernel clamps this to net.core.somaxconn
+    # anyway, so request more than we'd ever expect to need.
+    web.run_app(app, host="0.0.0.0", port=port, print=None, backlog=10000)
 
 
 if __name__ == "__main__":
