@@ -1115,6 +1115,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_state.output_token_ids.pop()
             req_state.output_token_ids.extend(sampled_ids)
 
+        return valid_sampled_token_ids
+
+    def _flush_prev_async_results(
+        self,
+        kv_connector_output: Optional[KVConnectorOutput] = None,
+    ) -> ModelRunnerOutput:
+        assert self._pre_async_results is not None
+        pre_req_ids = self._pre_async_results.req_ids
+        valid_sampled_token_ids = self._modify_prev_results()
+        self._pre_async_results = None
+        return ModelRunnerOutput(
+            req_ids=pre_req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index.copy(),
+            sampled_token_ids=valid_sampled_token_ids,
+            logprobs=None,
+            prompt_logprobs_dict={req_id: None for req_id in pre_req_ids},
+            pooler_output=[],
+            kv_connector_output=kv_connector_output,
+        )
+
     def _update_placeholder(
             self,
             discard_sampled_tokens_req_indices,
@@ -1169,6 +1189,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
+            if (self.scheduler_config.async_scheduling
+                    and self._pre_async_results is not None):
+                logger.debug(
+                    "No tokens scheduled; flushing pending async TPU output.")
+                return self._flush_prev_async_results()
+
             if has_kv_transfer_group():
                 return self.kv_connector_no_forward(scheduler_output,
                                                     self.vllm_config)
