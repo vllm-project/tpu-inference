@@ -15,8 +15,8 @@
 import functools
 import logging
 import random
-from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, replace
+from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
@@ -94,17 +94,23 @@ from tpu_inference.utils import (device_array, make_optimized_mesh,
 
 try:
     import sys
+
     import vllm.lora.utils as lora_utils_mod
 
     # Patch is_base_embedding_weights to classify non-LoRA checkpoint keys as base weights
-    _orig_is_base_embedding_weights = getattr(lora_utils_mod, "is_base_embedding_weights", None)
+    _orig_is_base_embedding_weights = getattr(lora_utils_mod,
+                                              "is_base_embedding_weights",
+                                              None)
+
     def _patched_is_base_embedding_weights(name: str) -> bool:
-        lora_signatures = ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B")
+        lora_signatures = ("lora_A", "lora_B", "lora_embedding_A",
+                           "lora_embedding_B")
         if not any(sig in name for sig in lora_signatures):
             return True
         if _orig_is_base_embedding_weights is not None:
             return _orig_is_base_embedding_weights(name)
         return False
+
     lora_utils_mod.is_base_embedding_weights = _patched_is_base_embedding_weights
 
     # Target module updates in loaded modules to avoid broad sys.modules loops
@@ -112,7 +118,8 @@ try:
         if m in sys.modules:
             mod = sys.modules[m]
             if hasattr(mod, "is_base_embedding_weights"):
-                setattr(mod, "is_base_embedding_weights", _patched_is_base_embedding_weights)
+                setattr(mod, "is_base_embedding_weights",
+                        _patched_is_base_embedding_weights)
 except Exception:
     pass
 
