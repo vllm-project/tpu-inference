@@ -1,0 +1,3 @@
+# This file contains additional dependencies needed for TPU v7x support.
+# It is expected to be used in conjunction with the main requirements.txt file.
+google-cloud-mldiagnostics
