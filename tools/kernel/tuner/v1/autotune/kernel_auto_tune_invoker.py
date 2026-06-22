@@ -213,8 +213,7 @@ class KernelAutoTuneInvoker:
                     #(TODO): Only support kernel without communication for now and we don't have TPU 7x with 1 core queue
                     tpu_cores=supported_core_num,
                     case_set_desc=f'{kernel_tuner_name}_autotune',
-                    # parent step is from in pipeline_build.yml''
-                    parent_step_key='build_docker',
+                    parent_step_key='invoke_kernel_tuners',
                 ))
         os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
         with open(OUTPUT_PATH, "w") as f:
