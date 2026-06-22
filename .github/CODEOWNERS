@@ -42,6 +42,7 @@
 /tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
 /tpu_inference/runner/tpu_runner.py @jrplatin @kyuyeunk @wenxindongwork @sixiang-google
 /tpu_inference/runner/persistent_batch_manager.py @jrplatin @wenxindongwork
+/tpu_inference/runner/multimodal_manager.py @lk-chen @kwang3939 @jrplatin
 /tpu_inference/executors/ @sixiang-google @mrjunwan-lang
 /tpu_inference/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
 /tpu_inference/layers/common/sharding.py @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
