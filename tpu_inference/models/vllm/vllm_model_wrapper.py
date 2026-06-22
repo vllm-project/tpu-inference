@@ -771,7 +771,7 @@ def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
         device,
         model.embedding_modules,
     )
-    return lora_manager, lora_manager.create_lora_manager(model)
+    return lora_manager, lora_manager.create_lora_manager(model, vllm_config)
 
 
 # The reason why replace the method is that the set_lora and reset_lora need to
