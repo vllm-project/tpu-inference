@@ -191,7 +191,7 @@ class TPUWorker(WorkerBase):
                 # start mlrun for machinelearning diagnostics
                 self.mlrun = machinelearning_run(
                     name=f"vllm-{hostname}-{now}",
-                    environment="prod",  # IMPORTANT: PLEASE EDIT THIS
+                    environment="prod",
                     gcs_path=conf_profile_dir,
                     region=os.environ.get("ML_DIAGNOSTICS_REGION", "us-central1"),  # IMPORTANT: PLEASE EDIT THIS
                 )
