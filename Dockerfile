@@ -7,8 +7,8 @@ COPY . .
 # Patch import in tpu-inference to match new vLLM structure
 RUN find /app/tpu-inference -name "*.py" -exec sed -i 's/from vllm.inputs import ProcessorInputs/from vllm.multimodal.processing import ProcessorInputs/g' {} +
 
-# 2. Get vLLM (Use HEAD from main branch)
-RUN git clone https://github.com/vllm-project/vllm.git /app/vllm
+# 2. Get vLLM (Use fixed stable release tag)
+RUN git clone --branch v0.23.0 https://github.com/vllm-project/vllm.git /app/vllm
 
 # 3. Install vLLM first
 WORKDIR /app/vllm
