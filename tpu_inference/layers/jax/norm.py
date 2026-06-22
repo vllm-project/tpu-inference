@@ -18,51 +18,62 @@ import jax
 from flax import nnx
 
 from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 
 
-class JaxRmsNorm(nnx.RMSNorm, JaxModule):
+class JaxRmsNorm(JaxModule):
     """RmsNorm layer for JAX."""
 
     def __init__(self,
-                 *args,
+                 num_features: int,
+                 *,
+                 epsilon: float = 1e-6,
+                 param_dtype: jax.numpy.dtype = jax.numpy.float32,
+                 use_scale: bool = True,
+                 scale_init=nnx.initializers.uniform(),
+                 rngs: nnx.Rngs,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = "",
-                 **kwargs):
-        # nnx.RMSNorm uses `param_dtype` for parameter initialization dtype.
-        # Accept `dtype` as an alias for backward compatibility, but forward it
-        # as `param_dtype` so that weights are created with the correct dtype.
-        if "dtype" in kwargs and "param_dtype" not in kwargs:
-            kwargs["param_dtype"] = kwargs.pop("dtype")
-        nnx.RMSNorm.__init__(self, *args, **kwargs)
-        # For compatibility. HF model use 'weight' as name suffix, we alias `self.scale` to
-        # `self.weight` such that `named_parameters()` can match the names in HF models. We also
-        # apply transpose here to match HF weight layout.
-        self.weight = self.scale
-        delattr(self, 'scale')
-        if hasattr(self.weight, 'out_sharding'):
-            self.weight.set_metadata('sharding', self.weight.out_sharding)
-
-        self.quant_method = None
-        if quant_config is not None:
-            quant_method = quant_config.get_quant_method(self, prefix=prefix)
-            if quant_method is not None:
-                assert isinstance(quant_method, QuantizeMethodBase)
-                self.quant_method = quant_method
-                quant_method.create_weights_jax(self)
-
-    def __getattr__(self, name: str):
-        if name == "scale":
-            # nnx.RMSNorm needs to access self.scale
-            return self.weight
+                 prefix: str = ""):
+        """Initializes the RmsNorm layer.
+        
+        Args:
+            num_features: Number of features in the input.
+            epsilon: A small float added to variance to avoid dividing by zero.
+            param_dtype: The dtype of the parameters.
+            use_scale: If True, a learnable scale parameter is used.
+            scale_init: Initializer for the scale parameter.
+            rngs: Random number generators for parameter initialization.
+            quant_config: Optional quantization configuration.
+            prefix: Prefix for the layer name.
+        """
+        self.epsilon = epsilon
+        if use_scale:
+            self.weight = nnx.Param(
+                scale_init(rngs.params(), (num_features, ), param_dtype))
+        else:
+            self.weight = nnx.data(None)
+        self._layer_prefix = prefix
 
     def __call__(self,
                  x: jax.Array,
                  mask: Optional[jax.Array] = None) -> jax.Array:
-        if self.quant_method is None:
-            return nnx.RMSNorm.__call__(self, x, mask=mask)
-        return self.quant_method.apply_jax(self, x, mask=mask)
+        with jax.named_scope(self._layer_prefix):
+            weight = self.weight[...] if self.weight is not None else None
+            # Unlike nnx.RmsNorm, we do not want to upcast the output to float32, which causes
+            # convert + reshape. Instead, we keep the output in the same dtype as the input for
+            # better performance.
+            out_dtype = x.dtype
+
+            var = jax.numpy.mean(jax.numpy.square(x),
+                                 axis=-1,
+                                 keepdims=True,
+                                 where=mask)
+            mul = jax.lax.rsqrt(var + self.epsilon)
+
+            y = x * mul
+            if weight is not None:
+                y = y * jax.numpy.asarray(weight, out_dtype)
+            return jax.numpy.asarray(y, out_dtype)
 
 
 class JaxLayerNorm(nnx.LayerNorm, JaxModule):
