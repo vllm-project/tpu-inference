@@ -767,7 +767,7 @@ class KVCacheManager:
                         if len(group_sizes) > 1:
                             logger.warning_once(
                                 "Non-uniform KV-cache group sizes %s (hybrid model with irregular attention spacing); "
-                                "handled via per-group sizing.", sorted(group_sizes))
+                                "handled via per-group sizing.", tuple(sorted(group_sizes)))
                     break
 
         flat_layer_idx = 0
