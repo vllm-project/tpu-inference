@@ -171,16 +171,21 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
             )
 
 
-def create_benchmark_steps(
-        case_data: Dict[str, Any],
-        global_env: Dict[str, Any],
-        file_path: str,
-        file_basename: str,
-        parent_dir: str,
-        used_keys: Set[str],
-        errors: List[str],
-        no_verify: bool = False,
-        is_single_case: bool = False) -> List[Dict[str, Any]]:
+def _get_mlcompass_select_tests() -> Set[str]:
+    selected = os.getenv('MLCOMPASS_SELECT_TESTS')
+    if selected:
+        return {s.strip() for s in selected.split(',') if s.strip()}
+    return set()
+
+
+def create_benchmark_steps(case_data: Dict[str, Any],
+                           global_env: Dict[str, Any],
+                           file_path: str,
+                           file_basename: str,
+                           parent_dir: str,
+                           used_keys: Set[str],
+                           errors: List[str],
+                           no_verify: bool = False) -> List[Dict[str, Any]]:
     """
     Generates a list of Buildkite steps for a case.
     """
@@ -215,19 +220,22 @@ def create_benchmark_steps(
 
     # Construct the Step dictionary
     child_steps = []
+    mlcompass_select_tests = _get_mlcompass_select_tests()
     for agent in ci_queues:
         # Build the environment for this specific step
-        step_env = {**combined_env, "ci_queue": agent}
+        step_env = {
+            **combined_env, "ci_queue": agent,
+            "USE_PREBUILT_IMAGE": "1"
+        }
 
-        if is_single_case:
-            # Include parent_dir in label for uniqueness
-            step_label = f"[{parent_dir}] {agent} {file_basename}"
-            case_parameter = f"{file_path}"
-        else:
-            step_env["TARGET_CASE_NAME"] = case_name
-            # Include parent_dir in label for uniqueness
-            step_label = f"[{parent_dir}] {agent} {file_basename} {case_name}"
-            case_parameter = f"{file_path} {case_name}"
+        step_env["TARGET_CASE_NAME"] = case_name
+        # Include parent_dir in label for uniqueness
+        step_label = f"[{parent_dir}] {agent} {file_basename} {case_name}"
+        case_parameter = f"{file_path} {case_name}"
+        step_env["MLCOMPASS_TEST_NAME"] = f"vllm:{agent}:{case_name}"
+        if mlcompass_select_tests and step_env[
+                "MLCOMPASS_TEST_NAME"] not in mlcompass_select_tests:
+            continue
 
         # Define step key and check for internal collisions
         step_safe_key = clean_key_string(step_label)
@@ -237,7 +245,7 @@ def create_benchmark_steps(
                 f"within {file_path}. Ensure all of case_name are unique.")
         used_keys.add(step_safe_key)
 
-        child_steps.append({
+        step = {
             "label":
             step_label,
             "key":
@@ -249,7 +257,13 @@ def create_benchmark_steps(
             },
             "command":
             f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
-        })
+        }
+
+        # Add dependency on global case name validation if it was uploaded in bootstrap
+        if os.environ.get("BENCHMARK_VALIDATION_UPLOADED") == "true":
+            step["depends_on"] = "validate_benchmark_case_name"
+
+        child_steps.append(step)
 
     return child_steps
 
@@ -288,31 +302,22 @@ def main():
     errors = []
 
     # Process cases
-    if "benchmark_cases" in data:
-        for case in data["benchmark_cases"]:
-            # Aggregate all steps from all cases
-            all_steps.extend(
-                create_benchmark_steps(case,
-                                       global_env,
-                                       file_path,
-                                       file_basename,
-                                       parent_dir,
-                                       used_keys,
-                                       errors,
-                                       no_verify=args.no_verify,
-                                       is_single_case=False))
-    else:
-        # Single-case
+    if "benchmark_cases" not in data:
+        print(f"Error: 'benchmark_cases' is missing in {file_path}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    for case in data["benchmark_cases"]:
+        # Aggregate all steps from all cases
         all_steps.extend(
-            create_benchmark_steps(data,
+            create_benchmark_steps(case,
                                    global_env,
                                    file_path,
                                    file_basename,
                                    parent_dir,
                                    used_keys,
                                    errors,
-                                   no_verify=args.no_verify,
-                                   is_single_case=True))
+                                   no_verify=args.no_verify))
 
     # Final check: Ensure we actually produced steps and no errors occurred
     if errors:
@@ -321,9 +326,18 @@ def main():
         sys.exit(1)
 
     if not all_steps:
-        print(f"Error: No steps were generated for {file_path}",
-              file=sys.stderr)
-        sys.exit(1)
+        if _get_mlcompass_select_tests():
+            all_steps.append({
+                "label":
+                "⏭️ Benchmark case skipped — not selected by MLCompass.",
+                "command":
+                "echo Benchmark case skipped — not selected by MLCompass.",
+                "skip": True
+            })
+        else:
+            print(f"Error: No steps were generated for {file_path}",
+                  file=sys.stderr)
+            sys.exit(1)
 
     # Wrap everything in a single group
     # Group name and key both use parent_dir for absolute uniqueness
@@ -334,6 +348,7 @@ def main():
         "steps": [{
             "group": group_display_name,
             "key": group_key,
+            "depends_on": "build_docker",
             "steps": all_steps
         }]
     }

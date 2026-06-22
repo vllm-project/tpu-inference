@@ -67,16 +67,19 @@ def sharded_flash_attention(
     sm_scale: Optional[float] = None,
     vmem_limit_bytes: int | None = None,
     use_attention_bias: bool = False,
+    batch_axis="data",
+    head_axis="model",
 ) -> Callable[..., Any]:
     if use_attention_bias:
         in_specs = (
-            P("data", "model", None, None),  # q
-            P("data", "model", None, None),  # k
-            P("data", "model", None, None),  # v
-            P("data", "model", None, None),  # attention_bias
-            P("data", None),  # segment_ids (B matches q's B, so shard 'data')
+            P(batch_axis, head_axis, None, None),  # q
+            P(batch_axis, head_axis, None, None),  # k
+            P(batch_axis, head_axis, None, None),  # v
+            P(batch_axis, head_axis, None, None),  # attention_bias
+            P(batch_axis,
+              None),  # segment_ids (B matches q's B, so shard 'data')
         )
-        out_specs = P("data", "model", None, None)
+        out_specs = P(batch_axis, head_axis, None, None)
 
         def _flash_attention_use_ab(q, k, v, attention_bias, segment_ids):
             return flash_attention(q,
@@ -91,12 +94,13 @@ def sharded_flash_attention(
         attn_fn = _flash_attention_use_ab
     else:
         in_specs = (
-            P("data", "model", None, None),  # q
-            P("data", "model", None, None),  # k
-            P("data", "model", None, None),  # v
-            P("data", None),  # segment_ids (B matches q's B, so shard 'data')
+            P(batch_axis, head_axis, None, None),  # q
+            P(batch_axis, head_axis, None, None),  # k
+            P(batch_axis, head_axis, None, None),  # v
+            P(batch_axis,
+              None),  # segment_ids (B matches q's B, so shard 'data')
         )
-        out_specs = P("data", "model", None, None)
+        out_specs = P(batch_axis, head_axis, None, None)
 
         def _flash_attention(q, k, v, segment_ids):
             return flash_attention(q,
@@ -571,7 +575,8 @@ def mla_attention(
             decode_batch_size=decode_batch_size,
             q_scale=q_scale,
             k_scale=k_scale,
-            v_scale=v_scale)
+            v_scale=v_scale,
+            transpose_kv_cache=envs.MLA_TRANSPOSE_KV_CACHE)
 
         return new_cache, out
 
