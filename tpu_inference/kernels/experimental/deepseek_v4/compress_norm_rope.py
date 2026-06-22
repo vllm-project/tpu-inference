@@ -69,8 +69,8 @@ def quantize_fp8_ue8m0(x: jax.Array, block_size: int):
     fp8_max = float(jnp.finfo(jnp.float8_e4m3fn).max)
     *lead, dim = x.shape
     blocked = x.reshape(*lead, dim // block_size, block_size)
-    amax = jnp.clip(
-        jnp.max(jnp.abs(blocked), axis=-1, keepdims=True), 1e-4, None)
+    amax = jnp.clip(jnp.max(jnp.abs(blocked), axis=-1, keepdims=True), 1e-4,
+                    None)
     scale = jnp.exp2(jnp.ceil(jnp.log2(amax / fp8_max)))
     q = (blocked * (1.0 / scale)).astype(jnp.float8_e4m3fn).reshape(x.shape)
     scale = jnp.squeeze(scale, -1).astype(jnp.float8_e8m0fnu)
@@ -102,8 +102,8 @@ def unpack_sparse_kv_cache(kv_cache: jax.Array, nope_dim: int,
     b = a + rope_head_dim * 2
     nope = _from_byte_lane(kv_cache[..., :a], jnp.float8_e4m3fn)
     rope = _from_byte_lane(kv_cache[..., a:b], jnp.bfloat16)
-    scale = _from_byte_lane(
-        kv_cache[..., b:b + n_qb], jnp.float8_e8m0fnu).astype(jnp.float32)
+    scale = _from_byte_lane(kv_cache[..., b:b + n_qb],
+                            jnp.float8_e8m0fnu).astype(jnp.float32)
     return nope, rope, scale
 
 
@@ -112,9 +112,8 @@ def unpack_indexer_kv_cache(kv_cache: jax.Array, head_dim: int,
     """Split the packed indexer KV cache into ``(fp8, scale)`` views."""
     n_qb = head_dim // quant_block
     fp8 = _from_byte_lane(kv_cache[..., :head_dim], jnp.float8_e4m3fn)
-    scale = _from_byte_lane(
-        kv_cache[..., head_dim:head_dim + n_qb],
-        jnp.float8_e8m0fnu).astype(jnp.float32)
+    scale = _from_byte_lane(kv_cache[..., head_dim:head_dim + n_qb],
+                            jnp.float8_e8m0fnu).astype(jnp.float32)
     return fp8, scale
 
 
@@ -136,7 +135,8 @@ def shared_sparse_cache_shape(num_pages: int, page_size: int, nope_dim: int,
     """
     width = _align_to(
         sparse_packed_width(nope_dim, rope_head_dim, quant_block), 128)
-    return (num_pages, _align_to(page_size, PACKING) // PACKING, PACKING, width)
+    return (num_pages, _align_to(page_size, PACKING) // PACKING, PACKING,
+            width)
 
 
 def shared_indexer_cache_shape(num_pages: int, page_size: int, head_dim: int,
@@ -148,7 +148,8 @@ def shared_indexer_cache_shape(num_pages: int, page_size: int, head_dim: int,
     DeepSeek-V4 head_dim=128). 
     """
     width = _align_to(indexer_packed_width(head_dim, quant_block), 128)
-    return (num_pages, _align_to(page_size, PACKING) // PACKING, PACKING, width)
+    return (num_pages, _align_to(page_size, PACKING) // PACKING, PACKING,
+            width)
 
 
 def _state_chunk_dims(cache_shape, state_block_size: int, state_dim: int):
@@ -164,14 +165,12 @@ def _state_chunk_dims(cache_shape, state_block_size: int, state_dim: int):
     num_pages, rows, packing, width = cache_shape
     kv_slots = rows * packing
     if kv_slots % state_block_size != 0:
-        raise ValueError(
-            f"page_size {kv_slots} not divisible by "
-            f"state_block_size {state_block_size}")
+        raise ValueError(f"page_size {kv_slots} not divisible by "
+                         f"state_block_size {state_block_size}")
     rows_per_token = kv_slots // state_block_size
     if state_dim % rows_per_token != 0:
-        raise ValueError(
-            f"state_dim {state_dim} not divisible by "
-            f"rows_per_token {rows_per_token}")
+        raise ValueError(f"state_dim {state_dim} not divisible by "
+                         f"rows_per_token {rows_per_token}")
     f32_per_row = state_dim // rows_per_token
     bytes_per_row = f32_per_row * 4
     if bytes_per_row > width:
@@ -188,8 +187,8 @@ def unpack_state_cache(cache: jax.Array, state_block_size: int,
     row-slot carry state; trailing pad bytes are ignored.
     """
     num_pages, rows, packing, width = cache.shape
-    kv_slots, rpt, _, bpr = _state_chunk_dims(
-        cache.shape, state_block_size, state_dim)
+    kv_slots, rpt, _, bpr = _state_chunk_dims(cache.shape, state_block_size,
+                                              state_dim)
     slots = cache.reshape(num_pages, kv_slots, width)
     chunk = slots[:, :, :bpr].reshape(num_pages, state_block_size, rpt, bpr)
     f32 = _from_byte_lane(chunk, jnp.float32)  # [num_pages, sb, rpt, fpr]
@@ -213,8 +212,8 @@ def pack_state_cache(cache: jax.Array, state: jax.Array) -> jax.Array:
 
 
 def interleaved_rope(
-    x: jax.Array,            # [..., head_dim] fp32
-    cos_sin: jax.Array,        # [..., rope_head_dim] fp32 ([cos | sin])
+    x: jax.Array,  # [..., head_dim] fp32
+    cos_sin: jax.Array,  # [..., rope_head_dim] fp32 ([cos | sin])
     rope_head_dim: int,
 ) -> jax.Array:
     """Interleaved (GPT-J) RoPE on the trailing ``rope_head_dim`` elements."""
@@ -222,9 +221,8 @@ def interleaved_rope(
     if head_dim % 2 != 0:
         raise ValueError(f"head_dim must be even; got {head_dim}")
     if rope_head_dim % 2 != 0 or rope_head_dim > head_dim:
-        raise ValueError(
-            f"rope_head_dim must be even and <= head_dim; got "
-            f"rope_head_dim={rope_head_dim}, head_dim={head_dim}")
+        raise ValueError(f"rope_head_dim must be even and <= head_dim; got "
+                         f"rope_head_dim={rope_head_dim}, head_dim={head_dim}")
 
     half_rope = rope_head_dim // 2
     num_pairs = head_dim // 2
@@ -249,11 +247,11 @@ def interleaved_rope(
 
 
 def compress_norm_rope(
-    kv_window: jax.Array,       # [num_tokens, window, head_dim] fp32
-    score_window: jax.Array,    # [num_tokens, window, head_dim] fp32
-    valid_mask: jax.Array,      # [num_tokens, window] bool
-    rms_weight: jax.Array,      # [head_dim] fp32
-    cos_sin_cache: jax.Array,   # [max_pos, rope_head_dim] fp32
+    kv_window: jax.Array,  # [num_tokens, window, head_dim] fp32
+    score_window: jax.Array,  # [num_tokens, window, head_dim] fp32
+    valid_mask: jax.Array,  # [num_tokens, window] bool
+    rms_weight: jax.Array,  # [head_dim] fp32
+    cos_sin_cache: jax.Array,  # [max_pos, rope_head_dim] fp32
     compressed_pos: jax.Array,  # [num_tokens] int
     rms_eps: float,
     rope_head_dim: int,
@@ -263,7 +261,8 @@ def compress_norm_rope(
     masked_score = jnp.where(valid_mask[..., None], score_window, neg_inf)
     weights = jax.nn.softmax(masked_score, axis=1)
 
-    compressed_kv = jnp.sum(weights * kv_window, axis=1) # [num_tokens, head_dim]
+    compressed_kv = jnp.sum(weights * kv_window,
+                            axis=1)  # [num_tokens, head_dim]
 
     # RMSNorm over head_dim. variance: [num_tokens, 1];
     # normed: [num_tokens, head_dim].
@@ -275,9 +274,9 @@ def compress_norm_rope(
 
 
 def gather_state_windows(
-    state_cache: jax.Array,         # [num_blocks, block_size, 2*state_width] fp32
-    positions: jax.Array,           # [num_tokens] int
-    block_table: jax.Array,         # [num_reqs, max_blocks] int
+    state_cache: jax.Array,  # [num_blocks, block_size, 2*state_width] fp32
+    positions: jax.Array,  # [num_tokens] int
+    block_table: jax.Array,  # [num_reqs, max_blocks] int
     token_to_req_indices: jax.Array,  # [num_tokens] int
     block_size: int,
     head_dim: int,
@@ -322,9 +321,9 @@ def gather_state_windows(
 
 
 def _boundary_dest(
-    positions: jax.Array,       # [num_tokens] int
-    slot_mapping: jax.Array,      # [num_tokens] int
-    kv_slot_mapping: jax.Array,   # [num_tokens] int
+    positions: jax.Array,  # [num_tokens] int
+    slot_mapping: jax.Array,  # [num_tokens] int
+    kv_slot_mapping: jax.Array,  # [num_tokens] int
     compress_ratio: int,
     num_slots: int,
 ) -> jax.Array:
@@ -334,14 +333,14 @@ def _boundary_dest(
 
 
 def compress_norm_rope_store(
-    cache: jax.Array,               # [num_pages, page_size//4, 4, width] uint8
-    positions: jax.Array,           # [num_tokens] int
-    slot_mapping: jax.Array,        # [num_tokens] int (state-cache slots)
-    block_table: jax.Array,         # [num_reqs, max_blocks] int (state pages)
+    cache: jax.Array,  # [num_pages, page_size//4, 4, width] uint8
+    positions: jax.Array,  # [num_tokens] int
+    slot_mapping: jax.Array,  # [num_tokens] int (state-cache slots)
+    block_table: jax.Array,  # [num_reqs, max_blocks] int (state pages)
     token_to_req_indices: jax.Array,  # [num_tokens] int
-    kv_slot_mapping: jax.Array,     # [num_tokens] int (compressed-KV slots)
-    rms_weight: jax.Array,          # [head_dim] fp32
-    cos_sin_cache: jax.Array,       # [max_pos, rope_head_dim] fp32
+    kv_slot_mapping: jax.Array,  # [num_tokens] int (compressed-KV slots)
+    rms_weight: jax.Array,  # [head_dim] fp32
+    cos_sin_cache: jax.Array,  # [max_pos, rope_head_dim] fp32
     state_block_size: int,
     head_dim: int,
     rope_head_dim: int,
@@ -386,7 +385,9 @@ def compress_norm_rope_store(
     rope_q = rope.astype(jnp.bfloat16)
 
     record = jnp.concatenate(
-        [_to_byte_lane(q), _to_byte_lane(rope_q), _to_byte_lane(scale)],
+        [_to_byte_lane(q),
+         _to_byte_lane(rope_q),
+         _to_byte_lane(scale)],
         axis=-1)
 
     num_pages, rows, packing, width = cache.shape
@@ -405,14 +406,14 @@ def compress_norm_rope_store(
 
 
 def compress_norm_rope_store_indexer(
-    cache: jax.Array,               # [num_pages, page_size//4, 4, width] uint8
-    positions: jax.Array,           # [num_tokens] int
-    slot_mapping: jax.Array,        # [num_tokens] int (state-cache slots)
-    block_table: jax.Array,         # [num_reqs, max_blocks] int (state pages)
+    cache: jax.Array,  # [num_pages, page_size//4, 4, width] uint8
+    positions: jax.Array,  # [num_tokens] int
+    slot_mapping: jax.Array,  # [num_tokens] int (state-cache slots)
+    block_table: jax.Array,  # [num_reqs, max_blocks] int (state pages)
     token_to_req_indices: jax.Array,  # [num_tokens] int
-    kv_slot_mapping: jax.Array,     # [num_tokens] int (indexer-KV slots)
-    rms_weight: jax.Array,          # [head_dim] fp32
-    cos_sin_cache: jax.Array,       # [max_pos, rope_head_dim] fp32
+    kv_slot_mapping: jax.Array,  # [num_tokens] int (indexer-KV slots)
+    rms_weight: jax.Array,  # [head_dim] fp32
+    cos_sin_cache: jax.Array,  # [max_pos, rope_head_dim] fp32
     state_block_size: int,
     head_dim: int,
     rope_head_dim: int,
@@ -451,8 +452,7 @@ def compress_norm_rope_store_indexer(
 
     q, scale = quantize_fp8_ue8m0(compressed, quant_block)
 
-    record = jnp.concatenate(
-        [_to_byte_lane(q), _to_byte_lane(scale)], axis=-1)
+    record = jnp.concatenate([_to_byte_lane(q), _to_byte_lane(scale)], axis=-1)
 
     num_pages, rows, packing, width = cache.shape
     pad = width - record.shape[-1]

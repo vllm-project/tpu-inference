@@ -18,11 +18,11 @@ import jax.numpy as jnp
 
 
 def save_partial_states(
-    kv: jax.Array,            # [num_tokens, state_width] fp32
-    score: jax.Array,         # [num_tokens, state_width] fp32
-    ape: jax.Array,           # [compress_ratio, state_width] fp32
-    positions: jax.Array,     # [num_tokens] int
-    state_cache: jax.Array,   # [num_blocks, block_size, 2 * state_width] fp32
+    kv: jax.Array,  # [num_tokens, state_width] fp32
+    score: jax.Array,  # [num_tokens, state_width] fp32
+    ape: jax.Array,  # [compress_ratio, state_width] fp32
+    positions: jax.Array,  # [num_tokens] int
+    state_cache: jax.Array,  # [num_blocks, block_size, 2 * state_width] fp32
     slot_mapping: jax.Array,  # [num_tokens] int
     compress_ratio: int,
 ) -> jax.Array:

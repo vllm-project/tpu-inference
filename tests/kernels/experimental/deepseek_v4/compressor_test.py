@@ -19,10 +19,14 @@ import ml_dtypes
 import numpy as np
 import pytest
 
+# isort: off
 from tpu_inference.kernels.experimental.deepseek_v4.compress_norm_rope import (
-    quantize_fp8_ue8m0, shared_sparse_cache_shape, unpack_sparse_kv_cache)
-from tpu_inference.kernels.experimental.deepseek_v4.compressor import (
-    compressor_forward)
+    quantize_fp8_ue8m0,
+    shared_sparse_cache_shape,
+    unpack_sparse_kv_cache,
+)
+from tpu_inference.kernels.experimental.deepseek_v4.compressor import compressor_forward
+# isort: on
 
 requires_tpu = pytest.mark.skipif(
     jax.devices()[0].platform != "tpu",
@@ -58,9 +62,21 @@ def _interleaved_rope_ref(x, cos_sin, rope_head_dim):
 
 
 def _boundary_store_ref(
-    state_cache, positions, slot_mapping, block_table, token_to_req_indices,
-    kv_slot_mapping, rms_weight, cos_sin_cache, state_block_size, head_dim,
-    rope_head_dim, compress_ratio, overlap, rms_eps, quant_block,
+    state_cache,
+    positions,
+    slot_mapping,
+    block_table,
+    token_to_req_indices,
+    kv_slot_mapping,
+    rms_weight,
+    cos_sin_cache,
+    state_block_size,
+    head_dim,
+    rope_head_dim,
+    compress_ratio,
+    overlap,
+    rms_eps,
+    quant_block,
 ):
     """Naive NumPy boundary store; returns nope/rope/scale per flat KV slot."""
     coff = 1 + int(overlap)
@@ -94,8 +110,8 @@ def _boundary_store_ref(
             head_off = head_dim if w >= compress_ratio else 0
             kv_win[w] = state_cache[bn, bo, head_off:head_off + head_dim]
             score_win[w] = state_cache[bn, bo,
-                                       state_width + head_off:
-                                       state_width + head_off + head_dim]
+                                       state_width + head_off:state_width +
+                                       head_off + head_dim]
 
         m = np.max(score_win, axis=0, keepdims=True)
         e = np.exp(score_win - m)
@@ -125,8 +141,16 @@ def _boundary_store_ref(
 
 
 def _make_inputs(
-    compress_ratio, overlap, head_dim=512, rope_head_dim=64, quant_block=64,
-    hidden_size=256, num_reqs=2, seq_len=None, num_pad=0, seed=0,
+    compress_ratio,
+    overlap,
+    head_dim=512,
+    rope_head_dim=64,
+    quant_block=64,
+    hidden_size=256,
+    num_reqs=2,
+    seq_len=None,
+    num_pad=0,
+    seed=0,
 ):
     """Build a consistent batch: compressor slots follow the block table."""
     rng = np.random.default_rng(seed)
@@ -155,8 +179,8 @@ def _make_inputs(
 
     positions = np.concatenate(
         [np.arange(seq_len, dtype=np.int32) for _ in range(num_reqs)])
-    token_to_req_indices = np.repeat(
-        np.arange(num_reqs, dtype=np.int32), seq_len)
+    token_to_req_indices = np.repeat(np.arange(num_reqs, dtype=np.int32),
+                                     seq_len)
 
     # Compressor (state) slot = physical slot of this token's logical position,
     # so the stage-2 window gather reads back exactly what stage 1 wrote.
@@ -171,16 +195,17 @@ def _make_inputs(
     # state bytes the gather still needs.
     kv_base = num_state_pages * PAGE_SIZE
     kv_capacity = num_kv_pages * PAGE_SIZE
-    kv_slot_mapping = (
-        kv_base + rng.permutation(kv_capacity)[:num_tokens]).astype(np.int32)
+    kv_slot_mapping = (kv_base +
+                       rng.permutation(kv_capacity)[:num_tokens]).astype(
+                           np.int32)
 
     if num_pad > 0:
         pad_idx = rng.permutation(num_tokens)[:num_pad]
         slot_mapping[pad_idx] = -1
         kv_slot_mapping[pad_idx] = -1
 
-    hidden_states = rng.standard_normal(
-        (num_tokens, hidden_size), dtype=np.float32)
+    hidden_states = rng.standard_normal((num_tokens, hidden_size),
+                                        dtype=np.float32)
     # Small projection weights keep the post-GEMM magnitudes reasonable.
     wkv_wgate = (rng.standard_normal(
         (2 * state_width, hidden_size), dtype=np.float32) * 0.05)
@@ -188,23 +213,32 @@ def _make_inputs(
     norm_weight = rng.standard_normal(head_dim, dtype=np.float32)
 
     max_pos = seq_len + compress_ratio
-    cos_sin_cache = rng.standard_normal(
-        (max_pos, rope_head_dim), dtype=np.float32)
+    cos_sin_cache = rng.standard_normal((max_pos, rope_head_dim),
+                                        dtype=np.float32)
 
-    cache_shape = shared_sparse_cache_shape(
-        num_pages, PAGE_SIZE, head_dim - rope_head_dim, rope_head_dim,
-        quant_block)
+    cache_shape = shared_sparse_cache_shape(num_pages, PAGE_SIZE,
+                                            head_dim - rope_head_dim,
+                                            rope_head_dim, quant_block)
     cache = np.zeros(cache_shape, dtype=np.uint8)
 
-    return dict(
-        hidden_states=hidden_states, wkv_wgate=wkv_wgate, ape=ape,
-        norm_weight=norm_weight, cos_sin_cache=cos_sin_cache,
-        positions=positions, slot_mapping=slot_mapping,
-        block_table=block_table, token_to_req_indices=token_to_req_indices,
-        kv_slot_mapping=kv_slot_mapping, cache=cache,
-        state_block_size=state_block_size, head_dim=head_dim,
-        rope_head_dim=rope_head_dim, compress_ratio=compress_ratio,
-        overlap=overlap, rms_eps=1e-6, quant_block=quant_block)
+    return dict(hidden_states=hidden_states,
+                wkv_wgate=wkv_wgate,
+                ape=ape,
+                norm_weight=norm_weight,
+                cos_sin_cache=cos_sin_cache,
+                positions=positions,
+                slot_mapping=slot_mapping,
+                block_table=block_table,
+                token_to_req_indices=token_to_req_indices,
+                kv_slot_mapping=kv_slot_mapping,
+                cache=cache,
+                state_block_size=state_block_size,
+                head_dim=head_dim,
+                rope_head_dim=rope_head_dim,
+                compress_ratio=compress_ratio,
+                overlap=overlap,
+                rms_eps=1e-6,
+                quant_block=quant_block)
 
 
 def _to_jax(kw):
@@ -259,14 +293,20 @@ def _naive_reference(kw):
     state_cache = _save_state_ref(kv, score, kw)
 
     nope, rope, scale = _boundary_store_ref(
-        state_cache=state_cache, positions=kw["positions"],
-        slot_mapping=kw["slot_mapping"], block_table=kw["block_table"],
+        state_cache=state_cache,
+        positions=kw["positions"],
+        slot_mapping=kw["slot_mapping"],
+        block_table=kw["block_table"],
         token_to_req_indices=kw["token_to_req_indices"],
-        kv_slot_mapping=kw["kv_slot_mapping"], rms_weight=kw["norm_weight"],
+        kv_slot_mapping=kw["kv_slot_mapping"],
+        rms_weight=kw["norm_weight"],
         cos_sin_cache=kw["cos_sin_cache"],
-        state_block_size=kw["state_block_size"], head_dim=kw["head_dim"],
-        rope_head_dim=kw["rope_head_dim"], compress_ratio=kw["compress_ratio"],
-        overlap=kw["overlap"], rms_eps=kw["rms_eps"],
+        state_block_size=kw["state_block_size"],
+        head_dim=kw["head_dim"],
+        rope_head_dim=kw["rope_head_dim"],
+        compress_ratio=kw["compress_ratio"],
+        overlap=kw["overlap"],
+        rms_eps=kw["rms_eps"],
         quant_block=kw["quant_block"])
     return _dequant(nope, rope, scale, kw)
 
@@ -274,8 +314,9 @@ def _naive_reference(kw):
 def _dequant_written(act_cache, kw):
     """Unpack the kernel's shared buffer and dequantize every KV row-slot."""
     nope_dim = kw["head_dim"] - kw["rope_head_dim"]
-    nope, rope, scale = unpack_sparse_kv_cache(
-        act_cache, nope_dim, kw["rope_head_dim"], kw["quant_block"])
+    nope, rope, scale = unpack_sparse_kv_cache(act_cache, nope_dim,
+                                               kw["rope_head_dim"],
+                                               kw["quant_block"])
     return _dequant(nope, rope, scale, kw)
 
 
@@ -300,12 +341,14 @@ _CASES = [
 ]
 
 
-@pytest.mark.parametrize(
-    "compress_ratio,overlap,seq_len,num_pad,seed", _CASES)
-def test_compressor_forward_matches_reference(
-        compress_ratio, overlap, seq_len, num_pad, seed):
-    kw = _make_inputs(compress_ratio, overlap, seq_len=seq_len,
-                      num_pad=num_pad, seed=seed)
+@pytest.mark.parametrize("compress_ratio,overlap,seq_len,num_pad,seed", _CASES)
+def test_compressor_forward_matches_reference(compress_ratio, overlap, seq_len,
+                                              num_pad, seed):
+    kw = _make_inputs(compress_ratio,
+                      overlap,
+                      seq_len=seq_len,
+                      num_pad=num_pad,
+                      seed=seed)
     ref_deq = _naive_reference(kw)
 
     act_cache = np.asarray(compressor_forward(**_to_jax(kw)))
@@ -315,8 +358,10 @@ def test_compressor_forward_matches_reference(
     # written.
     slots = _written_slots(kw)
     assert slots.size > 0
-    np.testing.assert_allclose(
-        act_deq[slots], ref_deq[slots], rtol=2e-2, atol=2e-2)
+    np.testing.assert_allclose(act_deq[slots],
+                               ref_deq[slots],
+                               rtol=2e-2,
+                               atol=2e-2)
 
 
 def test_compressor_forward_eval_shape():
@@ -327,23 +372,31 @@ def test_compressor_forward_eval_shape():
     def fn(hidden_states, wkv_wgate, ape, norm_weight, cos_sin_cache,
            positions, slot_mapping, block_table, token_to_req_indices,
            kv_slot_mapping, cache):
-        return compressor_forward(
-            hidden_states=hidden_states, wkv_wgate=wkv_wgate, ape=ape,
-            norm_weight=norm_weight, cos_sin_cache=cos_sin_cache,
-            positions=positions, slot_mapping=slot_mapping,
-            block_table=block_table,
-            token_to_req_indices=token_to_req_indices,
-            kv_slot_mapping=kv_slot_mapping, cache=cache,
-            state_block_size=kw["state_block_size"], head_dim=kw["head_dim"],
-            rope_head_dim=kw["rope_head_dim"],
-            compress_ratio=kw["compress_ratio"], overlap=kw["overlap"],
-            rms_eps=kw["rms_eps"], quant_block=kw["quant_block"])
+        return compressor_forward(hidden_states=hidden_states,
+                                  wkv_wgate=wkv_wgate,
+                                  ape=ape,
+                                  norm_weight=norm_weight,
+                                  cos_sin_cache=cos_sin_cache,
+                                  positions=positions,
+                                  slot_mapping=slot_mapping,
+                                  block_table=block_table,
+                                  token_to_req_indices=token_to_req_indices,
+                                  kv_slot_mapping=kv_slot_mapping,
+                                  cache=cache,
+                                  state_block_size=kw["state_block_size"],
+                                  head_dim=kw["head_dim"],
+                                  rope_head_dim=kw["rope_head_dim"],
+                                  compress_ratio=kw["compress_ratio"],
+                                  overlap=kw["overlap"],
+                                  rms_eps=kw["rms_eps"],
+                                  quant_block=kw["quant_block"])
 
-    out_cache = jax.eval_shape(
-        fn, jkw["hidden_states"], jkw["wkv_wgate"], jkw["ape"],
-        jkw["norm_weight"], jkw["cos_sin_cache"], jkw["positions"],
-        jkw["slot_mapping"], jkw["block_table"], jkw["token_to_req_indices"],
-        jkw["kv_slot_mapping"], jkw["cache"])
+    out_cache = jax.eval_shape(fn, jkw["hidden_states"], jkw["wkv_wgate"],
+                               jkw["ape"], jkw["norm_weight"],
+                               jkw["cos_sin_cache"], jkw["positions"],
+                               jkw["slot_mapping"], jkw["block_table"],
+                               jkw["token_to_req_indices"],
+                               jkw["kv_slot_mapping"], jkw["cache"])
     assert out_cache.shape == kw["cache"].shape
     assert out_cache.dtype == jnp.uint8
 
@@ -361,5 +414,7 @@ def test_compressor_forward_runs_on_tpu():
     act_deq = _dequant_written(np.asarray(act), kw)
     slots = _written_slots(kw)
     assert slots.size > 0
-    np.testing.assert_allclose(
-        act_deq[slots], ref_deq[slots], rtol=2e-2, atol=2e-2)
+    np.testing.assert_allclose(act_deq[slots],
+                               ref_deq[slots],
+                               rtol=2e-2,
+                               atol=2e-2)
