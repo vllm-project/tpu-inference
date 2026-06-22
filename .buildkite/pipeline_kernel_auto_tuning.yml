@@ -51,5 +51,15 @@ steps:
             queue: tpu_v6e_queue
           commands:
             - |
+              rm -f /tmp/kernel_tuning/generated_pipeline.yml
+            - |
               .buildkite/scripts/run_in_docker.sh bash -c 'pip install --upgrade google-cloud-spanner google-api-core google-auth absl-py && python3 -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_invoker --case_set_id=$$KERNEL_AUTOTUNE_ID'
-      EOF
+            - |
+              # Upload the generated pipeline YAML from the temp dir on the host.
+              buildkite-agent artifact upload "/tmp/kernel_tuning/generated_pipeline.yml"
+              echo "Upload generated pipeline YAML to Buildkite artifacts with priority ${PRIORITY_KERNEL_TUNING}"
+              { 
+                echo "priority: ${PRIORITY_KERNEL_TUNING}"; 
+                cat /tmp/kernel_tuning/generated_pipeline.yml; 
+              } | buildkite-agent pipeline upload
+            EOF
