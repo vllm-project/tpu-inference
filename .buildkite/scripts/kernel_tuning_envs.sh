@@ -22,17 +22,20 @@
 KERNEL_TUNING_ENV_VARS=(
     -e KERNEL_TUNING_CASE_SET_ID="${KERNEL_TUNING_CASE_SET_ID:-}"
     -e KERNEL_TUNING_RUN_ID="${KERNEL_TUNING_RUN_ID:-}"
-    -e KERNEL_TUNING_KERNEL_NAME="${KERNEL_TUNING_KERNEL_NAME:-}"
+    -e KERNEL_TUNING_KERNEL_TUNER_NAME="${KERNEL_TUNING_KERNEL_TUNER_NAME:-}"
     -e KERNEL_TUNING_TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-}"
     -e KERNEL_TUNING_TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
 )
 
 # Validation logic
 for entry in "${KERNEL_TUNING_ENV_VARS[@]}"; do
-    # Extract the variable name from the '-e NAME=VALUE' string
-    # This pattern removes everything before '=' and the '-e ' prefix
-    var_name=$(echo "$entry" | sed 's/^-e //;s/=.*//')
-  
+    # Extract the variable name from the 'NAME=VALUE' string, skip '-e' 
+    if [[ "$entry" = "-e" ]]; then
+        continue
+    fi
+    # This pattern removes everything before '='
+    var_name="${entry%%=*}"
+
     # Check if the variable is defined and not empty
     if [[ -z "${!var_name}" ]]; then
         echo "Error: Required environment variable $var_name is not defined or is empty."
@@ -56,12 +59,20 @@ EXISTING_VARS=$(echo "${KERNEL_TUNING_ENV_VARS[@]}" | grep -oP 'KERNEL_TUNING_[A
 
 # Gather and append only if not already present, these are kernel specific environment variables
 for var in "${!KERNEL_TUNING_@}"; do
-    # Skip if the variable name is already in the EXISTING_VARS list
-    if [[ "$EXISTING_VARS" =~ $var ]]; then
+    # Skip if the exact variable name is already in the EXISTING_VARS list
+    skip=false
+    for existing_var in $EXISTING_VARS; do
+        if [[ "$existing_var" == "$var" || "$var" == "KERNEL_TUNING_ENV_VARS" ]]; then
+            skip=true
+            break
+        fi
+    done
+    
+    if [[ "$skip" == true ]]; then
+        echo "Variable $var is in the existing vars list or it's the KERNEL_TUNING_ENV_VARS, skipping it."
         continue
     fi
-
-    # Ensure the variable is not empty before adding
+    echo "Variable $var is NOT in the existing vars list, adding it if not empty."
     if [[ -n "${!var:-}" ]]; then
         KERNEL_TUNING_ENV_VARS+=(-e "${var}=${!var}")
     fi

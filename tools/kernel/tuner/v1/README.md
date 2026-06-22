@@ -136,7 +136,7 @@ python -m tools.kernel.tuner.v1.kernel_tuner_runner \
   --case_set_desc="My kernel first tuning run"
 ```
 
-On Buildkite, set `KERNEL_TUNING_KERNEL_NAME=my_kernel_tuner` in the build environment variables (see Section 2).
+On Buildkite, set `KERNEL_TUNING_KERNEL_TUNER_NAME=my_kernel_tuner` in the build environment variables (see Section 2).
 
 ---
 
@@ -208,7 +208,7 @@ curl -s -X POST \
     "branch": "'"$(git rev-parse --abbrev-ref HEAD)"'",
     "message": "kernel tuning run",
     "env": {
-      "KERNEL_TUNING_KERNEL_NAME":    "rpa_v3_kernel_tuner",
+      "KERNEL_TUNING_TUNER_KERNEL_NAME":    "rpa_v3_kernel_tuner",
       "KERNEL_TUNING_CASE_SET_ID":    "my_case_set_001",
       "KERNEL_TUNING_RUN_ID":         "001",
       "KERNEL_TUNING_CASE_SET_DESC":  "My tuning run description",
@@ -224,7 +224,7 @@ Set these in the Buildkite **New Build → Environment Variables** section:
 
 | Variable | Example | Description |
 |---|---|---|
-| `KERNEL_TUNING_KERNEL_NAME` | `rpa_v3_kernel_tuner` | Name of the kernel tuner to run. Must match a key in `KERNEL_TUNER_REGISTRY` defined in kernel_tuner_runner.py. |
+| `KERNEL_TUNING_KERNEL_TUNER_NAME` | `rpa_v3_kernel_tuner` | Name of the kernel tuner to run. Must match a key in `KERNEL_TUNER_REGISTRY` defined in kernel_tuner_runner.py. |
 | `KERNEL_TUNING_CASE_SET_ID` | `gmm_v2_tuning_001` | Unique identifier for this case set. Used as the primary key in Spanner. |
 | `KERNEL_TUNING_RUN_ID` | `001` | Run ID within the case set. Increment for re-runs of the same case set. |
 | `KERNEL_TUNING_CASE_SET_DESC` | `"Your description about this case set"` | Human-readable description stored alongside results. |

@@ -57,7 +57,6 @@ steps:
           # Start with the arguments that do not follow the KERNEL_TUNING_ pattern
           PYTHON_ARGS=( 
             "--generate_buildkite_pipeline=True"
-            "--tpu_version=${TPU_VERSION}"
           )
           
           # Dynamically gather all KERNEL_TUNING_ variables
