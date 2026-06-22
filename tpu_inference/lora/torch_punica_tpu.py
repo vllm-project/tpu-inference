@@ -17,10 +17,6 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from tpu_inference.lora.torch_lora_ops import bgmv_expand_slice, bgmv_shrink
 
-# NOTE: `async_tensor_h2d` no longer takes a `pin_memory` argument; vLLM now
-# gates pinning on its module-level `PIN_MEMORY` constant, which already
-# resolves to False on TPU, so no patching is needed here.
-
 
 class PunicaWrapperTPU(PunicaWrapperBase):
     """
