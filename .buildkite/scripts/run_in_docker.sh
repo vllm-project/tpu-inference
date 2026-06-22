@@ -20,6 +20,11 @@
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
 
+# Centrally default to using prebuilt image when running in Buildkite CI
+if [ -n "${BUILDKITE:-}" ]; then
+  export USE_PREBUILT_IMAGE="${USE_PREBUILT_IMAGE:-1}"
+fi
+
 if [ "$#" -eq 0 ]; then
   echo "ERROR: Usage: $0 <command_and_args_to_run_in_docker...>"
   exit 1
@@ -64,6 +69,7 @@ ENV_VARS=(
   -e KERNEL_TUNING_JOB_PRIORITY="${PRIORITY_KERNEL_TUNING:--10}"
   -e KERNEL_TUNING_MAX_EXECUTION_MINUTES="${KERNEL_TUNING_MAX_EXECUTION_MINUTES:-20}"
   -e HOST_NAME="${HOST_NAME:-}"
+  -e GCS_BUCKET="${GCS_BUCKET:-}"
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
@@ -116,41 +122,25 @@ KERNEL_TUNING_TMP_DIR="/tmp/kernel_tuning"
 mkdir -p "$KERNEL_TUNING_TMP_DIR"
 
 # Try to cache the JAX compilations.
-declare -a JAX_CACHE_ARGS=()
-FUSE_MOUNT_DIR="/mnt/disks/persist/tpu_jax_cache"
-
-# Probe JAX version from docker image (needed for both FUSE and direct GCS mode to separate namespaces)
+GCS_CACHE_BASE="gs://ullm-ci-cache/jax_cache"
 echo "[INFO] Probing JAX version from docker image..."
 JAX_VERSION=$(docker run --rm "$FULL_IMAGE_TAG" python3 -c "import jax; print(jax.__version__)")
 echo "[INFO] Detected JAX Version: ${JAX_VERSION}"
 
-# Centralized namespace path
+# Centralized GCS cache path
 CACHE_NAMESPACE="jax${JAX_VERSION}_tpu${TPU_VERSION:-tpu6e}"
+FINAL_CACHE_PATH="${GCS_CACHE_BASE}/${CACHE_NAMESPACE}"
 
-if [ "${CI_CACHE_FUSE_MOUNTED:-0}" = "1" ] && mountpoint -q "$FUSE_MOUNT_DIR"; then
-  # FUSE Mode: Use the host gcsfuse mount directly
-  FUSE_CACHE_DIR="${FUSE_MOUNT_DIR}/jax_cache/${CACHE_NAMESPACE}"
-  
-  # Ensure the subdirectory exists in GCS (FUSE creates folders dynamically)
-  mkdir -p "$FUSE_CACHE_DIR"
+LOCAL_JAX_CACHE_DIR="/mnt/disks/persist/tpu_jax_cache/${CACHE_NAMESPACE}"
 
-  echo "[INFO] Using GCS FUSE cache path: ${FUSE_CACHE_DIR}"
-  JAX_CACHE_ARGS+=(
-    -v "$FUSE_MOUNT_DIR":"$FUSE_MOUNT_DIR"
-    -e VLLM_XLA_CACHE_PATH="$FUSE_CACHE_DIR"
-    -e JAX_COMPILATION_CACHE_DIR="$FUSE_CACHE_DIR"
-  )
-else
-  # Direct GCS Mode: Write directly to GCS via gs:// bucket paths
-  GCS_CACHE_BASE="gs://ullm-ci-cache/jax_cache"
-  FINAL_CACHE_PATH="${GCS_CACHE_BASE}/${CACHE_NAMESPACE}"
-
-  echo "[INFO] Direct GCS JAX cache path configured: ${FINAL_CACHE_PATH}"
-  JAX_CACHE_ARGS+=(
-    -e VLLM_XLA_CACHE_PATH="${FINAL_CACHE_PATH}"
-    -e JAX_COMPILATION_CACHE_DIR="${FINAL_CACHE_PATH}"
-  )
+if ! mkdir -p "$LOCAL_JAX_CACHE_DIR"; then
+  echo "[ERROR] Failed to create $LOCAL_JAX_CACHE_DIR on persistent disk."
+  exit 1
 fi
+echo "[INFO] Pulling JAX Cache from GCS to local directory..."
+# Parallel CI builds‘ pushes are safe because JAX's compilation cache 
+# entries are content-addressed. Concurrent pushes are thus idempotent;
+gsutil -m rsync -d -r "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" || echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
 
 # ==========================================
 # 2. Run Docker Container
@@ -178,7 +168,7 @@ docker run \
   --shm-size=16G \
   --rm \
   -v "$LOCAL_HF_HOME":"$DOCKER_HF_HOME" \
-  "${JAX_CACHE_ARGS[@]}" \
+  -v "$LOCAL_JAX_CACHE_DIR":"$LOCAL_JAX_CACHE_DIR" \
   -v "$KERNEL_TUNING_TMP_DIR":"$KERNEL_TUNING_TMP_DIR" \
   "${DEV_MOUNT[@]}" \
   "${ENV_VARS[@]}" \
@@ -186,6 +176,8 @@ docker run \
   -e HF_HOME="$DOCKER_HF_HOME" \
   -e MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
   -e HF_TOKEN="$HF_TOKEN" \
+  -e VLLM_XLA_CACHE_PATH="$LOCAL_JAX_CACHE_DIR" \
+  -e JAX_COMPILATION_CACHE_DIR="$LOCAL_JAX_CACHE_DIR" \
   -e VLLM_XLA_CHECK_RECOMPILATION=1 \
   ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
   ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
@@ -196,6 +188,7 @@ docker run \
   ${USE_V7X8_QUEUE:+-e USE_V7X8_QUEUE="$USE_V7X8_QUEUE"} \
   ${MOE_REQUANTIZE_BLOCK_SIZE:+-e MOE_REQUANTIZE_BLOCK_SIZE="$MOE_REQUANTIZE_BLOCK_SIZE"} \
   ${MOE_REQUANTIZE_WEIGHT_DTYPE:+-e MOE_REQUANTIZE_WEIGHT_DTYPE="$MOE_REQUANTIZE_WEIGHT_DTYPE"} \
+  ${BVT_ONLY:+-e BVT_ONLY="$BVT_ONLY"} \
   -e NUM_PRECOMPILE_WORKERS="${NUM_PRECOMPILE_WORKERS:-1}" \
    "${BENCHMARK_DOCKER_ARGS[@]}" \
   "$FULL_IMAGE_TAG" \
@@ -208,5 +201,8 @@ set -e
 # 3. Post-Docker Actions
 # ==========================================
 echo "[INFO] Docker finished with exit code ${DOCKER_EXIT_CODE}."
+
+echo "[INFO] Syncing local JAX Cache back to GCS..."
+gsutil -m rsync -r "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" || echo "[WARN] Failed to sync JAX Cache back to GCS."
 
 exit $DOCKER_EXIT_CODE

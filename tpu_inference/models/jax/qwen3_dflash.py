@@ -333,7 +333,7 @@ class Qwen3DFlashModel(nnx.Module):
             quant_config=vllm_config.quant_config,
         )
 
-        self.layers = [
+        self.layers = nnx.List([
             # DFlash proposes up to `num_speculative_tokens + 1` query tokens
             # per request per model invocation.
             Qwen3DFlashDecoderLayer(
@@ -348,7 +348,7 @@ class Qwen3DFlashModel(nnx.Module):
                 max_query_len=int(
                     vllm_config.speculative_config.num_speculative_tokens) + 1,
             ) for _ in range(hf_config.num_hidden_layers)
-        ]
+        ])
 
         target_layer_ids = _get_dflash_target_layer_ids(
             hf_config, target_model_config.hf_config.num_hidden_layers)

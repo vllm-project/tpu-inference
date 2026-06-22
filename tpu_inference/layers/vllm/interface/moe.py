@@ -111,6 +111,7 @@ def vllm_moe_apply(layer: RoutedExperts,
 
     extra_kwargs = dict(quant_method_instance.extra_backend_kwargs)
     extra_kwargs["scatter_results"] = is_dp
+    extra_kwargs["moe_chunk_size"] = envs.VLLM_MOE_CHUNK_SIZE
 
     if getattr(layer, "hash_indices_table", None) is not None:
         assert input_ids is not None, "input_ids must be provided when hash_indices_table is present in the layer"

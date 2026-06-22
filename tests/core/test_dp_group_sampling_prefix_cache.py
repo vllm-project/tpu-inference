@@ -54,8 +54,7 @@ def llm():
         data_parallel_size=2,
     )
     yield engine
-    del engine
-    time.sleep(5)
+    engine.llm_engine.engine_core.shutdown()
 
 
 class TestGroupSamplingPrefixCache:

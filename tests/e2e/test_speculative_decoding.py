@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import random
 import string
-import time
 
 import pytest
 from vllm import LLM, SamplingParams
@@ -224,6 +223,10 @@ def _test_correctness_helper(
         spec_llm.llm_engine.engine_core.shutdown()
 
 
+# @pytest.mark.bvt selects a case into the fast per-push smoke set (the "- bvt"
+# pipeline step sets BVT_ONLY=1). Mark any new smoke-worthy case so it runs on
+# PRs; unmarked cases here run only in the full nightly matrix.
+@pytest.mark.bvt
 def test_ngram_correctness_greedy(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -352,13 +355,12 @@ def _test_performance_helper(
             print("num_accepted_tokens:" + str(num_accepted_tokens))
             print("num_draft_tokens:" + str(num_draft_tokens))
 
-        del spec_llm
-        # Waiting for TPUs to be released
-        time.sleep(30)
+        spec_llm.llm_engine.engine_core.shutdown()
 
         assert acceptance_rate >= min_acceptance_rate, f"Expected at least {min_acceptance_rate:.2%} acceptance rate for {speculative_config['method']}, got {acceptance_rate:.2%}"
 
 
+@pytest.mark.bvt
 def test_ngram_performance_greedy(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -433,10 +435,10 @@ def eagle3_baseline():
 @pytest.mark.parametrize(
     "async_scheduling, enable_dp_attention",
     [
-        (False, False),
+        pytest.param(False, False, marks=pytest.mark.bvt),
         (False, True),
         (True, False),
-        (True, True),
+        pytest.param(True, True, marks=pytest.mark.bvt),
     ],
 )
 def test_eagle3_correctness(
@@ -476,7 +478,8 @@ def test_eagle3_correctness(
 
 @pytest.mark.parametrize(
     "max_num_seqs,async_scheduling, enable_dp_attention",
-    [(1, False, False), (20, True, False), (20, True, True)],
+    [(1, False, False), (20, True, False),
+     pytest.param(20, True, True, marks=pytest.mark.bvt)],
 )
 def test_eagle3_performance(
     monkeypatch: pytest.MonkeyPatch,
@@ -554,9 +557,9 @@ def mtp_baseline():
 @pytest.mark.parametrize(
     "async_scheduling, enable_dp_attention",
     [
-        (False, False),
+        pytest.param(False, False, marks=pytest.mark.bvt),
         (True, False),
-        (True, True),
+        pytest.param(True, True, marks=pytest.mark.bvt),
     ],
 )
 def test_mtp_correctness(
@@ -597,7 +600,8 @@ def test_mtp_correctness(
 
 @pytest.mark.parametrize(
     "max_num_seqs,async_scheduling, enable_dp_attention",
-    [(1, False, False), (20, True, False), (20, True, True)],
+    [(1, False, False),
+     pytest.param(20, True, False, marks=pytest.mark.bvt), (20, True, True)],
 )
 def test_mtp_performance(
     monkeypatch: pytest.MonkeyPatch,

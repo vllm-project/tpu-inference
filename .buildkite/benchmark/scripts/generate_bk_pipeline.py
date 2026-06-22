@@ -223,7 +223,10 @@ def create_benchmark_steps(case_data: Dict[str, Any],
     mlcompass_select_tests = _get_mlcompass_select_tests()
     for agent in ci_queues:
         # Build the environment for this specific step
-        step_env = {**combined_env, "ci_queue": agent}
+        step_env = {
+            **combined_env, "ci_queue": agent,
+            "USE_PREBUILT_IMAGE": "1"
+        }
 
         step_env["TARGET_CASE_NAME"] = case_name
         # Include parent_dir in label for uniqueness
@@ -345,6 +348,7 @@ def main():
         "steps": [{
             "group": group_display_name,
             "key": group_key,
+            "depends_on": "build_docker",
             "steps": all_steps
         }]
     }

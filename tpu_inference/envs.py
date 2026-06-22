@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
+    MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
     LAYOUT_Q_PROJ_AS_NDH: bool = False
@@ -44,6 +45,13 @@ if TYPE_CHECKING:
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
     RAGGED_GATED_DELTA_RULE_IMPL: str = "chunked_jax_pd"
+    # SparseCore MoE gather kernel version used by fused_moe_gmm.
+    # "v2" (default) = ragged_gather_v2; "v1" = legacy ragged_gather.
+    RAGGED_GATHER_VERSION: str = "v2"
+    # SparseCore MoE gather-reduce (combine) kernel version used by
+    # fused_moe_gmm. "v2" (default) = ragged_gather_reduce_v2; "v1" = legacy
+    # ragged_gather_reduce.
+    RAGGED_GATHER_REDUCE_VERSION: str = "v2"
     MOE_ALL_GATHER_ACTIVATION_DTYPE: str = ""
     TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
     TPU_OFFLOAD_DECODE_SAVE: bool = False
@@ -53,6 +61,7 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_BATCHED_SAVE: bool = False
     TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
     TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
+    TPU_OFFLOAD_BLOCK_SIZE_BUCKETS: list[int] = []
     MOE_APPROX_TOPK: bool = False
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
@@ -60,6 +69,7 @@ if TYPE_CHECKING:
     NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
+    VLLM_MOE_CHUNK_SIZE: int = 0
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
     PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
@@ -286,6 +296,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MOE_REQUANTIZE_BLOCK_SIZE":
     lambda: int(block_size)
     if (block_size := os.getenv("MOE_REQUANTIZE_BLOCK_SIZE")) else None,
+    # Clip outlier weights before requantization at the given percentile
+    # (e.g. 99.9). Reduces quantization error for large block sizes by
+    # preventing extreme outliers from inflating the per-block scale.
+    "MOE_REQUANTIZE_CLIP_PERCENTILE":
+    lambda: float(pct)
+    if (pct := os.getenv("MOE_REQUANTIZE_CLIP_PERCENTILE")) else None,
     # By default, it only use max_reqs for attentions. But if set true, it
     # will precompile max_reqs to power-of-twos between min and max reqs,
     # and attention will have the num_reqs closer to actual num_reqs. This
@@ -324,6 +340,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "chunked_kernel_p_recurrent_kernel_d"
         ],
     ),
+    "RAGGED_GATHER_VERSION":
+    env_with_choices("RAGGED_GATHER_VERSION", "v2", ["v1", "v2"]),
+    "RAGGED_GATHER_REDUCE_VERSION":
+    env_with_choices("RAGGED_GATHER_REDUCE_VERSION", "v2", ["v1", "v2"]),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
     # kv offload to dram: skip pre-compiling swap-related jax functions
@@ -352,6 +372,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("TPU_OFFLOAD_USE_UNPINNED_HOST", "0"))),
     "AGGREGATED_STATS_DIR":
     lambda: os.getenv("AGGREGATED_STATS_DIR", ""),
+    # kv offload to dram: buckets of sizes for pre-compilation
+    "TPU_OFFLOAD_BLOCK_SIZE_BUCKETS":
+    lambda: env_int_list("TPU_OFFLOAD_BLOCK_SIZE_BUCKETS")
+    () or [1, 2, 4, 8, 16, 32, 64],
     # MoE: whether to use approximate top-k for expert selection.
     # Enabling this may speedup the expert selection at the risk of accuracy loss.
     "MOE_APPROX_TOPK":
@@ -382,6 +406,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS", "30000")),
     "MLA_XPOSE_N_TILE_SIZE":
     lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),
+    "VLLM_MOE_CHUNK_SIZE":
+    lambda: int(os.getenv("VLLM_MOE_CHUNK_SIZE", "0")),
     # Use Onehot+Matmul for permute and unpermute before and after moe
     # when the batch size <= this threshold. When set to 0, this feature
     # is effectively disabled.
