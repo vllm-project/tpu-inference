@@ -232,6 +232,20 @@ class TpuPlatform(Platform):
         vllm_config.sharding_config = sharding_config
         logger.info(f"Initialized sharding configuration: {sharding_config}")
 
+        # Warn about EP behavior under the default 2D sharding mode
+        tp = sharding_config.sharding_strategy.tensor_parallelism
+        ep = sharding_config.sharding_strategy.expert_parallelism
+        try:
+            use_base = envs.NEW_MODEL_DESIGN
+        except Exception:
+            use_base = False
+
+        if not use_base and ep == 1 and tp > 1:
+            logger.warning(
+                "ShardingAxisName2D (default): EP shares the 'model' "
+                "axis with TP. Effective EP=TP=%d. To use independent "
+                "EP, set NEW_MODEL_DESIGN=1.", tp)
+
     @classmethod
     def _resolve_multiprocess_dp(cls, vllm_config: VllmConfig) -> None:
         """vLLM-native multi-process DP only works for online `vllm serve` (which
