@@ -97,7 +97,8 @@ class KernelAutoTuneInvoker:
                     f'  --tpu_version={tpu_version} '
                     f'  --tpu_cores={tpu_cores} '
                     f'  --case_set_desc=\"{case_set_desc}\" '
-                    f'  --autotune_model=True '
+                    f'  --autotune_mode=True '
+                    f'  --generate_buildkite_pipeline=True '
                     f'  --max_execution_minutes={max_execution_minutes} '
                     f'  --job_priority={job_priority} '),
                 LiteralString(
