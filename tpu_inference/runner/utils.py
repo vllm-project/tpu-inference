@@ -596,6 +596,8 @@ class PhasedBasedProfiler:
             }
 
         self.current_phase: str = ""
+        self.reset_sentinel_path: str = os.path.join(
+            self.profile_dir, "reset_profiler")
 
         self.worker_rank = worker_rank
         self.aggregated_stats_logger = None
@@ -724,6 +726,28 @@ class PhasedBasedProfiler:
                     f"Profiling for {self.current_phase} phase finished")
                 self.current_phase = ""
 
+    def reset(self) -> None:
+        """
+        Resets the profiler so all phases can be captured again.
+        Called when the sentinel file is detected, allowing the bench
+        script to re-arm profiling between benchmark configurations.
+        """
+        for phase in self.inference_phase_seen:
+            self.inference_phase_seen[phase] = False
+        self.profiling_n_steps_left = 0
+        self.current_phase = ""
+        logger.info("Phased profiler reset — all phases will be re-captured")
+
+    def _check_reset_sentinel(self) -> None:
+        """
+        Checks for a sentinel file that signals the profiler should reset.
+        The bench script writes this file between benchmark configs so that
+        traces are captured for every ISL/OSL/concurrency combination.
+        """
+        if os.path.exists(self.reset_sentinel_path):
+            os.remove(self.reset_sentinel_path)
+            self.reset()
+
     # How long non-zero DP ranks will wait for rank 0 to publish the
     # canonical-ts marker before falling back to their own timestamp.
     _CANONICAL_TS_POLL_TIMEOUT_S = 5.0
@@ -847,7 +871,7 @@ class PhasedBasedProfiler:
                     num_reqs: The number of requests in the batch.
                     phase: The phase of the inference the batch is in.
         """
-
+        self._check_reset_sentinel()
         have_seen_all_phases = all(self.inference_phase_seen.values())
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
