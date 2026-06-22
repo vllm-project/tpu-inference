@@ -144,6 +144,9 @@ def _scheduler_worker_process(
     original_scheduler_cls: type,
 ):
     """Worker process that manages a single scheduler instance."""
+    import atexit, gc
+    atexit._clear()
+    gc.disable()
     # Initialize the scheduler in this process
     import inspect
     sig = inspect.signature(original_scheduler_cls)
