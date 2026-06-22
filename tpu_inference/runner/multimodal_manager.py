@@ -169,6 +169,7 @@ class MultiModalManager:
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
         encoder_outputs = []
+        deepstack_outputs = None
         for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
             # Run the encoder.
@@ -180,6 +181,10 @@ class MultiModalManager:
             # depending on the input multimodal items.
             curr_group_outputs = self.runner.embed_multimodal_fn(
                 self.runner.state_leaves, **mm_kwargs_group)
+            deepstack_group_outputs = None
+            if isinstance(curr_group_outputs, dict):
+                deepstack_group_outputs = curr_group_outputs.get("deepstack")
+                curr_group_outputs = curr_group_outputs.get("embeds", ())
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -188,14 +193,30 @@ class MultiModalManager:
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
+            if deepstack_group_outputs is not None:
+                if len(deepstack_group_outputs) != len(curr_group_outputs):
+                    raise ValueError(
+                        "DeepStack outputs must align with encoder outputs.")
+                if deepstack_outputs is None:
+                    deepstack_outputs = []
+                deepstack_outputs.extend(deepstack_group_outputs)
+            elif deepstack_outputs is not None:
+                deepstack_outputs.extend([None] * len(curr_group_outputs))
 
         # Cache the encoder outputs.
-        for (mm_hash, _), output in zip(
-                mm_hashes_pos,
-                encoder_outputs,
-        ):
-
-            self.runner.encoder_cache[mm_hash] = output
+        if deepstack_outputs is None:
+            for (mm_hash, _), output in zip(
+                    mm_hashes_pos,
+                    encoder_outputs,
+            ):
+                self.runner.encoder_cache[mm_hash] = output
+        else:
+            for (mm_hash, _), output, deepstack_output in zip(
+                    mm_hashes_pos,
+                    encoder_outputs,
+                    deepstack_outputs,
+            ):
+                self.runner.encoder_cache[mm_hash] = (output, deepstack_output)
 
     def gather_mm_embeddings(
         self,
@@ -204,7 +225,7 @@ class MultiModalManager:
         req_ids_dp: dict[int, list[str]],
         padded_num_scheduled_tokens_per_dp_rank: int,
     ) -> tuple[list[jax.Array] | None, jax.Array | None]:
-        """Gather multimodal_embeddings from the encoder cache with is_multimodal.
+        """Gather multimodal embeddings, mask, and optional DeepStack outputs.
 
         Args:
             scheduler_output: The VllmSchedulerOutput.
@@ -219,7 +240,8 @@ class MultiModalManager:
         Returns:
             A tuple containing:
                 - mm_embeds: A list of JAX arrays containing the unpadded multimodal
-                    embeddings, or None if there are no multimodal embeddings.
+                    embeddings (with DeepStack concatenated if present),
+                    or None if there are no multimodal embeddings.
                 - is_mm_embed: A boolean JAX array mask of length target_pad_len.
                     Within each DP rank's slot, True positions appear in the same
                     order as the corresponding embeddings in mm_embeds, so a
@@ -271,10 +293,14 @@ class MultiModalManager:
                         continue
 
                     mm_hash = mm_feature.identifier
-                    encoder_output = self.runner.encoder_cache.get(
-                        mm_hash, None)
-                    assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
-                    encoder_output = self.runner.encoder_cache[mm_hash]
+                    encoder_val = self.runner.encoder_cache.get(mm_hash, None)
+                    assert encoder_val is not None, f"Encoder cache miss for {mm_hash}."
+
+                    if isinstance(encoder_val, tuple):
+                        encoder_output, deepstack_output = encoder_val
+                    else:
+                        encoder_output = encoder_val
+                        deepstack_output = None
 
                     if (is_embed := pos_info.is_embed) is not None:
                         is_embed = is_embed[start_idx:end_idx]
@@ -283,7 +309,20 @@ class MultiModalManager:
                     else:
                         mm_embeds_item = encoder_output[start_idx:end_idx]
 
-                    mm_embeds.append(mm_embeds_item)
+                    if deepstack_output is not None:
+                        items_to_concat = [mm_embeds_item]
+                        for layer_embeds in deepstack_output:
+                            if is_embed is not None:
+                                layer_item = layer_embeds[
+                                    curr_embeds_start:curr_embeds_end]
+                            else:
+                                layer_item = layer_embeds[start_idx:end_idx]
+                            items_to_concat.append(layer_item)
+                        combined_item = jnp.concatenate(items_to_concat,
+                                                        axis=-1)
+                        mm_embeds.append(combined_item)
+                    else:
+                        mm_embeds.append(mm_embeds_item)
 
                     req_start_pos = (rank_token_offset + req_start_idx +
                                      start_pos - num_computed_tokens)
@@ -294,15 +333,18 @@ class MultiModalManager:
                                         start_idx:req_start_pos +
                                         end_idx] = True
                     else:
-                        # is_embed is torch Tensor in cpu
+                        embed_mask = is_embed.numpy() if hasattr(
+                            is_embed, "numpy") else np.asarray(is_embed,
+                                                               dtype=np.bool_)
                         is_mm_embed_cpu[req_start_pos +
                                         start_idx:req_start_pos +
-                                        end_idx] |= is_embed.numpy()
+                                        end_idx] |= embed_mask
 
                 req_start_idx += num_scheduled_tokens
 
         if not mm_embeds:
             return None, None
+
         is_mm_embed = jnp.array(is_mm_embed_cpu, dtype=jnp.bool_)
         assert target_pad_len == is_mm_embed.shape[0]
 
