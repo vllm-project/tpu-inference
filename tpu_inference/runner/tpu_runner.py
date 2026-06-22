@@ -15,8 +15,8 @@
 import functools
 import logging
 import random
-from contextlib import nullcontext
-from dataclasses import dataclass
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import jax
@@ -91,6 +91,30 @@ from tpu_inference.spec_decode.jax.utils import (
     process_and_extend_logits)
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function, to_jax_dtype, to_torch_dtype)
+
+try:
+    import sys
+    import vllm.lora.utils as lora_utils_mod
+
+    # Patch is_base_embedding_weights to classify non-LoRA checkpoint keys as base weights
+    _orig_is_base_embedding_weights = getattr(lora_utils_mod, "is_base_embedding_weights", None)
+    def _patched_is_base_embedding_weights(name: str) -> bool:
+        lora_signatures = ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B")
+        if not any(sig in name for sig in lora_signatures):
+            return True
+        if _orig_is_base_embedding_weights is not None:
+            return _orig_is_base_embedding_weights(name)
+        return False
+    lora_utils_mod.is_base_embedding_weights = _patched_is_base_embedding_weights
+
+    # Target module updates in loaded modules to avoid broad sys.modules loops
+    for m in ("vllm.lora.utils", "vllm.lora.lora_model"):
+        if m in sys.modules:
+            mod = sys.modules[m]
+            if hasattr(mod, "is_base_embedding_weights"):
+                setattr(mod, "is_base_embedding_weights", _patched_is_base_embedding_weights)
+except Exception:
+    pass
 
 logger = init_logger(__name__)
 
@@ -817,6 +841,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.device_buffer = common_utils.DeviceBuffer(initial_capacity=1024)
         # Cache a zero scalar JAX array to avoid eager allocation overhead during continue_decode cycles.
         self.zero_array = jnp.array(0, dtype=jnp.int32)
+
+    def add_lora(self, lora_request: Any) -> bool:
+        import torch
+        from torch.utils._mode_utils import no_dispatch
+
+        with no_dispatch(), torch._C.DisableTorchFunction():
+            return super().add_lora(lora_request)
 
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
