@@ -29,7 +29,8 @@ from jax.sharding import Sharding
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import envs
-from tpu_inference.kernels.flash_attention.kernel import flash_attention, encoder_only_flash_attention
+from tpu_inference.kernels.flash_attention.kernel import (
+    encoder_only_flash_attention, flash_attention)
 from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
@@ -155,8 +156,7 @@ def sharded_encoder_only_attention(
             in_specs=in_specs,
             out_specs=out_specs,
             check_vma=False,
-        )
-    )
+        ))
 
 
 def sharded_paged_attention(

@@ -12,15 +12,16 @@ from torchax.ops.mappings import t2j
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl,
-                                       AttentionLayer, AttentionType,
-                                       AttentionMetadataBuilder,
+                                       AttentionLayer,
+                                       AttentionMetadataBuilder, AttentionType,
                                        CommonAttentionMetadata)
 from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
                                                  register_backend)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from tpu_inference import utils
-from tpu_inference.layers.common.attention_interface import attention, encoder_only_attention
+from tpu_inference.layers.common.attention_interface import (
+    attention, encoder_only_attention)
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
@@ -28,6 +29,7 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 
 logger = init_logger(__name__)
+
 
 def get_tpu_head_size_alignment() -> int:
     try:
@@ -47,7 +49,8 @@ def get_half_smem_capacity_bytes() -> int:
         ) from e
 
 
-class PallasAttentionMetadataBuilder(AttentionMetadataBuilder[AttentionMetadata]):
+class PallasAttentionMetadataBuilder(
+        AttentionMetadataBuilder[AttentionMetadata]):
 
     def __init__(
         self,
@@ -105,8 +108,7 @@ class PallasAttentionBackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         head_alignment = get_tpu_head_size_alignment()
-        padded_head_size = (cdiv(head_size, head_alignment) *
-                            head_alignment)
+        padded_head_size = (cdiv(head_size, head_alignment) * head_alignment)
         return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
 
     @staticmethod
@@ -187,11 +189,13 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.to_jax_dtype(kv_cache_dtype)
 
-        if attn_type not in (AttentionType.DECODER, AttentionType.ENCODER_ONLY):
-            raise NotImplementedError("Encoder self-attention (for encoder-decoder) and "
-                                       "encoder/decoder cross-attention "
-                                       "are not implemented for "
-                                       "PallasAttentionBackendImpl")
+        if attn_type not in (AttentionType.DECODER,
+                             AttentionType.ENCODER_ONLY):
+            raise NotImplementedError(
+                "Encoder self-attention (for encoder-decoder) and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "PallasAttentionBackendImpl")
         self.attn_type = attn_type
 
         self.sinks = sinks
@@ -262,9 +266,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 q_scale = k_scale = v_scale = None
                 if self.kv_cache_quantized_dtype:
                     # Quantize K and V views
-                    k_jax, v_jax = quantize_kv(self.kv_cache_quantized_dtype, k_jax, v_jax,
-                                             layer._k_scale_float,
-                                             layer._v_scale_float)
+                    k_jax, v_jax = quantize_kv(self.kv_cache_quantized_dtype,
+                                               k_jax, v_jax,
+                                               layer._k_scale_float,
+                                               layer._v_scale_float)
                     k_scale = layer._k_scale_float
                     v_scale = layer._v_scale_float
 
@@ -287,9 +292,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
                     v_scale,
                     self.sliding_window,
                 )
-                vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
+                vllm_model_wrapper_context.kv_caches[
+                    kv_cache_index] = new_kv_cache
             case _:
-                raise NotImplementedError(f"Unsupported attention type: {self.attn_type}")
+                raise NotImplementedError(
+                    f"Unsupported attention type: {self.attn_type}")
 
         # 2. Common Output Copy Back and Return
         out_torch = torch_view(outputs)
@@ -377,22 +384,19 @@ def _jax_attn_func(
         attention_chunk_size=sliding_window,
     )
 
-    formatted_outputs = _format_attention_output(
-        outputs, q_len, num_heads, head_size, q.dtype
-    )
+    formatted_outputs = _format_attention_output(outputs, q_len, num_heads,
+                                                 head_size, q.dtype)
     return new_kv_cache, formatted_outputs
 
 
-@jax.jit(
-    static_argnames=(
-        "mesh",
-        "scale",
-        "head_size",
-        "num_heads",
-        "num_kv_heads",
-        "sliding_window",
-    ),
-)
+@jax.jit(static_argnames=(
+    "mesh",
+    "scale",
+    "head_size",
+    "num_heads",
+    "num_kv_heads",
+    "sliding_window",
+), )
 def _jax_encoder_only_attn_func(
     q: jax.Array,
     k: jax.Array,
@@ -418,6 +422,5 @@ def _jax_encoder_only_attn_func(
         sliding_window=sliding_window,
     )
 
-    return _format_attention_output(
-        output, q_len, num_heads, head_size, q.dtype
-    )
+    return _format_attention_output(output, q_len, num_heads, head_size,
+                                    q.dtype)

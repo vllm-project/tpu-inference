@@ -74,16 +74,14 @@ class BlockSizes:
         )
 
 
-@jax.jit(
-    static_argnames=(
-        "causal",
-        "sm_scale",
-        "sliding_window",
-        "block_sizes",
-        "vmem_limit_bytes",
-        "debug",
-    ),
-)
+@jax.jit(static_argnames=(
+    "causal",
+    "sm_scale",
+    "sliding_window",
+    "block_sizes",
+    "vmem_limit_bytes",
+    "debug",
+), )
 def encoder_only_flash_attention(
     q,  # [q_len, num_heads, head_size]
     k,  # [k_len, num_kv_heads, head_size]
@@ -115,7 +113,8 @@ def encoder_only_flash_attention(
         return jnp.pad(t, ((0, 0), (0, size), (0, 0)), constant_values=0)
 
     if block_sizes is None:
-        block_sizes = BlockSizes.get_default(1, num_heads, q_len, k_len, head_size)
+        block_sizes = BlockSizes.get_default(1, num_heads, q_len, k_len,
+                                             head_size)
     block_q = block_sizes.block_q
     block_kv = block_sizes.block_k
 
