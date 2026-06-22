@@ -42,7 +42,6 @@ steps:
           key: invoke_kernel_tuners
           priority: 200
           depends_on:
-            # - "kernel_cases_collection"
             - "kernel_autotune_main"
           env:
             USE_PREBUILT_IMAGE: "1"
