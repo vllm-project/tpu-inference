@@ -149,4 +149,4 @@ class KernelAutoTuneInvoker:
 
 if __name__ == "__main__":
     app.run(lambda _: KernelAutoTuneInvoker(
-        case_set_id='AUTOTUNE-2026-06-19-07').generate_kernel_tuning_cases())
+        case_set_id=_CASE_SET_ID.value).generate_kernel_tuning_cases())
