@@ -245,8 +245,10 @@ def quantize_tensor(
         tensor = tensor.reshape(blocked_shape)
 
     if clip_percentile is not None and block_size is not None:
-        clip_vals = jnp.percentile(
-            jnp.abs(tensor), clip_percentile, axis=tuple(axis), keepdims=True)
+        clip_vals = jnp.percentile(jnp.abs(tensor),
+                                   clip_percentile,
+                                   axis=tuple(axis),
+                                   keepdims=True)
         tensor = jnp.clip(tensor, -clip_vals, clip_vals)
 
     if jnp.issubdtype(dtype, jnp.integer):
