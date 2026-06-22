@@ -529,6 +529,7 @@ def test_phased_profiler_full_cycle(profiler_fixture):
     assert profiler.profiling_n_steps_left == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
     assert profiler.current_phase == "prefill_heavy"
     assert profiler.inference_phase_seen[InferencePhase.PREFILL_HEAVY]
+    time.sleep(0.5)  # Wait for async file write
     assert mock_file().write.call_count == 1  # Wrote stats on start
 
     # 2. Step profiling (N-1 steps)
@@ -543,6 +544,7 @@ def test_phased_profiler_full_cycle(profiler_fixture):
     mock_stop.assert_called_once()
     assert profiler.profiling_n_steps_left == 0
     assert profiler.current_phase == ""
+    time.sleep(0.5)  # Wait for async file writes
     assert mock_file(
     ).write.call_count == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR + 1
 
