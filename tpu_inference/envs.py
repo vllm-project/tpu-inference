@@ -256,7 +256,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("NEW_MODEL_DESIGN", default=False),
     # Directory to store phased profiling output
     "PHASED_PROFILING_DIR":
-    lambda: os.getenv("PHASED_PROFILING_DIR", "gs://vllm-profiles/iteration-two"),
+    lambda: os.getenv("PHASED_PROFILING_DIR", "gs://vllm-profiles/iteration-two"),  # IMPORTANT: PLEASE EDIT THIS
     # Python tracer level for profiling
     "PYTHON_TRACER_LEVEL":
     lambda: int(os.getenv("PYTHON_TRACER_LEVEL") or "1"),
