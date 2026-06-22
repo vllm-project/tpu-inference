@@ -196,20 +196,6 @@ class KernelAutoTuneInvoker:
             'tpu6e' in tpu or 'tpu7x' in tpu for tpu in tpus
         ), f'Unsupported TPU versions found in auto-tune cases: {tpus}. Supported versions are tpu6e and tpu7x.'
         tpus = set('tpu6e' if 'tpu6e' in tpu else 'tpu7x' for tpu in tpus)
-        if 'tpu6e' in tpus:
-            build_image_step_6e_key = 'tpu6e_build_docker'
-            build_image_step_6e = self._generate_build_image_step(
-                "tpu6e",
-                parent_step_key='invoke_all_kernel_tuners',
-                step_key=build_image_step_6e_key)
-            pipeline["steps"].append(build_image_step_6e)
-        if 'tpu7x' in tpus:
-            build_image_step_7x_key = 'tpu7x_build_docker'
-            build_image_step_7x = self._generate_build_image_step(
-                "tpu7x",
-                parent_step_key='invoke_all_kernel_tuners',
-                step_key=build_image_step_7x_key)
-            pipeline["steps"].append(build_image_step_7x)
 
         generated_cases = set()
         for row in autotune_cases:
@@ -219,7 +205,6 @@ class KernelAutoTuneInvoker:
                 continue
             generated_cases.add((kernel_tuner_name, tpu))
             supported_core_num = 1 if tpu == 'tpu6e' else 2
-            parent_step_key = build_image_step_6e_key if tpu == 'tpu6e' else build_image_step_7x_key
             pipeline['steps'].append(
                 self._build_generate_tuning_cases_step(
                     kernel_tuner_name=kernel_tuner_name,
@@ -228,7 +213,8 @@ class KernelAutoTuneInvoker:
                     #(TODO): Only support kernel without communication for now and we don't have TPU 7x with 1 core queue
                     tpu_cores=supported_core_num,
                     case_set_desc=f'{kernel_tuner_name}_autotune',
-                    parent_step_key=parent_step_key,
+                    # parent step is from in pipeline_build.yml''
+                    parent_step_key='build_docker',
                 ))
         os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
         with open(OUTPUT_PATH, "w") as f:
