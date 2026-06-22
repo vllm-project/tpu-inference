@@ -270,8 +270,11 @@ class StorageManager:
         """
         raise NotImplementedError(
             "Subclasses must implement add_auto_tune_case")
-    
-    def read_auto_tune_cases(self, case_set_id: str, kernel_tuner_name: str = None, tpu: str = None):
+
+    def read_auto_tune_cases(self,
+                             case_set_id: str,
+                             kernel_tuner_name: str = None,
+                             tpu: str = None):
         """Reads tuning cases from the AutoTuneCase table for a given case set.
 
         Used for debugging and analysis of tuning runs.

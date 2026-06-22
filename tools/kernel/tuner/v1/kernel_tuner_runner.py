@@ -110,7 +110,6 @@ KERNEL_TUNER_REGISTRY = {
 }
 
 
-
 def main(argv):
     del argv  # Unused.
 
