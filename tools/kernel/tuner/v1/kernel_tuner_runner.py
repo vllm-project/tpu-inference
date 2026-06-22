@@ -148,6 +148,7 @@ def main(argv):
                            spanner_instance_id=_SPANNER_INSTANCE_ID.value,
                            spanner_database_id=_SPANNER_DATABASE_ID.value,
                            worker_id=_WORKER_ID.value,
+                           autotune_mode=_AUTOTUNE_MODE.value,
                            debug=_DEBUG.value)
     kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
     kernel_tuner = kernel_tuner_cls(run_config=run_config)

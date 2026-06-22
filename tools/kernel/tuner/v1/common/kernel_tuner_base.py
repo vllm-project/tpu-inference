@@ -106,6 +106,7 @@ class RunConfig:
     spanner_instance_id: str = None
     spanner_database_id: str = None
     worker_id: str = None
+    autotune_mode: bool = False
     debug: bool = False
 
 

@@ -164,6 +164,9 @@ class MlaKernelTuner(KernelTunerBase):
                                         kernel_tuner_name="mla_kernel_tuner")
         super().__init__(tuner_config=self.tuner_config, run_config=run_config)
 
+    def support_autotune(self) -> bool:
+        return True
+
     def generate_cases(self) -> list[TuningCase]:
         tuning_set_from_log = []
         # The tuningKey and tunableParams in this list is constructed based on the real kernel execution logs during benchmarking.
