@@ -261,7 +261,7 @@ def _flash_attention_kernel_single_batch(
                                             block_k))].astype(jnp.float32)
                 s += ab
 
-            if sm_scale != 1.0:
+            if sm_scale is not None and sm_scale != 1.0:
                 s *= sm_scale
 
             mask = None
@@ -371,7 +371,7 @@ def _flash_attention_kernel_single_batch_single_step(
 
     if ab_tile_ref is not None:
         s += ab_tile_ref[batch_idx].astype(jnp.float32)
-    if sm_scale != 1.0:
+    if sm_scale is not None and sm_scale != 1.0:
         s *= sm_scale
 
     mask = None
@@ -677,7 +677,7 @@ def mha_reference_no_custom_vjp(
     logits = jnp.einsum("bhqc,bhkc->bhqk", q, k)
     if ab is not None:
         logits += ab
-    if sm_scale != 1.0:
+    if sm_scale is not None and sm_scale != 1.0:
         logits *= sm_scale
 
     mask = None

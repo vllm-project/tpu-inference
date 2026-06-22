@@ -537,7 +537,6 @@ def get_vllm_model(
     model_dtype = to_torch_dtype(vllm_config.model_config.dtype)
     vllm_config.model_config.dtype = model_dtype
     from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
-
     model = VllmModelWrapper(
         vllm_config=vllm_config,
         rng=rng,
