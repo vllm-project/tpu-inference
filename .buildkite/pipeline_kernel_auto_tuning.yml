@@ -13,8 +13,8 @@
 # limitations under the License.
 
 steps:
-  - label: "Kernel AutoTune Main"
-    key: kernel_autotune_main
+  - label: "Kernel AutoTune Entry"
+    key: kernel_autotune_entry
     agents:
       queue: cpu
     priority: 200
@@ -32,7 +32,7 @@ steps:
         #     queue: cpu
         #   priority: 200
         #   key: kernel_cases_collection
-        #   depends_on: kernel_autotune_main
+        #   depends_on: kernel_autotune_entry
         #   env:
         #     KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
         #   command: |
@@ -42,7 +42,7 @@ steps:
           key: invoke_kernel_tuners
           priority: 200
           depends_on:
-            - "kernel_autotune_main"
+            - "kernel_autotune_entry"
           env:
             USE_PREBUILT_IMAGE: "1"
             TPU_VERSION: "tpu6e"
