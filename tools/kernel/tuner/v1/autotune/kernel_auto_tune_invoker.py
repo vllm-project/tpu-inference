@@ -19,6 +19,8 @@ from absl import app, flags
 
 from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
     SpannerStorageManager
+import logging
+logger = logging.getLogger(__name__)
 
 # invoke the kernel tuning pipeline for each kernel
 # when in auto tune mode, the kernel tuner will read the cases from spanner instead
@@ -44,6 +46,7 @@ _SPANNER_INSTANCE_ID = flags.DEFINE_string(
 _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'spanner_database_id', 'tune-gmm',
     'The Spanner database ID to use. Only used when --run_locally is false.')
+_CASE_SET_ID = flags.DEFINE_string('case_set_id', '', 'The case set ID to use for this run.')
 
 OUTPUT_PATH = "/tmp/kernel_tuning/generated_pipeline.yml"
 
@@ -57,47 +60,6 @@ class KernelAutoTuneInvoker:
             gcp_project_id=_GCP_PROJECT_ID.value,
             spanner_instance_id=_SPANNER_INSTANCE_ID.value,
             spanner_database_id=_SPANNER_DATABASE_ID.value)
-
-#   - label: ":docker: Tuning Cases Generation and Pipeline Upload (${TPU_VERSION:-tpu6e})"
-#     key: generate_tuning_cases_and_yml
-#     depends_on: ${TPU_VERSION:-tpu6e}_build_docker
-#     env:
-#       USE_PREBUILT_IMAGE: "1"
-#       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-#     agents:
-#       queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
-#     commands:
-#       - |
-#         # remove the existing generated pipeline YAML in the temp dir on the host.
-#         rm -f "/tmp/kernel_tuning/generated_pipeline.yml"
-#       - |
-#         .buildkite/scripts/run_in_docker.sh bash -c "
-#           if [ -z \"\${KERNEL_TUNING_RUN_ID}\" ] || [ -z \"\${KERNEL_TUNING_CASE_SET_ID}\" ]; then
-#             echo \"Error: KERNEL_TUNING_RUN_ID or KERNEL_TUNING_CASE_SET_ID not set\"
-#             exit 1
-#           fi && \
-#           pip install --upgrade google-cloud-spanner && \
-#           pip install --upgrade google-api-core && \
-#           pip install --upgrade google-auth && \
-#           pip install --upgrade absl-py && \
-#           python -m tools.kernel.tuner.v1.kernel_tuner_runner \
-#           --kernel_tuner_name=\${KERNEL_TUNING_KERNEL_NAME} \
-#           --case_set_desc=\${KERNEL_TUNING_CASE_SET_DESC} \
-#           --generate_buildkite_pipeline=True \
-#           --case_set_id=\${KERNEL_TUNING_CASE_SET_ID} \
-#           --run_id=\${KERNEL_TUNING_RUN_ID} \
-#           --tpu_cores=\${KERNEL_TUNING_TPU_CORES} \
-#           --job_priority=\${KERNEL_TUNING_JOB_PRIORITY:--10} \
-#           --max_execution_minutes=\${KERNEL_TUNING_MAX_EXECUTION_MINUTES:-20} \
-#           --tpu_version=\${TPU_VERSION} "
-#       - |
-#         # Upload the generated pipeline YAML from the temp dir on the host.
-#         buildkite-agent artifact upload "/tmp/kernel_tuning/generated_pipeline.yml"
-#         echo "Upload generated pipeline YAML to Buildkite artifacts with priority ${PRIORITY_KERNEL_TUNING}"
-#         {
-#           echo "priority: ${PRIORITY_KERNEL_TUNING}";
-#           cat /tmp/kernel_tuning/generated_pipeline.yml;
-#         } | buildkite-agent pipeline upload
 
     def _build_generate_tuning_cases_step(self,
                                           kernel_tuner_name: str,
@@ -152,41 +114,6 @@ class KernelAutoTuneInvoker:
             ]
         }
 
-
-#   - label: ":docker: Build and Push Base Image (${TPU_VERSION:-tpu6e})"
-#     key: ${TPU_VERSION:-tpu6e}_build_docker
-#     agents:
-#       queue: cpu_64_core
-#     env:
-#       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-#     commands:
-#       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
-
-    def _generate_build_image_step(self,
-                                   tpu_version: str,
-                                   step_key: str,
-                                   parent_step_key: str = None) -> dict:
-        parent_step_key = parent_step_key or 'generate_tuning_cases_and_yml'
-        return {
-            "label":
-            f":docker: Build and Push Base Image ({tpu_version})",
-            "key":
-            step_key,
-            "depends_on":
-            parent_step_key,
-            "agents": {
-                "queue": "cpu_64_core"
-            },
-            "env": {
-                "TPU_VERSION": f"\"{tpu_version}\""
-            },
-            "commands": [
-                LiteralString(
-                    'bash -c \'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"\''
-                ),
-            ]
-        }
-
     def generate_kernel_tuning_cases(self):
         pipeline = {"steps": []}
         autotune_cases = self.storage_manager.read_auto_tune_cases(
@@ -217,6 +144,7 @@ class KernelAutoTuneInvoker:
                 ))
         os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
         with open(OUTPUT_PATH, "w") as f:
+            logger.info(f"Writing generated pipeline to {OUTPUT_PATH}")
             yaml.dump(pipeline, f, default_flow_style=False, sort_keys=False)
 
 if __name__ == "__main__":
