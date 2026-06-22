@@ -13,10 +13,11 @@
 # limitations under the License.
 
 steps:
-  - label: ":main:"
+  - label: "Kernel AutoTune Main"
     agents:
       queue: cpu
     priority: 200
+    depends_on: upload_pipeline
     command: |
       # export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$$(date +%Y-%m-%d-%H-%M)
       export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-20-06-21"
@@ -37,8 +38,6 @@ steps:
           
         - label: "Invoke Kernel Tuners"
           key: invoke_kernel_tuners
-          agents:
-            queue: cpu
           priority: 200
           depends_on:
             - "build_docker_tpu6e"
@@ -47,6 +46,8 @@ steps:
             USE_PREBUILT_IMAGE: "1"
             TPU_VERSION: "tpu6e"
             KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
+          agents:
+            queue: tpu_v6e_queue
           commands:
             - |
               .buildkite/scripts/run_in_docker.sh bash -c 'pip install --upgrade google-cloud-spanner google-api-core google-auth absl-py && python3 -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_invoker'
