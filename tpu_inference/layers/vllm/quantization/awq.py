@@ -29,10 +29,10 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
-from vllm.model_executor.layers.quantization.auto_awq import \
-    AutoAWQConfig as AWQConfig
-from vllm.model_executor.layers.quantization.auto_awq import \
-    AutoAWQLinearMethod as AWQLinearMethod
+from vllm.model_executor.layers.quantization.awq import \
+    AWQConfig
+from vllm.model_executor.layers.quantization.awq import \
+    AWQLinearMethod
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import \

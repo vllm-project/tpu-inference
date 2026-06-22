@@ -3,6 +3,8 @@
 import math
 import os
 import tempfile
+import datetime
+import socket
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 
@@ -171,6 +173,32 @@ class TPUWorker(WorkerBase):
 
         # step_counter is used to calculate uuid to transfer intermediate tensors.
         self.step_counter = 0
+
+        self.mlrun = None
+
+        # IMPORTANT: PLEASE EDIT THIS - Hardcoded Diagon configurations
+        enable_diagon = True  # IMPORTANT: PLEASE EDIT THIS
+        conf_profile_dir = "gs://vllm-profiles/iteration-three"  # IMPORTANT: PLEASE EDIT THIS
+
+        if enable_diagon and conf_profile_dir:
+            logger.info("Initializing mldiagnostics")
+            try:
+                from google_cloud_mldiagnostics import machinelearning_run
+
+                now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                hostname = socket.gethostname()
+
+                # start mlrun for machinelearning diagnostics
+                self.mlrun = machinelearning_run(
+                    name=f"vllm-{hostname}-{now}",
+                    environment="prod",
+                    gcs_path=conf_profile_dir,
+                    region=os.environ.get("ML_DIAGNOSTICS_REGION", "us-central1"),  # IMPORTANT: PLEASE EDIT THIS
+                )
+                self.profile_dir = f"{self.mlrun.gcs_path}/{self.mlrun.name}"
+                logger.info(f"Mldiagnostics init profile dir {self.profile_dir}")
+            except ImportError as e:
+                raise ImportError(f"ENABLE_GOOGLE_DIAGON_ML_DIAGNOSTICS specified but dependency missed. Please install google-cloud-mldiagnostics.") from e
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -372,7 +400,7 @@ class TPUWorker(WorkerBase):
 
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
                                            self.rank, is_first_rank,
-                                           is_last_rank)
+                                           is_last_rank, self.mlrun)
         logger.info(f"Init worker | "
                     f"rank={self.rank} | "
                     f"is_first_rank={is_first_rank} | "
