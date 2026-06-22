@@ -2,12 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import Optional, TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch.nn.functional as F
 import torchax
-from vllm.lora.punica_wrapper.utils import convert_mapping
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -274,9 +273,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             mapping.prompt_mapping)
 
         # Compute mapping using NumPy to avoid PyTorch JAX devices linking errors
-        import numpy as np
         import jax
         import jax.numpy as jnp
+        import numpy as np
         import torchax
 
         index_mapping_indices: list[int] = list(mapping.index_mapping)
@@ -284,19 +283,20 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         lora_indices = index_mapping_indices.copy()
 
         prompt_mapping: list[int] = [
-            lora_index_to_id.index(x) if x > 0 else -1 for x in mapping.prompt_mapping
+            lora_index_to_id.index(x) if x > 0 else -1
+            for x in mapping.prompt_mapping
         ]
         for i in range(len(index_mapping_indices)):
-            lora_idx = (
-                lora_index_to_id.index(index_mapping_indices[i])
-                if index_mapping_indices[i] > 0
-                else -1
-            )
-            embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
+            lora_idx = (lora_index_to_id.index(index_mapping_indices[i])
+                        if index_mapping_indices[i] > 0 else -1)
+            embedding_indices[
+                i] = lora_idx if index_mapping_indices[i] > 0 else 0
             lora_indices[i] = lora_idx
 
         # Calculate shapes and mapping arrays in numpy
-        indices = np.array([index_mapping_indices, lora_indices, embedding_indices], dtype=np.int64)
+        indices = np.array(
+            [index_mapping_indices, lora_indices, embedding_indices],
+            dtype=np.int64)
         prompt_mapping_arr = np.array(prompt_mapping, dtype=np.int64)
 
         extra_vocab_size = 0  # default mapping parameter
@@ -304,14 +304,14 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         mapped_1 = indices[2] * (vocab_size + extra_vocab_size)
         embeddings_indices_arr = np.stack([mapped_0, mapped_1])
 
-        embeddings_indices_arr = np.where(
-            embeddings_indices_arr == -1, max_loras - 1, embeddings_indices_arr
-        )
+        embeddings_indices_arr = np.where(embeddings_indices_arr == -1,
+                                          max_loras - 1,
+                                          embeddings_indices_arr)
         base_indices_arr = indices[1]
         sampler_indices_arr = prompt_mapping_arr
-        sampler_indices_padded_arr = np.where(
-            sampler_indices_arr == -1, max_loras - 1, sampler_indices_arr
-        )
+        sampler_indices_padded_arr = np.where(sampler_indices_arr == -1,
+                                              max_loras - 1,
+                                              sampler_indices_arr)
 
         indices_len = [
             len(index_mapping_indices),
@@ -327,10 +327,14 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             from torch_xla2.interop import jax_view
 
         with torchax.default_env():
-            base_indices = jax_view(jax.device_put(jnp.array(base_indices_arr)))
-            sampler_indices = jax_view(jax.device_put(jnp.array(sampler_indices_arr)))
-            sampler_indices_padded = jax_view(jax.device_put(jnp.array(sampler_indices_padded_arr)))
-            embeddings_indices = jax_view(jax.device_put(jnp.array(embeddings_indices_arr)))
+            base_indices = jax_view(jax.device_put(
+                jnp.array(base_indices_arr)))
+            sampler_indices = jax_view(
+                jax.device_put(jnp.array(sampler_indices_arr)))
+            sampler_indices_padded = jax_view(
+                jax.device_put(jnp.array(sampler_indices_padded_arr)))
+            embeddings_indices = jax_view(
+                jax.device_put(jnp.array(embeddings_indices_arr)))
 
             self._token_lora_indices = self._pad_to_shape(
                 base_indices, self._token_lora_indices.shape,
