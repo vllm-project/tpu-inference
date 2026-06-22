@@ -104,7 +104,7 @@ TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-}"
 TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
 
 set_jax_envs "${TPU_VERSION}" "${TPU_CORES}"
-buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
+buildkite-agent pipeline upload .buildkite/pipeline_kernel_auto_tuning.yml
 set_jax_envs "unset" ""
 
 buildkite-agent pipeline upload .buildkite/pipeline_build.yml
