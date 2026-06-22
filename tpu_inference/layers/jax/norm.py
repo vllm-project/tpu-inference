@@ -29,6 +29,7 @@ class JaxRmsNorm(JaxModule):
                  *,
                  epsilon: float = 1e-6,
                  param_dtype: jax.numpy.dtype = jax.numpy.float32,
+                 dtype: Optional[jax.numpy.dtype] = None,
                  use_scale: bool = True,
                  scale_init=nnx.initializers.uniform(),
                  rngs: nnx.Rngs,
@@ -40,6 +41,7 @@ class JaxRmsNorm(JaxModule):
             num_features: Number of features in the input.
             epsilon: A small float added to variance to avoid dividing by zero.
             param_dtype: The dtype of the parameters.
+            dtype: The dtype of the output. If None, defaults to input dtype.
             use_scale: If True, a learnable scale parameter is used.
             scale_init: Initializer for the scale parameter.
             rngs: Random number generators for parameter initialization.
@@ -47,6 +49,7 @@ class JaxRmsNorm(JaxModule):
             prefix: Prefix for the layer name.
         """
         self.epsilon = epsilon
+        self.dtype = dtype
         if use_scale:
             self.weight = nnx.Param(
                 scale_init(rngs.params(), (num_features, ), param_dtype))
@@ -62,7 +65,7 @@ class JaxRmsNorm(JaxModule):
             # Unlike nnx.RmsNorm, we do not want to upcast the output to float32, which causes
             # convert + reshape. Instead, we keep the output in the same dtype as the input for
             # better performance.
-            out_dtype = x.dtype
+            out_dtype = self.dtype if self.dtype is not None else x.dtype
 
             var = jax.numpy.mean(jax.numpy.square(x),
                                  axis=-1,

@@ -59,10 +59,21 @@ class TestJaxRmsNorm:
         jax_output = layer(x)
         flax_output = flax_layer(x)
 
+        # JaxRmsNorm intentionally computes RMS stats in the input's native
+        # dtype rather than upcasting to float32 like nnx.RMSNorm does (a
+        # deliberate speed-for-precision tradeoff -- upcasting forces a real
+        # TPU relayout, not just a "free" reshape). That makes bf16/fp16
+        # diverge from nnx.RMSNorm by up to 1 ULP at that precision; float32
+        # is unaffected since there's nothing to upcast from.
+        atol = {
+            jax.numpy.float32: 1e-5,
+            jax.numpy.float16: 2e-3,
+            jax.numpy.bfloat16: 1e-2,
+        }[dtype]
         assert jax.numpy.allclose(jax_output,
                                   flax_output,
                                   rtol=1e-5,
-                                  atol=1e-5)
+                                  atol=atol)
 
 
 class TestJaxLayerNorm:
