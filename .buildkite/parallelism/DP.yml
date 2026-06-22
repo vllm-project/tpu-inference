@@ -70,7 +70,7 @@ steps:
     env:
       NEW_MODEL_DESIGN: "1"
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+      queue: cpu  # TODO: replace with execution environment (e.g. "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}")
     commands:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Multi_Host" "unverified"
@@ -95,7 +95,7 @@ steps:
     env:
       NEW_MODEL_DESIGN: "1"
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+      queue: cpu  # TODO: replace with execution environment (e.g. "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}")
     commands:
       - |
         buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Multi_Host" "unverified"

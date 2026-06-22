@@ -122,8 +122,21 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
 
     def __init__(self, quant_config: 'VllmNvfp4Config',
                  linear_config: VllmQuantLinearConfig):
+        # Monkeypatch expose_input_quant_key in modelopt module safely on TPU
+        from vllm.model_executor.layers.quantization import \
+            modelopt as vllm_modelopt
+        original_expose = vllm_modelopt.expose_input_quant_key
+
+        def safe_expose_input_quant_key(layer, kernel):
+            if kernel is None:
+                return
+            original_expose(layer, kernel)
+
+        vllm_modelopt.expose_input_quant_key = safe_expose_input_quant_key
+
         VllmUnquantizedLinearMethod.__init__(self, linear_config)
         self.quant_config = quant_config
+        self.kernel = None
 
     def create_weights(self, layer, input_size_per_partition,
                        output_partition_sizes, input_size, output_size,

@@ -99,9 +99,7 @@ def _test_performance_helper(monkeypatch: pytest.MonkeyPatch,
         _ = ref_llm.generate(test_prompts, sampling_config)
         ref_time = time.time() - start_time
 
-        del ref_llm
-        # Waiting for TPUs to be released
-        time.sleep(10)
+        ref_llm.llm_engine.engine_core.shutdown()
 
         # # Test async LLM timing with max_num_seqs=256
         async_llm = LLM(model=model_name,
@@ -115,9 +113,7 @@ def _test_performance_helper(monkeypatch: pytest.MonkeyPatch,
         _ = async_llm.generate(test_prompts, sampling_config)
         async_time = time.time() - start_time
 
-        del async_llm
-        # # Waiting for TPUs to be released
-        time.sleep(10)
+        async_llm.llm_engine.engine_core.shutdown()
 
         speedup = ref_time / async_time
         print(f"Reference LLM time: {ref_time:.2f}s")
@@ -168,10 +164,7 @@ def _test_correctness_helper(
                       async_scheduling=0)
         ref_outputs = ref_llm.generate(test_prompts, sampling_config)
 
-        del ref_llm
-
-        # Waiting for TPUs to be released.
-        time.sleep(10)
+        ref_llm.llm_engine.engine_core.shutdown()
 
         async_llm = LLM(model=model_name,
                         max_model_len=1024,
@@ -196,10 +189,7 @@ def _test_correctness_helper(
                 )
 
         assert misses <= 5  # Adjusted the performance thresholds for this specific test to better reflect the realities of the CI environment
-        del async_llm
-
-        # Waiting for TPUs to be released.
-        time.sleep(10)
+        async_llm.llm_engine.engine_core.shutdown()
 
 
 def test_async_correctness(

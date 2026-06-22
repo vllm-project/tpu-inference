@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import functools
 import math
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch.nn.functional as F
 import torchax
-import vllm.lora.punica_wrapper.utils as _punica_utils
 from vllm.lora.punica_wrapper.utils import convert_mapping
-from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -19,11 +16,6 @@ if TYPE_CHECKING:
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from tpu_inference.lora.torch_lora_ops import bgmv_expand_slice, bgmv_shrink
-
-# Pin memory is unsupported on TPU; force `pin_memory` off for
-# `async_tensor_h2d` calls.
-_punica_utils.async_tensor_h2d = functools.partial(
-    _punica_utils.async_tensor_h2d, pin_memory=is_pin_memory_available())
 
 
 class PunicaWrapperTPU(PunicaWrapperBase):

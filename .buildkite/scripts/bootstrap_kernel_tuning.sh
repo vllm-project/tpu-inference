@@ -107,4 +107,6 @@ set_jax_envs "${TPU_VERSION}" "${TPU_CORES}"
 buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
 set_jax_envs "unset" ""
 
+buildkite-agent pipeline upload .buildkite/pipeline_build.yml
+
 echo "--- Buildkite Kernel Tuning Bootstrap Finished"
