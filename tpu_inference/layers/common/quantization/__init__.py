@@ -196,6 +196,7 @@ def quantize_tensor(
     tensor: jax.Array,
     axis: int | tuple | None = -1,
     block_size: int | None = None,
+    clip_percentile: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Quantize tensor.
 
@@ -204,6 +205,7 @@ def quantize_tensor(
         tensor: Unquantized tensor
         axis: Axis to perform quantization. None denotes per-tensor.
         block_size: Specify block quantization size.
+        clip_percentile: If set, clip outliers per block before computing scale.
 
     Returns:
         Tensor quantized to dtype.
@@ -241,6 +243,11 @@ def quantize_tensor(
         # Flatten list of lists that contains (num_blocks, block).
         blocked_shape = list(itertools.chain(*blocked_shape))
         tensor = tensor.reshape(blocked_shape)
+
+    if clip_percentile is not None and block_size is not None:
+        clip_vals = jnp.percentile(
+            jnp.abs(tensor), clip_percentile, axis=tuple(axis), keepdims=True)
+        tensor = jnp.clip(tensor, -clip_vals, clip_vals)
 
     if jnp.issubdtype(dtype, jnp.integer):
         dtype_info = jnp.iinfo(dtype)
