@@ -88,6 +88,7 @@ steps:
       - label: "${TPU_VERSION:-tpu6e} E2E speculative decoding test"
         key: ${TPU_VERSION:-tpu6e}_test_6
         soft_fail: true
+        timeout_in_minutes: 240
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
