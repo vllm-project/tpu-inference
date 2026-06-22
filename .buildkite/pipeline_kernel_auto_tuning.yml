@@ -14,10 +14,11 @@
 
 steps:
   - label: "Kernel AutoTune Main"
+    key: kernel_autotune_main
     agents:
       queue: cpu
     priority: 200
-    depends_on: upload_pipeline
+    depends_on: build_docker
     command: |
       # export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$$(date +%Y-%m-%d-%H-%M)
       export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-20-06-21"
@@ -31,6 +32,7 @@ steps:
         #     queue: cpu
         #   priority: 200
         #   key: kernel_cases_collection
+        #   depends_on: kernel_autotune_main
         #   env:
         #     KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
         #   command: |
@@ -40,8 +42,7 @@ steps:
           key: invoke_kernel_tuners
           priority: 200
           depends_on:
-            - "build_docker_tpu6e"
-            # - "kernel_cases_collection"
+            - "kernel_cases_collection"
           env:
             USE_PREBUILT_IMAGE: "1"
             TPU_VERSION: "tpu6e"
