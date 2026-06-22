@@ -528,7 +528,8 @@ def test_phased_profiler_full_cycle(profiler_fixture):
     mock_start.assert_called_once()
     assert profiler.profiling_n_steps_left == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
     assert profiler.current_phase == "prefill_heavy_concur_2"
-    assert (InferencePhase.PREFILL_HEAVY, 2) in profiler.inference_phases_profiled
+    assert (InferencePhase.PREFILL_HEAVY,
+            2) in profiler.inference_phases_profiled
     assert mock_file().write.call_count == 1  # Wrote stats on start
 
     # 2. Step profiling (N-1 steps)
@@ -618,12 +619,14 @@ def test_phased_profiler_skips_decode_steps_before_profiling(profiler_fixture):
         profiler.step(stats)
         assert profiler.decode_steps_skipped == i + 1
         mock_start.assert_not_called()
-        assert (InferencePhase.DECODE_HEAVY, 2) not in profiler.inference_phases_profiled
+        assert (InferencePhase.DECODE_HEAVY,
+                2) not in profiler.inference_phases_profiled
 
     # The next step should actually start profiling
     profiler.step(stats)
     mock_start.assert_called_once()
-    assert (InferencePhase.DECODE_HEAVY, 2) in profiler.inference_phases_profiled
+    assert (InferencePhase.DECODE_HEAVY,
+            2) in profiler.inference_phases_profiled
     assert profiler.current_phase == "decode_heavy_concur_2"
     assert profiler.profiling_n_steps_left == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
 
@@ -649,7 +652,8 @@ def test_phased_profiler_skip_only_affects_decode_heavy(profiler_fixture):
     mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
     profiler.step(stats)
     mock_start.assert_called_once()
-    assert (InferencePhase.PREFILL_HEAVY, 2) in profiler.inference_phases_profiled
+    assert (InferencePhase.PREFILL_HEAVY,
+            2) in profiler.inference_phases_profiled
     assert profiler.decode_steps_skipped == 0  # Not incremented
 
     # Complete the PREFILL_HEAVY profiling cycle
@@ -693,13 +697,15 @@ def test_phased_profiler_skips_decode_only_steps_based_on_kv_len(
     # Should be skipped as min_kv_len (5) < threshold (10)
     profiler.step(stats)
     mock_start.assert_not_called()
-    assert (InferencePhase.DECODE_ONLY, 2) not in profiler.inference_phases_profiled
+    assert (InferencePhase.DECODE_ONLY,
+            2) not in profiler.inference_phases_profiled
 
     # Should start profiling as min_kv_len (10) >= threshold (10)
     stats["min_kv_len"] = 10
     profiler.step(stats)
     mock_start.assert_called_once()
-    assert (InferencePhase.DECODE_ONLY, 2) in profiler.inference_phases_profiled
+    assert (InferencePhase.DECODE_ONLY,
+            2) in profiler.inference_phases_profiled
     assert profiler.current_phase == "decode_only_concur_2"
     assert profiler.profiling_n_steps_left == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
 
