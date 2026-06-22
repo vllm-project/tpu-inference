@@ -178,7 +178,7 @@ class TPUWorker(WorkerBase):
 
         # IMPORTANT: PLEASE EDIT THIS - Hardcoded Diagon configurations
         enable_diagon = True  # IMPORTANT: PLEASE EDIT THIS
-        conf_profile_dir = "gs://vllm-profiles/iteration-one"  # IMPORTANT: PLEASE EDIT THIS
+        conf_profile_dir = "gs://vllm-profiles/iteration-two"  # IMPORTANT: PLEASE EDIT THIS
 
         if enable_diagon and conf_profile_dir:
             logger.info("Initializing mldiagnostics")
