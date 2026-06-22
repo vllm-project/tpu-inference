@@ -62,7 +62,6 @@ from vllm.ir import enable_torch_wrap
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import to_jax_dtype
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -165,7 +164,6 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         """
         self.vllm_runner = vllm_runner
         self.params_and_buffers = params_and_buffers
-        self._jax_dtype = to_jax_dtype(vllm_config.model_config.dtype)
 
         # The parent calls model.{get_encoder_cudagraph_config,
         # get_encoder_cudagraph_budget_range}; the inherited _execute_local
@@ -348,7 +346,7 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         """
         num_items = len(self._get_item_specs(mm_kwargs))
         if token_budget not in self.budget_templates:
-            # No template for this budget (shouldn't happen — budget comes
+            # No template for this budget (rarely happen — budget comes
             # from _find_smallest_fitting_budget over self.token_budgets).
             self.graph_misses += num_items
             return None
