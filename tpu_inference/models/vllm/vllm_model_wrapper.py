@@ -37,6 +37,7 @@ from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
+from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
 from vllm.model_executor.models.interfaces_base import is_pooling_model
 from vllm.platforms import current_platform
 from vllm.v1.outputs import PoolerOutput
@@ -66,6 +67,7 @@ from tpu_inference.models.vllm.experimental.vision_tower_jit import (
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
+from tpu_inference.runner.mm_encoder_jit_manager import MMEncoderJITManager
 
 logger = init_logger(__name__)
 
@@ -211,6 +213,7 @@ class VllmModelWrapper:
         self.rng = rng
         self.mesh = mesh
         self.is_draft_model = is_draft_model
+        self._mm_encoder_jit_manager: MMEncoderJITManager | None = None
 
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
@@ -375,7 +378,10 @@ class VllmModelWrapper:
             f"Total time to load model weights from storage to TPU: {total_loading_time:.2f} seconds."
         )
         # Returning to the jax land, so we need to wrap it into a JaxValue.
-        return jax_view(params_and_buffers), lora_manager
+        params = jax_view(params_and_buffers)
+        self._mm_encoder_jit_manager = self._maybe_create_mm_encoder_jit_manager(
+            params)
+        return params, lora_manager
 
     def jit_step_func(self):
 
@@ -549,13 +555,42 @@ class VllmModelWrapper:
             self.step_fn_no_options = step_fun_no_options
             return step_fun_with_options
 
+    def _maybe_create_mm_encoder_jit_manager(
+            self, params) -> 'MMEncoderJITManager | None':
+        if not self.vllm_config.compilation_config.cudagraph_mm_encoder:
+            return None
+        if not supports_encoder_cudagraph(self.model.vllm_model):
+            return None
+        return MMEncoderJITManager(
+            vllm_config=self.vllm_config,
+            vllm_runner=self.model,
+            vllm_model=self.model.vllm_model,
+            params_and_buffers=params,
+        )
+
     def wrap_precompile_vision_encoder_fn(
         self,
         params: Any,
     ) -> Optional[Any]:
-        """Return a precompile function for the vision encoder, or None."""
+        """Return a precompile function for the vision encoder, or None.
+
+        Registers budget-capture tasks against the existing manager so
+        compile_manager can AOT-prime the XLA cache at startup.
+        """
         if not self.vllm_config.model_config.is_multimodal_model:
             return None
+        if self._mm_encoder_jit_manager is not None:
+
+            def jit_manager_precompile_fn(run_compilation):
+                for budget in self._mm_encoder_jit_manager.token_budgets:
+                    run_compilation(
+                        "mm_encoder_jit",
+                        self._mm_encoder_jit_manager._capture_budget_graph,
+                        budget,
+                        budget=budget)
+
+            return jit_manager_precompile_fn
+
         embed_multimodal_fn = self.wrap_embed_multimodal_func()
         return maybe_precompile_vision_encoder_fn(params, embed_multimodal_fn,
                                                   self.model.vllm_model,
@@ -588,7 +623,16 @@ class VllmModelWrapper:
             return jax_view(output_from_torch)
 
         def embed_multimodal_func_torch(params_and_buffers: Any,
+                                        modality: str | None = None,
                                         **kwargs) -> Any:
+            # Route to JIT manager when modality is specified and supported.
+            # modality=None means the call comes from the precompile path
+            # (vision_tower_jit), which should always use the base JAX path.
+            if modality is not None:
+                mm_jit = self._mm_encoder_jit_manager
+                if mm_jit is not None and mm_jit.supports_modality(modality):
+                    return mm_jit.execute(kwargs)
+
             # embed_multimodal_func_jax requires kwargs to be jax.Array such that jit can work
             # Here we move_to_jax, then call (maybe jit'ed) embed_multimodal_func_jax.
             with torchax.default_env(), enable_torch_wrap(False):
