@@ -932,9 +932,12 @@ def calculate_tiling(
         tile_n_limit //= fuse_act_factor
 
     def _is_tile_k_quant_block_compatible(tk: int) -> bool:
-        if (tk % rhs_cfgs.quant_block_size != 0
-                and rhs_cfgs.quant_block_size % tk != 0):
-            return False
+        if rhs_cfgs.has_scale and rhs_cfgs.quant_block_size is not None:
+            if rhs_cfgs.should_dequantize_before_matmul:
+                return tk % rhs_cfgs.quant_block_size == 0
+            if (tk % rhs_cfgs.quant_block_size != 0
+                    and rhs_cfgs.quant_block_size % tk != 0):
+                return False
         return True
 
     # Initialize tile_k and tile_n to their maximum valid values.
@@ -942,6 +945,14 @@ def calculate_tiling(
     num_lanes = pltpu.get_tpu_info().num_lanes
     tile_k = align_to(dims.size_k, num_lanes)
     tile_n = align_to(size_n_per_rhs, num_lanes)
+
+    # Ensure the initial tile_k is compatible with the quantization block size.
+    if not _is_tile_k_quant_block_compatible(tile_k):
+        if rhs_cfgs.has_scale and rhs_cfgs.quant_block_size is not None:
+            if rhs_cfgs.should_dequantize_before_matmul:
+                tile_k = align_to(tile_k, rhs_cfgs.quant_block_size)
+            else:
+                tile_k = align_to(tile_k, rhs_cfgs.quant_block_size)
 
     def _gmm_vmem_estimate(tn: int, tk: int) -> int:
         # 1. LHS tile (double-buffered)
@@ -991,12 +1002,29 @@ def calculate_tiling(
                           num_n_tiles * num_lanes) // num_n_tiles
 
         # Decrease tile_k until total memory fits in vmem limit and tile_k is valid.
+        prev_tile_k = None
         while _gmm_vmem_estimate(
                 tile_n, tile_k
         ) > vmem_limit_bytes or not _is_tile_k_quant_block_compatible(tile_k):
+            if tile_k == prev_tile_k:
+                raise ValueError(
+                    f"Could not find valid tile sizes within VMEM limit. "
+                    f"tile_k is stuck at {tile_k} (limit: {vmem_limit_bytes})."
+                )
+            prev_tile_k = tile_k
             num_k_tiles += 1
             tile_k = align_to(dims.size_k,
                               num_k_tiles * num_lanes) // num_k_tiles
+            if not _is_tile_k_quant_block_compatible(tile_k):
+                if rhs_cfgs.should_dequantize_before_matmul:
+                    qbs = rhs_cfgs.quant_block_size
+                    tile_k = max(qbs, (tile_k // qbs) * qbs)
+                else:
+                    qbs = rhs_cfgs.quant_block_size
+                    for div in sorted([d for d in range(1, qbs + 1) if qbs % d == 0], reverse=True):
+                        if div <= tile_k:
+                            tile_k = div
+                            break
 
     if tile_n == 0 or tile_k == 0:
         final_estimate = _gmm_vmem_estimate(tile_n, tile_k)
