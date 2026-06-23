@@ -91,7 +91,7 @@ class DFlashTorchaxProposer:
 
     def load_model(self, target_model: Any) -> None:
         """Load the DFlash draft model via torchax and share embeddings."""
-        from tpu_inference.models.torchax.dflash import DFlashTorchaxWrapper
+        from tpu_inference.models.vllm.dflash import DFlashTorchaxWrapper
         self._wrapper = DFlashTorchaxWrapper(self.mesh)
         self._wrapper.load(self.draft_model_config.model, target_model)
 

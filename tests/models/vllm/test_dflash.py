@@ -22,8 +22,8 @@ import pytest
 import torch
 from jax.sharding import Mesh
 
-from tpu_inference.models.torchax.dflash import (DFlashTorchaxWrapper,
-                                                 _DFlashRunner)
+from tpu_inference.models.vllm.dflash import (DFlashTorchaxWrapper,
+                                              _DFlashRunner)
 
 
 @pytest.fixture(scope="module")
@@ -123,10 +123,9 @@ class DummyContextManager:
         pass
 
 
-@patch("tpu_inference.models.torchax.dflash.AutoModel.from_pretrained")
-@patch("tpu_inference.models.torchax.dflash.shard_model_to_tpu")
-@patch("tpu_inference.models.torchax.dflash.jax_view",
-       side_effect=mock_jax_view)
+@patch("tpu_inference.models.vllm.dflash.AutoModel.from_pretrained")
+@patch("tpu_inference.models.vllm.dflash.shard_model_to_tpu")
+@patch("tpu_inference.models.vllm.dflash.jax_view", side_effect=mock_jax_view)
 def test_dflash_torchax_wrapper_load(mock_jax, mock_shard,
                                      mock_from_pretrained, mesh):
     """Verifies that DFlashTorchaxWrapper.load configures model parameters and shared embeddings correctly."""
@@ -173,13 +172,12 @@ def test_dflash_torchax_wrapper_load(mock_jax, mock_shard,
     mock_jax.assert_called_once()
 
 
-@patch("tpu_inference.models.torchax.dflash.AutoModel.from_pretrained")
-@patch("tpu_inference.models.torchax.dflash.shard_model_to_tpu")
-@patch("tpu_inference.models.torchax.dflash.jax_view",
-       side_effect=mock_jax_view)
-@patch("tpu_inference.models.torchax.dflash.torch_view",
+@patch("tpu_inference.models.vllm.dflash.AutoModel.from_pretrained")
+@patch("tpu_inference.models.vllm.dflash.shard_model_to_tpu")
+@patch("tpu_inference.models.vllm.dflash.jax_view", side_effect=mock_jax_view)
+@patch("tpu_inference.models.vllm.dflash.torch_view",
        side_effect=mock_torch_view)
-@patch("tpu_inference.models.torchax.dflash.torchax.default_env",
+@patch("tpu_inference.models.vllm.dflash.torchax.default_env",
        side_effect=DummyContextManager)
 def test_dflash_torchax_wrapper_fns(mock_env, mock_torch, mock_jax, mock_shard,
                                     mock_from_pretrained, mesh):
