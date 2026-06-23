@@ -196,11 +196,14 @@ class KernelTunerBase(ABC):
             case_set_id=auto_tune_case_set_id,
             kernel_tuner_name=self.tuner_config.kernel_tuner_name,
             tpu=self.run_config.tpu_version)
+        bucket_by_key = []
         for row in autotune_cases:
             case_key_value = row['CaseKeyValue']
             tuning_case = TuningCase.from_string(
                 case_key_value, self.tuner_config.tuning_key_class,
                 self.tuner_config.tunable_params_class)
+            
+            start_case_id = len(tuning_set)
             tuning_set.append(tuning_case)
             tuning_key = tuning_case.tuning_key
             search_space = self.get_search_space(tuning_key)
@@ -227,11 +230,13 @@ class KernelTunerBase(ABC):
                                                    {}):
                 tuning_set.append(
                     TuningCase(tuning_key, tunable_params, is_baseline=False))
+            end_case_id = len(tuning_set)
+            bucket_by_key.append((start_case_id, end_case_id)) # [Include start_case_id, Exclude end_case_id)
 
         logger.info(
             f"Retrieved {len(tuning_set)} autotune cases for CaseSetId: {self.run_config.case_set_id} from Spanner."
         )
-        return tuning_set
+        return tuning_set, bucket_by_key
 
     @abstractmethod
     def generate_cases(self) -> list[TuningCase]:
