@@ -185,6 +185,13 @@ class KernelTunerBase(ABC):
             return True
         return False
 
+    def generate_autotune_cases(self) -> list[TuningCase]:
+        tuning_set = []
+        autotune_cases = self.storage_manager.read_auto_tune_cases(
+            case_set_id=self.case_set_id, 
+            kernel_tuner_name = self.tuner_config.kernel_tuner_name,
+            tpu = self.tuner_config.tpu_version)
+
     @abstractmethod
     def generate_cases(self) -> list[TuningCase]:
         """Generate the cases for the given case_set_id.

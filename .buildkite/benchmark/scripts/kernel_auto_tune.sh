@@ -37,12 +37,20 @@ for key in "${!kernel_auto_tune_mapping[@]}"; do
     echo "" >> "$target_file"
     cat "$UPDATE_SCRIPT" >> "$target_file"
 
+    # Create tpu variable based on DEVICE
+    if [[ "$DEVICE" == *"6e"* ]]; then
+        tpu="tpu6e"
+    elif [[ "$DEVICE" == *"7x"* ]]; then
+        tpu="tpu7x"
+    else
+        echo "Error: DEVICE must contain '6e' or '7x'"
+        exit 1
+    fi
+
     # Steps 3, 4, and 5: Replace the placeholders
-    # Note: We use '|' as the sed delimiter instead of the standard '/' 
-    # just in case your $DEVICE environment variable contains slashes.
     sed -i "s|KERNEL_TUNER_NAME_PLACEHOLDER|$key|g; \
             s|CASE_SET_ID_PLACEHOLDER|$KERNEL_AUTOTUNE_ID|g; \
-            s|TPU_PLACEHOLDER|$DEVICE|g" "$target_file"
+            s|TPU_PLACEHOLDER|$tpu|g" "$target_file"
 
     echo "Successfully updated $target_file"
     echo "----------------------------------------"
