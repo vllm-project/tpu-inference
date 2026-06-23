@@ -609,7 +609,16 @@ def hybrid_parallel_gmm(
 
     w2_bias_spec = None if w2_bias is None else P(ep_axis, None, None)
 
-    data_out_spec = P(ep_axis)
+    dp_axes = ShardingAxisName.MLP_DATA
+    if isinstance(dp_axes, str):
+        dp_axes = (dp_axes, )
+    else:
+        dp_axes = tuple(dp_axes)
+
+    if scatter_results or enable_rs_kernel:
+        final_out_specs = P(dp_axes + ep_axis)
+    else:
+        final_out_specs = data_p_spec
 
     return jax.shard_map(
         functools.partial(
@@ -637,7 +646,7 @@ def hybrid_parallel_gmm(
             data_p_spec,
             data_p_spec,
         ),
-        out_specs=data_out_spec,
+        out_specs=final_out_specs,
         check_vma=False,
     )(
         x,
@@ -743,6 +752,7 @@ def fused_moe_func(
     num_tokens, hidden_size = hidden_states.shape
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
+    tp_axis, ep_axis = get_hybrid_moe_axes(mesh)
 
     assert (num_tokens * topk) % 16 == 0, (
         "The kernel requires num_tokens * topk to be a multiple of "
@@ -808,11 +818,24 @@ def fused_moe_func(
         topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
 
         if use_ep:
-            num_ep_shard = get_mesh_shape_product(mesh,
-                                                  ShardingAxisName.EXPERT)
-            local_num_experts = global_num_experts // num_ep_shard
-            shard_idx = jax.lax.axis_index(ShardingAxisName.EXPERT)
+            if use_hybrid and len(tp_axis) > 0 and len(ep_axis) > 0:
+                num_ep_shard = get_mesh_shape_product(mesh, ep_axis)
+                active_axes = ep_axis
+            else:
+                num_ep_shard = get_mesh_shape_product(mesh,
+                                                      ShardingAxisName.EXPERT)
+                active_axes = ShardingAxisName.EXPERT
+                if isinstance(active_axes, str):
+                    active_axes = (active_axes, )
 
+            # Compute flat index over the active axes
+            shard_idx = 0
+            multiplier = 1
+            for axis in reversed(active_axes):
+                shard_idx += jax.lax.axis_index(axis) * multiplier
+                multiplier *= get_mesh_shape_product(mesh, axis)
+
+            local_num_experts = global_num_experts // num_ep_shard
             experts_start = shard_idx * local_num_experts
             experts_end = experts_start + local_num_experts
             group_offsets = jnp.cumulative_sum(group_sizes_local,
@@ -863,8 +886,6 @@ def fused_moe_func(
         raise ValueError(
             f"Error when padding input hidden states from {hidden_size} to {padded_hidden_size}."
         ) from e
-
-    tp_axis, ep_axis = get_hybrid_moe_axes(mesh)
 
     if use_hybrid and len(tp_axis) > 0 and len(ep_axis) > 0:
         x = hybrid_parallel_gmm(
