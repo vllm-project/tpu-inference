@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 
 import yaml
@@ -19,7 +20,7 @@ from absl import app, flags
 
 from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
     SpannerStorageManager
-import logging
+
 logger = logging.getLogger(__name__)
 
 # invoke the kernel tuning pipeline for each kernel
@@ -46,7 +47,8 @@ _SPANNER_INSTANCE_ID = flags.DEFINE_string(
 _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'spanner_database_id', 'tune-gmm',
     'The Spanner database ID to use. Only used when --run_locally is false.')
-_CASE_SET_ID = flags.DEFINE_string('case_set_id', '', 'The case set ID to use for this run.')
+_CASE_SET_ID = flags.DEFINE_string('case_set_id', '',
+                                   'The case set ID to use for this run.')
 
 OUTPUT_PATH = "/tmp/kernel_tuning/generated_pipeline.yml"
 
@@ -80,7 +82,9 @@ class KernelAutoTuneInvoker:
             "depends_on":
             parent_step_key,
             "agents": {
-                "queue": 'cpu'
+                "queue":
+                'tpu_v6e_queue'
+                if tpu_version == 'tpu6e' else 'tpu_v7x_2_queue'
             },
             "env": {
                 "USE_PREBUILT_IMAGE": "1",
@@ -100,7 +104,7 @@ class KernelAutoTuneInvoker:
                     f'  --autotune_mode=True '
                     f'  --generate_buildkite_pipeline=True '
                     f'  --max_execution_minutes={max_execution_minutes} '
-                    f'  --job_priority={job_priority} '),
+                    f'  --job_priority={job_priority}\' '),
                 LiteralString(
                     f'if [ -f {OUTPUT_PATH} ]; then '
                     f'  buildkite-agent artifact upload {OUTPUT_PATH} && '
@@ -141,13 +145,16 @@ class KernelAutoTuneInvoker:
                     #(TODO): Only support kernel without communication for now and we don't have TPU 7x with 1 core queue
                     tpu_cores=supported_core_num,
                     case_set_desc=f'{kernel_tuner_name}_autotune',
-                    parent_step_key=os.environ.get('BUILDKITE_STEP_KEY', None)
-                ))
+                    parent_step_key=os.environ.get('BUILDKITE_STEP_KEY',
+                                                   None)))
         os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
         with open(OUTPUT_PATH, "w") as f:
-            logger.info(f"Writing generated pipeline \n {yaml.dump(pipeline, default_flow_style=False, sort_keys=False)} \n to {OUTPUT_PATH}")
+            logger.info(
+                f"Writing generated pipeline \n {yaml.dump(pipeline, default_flow_style=False, sort_keys=False)} \n to {OUTPUT_PATH}"
+            )
             yaml.dump(pipeline, f, default_flow_style=False, sort_keys=False)
 
+
 if __name__ == "__main__":
-    app.run(lambda _: KernelAutoTuneInvoker(
-        case_set_id=_CASE_SET_ID.value).generate_kernel_tuning_cases())
+    app.run(lambda _: KernelAutoTuneInvoker(case_set_id=_CASE_SET_ID.value).
+            generate_kernel_tuning_cases())
