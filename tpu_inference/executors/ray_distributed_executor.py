@@ -332,7 +332,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         worker_node_and_tpu_ids = []
         for worker in self.workers:
             worker_node_and_tpu_ids.append(
-                ray.get(worker.get_node_and_gpu_ids.remote()) \
+                ray.get(worker.get_node_and_physical_gpu_ids.remote()) \
             ) # type: ignore
 
         node_workers = defaultdict(list)  # node id -> list of worker ranks

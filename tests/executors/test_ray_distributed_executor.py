@@ -103,8 +103,9 @@ class TestTpuRayDistributedExecutor(unittest.TestCase):
         mock_ray.util.placement_group.return_value = mock_placement_group
 
         mock_worker = MagicMock()
-        mock_worker.get_node_and_gpu_ids.remote.return_value = [("node_1",
-                                                                 [0, 1, 2, 3])]
+        mock_worker.get_node_and_physical_gpu_ids.remote.return_value = [
+            ("node_1", [0, 1, 2, 3])
+        ]
         mock_ray.remote.return_value.remote.return_value = mock_worker
 
         # Simulate remote calls on the worker
