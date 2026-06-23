@@ -93,7 +93,7 @@ class MockInputBatch:
         self.req_id_to_index[id_j] = j
 
 
-def _create_manager(req_ids, num_scheduled_tokens_map):
+def _create_manager(req_ids, num_scheduled_tokens_map, spec_req_ids=()):
     """Helper to create a PersistentBatchManager with a MockInputBatch
     and a mock scheduler_output.
 
@@ -101,6 +101,9 @@ def _create_manager(req_ids, num_scheduled_tokens_map):
         req_ids: list of request id strings, in the order they appear
             in the batch.
         num_scheduled_tokens_map: dict mapping req_id -> num_scheduled_tokens.
+        spec_req_ids: request ids that have scheduled spec-decode tokens. These
+            are reflected in scheduler_output.scheduled_spec_decode_tokens so
+            _reorder_batch classifies them as decode-region requests.
 
     Returns:
         (manager, scheduler_output) tuple.
@@ -120,6 +123,10 @@ def _create_manager(req_ids, num_scheduled_tokens_map):
     scheduler_output.num_scheduled_tokens = num_scheduled_tokens_map
     scheduler_output.total_num_scheduled_tokens = sum(
         num_scheduled_tokens_map.values())
+    scheduler_output.scheduled_spec_decode_tokens = {
+        rid: [0]
+        for rid in spec_req_ids
+    }
 
     return manager, scheduler_output
 
@@ -171,6 +178,43 @@ class TestReorderBatch(unittest.TestCase):
         # Last 2 should be prefill requests
         for rid in result_ids[2:]:
             self.assertGreater(num_scheduled[rid], 1)
+
+    def test_spec_decode_classified_as_decode(self):
+        """Spec-decode requests (q>1 but with scheduled spec tokens) go to the
+        decode region."""
+        req_ids = ["r0", "r1", "r2", "r3"]
+        num_scheduled = {r: 4 for r in req_ids}  # 1 + 3 draft tokens
+        manager, sched_out = _create_manager(req_ids,
+                                             num_scheduled,
+                                             spec_req_ids=req_ids)
+        swap_cnt = manager._reorder_batch(sched_out)
+        self.assertEqual(swap_cnt, 0)
+        self.assertEqual(manager.input_batch.request_distribution, [4, 4, 4])
+
+    def test_mixed_spec_and_prefill(self):
+        """Spec decodes (in spec dict) move to front; chunked prefills (q>1, no
+        spec tokens) stay at the back."""
+        req_ids = ["r0", "r1", "r2", "r3"]
+        # r0,r3 are chunked prefills (q>1, NOT spec); r1,r2 are spec decodes.
+        num_scheduled = {"r0": 10, "r1": 4, "r2": 4, "r3": 20}
+        manager, sched_out = _create_manager(req_ids,
+                                             num_scheduled,
+                                             spec_req_ids=["r1", "r2"])
+        manager._reorder_batch(sched_out)
+        self.assertEqual(manager.input_batch.request_distribution, [2, 2, 4])
+        result_ids = manager.input_batch.req_ids
+        for rid in result_ids[:2]:
+            self.assertIn(rid, ("r1", "r2"))  # decode region = the spec reqs
+        for rid in result_ids[2:]:
+            self.assertIn(rid, ("r0", "r3"))  # mixed region = the prefills
+
+    def test_spec_off_prefill_not_decode(self):
+        """Spec OFF (empty spec dict): a q>1 request is a prefill, not decode."""
+        req_ids = ["r0", "r1"]
+        num_scheduled = {"r0": 1, "r1": 8}
+        manager, sched_out = _create_manager(req_ids, num_scheduled)
+        manager._reorder_batch(sched_out)
+        self.assertEqual(manager.input_batch.request_distribution, [1, 1, 2])
 
 
 class TestPersistentBatchManager(unittest.TestCase):

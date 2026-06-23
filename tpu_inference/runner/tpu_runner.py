@@ -1911,14 +1911,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
+        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
         _request_distribution = []
         for dp_rank in range(dp_size):
             _num_reqs = num_req_per_dp_rank[dp_rank]
             # The batch has been reordered by _reorder_batch so decode requests come first
-            # Count decode requests (those with num_scheduled_tokens == 1) in this DP rank
+            # Count decode-region requests in this DP rank, matching
+            # _reorder_batch: a plain decode (num_scheduled_tokens == 1) or a
+            # speculative-decode request (1 + num_draft tokens, in the spec
+            # token dict, handled by the RPA decode kernel via decode_q_len).
             num_decode_in_dp_rank = 0
             for req_id in req_ids_dp[dp_rank]:
-                if scheduler_output.num_scheduled_tokens[req_id] == 1:
+                if (scheduler_output.num_scheduled_tokens[req_id] == 1
+                        or req_id in spec_decode_tokens):
                     num_decode_in_dp_rank += 1
             _request_distribution.append(
                 [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
