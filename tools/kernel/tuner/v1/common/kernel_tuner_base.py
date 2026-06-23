@@ -187,10 +187,25 @@ class KernelTunerBase(ABC):
 
     def generate_autotune_cases(self) -> list[TuningCase]:
         tuning_set = []
+        # The case_set_id is constructed as {kernel_tuner_name}_{auto_tune_case_set_id} in the kernel_auto_tune_invoker.py
+        auto_tune_case_set_id = self.case_set_id.lstrip(
+            f'{self.tuner_config.kernel_tuner_name}_')
         autotune_cases = self.storage_manager.read_auto_tune_cases(
-            case_set_id=self.case_set_id, 
-            kernel_tuner_name = self.tuner_config.kernel_tuner_name,
-            tpu = self.tuner_config.tpu_version)
+            case_set_id=auto_tune_case_set_id,
+            kernel_tuner_name=self.tuner_config.kernel_tuner_name,
+            tpu=self.tuner_config.tpu_version)
+        for row in autotune_cases:
+            case_key_value = row['CaseKeyValue']
+            # kernel_tuner_name = row['KernelTunerName']
+            # tpu = 'tpu6e' if 'tpu6e' in row['TPU'] else 'tpu7x'
+            tuning_set.append(
+                TuningCase.from_string(case_key_value,
+                                       self.tuner_config.tuning_key_class,
+                                       self.tuner_config.tunable_params_class))
+        logger.info(
+            f"Retrieved {len(tuning_set)} autotune cases for CaseSetId: {self.run_config.case_set_id} from Spanner."
+        )
+        return tuning_set
 
     @abstractmethod
     def generate_cases(self) -> list[TuningCase]:
@@ -201,6 +216,17 @@ class KernelTunerBase(ABC):
         """
         raise NotImplementedError(
             "Specific kernel should implement this to generate the cases for the given case_set_id and desc, and return a list of TuningCase objects representing the tuning cases."
+        )
+
+    @abstractmethod
+    def support_autotune(self) -> bool:
+        """Check whether the kernel tuner supports auto-tuning mode. If True, the generate_autotune_cases method will be called to retrieve the tuning cases from the storage manager instead of generating new cases.
+
+        Returns:
+            True if the kernel tuner supports auto-tuning mode, False otherwise.
+        """
+        raise NotImplementedError(
+            "Specific kernel should implement this to indicate whether it supports auto-tuning mode."
         )
 
     def _generate_tuning_jobs(self) -> list[tuple[int, int]]:
@@ -218,7 +244,9 @@ class KernelTunerBase(ABC):
         try:
             if self._init_case_set():
                 start_time = time.perf_counter()
-                cases = self.generate_cases()
+                cases = self.generate_cases() if not self.supports_autotune(
+                ) or not self.run_config.autotune_mode else self.generate_autotune_cases(
+                )
                 total_cases = len(cases)
                 for case_id, case_str in enumerate(map(str, cases)):
                     self.storage_manager.add_tuner_case(
