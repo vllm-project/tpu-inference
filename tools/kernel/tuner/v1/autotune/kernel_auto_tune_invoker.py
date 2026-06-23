@@ -155,7 +155,7 @@ class KernelAutoTuneInvoker:
     def generate_kernel_tuning_cases(self):
         pipeline = {"steps": []}
         autotune_cases = self.storage_manager.read_auto_tune_cases(
-            case_set_id=self.case_set_id)
+            case_set_id=self.auto_tune_id)
         tpus = set(case['TPU'] for case in autotune_cases)
         assert all(
             'tpu6e' in tpu or 'tpu7x' in tpu for tpu in tpus
