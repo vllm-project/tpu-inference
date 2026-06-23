@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+import torch.nn.functional as F
 import vllm.model_executor.kernels.mhc as mhc_kernels
 from vllm.model_executor.layers.mhc import (HCHeadOp, MHCFusedPostPreOp,
                                             MHCPostOp, MHCPreOp)
@@ -81,26 +82,41 @@ class VllmMHCPostOp(MHCPostOp):
 
 @HCHeadOp.register_oot
 class VllmHCHeadOp(HCHeadOp):
+    """TPU implementation of HCHeadOp."""
 
     @classmethod
     def enabled(cls) -> bool:
+        """Returns whether this operation is enabled."""
         return True
 
     def forward_tpu(
         self,
-        hidden_states: torch.Tensor,
-        hc_fn: torch.Tensor,
-        hc_scale: torch.Tensor,
-        hc_base: torch.Tensor,
+        hidden_states: torch.Tensor,  # [batch_size, hc_mult, hidden_size]
+        hc_fn: torch.Tensor,  # [hc_mult, hc_mult * hidden_size]
+        hc_scale: torch.Tensor,  # [hc_mult]
+        hc_base: torch.Tensor,  # [hc_mult]
         rms_norm_eps: float,
         hc_eps: float,
     ) -> torch.Tensor:
-        logger.error(
-            "VllmHCHeadOp.forward_tpu is not implemented, just a pass-through for now"
-        )
-        hc_mult, hidden_size = hidden_states.shape[-2:]
-        outer_shape = hidden_states.shape[:-2]
-        return hidden_states[..., 0, :].reshape(*outer_shape, hidden_size)
+        """Applies the TPU forward pass for the op."""
+        # Using .flatten(start_dim=-2) avoids XLA contiguity RuntimeErrors.
+        hs_flat = hidden_states.flatten(start_dim=-2)
+
+        # Upcast to float32 for stable variance computation on TPUs.
+        hs_flat_fp32 = hs_flat.float()
+        variance = hs_flat_fp32.pow(2).mean(dim=-1, keepdim=True)
+        hs_norm = (hs_flat_fp32 * torch.rsqrt(variance + rms_norm_eps)).to(
+            hidden_states.dtype)
+
+        # Compute mixing gates, apply scale/base, and calculate sigmoid + epsilon.
+        gates = F.linear(hs_norm, hc_fn)
+        gates = torch.sigmoid((gates * hc_scale) + hc_base) + hc_eps
+
+        # Collapse multi-stream residuals into 1 stream via weighted sum.
+        gates = gates.unsqueeze(-1)
+        out = (hidden_states * gates).sum(dim=-2).bfloat16()
+
+        return out
 
 
 @MHCFusedPostPreOp.register_oot
