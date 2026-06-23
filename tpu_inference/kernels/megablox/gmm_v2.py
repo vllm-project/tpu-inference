@@ -59,8 +59,7 @@ def apply_act_fn(acc: jax.Array, fuse_act: str | None):
 
     Args:
         acc: The accumulator array, with the last dimension being 2 * tile_n.
-        fuse_act: The name of the activation function to apply. Supported values are
-            "silu", "gelu", and "swigluoai". If None, no activation is applied.
+        fuse_act: The name of the activation function to apply.
 
     Returns:
         The result of applying the activation function.
@@ -196,23 +195,16 @@ class InputConfigs:
 
     @property
     def should_dequantize_before_matmul(self) -> bool:
-        """Whether to dequantize before matmul.
-
-        Dequantization is preferred when the quant block size is smaller than the
-        MXU column size. In the standard quantized matmul flow, the contracting
-        dimension is tied to the quantization block size. If the block size is
-        small (e.g., 16 or 32 for MX formats), it severely underutilizes the MXU
-        (which expects 128 or 256), causing poor performance.
-
-        By dequantizing the weights inside VMEM first, we can reshape them and
-        perform a regular bf16 matmul that fully utilizes the MXU capacity. This
-        retains high performance while allowing us to keep the original, non-requantized
-        weights in HBM.
-        """
-        if not self.has_scale or self.quant_block_size is None:
+        """Dequantize rhs before matmul if block size limits MXU utilization."""
+        if not self.has_scale:
             return False
+        assert self.quant_block_size is not None
         mxu_size = pltpu.get_tpu_info().mxu_column_size
         return self.quant_block_size < mxu_size
+
+    @property
+    def should_dequantize_after_matmul(self) -> bool:
+        return self.has_scale and not self.should_dequantize_before_matmul
 
 
 @dataclasses.dataclass(frozen=True)
@@ -382,12 +374,15 @@ def inner_kernel(
     """
 
     def _matmul(is_first_k_step: bool, is_last_k_step: bool):
-        rhs_qbs = cfgs.rhs_cfgs.quant_block_size
+        tpu_info = pltpu.get_tpu_info()
+        mxu_size = tpu_info.mxu_column_size
+
+        # Step 1: Input pre-processing.
         tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[...]
+        tiled_rhs = tiled_rhs_ref.get_weight()
         # When rhs is packed (quantized dtype packed into uint32), unpack it
         # back to the original dtype using pltpu.bitcast which operates on K
         # axis. This expands the K dimension back to tile_k.
-        tiled_rhs = tiled_rhs_ref.get_weight()
         if cfgs.rhs_cfgs.should_bitcast:
             tiled_rhs = pltpu.bitcast(tiled_rhs, cfgs.rhs_cfgs.dtype)
         rhs_tile_n = tiled_rhs.shape[1]
@@ -395,6 +390,7 @@ def inner_kernel(
         # This should only be taken in the case where we don't requantize
         # the scales and thus we need to dequantize inside VMEM to avoid small
         # contracting dimmensions
+        rhs_qbs = cfgs.rhs_cfgs.quant_block_size
         if cfgs.rhs_cfgs.should_dequantize_before_matmul:
             tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(
                 cfgs.lhs_cfgs.dtype)
@@ -404,9 +400,7 @@ def inner_kernel(
             tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
             tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
                                                   rhs_tile_n)
-            rhs_step_k = cfgs.tiles.tile_k
-        else:
-            rhs_step_k = rhs_qbs
+            rhs_qbs = cfgs.tiles.tile_k
 
         valid_k = cfgs.dims.size_k % cfgs.tiles.tile_k
         if is_last_k_step and valid_k != 0:
@@ -414,19 +408,18 @@ def inner_kernel(
                                             0) < valid_k
             tiled_rhs = jnp.where(mask_rhs, tiled_rhs, 0)
 
+        # Step 2: Matmul.
         acc_list = []
         if cfgs.lhs_cfgs.quant_dtype is None:
             # Unquantized matmul path.
-            mxu_size = pltpu.get_tpu_info().mxu_column_size
-
             for start_n in range(0, rhs_tile_n, mxu_size):
                 end_n = min(rhs_tile_n, start_n + mxu_size)
                 col_size = end_n - start_n
 
                 acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
                                   dtype=acc_ref.dtype)
-                for start_k in range(0, cfgs.tiles.tile_k, rhs_step_k):
-                    end_k = min(cfgs.tiles.tile_k, start_k + rhs_step_k)
+                for start_k in range(0, cfgs.tiles.tile_k, rhs_qbs):
+                    end_k = min(cfgs.tiles.tile_k, start_k + rhs_qbs)
 
                     block_acc = jnp.matmul(
                         tiled_lhs[:, start_k:end_k],
@@ -434,9 +427,8 @@ def inner_kernel(
                         preferred_element_type=jnp.float32,
                     ).astype(acc_ref.dtype)
 
-                    if (cfgs.rhs_cfgs.has_scale and
-                            not cfgs.rhs_cfgs.should_dequantize_before_matmul):
-                        b_id = start_k // cfgs.rhs_cfgs.quant_block_size
+                    if cfgs.rhs_cfgs.should_dequantize_after_matmul:
+                        b_id = start_k // rhs_qbs
                         tiled_rhs_scale = tiled_rhs_ref.get_scale()
                         block_acc *= tiled_rhs_scale[b_id, :,
                                                      start_n:end_n].astype(
@@ -462,8 +454,6 @@ def inner_kernel(
             # result of [tile_m, mxu_size] becomes available at the end of every k
             # inner loop which can be used to pipeline subsequent VPU or VST ops with
             # MXU ops for the next [tile_m, mxu_size].
-            mxu_size = pltpu.get_tpu_info().mxu_column_size
-
             for start_n in range(0, rhs_tile_n, mxu_size):
                 end_n = min(rhs_tile_n, start_n + mxu_size)
                 col_size = end_n - start_n
@@ -492,10 +482,11 @@ def inner_kernel(
                     # Convert lhs into quantized dtype.
                     block_lhs_q = (block_lhs *
                                    block_scale_inv).astype(lhs_q_dtype)
-                    # Some mixed precision matmuls are not supported. In that case,
-                    # convert rhs into the same dtype as lhs. We generally expect that
-                    # this will be an upcast, e.g. int4 -> fp8 or int8.
-                    if not pltpu.get_tpu_info().is_matmul_supported(
+
+                    # Unlike unquantized path, compiler may not perform implicit type
+                    # conversion due to numeric concerns. As this can cause unsupported
+                    # matmul error, explicit type conversion is performed.
+                    if not tpu_info.is_matmul_supported(
                             lhs_q_dtype, block_rhs.dtype):
                         block_rhs = block_rhs.astype(lhs_q_dtype)
 
@@ -507,13 +498,9 @@ def inner_kernel(
 
                     block_acc *= block_scale.astype(acc_ref.dtype)
 
-                    # Apply rhs subchannel scale per quant block if it was
-                    # not dequantized earlier.
-                    if cfgs.rhs_cfgs.has_scale:
-                        assert not cfgs.rhs_cfgs.should_dequantize_before_matmul, (
-                            "If rhs is dequantized before matmul, quantized matmul path "
-                            "should not be taken.")
-                        b_id = start_k // cfgs.rhs_cfgs.quant_block_size
+                    # Apply rhs subchannel scale per quant block.
+                    if cfgs.rhs_cfgs.should_dequantize_after_matmul:
+                        b_id = start_k // rhs_qbs
                         rhs_scale_slice = tiled_rhs_ref.get_scale()
                         block_acc *= rhs_scale_slice[b_id, :,
                                                      start_n:end_n].astype(
@@ -523,6 +510,7 @@ def inner_kernel(
                 acc_list.append(acc_n)
         acc = jnp.concatenate(acc_list, axis=1)
 
+        # Step 3: Output post-processing.
         if not is_first_k_step:
             acc += acc_ref[...]
 
@@ -1029,8 +1017,7 @@ def validate_inputs(
     if rhs_scale is not None:
         num_quant_blocks = rhs_scale.shape[1]
         assert rhs_scale.shape == (size_group, num_quant_blocks, 1, size_n)
-        assert (size_k % num_quant_blocks == 0
-                ), f"{size_k=} should be divisible by {num_quant_blocks=}"
+        assert size_k % num_quant_blocks == 0
 
     assert group_offset.shape == (1, )
 
@@ -1137,16 +1124,16 @@ def make_gmm_configs(
     )
 
     lhs_q_dtype = None
-    if maybe_quantize_lhs and rhs_quant_dtype is not None and not rhs_cfgs.should_dequantize_before_matmul:
+    if maybe_quantize_lhs and rhs_cfgs.should_dequantize_after_matmul:
         # Choose lhs quantization dtype based on TPU hardware support.
         is_rhs_float = jnp.issubdtype(rhs_quant_dtype, jnp.floating)
-        is_rhs_4bits = jax.dtypes.itemsize_bits(rhs_quant_dtype) == 4
         tpu_info = pltpu.get_tpu_info()
         # Check if there is hardware compute support for rhs dtype group.
-        # If the rhs is quantized to int4 or uint4 bits, these can be upcast to
-        # e4m3 without loss, so we consider both fp8 and int8.
-        # Does not consider int8 x fp4 since fp4 does not cleanly map to int8.
         if tpu_info.fp8_ops_per_second > 0:
+            # Special handling for 4-bit integer rhs as it can be converted to fp8
+            # without a numeric issues. Note that this is not the case for 4-bit
+            # floating rhs as conversion to int8 will cause numeric issues.
+            is_rhs_4bits = jax.dtypes.itemsize_bits(rhs_quant_dtype) == 4
             if is_rhs_float or is_rhs_4bits:
                 lhs_q_dtype = jnp.float8_e4m3fn.dtype
         if tpu_info.int8_ops_per_second > 0:
