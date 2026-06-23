@@ -185,9 +185,6 @@ class KernelTunerBase(ABC):
                 f"CaseSet with ID: {self.run_config.case_set_id} and description: {self.run_config.case_set_desc} initialized."
             )
             return True
-        logger.info(
-            f"CaseSetId {self.run_config.case_set_id} with description: {self.run_config.case_set_desc} already exists. Proceeding with the existing case set."
-        )
         return False
 
     def generate_autotune_cases(self) -> list[TuningCase]:
@@ -433,6 +430,7 @@ class KernelTunerBase(ABC):
                                     parent_step_key=os.environ.get(
                                         'BUILDKITE_STEP_KEY', None))
             pipeline["steps"].append(step)
+            # (TODO): Check (case_set_id, run_id) exists in the storage or not first
             self.storage_manager.create_bucket_for_run(
                 self.run_config.case_set_id,
                 self.run_config.run_id,
@@ -442,9 +440,9 @@ class KernelTunerBase(ABC):
                 tpu=self.run_config.tpu_queue_multi)
 
         if self.run_config.support_bayesian_optimization:
-            group_name = 'Kernel Tuning Bayesian Optimization Group'
+            group_name = f'Bayesian Optimization Group[{self.tuner_config.kernel_tuner_name}]'
         else:
-            group_name = 'Kernel Tuning Sweeping Group'
+            group_name = f'Sweeping Group[{self.tuner_config.kernel_tuner_name}]'
         pipeline['steps'] = [{
             'group': group_name,
             'steps': pipeline['steps']
