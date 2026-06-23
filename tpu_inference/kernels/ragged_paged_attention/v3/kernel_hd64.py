@@ -1381,8 +1381,8 @@ def ragged_paged_attention_hd64(
     cu_q_lens: the cumulative sum of the effective query lengths. Similar to
       kv_lens, only the first num_seqs+1 values are valid.
     distribution: (i, j, k) represents that sequences[0:i] are decode-only,
-      sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed. The
-      k is also the total number of sequences.
+      sequences[i:j] are fixed chunked-prefill-only, and sequences[j:k] are
+      mixed. The k is also the total number of sequences.
     attention_sink: optional attention sink for each q head.
     sm_scale: the softmax scale which will be applied to the Q@K^T.
     sliding_window: the sliding window size for the attention.
