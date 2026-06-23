@@ -2050,6 +2050,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             seq_lens, positions = self._subtract_num_rejected_tokens(
                 seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank)
 
+        # Static (compile-time) per-request query length for the RPA decode
+        # region. With speculative decoding, decode-region requests carry up to
+        # `num_speculative_tokens + 1` query tokens (draft tokens + the bonus
+        # token); otherwise ordinary decode has exactly 1.
+        decode_q_len = (self.speculative_config.num_speculative_tokens +
+                        1) if self.speculative_config is not None else 1
+
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
@@ -2059,6 +2066,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
+                decode_q_len=decode_q_len,
             )
 
             return attention_metadata_gid

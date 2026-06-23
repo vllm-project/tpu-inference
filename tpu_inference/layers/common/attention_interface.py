@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import inspect
 import math
 from typing import Any, Callable, Optional, Tuple
 
@@ -57,6 +58,21 @@ get_kv_cache_shape = rpa.get_kv_cache_shape
 
 ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
 get_kv_cache_shape_hd64 = rpa_hd64.get_kv_cache_shape
+
+
+@functools.lru_cache(maxsize=None)
+def _rpa_accepts_decode_q_len(func: Callable) -> bool:
+    """Whether the resolved RPA kernel accepts a static `decode_q_len` kwarg.
+
+    Only the msl-monkeypatched kernel accepts it; the in-tree v3 kernel does
+    not, so passing it unconditionally would raise TypeError. Cached per
+    function object (cheap, computed once) to keep `inspect.signature` out of
+    the hot per-call path.
+    """
+    try:
+        return "decode_q_len" in inspect.signature(func).parameters
+    except (ValueError, TypeError):
+        return False
 
 
 def sharded_flash_attention(
@@ -340,6 +356,7 @@ def sharded_ragged_paged_attention(
     k_scale: float | None = None,
     v_scale: float | None = None,
     update_kv_cache: bool = True,
+    decode_q_len: int = 1,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
@@ -393,6 +410,13 @@ def sharded_ragged_paged_attention(
             "update_kv_cache=False (KV-share) is not supported on the "
             "head_dim==64 RPA kernel.")
 
+    # decode_q_len is a compile-time static (Python int captured as a closure
+    # constant, exactly like sm_scale). Only forward it when the resolved
+    # kernel accepts it (the msl-monkeypatched kernel; the in-tree v3 kernel
+    # does not) and only when it differs from the default to keep the ordinary
+    # single-token decode path untouched.
+    pass_decode_q_len = (decode_q_len > 1 and _rpa_accepts_decode_q_len(func))
+
     def _ragged_paged_attention(*args):
         kwargs = dict(
             sm_scale=sm_scale,
@@ -406,6 +430,8 @@ def sharded_ragged_paged_attention(
         # is a no-op so we don't forward it to the hd64 signature.
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
+        if pass_decode_q_len:
+            kwargs["decode_q_len"] = decode_q_len
         return func(*args, **kwargs)
 
     return jax.shard_map(
@@ -471,6 +497,7 @@ def attention(
         k_scale=k_scale,
         v_scale=v_scale,
         update_kv_cache=update_kv_cache,
+        decode_q_len=md.decode_q_len,
     )
 
     return kv_cache, output
