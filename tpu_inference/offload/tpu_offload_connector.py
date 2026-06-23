@@ -1992,14 +1992,7 @@ class TPUOffloadConnectorWorker:
     def _start_batched_save_kv(self, metadata: TPUOffloadConnectorMetadata):
         """
         Groups all HBM->CPU transfers across requests for a given batch
-        into a single gather and swap operation
-
-        Budgeting & Correctness:
-        This optimization is "transparent" to the StagingBufferManager. The Scheduler
-        performs per-request transactional allocations in build_connector_meta.
-        Because the total staging area is fixed, and the sum of individual
-        allocations is guaranteed to be within that limit, the unified batch
-        created here is always correctly budgeted and will not cause HBM OOM.
+        into a single gather and swap operation.
         """
         # 1. SYNC BLOCKING: Unified Gather and Validation
         gather_result = self._batched_gather_tpu_blocks(metadata)
@@ -2009,25 +2002,23 @@ class TPUOffloadConnectorWorker:
 
         flat_kv_caches_tpu, manifest, total_num_blocks_to_save = gather_result
 
-        # 2. ASYNC NON-BLOCKING: Single Batch Transfer
-        def _async_batch_transfer_task(*args, **kwargs):
-            try:
-                self._transfer_and_register_cpu_chunks(*args, **kwargs)
-            except Exception as e:
-                logger.error(f"Error in batched transfer: {e}", exc_info=True)
-
+        # 2. SYNC BLOCKING: Single Batch Transfer
         logger.debug(
-            f"Submitting batched transfer task for {len(manifest)} requests, {total_num_blocks_to_save} blocks total."
+            f"Performing synchronous batched transfer for {len(manifest)} requests, {total_num_blocks_to_save} blocks total."
         )
-        # Note: We use manifest for the pending future tracking.
-        # record_save will be handled in the main thread by _process_completed_saves.
+        self._transfer_and_register_cpu_chunks(flat_kv_caches_tpu,
+                                               total_num_blocks_to_save,
+                                               manifest,
+                                               is_batched=True)
+        self.metrics_collector.record_d2h_operation()
 
-        future = self.save_executor.submit(_async_batch_transfer_task,
-                                           flat_kv_caches_tpu,
-                                           total_num_blocks_to_save,
-                                           manifest,
-                                           is_batched=True)
-        self._pending_save_futures.append((future, manifest))
+        # Record saves for all requests in the manifest immediately
+        for info in manifest:
+            if info.num_blocks > 0:
+                self.offload_stats.record_save(req=info.req_id,
+                                               saved_chunk_ids=info.dst_chunks)
+            if info.is_final_save:
+                self.finished_save_reqs.add(info.req_id)
 
     def _get_blocks_for_req_from_metadata(
             self, info: SaveReqInfo,
@@ -2044,21 +2035,16 @@ class TPUOffloadConnectorWorker:
     def start_save_kv(self):
         """
         This function is the worker-side entry point for transfering data from the
-        TPU's sharded KV cache to the Host CPU RAM. Initiates the two-stage asynchronous
+        TPU's sharded KV cache to the Host CPU RAM. Initiates the two-stage
         save (offload) pipeline.
 
         Stage 1: Gather (Synchronous/Blocking)
         - Uses a JIT-compiled gather kernel to collect non-contiguous KV blocks
           to a HBM staging buffer.
-        - This step is blocking to ensure data consistency before the next
-          model iteration. Once the data is copied to the staging buffer, vllm can
-          reclaim the KV blocks.
 
-        Stage 2: Swap-Out (Asynchronous/Non-Blocking)
-        - Submits a background task to the ThreadPoolExecutor to perform
-          the Device-to-Host (D2H) transfer.
-        - The background thread moves data from HBM to Host RAM and
-          registers the chunks in the LocalCPUBackend.
+        Stage 2: Swap-Out (Synchronous/Blocking)
+        - Performs the Device-to-Host (D2H) transfer synchronously on the main thread,
+          blocking until the copy is complete.
         """
         # assert self.cpu_backend, "please initialize cpu_backend first."
         # This method is idempotent. If the save operations for the current
@@ -2098,7 +2084,6 @@ class TPUOffloadConnectorWorker:
                     continue
 
                 # 1. non-blocking gather from TPU
-                # We wrap this in a try/except to catch validation errors immediately.
                 try:
                     gather_result = self._gather_tpu_blocks(
                         meta.req_id, meta.local_block_ids, meta.token_ids,
@@ -2122,68 +2107,30 @@ class TPUOffloadConnectorWorker:
                                    dst_chunks=dst_chunks,
                                    is_final_save=meta.save_spec.is_final_save)
 
-                # Define a safe wrapper for the async part to ensure logging
-                def _async_transfer_task(req_id, *args):
-                    try:
-                        self._transfer_and_register_cpu_chunks(*args)
-                    except Exception as e:
-                        raise ValueError(
-                            f"Error transferring blocks for request {req_id}: {e}"
-                        )
-                    return req_id
-
-                # 2. ASYNC NON-BLOCKING: Transfer to CPU and Register
+                # 2. SYNC BLOCKING: Transfer to CPU and Register
                 logger.debug(
-                    f"Submitting transfer task for request {meta.req_id}")
-                future = self.save_executor.submit(_async_transfer_task,
-                                                   meta.req_id,
-                                                   flat_kv_caches_tpu,
-                                                   num_blocks_to_save, [info],
-                                                   False)
-
-                self._pending_save_futures.append((future, [info]))
+                    f"Performing synchronous transfer task for request {meta.req_id}"
+                )
+                self._transfer_and_register_cpu_chunks(flat_kv_caches_tpu,
+                                                       num_blocks_to_save,
+                                                       [info], False)
                 self.metrics_collector.record_d2h_operation()
+
+                # Record saves for all requests in the manifest immediately
+                if info.num_blocks > 0:
+                    self.offload_stats.record_save(
+                        req=info.req_id, saved_chunk_ids=info.dst_chunks)
+                if info.is_final_save:
+                    self.finished_save_reqs.add(info.req_id)
 
         self._processed_save_for_step = True
 
     def _process_completed_saves(self):
         """
-        Checks for and processes completed asynchronous save operations.
-        Supports both single and batched mode save operations using the
-        list[SaveReqInfo] manifest.
+        Since all save operations are performed synchronously in start_save_kv,
+        this method is a no-op.
         """
-        if not self._pending_save_futures:
-            return
-
-        start_time = time.time()
-        completed_count = 0
-        remaining_futures: list[tuple[Future, list[SaveReqInfo]]] = []
-        # TODO: Metrics data transfer operation in process
-        for future, manifest in self._pending_save_futures:
-            if future.done():
-                # Ensure the task finished successfully.
-                try:
-                    future.result()
-                    # Record saves for all requests in the manifest
-                    for info in manifest:
-                        if info.num_blocks > 0:
-                            self.offload_stats.record_save(
-                                req=info.req_id,
-                                saved_chunk_ids=info.dst_chunks)
-                            # TODO: Metrics data transfer complete
-
-                    completed_count += 1
-                except Exception as e:
-                    raise ValueError(f"A save operation failed: {e}")
-            else:
-                remaining_futures.append((future, manifest))
-
-        if completed_count > 0:
-            duration = time.time() - start_time
-            logger.debug(f"collected {completed_count} save operation "
-                         f"completions in {duration:.4f} seconds.")
-
-        self._pending_save_futures = remaining_futures
+        pass
 
     def start_load_kv(self, fwd_ctx: "ForwardContext") -> None:
         """
