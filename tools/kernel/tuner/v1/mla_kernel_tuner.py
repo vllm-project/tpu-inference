@@ -161,11 +161,13 @@ class MlaKernelTuner(KernelTunerBase):
     def __init__(self, run_config: RunConfig):
         self.tuner_config = TunerConfig(tuning_key_class=TuningKey,
                                         tunable_params_class=TunableParams,
-                                        kernel_tuner_name="mla_kernel_tuner")
+                                        kernel_tuner_name="mla_kernel_tuner",
+                                        support_autotune=True,
+                                        support_bayesian_optimization=False)
         super().__init__(tuner_config=self.tuner_config, run_config=run_config)
 
-    def support_autotune(self) -> bool:
-        return True
+    def get_search_space(self, tuning_key: TuningKey) -> dict:
+        return {}
 
     def generate_cases(self) -> list[TuningCase]:
         tuning_set_from_log = []

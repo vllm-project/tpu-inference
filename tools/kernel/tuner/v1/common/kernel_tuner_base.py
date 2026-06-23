@@ -80,7 +80,7 @@ class TuningCase:
         tunable_params = tunable_params_class(**data['tunable_params'])
         case = TuningCase(tuning_key, tunable_params)
         case.is_baseline = data.get('is_baseline', False)
-        return case.tuning_key, case.tunable_params, case.is_baseline
+        return case
 
 
 @dataclass
@@ -88,6 +88,8 @@ class TunerConfig:
     tuning_key_class: any = None
     tunable_params_class: any = None
     kernel_tuner_name: str = None
+    support_autotune: bool = False
+    support_bayesian_optimization: bool = False
 
 
 @dataclass
@@ -188,7 +190,7 @@ class KernelTunerBase(ABC):
     def generate_autotune_cases(self) -> list[TuningCase]:
         tuning_set = []
         # The case_set_id is constructed as {kernel_tuner_name}_{auto_tune_case_set_id} in the kernel_auto_tune_invoker.py
-        auto_tune_case_set_id = self.case_set_id.lstrip(
+        auto_tune_case_set_id = self.run_config.case_set_id.lstrip(
             f'{self.tuner_config.kernel_tuner_name}_')
         autotune_cases = self.storage_manager.read_auto_tune_cases(
             case_set_id=auto_tune_case_set_id,
@@ -196,12 +198,36 @@ class KernelTunerBase(ABC):
             tpu=self.tuner_config.tpu_version)
         for row in autotune_cases:
             case_key_value = row['CaseKeyValue']
-            # kernel_tuner_name = row['KernelTunerName']
-            # tpu = 'tpu6e' if 'tpu6e' in row['TPU'] else 'tpu7x'
-            tuning_set.append(
-                TuningCase.from_string(case_key_value,
-                                       self.tuner_config.tuning_key_class,
-                                       self.tuner_config.tunable_params_class))
+            tuning_case = TuningCase.from_string(
+                case_key_value, self.tuner_config.tuning_key_class,
+                self.tuner_config.tunable_params_class)
+            tuning_set.append(tuning_case)
+            tuning_key = tuning_case.tuning_key
+            search_space = self.get_search_space(tuning_key)
+            if not isinstance(search_space, dict):
+                raise ValueError(
+                    f"get_search_space should return a dictionary, but got {type(search_space)}"
+                )
+
+            def all_combinations(remain_keys, current_combination):
+                if not remain_keys:
+                    # tunable_params_list.append(TunableParams.from_dict(current_combination))
+                    if not current_combination:
+                        return
+                    yield TunableParams(**current_combination)
+                    return
+                key = remain_keys[0]
+                for value in search_space[key]:
+                    new_combination = current_combination.copy()
+                    new_combination[key] = value
+                    yield from all_combinations(remain_keys[1:],
+                                                new_combination)
+
+            for tunable_params in all_combinations(list(search_space.keys()),
+                                                   {}):
+                tuning_set.append(
+                    TuningCase(tuning_key, tunable_params, is_baseline=False))
+
         logger.info(
             f"Retrieved {len(tuning_set)} autotune cases for CaseSetId: {self.run_config.case_set_id} from Spanner."
         )
@@ -215,18 +241,24 @@ class KernelTunerBase(ABC):
         Returns: A list of TuningCase objects representing the tuning cases to be processed.
         """
         raise NotImplementedError(
-            "Specific kernel should implement this to generate the cases for the given case_set_id and desc, and return a list of TuningCase objects representing the tuning cases."
+            "Specific kernel tuner should implement this to generate the cases for the given case_set_id and desc, and return a list of TuningCase objects representing the tuning cases."
         )
 
     @abstractmethod
-    def support_autotune(self) -> bool:
-        """Check whether the kernel tuner supports auto-tuning mode. If True, the generate_autotune_cases method will be called to retrieve the tuning cases from the storage manager instead of generating new cases.
+    def get_search_space(self, tuning_key: TuningKey) -> dict:
+        """Get the search space for the given kernel tuner with the specified tuning key. The search space is a dictionary where the keys are the tunable parameter names and the values are lists of possible values for each parameter.
+
+        For example, for a kernel tuner that TunableParams has two tunable parameters 'tile_size' and 'unroll_factor', the search space could be represented as:
+        {
+            'tile_size': [16, 32, 64],
+            'unroll_factor': [1, 2, 4]
+        }
 
         Returns:
-            True if the kernel tuner supports auto-tuning mode, False otherwise.
+            A dictionary representing the search space for the kernel tuner.
         """
         raise NotImplementedError(
-            "Specific kernel should implement this to indicate whether it supports auto-tuning mode."
+            "Specific kernel tuner must implement this to return the search space for the kernel tuner if it supports bayesian optimization."
         )
 
     def _generate_tuning_jobs(self) -> list[tuple[int, int]]:
@@ -244,8 +276,8 @@ class KernelTunerBase(ABC):
         try:
             if self._init_case_set():
                 start_time = time.perf_counter()
-                cases = self.generate_cases() if not self.support_autotune(
-                ) or not self.run_config.autotune_mode else self.generate_autotune_cases(
+                cases = self.generate_autotune_cases(
+                ) if self.tuner_config.support_autotune and self.run_config.autotune_mode else self.generate_cases(
                 )
                 total_cases = len(cases)
                 for case_id, case_str in enumerate(map(str, cases)):
@@ -271,6 +303,8 @@ class KernelTunerBase(ABC):
             buckets = [
                 (i, min(i + self.run_config.job_bucket_size, total_cases))
                 for i in range(0, total_cases, self.run_config.job_bucket_size)
+            ] if not self.tuner_config.support_bayesian_optimization else [
+                (0, total_cases)
             ]
             return buckets
         except Exception as e:
@@ -383,10 +417,11 @@ class KernelTunerBase(ABC):
                 case_id_end,
                 tpu=self.run_config.tpu_queue_multi)
 
-        pipeline['steps'] = [{
-            'group': 'Kernel Sweeping Group',
-            'steps': pipeline['steps']
-        }]
+        if not self.tuner_config.support_bayesian_optimization:
+            pipeline['steps'] = [{
+                'group': 'Kernel Sweeping Group',
+                'steps': pipeline['steps']
+            }]
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w") as f:
@@ -513,9 +548,10 @@ class KernelTunerBase(ABC):
                 continue
             assert cid in all_configs, f"CaseId {cid} is missing in the configs retrieved from storage manager for CaseSetId {self.run_config.case_set_id}. This should not happen as the configs should have been generated and stored in the storage manager before."
             _, _, case_key_value = all_configs[cid]
-            tuning_key, tunable_params, is_baseline = TuningCase.from_string(
+            tuning_case = TuningCase.from_string(
                 case_key_value, self.tuner_config.tuning_key_class,
                 self.tuner_config.tunable_params_class)
+            tuning_key, tunable_params, _ = tuning_case.tuning_key, tuning_case.tunable_params, tuning_case.is_baseline
 
             begin_case_id_time = time.perf_counter_ns()
             # status can be SUCCESS, FAILED_OOM, UNKNOWN_ERROR.
