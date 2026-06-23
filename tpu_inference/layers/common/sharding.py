@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, List, Optional
 
 import jax.numpy as jnp
 import numpy as np
-import vllm.envs as vllm_envs
 from jax.sharding import Mesh
 
 from tpu_inference import envs, utils
@@ -64,6 +63,10 @@ class ShardingAxisNameBase:
     CONTEXT = 'dcp'
     KV_CACHE_HEAD = ('model', 'expert')
 
+    # Vision encoder sharding axes
+    VIT_BATCH = ('data', 'attn_dp', 'attn_dp_expert')
+    VIT_MODEL = 'model'
+
 
 class ShardingAxisName2D:
     """Sharding axis names for 2D data parallelism scenarios.
@@ -86,6 +89,10 @@ class ShardingAxisName2D:
     KV_CACHE_HEAD = 'model'
     MODEL = 'model'
 
+    # Vision encoder sharding axes
+    VIT_BATCH = 'data'
+    VIT_MODEL = 'model'
+
 
 # Lazily initialize the ShardingAxisName so that we can decide which one to use based on the
 # propagated / updated environment variables in the multi-host setup.
@@ -94,6 +101,7 @@ class LazyShardingAxisName:
 
     def __init__(self):
         self._cls = None
+        self._overrides: dict = {}
 
     def _initialize(self):
         if self._cls is None:
@@ -107,7 +115,17 @@ class LazyShardingAxisName:
             except Exception:
                 self._cls = ShardingAxisName2D
 
+    def override(self, **kwargs):
+        """Set runtime axis overrides."""
+        self._overrides.update(kwargs)
+
+    def reset(self):
+        """Clear all overrides, restoring base-class values."""
+        self._overrides.clear()
+
     def __getattr__(self, name):
+        if name in self._overrides:
+            return self._overrides[name]
         self._initialize()
         return getattr(self._cls, name)
 
@@ -154,7 +172,8 @@ class ShardingConfigManager:
 
     def __init__(self,
                  sharding_strategy: ShardingStrategy,
-                 device_indexes: Optional[List] = None):
+                 device_indexes: Optional[List] = None,
+                 mm_encoder_tp_mode: str = "weights"):
 
         self.sharding_strategy: ShardingStrategy = sharding_strategy
         self.device_indexes: Optional[List[int]] = device_indexes
@@ -162,6 +181,7 @@ class ShardingConfigManager:
             math.prod(asdict(sharding_strategy).values()))
         if device_indexes:
             assert self._total_devices == len(device_indexes)
+        self.mm_encoder_tp_mode = mm_encoder_tp_mode
 
     @classmethod
     def from_vllm_config(cls,
@@ -177,27 +197,8 @@ class ShardingConfigManager:
         data_parallelism = parallel_config.data_parallel_size
         enable_dp_attention = sharding_strategy.get("enable_dp_attention",
                                                     False)
-        # vLLM-native multi-process data parallelism: one engine process per
-        # DP rank, fronted by a single load-balanced API endpoint.
-        #
-        # It is not used (we fall back to single-process SPMD DP) when:
-        #  - attention DP is enabled
-        #  - running on Pathways
-        multiprocess_dp = (envs.TPU_MULTIPROCESS_DP and data_parallelism > 1
-                           and not enable_dp_attention
-                           and not vllm_envs.VLLM_TPU_USING_PATHWAYS)
-        if (envs.TPU_MULTIPROCESS_DP and data_parallelism > 1
-                and not multiprocess_dp):
-            raise ValueError(
-                "TPU_MULTIPROCESS_DP is set but is not supported with "
-                "attention DP (enable_dp_attention) or on Pathways. "
-                "Please disable TPU_MULTIPROCESS_DP.")
-        if multiprocess_dp:
+        if envs.TPU_MULTIPROCESS_DP:
             data_parallelism = 1
-            logger.warning(
-                "TPU_MULTIPROCESS_DP is enabled: supported for online serving "
-                "only. The offline LLM().generate() API will hang. "
-                "Use `vllm serve` instead.")
         expert_parallelism = sharding_strategy.get("expert_parallelism", 1)
         sequence_parallelism = sharding_strategy.get("sequence_parallelism", 1)
         device_indexes = sharding_strategy.get("device_indexes", None)
@@ -280,14 +281,18 @@ class ShardingConfigManager:
             decode_context_parallelism=decode_context_parallelism)
 
         # Must override here to avoid vLLM spinning up multiple DP engines.
-        if (not multiprocess_dp
+        if (not envs.TPU_MULTIPROCESS_DP
                 and vllm_config.parallel_config.data_parallel_size > 1):
             vllm_config.parallel_config.data_parallel_size = 1
             vllm_config.parallel_config.data_parallel_rank = 0
             vllm_config.parallel_config.data_parallel_size_local = 1
 
+        # To enable data-parallel vision encoding, pass:
+        # --additional_config='{"mm-encoder-tp-mode": "data"}'
+        mm_encoder_tp_mode = vllm_config.additional_config.get(
+            'mm-encoder-tp-mode', 'weights')
         cls.validate(vllm_config, sharding_strategy)
-        return cls(sharding_strategy, device_indexes)
+        return cls(sharding_strategy, device_indexes, mm_encoder_tp_mode)
 
     @classmethod
     def validate(cls, vllm_config, sharding_strategy):
@@ -345,9 +350,19 @@ class ShardingConfigManager:
     def total_devices(self) -> int:
         return self._total_devices
 
+    def apply_vision_sharding(self):
+        ShardingAxisName.reset()
+        if self.mm_encoder_tp_mode == "data" and self.tp_size > 1:
+            base = ShardingAxisName.VIT_BATCH
+            model_axis = ShardingAxisName.MODEL
+            vit_batch = (base, model_axis) if isinstance(
+                base, str) else tuple(base) + (model_axis, )
+            ShardingAxisName.override(VIT_BATCH=vit_batch, VIT_MODEL=None)
+
     def __str__(self):
         return (f"ShardingConfigManager(total_devices={self.total_devices}, "
                 f"sharding_strategy={self.sharding_strategy}, "
+                f"mm_encoder_tp_mode={self.mm_encoder_tp_mode}, "
                 f"device_indexes={self.device_indexes})")
 
 

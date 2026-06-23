@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-import time
 
 import pytest
 from vllm import LLM, SamplingParams
@@ -68,9 +67,7 @@ def _run_inference_with_config(
         outputs = llm.generate(test_prompts, sampling_params)
         return outputs
     finally:
-        del llm
-        # Wait for TPUs to be released
-        time.sleep(10)
+        llm.llm_engine.engine_core.shutdown()
 
 
 def test_hybrid_kv_cache(

@@ -69,7 +69,7 @@ def compute_schedule_table_v2(
     # 1. Get each prefill sequence's effective start for chunkwise math
     # =========================================================================
     r_idx = jnp.arange(num_seqs)
-    is_last_seq = r_idx == num_seqs - 1
+    is_last_seq = r_idx == num_valid_seqs - 1
     seq_start = query_start_loc[:-1]
     seq_end = query_start_loc[1:]
     num_tokens = query_start_loc[num_valid_seqs]

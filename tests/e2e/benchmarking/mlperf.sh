@@ -324,7 +324,7 @@ for model_name in $model_list; do
             max_batched_tokens=1024
             if [[ "${model_name,,}" == *"kimi"* ]]; then
                 served_name=moonshotai/Kimi-K2.6
-                current_serve_args+=(--kv-cache-dtype=fp8 --gpu-memory-utilization 0.977 --limit-mm-per-prompt='{"image": 0, "video": 0, "vision_chunk": 0}' )
+                current_serve_args+=(--kv-cache-dtype=fp8 --gpu-memory-utilization 0.95 --limit-mm-per-prompt='{"image": 0, "video": 0, "vision_chunk": 0}' )
                 current_serve_args+=(--served-model-name "${served_name}"  --load-format=runai_streamer --enable-expert-parallel  --trust-remote-code --kv-cache-dtype=fp8 --additional-config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "tensor_parallelism": '"${DEVICE_COUNT}"'}}}')
             else
                 served_name=deepseek-ai/DeepSeek-R1

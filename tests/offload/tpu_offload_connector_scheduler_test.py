@@ -489,7 +489,9 @@ class TestTPUOffloadConnectorScheduler:
 
         assert req_id not in scheduler._unfinished_requests
         assert req_id not in scheduler._request_trackers
-        assert len(metadata.requests_meta) == 0
+        assert len(metadata.requests_meta) == 1
+        assert metadata.requests_meta[0].save_spec.skip_save is True
+        assert metadata.requests_meta[0].save_spec.is_final_save is True
 
 
 @pytest.fixture
