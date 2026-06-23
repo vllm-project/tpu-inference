@@ -85,8 +85,9 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 source "$SCRIPT_DIR/setup_docker_env.sh"
 setup_environment $IMAGE_NAME
 
+# Kernel Tuning Environment Variables, tuning should be invoked through below pipelines
 # shellcheck disable=SC1091
-if [[ "$BUILDKITE_PIPELINE_NAME" =~ (kernel-tuning|kernel-autotune) ]]; then
+if [[ "${BUILDKITE_PIPELINE_NAME:-}" =~ (kernel-tuning|kernel-autotune) ]]; then
   source "$SCRIPT_DIR/kernel_tuning_envs.sh"
   ENV_VARS+=("${KERNEL_TUNING_ENV_VARS[@]}")
 fi

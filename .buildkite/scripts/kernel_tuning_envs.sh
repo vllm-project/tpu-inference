@@ -41,10 +41,6 @@ for entry in "${KERNEL_TUNING_ENV_VARS[@]}"; do
         echo "Error: Required environment variable $var_name is not defined or is empty."
         exit 1
     fi
-          if [ -z "${KERNEL_TUNING_RUN_ID:-}" ] || [ -z "${KERNEL_TUNING_CASE_SET_ID:-}" ]; then
-            echo "Error: KERNEL_TUNING_RUN_ID or KERNEL_TUNING_CASE_SET_ID not set"
-            exit 1
-          fi
 done
 
 # Optional environment variables that can be added if they are set in the environment
