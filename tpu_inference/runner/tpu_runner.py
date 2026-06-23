@@ -369,7 +369,14 @@ def _reconstruct_slots_for_request(
     block_size: int,
 ) -> np.ndarray:
     """Reconstructs physical slot mappings for a request using vectorized NumPy."""
-    start_pos = req_state.num_computed_tokens
+    # num_computed_tokens has already been advanced past this step's tokens by
+    # the time routed experts are reconstructed, so this step's tokens occupy
+    # absolute positions [num_computed_tokens - num_tokens, num_computed_tokens).
+    # Using num_computed_tokens directly shifts the slots forward by num_tokens,
+    # which misaligns with the scheduler-side slot read (RoutedExpertsManager.get,
+    # block-relative from position 0) and yields zero-filled routed experts for
+    # the prompt tokens.
+    start_pos = req_state.num_computed_tokens - num_tokens
     block_ids = req_state.block_ids[0] if req_state.block_ids else []
 
     if num_tokens <= 0:
