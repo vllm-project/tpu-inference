@@ -13,23 +13,23 @@
 # limitations under the License.
 
 steps:
-  # -----------------------------------------------------------------
-  # Centralized Build Step (Runs on the CPU queue)
-  # -----------------------------------------------------------------
-  - label: ":docker: Build and Push Base Image (${TPU_VERSION:-tpu6e})"
-    key: "${TPU_VERSION:-tpu6e}_build_docker_combo"
-    agents:
-      queue: cpu_64_core
-    env:
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-    commands:
-      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+  # # -----------------------------------------------------------------
+  # # Centralized Build Step (Runs on the CPU queue)
+  # # -----------------------------------------------------------------
+  # - label: ":docker: Build and Push Base Image (${TPU_VERSION:-tpu6e})"
+  #   key: "${TPU_VERSION:-tpu6e}_build_docker_combo"
+  #   agents:
+  #     queue: cpu_64_core
+  #   env:
+  #     TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+  #   commands:
+  #     - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
   # TPU Combo E2E Tests
   # -----------------------------------------------------------------
   - group: "[${TPU_VERSION:-tpu6e}] Combo E2E Tests"
-    depends_on: "${TPU_VERSION:-tpu6e}_build_docker_combo"
+    depends_on: "build_docker"
     steps:
       - label: "${TPU_VERSION:-tpu6e} test_combo_chunked_offload_spec.py"
         agents:
