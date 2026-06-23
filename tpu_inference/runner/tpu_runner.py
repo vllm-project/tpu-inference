@@ -1189,7 +1189,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # request_distribution[0] tracks the number of decode requests.
         is_decode_only = self.input_batch.request_distribution[
             0] == self.input_batch.num_reqs
-        if is_decode_only and self.enable_continue_decode:
+        # The continue-decode fast loop assumes exactly one new token per
+        # request per step. Speculative decoding now routes its multi-token
+        # requests into the decode region, so spec batches (even when
+        # classified as decode-only) must take the regular path instead.
+        if (is_decode_only and self.enable_continue_decode
+                and self.speculative_config is None):
             return self._execute_continue_decode(scheduler_output)
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
@@ -2494,6 +2499,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             seq_lens, positions = self._subtract_num_rejected_tokens(
                 seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank)
 
+        # Static (compile-time) per-request query length for the RPA decode
+        # region. With speculative decoding, decode-region requests carry up to
+        # `num_speculative_tokens + 1` query tokens (draft tokens + the bonus
+        # token); otherwise ordinary decode has exactly 1.
+        decode_q_len = (self.speculative_config.num_speculative_tokens +
+                        1) if self.speculative_config is not None else 1
+
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
@@ -2503,6 +2515,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
+                decode_q_len=decode_q_len,
             )
 
             return attention_metadata_gid
