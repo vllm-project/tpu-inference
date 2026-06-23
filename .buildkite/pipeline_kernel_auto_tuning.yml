@@ -27,22 +27,22 @@ steps:
       env:
         KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
       steps:
-        # - label: ":pipeline: Run Benchmarks and Collect Kernel Cases"
-        #   agents:
-        #     queue: cpu
-        #   priority: 200
-        #   key: kernel_cases_collection
-        #   depends_on: kernel_autotune_entry
-        #   env:
-        #     KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
-        #   command: |
-        #     bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh
+        - label: ":pipeline: Run Benchmarks and Collect Kernel Cases"
+          agents:
+            queue: cpu
+          priority: 200
+          key: kernel_cases_collection
+          depends_on: kernel_autotune_entry
+          env:
+            KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
+          command: |
+            bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh
           
         - label: "Invoke Kernel Tuners"
           key: invoke_kernel_tuners
           priority: 200
           depends_on:
-            - "kernel_autotune_entry"
+            - "kernel_cases_collection"
           env:
             USE_PREBUILT_IMAGE: "1"
             TPU_VERSION: "tpu6e"

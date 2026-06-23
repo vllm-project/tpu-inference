@@ -244,7 +244,7 @@ class KernelTunerBase(ABC):
         try:
             if self._init_case_set():
                 start_time = time.perf_counter()
-                cases = self.generate_cases() if not self.supports_autotune(
+                cases = self.generate_cases() if not self.support_autotune(
                 ) or not self.run_config.autotune_mode else self.generate_autotune_cases(
                 )
                 total_cases = len(cases)
