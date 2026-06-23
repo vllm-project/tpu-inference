@@ -441,11 +441,14 @@ class KernelTunerBase(ABC):
                 case_id_end,
                 tpu=self.run_config.tpu_queue_multi)
 
-        if not self.tuner_config.support_bayesian_optimization:
-            pipeline['steps'] = [{
-                'group': 'Kernel Sweeping Group',
-                'steps': pipeline['steps']
-            }]
+        if self.run_config.support_bayesian_optimization:
+            group_name = 'Kernel Tuning Bayesian Optimization Group'
+        else:
+            group_name = 'Kernel Tuning Sweeping Group'
+        pipeline['steps'] = [{
+            'group': group_name,
+            'steps': pipeline['steps']
+        }]
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w") as f:
