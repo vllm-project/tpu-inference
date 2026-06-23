@@ -63,10 +63,6 @@ ENV_VARS=(
   -e GCS_BUCKET="${GCS_BUCKET:-}"
 )
 
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/kernel_tuning_envs.sh"
-ENV_VARS+=("${KERNEL_TUNING_ENV_VARS[@]}")
-
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
     MODEL_IMPL_TYPE=auto
 fi
