@@ -422,6 +422,23 @@ def _reconstruct_routed_experts(
     total_active_tokens = scheduler_output.total_num_scheduled_tokens
     dp_size = runner.dp_size
 
+    # Absolute start position of each request's chunk = its PRE-step
+    # computed-token count, sourced from scheduler_output (not from
+    # req_state.num_computed_tokens). req_state.num_computed_tokens is advanced
+    # at different times across the two output paths that reach this function:
+    # it is already advanced past this step on the async get_output path, but is
+    # still the pre-step value on the sync _sample_from_logits path
+    # (async_scheduling=False, required by continue_decode). scheduler_output
+    # always carries the pre-step value, so it is correct for both; deriving
+    # start_pos as `num_computed_tokens - n` underflows to a negative value on a
+    # fresh prefill in the sync path.
+    chunk_start = {}
+    for new_req in scheduler_output.scheduled_new_reqs:
+        chunk_start[new_req.req_id] = new_req.num_computed_tokens
+    cached_reqs = scheduler_output.scheduled_cached_reqs
+    for i, rid in enumerate(cached_reqs.req_ids):
+        chunk_start[rid] = cached_reqs.num_computed_tokens[i]
+
     # 1. Compute global start offsets of every request in input batch order
     global_start_offsets = {}
     current_global_offset = 0
@@ -455,12 +472,10 @@ def _reconstruct_routed_experts(
                                                              dp_end,
                                                              dtype=np.int32)
 
-            # Reconstruct slots for this request using vectorized NumPy.
-            # num_computed_tokens has already been advanced past this chunk, so
-            # the chunk's tokens start at num_computed_tokens - n. Passing
-            # num_computed_tokens directly would shift slots forward by n and
-            # misalign with the scheduler-side block-relative read, yielding
-            # zero-filled routed experts for the prompt tokens.
+            # Reconstruct slots for this request using vectorized NumPy. Use the
+            # pre-step chunk start from scheduler_output (see chunk_start above);
+            # the slots must match the scheduler-side block-relative read
+            # (RoutedExpertsManager.get, from position 0).
             req_state = runner.requests[req_id]
             if n > 0:
                 global_slots[
@@ -468,7 +483,7 @@ def _reconstruct_routed_experts(
                         req_state,
                         n,
                         block_size,
-                        start_pos=req_state.num_computed_tokens - n)
+                        start_pos=chunk_start[req_id])
 
     # 3. Perform global rank reordering and transpose in a single fancy indexing sweep!
     expert_indices_reordered = expert_indices_cpu[:, indices_map, :].transpose(

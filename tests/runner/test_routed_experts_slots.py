@@ -18,9 +18,10 @@ The routed experts of a step are stored into the scheduler-side slot buffer
 block-relative from position 0. So the slot_mapping produced here must place a
 request's tokens at their true absolute positions. ``_reconstruct_slots_for_request``
 takes an explicit ``start_pos`` (the two call sites have different token
-contracts); ``_reconstruct_routed_experts`` derives it for the routed-experts
-path as ``num_computed_tokens - num_tokens`` (num_computed_tokens has already
-been advanced past the step's tokens by reconstruction time).
+contracts); ``_reconstruct_routed_experts`` sources it from ``scheduler_output``
+(the pre-step computed-token count), which is correct on both the sync and
+async output paths -- unlike ``req_state.num_computed_tokens``, whose
+advancement timing differs between them.
 """
 from types import SimpleNamespace
 
@@ -85,23 +86,37 @@ class TestReconstructSlotsForRequest:
                                            start_pos=-2)
 
 
+def _new_req_sched(req_id, num_computed_tokens):
+    return SimpleNamespace(req_id=req_id,
+                           num_computed_tokens=num_computed_tokens)
+
+
+def _empty_cached():
+    return SimpleNamespace(req_ids=[], num_computed_tokens=[])
+
+
 class TestReconstructRoutedExperts:
     """End-to-end slot derivation for the routed-experts reconstruction path
-    (the caller that had the off-by-num_tokens bug)."""
+    (the caller that had the slot-start bug). The chunk start is sourced from
+    scheduler_output (pre-step), NOT from req_state.num_computed_tokens, whose
+    advancement timing differs between the sync and async output paths."""
 
-    def test_prefill_slots_block_relative_and_routing_preserved(self):
+    def test_new_request_prefill_slots_block_relative(self):
         req_id = "req0"
         n = 5  # 5-token prompt prefill
         block_size = 16
         num_layers, top_k = 2, 4
-        # num_computed_tokens already advanced past the chunk (post-prefill = 5).
-        req_state = _req(num_computed_tokens=n, block_ids=[1])
+        # Set req_state.num_computed_tokens to a wrong sentinel: the result must
+        # be derived from scheduler_output (chunk start 0), not this field.
+        req_state = _req(num_computed_tokens=99999, block_ids=[1])
         runner = SimpleNamespace(block_size=block_size,
                                  dp_size=1,
                                  requests={req_id: req_state})
         scheduler_output = SimpleNamespace(
             num_scheduled_tokens={req_id: n},
             total_num_scheduled_tokens=n,
+            scheduled_new_reqs=[_new_req_sched(req_id, 0)],
+            scheduled_cached_reqs=_empty_cached(),
         )
         # Distinct per-(layer, token) values to detect any mis-mapping.
         expert_indices_cpu = np.arange(num_layers * n * top_k,
@@ -117,8 +132,10 @@ class TestReconstructRoutedExperts:
             padded_num_scheduled_tokens_per_dp_rank=n,
         )
 
-        # The fix: prompt tokens at positions 0..4 in block 1 -> slots 16..20.
-        # (The pre-fix code produced 21..25, which the scheduler reads as zeros.)
+        # Prompt tokens at positions 0..4 in block 1 -> slots 16..20.
+        # (The buggy num_computed_tokens-based code underflowed to -5 on the
+        # sync path and produced 21..25 on the async path; sourcing the chunk
+        # start from scheduler_output is correct for both.)
         np.testing.assert_array_equal(
             result.slot_mapping, np.array([16, 17, 18, 19, 20],
                                           dtype=np.int32))
@@ -126,3 +143,37 @@ class TestReconstructRoutedExperts:
         # transposed to (tokens, layers, top_k).
         np.testing.assert_array_equal(result.routing_data,
                                       expert_indices_cpu.transpose(1, 0, 2))
+
+    def test_cached_request_chunk_slots_use_pre_step_start(self):
+        # A cached/running request whose chunk starts at absolute position 20.
+        req_id = "reqC"
+        n = 1
+        block_size = 16
+        num_layers, top_k = 2, 4
+        req_state = _req(num_computed_tokens=99999, block_ids=[1, 2])
+        runner = SimpleNamespace(block_size=block_size,
+                                 dp_size=1,
+                                 requests={req_id: req_state})
+        scheduler_output = SimpleNamespace(
+            num_scheduled_tokens={req_id: n},
+            total_num_scheduled_tokens=n,
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[req_id],
+                                                  num_computed_tokens=[20]),
+        )
+        expert_indices_cpu = np.arange(num_layers * n * top_k,
+                                       dtype=np.int32).reshape(
+                                           num_layers, n, top_k)
+
+        result = _reconstruct_routed_experts(
+            runner=runner,
+            scheduler_output=scheduler_output,
+            expert_indices_cpu=expert_indices_cpu,
+            req_ids=[req_id],
+            req_ids_dp={0: [req_id]},
+            padded_num_scheduled_tokens_per_dp_rank=n,
+        )
+
+        # Position 20 -> block_ids[20 // 16 = 1] = block 2 -> 2*16 + 20%16 = 36.
+        np.testing.assert_array_equal(result.slot_mapping,
+                                      np.array([36], dtype=np.int32))
