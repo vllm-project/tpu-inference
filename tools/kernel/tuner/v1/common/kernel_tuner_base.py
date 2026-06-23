@@ -439,12 +439,14 @@ class KernelTunerBase(ABC):
                 case_id_end,
                 tpu=self.run_config.tpu_queue_multi)
 
-        if self.run_config.support_bayesian_optimization:
+        if self.tuner_config.support_bayesian_optimization:
             group_name = f'Bayesian Optimization Group[{self.tuner_config.kernel_tuner_name}]'
         else:
             group_name = f'Sweeping Group[{self.tuner_config.kernel_tuner_name}]'
         pipeline['steps'] = [{
             'group': group_name,
+            'key':
+            f'{self.tuner_config.kernel_tuner_name}_{self.run_config.tpu_version}_tuning_group',
             'steps': pipeline['steps']
         }]
 
@@ -559,7 +561,8 @@ class KernelTunerBase(ABC):
             )
             if not self.run_config.run_locally and (
                     time_elapsed_minutes
-                    > self.run_config.max_execution_minutes):
+                    > self.run_config.max_execution_minutes
+            ) and not self.tuner_config.support_bayesian_optimization:
                 logger.warning(
                     f"Worker [{worker_id}] has been processing bucket {bucket_id} for {time_elapsed_minutes:.2f} minutes, which exceeds the limit of {self.run_config.max_execution_minutes} minutes. Stopping processing more cases in this bucket to allow other jobs(like CICD jobs) in the queue to proceed."
                 )
