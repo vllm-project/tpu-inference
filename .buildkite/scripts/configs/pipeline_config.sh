@@ -34,6 +34,18 @@ upload_with_priority() {
   } | buildkite-agent pipeline upload
 }
 
+# Uploads pipeline_build.yml exactly once per Buildkite build, using meta-data
+# as a guard. Safe to call from multiple bootstrap scripts or pipeline steps.
+upload_pipeline_build_once() {
+  local JOB_PRIORITY=${1:-$PRIORITY_DEFAULT}
+  if buildkite-agent meta-data get "pipeline_build_uploaded" > /dev/null 2>&1; then
+    echo "--- :pipeline: pipeline_build.yml already uploaded, skipping"
+    return 0
+  fi
+  upload_with_priority .buildkite/pipeline_build.yml "$JOB_PRIORITY"
+  buildkite-agent meta-data set "pipeline_build_uploaded" "true"
+}
+
 get_vllm_commit_hash() {
   # load vllm commit hash from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
   local commit_hash=""

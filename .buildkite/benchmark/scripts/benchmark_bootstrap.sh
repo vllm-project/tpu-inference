@@ -66,7 +66,7 @@ upload_benchmark_pipeline() {
     if [ "$(ls -A "$case_folder" 2>/dev/null)" ]; then
         # Since Buildkite inserts steps in reverse order, uploading this last 
         # ensures the Docker build steps appear at the very top of the UI.
-        upload_with_priority .buildkite/pipeline_build.yml "$JOB_PRIORITY"
+        upload_pipeline_build_once "$JOB_PRIORITY"
     else
         echo "No benchmark cases found in $case_folder. Skipping docker build."
     fi
