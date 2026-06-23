@@ -47,17 +47,16 @@ _SPANNER_INSTANCE_ID = flags.DEFINE_string(
 _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'spanner_database_id', 'tune-gmm',
     'The Spanner database ID to use. Only used when --run_locally is false.')
-_CASE_SET_ID = flags.DEFINE_string('case_set_id', '',
-                                   'The case set ID to use for this run.')
+_AUTO_TUNE_ID = flags.DEFINE_string('auto_tune_id', '',
+                                    'The auto tune ID to use for this run.')
 
 OUTPUT_PATH = "/tmp/kernel_tuning/generated_pipeline.yml"
 
 
 class KernelAutoTuneInvoker:
 
-    def __init__(self, case_set_id: str):
-        self.case_set_id = case_set_id
-        # the case_set_id will be used to query
+    def __init__(self, auto_tune_id: str):
+        self.auto_tune_id = auto_tune_id
         self.storage_manager = SpannerStorageManager(
             gcp_project_id=_GCP_PROJECT_ID.value,
             spanner_instance_id=_SPANNER_INSTANCE_ID.value,
@@ -65,22 +64,35 @@ class KernelAutoTuneInvoker:
 
     def _build_result_processing_step(self,
                                       parent_step_keys: list[str]) -> dict:
+        branch_name = f"kernel_autotune.update_tuned_params_{self.auto_tune_id}"
         return {
             "label":
             "Kernel Auto-Tuning Result Processing",
             "key":
-            'kernel_autotune_result_processing',
+            'patch_kernel_autotune_result',
             "depends_on":
             parent_step_keys,
             "agents": {
-                "queue": "cpu"
+                "queue": 'tpu_v6e_queue'
+            },
+            "env": {
+                "USE_PREBUILT_IMAGE": "1",
+                "TPU_VERSION": 'tpu6e'
             },
             "priority":
             200,
             "commands": [
+                LiteralString(f'git checkout -b {branch_name}'),
                 LiteralString(
-                    'echo "Kernel Auto-Tuning Completed. All tuning cases have been generated."'
-                )
+                    '.buildkite/scripts/run_in_docker.sh bash -c \''
+                    'pip install --upgrade google-cloud-spanner google-api-core google-auth absl-py && '
+                    'python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing '
+                    f'--auto_tune_id={self.auto_tune_id}\' '),
+                LiteralString('git add -u'),
+                LiteralString(
+                    f'git commit -m "Update tuned params for auto tune ID: {self.auto_tune_id}"'
+                ),
+                LiteralString(f'git push origin {branch_name} --force'),
             ]
         }
 
@@ -163,7 +175,7 @@ class KernelAutoTuneInvoker:
             pipeline['steps'].append(
                 self._build_generate_tuning_cases_step(
                     kernel_tuner_name=kernel_tuner_name,
-                    case_set_id=f'{kernel_tuner_name}_{self.case_set_id}',
+                    case_set_id=f'{kernel_tuner_name}_{self.auto_tune_id}',
                     tpu_version=tpu,
                     #(TODO): Only support kernel without communication for now and we don't have TPU 7x with 1 core queue
                     tpu_cores=supported_core_num,
@@ -182,5 +194,5 @@ class KernelAutoTuneInvoker:
 
 
 if __name__ == "__main__":
-    app.run(lambda _: KernelAutoTuneInvoker(case_set_id=_CASE_SET_ID.value).
+    app.run(lambda _: KernelAutoTuneInvoker(auto_tune_id=_AUTO_TUNE_ID.value).
             generate_kernel_tuning_cases())
