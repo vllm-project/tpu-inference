@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Union
 
+import numpy as np
 import pytest
 from vllm import LLM, SamplingParams
 
@@ -280,7 +281,7 @@ def test_continue_decode_correctness_matrix(matrix_case, sampling_params):
 
     # 5. Verify expert routing metadata for MoE architectures
     if "MoE" in config.model_name:
-        for cd_out in continue_decode_outputs:
+        for base_out, cd_out in zip(baseline_outputs, continue_decode_outputs):
             cd_req = cd_out.outputs[0]
             assert cd_req.routed_experts is not None, "routed_experts tensor must be populated for MoE models when enabled."
             assert len(
@@ -297,6 +298,27 @@ def test_continue_decode_correctness_matrix(matrix_case, sampling_params):
                 f"Exported expert IDs token dimension mismatch. Expected {expected_tokens_dim} "
                 f"(prompt len {num_prompt_tokens} + gen len {num_gen_tokens} - 1), got {actual_tokens_dim}"
             )
+
+            # Value-level check: continue_decode must return the *same* routed
+            # expert IDs as the single-step baseline (deterministic, temp=0).
+            # A shape-only check cannot catch a slot-mapping regression (e.g. a
+            # wrong start_pos that zero-fills the prompt experts), so compare the
+            # actual IDs against the baseline run.
+            base_req = base_out.outputs[0]
+            assert base_req.routed_experts is not None, (
+                "baseline routed_experts must be populated for MoE models")
+            cd_re = np.asarray(cd_req.routed_experts)
+            base_re = np.asarray(base_req.routed_experts)
+            assert cd_re.shape == base_re.shape, (
+                f"routed_experts shape mismatch: continue_decode {cd_re.shape} "
+                f"vs baseline {base_re.shape}")
+            np.testing.assert_array_equal(
+                cd_re,
+                base_re,
+                err_msg=
+                ("continue_decode routed experts differ from the single-step "
+                 "baseline; a slot-mapping regression can zero-fill or shift "
+                 "expert IDs while keeping the shape correct"))
 
 
 # Scenarios 5-6: Performance evaluation on MMLU workloads with Qwen/Qwen1.5-MoE-A2.7B
