@@ -27,7 +27,7 @@ steps:
       env:
         KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
       steps:
-        - label: ":pipeline: Run Benchmarks and Collect Kernel Cases"
+        - label: ":pipeline: Run Benchmarks For Collecting Tuning Cases"
           agents:
             queue: cpu
           priority: 200
