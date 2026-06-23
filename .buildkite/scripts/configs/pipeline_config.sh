@@ -96,6 +96,7 @@ process_json_benchmark_cases() {
   local generator="${2:-}"
   local priority="${3:-}"
   local extra_files="${4:-}" # Optional: newline-separated list of files
+  local dependency_step="${5:-}" # Optional: Buildkite step key that all benchmark steps depend on
   local error_msgs=()
 
   echo "--- Generating dynamic pipelines from $case_folder and $extra_files"
@@ -105,6 +106,7 @@ process_json_benchmark_cases() {
   _process_benchmark_file() {
     local f="$1"
     local no_verify="${2:-false}"
+    local dependency_step="${3:-}"
 
     if [ ! -f "$f" ]; then
       # If the file does not exist (e.g., deleted in the current PR), skip it gracefully.
@@ -116,7 +118,7 @@ process_json_benchmark_cases() {
     
     local py_output
     # 1. Generate pipeline and capture output/exit code (including stderr)
-    if ! py_output=$(python3 "$generator" --input "$f" --no-verify "$no_verify" 2>&1); then
+    if ! py_output=$(python3 "$generator" --input "$f" --no-verify "$no_verify" --dependency-step "$dependency_step" 2>&1); then
       echo "🚨 Generator failed for $f"
       error_msgs+=("❌ Generation Failure in $f:\n$py_output")
       return
@@ -141,7 +143,7 @@ process_json_benchmark_cases() {
         echo "--- Skipping $f in folder pass (will be verified in extra_files pass)"
         continue
       fi
-      _process_benchmark_file "$f" "true"
+      _process_benchmark_file "$f" "true" "$dependency_step"
     done
   fi
 
@@ -149,7 +151,7 @@ process_json_benchmark_cases() {
   if [ -n "$extra_files" ]; then
     while IFS= read -r f; do
       [ -z "$f" ] && continue
-      _process_benchmark_file "$f" "false"
+      _process_benchmark_file "$f" "false" "$dependency_step"
     done <<< "$extra_files"
   fi
 

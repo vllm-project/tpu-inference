@@ -18,6 +18,7 @@ set -Eeuo pipefail
 # Define the dictionary
 declare -A kernel_auto_tune_mapping
 # The key should be one of tools.kernel.tuner.v1.kernel_tuner_runner.KERNEL_TUNER_REGISTRY keys, and the value is the corresponding file path to be updated.
+# This must be kept in sync with the tools.kernel.tuner.v1.autotune.kernel_auto_tune_config.kernel_auto_tune_mapping dictionary.
 kernel_auto_tune_mapping["mla_kernel_tuner"]="/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py"
 
 # Path to the script you want to append

@@ -327,7 +327,8 @@ class KernelTunerBase(ABC):
                                 total_cases))
                            for i in range(0, total_cases,
                                           self.run_config.job_bucket_size)]
-            logger.info(f'total cases: {len(cases)}, total buckets: {len(buckets)}')
+            logger.info(
+                f'total cases: {len(cases)}, total buckets: {len(buckets)}')
             return buckets
         except Exception as e:
             logger.error(
@@ -430,7 +431,9 @@ class KernelTunerBase(ABC):
                                     case_id_end,
                                     parent_step_key=os.environ.get(
                                         'BUILDKITE_STEP_KEY', None))
-            logger.info(f"Adding Buildkite step for bucket {bucket_id}: cases [{case_id_start}, {case_id_end})")
+            logger.info(
+                f"Adding Buildkite step for bucket {bucket_id}: cases [{case_id_start}, {case_id_end})"
+            )
             pipeline["steps"].append(step)
             # (TODO): Check (case_set_id, run_id) exists in the storage or not first
             self.storage_manager.create_bucket_for_run(

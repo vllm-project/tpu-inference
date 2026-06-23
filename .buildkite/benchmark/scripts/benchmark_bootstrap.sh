@@ -25,6 +25,7 @@ source "${SCRIPT_DIR}/../../scripts/configs/pipeline_config.sh"
 
 # Read CASE_TYPE from the first argument or default to DAILY.
 BM_CASE_TYPE="${BM_CASE_TYPE:-DAILY}"
+DEPENDENCY_STEP="${1:-}"
 
 # Validate BM_CASE_TYPE input.
 case "${BM_CASE_TYPE}" in
@@ -45,6 +46,7 @@ JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
 buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
 
 upload_benchmark_pipeline() {
+    local dependency_step="${1:-}"
     local target_case_type="$BM_CASE_TYPE"
 
     VLLM_COMMIT_HASH=${VLLM_COMMIT_HASH:-$(get_vllm_commit_hash)}
@@ -60,7 +62,7 @@ upload_benchmark_pipeline() {
     # Set benchmark cases directory dynamically based on target_case_type.
     local case_folder=".buildkite/benchmark/cases/${folder_name}"
     local generator_script="${SCRIPT_DIR}/generate_bk_pipeline.py"
-    process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY"
+    process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY" "" "$dependency_step"
 
     # If the folder is not empty, upload the docker build pipeline.
     if [ "$(ls -A "$case_folder" 2>/dev/null)" ]; then
@@ -72,4 +74,4 @@ upload_benchmark_pipeline() {
     fi
 }
 
-upload_benchmark_pipeline
+upload_benchmark_pipeline "$DEPENDENCY_STEP"

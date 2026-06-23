@@ -36,7 +36,7 @@ steps:
         #   env:
         #     KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
         #   command: |
-        #     bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh
+        #     bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh kernel_cases_collection
           
         - label: "Invoke Kernel Tuners"
           key: invoke_kernel_tuners
@@ -63,4 +63,13 @@ steps:
                 echo "priority: ${PRIORITY_KERNEL_TUNING}"; 
                 cat /tmp/kernel_tuning/generated_pipeline.yml; 
               } | buildkite-agent pipeline upload
+
+        - label: ":pipeline: Re-Run Benchmarks For Evaluating Tuning Results"
+          agents:
+            queue: cpu
+          priority: 200
+          key: kernel_autotune_result_evaluation
+          depends_on: kernel_autotune_entry
+          command: |
+            bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh patch_kernel_autotune_result
       EOF

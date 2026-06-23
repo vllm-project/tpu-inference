@@ -277,6 +277,12 @@ def main():
                         type=str2bool,
                         default=False,
                         help="Skip validation rules")
+    parser.add_argument(
+        "--depndency-step",
+        type=str,
+        default=None,
+        required=False,
+        help="Optional Buildkite step key that all benchmark steps depend on")
     args = parser.parse_args()
 
     # Verify input file existence
@@ -348,7 +354,7 @@ def main():
         "steps": [{
             "group": group_display_name,
             "key": group_key,
-            "depends_on": "build_docker",
+            "depends_on": args.dependency_step or "build_docker",
             "steps": all_steps
         }]
     }
