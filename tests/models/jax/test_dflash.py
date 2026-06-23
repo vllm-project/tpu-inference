@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Unit tests for the DFlash speculative decoding draft model on JAX/TPU."""
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import jax
 import jax.numpy as jnp
@@ -22,9 +22,25 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import Qwen3Config
 
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.jax.dflash import (DFlashAttention,
                                              DFlashDecoderLayer,
                                              DFlashForCausalLM, DFlashMLP)
+
+
+def _make_attention_metadata(query_start_loc: list[int],
+                             total_tokens: int) -> AttentionMetadata:
+    """Helper to construct dummy AttentionMetadata."""
+    query_start_loc = np.asarray(query_start_loc, dtype=np.int32)
+    seq_lens = np.diff(query_start_loc)
+    return AttentionMetadata(
+        input_positions=jnp.arange(total_tokens, dtype=jnp.int32),
+        block_tables=jnp.zeros((max(1, total_tokens), ), dtype=jnp.int32),
+        seq_lens=jnp.asarray(seq_lens, dtype=jnp.int32),
+        query_start_loc=jnp.asarray(query_start_loc, dtype=jnp.int32),
+        request_distribution=jnp.asarray([0, 0, len(seq_lens)],
+                                         dtype=jnp.int32),
+    )
 
 
 @pytest.fixture(scope="module")
@@ -95,35 +111,44 @@ class MockVllmConfig:
 
         class MockModelConfig:
 
-            def __init__(self):
+            def __init__(self, hf_config):
+                self.hf_config = hf_config
                 self.seed = 42
                 self.model = "mock-model"
+
+            def get_vocab_size(self):
+                return self.hf_config.vocab_size
+
+            def get_hidden_size(self):
+                return self.hf_config.hidden_size
 
         class MockLoadConfig:
 
             def __init__(self):
                 self.download_dir = None
 
+        class MockParallelConfig:
+
+            def __init__(self):
+                self.tensor_parallel_size = 1
+
         self.speculative_config = MockSpeculativeConfig(hf_config)
-        self.model_config = MockModelConfig()
+        self.model_config = MockModelConfig(hf_config)
         self.load_config = MockLoadConfig()
+        self.parallel_config = MockParallelConfig()
 
 
-def dummy_ragged_paged_attention(queries, keys, values, kv_cache, kv_lens,
-                                 page_indices, cu_q_lens, distribution,
-                                 **kwargs):
-    """Dummy replacement for ragged_paged_attention to allow CPU-only unit testing."""
-    attn_out = jnp.zeros(
-        (queries.shape[0], queries.shape[1], queries.shape[2]),
-        dtype=queries.dtype)
-    return attn_out, kv_cache
+def dummy_attention(kv_cache, q, k, v, *args, **kwargs):
+    """Dummy replacement for attention to allow CPU-only unit testing."""
+    del k, v, args, kwargs
+    return kv_cache, q
 
 
 @patch(
-    "tpu_inference.models.jax.dflash.ragged_paged_attention",
-    side_effect=dummy_ragged_paged_attention,
+    "tpu_inference.models.jax.dflash.attention",
+    side_effect=dummy_attention,
 )
-def test_dflash_attention(mock_rpa, hf_config, mesh):
+def test_dflash_attention(mock_attn, hf_config, mesh):
     """Verifies that DFlashAttention runs correctly and writes to the KV cache."""
     rng = nnx.Rngs(42)
     dtype = jnp.bfloat16
@@ -142,14 +167,7 @@ def test_dflash_attention(mock_rpa, hf_config, mesh):
     target_query_start_loc = jnp.array([0, T_padded], dtype=jnp.int32)
     target_positions = jnp.arange(T_padded, dtype=jnp.int32)
     # Mock attention metadata
-    attention_metadata = MagicMock()
-    attention_metadata.seq_lens = jnp.array([10], dtype=jnp.int32)
-    attention_metadata.block_tables = jnp.array([[0, 1]], dtype=jnp.int32)
-    attention_metadata.query_start_loc = jnp.array([0, T_noise],
-                                                   dtype=jnp.int32)
-    attention_metadata.input_positions = jnp.arange(T_noise, dtype=jnp.int32)
-    attention_metadata.request_distribution = jnp.array([0, 0, 1],
-                                                        dtype=jnp.int32)
+    attention_metadata = _make_attention_metadata([0, T_noise], T_noise)
     # kv_cache shape: [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
     kv_cache = jnp.zeros((10, 16, 4, 1, attn.head_dim), dtype=dtype)
     with jax.set_mesh(mesh):
@@ -163,7 +181,7 @@ def test_dflash_attention(mock_rpa, hf_config, mesh):
         )
     assert output.shape == (T_noise, hidden_size)
     assert new_kv_cache.shape == kv_cache.shape
-    assert mock_rpa.call_count == 2  # Step 1 (target) and Step 2 (noise)
+    assert mock_attn.call_count == 2  # Step 1 (target) and Step 2 (noise)
 
 
 def test_dflash_mlp(hf_config, mesh):
@@ -179,10 +197,10 @@ def test_dflash_mlp(hf_config, mesh):
 
 
 @patch(
-    "tpu_inference.models.jax.dflash.ragged_paged_attention",
-    side_effect=dummy_ragged_paged_attention,
+    "tpu_inference.models.jax.dflash.attention",
+    side_effect=dummy_attention,
 )
-def test_dflash_decoder_layer(mock_rpa, hf_config, mesh):
+def test_dflash_decoder_layer(mock_attn, hf_config, mesh):
     """Verifies that the DFlashDecoderLayer forward pass completes successfully."""
     rng = nnx.Rngs(42)
     dtype = jnp.bfloat16
@@ -200,14 +218,7 @@ def test_dflash_decoder_layer(mock_rpa, hf_config, mesh):
     target_hidden = jnp.ones((T_padded, hidden_size), dtype=dtype)
     target_query_start_loc = jnp.array([0, T_padded], dtype=jnp.int32)
     target_positions = jnp.arange(T_padded, dtype=jnp.int32)
-    attention_metadata = MagicMock()
-    attention_metadata.seq_lens = jnp.array([10], dtype=jnp.int32)
-    attention_metadata.block_tables = jnp.array([[0, 1]], dtype=jnp.int32)
-    attention_metadata.query_start_loc = jnp.array([0, T_noise],
-                                                   dtype=jnp.int32)
-    attention_metadata.input_positions = jnp.arange(T_noise, dtype=jnp.int32)
-    attention_metadata.request_distribution = jnp.array([0, 0, 1],
-                                                        dtype=jnp.int32)
+    attention_metadata = _make_attention_metadata([0, T_noise], T_noise)
     kv_cache = jnp.zeros((10, 16, 4, 1, layer.self_attn.head_dim), dtype=dtype)
     with jax.set_mesh(mesh):
         output, new_kv_cache = layer(
@@ -220,14 +231,14 @@ def test_dflash_decoder_layer(mock_rpa, hf_config, mesh):
         )
     assert output.shape == (T_noise, hidden_size)
     assert new_kv_cache.shape == kv_cache.shape
-    assert mock_rpa.call_count == 2
+    assert mock_attn.call_count == 2
 
 
 @patch(
-    "tpu_inference.models.jax.dflash.ragged_paged_attention",
-    side_effect=dummy_ragged_paged_attention,
+    "tpu_inference.models.jax.dflash.attention",
+    side_effect=dummy_attention,
 )
-def test_dflash_for_causal_lm(mock_rpa, hf_config, mesh):
+def test_dflash_for_causal_lm(mock_attn, hf_config, mesh):
     """Validates the full draft model's forward pass, logits calculation, and state projection."""
     vllm_config = MockVllmConfig(hf_config)
     rng_key = jax.random.PRNGKey(0)
@@ -252,21 +263,14 @@ def test_dflash_for_causal_lm(mock_rpa, hf_config, mesh):
     target_positions = jnp.arange(T_padded, dtype=jnp.int32)
     target_hidden_states = (ctx_hidden, target_query_start_loc,
                             target_positions)
-    attention_metadata = MagicMock()
-    attention_metadata.seq_lens = jnp.array([10], dtype=jnp.int32)
-    attention_metadata.block_tables = jnp.array([[0, 1]], dtype=jnp.int32)
-    attention_metadata.query_start_loc = jnp.array([0, T_noise],
-                                                   dtype=jnp.int32)
-    attention_metadata.input_positions = jnp.arange(T_noise, dtype=jnp.int32)
-    attention_metadata.request_distribution = jnp.array([0, 0, 1],
-                                                        dtype=jnp.int32)
+    attention_metadata = _make_attention_metadata([0, T_noise], T_noise)
     # List of kv_cache tensors, one per layer
     kv_caches = [
         jnp.zeros((10, 16, 4, 1, head_dim), dtype=jnp.bfloat16)
         for _ in range(hf_config.num_hidden_layers)
     ]
     with jax.set_mesh(mesh):
-        new_kv_caches, hidden_states, extra = model(
+        new_kv_caches, hidden_states, extra, _ = model(
             kv_caches=kv_caches,
             input_ids=input_ids,
             target_hidden_states=target_hidden_states,

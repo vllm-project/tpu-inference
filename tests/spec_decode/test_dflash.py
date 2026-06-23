@@ -26,7 +26,11 @@ from tpu_inference.spec_decode.jax.dflash import DFlashProposer
 
 def _make_single_device_mesh() -> jax.sharding.Mesh:
     devices = np.array(jax.devices()[:1])
-    m = jax.sharding.Mesh(devices, axis_names=("model", ))
+    device_mesh = devices.reshape((1, 1, 1, 1))
+    m = jax.sharding.Mesh(
+        device_mesh,
+        axis_names=('data', 'attn_dp', 'expert', 'model'),
+    )
     return m
 
 
@@ -107,45 +111,62 @@ class MockDraftModelInterface:
 
 
 # ----- Existing Minimal Tests -----
-def test_sample_block_draft_tokens_uses_target_model_logits():
+def test_propose_uses_target_model_logits():
     proposer = object.__new__(DFlashProposer)
     proposer.mesh = _make_single_device_mesh()
     proposer.num_speculative_tokens = 2
-    proposer.block_size = proposer.num_speculative_tokens + 1
+    proposer.block_size = proposer.num_speculative_tokens + 1  # 3
+
+    # mock model_fn to return a dummy hidden_states tensor
+    # shape: (num_reqs * block_size, hidden_size) = (1 * 3, 8) = (3, 8)
+    hidden_states = jnp.ones((3, 8), dtype=jnp.bfloat16)
+    proposer.model_fn = lambda state, kv_caches, input_ids, target_hidden_states, attn_metadata: (
+        kv_caches, hidden_states, None, None)
 
     call_record = {}
-    target_state = jnp.array(0)
 
     def fake_compute_logits_fn(state, hidden_states, lora_metadata):
         call_record["shape"] = hidden_states.shape
-        return jnp.array([[[0.0, 2.0, 1.0], [4.0, 1.0, 0.0]]],
-                         dtype=jnp.float32)
+        # return logits of shape (2, 3) (matching flattened 2 draft tokens, 3 vocab size)
+        return jnp.array([[0.0, 2.0, 1.0], [4.0, 1.0, 0.0]], dtype=jnp.float32)
 
     proposer.compute_logits_fn = fake_compute_logits_fn
 
-    # hidden_states layout: [context_token, draft_token_0, draft_token_1, ...]
-    # _sample_block_draft_tokens slices [:, 1:1+num_speculative_tokens, :]
-    hidden_states = jnp.ones((3, 8), dtype=jnp.bfloat16)
-    draft_token_ids = proposer._sample_block_draft_tokens(
-        target_state, hidden_states)
+    # Call JITted _propose
+    _, draft_token_ids = proposer._propose(
+        state_leaves=None,
+        kv_caches=[],
+        input_ids=None,
+        attn_metadata=None,
+        target_hidden_states=None,
+    )
 
     np.testing.assert_array_equal(np.asarray(draft_token_ids),
                                   np.array([[1, 0]], dtype=np.int32))
-    assert call_record["shape"] == (1, 2, 8)
+    assert call_record["shape"] == (2, 8)
 
 
-def test_sample_block_draft_tokens_returns_1d_int_ids():
+def test_propose_returns_2d_int_ids():
     proposer = object.__new__(DFlashProposer)
     proposer.mesh = _make_single_device_mesh()
     proposer.num_speculative_tokens = 2
-    proposer.block_size = proposer.num_speculative_tokens + 1
-
-    proposer.compute_logits_fn = lambda _state, _hidden, _lora: jnp.array(
-        [[[1.0, 0.0], [0.0, 1.0]]], dtype=jnp.float32)
+    proposer.block_size = proposer.num_speculative_tokens + 1  # 3
 
     hidden_states = jnp.ones((3, 4), dtype=jnp.bfloat16)
-    draft_token_ids = proposer._sample_block_draft_tokens(
-        jnp.array(0), hidden_states)
+    proposer.model_fn = lambda state, kv_caches, input_ids, target_hidden_states, attn_metadata: (
+        kv_caches, hidden_states, None, None)
+
+    proposer.compute_logits_fn = lambda _state, _hidden, _lora: jnp.array(
+        [[1.0, 0.0], [0.0, 1.0]], dtype=jnp.float32)
+
+    # Call _propose
+    _, draft_token_ids = proposer._propose(
+        state_leaves=None,
+        kv_caches=[],
+        input_ids=None,
+        attn_metadata=None,
+        target_hidden_states=None,
+    )
 
     assert draft_token_ids.ndim == 2
     assert draft_token_ids.shape == (1, 2)
