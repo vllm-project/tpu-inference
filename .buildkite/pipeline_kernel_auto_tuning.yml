@@ -20,29 +20,30 @@ steps:
     priority: 200
     depends_on: build_docker
     command: |
-      export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$$(date +%Y-%m-%d-%H-%M)
-      # export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-20-06-21"
+      # export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$$(date +%Y-%m-%d-%H-%M)
+      export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-23-07-10"
       
       cat <<EOF | buildkite-agent pipeline upload
       env:
         KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
       steps:
-        - label: ":pipeline: Run Benchmarks For Collecting Tuning Cases"
-          agents:
-            queue: cpu
-          priority: 200
-          key: kernel_cases_collection
-          depends_on: kernel_autotune_entry
-          env:
-            KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
-          command: |
-            bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh
+        # - label: ":pipeline: Run Benchmarks For Collecting Tuning Cases"
+        #   agents:
+        #     queue: cpu
+        #   priority: 200
+        #   key: kernel_cases_collection
+        #   depends_on: kernel_autotune_entry
+        #   env:
+        #     KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
+        #   command: |
+        #     bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh
           
         - label: "Invoke Kernel Tuners"
           key: invoke_kernel_tuners
           priority: 200
           depends_on:
-            - "kernel_cases_collection"
+            # - "kernel_cases_collection"
+            - "kernel_autotune_entry"
           env:
             USE_PREBUILT_IMAGE: "1"
             TPU_VERSION: "tpu6e"
