@@ -20,8 +20,8 @@ steps:
     priority: 200
     depends_on: build_docker
     command: |
-      # export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$$(date +%Y-%m-%d-%H-%M)
-      export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-20-06-21"
+      export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$$(date +%Y-%m-%d-%H-%M)
+      # export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-20-06-21"
       
       cat <<EOF | buildkite-agent pipeline upload
       env:
