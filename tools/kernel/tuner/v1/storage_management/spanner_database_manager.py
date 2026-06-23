@@ -293,6 +293,19 @@ class SpannerStorageManager(StorageManager):
                                            })
             }
 
+    def get_all_cases(self, case_set_id):
+        """Returns all cases in the given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+
+        Returns:
+            A list of all cases in the case set.
+        """
+        query = "SELECT CaseId, CaseKeyValue FROM KernelTuningCases WHERE ID = @id ORDER BY CaseId ASC"
+        with self.database.snapshot() as snp:
+            return list(snp.execute_sql(query, params={'id': case_set_id}))
+
     def get_total_cases_in_case_set(self, case_set_id):
         """Returns the total number of cases in the given case set.
 

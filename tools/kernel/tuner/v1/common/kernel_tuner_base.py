@@ -182,9 +182,12 @@ class KernelTunerBase(ABC):
                 scan_space=0,
                 desc=self.run_config.case_set_desc)
             logger.info(
-                f"Initialized new CaseSet with ID: {self.run_config.case_set_id} and description: {self.run_config.case_set_desc}"
+                f"CaseSet with ID: {self.run_config.case_set_id} and description: {self.run_config.case_set_desc} initialized."
             )
             return True
+        logger.info(
+            f"CaseSetId {self.run_config.case_set_id} with description: {self.run_config.case_set_desc} already exists. Proceeding with the existing case set."
+        )
         return False
 
     def generate_autotune_cases(self) -> list[TuningCase]:
@@ -202,7 +205,7 @@ class KernelTunerBase(ABC):
             tuning_case = TuningCase.from_string(
                 case_key_value, self.tuner_config.tuning_key_class,
                 self.tuner_config.tunable_params_class)
-            
+
             start_case_id = len(tuning_set)
             tuning_set.append(tuning_case)
             tuning_key = tuning_case.tuning_key
@@ -231,7 +234,9 @@ class KernelTunerBase(ABC):
                 tuning_set.append(
                     TuningCase(tuning_key, tunable_params, is_baseline=False))
             end_case_id = len(tuning_set)
-            bucket_by_key.append((start_case_id, end_case_id)) # [Include start_case_id, Exclude end_case_id)
+            bucket_by_key.append(
+                (start_case_id,
+                 end_case_id))  # [Include start_case_id, Exclude end_case_id)
 
         logger.info(
             f"Retrieved {len(tuning_set)} autotune cases for CaseSetId: {self.run_config.case_set_id} from Spanner."
@@ -281,9 +286,10 @@ class KernelTunerBase(ABC):
         try:
             if self._init_case_set():
                 start_time = time.perf_counter()
-                cases = self.generate_autotune_cases(
-                ) if self.tuner_config.support_autotune and self.run_config.autotune_mode else self.generate_cases(
-                )
+                if self.tuner_config.support_autotune and self.run_config.autotune_mode:
+                    cases, _ = self.generate_autotune_cases()
+                else:
+                    cases = self.generate_cases()
                 total_cases = len(cases)
                 for case_id, case_str in enumerate(map(str, cases)):
                     self.storage_manager.add_tuner_case(
@@ -301,16 +307,29 @@ class KernelTunerBase(ABC):
                 logger.info(
                     f"\nComplete Generate Tuning Cases for {self.run_config.case_set_id}, Valid Cases: {total_cases} | Duration: {duration_sec}s"
                 )
+            # read back all the cases and partition them into buckets for parallel execution
+            cases = self.storage_manager.get_all_cases(
+                self.run_config.case_set_id)
+            assert len(
+                cases
+            ) > 0, f"No cases found for CaseSetId {self.run_config.case_set_id}. This should not happen as the cases should have been generated and stored in the storage manager before."
+            if self.tuner_config.support_bayesian_optimization:
+                # For Bayesian optimization, partition the cases by key.
+                buckets = []
+                previous_tuning_key = None
+                for case_id, case in enumerate(cases):
+                    if previous_tuning_key is None or case.tuning_key != previous_tuning_key:
+                        buckets.append((case_id, case_id + 1))
+                        previous_tuning_key = case.tuning_key
+                    else:
+                        buckets[-1] = (buckets[-1][0], case_id + 1)
             else:
-                # If the case set already exists, we assume the cases have been generated and we just need to generate the buckets for tuning jobs.
-                total_cases = self.storage_manager.get_total_cases_in_case_set(
-                    self.run_config.case_set_id)
-            buckets = [
-                (i, min(i + self.run_config.job_bucket_size, total_cases))
-                for i in range(0, total_cases, self.run_config.job_bucket_size)
-            ] if not self.tuner_config.support_bayesian_optimization else [
-                (0, total_cases)
-            ]
+                total_cases = len(cases)
+                buckets = [(i,
+                            min(i + self.run_config.job_bucket_size,
+                                total_cases))
+                           for i in range(0, total_cases,
+                                          self.run_config.job_bucket_size)]
             return buckets
         except Exception as e:
             logger.error(
@@ -318,12 +337,9 @@ class KernelTunerBase(ABC):
             )
             raise e
 
-    def _build_step(self,
-                    case_id_start: int,
-                    case_id_end: int,
-                    parent_step_key: str = None) -> dict:
+    def _build_step(self, case_id_start: int, case_id_end: int,
+                    parent_step_key: str) -> dict:
         step_key = f'{self.tuner_config.kernel_tuner_name}_{self.run_config.case_set_id}_{self.run_config.run_id}_{case_id_start}_{case_id_end}'
-        parent_step_key = parent_step_key or 'generate_tuning_cases_and_yml'
         return {
             "label":
             f"cs_id={self.run_config.case_set_id} rid={self.run_config.run_id} Bucket([{case_id_start}, {case_id_end}))",
@@ -412,7 +428,10 @@ class KernelTunerBase(ABC):
         pipeline = {"steps": []}
 
         for bucket_id, (case_id_start, case_id_end) in enumerate(buckets):
-            step = self._build_step(case_id_start, case_id_end)
+            step = self._build_step(case_id_start,
+                                    case_id_end,
+                                    parent_step_key=os.environ.get(
+                                        'BUILDKITE_STEP_KEY', None))
             pipeline["steps"].append(step)
             self.storage_manager.create_bucket_for_run(
                 self.run_config.case_set_id,
