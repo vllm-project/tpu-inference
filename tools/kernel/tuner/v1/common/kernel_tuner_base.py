@@ -195,7 +195,7 @@ class KernelTunerBase(ABC):
         autotune_cases = self.storage_manager.read_auto_tune_cases(
             case_set_id=auto_tune_case_set_id,
             kernel_tuner_name=self.tuner_config.kernel_tuner_name,
-            tpu=self.tuner_config.tpu_version)
+            tpu=self.run_config.tpu_version)
         for row in autotune_cases:
             case_key_value = row['CaseKeyValue']
             tuning_case = TuningCase.from_string(
