@@ -114,6 +114,6 @@ else
     set_jax_envs "unset" ""
 fi
 
-buildkite-agent pipeline upload .buildkite/pipeline_build.yml
+upload_pipeline_build_once
 
 echo "--- Buildkite Kernel Tuning Bootstrap Finished"
