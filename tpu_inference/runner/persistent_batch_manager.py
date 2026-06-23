@@ -25,16 +25,25 @@ logger = init_logger(__name__)
 
 class PersistentBatchManager:
 
-    def __init__(self, requests: Dict[str, CachedRequestState],
-                 input_batch: InputBatch, encoder_cache: Dict[str,
-                                                              'jax.Array'],
-                 uses_mrope: bool, model_config, is_last_rank: bool):
+    def __init__(self,
+                 requests: Dict[str, CachedRequestState],
+                 input_batch: InputBatch,
+                 encoder_cache: Dict[str, 'jax.Array'],
+                 uses_mrope: bool,
+                 model_config,
+                 is_last_rank: bool,
+                 enable_multitoken_decode: bool = False):
         self.requests = requests
         self.input_batch = input_batch
         self.encoder_cache = encoder_cache
         self.uses_mrope = uses_mrope
         self.model_config = model_config
         self.is_last_rank = is_last_rank
+        # Whether the active RPA kernel can handle q_len>1 in the decode region
+        # (msl multi-token kernel via decode_q_len). When False, speculative
+        # requests (q>1) must stay in the mixed region, matching the in-tree
+        # kernel which hardcodes decode q_len=1.
+        self.enable_multitoken_decode = enable_multitoken_decode
 
     def _reorder_batch(self, scheduler_output: "VllmSchedulerOutput") -> int:
         """ Reorder the sheduled requests to RPA kernel friendly distribution
@@ -57,9 +66,12 @@ class PersistentBatchManager:
             # bounded number of query tokens this step: a plain decode (1 token)
             # or a speculative-decode request (1 + num_draft tokens, handled by
             # the RPA decode kernel via decode_q_len). Chunked-prefill requests
-            # (>1 token, no spec tokens) stay in the mixed region.
-            return (scheduler_output.num_scheduled_tokens[req_id] == 1
-                    or req_id in spec_tokens)
+            # (>1 token, no spec tokens) stay in the mixed region. The spec
+            # branch is gated on `enable_multitoken_decode`: when the active RPA
+            # kernel cannot do multi-token decode, spec requests (q>1) stay in
+            # the mixed region (the pre-branch behavior).
+            return (scheduler_output.num_scheduled_tokens[req_id] == 1 or
+                    (self.enable_multitoken_decode and req_id in spec_tokens))
 
         # Fast path: every request is a plain decode (exactly 1 token each).
         if scheduler_output.total_num_scheduled_tokens == num_reqs:

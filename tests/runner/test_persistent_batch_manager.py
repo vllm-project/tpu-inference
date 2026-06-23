@@ -93,7 +93,10 @@ class MockInputBatch:
         self.req_id_to_index[id_j] = j
 
 
-def _create_manager(req_ids, num_scheduled_tokens_map, spec_req_ids=()):
+def _create_manager(req_ids,
+                    num_scheduled_tokens_map,
+                    spec_req_ids=(),
+                    enable_multitoken_decode=True):
     """Helper to create a PersistentBatchManager with a MockInputBatch
     and a mock scheduler_output.
 
@@ -104,6 +107,11 @@ def _create_manager(req_ids, num_scheduled_tokens_map, spec_req_ids=()):
         spec_req_ids: request ids that have scheduled spec-decode tokens. These
             are reflected in scheduler_output.scheduled_spec_decode_tokens so
             _reorder_batch classifies them as decode-region requests.
+        enable_multitoken_decode: whether the active RPA kernel can handle
+            q_len>1 in the decode region. When True, spec requests route to the
+            decode region; when False they stay in the mixed region (the
+            pre-branch behavior). Defaults to True so the spec-routing tests
+            exercise the routing-ON path.
 
     Returns:
         (manager, scheduler_output) tuple.
@@ -117,6 +125,7 @@ def _create_manager(req_ids, num_scheduled_tokens_map, spec_req_ids=()):
         uses_mrope=False,
         model_config=MagicMock(),
         is_last_rank=True,
+        enable_multitoken_decode=enable_multitoken_decode,
     )
 
     scheduler_output = MagicMock()
@@ -214,6 +223,23 @@ class TestReorderBatch(unittest.TestCase):
         num_scheduled = {"r0": 1, "r1": 8}
         manager, sched_out = _create_manager(req_ids, num_scheduled)
         manager._reorder_batch(sched_out)
+        self.assertEqual(manager.input_batch.request_distribution, [1, 1, 2])
+
+    def test_spec_off_gate_keeps_spec_in_mixed(self):
+        """Gate OFF (enable_multitoken_decode=False): a request that HAS spec
+        tokens but q>1 is treated as PREFILL (mixed region), not decode. This
+        is the pre-branch behavior for kernels that cannot do multi-token
+        decode."""
+        req_ids = ["r0", "r1"]
+        # r0 is a plain decode (1 token); r1 has spec tokens (q>1) but the gate
+        # is off so it must stay in the mixed region.
+        num_scheduled = {"r0": 1, "r1": 4}
+        manager, sched_out = _create_manager(req_ids,
+                                             num_scheduled,
+                                             spec_req_ids=["r1"],
+                                             enable_multitoken_decode=False)
+        manager._reorder_batch(sched_out)
+        # Only r0 is decode; r1 stays mixed -> distribution [1, 1, 2].
         self.assertEqual(manager.input_batch.request_distribution, [1, 1, 2])
 
 
