@@ -347,11 +347,28 @@ def _streamindex_topk_kernel(
         # Quantized FP8 index cache path: unpack keys and scale factors locally.
         flat_bkv = bkv.reshape(-1, bkv.shape[-1])
         fp8_val = flat_bkv[:, :head_dim]
-        fp8_val = jax.lax.bitcast_convert_type(fp8_val, jnp.float8_e4m3fn)
+        fp8_val = pltpu.bitcast(fp8_val, jnp.float8_e4m3fn)
 
         scale_val = flat_bkv[:, head_dim:head_dim + 1]
-        scale_val = jax.lax.bitcast_convert_type(
-            scale_val, jnp.float8_e8m0fnu).astype(jnp.float32)
+
+        # Force exact unsigned extraction to bypass negative int8 overflow.
+        scale_val_u32 = scale_val.astype(jnp.int32) & 0xFF
+
+        # Map standard values (1 to 254) using exact bitshifting.
+        scale_val_shifted = scale_val_u32 << 23
+
+        # Handle the 0 byte edge case: f8E8M0FNU spec maps 0 to 2^-127
+        # The exact IEEE-754 float32 bits for the subnormal 2^-127 is 0x00400000.
+        scale_val_shifted = jnp.where(scale_val_u32 == 0,
+                                      jnp.int32(0x00400000), scale_val_shifted)
+
+        # Handle the 255 byte edge case: f8E8M0FNU spec maps 255 to NaN
+        # The standard float32 bits for NaN is 0x7FC00000.
+        scale_val_shifted = jnp.where(scale_val_u32 == 255,
+                                      jnp.int32(0x7FC00000), scale_val_shifted)
+
+        # Bitcast the strictly reconstructed bits directly to float32
+        scale_val = pltpu.bitcast(scale_val_shifted, jnp.float32)
 
         # NOTE: Do NOT multiply the scales here. Return them separately.
         return fp8_val.reshape(bkv_sz, head_dim), scale_val.reshape(bkv_sz, 1)
