@@ -23,7 +23,7 @@ MODEL_NAME = "google/gemma-3-4b-it"
 
 def _check_correctness(test_name: str, reference_outputs: list,
                        test_outputs: list):
-    """Verify generated token ids match the reference run within acceptable tolerance."""
+    """Verify generated token ids match the reference run."""
     assert len(reference_outputs) == len(test_outputs)
 
     for i, (reference,
@@ -33,26 +33,14 @@ def _check_correctness(test_name: str, reference_outputs: list,
         reference_token_ids = tuple(reference_completion.token_ids)
         test_token_ids = tuple(test_completion.token_ids)
 
-        # Verify prefix cache hit metric
-        if "hit" in test_name.lower():
-            num_cached = getattr(test_result, "num_cached_tokens", 0)
-            assert num_cached > 0, f"Prefix cache hit missed. Cached tokens: {num_cached}"
+        assert reference_token_ids == test_token_ids, (
+            f"{test_name} token mismatch in prompt {i}:\n"
+            f"  Reference text: {reference_completion.text!r}\n"
+            f"  {test_name} text: {test_completion.text!r}\n"
+            f"  Reference token ids: {reference_token_ids}\n"
+            f"  {test_name} token ids: {test_token_ids}")
 
-        # Allow minor numerical divergence on TPU v7x; verify initial tokens match
-        min_match_len = min(5, len(reference_token_ids), len(test_token_ids))
-
-        assert reference_token_ids[:min_match_len] == test_token_ids[:min_match_len], (
-            f"{test_name} critical prefix token mismatch in prompt {i}:\n"
-            f"  Reference front: {reference_token_ids[:min_match_len]}\n"
-            f"  Test front: {test_token_ids[:min_match_len]}")
-
-        # Verify token length consistency
-        assert abs(len(reference_token_ids) - len(test_token_ids)) <= 2, (
-            f"{test_name} length mismatch too wide in prompt {i}: "
-            f"Reference len {len(reference_token_ids)}, Test len {len(test_token_ids)}"
-        )
-
-    print(f"{test_name} generated outputs match reference criteria.")
+    print(f"{test_name} generated token ids match reference outputs.")
 
 
 def _reset_engine_prefix_cache(llm: LLM) -> None:
@@ -100,7 +88,6 @@ def _run_prefix_cache_sequence(
             max_num_seqs=64,
             enable_prefix_caching=True,
             disable_hybrid_kv_cache_manager=False,
-            block_size=32,
         )
 
         # Step 1: Warm up and populate the in-memory prefix cache.
