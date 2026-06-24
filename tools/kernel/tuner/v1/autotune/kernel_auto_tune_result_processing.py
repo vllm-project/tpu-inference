@@ -39,6 +39,10 @@ _AUTO_TUNE_ID = flags.DEFINE_string(
     'auto_tune_id', '',
     'The auto tune ID to use for this run, for example, "KERNEL_AUTOTUNE_2026-06-23-07-10".'
 )
+_PROCESS_STEP = flags.DEFINE_string(
+    'process_step', 'PATCH_KERNEL_AUTOTUNE_RESULT',
+    'The process step to run. Options: COMPARE_BM_METRICS, PATCH_KERNEL_AUTOTUNE_RESULT'
+)
 
 
 class KernelAutoTuneResultProcessor:
@@ -48,6 +52,9 @@ class KernelAutoTuneResultProcessor:
         self.gcp_project_id = _GCP_PROJECT_ID.value
         self.spanner_instance_id = _SPANNER_INSTANCE_ID.value
         self.spanner_database_id = _SPANNER_DATABASE_ID.value
+        assert _PROCESS_STEP.value in [
+            'COMPARE_BM_METRICS', 'PATCH_KERNEL_AUTOTUNE_RESULT'], f"Invalid process step: {_PROCESS_STEP.value}. Must be one of ['COMPARE_BM_METRICS', 'PATCH_KERNEL_AUTOTUNE_RESULT']"
+        self.process_step = _PROCESS_STEP.value
 
     def _get_spanner_db(self, project, instance_id, database_id):
         from google.cloud import \
@@ -242,14 +249,38 @@ class KernelAutoTuneResultProcessor:
     def _py_repr(self, value):
         return repr(value)
 
-    def process_all_kernel_tuner_results(self):
+    def patch_tuned_results(self):
         for kernel_tuner_name in kernel_auto_tune_mapping.keys():
             case_set_id = f"{kernel_tuner_name}_{self.auto_tune_id}"
             logger.info(f"Processing results for case set ID: {case_set_id}")
             best_results = self.get_best_results(case_set_id)
             self.update_best_results(best_results, kernel_tuner_name)
 
+    def compare_benchmark_metrics(self):
+        logger.info(
+            "Comparing benchmark metrics"
+        )
+        from google.cloud import \
+            spanner as gspanner  # pylint: disable=import-outside-toplevel
+        query = """
+            SELECT OutputTokenThroughput  
+            FROM RunRecord rr where rr.status = 'COMPLETED' and rr.run_type like 'KERNEL_AUTOTUNE'
+        """
+        db = self._get_spanner_db(self.gcp_project_id,
+                                  self.spanner_instance_id,
+                                  self.spanner_database_id)
+        with db.snapshot() as snap:
+            for r in snap.execute_sql(query):
+                print(r)
+                return
+        return "Comparison of benchmark metrics completed."
+
+    def execute(self):
+        if self.process_step == 'PATCH_KERNEL_AUTOTUNE_RESULT':
+            self.patch_tuned_results()
+        elif self.process_step == 'COMPARE_BM_METRICS':
+            return self.compare_benchmark_metrics()
+
 
 if __name__ == "__main__":
-    app.run(lambda _: KernelAutoTuneResultProcessor().
-            process_all_kernel_tuner_results())
+    app.run(lambda _: KernelAutoTuneResultProcessor().execute())  # pylint: disable=no-value-for-parameter
