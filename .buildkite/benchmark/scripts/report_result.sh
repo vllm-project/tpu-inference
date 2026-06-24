@@ -178,6 +178,27 @@ fi
     # Accuracy run logic
     echo "Accuracy run ($RUN_TYPE) detected. Parsing accuracy metrics."
     AccuracyMetricsJSON=$(grep -a "AccuracyMetrics:" "$BM_LOG" | sed 's/AccuracyMetrics: //' || true)
+    if [[ -z "$AccuracyMetricsJSON" ]]; then
+       # Fallback: Try parsing the python-style dict printed under "Results" line (legacy benchmark_serving.py output)
+       AccuracyMetricsJSON=$(python3 -c '
+import sys, ast, json
+try:
+    with open(sys.argv[1], "r") as f:
+        lines = f.readlines()
+except Exception:
+    sys.exit(0)
+for i, line in enumerate(lines):
+    if line.strip() == "Results":
+        for j in range(1, min(6, len(lines) - i)):
+            try:
+                acc_dict = ast.literal_eval(lines[i+j].strip())
+                if isinstance(acc_dict, dict) and "accuracy" in acc_dict:
+                    print(json.dumps({"accuracy": acc_dict["accuracy"]}))
+                    sys.exit(0)
+            except Exception:
+                pass
+' "$BM_LOG" || true)
+    fi
     echo "AccuracyMetricsJSON: $AccuracyMetricsJSON"
     if [ -n "$AccuracyMetricsJSON" ]; then
       echo "AccuracyMetrics=$AccuracyMetricsJSON" > "$RESULT_FILE"
@@ -336,7 +357,7 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
   SQL_EXTRA_ENVS=$(prepare_sql_val "${EXTRA_ENVS:-}" "''")
   SQL_RECORD_ID=$(prepare_sql_val "$RECORD_ID" "''")
   SQL_STATUS=$(prepare_sql_val "$FINAL_STATUS" "FAILED")
-  SQL_USER=$(prepare_sql_val "${USER:-buildkite-agent}" "buildkite-agent")
+  SQL_USER=$(prepare_sql_val "${CREATED_BY:-${USER:-buildkite-agent}}" "buildkite-agent")
   SQL_JOB_REFERENCE=$(prepare_sql_val "${JOB_REFERENCE:-}" "''")
   SQL_AGENT_NAME=$(prepare_sql_val "${BUILDKITE_AGENT_NAME:-}" "''")
   SQL_DEVICE=$(prepare_sql_val "${DEVICE:-}" "''")
