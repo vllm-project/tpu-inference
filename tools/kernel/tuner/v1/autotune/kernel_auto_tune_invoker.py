@@ -88,7 +88,7 @@ class KernelAutoTuneInvoker:
                     'apt install git -y && '
                     'git config user.name "Buildkite Bot" && '
                     'git config user.email "buildkite-bot@users.noreply.github.com" && '
-                    f'git git checkout -b {branch_name} && '
+                    f'git checkout -b {branch_name} && '
                     f'python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --auto_tune_id={self.auto_tune_id} && '
                     f'git add -u && '
                     f'git commit -m "Update tuned params for auto tune ID: {self.auto_tune_id}" && '
