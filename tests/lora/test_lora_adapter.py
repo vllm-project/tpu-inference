@@ -14,6 +14,7 @@
 
 import gc
 import os
+import time
 
 import pytest
 import vllm
@@ -56,7 +57,7 @@ def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
         enable_lora=True,
         max_loras=num_loras,
         async_scheduling=0,
-        max_lora_rank=8,
+        max_lora_rank=32,
     )
 
 
@@ -159,3 +160,44 @@ def test_dynamic_lora_lru_eviction(tp):
     llm.llm_engine.engine_core.shutdown()
     del llm
     gc.collect()
+
+
+@skip_multihost
+@pytest.mark.parametrize("tp", TP)
+def test_dynamic_lora_e2e_generation(tp):
+    llm = setup_vllm(1, tp)
+
+    try:
+        prompt = "What is 1+1?"
+        sampling_params = vllm.SamplingParams(max_tokens=16, temperature=0.0)
+
+        # If the TPU backend mistakenly uses the global ID instead of the
+        # mapped local ID, passing `1` prevents the silent JAX out-of-bounds
+        # clamping bug.
+        lora_id = 1
+        lora_name_template = "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
+        req = LoRARequest(f"lora_adapter_{lora_id}", lora_id,
+                          lora_name_template.format(lora_id))
+
+        success = llm.llm_engine.add_lora(req)
+        assert success is True
+        assert lora_id in llm.llm_engine.list_loras()
+
+        # Give the background TPU workers a moment to compile/pin the weights.
+        time.sleep(2)
+
+        raw_output = llm.generate(prompt,
+                                  sampling_params=sampling_params,
+                                  lora_request=req)
+
+        full_text = raw_output[0].outputs[0].text.strip()
+
+        assert str(lora_id) in full_text, (
+            f"TPU ENGINE BUG: The LoRA adapter weights were ignored during the forward pass!\n"
+            f"Expected output to contain: '{lora_id}'\n"
+            f"Got base model output: {full_text!r}")
+
+    finally:
+        llm.llm_engine.engine_core.shutdown()
+        del llm
+        gc.collect()
