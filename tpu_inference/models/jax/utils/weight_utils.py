@@ -788,7 +788,9 @@ def assign_and_shard_param(jax_param: nnx.Param,
         jax_param.set_value(shard_put(jax_weight, spec, mesh=param_mesh))
         jax_param.set_metadata("_is_loaded", True)
         del jax_weight
-        jax.clear_caches()
+        import os
+        if os.environ.get("TPU_INF_ENABLE_JAX_CACHE", "1") == "0":
+            jax.clear_caches()
     except Exception as e:
         raise RuntimeError(
             f"Failed to load weight '{param_name}' with shape {shape} into param with shape {jax_param.get_value().shape}"
