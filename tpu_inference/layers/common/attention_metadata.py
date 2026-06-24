@@ -29,7 +29,7 @@ import jax
         "request_distribution",
         "mamba_state_indices",
     ],
-    meta_fields=["padded_num_reqs"],
+    meta_fields=["padded_num_reqs", "decode_q_len"],
     drop_fields=["query_start_loc_cpu", "seq_lens_cpu"],
 )
 @dataclass
@@ -60,5 +60,14 @@ class AttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
+
+    # The static (compile-time) number of query tokens the RPA decode region
+    # processes per request. 1 for ordinary single-token decode; set to
+    # `num_speculative_tokens + 1` when speculative decoding is active so the
+    # decode region handles the (masked, variable-per-request) multi-token
+    # query. This is a meta (non-traced) field: it is passed to the RPA kernel
+    # as a compile-time static (captured as a Python-int closure constant, like
+    # sm_scale), so it MUST stay a Python int and never be traced.
+    decode_q_len: int = 1
 
     query_start_loc_cpu: Any = field(init=False)

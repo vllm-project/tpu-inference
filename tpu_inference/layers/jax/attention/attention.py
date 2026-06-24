@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
+import inspect
 from dataclasses import InitVar, dataclass
-from typing import Any, Tuple
+from typing import Any, Callable, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -33,6 +35,23 @@ from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.rope_interface import apply_rope
 
 KVCache = Tuple[jax.Array, jax.Array]
+
+
+@functools.lru_cache(maxsize=None)
+def _rpa_accepts_decode_q_len(func: Callable) -> bool:
+    """Whether the resolved RPA kernel accepts a static `decode_q_len` kwarg.
+
+    Only the msl-monkeypatched kernel accepts it; the in-tree v3 kernel does
+    not, so passing it unconditionally would raise TypeError. Resolved at call
+    time against the function object actually invoked (msl's `override_function`
+    rebinds `ragged_paged_attention` at patch time, which may run after this
+    module is imported). Cached per function object (cheap, computed once) to
+    keep `inspect.signature` out of the hot per-call path.
+    """
+    try:
+        return "decode_q_len" in inspect.signature(func).parameters
+    except (ValueError, TypeError):
+        return False
 
 
 @dataclass(kw_only=True)
@@ -240,14 +259,26 @@ class Attention(nnx.Module):
 
         out_specs = (self.attn_o_tnh, kv_cache_spec)
 
+        # decode_q_len is a compile-time static (Python int closure constant,
+        # like sm_scale). Forward it only when the kernel accepts it and it
+        # differs from the default, so the ordinary single-token decode path
+        # and the in-tree kernel are untouched. Resolve the accept-flag at call
+        # time against the same `ragged_paged_attention` symbol the closure
+        # below invokes, so msl's patch-time rebind is reflected.
+        pass_decode_q_len = (md.decode_q_len > 1 and
+                             _rpa_accepts_decode_q_len(ragged_paged_attention))
+        decode_q_len = md.decode_q_len
+
         def _ragged_paged_attention(*args):
-            return ragged_paged_attention(
-                *args,
+            kwargs = dict(
                 sm_scale=q_TNH.shape[-1]**-0.5,
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
             )
+            if pass_decode_q_len:
+                kwargs["decode_q_len"] = decode_q_len
+            return ragged_paged_attention(*args, **kwargs)
 
         output_TNH, kv_cache = jax.jit(
             jax.shard_map(

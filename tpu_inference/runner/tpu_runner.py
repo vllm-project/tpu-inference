@@ -323,6 +323,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._init_inputs()
         self._init_speculative_decoding()
 
+        # Gate spec-decode decode-region routing on the active RPA kernel's
+        # ability to handle q_len>1 in the decode region. Only the msl
+        # multi-token kernel accepts a static `decode_q_len`; the in-tree v3
+        # kernel hardcodes decode q_len=1. When the kernel can't do multi-token
+        # decode, spec requests must stay in the mixed region (q>1 is correct
+        # there) and decode_q_len must remain 1. The runner is constructed after
+        # kernels are monkeypatched, so the resolved kernel binding is final; we
+        # read it through the module and reuse the interface's signature check.
+        from tpu_inference.layers.common import attention_interface
+        self.enable_multitoken_decode = (
+            self.speculative_config is not None
+            and attention_interface._rpa_accepts_decode_q_len(
+                attention_interface.ragged_paged_attention))
+
         # Delegate functions to specific manager classes.
         self.compilation_manager = CompilationManager(self)
         if self.is_last_rank:
@@ -332,8 +346,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_cache_manager = KVCacheManager(self)
         self.mm_manager = MultiModalManager(self)
         self.persistent_batch_manager = PersistentBatchManager(
-            self.requests, self.input_batch, self.encoder_cache,
-            self.uses_mrope, self.model_config, self.is_last_rank)
+            self.requests,
+            self.input_batch,
+            self.encoder_cache,
+            self.uses_mrope,
+            self.model_config,
+            self.is_last_rank,
+            enable_multitoken_decode=self.enable_multitoken_decode)
         self.lora_utils = LoraUtils(self)
 
         cache_dtype = self.cache_config.cache_dtype
@@ -1911,14 +1930,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
+        spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
         _request_distribution = []
         for dp_rank in range(dp_size):
             _num_reqs = num_req_per_dp_rank[dp_rank]
             # The batch has been reordered by _reorder_batch so decode requests come first
-            # Count decode requests (those with num_scheduled_tokens == 1) in this DP rank
+            # Count decode-region requests in this DP rank, matching
+            # _reorder_batch: a plain decode (num_scheduled_tokens == 1) or a
+            # speculative-decode request (1 + num_draft tokens, in the spec
+            # token dict, handled by the RPA decode kernel via decode_q_len).
+            # The spec term is gated on enable_multitoken_decode so spec
+            # requests stay in the mixed region when the kernel can't do
+            # multi-token decode (matching _reorder_batch and pre-branch).
             num_decode_in_dp_rank = 0
             for req_id in req_ids_dp[dp_rank]:
-                if scheduler_output.num_scheduled_tokens[req_id] == 1:
+                if (scheduler_output.num_scheduled_tokens[req_id] == 1
+                        or (self.enable_multitoken_decode
+                            and req_id in spec_decode_tokens)):
                     num_decode_in_dp_rank += 1
             _request_distribution.append(
                 [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
@@ -2045,6 +2073,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             seq_lens, positions = self._subtract_num_rejected_tokens(
                 seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank)
 
+        # Static (compile-time) per-request query length for the RPA decode
+        # region. With multi-token decode enabled (spec config AND a kernel that
+        # accepts decode_q_len), decode-region requests carry up to
+        # `num_speculative_tokens + 1` query tokens (draft tokens + the bonus
+        # token). Otherwise ordinary decode has exactly 1, and (consistent with
+        # the routing) spec requests stay in the mixed region.
+        decode_q_len = (self.speculative_config.num_speculative_tokens +
+                        1) if self.enable_multitoken_decode else 1
+
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
@@ -2054,6 +2091,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
+                decode_q_len=decode_q_len,
             )
 
             return attention_metadata_gid
