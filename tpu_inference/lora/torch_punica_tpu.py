@@ -317,7 +317,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             len(index_mapping_indices),
             len(lora_indices),
             len(lora_indices),
-            len(embedding_indices),
+            embeddings_indices_arr.shape[1],
         ]
 
         # Convert the NumPy results directly into Torchax (JAX-backed) Tensors in the default env context
