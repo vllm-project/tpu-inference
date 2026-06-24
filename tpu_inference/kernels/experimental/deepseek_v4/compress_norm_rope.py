@@ -293,7 +293,6 @@ def gather_state_windows(
     
     """
     coff = 1 + int(overlap)
-    state_width = coff * head_dim
     window = coff * compress_ratio
 
     start = positions - window + 1
@@ -309,17 +308,25 @@ def gather_state_windows(
     block_numbers = block_table.reshape(-1)[flat_index]
     block_offsets = safe_pos % block_size
 
-    # C4 overlap: slots >= compress_ratio read the second head slice.
-    # head_offset = 512 if w_idx >= compress_ratio else 0
-    # this is because last dimension is 2 * state_width (2048)
-    head_offset = (w_idx >= compress_ratio).astype(jnp.int32) * head_dim
-    # cols = head_offset + [0..511]
-    col = head_offset[None, :, None] + jnp.arange(head_dim)[None, None, :]
-
     bn = block_numbers[:, :, None]
     bo = block_offsets[:, :, None]
-    kv_window = state_cache[bn, bo, col]
-    score_window = state_cache[bn, bo, state_width + col]
+
+    # Gather the entire state vector for the window tokens
+    temp = state_cache[bn, bo].squeeze(2)
+
+    if not overlap:
+        kv_window = temp[:, :, :head_dim]
+        score_window = temp[:, :, head_dim:2 * head_dim]
+    else:
+        # state_width * 2 = 4 * head_dim
+        # Reshape to separate the 4 head-sized blocks:
+        # [num_tokens, window, 4, head_dim]
+        temp_reshaped = temp.reshape(temp.shape[0], window, 4, head_dim)
+        w_cond = (w_idx < compress_ratio)[None, :, None]
+        kv_window = jnp.where(w_cond, temp_reshaped[:, :, 0, :],
+                              temp_reshaped[:, :, 1, :])
+        score_window = jnp.where(w_cond, temp_reshaped[:, :, 2, :],
+                                 temp_reshaped[:, :, 3, :])
     return kv_window, score_window, valid_mask
 
 
