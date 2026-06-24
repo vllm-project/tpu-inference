@@ -2,9 +2,10 @@
 
 import math
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import jax
 import jaxlib
@@ -87,6 +88,89 @@ class PPConfig:
 
                 # Set bounds to match the visible chips exactly.
                 self.default_tpu_chips_per_process_bounds = f"1,{chips_per_stage},1"
+
+
+_STANDARD_KEYS = frozenset({
+    "host_tracer_level",
+    "device_tracer_level",
+    "python_tracer_level",
+})
+
+
+def _parse_option_value(key: str, val: str) -> Any:
+    """Parses and infers the type of an option value string.
+
+    Tries to parse the value as a boolean (true/false) or integer. If those fail,
+    verifies that the string contains only safe whitelisted characters and returns
+    it as-is.
+    """
+    val_lower = val.lower()
+    if val_lower == "true":
+        return True
+    if val_lower == "false":
+        return False
+    try:
+        return int(val)
+    except ValueError:
+        if not re.match(r'^[a-zA-Z0-9_./,:-]*$', val):
+            raise ValueError(f"Invalid characters in option value '{val}' "
+                             f"for key '{key}'")
+        return val
+
+
+def _parse_profile_options(
+        profile_prefix: Optional[str]
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Parses profile options from a semicolon-separated profile_prefix string.
+
+    This function extracts profiling parameters from the provided profile_prefix
+    string and splits them into standard options (which map directly to native
+    jax.profiler.ProfileOptions attributes) and advanced/custom options
+    (which map to JAX's advanced_configuration dictionary).
+
+    Args:
+        profile_prefix: A semicolon-separated string of key-value pairs.
+          E.g., "host_tracer_level:3;tpu_num_chips_to_profile_per_task:2;my_custom_option:true"
+
+    Returns:
+        A tuple containing two dictionaries:
+          1. standard_opts: Dictionaries of parsed option keys and their typed
+             values (e.g. bool, int, or str) that match standard JAX options
+             (host_tracer_level, device_tracer_level, python_tracer_level).
+          2. advanced_opts: Dictionaries of parsed custom option keys and their
+             typed values to be passed to JAX's advanced_configuration dictionary.
+          E.g., ({"host_tracer_level": 3}, {"tpu_num_chips_to_profile_per_task": 2, "my_custom_option": True})
+    """
+    if not profile_prefix or not profile_prefix.strip():
+        return {}, {}
+
+    if not profile_prefix.isascii():
+        raise ValueError("profile_prefix contains non-ASCII characters")
+
+    standard_opts = {}
+    advanced_opts = {}
+
+    parts = profile_prefix.split(';')
+
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.+)$', part)
+        if not match:
+            raise ValueError(f"Invalid profile option format in '{part}'. "
+                             "Expected 'key:value' format.")
+        key = match.group(1)
+        val = match.group(2)
+
+        parsed_val = _parse_option_value(key, val)
+
+        if key in _STANDARD_KEYS:
+            standard_opts[key] = parsed_val
+        else:
+            advanced_opts[key] = parsed_val
+
+    return standard_opts, advanced_opts
 
 
 class TPUWorker(WorkerBase):
@@ -523,15 +607,34 @@ class TPUWorker(WorkerBase):
                 is_start: bool = True,
                 profile_prefix: str | None = None):
         if is_start:
+            standard_opts, advanced_opts = _parse_profile_options(
+                profile_prefix)
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
+
+            # Enable strict validation of experimental options by default. If an
+            # unrecognized configuration is passed, JAX/libtpu will raise a
+            # runtime initialization error instead of silently ignoring it.
+            # Users can opt-out by passing 'check_experimental_options:false'.
+            advanced_config = {
+                "check_experimental_options": True,
+            }
             if envs.PROFILE_SINGLE_DEVICE:
-                options.advanced_configuration = {
+                advanced_config.update({
                     "tpu_num_chips_to_profile_per_task": 1,
                     "tpu_num_sparse_cores_to_trace": 1,
                     "tpu_num_sparse_core_tiles_to_trace": 1,
-                }
+                })
+
+            # Override with parsed options
+            for key, val in standard_opts.items():
+                setattr(options, key, val)
+
+            advanced_config.update(advanced_opts)
+            if advanced_config:
+                options.advanced_configuration = advanced_config
+
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
         else:
