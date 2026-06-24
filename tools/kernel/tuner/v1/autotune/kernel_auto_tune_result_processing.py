@@ -53,7 +53,8 @@ class KernelAutoTuneResultProcessor:
         self.spanner_instance_id = _SPANNER_INSTANCE_ID.value
         self.spanner_database_id = _SPANNER_DATABASE_ID.value
         assert _PROCESS_STEP.value in [
-            'COMPARE_BM_METRICS', 'PATCH_KERNEL_AUTOTUNE_RESULT'], f"Invalid process step: {_PROCESS_STEP.value}. Must be one of ['COMPARE_BM_METRICS', 'PATCH_KERNEL_AUTOTUNE_RESULT']"
+            'COMPARE_BM_METRICS', 'PATCH_KERNEL_AUTOTUNE_RESULT'
+        ], f"Invalid process step: {_PROCESS_STEP.value}. Must be one of ['COMPARE_BM_METRICS', 'PATCH_KERNEL_AUTOTUNE_RESULT']"
         self.process_step = _PROCESS_STEP.value
 
     def _get_spanner_db(self, project, instance_id, database_id):
@@ -257,11 +258,7 @@ class KernelAutoTuneResultProcessor:
             self.update_best_results(best_results, kernel_tuner_name)
 
     def compare_benchmark_metrics(self):
-        logger.info(
-            "Comparing benchmark metrics"
-        )
-        from google.cloud import \
-            spanner as gspanner  # pylint: disable=import-outside-toplevel
+        logger.info("Comparing benchmark metrics")
         query = """
             SELECT OutputTokenThroughput  
             FROM RunRecord rr where rr.status = 'COMPLETED' and rr.run_type like 'KERNEL_AUTOTUNE'

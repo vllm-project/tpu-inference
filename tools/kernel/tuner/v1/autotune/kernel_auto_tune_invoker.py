@@ -68,8 +68,8 @@ class KernelAutoTuneInvoker:
         github_pat = os.environ.get('GITHUB_PAT', None)
         assert github_pat is not None, "GITHUB_PAT environment variable is not set."
         logger.info(f"Using : {github_pat[:4]}...{github_pat[-4:]}.")
-        repo_url="github.com/vllm-project/tpu-inference.git" 
-        authenticated_repo_url=f"https://x-access-token:{github_pat}@{repo_url}"
+        repo_url = "github.com/vllm-project/tpu-inference.git"
+        authenticated_repo_url = f"https://x-access-token:{github_pat}@{repo_url}"
         return {
             "label":
             "Kernel Auto-Tuning Result Processing",
@@ -84,9 +84,7 @@ class KernelAutoTuneInvoker:
                 "USE_PREBUILT_IMAGE": "1",
                 "TPU_VERSION": 'tpu6e'
             },
-            "secrets": [
-                "GITHUB_PAT"
-            ],
+            "secrets": ["GITHUB_PAT"],
             "priority":
             200,
             "commands": [
