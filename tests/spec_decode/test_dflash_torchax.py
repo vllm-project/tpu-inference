@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tpu_inference.spec_decode.torchax.dflash import DFlashTorchaxProposer
+from tpu_inference.spec_decode.vllm.dflash import DFlashTorchaxProposer
 
 
 def _make_single_device_mesh() -> jax.sharding.Mesh:
@@ -202,7 +202,7 @@ def mesh():
         yield m
 
 
-@patch("tpu_inference.models.torchax.dflash.DFlashTorchaxWrapper")
+@patch("tpu_inference.models.vllm.dflash.DFlashTorchaxWrapper")
 def test_torchax_proposer_lifecycle_flow(mock_wrapper_cls, mesh):
     """Verifies the entire lifecycle (load, precompile, prepare_inputs, propose, request-reset) of DFlashTorchaxProposer."""
     vllm_config = MockVllmConfig()
