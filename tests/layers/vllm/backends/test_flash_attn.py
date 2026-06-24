@@ -436,7 +436,7 @@ class TestPallasAttentionBackendImpl:
             num_heads=NUM_HEADS,
             head_size=HEAD_DIM,
             scale=0.088,
-            num_kv_heads=NUM_KV_HEADS,
+            num_kv_heads=NUM_HEADS,
             alibi_slopes=None,
             sliding_window=None,
             kv_cache_dtype="auto",
@@ -446,7 +446,8 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, _, metadata = create_inputs(mesh)
+        query, key, value, _, metadata = create_inputs(
+            mesh, num_kv_heads=NUM_HEADS)
         metadata.padded_num_reqs = MAX_NUM_SEQS
 
         from vllm.config import VllmConfig

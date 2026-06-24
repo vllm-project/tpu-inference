@@ -2,13 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional, Tuple
 
-import multiprocessing
-import os
-
 import jax
 import jax.numpy as jnp
 import torch
-from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
@@ -33,34 +29,8 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
 
 logger = init_logger(__name__)
 
-
-def _is_v1_api_server() -> bool:
-    return (
-        os.getenv("VLLM_USE_V1") == "1"
-        and not multiprocessing.current_process().name.startswith("EngineCore")
-    )
-
-
-def get_tpu_head_size_alignment() -> int:
-    if _is_v1_api_server():
-        return 128
-    try:
-        return pltpu.get_tpu_info().num_lanes
-    except Exception as e:
-        raise AssertionError(
-            "TPU hardware info is not available. Ensure you are running on a TPU."
-        ) from e
-
-
-def get_half_smem_capacity_bytes() -> int:
-    if _is_v1_api_server():
-        return 512 * 1024
-    try:
-        return pltpu.get_tpu_info().smem_capacity_bytes // 2
-    except Exception as e:
-        raise AssertionError(
-            "TPU hardware info is not available. Ensure you are running on a TPU."
-        ) from e
+# TPU requires the head size to be a multiple of 128.
+TPU_HEAD_SIZE_ALIGNMENT = 128
 
 
 class PallasAttentionMetadataBuilder(
@@ -121,8 +91,8 @@ class PallasAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        head_alignment = get_tpu_head_size_alignment()
-        padded_head_size = (cdiv(head_size, head_alignment) * head_alignment)
+        padded_head_size = (cdiv(head_size, TPU_HEAD_SIZE_ALIGNMENT) *
+                            TPU_HEAD_SIZE_ALIGNMENT)
         return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
 
     @staticmethod
@@ -139,7 +109,7 @@ class PallasAttentionBackend(AttentionBackend):
     # we simply make sure that the size is smaller than half of SMEM capacity.
     @staticmethod
     def get_min_page_size(vllm_config: VllmConfig) -> int:
-        max_num_page_per_req = (get_half_smem_capacity_bytes() //
+        max_num_page_per_req = (1024 * 1024 // 2 //
                                 vllm_config.scheduler_config.max_num_seqs // 4)
         min_page_size = cdiv(vllm_config.model_config.max_model_len,
                              max_num_page_per_req)
@@ -149,7 +119,7 @@ class PallasAttentionBackend(AttentionBackend):
     @staticmethod
     def get_max_num_seqs(model_len: int, page_size: int) -> int:
         num_page_per_req = cdiv(model_len, page_size)
-        return get_half_smem_capacity_bytes() // num_page_per_req // 4
+        return 1024 * 1024 // 2 // num_page_per_req // 4
 
     # TPU has limited SREGs (scalar registers), if page_size is too small, we
     # can spill SREGs easily which leads to bad performance. The strategy we
