@@ -50,6 +50,8 @@ steps:
             USE_PREBUILT_IMAGE: "1"
             TPU_VERSION: "tpu6e"
             KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
+          secrets:
+            - GITHUB_PAT
           agents:
             queue: tpu_v6e_queue
           commands:

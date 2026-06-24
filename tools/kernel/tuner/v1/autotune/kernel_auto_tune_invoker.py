@@ -67,6 +67,7 @@ class KernelAutoTuneInvoker:
         branch_name = f"kernel_autotune.update_tuned_params_{self.auto_tune_id}"
         github_pat = os.environ.get('GITHUB_PAT', None)
         assert github_pat is not None, "GITHUB_PAT environment variable is not set."
+        logger.info(f"Using : {github_pat[:4]}...{github_pat[-4:]}.")
         repo_url="github.com/vllm-project/tpu-inference.git" 
         authenticated_repo_url=f"https://x-access-token:{github_pat}@{repo_url}"
         return {
