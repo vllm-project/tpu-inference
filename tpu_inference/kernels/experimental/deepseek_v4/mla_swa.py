@@ -628,11 +628,21 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
         ).reshape(bq_sz * num_q_heads, head_dim)
         return q
 
-    def load_bkv(bkv_sem_idx):
+    def load_bkv(bkv_sem_idx, bkv_idx):
         bkv_ref = (bkv_x2_ref.bitcast(
             jnp.uint32).at[bkv_sem_idx, :bkv_sz_per_kv_packing].reshape(
                 bkv_sz_per_kv_packing, lkv_dim))
         bkv = pltpu.bitcast(bkv_ref[...], kv_dtype).reshape(bkv_sz, lkv_dim)
+
+        # In vLLM, multiple caches may overlay on the same KV Tensor. For example,
+        # compressor state cache write data in bfloat16 / float32 format, certain
+        # byte pattern are interpreted as NaN in FP8, e.g. float8_e8m0fnu byte 0xFF
+        # decodes to NaN.
+        # We need to mask out the data by the actual kv_len to avoid NaN propagting
+        # to the downstream computation.
+        k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(
+            jnp.int32, bkv.shape, 0)
+        bkv = jnp.where(k_span < kv_len, bkv, 0)
 
         # Dequantize DSV4 FP8 format to BF16.
         # 448 fp8, 64 bf16, 7 fp8 scales, 7 e8m0 scale for 448 fp8 (block size 64)
@@ -664,11 +674,16 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
     def process():
         # Only when bq_idx == 0, we do kv cache update, need to go all the way to
         # the kv_len
-        num_bkv = cdiv(kv_len, bkv_sz)
+
+        # Force at least one bkv block and one bq block per sequence: the
+        # double-buffered DMA pipeline hands the bkv and bq semaphore across
+        # sequence boundaries and assumes every sequence runs >=1 bkv and bq
+        # iteration.
+        num_bkv = jnp.maximum(1, cdiv(kv_len, bkv_sz))
         if static_q_len is None:
-            num_bq = cdiv(q_len, bq_sz)
+            num_bq = jnp.maximum(1, cdiv(q_len, bq_sz))
         else:
-            num_bq = cdiv(static_q_len, bq_sz)
+            num_bq = jnp.maximum(1, cdiv(static_q_len, bq_sz))
 
         def get_next_bq_ids(seq_idx, bq_idx, bq_sem_idx):
             next_bq_idx = bq_idx + 1
@@ -744,7 +759,10 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
                 # because the score of invalid Q.K^T pairs are masked (to be zero) in
                 # flash attention, so that the invalid kv entries
                 # (as long as they are not NaN or inf) won't affect to the output.
-                bkv = load_bkv(bkv_sem_idx, )
+                bkv = load_bkv(
+                    bkv_sem_idx,
+                    bkv_idx,
+                )
 
                 bq = load_bq(bq_sem_idx)
 
@@ -812,15 +830,6 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
     @pl.when(seq_idx == start_seq_idx)
     def prologue():
         start_fetch_bq(start_seq_idx, 0, 0)
-
-        # Initialize bkv_x2_ref to zeros to avoid NaN issues from accessing
-        # uninitialized memory. Bitcast into int32 to avoid tiling issues.
-        bkv_x2_int32_ref = bkv_x2_ref.bitcast(jnp.int32).reshape(
-            (2, -1, lkv_dim))
-        bkv_zeros = jnp.zeros(bkv_x2_int32_ref.shape[1:], jnp.int32)
-
-        # To pipeline VST and DMA, we divide the initialization into two steps.
-        bkv_x2_int32_ref[0] = bkv_zeros
         start_fetch_bkv(
             start_seq_idx,
             jnp.maximum(
@@ -830,7 +839,6 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
             ) // bkv_sz,
             0,
         )
-        bkv_x2_int32_ref[1] = bkv_zeros
 
     process()
 
