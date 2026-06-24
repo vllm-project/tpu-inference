@@ -18,6 +18,7 @@
 # when the pipeline is invoked through Buildkite. 
 #
 
+
 # Required environment variables for kernel tuning pipeline.
 KERNEL_TUNING_ENV_VARS=(
     -e KERNEL_TUNING_CASE_SET_ID="${KERNEL_TUNING_CASE_SET_ID:-}"
@@ -37,7 +38,7 @@ for entry in "${KERNEL_TUNING_ENV_VARS[@]}"; do
     var_name="${entry%%=*}"
 
     # Check if the variable is defined and not empty
-    if [[ -z "${!var_name}" ]]; then
+    if [[ -z "${!var_name:-}" ]]; then
         echo "Error: Required environment variable $var_name is not defined or is empty."
         exit 1
     fi
