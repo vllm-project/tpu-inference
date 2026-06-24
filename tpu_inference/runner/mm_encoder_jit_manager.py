@@ -89,6 +89,50 @@ class _TorchaxEncoderModelAdapter:
         self._model = vllm_model
         self._runner = vllm_runner
         self._params = params_and_buffers
+        self._jit_forward = jax.jit(self._build_forward_fn())
+
+    # ----- JIT forward closure -----
+
+    def _build_forward_fn(self) -> Callable:
+        """Build the closure that gets ``jax.jit``-wrapped exactly once.
+
+        Inputs: ``params_jax`` (the model weights) + ``values_jax`` (the
+        full padded buffer dict including ``pixel_values``).
+
+        Inside: bridge jax -> torchax with ``torch_view``, dispatch via
+        ``functional_call(call_method="encoder_cudagraph_forward")``,
+        bridge torchax output back to jax with ``jax_view``.
+        """
+        vllm_runner = self._runner
+
+        def _forward(params_jax: Any, values_jax: dict[str, jax.Array]):
+            params_torchax = torch_view(params_jax)
+            values_torchax = {
+                k: jax.tree.map(torch_view, v)
+                for k, v in values_jax.items()
+            }
+            out_torch = torch.func.functional_call(
+                vllm_runner,
+                params_torchax,
+                kwargs={
+                    "call_method": "encoder_cudagraph_forward",
+                    "call_args": (values_torchax, ),
+                    "call_kwargs": {},
+                },
+                tie_weights=False,
+            )
+            return jax_view(out_torch)
+
+        return _forward
+
+    def run_budget_forward(self, padded_torch: dict[str, Any]) -> jax.Array:
+        # Convert + JIT — INSIDE the env (the closure bridges torchax<->jax).
+        with torchax.default_env(), enable_torch_wrap(False):
+            padded_jax = {
+                k: jax.tree.map(self._t2j_if_tensor, v)
+                for k, v in padded_torch.items()
+            }
+            return self._jit_forward(self._params, padded_jax)
 
     def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> jax.Array:
         # Bridge plain-torch mm_kwargs -> torchax, dispatch the model's eager
@@ -99,7 +143,7 @@ class _TorchaxEncoderModelAdapter:
         # under the torchax dispatch).
         with torchax.default_env():
             torchax_kwargs = {
-                k: jax.tree.map(_torchax_view_if_torch, v)
+                k: jax.tree.map(self._torchax_view_if_torch, v)
                 for k, v in mm_kwargs.items()
             }
             out_torch = torch.func.functional_call(
@@ -131,6 +175,20 @@ class _TorchaxEncoderModelAdapter:
             dest[idx] = output[offset:offset + n]
             offset += n
 
+    @staticmethod
+    def _t2j_if_tensor(v: torch.Tensor | jax.Array) -> jax.Array:
+        """Tree-map helper — convert leaf torch.Tensors to jax.Array."""
+        if isinstance(v, torch.Tensor):
+            return t2j(v, use_dlpack=False)
+        return v
+
+    @staticmethod
+    def _torchax_view_if_torch(v):
+        """Tree-map helper for the eager path."""
+        if isinstance(v, torch.Tensor):
+            return torch_view(t2j(v, use_dlpack=False))
+        return v
+
     def __getattr__(self, name: str) -> Any:
         # Delegate all non-overridden protocol methods to the real model.
         return getattr(self._model, name)
@@ -142,7 +200,7 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
     def __init__(
         self,
         vllm_config: "VllmConfig",
-        vllm_runner: torch.nn.Module,
+        vllm_runner: torch.nn.Module | None,
         vllm_model: Any,
         params_and_buffers: Any,
     ):
@@ -155,23 +213,27 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
               ``encoder_cudagraph_max_frames_per_batch`` (same as GPU).
           vllm_runner: The torchax-wrapped ``_VllmRunner`` (provides
               ``forward(call_method=..., call_args=...)``-style dispatch
-              required by ``torch.func.functional_call``).
+              required by ``torch.func.functional_call``). Pass ``None``
+              for the JAX/flax path — selects ``JaxEncoderModelAdapter``.
           vllm_model: The underlying vllm model (e.g.
-              ``Qwen3VLForConditionalGeneration``). Must implement
-              ``SupportsEncoderCudaGraph``.
+              ``Qwen3VLForConditionalGeneration``) or a JAX flax model.
+              Must implement ``SupportsEncoderCudaGraph``.
           params_and_buffers: The model's loaded weights as a pytree of
               JAX arrays. Bound into ``functional_call`` per request.
+              Pass ``None`` for the JAX/flax path.
         """
-        self.vllm_runner = vllm_runner
-        self.params_and_buffers = params_and_buffers
-
         # The parent calls model.{get_encoder_cudagraph_config,
         # get_encoder_cudagraph_budget_range}; the inherited _execute_local
         # later calls model.{select_encoder_cudagraph_items,
         # encoder_eager_forward, postprocess_encoder_output}. Route eager
-        # forward through the torchax runner via the adapter.
-        adapter = _TorchaxEncoderModelAdapter(vllm_model, vllm_runner,
-                                              params_and_buffers)
+        # forward and budget execution through the appropriate adapter.
+        if vllm_runner is None:
+            # JAX/flax path
+            adapter = JaxEncoderModelAdapter(vllm_model)
+        else:
+            # torchax path: functional_call through the torchax runner.
+            adapter = _TorchaxEncoderModelAdapter(vllm_model, vllm_runner,
+                                                  params_and_buffers)
 
         # Reuse upstream budget derivation + validation. Capture inputs are
         # built on CPU; the JIT path moves them to TPU via t2j, so we never
@@ -182,10 +244,6 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
             dtype=vllm_config.model_config.dtype,
             model=adapter,
         )
-        # Keep the raw model for the grid/pixel helper calls in the
-        # metadata-cache path (the adapter would delegate, but referencing
-        # the model directly is clearer).
-        self.vllm_model = vllm_model
 
         # Capture templates per budget — shape signature reference for
         # host-side padding. The values inside templates are dummy; only
@@ -194,7 +252,7 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         capture_dtype = vllm_config.model_config.dtype
         self.budget_templates: dict[int, dict[str, torch.Tensor]] = {}
         for budget in self.token_budgets:
-            capture = vllm_model.prepare_encoder_cudagraph_capture_inputs(
+            capture = self.model.prepare_encoder_cudagraph_capture_inputs(
                 budget, self.max_batch_size, self.max_frames_per_batch,
                 capture_device, capture_dtype)
             self.budget_templates[budget] = capture.values
@@ -204,44 +262,6 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
             "max_frames_per_batch=%d template_keys=%s", self.token_budgets,
             self.max_batch_size, self.max_frames_per_batch,
             list(next(iter(self.budget_templates.values())).keys()))
-
-        # Hoist the JIT-wrap once (v7 cache-share fix — PjitFunction lives
-        # on this instance and accumulates per-shape entries from here).
-        self._jit_forward = jax.jit(self._build_forward_closure())
-
-    # ----- JIT forward closure -----
-
-    def _build_forward_closure(self) -> Callable:
-        """Build the closure that gets ``jax.jit``-wrapped exactly once.
-
-        Inputs: ``params_jax`` (the model weights) + ``values_jax`` (the
-        full padded buffer dict including ``pixel_values``).
-
-        Inside: bridge jax -> torchax with ``torch_view``, dispatch via
-        ``functional_call(call_method="encoder_cudagraph_forward")``,
-        bridge torchax output back to jax with ``jax_view``.
-        """
-        vllm_runner = self.vllm_runner
-
-        def _forward(params_jax: Any, values_jax: dict[str, jax.Array]):
-            params_torchax = torch_view(params_jax)
-            values_torchax = {
-                k: jax.tree.map(torch_view, v)
-                for k, v in values_jax.items()
-            }
-            out_torch = torch.func.functional_call(
-                vllm_runner,
-                params_torchax,
-                kwargs={
-                    "call_method": "encoder_cudagraph_forward",
-                    "call_args": (values_torchax, ),
-                    "call_kwargs": {},
-                },
-                tie_weights=False,
-            )
-            return jax_view(out_torch)
-
-        return _forward
 
     # ----- Padding (per-key) -----
 
@@ -320,13 +340,8 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         lazily on first ``execute``).
         """
         template = self.budget_templates[token_budget]
-        with torchax.default_env(), enable_torch_wrap(False):
-            values_jax = {
-                k: jax.tree.map(_t2j_if_tensor, v)
-                for k, v in template.items()
-            }
-            out = self._jit_forward(self.params_and_buffers, values_jax)
-            jax.block_until_ready(out)
+        out = self.model.run_budget_forward(template)
+        jax.block_until_ready(out)
         # Mark captured so inherited capture()/get_cumulative_stats count it.
         self.budget_graphs[token_budget] = template
 
@@ -338,11 +353,10 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         """XLA-cache analog of CUDA-graph replay.
 
         Host-pads the replay buffers to the budget template shape (plain
-        torch, outside the env) and calls the once-built ``jax.jit`` closure
-        inside a local ``torchax.default_env()``. Returns the encoder output
-        as a **jax.Array**, which the inherited ``_execute_local`` slices via
-        the adapter's jax-friendly ``postprocess_encoder_output`` — no outer
-        torchax env required.
+        torch, outside the env) and delegates to the adapter's
+        ``run_budget_forward``. Returns a **jax.Array** that the inherited
+        ``_execute_local`` slices via the adapter's jax-friendly
+        ``postprocess_encoder_output`` — no outer torchax env required.
         """
         num_items = len(self._get_item_specs(mm_kwargs))
         if token_budget not in self.budget_templates:
@@ -353,13 +367,7 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
 
         # Prep in plain torch (touches model Parameters) — OUTSIDE the env.
         padded_torch = self._prepare_padded_torch(mm_kwargs, token_budget)
-        # Convert + JIT — INSIDE the env (the closure bridges torchax<->jax).
-        with torchax.default_env(), enable_torch_wrap(False):
-            padded_jax = {
-                k: jax.tree.map(_t2j_if_tensor, v)
-                for k, v in padded_torch.items()
-            }
-            out_jax = self._jit_forward(self.params_and_buffers, padded_jax)
+        out_jax = self.model.run_budget_forward(padded_torch)
         self.graph_hits += num_items
         return out_jax
 
@@ -377,17 +385,3 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         expects from ``runner.embed_multimodal_fn(...)``.
         """
         return self._execute_local(mm_kwargs)
-
-
-def _t2j_if_tensor(v: torch.Tensor | jax.Array) -> jax.Array:
-    """Tree-map helper — convert leaf torch.Tensors to jax.Array."""
-    if isinstance(v, torch.Tensor):
-        return t2j(v, use_dlpack=False)
-    return v
-
-
-def _torchax_view_if_torch(v):
-    """Tree-map helper for the eager path."""
-    if isinstance(v, torch.Tensor):
-        return torch_view(t2j(v, use_dlpack=False))
-    return v
