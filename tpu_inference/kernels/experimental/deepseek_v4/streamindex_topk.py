@@ -94,10 +94,10 @@ def _streamindex_topk_kernel(
     bkv_p: int,
     bq_sz: int,
     actual_num_q_heads: int,
-    actual_head_dim: int,
     kv_packing: int,
 ):
     _, num_q_heads, head_dim = q_hbm_ref.shape
+    lkv_dim = cache_kv_hbm_ref.shape[-1]
 
     total_num_pages, page_size_per_kv_packing, _, _ = cache_kv_hbm_ref.shape
 
@@ -221,7 +221,7 @@ def _streamindex_topk_kernel(
         reshaped_cache_hbm_ref = cache_kv_hbm_ref.reshape(
             total_num_pages * page_size_per_kv_packing,
             kv_packing,
-            actual_head_dim,
+            lkv_dim,
         )
 
         kv_p_start = bkv_idx * bkv_p
@@ -336,7 +336,7 @@ def _streamindex_topk_kernel(
     def load_bq(bq_sem_idx):
         q = bq_x2_ref.at[bq_sem_idx, :bq_sz][...]
         q = q.reshape(bq_sz, num_q_heads, head_dim)
-        return q[:, :actual_num_q_heads, :actual_head_dim]
+        return q[:, :actual_num_q_heads, :]
 
     def load_bq_weights(bq_sem_idx):
         w = bq_weights_x2_ref.at[bq_sem_idx, :bq_sz][...]
@@ -349,26 +349,12 @@ def _streamindex_topk_kernel(
         fp8_val = flat_bkv[:, :head_dim]
         fp8_val = pltpu.bitcast(fp8_val, jnp.float8_e4m3fn)
 
-        scale_val = flat_bkv[:, head_dim:head_dim + 1]
-
-        # Force exact unsigned extraction to bypass negative int8 overflow.
-        scale_val_u32 = scale_val.astype(jnp.int32) & 0xFF
-
-        # Map standard values (1 to 254) using exact bitshifting.
-        scale_val_shifted = scale_val_u32 << 23
-
-        # Handle the 0 byte edge case: f8E8M0FNU spec maps 0 to 2^-127
-        # The exact IEEE-754 float32 bits for the subnormal 2^-127 is 0x00400000.
-        scale_val_shifted = jnp.where(scale_val_u32 == 0,
-                                      jnp.int32(0x00400000), scale_val_shifted)
-
-        # Handle the 255 byte edge case: f8E8M0FNU spec maps 255 to NaN
-        # The standard float32 bits for NaN is 0x7FC00000.
-        scale_val_shifted = jnp.where(scale_val_u32 == 255,
-                                      jnp.int32(0x7FC00000), scale_val_shifted)
-
-        # Bitcast the strictly reconstructed bits directly to float32
-        scale_val = pltpu.bitcast(scale_val_shifted, jnp.float32)
+        # libtpu 0.0.41 not yet support the f8E8M0FNU element type, so decode the
+        # E8M0 scale bytes manually. E8M0 stores value = 2**(byte - 127).
+        scale_val = pltpu.bitcast(flat_bkv[:, head_dim:head_dim + 1],
+                                  jnp.uint8)
+        scale_val = jnp.exp2(scale_val.astype(jnp.float32) - 127.0).astype(
+            jnp.bfloat16)
 
         # NOTE: Do NOT multiply the scales here. Return them separately.
         return fp8_val.reshape(bkv_sz, head_dim), scale_val.reshape(bkv_sz, 1)
@@ -479,17 +465,7 @@ def _streamindex_topk_kernel(
     @pl.when(seq_idx == start_seq_idx)
     def prologue():
         start_fetch_bq(start_seq_idx, 0, 0)
-
-        # Initialize bkv_x2_ref to zeros to avoid NaN issues from accessing
-        # uninitialized memory. Bitcast into int32 to avoid tiling issues.
-        bkv_x2_int32_ref = bkv_x2_ref.bitcast(jnp.int32).reshape(
-            (2, -1, actual_head_dim))
-        bkv_zeros = jnp.zeros(bkv_x2_int32_ref.shape[1:], jnp.int32)
-
-        # To pipeline VST and DMA, we divide the initialization into two steps.
-        bkv_x2_int32_ref[0] = bkv_zeros
         start_fetch_bkv(start_seq_idx, 0, 0)
-        bkv_x2_int32_ref[1] = bkv_zeros
 
     process()
 
@@ -621,7 +597,7 @@ def streamindex_topk(
 
     actual_num_q_heads = q.shape[1]
     q = prepare_q_inputs(q)
-    actual_head_dim = cache_kv.shape[-1]
+    lkv_dim = cache_kv.shape[-1]
 
     def run_topk_kernel(
         q,
@@ -667,7 +643,7 @@ def streamindex_topk(
                 2,
                 bkv_buf_sz_per_kv_packing,
                 kv_packing,
-                actual_head_dim,
+                lkv_dim,
             ),
             cache_kv.dtype,
         )
@@ -727,7 +703,6 @@ def streamindex_topk(
                 bq_sz=bq_sz,
                 bkv_p=bkv_p,
                 actual_num_q_heads=actual_num_q_heads,
-                actual_head_dim=actual_head_dim,
                 kv_packing=kv_packing,
             ),
             grid_spec=pltpu.PrefetchScalarGridSpec(

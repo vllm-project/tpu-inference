@@ -16,21 +16,41 @@
 
 from typing import Optional, Tuple
 
+import jax
 import jax.numpy as jnp
 import torch
 import torch.nn as nn
+from jax.sharding import PartitionSpec as P
 from torchax.interop import jax_view, torch_view
 from vllm.forward_context import get_forward_context
-from vllm.models.deepseek_v4.attention import DeepseekV4Indexer
+from vllm.models.deepseek_v4 import attention as dsv4_attention
+from vllm.models.deepseek_v4.attention import (DeepseekV4Indexer,
+                                               DeepseekV4IndexerCache)
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 # =====================================================================
 # IMPORT TPU CUSTOM OPS TO TRIGGER vLLM @register_oot DECORATORS
 # =====================================================================
-from tpu_inference.kernels.experimental.deepseek_v4.compressor import \
-    compressor_forward_indexer
 from tpu_inference.kernels.experimental.deepseek_v4.streamindex_topk import \
     streamindex_topk
 from tpu_inference.layers.common import quantization
+from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_compressor import \
+    VllmDeepseekCompressor
+from tpu_inference.logger import init_logger
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
+
+logger = init_logger(__name__)
+
+
+def cdiv(a, b):
+    assert b != 0
+    return (a + b - 1) // b
+
+
+def align_to(x, a):
+    return cdiv(x, a) * a
 
 
 def fused_indexer_q_rope_quant(
@@ -53,10 +73,10 @@ def fused_indexer_q_rope_quant(
     # Apply the custom rotary embedding op directly in-place on the query tensor.
     q, _ = rotary_emb(positions, q)
 
-    # Bridge to JAX, call JAX quantize_tensor, and bridge back to PyTorch
-    q_jax = jax_view(q)
-    q_quant_jax, q_scales_jax = quantization.quantize_tensor(
-        q_jax, jnp.float8_e4m3fn)
+    q = jax_view(q)
+    q_quant_jax, q_scales_jax = quantization.quantize_tensor(jnp.float8_e4m3fn,
+                                                             q,
+                                                             axis=-1)
     q_quant = torch_view(q_quant_jax)
     q_scales = torch_view(q_scales_jax)
 
@@ -66,16 +86,50 @@ def fused_indexer_q_rope_quant(
     return q_quant, q_scales.squeeze(-1)
 
 
-class VllmDeepseekV4Indexer(DeepseekV4Indexer):
-    """TPU-compatible DeepSeek-V4 Lightning Indexer with StreamIndex.
+class VllmDeepseekV4IndexerCache(DeepseekV4IndexerCache):
+    """TPU-compatible indexer KV cache.
 
-  This class overrides the forward method of DeepseekV4Indexer to provide a
-  TPU-compatible implementation using JAX interop. It uses
-  `streamindex_topk` to compute top-k token indices over a
-  PagedAttention KV cache.
+  On TPU the indexer KV cache is allocated and tracked outside of vLLM's
+  attention-spec machinery, so we suppress the base ``get_kv_cache_spec`` to
+  avoid registering a spec for this layer.
   """
 
-    # pylint: disable=unused-argument
+    def get_kv_cache_spec(self, vllm_config):
+        # In DSV4 FP8 indexer cache format
+        # 128 fp8, 1 e8m0 scale packed as uint8
+        # TODO: consider put the scale as a separate Array / Tensor
+        # to reduce large space waste due to padding.
+        return MLAAttentionSpec(
+            block_size=self.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=align_to(128 + 1, 128),
+            dtype=torch.uint8,
+            compress_ratio=self.compress_ratio,
+            # DeepseekV4 aligns indexer pages to FlashMLA's 576B so they can pack with
+            # the indexer's compressor state cache. V3.2 keeps the legacy layout.
+            alignment=None,
+        )
+
+
+class VllmDeepseekV4Indexer(DeepseekV4Indexer):
+    """TPU-compatible DeepSeek-V4 Lightning Indexer with StreamIndex.
+    It uses `streamindex_topk` to compute top-k token indices over a PagedAttention KV cache.
+  """
+
+    def __init__(self, *args, **kwargs):
+        # The base ctor builds ``self.compressor`` and ``self.k_cache`` from the
+        # vLLM upstream classes. Temporarily rebind the module-level symbols
+        # the base ctor references so it constructs the TPU subclasses directly.
+        orig_compressor = dsv4_attention.DeepseekCompressor
+        orig_cache = dsv4_attention.DeepseekV4IndexerCache
+        dsv4_attention.DeepseekCompressor = VllmDeepseekCompressor
+        dsv4_attention.DeepseekV4IndexerCache = VllmDeepseekV4IndexerCache
+        try:
+            super().__init__(*args, **kwargs)
+        finally:
+            dsv4_attention.DeepseekCompressor = orig_compressor
+            dsv4_attention.DeepseekV4IndexerCache = orig_cache
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -85,9 +139,7 @@ class VllmDeepseekV4Indexer(DeepseekV4Indexer):
         positions: torch.Tensor,
         rotary_emb: nn.Module,
         slot_mapping: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-
-        actual_num_tokens = hidden_states.shape[0]
+    ):
 
         q, _ = self.wq_b(query)
         q = q.view(-1, self.n_head, self.head_dim)
@@ -99,82 +151,63 @@ class VllmDeepseekV4Indexer(DeepseekV4Indexer):
         weights = (indexer_weights.to(q.dtype) * self.softmax_scale *
                    (self.head_dim**-0.5) * q_scales)
 
+        self.compressor(compressed_kv_score, positions, rotary_emb)
+
+        wrapper_ctx = get_vllm_model_wrapper_context()
+        kv_cache_index = wrapper_ctx.layer_name_to_kvcache_index[
+            self.k_cache.prefix]
+        kv_cache = wrapper_ctx.kv_caches[kv_cache_index]
+        mesh = wrapper_ctx.mesh
         attn_metadata_dict = get_forward_context().attn_metadata
         attn_metadata = attn_metadata_dict[self.k_cache.prefix]
 
-        # ---------------------------------------------------------
-        # 1. EXECUTE COMPRESSOR & SCATTER TO KV CACHE
-        # ---------------------------------------------------------
-        # Project, norm, rope, and store states using the indexer's compressor.
-        wkv_wgate = torch.cat([self.kv_proj.weight, self.gate_proj.weight],
-                              dim=0)
-
-        # Compute request index mapping for each token in the batch.
-        token_to_req_indices = (
-            torch.bucketize(
-                torch.arange(actual_num_tokens, device=hidden_states.device),
-                attn_metadata.cu_seq_lens,  # pytype: disable=attribute-error
-                right=True,
-            ) - 1).to(torch.int32)
-
-        current_slot_mapping = (
-            slot_mapping if slot_mapping is not None else
-            attn_metadata.slot_mapping.flatten()  # pytype: disable=attribute-error
-        ).to(torch.int32)
-        # Key slots in compressed KV space (downsampled by compress_ratio).
-        kv_slot_mapping = (current_slot_mapping[:actual_num_tokens] //
-                           self.compress_ratio).to(torch.int32)
-
-        # Pack the state cache and write back to self.k_cache.kv_cache.
-        updated_cache_jax = compressor_forward_indexer(
-            hidden_states=jax_view(hidden_states),
-            wkv_wgate=jax_view(wkv_wgate),
-            ape=jax_view(self.position_bias),
-            norm_weight=jax_view(self.kv_norm.weight),
-            cos_sin_cache=jax_view(self.rotary_emb.cos_sin_cache),
-            positions=jax_view(positions),
-            slot_mapping=jax_view(current_slot_mapping[:actual_num_tokens]),
-            block_table=jax_view(attn_metadata.block_table),  # pytype: disable=attribute-error
-            token_to_req_indices=jax_view(token_to_req_indices),
-            kv_slot_mapping=jax_view(kv_slot_mapping),
-            cache=jax_view(self.k_cache.kv_cache),
-            state_block_size=self.k_cache.block_size,
-            head_dim=self.head_dim,
-            rope_head_dim=getattr(self.rotary_emb, "rotary_dim", 64),
-            compress_ratio=self.compress_ratio,
-            overlap=True,  # Overlap is True for CSA path.
-            rms_eps=self.kv_norm.eps,
-            quant_block=128,  # Indexer path FP8 block size is 128.
+        # All array inputs and the output are sharded along the leading axis on
+        # ShardingAxisName.ATTN_DATA; the kernel runs per-shard inside the
+        # shard_map. Static kwargs are captured in the closure.
+        data_spec = P(ShardingAxisName.ATTN_DATA)
+        cache_spec = P(ShardingAxisName.BATCH)
+        in_specs = (
+            data_spec,  # q
+            data_spec,  # indexer_weights
+            cache_spec,  # cache_kv
+            data_spec,  # seq_lens
+            data_spec,  # page_indices
+            data_spec,  # cu_q_lens
+            data_spec,  # distribution
         )
+        out_specs = data_spec  # topk_indices
 
-        # Write back in-place to the cache tensor before read-after-write logic.
-        self.k_cache.kv_cache.copy_(torch_view(updated_cache_jax))
+        def _streamindex_topk(q, indexer_weights, cache_kv, seq_lens,
+                              page_indices, cu_q_lens, distribution):
+            return streamindex_topk(
+                q=q,
+                indexer_weights=indexer_weights,
+                cache_kv=cache_kv,
+                seq_lens=seq_lens,
+                page_indices=page_indices,
+                cu_q_lens=cu_q_lens,
+                distribution=distribution,
+                k=self.topk_tokens,
+                compression_ratio=self.compress_ratio,
+                # TODO(hwanginho): Tune num_kv_pages_per_block, num_queries_per_block
+                num_kv_pages_per_block=1,
+                num_queries_per_block=1,
+            )
 
-        # ---------------------------------------------------------
-        # 2. EXTRACT KV CACHE FOR JAX KERNEL
-        # ---------------------------------------------------------
-        kv_cache_tensor = self.k_cache.kv_cache
-        # Scale factors are packed straight into kv_cache.
-
-        # ---------------------------------------------------------
-        # 3. DIRECT JAX KERNEL CALL
-        # ---------------------------------------------------------
-        bt_slice = attn_metadata.block_table  # pytype: disable=attribute-error
-        sl_slice = attn_metadata.seq_lens  # pytype: disable=attribute-error
-        csl_slice = attn_metadata.cu_seq_lens  # pytype: disable=attribute-error
-
-        topk_indices = streamindex_topk(
-            query_projection=q_quant[:actual_num_tokens],
-            kv_cache=kv_cache_tensor,
-            page_indices=bt_slice,
-            seq_lens=sl_slice,
-            cu_q_lens=csl_slice,
-            indexer_weights=weights,
-            k=self.topk_tokens,
-            compression_ratio=self.compress_ratio,
-            # TODO(hwanginho): Tune these block configurations later for performance
-            num_kv_pages_per_block=1,
-            num_queries_per_block=1,
+        topk_indices = jax.shard_map(
+            _streamindex_topk,
+            mesh=mesh,
+            in_specs=in_specs,
+            out_specs=out_specs,
+            check_vma=False,
+        )(
+            jax_view(q_quant),
+            jax_view(weights),
+            kv_cache,
+            attn_metadata.seq_lens,
+            attn_metadata.block_tables,
+            attn_metadata.query_start_loc,
+            attn_metadata.request_distribution,
         )
 
         return topk_indices
