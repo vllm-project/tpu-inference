@@ -320,7 +320,7 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         # the scale params are registered, so vLLM's MoE weight loader does
         # not see `quant_method` on them and rejects the load. Set them
         # explicitly here.
-        from vllm.model_executor.layers.fused_moe.layer import \
+        from vllm.model_executor.layers.fused_moe import \
             FusedMoeWeightScaleSupported
         for name in ("w13_weight_scale", "w2_weight_scale"):
             set_weight_attrs(
