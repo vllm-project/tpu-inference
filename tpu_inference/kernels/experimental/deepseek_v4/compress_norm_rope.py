@@ -303,7 +303,10 @@ def gather_state_windows(
 
     safe_pos = jnp.where(valid_mask, pos, 0)
     req = token_to_req_indices[:, None]
-    block_numbers = block_table[req, safe_pos // block_size]
+    # Gather page numbers (optimized to 1D indexing to avoid 2D index bitpacking)
+    max_blocks = block_table.shape[-1]
+    flat_index = req * max_blocks + (safe_pos // block_size)
+    block_numbers = block_table.reshape(-1)[flat_index]
     block_offsets = safe_pos % block_size
 
     # C4 overlap: slots >= compress_ratio read the second head slice.
@@ -334,6 +337,7 @@ def _boundary_dest(
 
 def compress_norm_rope_store(
     cache: jax.Array,  # [num_pages, page_size//4, 4, width] uint8
+    state_cache: jax.Array,  # [num_blocks, block_size, 2*state_width] fp32
     positions: jax.Array,  # [num_tokens] int
     slot_mapping: jax.Array,  # [num_tokens] int (state-cache slots)
     block_table: jax.Array,  # [num_reqs, max_blocks] int (state pages)
@@ -350,9 +354,7 @@ def compress_norm_rope_store(
     quant_block: int,
 ):
     """Compress, norm, RoPE, and write boundary KV into the shared cache."""
-    coff = 1 + int(overlap)
-    state_dim = 2 * coff * head_dim
-    state_view = unpack_state_cache(cache, state_block_size, state_dim)
+    state_view = state_cache
 
     kv_window, score_window, valid_mask = gather_state_windows(
         state_cache=state_view,
@@ -407,6 +409,7 @@ def compress_norm_rope_store(
 
 def compress_norm_rope_store_indexer(
     cache: jax.Array,  # [num_pages, page_size//4, 4, width] uint8
+    state_cache: jax.Array,  # [num_blocks, block_size, 2*state_width] fp32
     positions: jax.Array,  # [num_tokens] int
     slot_mapping: jax.Array,  # [num_tokens] int (state-cache slots)
     block_table: jax.Array,  # [num_reqs, max_blocks] int (state pages)
@@ -423,9 +426,7 @@ def compress_norm_rope_store_indexer(
     quant_block: int,
 ):
     """Indexer (head_dim=128) twin of ``compress_norm_rope_store``."""
-    coff = 1 + int(overlap)
-    state_dim = 2 * coff * head_dim
-    state_view = unpack_state_cache(cache, state_block_size, state_dim)
+    state_view = state_cache
 
     kv_window, score_window, valid_mask = gather_state_windows(
         state_cache=state_view,
