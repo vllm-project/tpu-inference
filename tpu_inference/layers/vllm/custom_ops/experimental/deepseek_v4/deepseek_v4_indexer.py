@@ -181,7 +181,7 @@ class VllmDeepseekV4Indexer(DeepseekV4Indexer):
                               page_indices, cu_q_lens, distribution):
             return streamindex_topk(
                 q=q,
-                index_weights=indexer_weights,
+                indexer_weights=indexer_weights,
                 cache_kv=cache_kv,
                 seq_lens=seq_lens,
                 page_indices=page_indices,

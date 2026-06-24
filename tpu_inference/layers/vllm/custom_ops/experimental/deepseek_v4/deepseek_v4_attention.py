@@ -98,7 +98,6 @@ class VllmDeepseekV4SWACache(DeepseekV4SWACache):
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
             alignment=None,
-            model_version="deepseek_v4",
         )
 
 
@@ -152,9 +151,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             head_size=align_to(448 + 64 * 2 + 7, 128),
             dtype=torch.uint8,
             compress_ratio=self.compress_ratio,
-            cache_dtype_str=self.kv_cache_dtype,
             alignment=None,
-            model_version="deepseek_v4",
         )
 
     def _o_proj(self, o: torch.Tensor,
