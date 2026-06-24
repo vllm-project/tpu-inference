@@ -688,17 +688,18 @@ def _ragged_paged_attention_kernel_loop(
         kv_len_start = bkv_idx * bkv_sz
         kv_p_start = bkv_idx * bkv_p
         kv_left = _seq_kv_len_local - kv_len_start
-        # if update_kv_cache:
-        #   kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
-        # else:
-        #   # KV-share: source layer already wrote the full K/V for the
-        #   # current step into the (redirected) cache slot before this
-        #   # layer's call, so read everything from cache. The shared
-        #   # layer's input k,v is unused. Mirrors vllm-pytorch behavior
-        #   # where unified_attention reads from key_cache/value_cache
-        #   # only, regardless of the layer's own k,v projections.
-        #   kv_left_frm_cache = kv_left
-        kv_left_frm_cache = jnp.maximum(kv_left - _seq_q_len, 0)
+        if update_kv_cache:
+            #   kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
+            kv_left_frm_cache = jnp.maximum(kv_left - _seq_q_len, 0)
+        else:
+            # KV-share: source layer already wrote the full K/V for the
+            # current step into the (redirected) cache slot before this
+            # layer's call, so read everything from cache. The shared
+            # layer's input k,v is unused. Mirrors vllm-pytorch behavior
+            # where unified_attention reads from key_cache/value_cache
+            # only, regardless of the layer's own k,v projections.
+            kv_left_frm_cache = kv_left
+
         kv_left_frm_new = kv_left - kv_left_frm_cache
 
         bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, bkv_sz)
