@@ -302,6 +302,8 @@ def main():
     # Inject UPLOAD_DB environment variable if present in parent environment
     if "UPLOAD_DB" in os.environ:
         global_env["UPLOAD_DB"] = os.environ["UPLOAD_DB"]
+    if "EXTRA_ENVS" in os.environ:
+        global_env["EXTRA_ENVS"] = os.environ["EXTRA_ENVS"]
 
     all_steps = []
     used_keys = set()  # Track keys for this file
