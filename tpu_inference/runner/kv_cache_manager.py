@@ -547,14 +547,17 @@ class KVCacheManager:
                         draft_hf_config, text_config)
                     for draft_layer, target_layer in redirects.items():
                         self.shared_kv_cache_layers[draft_layer] = target_layer
-                elif method == "eagle3":
+                elif method in ("eagle3", "dflash"):
+                    draft_num_layers = getattr(draft_hf_config,
+                                               'num_hidden_layers', 1)
+                    if method == "eagle3":
+                        draft_num_layers = 1
                     num_kv_heads = common_utils.get_padded_num_heads(
                         draft_hf_config.num_key_value_heads, model_cnt)
                     head_size = common_utils.get_padded_head_dim(
                         draft_hf_config.hidden_size //
                         draft_hf_config.num_attention_heads)
-                    # Eagle3 has only 1 layer
-                    for i in range(1):
+                    for i in range(draft_num_layers):
                         if self.use_mla:
                             kv_cache_spec[
                                 f"draft_layer.{i}"] = self._create_attention_spec(

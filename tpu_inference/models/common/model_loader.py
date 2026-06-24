@@ -100,6 +100,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         "Gemma4ForConditionalGeneration"] = Gemma4ForConditionalGeneration
     _MODEL_REGISTRY["Gemma4MTPModel"] = Gemma4MTPForCausalLM
     _MODEL_REGISTRY["DFlashForCausalLM"] = DFlashForCausalLM
+    _MODEL_REGISTRY["DFlashDraftModel"] = DFlashForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
