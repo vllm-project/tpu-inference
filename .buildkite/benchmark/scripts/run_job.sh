@@ -122,28 +122,76 @@ declare -a BENCHMARK_DOCKER_ARGS=(
 BENCHMARK_DOCKER_ARGS_STR="$(printf '%s\n' "${BENCHMARK_DOCKER_ARGS[@]}")"
 export BENCHMARK_DOCKER_ARGS_STR
 
-echo "--- Running job in docker via run_in_docker.sh"
-BM_JOB_STATUS=$EXIT_SUCCESS
+# Determine if it is a multi-host run.
+IS_MULTI_HOST="false"
+if [[ "${VERSION:-}" == "7x" && ${COUNT:-0} -gt 4 ]]; then
+    IS_MULTI_HOST="true"
+fi
+if [[ -n "${WORKER_IPS:-}" || "${TPU_MULTIHOST_BACKEND:-}" == "ray" ]]; then
+    IS_MULTI_HOST="true"
+fi
 
+BM_JOB_STATUS=$EXIT_SUCCESS
 export BM_INFRA="true"
 
-.buildkite/scripts/run_in_docker.sh bash -c "
-  if [[ \"${KERNEL_AUTOTUNE_STAGE:-}\" == \"PRE_KERNEL_AUTOTUNE_CASES_COLLECTION\" ]]; then
-    pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
-    source .buildkite/benchmark/scripts/kernel_autotune.sh && \
-    update_all_tuned_params_py || exit 1
-  fi && \
-  if [[ \"${KERNEL_AUTOTUNE_STAGE:-}\" == \"POST_KERNEL_AUTOTUNE_BM_RERUN\" ]]; then
-    pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
-    source .buildkite/benchmark/scripts/kernel_autotune.sh && \
-    checkout_updated_tuned_params_py_branch || exit 1
-  fi && \
-  echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
-  chmod +x .buildkite/benchmark/scripts/run_bm.sh && \
-  .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME" || {
-    echo "Error running benchmark job in docker."
-    BM_JOB_STATUS=$EXIT_FAILURE
-}
+if [[ "$IS_MULTI_HOST" == "true" ]]; then
+    echo "--- Multi-host environment detected. Running via run_multihost.sh on host..."
+
+    # Export Docker environment variables as EXTRA_DOCKER_ARGS
+    export EXTRA_DOCKER_ARGS="-v $ARTIFACT_FOLDER:/workspace/tpu_inference/artifacts \
+      -e DEVICE=$DEVICE \
+      -e RECORD_ID=$RECORD_ID \
+      -e RUN_TYPE=$RUN_TYPE \
+      -e CODE_HASH=${CODE_HASH} \
+      -e JOB_REFERENCE=${JOB_REFERENCE} \
+      -e GCP_PROJECT_ID=${GCP_PROJECT_ID:-} \
+      -e GCP_INSTANCE_ID=${GCP_INSTANCE_ID:-} \
+      -e GCP_DATABASE_ID=${GCP_DATABASE_ID:-} \
+      -e GCP_REGION=${GCP_REGION:-} \
+      -e GCS_BUCKET=${GCS_BUCKET:-} \
+      -e UPLOAD_DB=${UPLOAD_DB:-true}"
+
+    # Re-use parser_case.py to resolve the server command for this case on host.
+    PYTHON_PARSER="$(pwd)/.buildkite/benchmark/scripts/parser_case.py"
+    eval "$(python3 "$PYTHON_PARSER" "$CASE_FILE" "$TARGET_CASE_NAME")"
+
+    # Convert SERVER_CMD array to a single string for run_multihost.sh.
+    FULL_SERVER_CMD=""
+    for env_item in "${SERVER_CMD_ENVS[@]}"; do
+        FULL_SERVER_CMD+="$(printf '%q ' "$env_item")"
+    done
+    for cmd_item in "${SERVER_CMD[@]}"; do
+        FULL_SERVER_CMD+="$(printf '%q ' "$cmd_item")"
+    done
+
+    # The client command will execute run_bm.sh inside the container
+    CLIENT_CMD="SERVER_ALREADY_RUNNING=true ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts bash /workspace/tpu_inference/.buildkite/benchmark/scripts/run_bm.sh '$CASE_FILE' '$TARGET_CASE_NAME'"
+
+    echo "Executing run_multihost.sh on host..."
+    .buildkite/scripts/run_multihost.sh "$FULL_SERVER_CMD" "$CLIENT_CMD" || {
+        echo "Error running multihost benchmark."
+        BM_JOB_STATUS=$EXIT_FAILURE
+    }
+else
+    echo "--- Running job in docker via run_in_docker.sh (Single-Host Mode)"
+    .buildkite/scripts/run_in_docker.sh bash -c "
+      if [[ \"${KERNEL_AUTOTUNE_STAGE:-}\" == \"PRE_KERNEL_AUTOTUNE_CASES_COLLECTION\" ]]; then
+        pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
+        source .buildkite/benchmark/scripts/kernel_autotune.sh && \
+        update_all_tuned_params_py || exit 1
+      fi && \
+      if [[ \"${KERNEL_AUTOTUNE_STAGE:-}\" == \"POST_KERNEL_AUTOTUNE_BM_RERUN\" ]]; then
+        pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
+        source .buildkite/benchmark/scripts/kernel_autotune.sh && \
+        checkout_updated_tuned_params_py_branch || exit 1
+      fi && \
+      echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
+      chmod +x .buildkite/benchmark/scripts/run_bm.sh && \
+      .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME" || {
+        echo "Error running benchmark job in docker."
+        BM_JOB_STATUS=$EXIT_FAILURE
+    }
+fi
 
 
 (

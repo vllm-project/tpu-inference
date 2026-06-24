@@ -139,6 +139,11 @@ report_and_exit() {
   local exit_code=${1:-0}
   local record_id="${RECORD_ID:-local}"
   
+  if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
+    echo "--- Copying server log from /root/vllm_serve.log to $VLLM_LOG"
+    cp /root/vllm_serve.log "$VLLM_LOG" || true
+  fi
+
   echo "--- Calling report_result.sh for RECORD_ID=${record_id} with exit_code=${exit_code}"
   bash "$SCRIPT_DIR/report_result.sh" "$record_id" "$exit_code" || exit $?
   
@@ -351,21 +356,27 @@ echo "lanching vllm..."
 echo "logging to $VLLM_LOG"
 echo
 
-# Command from parser case json
-echo "[INFO] Starting vLLM Server in background..."
+SERVER_ALREADY_RUNNING="${SERVER_ALREADY_RUNNING:-false}"
+if [[ "$SERVER_ALREADY_RUNNING" == "false" ]]; then
+    # Command from parser case json
+    echo "[INFO] Starting vLLM Server in background..."
 
-echo "Printing the vllm serve command used to start the server:"
-printf "[DEBUG] Executing server_cmd: %s %s > \"%s\" 2>&1 &\n" "${SERVER_CMD_ENVS[*]}" "${SERVER_CMD[*]}" "$VLLM_LOG"
+    echo "Printing the vllm serve command used to start the server:"
+    printf "[DEBUG] Executing server_cmd: %s %s > \"%s\" 2>&1 &\n" "${SERVER_CMD_ENVS[*]}" "${SERVER_CMD[*]}" "$VLLM_LOG"
 
-# Start the server and capture its PID
-env "${SERVER_CMD_ENVS[@]}" "${SERVER_CMD[@]}" > "$VLLM_LOG" 2>&1 &
-VLLM_PID=$!
+    # Start the server and capture its PID
+    env "${SERVER_CMD_ENVS[@]}" "${SERVER_CMD[@]}" > "$VLLM_LOG" 2>&1 &
+    VLLM_PID=$!
 
-# Immediate check to see if it crashed on startup
-sleep 2
-if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-    echo "[ERROR] vLLM Server failed to start immediately. Check log: $VLLM_LOG"
-    exit 1
+    # Immediate check to see if it crashed on startup
+    sleep 2
+    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "[ERROR] vLLM Server failed to start immediately. Check log: $VLLM_LOG"
+        exit 1
+    fi
+else
+    echo "[INFO] Server is already running. Skipping startup."
+    VLLM_PID=""
 fi
 
 # ---------------------------------------------------------
@@ -607,6 +618,11 @@ echo "p99_e2el:$p99_e2el"
 # Step 1.5: check if initial run meets the E2EL requirement
 p99_int=$(printf "%.0f" "$p99_e2el")
 goal_int=$(printf "%.0f" "$EXPECTED_ETEL")
+
+if [[ "${RUN_ONCE:-false}" == "true" ]]; then
+  echo "[INFO] RUN_ONCE is enabled. Skipping binary search and reporting results."
+  report_and_exit 0
+fi
 
 if (( p99_int <= goal_int )); then
   echo "Initial run: P99 E2EL ($p99_e2el ms) <= EXPECTED_ETEL ($EXPECTED_ETEL ms), good enough. Exiting 0."

@@ -205,6 +205,7 @@ cleanup
 
 # 1. Start Ray Head Node locally
 echo "--- Starting Ray Head Node Locally"
+# shellcheck disable=SC2086
 bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${DOCKER_IMAGE}" \
   "${HEAD_INTERNAL_IP}" \
@@ -220,7 +221,8 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e MOE_REQUANTIZE_BLOCK_SIZE="${MOE_REQUANTIZE_BLOCK_SIZE:-}" \
   -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
-  -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" &
+  -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" \
+  ${EXTRA_DOCKER_ARGS:-} &
 
 sleep 60
 
@@ -281,6 +283,23 @@ if [ "$#" -ge 1 ]; then
     echo "Using provided VLLM_SERVE_CMD: $VLLM_SERVE_CMD"
     # Shift so that remaining args are treated as the benchmark command
     shift
+    
+    # Rewrite generation config if GCS path is used
+    if [[ "${VLLM_SERVE_CMD}" =~ --generation-config[=\ ]+gs://([^ ]+) ]]; then
+        gcs_path="gs://${BASH_REMATCH[1]}"
+        config_url="${gcs_path%/*}"
+        config_dir_name=$(basename "${config_url}")
+        config_file_name=$(basename "${gcs_path}")
+
+        echo "--- Detected GCS generation-config: $gcs_path"
+        echo "--- Pre-downloading config to workspace inside container..."
+
+        download_cmd="if ! command -v gsutil &> /dev/null; then curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null; export PATH=\"\$PATH:/root/google-cloud-sdk/bin\"; fi && mkdir -p /workspace && gsutil -m cp -r ${config_url} /workspace/ && "
+        
+        VLLM_SERVE_CMD=$(echo "${VLLM_SERVE_CMD}" | sed -E "s|--generation-config[=\ ]+gs://[^ ]+|--generation-config /workspace/${config_dir_name}/${config_file_name}|g")
+        VLLM_SERVE_CMD="${download_cmd}${VLLM_SERVE_CMD}"
+        echo "Rewritten VLLM_SERVE_CMD: $VLLM_SERVE_CMD"
+    fi
 fi
 
 # Launch vllm serve in the background inside the local 'node' container

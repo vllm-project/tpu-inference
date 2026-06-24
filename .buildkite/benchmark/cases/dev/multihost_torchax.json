@@ -1,0 +1,677 @@
+{
+  "global_env": {
+    "GCP_PROJECT_ID": "cloud-tpu-inference-test",
+    "GCS_BUCKET": "vllm-cb-storage2",
+    "GCP_INSTANCE_ID": "vllm-bm-inst",
+    "GCP_DATABASE_ID": "vllm-bm-runs",
+    "RUN_ONCE": "true"
+  },
+  "benchmark_cases": [
+    {
+      "case_name": "run_deepseek_v3_1k_1k",
+      "ci_queue": [
+        "tpu_v7x_16_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 1024,
+        "PREFIX_LEN": 0,
+        "DEVICE": "tpu7x-16",
+        "CREATED_BY": "bm-scheduler"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "0",
+          "NEW_MODEL_DESIGN": "1",
+          "VLLM_MLA_DISABLE": "0",
+          "MOE_REQUANTIZE_BLOCK_SIZE": "512",
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp4",
+          "MODEL_IMPL_TYPE": "vllm",
+          "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
+          "TPU_BACKEND_TYPE": "jax"
+        },
+        "args": {
+          "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
+          "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "seed": 42,
+          "max-num-seqs": 640,
+          "max-num-batched-tokens": 640,
+          "tensor-parallel-size": {
+            "v7x-16": 16
+          },
+          "max-model-len": 2048,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.92,
+          "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true,
+          "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
+          "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
+          "trust-remote-code": true,
+          "hf-config": "deepseek-ai/DeepSeek-R1"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "random",
+          "random-input-len": 1024,
+          "random-output-len": 1024,
+          "num-prompts": 10240,
+          "ignore-eos": true,
+          "trust-remote-code": true
+        }
+      }
+    },
+    {
+      "case_name": "run_deepseek_v3_1k_8k",
+      "ci_queue": [
+        "tpu_v7x_16_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 8192,
+        "PREFIX_LEN": 0,
+        "DEVICE": "tpu7x-16",
+        "CREATED_BY": "bm-scheduler"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "0",
+          "NEW_MODEL_DESIGN": "1",
+          "VLLM_MLA_DISABLE": "0",
+          "MOE_REQUANTIZE_BLOCK_SIZE": "512",
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp4",
+          "MODEL_IMPL_TYPE": "vllm",
+          "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
+          "TPU_BACKEND_TYPE": "jax"
+        },
+        "args": {
+          "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
+          "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "seed": 42,
+          "max-num-seqs": 160,
+          "max-num-batched-tokens": 512,
+          "tensor-parallel-size": {
+            "v7x-16": 16
+          },
+          "max-model-len": 9216,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.95,
+          "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true,
+          "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
+          "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
+          "trust-remote-code": true,
+          "hf-config": "deepseek-ai/DeepSeek-R1"
+        }
+      },
+      "client_command_options": {
+        "command_type": "lm_eval",
+        "args": {
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "mmlu",
+          "random-input-len": 1024,
+          "random-output-len": 8192,
+          "num-prompts": 2560,
+          "ignore-eos": true,
+          "trust-remote-code": true,
+          "mmlu-output-len": 4
+        }
+      }
+    },
+    {
+      "case_name": "run_deepseek_v3_1k_8k_random_routing",
+      "ci_queue": [
+        "tpu_v7x_16_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 8192,
+        "PREFIX_LEN": 0,
+        "DEVICE": "tpu7x-16",
+        "CREATED_BY": "bm-scheduler"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "0",
+          "NEW_MODEL_DESIGN": "1",
+          "VLLM_MLA_DISABLE": "0",
+          "MOE_REQUANTIZE_BLOCK_SIZE": "512",
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp4",
+          "MODEL_IMPL_TYPE": "vllm",
+          "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
+          "TPU_BACKEND_TYPE": "jax",
+          "FORCE_MOE_RANDOM_ROUTING": "1"
+        },
+        "args": {
+          "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
+          "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 512,
+          "tensor-parallel-size": {
+            "v7x-16": 16
+          },
+          "max-model-len": 9216,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.95,
+          "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true,
+          "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
+          "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
+          "trust-remote-code": true,
+          "hf-config": "deepseek-ai/DeepSeek-R1",
+          "api-server-count": 3
+        }
+      },
+      "client_command_options": {
+        "command_type": "lm_eval",
+        "args": {
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "mmlu",
+          "random-input-len": 1024,
+          "random-output-len": 8192,
+          "num-prompts": 2048,
+          "ignore-eos": true,
+          "trust-remote-code": true,
+          "mmlu-output-len": 4
+        }
+      }
+    },
+    {
+      "case_name": "run_deepseek_v3_8k_1k",
+      "ci_queue": [
+        "tpu_v7x_16_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 8192,
+        "OUTPUT_LEN": 1024,
+        "PREFIX_LEN": 0,
+        "DEVICE": "tpu7x-16",
+        "CREATED_BY": "bm-scheduler"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "0",
+          "NEW_MODEL_DESIGN": "1",
+          "VLLM_MLA_DISABLE": "0",
+          "MOE_REQUANTIZE_BLOCK_SIZE": "512",
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp4",
+          "MODEL_IMPL_TYPE": "vllm",
+          "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
+          "TPU_BACKEND_TYPE": "jax"
+        },
+        "args": {
+          "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
+          "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 512,
+          "tensor-parallel-size": {
+            "v7x-16": 16
+          },
+          "max-model-len": 9216,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.92,
+          "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true,
+          "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
+          "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
+          "trust-remote-code": true,
+          "hf-config": "deepseek-ai/DeepSeek-R1"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "random",
+          "random-input-len": 8192,
+          "random-output-len": 1024,
+          "num-prompts": 2048,
+          "ignore-eos": true,
+          "trust-remote-code": true
+        }
+      }
+    },
+    {
+      "case_name": "run_qwen3_coder_480b_1k_8k",
+      "ci_queue": [
+        "tpu_v7x_16_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 8192,
+        "PREFIX_LEN": 0,
+        "DEVICE": "tpu7x-16",
+        "CREATED_BY": "bm-scheduler"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "args": {
+          "model": "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-Coder-480B-A35B-Instruct/snapshots/9d90cf8fca1bf7b7acca42d3fc9ae694a2194069",
+          "served-model-name": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+          "tensor-parallel-size": {
+            "v7x-16": 16
+          },
+          "max-model-len": 10240,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 1024
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+          "dataset-name": "random",
+          "random-input-len": 1024,
+          "random-output-len": 8192,
+          "num-prompts": 128,
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "xprof_deepseek_v3_1k_1k",
+      "ci_queue": [
+        "tpu_v7x_16_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 1024,
+        "PREFIX_LEN": 0,
+        "DEVICE": "tpu7x-16",
+        "CREATED_BY": "bm-scheduler",
+        "UPLOAD_DB": "false"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "0",
+          "NEW_MODEL_DESIGN": "1",
+          "VLLM_MLA_DISABLE": "0",
+          "MOE_REQUANTIZE_BLOCK_SIZE": "512",
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp4",
+          "MODEL_IMPL_TYPE": "vllm",
+          "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
+          "TPU_BACKEND_TYPE": "jax",
+          "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/1k-1k"
+        },
+        "args": {
+          "model": "gs://tpu-commons-ci/deepseek/r1",
+          "load-format": "runai_streamer",
+          "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "seed": 42,
+          "max-num-seqs": 640,
+          "max-num-batched-tokens": 640,
+          "tensor-parallel-size": {
+            "v7x-16": 16
+          },
+          "max-model-len": 2048,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.92,
+          "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true,
+          "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
+          "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
+          "trust-remote-code": true,
+          "hf-config": "deepseek-ai/DeepSeek-R1"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "random",
+          "random-input-len": 1024,
+          "random-output-len": 1024,
+          "num-prompts": 10240,
+          "ignore-eos": true,
+          "trust-remote-code": true
+        }
+      }
+    },
+    {
+      "case_name": "xprof_deepseek_v3_1k_8k",
+      "ci_queue": [
+        "tpu_v7x_16_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 8192,
+        "PREFIX_LEN": 0,
+        "DEVICE": "tpu7x-16",
+        "CREATED_BY": "bm-scheduler",
+        "UPLOAD_DB": "false"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "0",
+          "NEW_MODEL_DESIGN": "1",
+          "VLLM_MLA_DISABLE": "0",
+          "MOE_REQUANTIZE_BLOCK_SIZE": "512",
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp4",
+          "MODEL_IMPL_TYPE": "vllm",
+          "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
+          "TPU_BACKEND_TYPE": "jax",
+          "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/1k-8k"
+        },
+        "args": {
+          "model": "gs://tpu-commons-ci/deepseek/r1",
+          "load-format": "runai_streamer",
+          "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 512,
+          "tensor-parallel-size": {
+            "v7x-16": 16
+          },
+          "max-model-len": 9216,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.95,
+          "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true,
+          "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
+          "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
+          "trust-remote-code": true,
+          "hf-config": "deepseek-ai/DeepSeek-R1"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "random",
+          "random-input-len": 1024,
+          "random-output-len": 8192,
+          "num-prompts": 2048,
+          "ignore-eos": true,
+          "trust-remote-code": true
+        }
+      }
+    },
+    {
+      "case_name": "xprof_deepseek_v3_1k_8k_random_routing",
+      "ci_queue": [
+        "tpu_v7x_16_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 8192,
+        "PREFIX_LEN": 0,
+        "DEVICE": "tpu7x-16",
+        "CREATED_BY": "bm-scheduler",
+        "UPLOAD_DB": "false"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "0",
+          "NEW_MODEL_DESIGN": "1",
+          "VLLM_MLA_DISABLE": "0",
+          "MOE_REQUANTIZE_BLOCK_SIZE": "512",
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp4",
+          "MODEL_IMPL_TYPE": "vllm",
+          "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
+          "TPU_BACKEND_TYPE": "jax",
+          "FORCE_MOE_RANDOM_ROUTING": "1",
+          "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/1k-8k-random-routing"
+        },
+        "args": {
+          "model": "gs://tpu-commons-ci/deepseek/r1",
+          "load-format": "runai_streamer",
+          "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 512,
+          "tensor-parallel-size": {
+            "v7x-16": 16
+          },
+          "max-model-len": 9216,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.95,
+          "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true,
+          "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
+          "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
+          "trust-remote-code": true,
+          "hf-config": "deepseek-ai/DeepSeek-R1"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "random",
+          "random-input-len": 1024,
+          "random-output-len": 8192,
+          "num-prompts": 2048,
+          "ignore-eos": true,
+          "trust-remote-code": true
+        }
+      }
+    },
+    {
+      "case_name": "xprof_deepseek_v3_8k_1k",
+      "ci_queue": [
+        "tpu_v7x_16_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 8192,
+        "OUTPUT_LEN": 1024,
+        "PREFIX_LEN": 0,
+        "DEVICE": "tpu7x-16",
+        "CREATED_BY": "bm-scheduler",
+        "UPLOAD_DB": "false"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "0",
+          "NEW_MODEL_DESIGN": "1",
+          "VLLM_MLA_DISABLE": "0",
+          "MOE_REQUANTIZE_BLOCK_SIZE": "512",
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp4",
+          "MODEL_IMPL_TYPE": "vllm",
+          "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
+          "TPU_BACKEND_TYPE": "jax",
+          "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/8k-1k"
+        },
+        "args": {
+          "model": "gs://tpu-commons-ci/deepseek/r1",
+          "load-format": "runai_streamer",
+          "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 512,
+          "tensor-parallel-size": {
+            "v7x-16": 16
+          },
+          "max-model-len": 9216,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.95,
+          "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true,
+          "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
+          "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
+          "trust-remote-code": true,
+          "hf-config": "deepseek-ai/DeepSeek-R1"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "random",
+          "random-input-len": 8192,
+          "random-output-len": 1024,
+          "num-prompts": 2048,
+          "ignore-eos": true,
+          "trust-remote-code": true
+        }
+      }
+    },
+    {
+      "case_name": "xprof_deepseek_v3_decode_1k_context_random_routing",
+      "ci_queue": [
+        "tpu_v7x_16_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1,
+        "OUTPUT_LEN": 9216,
+        "PREFIX_LEN": 0,
+        "DEVICE": "tpu7x-16",
+        "CREATED_BY": "bm-scheduler",
+        "UPLOAD_DB": "false"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "0",
+          "NEW_MODEL_DESIGN": "1",
+          "VLLM_MLA_DISABLE": "0",
+          "MOE_REQUANTIZE_BLOCK_SIZE": "512",
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp4",
+          "MODEL_IMPL_TYPE": "vllm",
+          "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
+          "TPU_BACKEND_TYPE": "jax",
+          "FORCE_MOE_RANDOM_ROUTING": "1",
+          "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/decoode-9k-context-random-routing",
+          "PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD": "1024"
+        },
+        "args": {
+          "model": "gs://tpu-commons-ci/deepseek/r1",
+          "load-format": "runai_streamer",
+          "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 512,
+          "tensor-parallel-size": {
+            "v7x-16": 16
+          },
+          "max-model-len": 9216,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.95,
+          "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true,
+          "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
+          "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
+          "trust-remote-code": true,
+          "hf-config": "deepseek-ai/DeepSeek-R1"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "random",
+          "random-input-len": 1,
+          "random-output-len": 9216,
+          "num-prompts": 2048,
+          "ignore-eos": true,
+          "trust-remote-code": true
+        }
+      }
+    },
+    {
+      "case_name": "xprof_deepseek_v3_decode_9k_context_random_routing",
+      "ci_queue": [
+        "tpu_v7x_16_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1,
+        "OUTPUT_LEN": 9216,
+        "PREFIX_LEN": 0,
+        "DEVICE": "tpu7x-16",
+        "CREATED_BY": "bm-scheduler",
+        "UPLOAD_DB": "false"
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "0",
+          "NEW_MODEL_DESIGN": "1",
+          "VLLM_MLA_DISABLE": "0",
+          "MOE_REQUANTIZE_BLOCK_SIZE": "512",
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "fp4",
+          "MODEL_IMPL_TYPE": "vllm",
+          "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
+          "TPU_BACKEND_TYPE": "jax",
+          "FORCE_MOE_RANDOM_ROUTING": "1",
+          "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/decoode-9k-context-random-routing",
+          "PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD": "9100"
+        },
+        "args": {
+          "model": "gs://tpu-commons-ci/deepseek/r1",
+          "load-format": "runai_streamer",
+          "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 512,
+          "tensor-parallel-size": {
+            "v7x-16": 16
+          },
+          "max-model-len": 9216,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.95,
+          "enable-expert-parallel": true,
+          "no-enable-prefix-caching": true,
+          "async-scheduling": true,
+          "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
+          "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
+          "trust-remote-code": true,
+          "hf-config": "deepseek-ai/DeepSeek-R1"
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "random",
+          "random-input-len": 1,
+          "random-output-len": 9216,
+          "num-prompts": 2048,
+          "ignore-eos": true,
+          "trust-remote-code": true
+        }
+      }
+    }
+  ]
+}
