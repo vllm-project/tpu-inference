@@ -35,6 +35,8 @@ steps:
         #   depends_on: kernel_autotune_entry
         #   env:
         #     KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
+        #     RUN_TYPE: "PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
+        #     EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID"
         #   command: |
         #     bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh kernel_cases_collection
           
@@ -69,6 +71,10 @@ steps:
             queue: cpu
           priority: 200
           key: kernel_autotune_result_evaluation
+          env:
+            KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
+            RUN_TYPE: "POST_KERNEL_AUTOTUNE_BM_RERUN"
+            EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID"
           depends_on: patch_kernel_autotune_result 
           command: |
             bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh patch_kernel_autotune_result

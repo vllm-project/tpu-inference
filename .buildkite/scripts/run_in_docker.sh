@@ -62,6 +62,7 @@ ENV_VARS=(
   -e BUILDKITE_STEP_KEY="${BUILDKITE_STEP_KEY:-}"
   -e HOST_NAME="${HOST_NAME:-}"
   -e GCS_BUCKET="${GCS_BUCKET:-}"
+  -e GITHUB_PAT="${GITHUB_PAT:-}"
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then

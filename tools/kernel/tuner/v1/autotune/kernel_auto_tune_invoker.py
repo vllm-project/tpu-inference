@@ -65,6 +65,10 @@ class KernelAutoTuneInvoker:
     def _build_result_processing_step(self,
                                       parent_step_keys: list[str]) -> dict:
         branch_name = f"kernel_autotune.update_tuned_params_{self.auto_tune_id}"
+        github_pat = os.environ.get('GITHUB_PAT', None)
+        assert github_pat is not None, "GITHUB_PAT environment variable is not set."
+        repo_url="github.com/vllm-project/tpu-inference.git" 
+        authenticated_repo_url=f"https://x-access-token:{github_pat}@{repo_url}"
         return {
             "label":
             "Kernel Auto-Tuning Result Processing",
@@ -79,6 +83,9 @@ class KernelAutoTuneInvoker:
                 "USE_PREBUILT_IMAGE": "1",
                 "TPU_VERSION": 'tpu6e'
             },
+            "secrets": [
+                "GITHUB_PAT"
+            ],
             "priority":
             200,
             "commands": [
@@ -86,10 +93,11 @@ class KernelAutoTuneInvoker:
                     '.buildkite/scripts/run_in_docker.sh bash -c \''
                     'pip install --upgrade google-cloud-spanner google-api-core google-auth absl-py && '
                     'apt install git -y && '
+                    f'git remote set-url origin "{authenticated_repo_url}" && '
                     'git config user.name "Buildkite Bot" && '
                     'git config user.email "buildkite-bot@users.noreply.github.com" && '
                     f'git checkout -b {branch_name} && '
-                    f'python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --auto_tune_id={self.auto_tune_id} && '
+                    f'python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --auto_tune_id={self.auto_tune_id} --process_step=PATCH_KERNEL_AUTOTUNE_RESULT && '
                     f'git add -u && '
                     f'git commit -m "Update tuned params for auto tune ID: {self.auto_tune_id}" && '
                     f'git push origin {branch_name} --force\''),
