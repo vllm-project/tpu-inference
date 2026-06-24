@@ -85,7 +85,7 @@ class KernelAutoTuneInvoker:
                 LiteralString(
                     '.buildkite/scripts/run_in_docker.sh bash -c \''
                     'pip install --upgrade google-cloud-spanner google-api-core google-auth absl-py && '
-                    'sudo apt install git -y && '
+                    'apt install git -y && '
                     'git config user.name "Buildkite Bot" && '
                     'git config user.email "buildkite-bot@users.noreply.github.com" && '
                     f'git git checkout -b {branch_name} && '
