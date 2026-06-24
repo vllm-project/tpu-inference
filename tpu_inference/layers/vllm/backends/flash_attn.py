@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional, Tuple
 
+import multiprocessing
+import os
+
 import jax
 import jax.numpy as jnp
 import torch
@@ -31,7 +34,16 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
 logger = init_logger(__name__)
 
 
+def _is_v1_api_server() -> bool:
+    return (
+        os.getenv("VLLM_USE_V1") == "1"
+        and not multiprocessing.current_process().name.startswith("EngineCore")
+    )
+
+
 def get_tpu_head_size_alignment() -> int:
+    if _is_v1_api_server():
+        return 128
     try:
         return pltpu.get_tpu_info().num_lanes
     except Exception as e:
@@ -41,6 +53,8 @@ def get_tpu_head_size_alignment() -> int:
 
 
 def get_half_smem_capacity_bytes() -> int:
+    if _is_v1_api_server():
+        return 512 * 1024
     try:
         return pltpu.get_tpu_info().smem_capacity_bytes // 2
     except Exception as e:
