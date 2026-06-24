@@ -82,17 +82,16 @@ class KernelAutoTuneInvoker:
             "priority":
             200,
             "commands": [
-                LiteralString(f'git checkout -b {branch_name}'),
                 LiteralString(
                     '.buildkite/scripts/run_in_docker.sh bash -c \''
                     'pip install --upgrade google-cloud-spanner google-api-core google-auth absl-py && '
-                    'python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing '
-                    f'--auto_tune_id={self.auto_tune_id}\' '),
-                LiteralString('git add -u'),
-                LiteralString(
-                    f'git commit -m "Update tuned params for auto tune ID: {self.auto_tune_id}"'
-                ),
-                LiteralString(f'git push origin {branch_name} --force'),
+                    'git config user.name "Buildkite Bot" && '
+                    'git config user.email "buildkite-bot@users.noreply.github.com" && '
+                    f'git git checkout -b {branch_name} && '
+                    f'python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --auto_tune_id={self.auto_tune_id} && '
+                    f'git add -u && '
+                    f'git commit -m "Update tuned params for auto tune ID: {self.auto_tune_id}" && '
+                    f'git push origin {branch_name} --force\''),
             ]
         }
 

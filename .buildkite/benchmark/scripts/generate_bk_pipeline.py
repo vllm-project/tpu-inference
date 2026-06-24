@@ -267,6 +267,7 @@ def create_benchmark_steps(case_data: Dict[str, Any],
 
     return child_steps
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input",
