@@ -69,7 +69,7 @@ steps:
             queue: cpu
           priority: 200
           key: kernel_autotune_result_evaluation
-          depends_on: kernel_autotune_entry
+          depends_on: patch_kernel_autotune_result 
           command: |
             bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh patch_kernel_autotune_result
       EOF
