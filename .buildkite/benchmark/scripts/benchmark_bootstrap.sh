@@ -58,6 +58,7 @@ if [[ "${RUN_TYPE:-}" == "POST_KERNEL_AUTOTUNE_BM_RERUN" ]]; then
     fi
     # Construct the branch name, this should match the branch name used in the kernel_auto_tune_invoker.py
     BRANCH_NAME="kernel_autotune.update_tuned_params_${KERNEL_AUTOTUNE_ID}"
+    git fetch
     git checkout "${BRANCH_NAME}"
     COMMIT_MESSAGE=$(git log -1 --pretty=%B)
     echo "🚀 Running in POST_KERNEL_AUTOTUNE_BM_RERUN mode in branch ${BRANCH_NAME}"
