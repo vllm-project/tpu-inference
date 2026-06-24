@@ -913,23 +913,18 @@ def _requant_expert_batch_fn(
     w2_pad_widths = ((0, 0), (0, hidden_pad), (0, inter_pad))
     w2_fp32 = jnp.pad(w2_fp32, w2_pad_widths)
 
-    if envs.MOE_REQUANTIZE_CLIP_PERCENTILE is not None:
-        percentile_val = envs.MOE_REQUANTIZE_CLIP_PERCENTILE
+    clip_pct = envs.MOE_REQUANTIZE_CLIP_PERCENTILE
 
-        for arr_name in ('w13', 'w2'):
-            arr = w13_fp32 if arr_name == 'w13' else w2_fp32
-
-            clip_val = jnp.percentile(jnp.abs(arr), percentile_val)
-
-            if arr_name == 'w13':
-                w13_fp32 = jnp.clip(w13_fp32, -clip_val, clip_val)
-            else:
-                w2_fp32 = jnp.clip(w2_fp32, -clip_val, clip_val)
-
-    w13_q_b, w13_s_new_b = quantize_tensor(desired_quant_dtype, w13_fp32, 2,
-                                           w13_block_size)
-    w2_q_b, w2_s_new_b = quantize_tensor(desired_quant_dtype, w2_fp32, 2,
-                                         w2_block_size)
+    w13_q_b, w13_s_new_b = quantize_tensor(desired_quant_dtype,
+                                           w13_fp32,
+                                           2,
+                                           w13_block_size,
+                                           clip_percentile=clip_pct)
+    w2_q_b, w2_s_new_b = quantize_tensor(desired_quant_dtype,
+                                         w2_fp32,
+                                         2,
+                                         w2_block_size,
+                                         clip_percentile=clip_pct)
     return carry, (w13_q_b, w13_s_new_b, w2_q_b, w2_s_new_b)
 
 
