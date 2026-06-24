@@ -80,6 +80,11 @@ steps:
         commands:
           - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
+      # Per-push runs the BVT smoke subset; nightly (NIGHTLY=1) runs the full
+      # matrix. The conftest collection gate narrows to @pytest.mark.bvt cases
+      # only when BVT_ONLY=1, so set BVT_ONLY=1 iff this is NOT a nightly build.
+      # Other consumers (feature pipelines, release-tag, local) never set
+      # BVT_ONLY and therefore always run the full set.
       - label: "${TPU_VERSION:-tpu6e} E2E speculative decoding test"
         key: ${TPU_VERSION:-tpu6e}_test_6
         soft_fail: true
@@ -90,6 +95,7 @@ steps:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
           - |
+              if [ "$${NIGHTLY:-0}" = "1" ]; then export BVT_ONLY=; else export BVT_ONLY=1; fi
               .buildkite/scripts/run_in_docker.sh \
                 bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py'
 

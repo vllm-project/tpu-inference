@@ -28,6 +28,8 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
 
+GBYTES = 1024 * 1024 * 1024
+
 
 class TestQwen3MoeForCausalLM:
 
@@ -90,7 +92,8 @@ class TestQwen3MoeForCausalLM:
                     model,
                     description=f"load_weights({model_name})",
                     threshold_multiplier=0.3,
-            ), set_current_vllm_config(vllm_config):
+                    min_threshold_bytes=3 *
+                    GBYTES), set_current_vllm_config(vllm_config):
                 loader.load_weights(model, model_config)
 
         layer_idx = model.model.start_layer
