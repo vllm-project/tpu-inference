@@ -838,3 +838,162 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             connector = self._create_connector()
             worker = connector.connector_worker
             self.assertEqual(worker.host_sharding.memory_kind, "pinned_host")
+
+    @parameterized.named_parameters(
+        dict(testcase_name="_delay_0.5s", delay=0.5),
+        dict(testcase_name="_delay_1.0s", delay=1.0),
+    )
+    def test_tpu_connector_raw_race_protection(self, delay):
+        """
+        Verifies that start_load_kv blocks if a load is requested for a chunk 
+        that is still being saved locally in the background.
+        """
+        # 1. Setup
+        connector = self._create_connector()
+        worker = connector.connector_worker
+        
+        block_to_save = 0
+        dst_chunk = 42
+        
+        # 2. Prepare Save Metadata
+        save_spec = SaveSpec(
+            num_skip_leading_tokens=0,
+            num_total_tokens=self.block_size,
+            is_final_save=False,
+            skip_save=False,
+            src_blocks=[block_to_save],
+            dst_chunks=[dst_chunk],
+        )
+        req_meta_save = TPUReqMeta(
+            req_id="raw_save_req",
+            token_ids=list(range(self.block_size)),
+            local_block_ids=[block_to_save],
+            save_spec=save_spec,
+        )
+        
+        # 3. Prepare Load Metadata (same chunk)
+        load_spec = LoadSpec(
+            num_matched_tokens=self.block_size,
+            dst_blocks=[block_to_save],
+            src_chunks=[dst_chunk],
+            can_load=True,
+            num_skip_leading_tokens=0,
+        )
+        req_meta_load = TPUReqMeta(
+            req_id="raw_load_req",
+            token_ids=list(range(self.block_size)),
+            local_block_ids=[block_to_save],
+            load_spec=load_spec,
+        )
+
+        # 4. Patch _transfer_and_register_cpu_chunks to inject delay
+        original_transfer = worker._transfer_and_register_cpu_chunks
+        
+        def delayed_transfer(*args, **kwargs):
+            time.sleep(delay) # Inject delay in background save
+            return original_transfer(*args, **kwargs)
+
+        # 5. Execute Save (Async)
+        connector.bind_connector_metadata(
+            TPUOffloadConnectorMetadata(requests_meta=[req_meta_save]))
+        
+        with mock.patch.object(worker, '_transfer_and_register_cpu_chunks', wraps=delayed_transfer):
+            worker.start_save_kv()
+            
+            # Verify it was submitted (it is in flight)
+            self.assertIn(dst_chunk, worker._local_in_flight_saves)
+            
+            # 6. Execute Load (Blocking) immediately
+            connector.bind_connector_metadata(
+                TPUOffloadConnectorMetadata(requests_meta=[req_meta_load]))
+            
+            start_time = time.time()
+            worker.start_load_kv(fwd_ctx=None)
+            end_time = time.time()
+            
+            # 7. Verification
+            # Load should have taken at least around the delay time because it was blocked by the delayed save
+            load_duration = end_time - start_time
+            logger.info(f"RAW Load duration: {load_duration:.4f}s (expected >= {delay}s)")
+            self.assertGreaterEqual(load_duration, delay * 0.8, "Load did not appear to block on in-flight save")
+            
+            # Verify chunk is removed from in-flight tracking
+            self.assertNotIn(dst_chunk, worker._local_in_flight_saves)
+            
+            # Verify data was loaded (basic check)
+            self.assertEqual(len(worker.runner.kv_caches), self.num_layers)
+
+    @parameterized.named_parameters(
+        dict(testcase_name="_2_saves", num_saves=2),
+        dict(testcase_name="_5_saves", num_saves=5),
+    )
+    def test_tpu_connector_waw_race_protection(self, num_saves):
+        """
+        Verifies that background saves targeting the same CPU slot are chained
+        and execute sequentially (FIFO) to prevent WAW races.
+        """
+        # 1. Setup
+        connector = self._create_connector()
+        worker = connector.connector_worker
+        
+        block_to_save = 0
+        dst_chunk = 42
+        
+        # 2. Prepare Save Metadata for N saves
+        save_reqs = []
+        for i in range(num_saves):
+            save_spec = SaveSpec(
+                num_skip_leading_tokens=0,
+                num_total_tokens=self.block_size,
+                is_final_save=False,
+                skip_save=False,
+                src_blocks=[block_to_save],
+                dst_chunks=[dst_chunk],
+            )
+            req_meta = TPUReqMeta(
+                req_id=f"waw_save_{i}",
+                token_ids=list(range(self.block_size)),
+                local_block_ids=[block_to_save],
+                save_spec=save_spec,
+            )
+            save_reqs.append(req_meta)
+
+        # 3. Patch _transfer_and_register_cpu_chunks to track execution and inject delay
+        execution_order = []
+        original_transfer = worker._transfer_and_register_cpu_chunks
+        
+        def tracked_transfer(chunks_on_cpu, num_blocks, manifest, is_batched=False):
+            req_id = manifest[0].req_id
+            execution_order.append(f"start_{req_id}")
+            if req_id == "waw_save_0":
+                time.sleep(0.5) # Inject delay in first save to hold up the chain
+            execution_order.append(f"end_{req_id}")
+            return original_transfer(chunks_on_cpu, num_blocks, manifest, is_batched)
+
+        # 4. Execute Saves sequentially in dispatch, but they run concurrently/chained in background
+        with mock.patch.object(worker, '_transfer_and_register_cpu_chunks', wraps=tracked_transfer):
+            for i in range(num_saves):
+                connector.bind_connector_metadata(
+                    TPUOffloadConnectorMetadata(requests_meta=[save_reqs[i]]))
+                worker.start_save_kv()
+                
+                # Reset flag to allow next save in same step (simulating fast recycling)
+                worker._processed_save_for_step = False
+            
+            # Wait for all to finish
+            while worker._pending_save_futures:
+                worker._process_completed_saves()
+                time.sleep(0.01)
+
+        # 5. Verification
+        logger.info(f"WAW Execution order for {num_saves} saves: {execution_order}")
+        
+        # We expect saves to execute in strict FIFO order: start_0, end_0, start_1, end_1...
+        expected_order = []
+        for i in range(num_saves):
+            expected_order.append(f"start_waw_save_{i}")
+            expected_order.append(f"end_waw_save_{i}")
+            
+        self.assertEqual(execution_order, expected_order,
+                         "WAW Saves did not execute in strict FIFO order")
+

@@ -102,7 +102,7 @@ feedback mechanism mediated by the vLLM engine's `KVConnectorOutput`.
 import copy
 import random
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Optional
@@ -133,6 +133,8 @@ from tpu_inference.offload.cpu_backend import LocalCPUBackend
 from tpu_inference.offload.offload_manager import (LRUCacheManager,
                                                    StagingBufferManager)
 from tpu_inference.offload.utils import (CpuChunkId, ReqId,
+                                         pure_jax_stack_kv_cache_cross_layers,
+                                         pure_jax_update_kv_caches_one,
                                          stack_kv_cache_cross_layers,
                                          update_kv_caches_one)
 from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -142,7 +144,7 @@ logger = init_logger(__name__)
 # kv cache layout needed by cpu offloading mechanism
 REQUIRED_KV_CACHE_LAYOUT = "NHD"
 
-BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16, 32, 64]
+BLOCK_SIZE_BUCKETS = envs.TPU_OFFLOAD_BLOCK_SIZE_BUCKETS
 
 # we keep our operations at vllm's block granularity,
 # and want to provide the following three preferences when handling
@@ -349,6 +351,37 @@ class KVOffloadConnectorStats(KVConnectorStats):
         return self.num_finished_blocks == 0
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        # NOTE: This method is functionally critical for control flow in multi-node setups.
+        # In addition to passive metrics, this stats object carries completion signals
+        # (finished chunk IDs) from Workers to the Scheduler. Aggregation ensures
+        # the Scheduler receives a unified view of all finished chunks across all nodes,
+        # allowing it to correctly free staging buffers and update internal tracking.
+        if not isinstance(other, KVOffloadConnectorStats):
+            logger.warning(
+                f"Cannot aggregate with non-KVOffloadConnectorStats: {type(other)}"
+            )
+            return self
+
+        for req, chunks in other.data["finished_save_chunks"].items():
+            if req not in self.data["finished_save_chunks"]:
+                self.data["finished_save_chunks"][req] = chunks
+            else:
+                c1 = Counter(self.data["finished_save_chunks"][req])
+                c2 = Counter(chunks)
+                # Keep max count for each chunk to avoid multiplication across workers
+                c_max = c1 | c2
+                self.data["finished_save_chunks"][req] = list(c_max.elements())
+
+        for req, chunks in other.data["finished_load_chunks"].items():
+            if req not in self.data["finished_load_chunks"]:
+                self.data["finished_load_chunks"][req] = chunks
+            else:
+                c1 = Counter(self.data["finished_load_chunks"][req])
+                c2 = Counter(chunks)
+                # Keep max count for each chunk to avoid multiplication across workers
+                c_max = c1 | c2
+                self.data["finished_load_chunks"][req] = list(c_max.elements())
+
         return self
 
     def reduce(self) -> dict[str, int | float]:
@@ -373,8 +406,13 @@ class KVOffloadConnectorStats(KVConnectorStats):
 
     @property
     def num_finished_blocks(self) -> int:
-        return len(self.data["finished_save_chunks"]) + len(
-            self.data["finished_load_chunks"])
+        finished_saves = sum(
+            len(chunks)
+            for chunks in self.data.get("finished_save_chunks", {}).values())
+        finished_loads = sum(
+            len(chunks)
+            for chunks in self.data.get("finished_load_chunks", {}).values())
+        return finished_saves + finished_loads
 
 
 # The metadata used for communicating between scheduler and worker connectors.
@@ -965,6 +1003,13 @@ class TPUOffloadConnectorScheduler():
                 )
                 continue
 
+            # Ensure any remaining decode tokens are flushed before cleanup
+            save_spec = self._prepare_save_spec(tracker, is_finished=True)
+            if save_spec:
+                req_meta = self._create_request_meta(tracker, save_spec, None)
+                if req_meta:
+                    metadata.requests_meta.append(req_meta)
+
             # Pop tracker and other state first.
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
@@ -1132,6 +1177,23 @@ class TPUOffloadConnectorScheduler():
             f"TPUOffloadConnectorScheduler: getting workers' output: finished_sending: {connector_output.finished_sending}, finished_recving: {connector_output.finished_recving}"
         )
 
+        # Filter out worker events for requests that have already been cleaned up.
+        # This prevents the vLLM engine from crashing on `assert req_id in self.requests`
+        # when processing the final decode save or lagging responses.
+        if connector_output.finished_sending:
+            connector_output.finished_sending = {
+                req_id
+                for req_id in connector_output.finished_sending
+                if req_id in self._unfinished_requests
+            }
+
+        if connector_output.finished_recving:
+            connector_output.finished_recving = {
+                req_id
+                for req_id in connector_output.finished_recving
+                if req_id in self._unfinished_requests
+            }
+
         # per iteration, update the finished staging blocks
         if connector_output.kv_connector_stats and connector_output.kv_connector_stats.data is not None:
             assert isinstance(connector_output.kv_connector_stats,
@@ -1141,19 +1203,30 @@ class TPUOffloadConnectorScheduler():
 
             for req_id, saved_chunk_ids in connector_output.kv_connector_stats.data[
                     "finished_save_chunks"].items():
-                num_saved_chunks = len(saved_chunk_ids)
+                # NOTE(jcgu): there might be in-flight savings even if the request has finished logically.
+                # This is handled by tracking in-flight operations independently in _reqs_being_saved
+                # and updating resource managers regardless of request lifecycle status.
+                valid_saved_chunks = []
+                for saved_chunk_id in saved_chunk_ids:
+                    if saved_chunk_id in self._reqs_being_saved[req_id]:
+                        self._reqs_being_saved[req_id].remove(saved_chunk_id)
+                        valid_saved_chunks.append(saved_chunk_id)
+                    else:
+                        logger.debug(
+                            f"Ignoring duplicate or unknown saved chunk confirmation: req={req_id}, chunk={saved_chunk_id}"
+                        )
+
+                if not valid_saved_chunks:
+                    continue
+
+                num_valid_saved_chunks = len(valid_saved_chunks)
                 logger.debug(
-                    f"  finished_save_chunks for {req_id}: {saved_chunk_ids}")
+                    f"  valid finished_save_chunks for {req_id}: {valid_saved_chunks}"
+                )
                 # free staging blocks
                 self.staging_buffer_manager.free(
-                    req_id, usage="save", num_finished_blocks=num_saved_chunks)
+                    req_id, usage="save", num_finished_blocks=num_valid_saved_chunks)
 
-                # update in-flight save
-                # NOTE(jcgu):  there might be in-flight savings,
-                # even if the requests has been finished.
-                for saved_chunk_id in saved_chunk_ids:
-                    assert saved_chunk_id in self._reqs_being_saved[req_id]
-                    self._reqs_being_saved[req_id].remove(saved_chunk_id)
                 if len(self._reqs_being_saved[req_id]) == 0:
                     self._reqs_being_saved.pop(req_id, None)
                 else:
@@ -1162,22 +1235,32 @@ class TPUOffloadConnectorScheduler():
                     )
 
                 # update the status of occupied cpu chunks
-                self.offload_manager.mark_completion(saved_chunk_ids, "save")
+                self.offload_manager.mark_completion(valid_saved_chunks, "save")
 
             for req_id, loaded_chunk_ids in connector_output.kv_connector_stats.data[
                     "finished_load_chunks"].items():
-                num_loaded_chunks = len(loaded_chunk_ids)
+                valid_loaded_chunks = []
+                for loaded_chunk_id in loaded_chunk_ids:
+                    if loaded_chunk_id in self._reqs_being_loaded[req_id]:
+                        self._reqs_being_loaded[req_id].remove(loaded_chunk_id)
+                        valid_loaded_chunks.append(loaded_chunk_id)
+                    else:
+                        logger.debug(
+                            f"Ignoring duplicate or unknown loaded chunk confirmation: req={req_id}, chunk={loaded_chunk_id}"
+                        )
+
+                if not valid_loaded_chunks:
+                    continue
+
+                num_valid_loaded_chunks = len(valid_loaded_chunks)
                 logger.debug(
-                    f"  finished_load_chunks for {req_id}: {num_loaded_chunks}"
+                    f"  valid finished_load_chunks for {req_id}: {num_valid_loaded_chunks}"
                 )
                 self.staging_buffer_manager.free(
                     req_id,
                     usage="load",
-                    num_finished_blocks=num_loaded_chunks)
-                # update in-flight save
-                for loaded_chunk_id in loaded_chunk_ids:
-                    assert loaded_chunk_id in self._reqs_being_loaded[req_id]
-                    self._reqs_being_loaded[req_id].remove(loaded_chunk_id)
+                    num_finished_blocks=num_valid_loaded_chunks)
+
                 if len(self._reqs_being_loaded[req_id]) == 0:
                     self._reqs_being_loaded.pop(req_id, None)
                 else:
@@ -1185,7 +1268,7 @@ class TPUOffloadConnectorScheduler():
                         f"  remaining_loading_blocks:{req_id}, {self._reqs_being_loaded[req_id]}."
                     )
                 # update the status of occupied cpu chunks
-                self.offload_manager.mark_completion(loaded_chunk_ids, "load")
+                self.offload_manager.mark_completion(valid_loaded_chunks, "load")
 
     def request_finished(
         self,
@@ -1266,6 +1349,8 @@ class TPUOffloadConnectorWorker:
         self._processed_save_for_step = False
         # On-going asynchronous save operations tracking futures and their associated manifest.
         self._pending_save_futures: list[tuple[Future, list[SaveReqInfo]]] = []
+        # Tracks local in-flight saves to prevent read-before-write race conditions during loads.
+        self._local_in_flight_saves: dict[CpuChunkId, Future] = {}
 
         # record finished save / load blocks (with req_ids) for each iteration
         self.offload_stats = KVOffloadConnectorStats()
@@ -1386,6 +1471,26 @@ class TPUOffloadConnectorWorker:
                 raise ValueError("Could not decompose with given buckets.")
         return decomposed_blocks
 
+    def _do_stack(self, kv_caches, block_ids_arr, num_blocks):
+        if self.mesh.shape.get('attn_dp', 1) > 1:
+            return pure_jax_stack_kv_cache_cross_layers(
+                kv_caches, block_ids_arr, num_blocks)
+        else:
+            return stack_kv_cache_cross_layers(kv_caches, block_ids_arr,
+                                               num_blocks)
+
+    def _do_update(self, kv_caches, kv_cache_slices, dst_blocks, mesh,
+                   cached_kv_sharding_spec, indices_sharding):
+        if self.mesh.shape.get('attn_dp', 1) > 1:
+            return pure_jax_update_kv_caches_one(kv_caches, kv_cache_slices,
+                                                 dst_blocks, mesh,
+                                                 cached_kv_sharding_spec,
+                                                 indices_sharding)
+        else:
+            return update_kv_caches_one(kv_caches, kv_cache_slices, dst_blocks,
+                                        mesh, cached_kv_sharding_spec,
+                                        indices_sharding)
+
     def _precompile_kv_swap_operations(self):
         """
         Pre-compiles the functions used for KV cache swapping
@@ -1409,7 +1514,7 @@ class TPUOffloadConnectorWorker:
                         dummy_block_ids_arr = jnp.array(dummy_block_ids)
 
                         # 1. gather / stack (for save)
-                        paged_kv_for_compilation, stacked_dummy_kv_caches_tpu = stack_kv_cache_cross_layers(
+                        paged_kv_for_compilation, stacked_dummy_kv_caches_tpu = self._do_stack(
                             paged_kv_for_compilation, dummy_block_ids_arr,
                             num_blocks)
                         stacked_dummy_kv_caches_tpu = [
@@ -1420,7 +1525,7 @@ class TPUOffloadConnectorWorker:
                         jax.block_until_ready(stacked_dummy_kv_caches_tpu)
 
                         # 2. update / insert  kv (for load)
-                        updated_kv_caches = update_kv_caches_one(
+                        updated_kv_caches = self._do_update(
                             paged_kv_for_compilation,
                             stacked_dummy_kv_caches_tpu, dummy_block_ids,
                             self.mesh, self.cached_kv_sharding_spec,
@@ -1453,8 +1558,7 @@ class TPUOffloadConnectorWorker:
             return kv_caches, []
         if num_blocks in BLOCK_SIZE_BUCKETS:
             block_ids_arr = jnp.array(block_ids)
-            return stack_kv_cache_cross_layers(kv_caches, block_ids_arr,
-                                               num_blocks)
+            return self._do_stack(kv_caches, block_ids_arr, num_blocks)
 
         # 2. Report the latency of decomposed_block_sizes
         decomposed_block_buckets = self._decompose_into_buckets(block_ids)
@@ -1473,7 +1577,7 @@ class TPUOffloadConnectorWorker:
             _num_blocks = len(decomposed_block_bucket)
             block_slice = decomposed_block_slice_arr[i]
             # Update current_kv_caches with the latest valid handle
-            current_kv_caches, gathered_chunk = stack_kv_cache_cross_layers(
+            current_kv_caches, gathered_chunk = self._do_stack(
                 current_kv_caches, block_slice, len(decomposed_block_bucket))
             gathered_chunks.extend(gathered_chunk)
 
@@ -1492,10 +1596,9 @@ class TPUOffloadConnectorWorker:
         if num_blocks == 0:
             return kv_caches
         if num_blocks in BLOCK_SIZE_BUCKETS:
-            return update_kv_caches_one(kv_caches, kv_cache_slices, dst_blocks,
-                                        self.mesh,
-                                        self.cached_kv_sharding_spec,
-                                        self.indices_sharding)
+            return self._do_update(kv_caches, kv_cache_slices, dst_blocks,
+                                   self.mesh, self.cached_kv_sharding_spec,
+                                   self.indices_sharding)
 
         decomposed_block_buckets = self._decompose_into_buckets(dst_blocks)
         logger.debug(
@@ -1508,7 +1611,7 @@ class TPUOffloadConnectorWorker:
             bucket_size = len(decomposed_block_bucket)
             next_offset = block_offset + bucket_size
             slices_for_bucket = kv_cache_slices[block_offset:next_offset]
-            updated_kv_caches = update_kv_caches_one(
+            updated_kv_caches = self._do_update(
                 updated_kv_caches, slices_for_bucket, decomposed_block_bucket,
                 self.mesh, self.cached_kv_sharding_spec, self.indices_sharding)
             block_offset = next_offset
@@ -1617,7 +1720,7 @@ class TPUOffloadConnectorWorker:
                 self.runner.kv_caches, blocks_to_save)
         else:
             blocks_to_save_arr = jnp.array(blocks_to_save)
-            kv_caches, gathered_kv_caches_tpu = stack_kv_cache_cross_layers(
+            kv_caches, gathered_kv_caches_tpu = self._do_stack(
                 self.runner.kv_caches, blocks_to_save_arr, num_blocks_to_save)
         self.runner.kv_caches = kv_caches
 
@@ -1701,7 +1804,7 @@ class TPUOffloadConnectorWorker:
                 self.runner.kv_caches, all_src_blocks)
         else:
             all_src_blocks_arr = jnp.array(all_src_blocks)
-            kv_caches, gathered_kv_caches_tpu = stack_kv_cache_cross_layers(
+            kv_caches, gathered_kv_caches_tpu = self._do_stack(
                 self.runner.kv_caches, all_src_blocks_arr,
                 total_num_blocks_to_save)
         self.runner.kv_caches = kv_caches
@@ -1714,7 +1817,7 @@ class TPUOffloadConnectorWorker:
         return gathered_kv_caches_tpu, manifest, total_num_blocks_to_save
 
     def _transfer_and_register_cpu_chunks(self,
-                                          flat_kv_caches_tpu: Any,
+                                          chunks_on_cpu: list[jax.Array],
                                           total_num_blocks_to_save: int,
                                           manifest: list[SaveReqInfo],
                                           is_batched: bool = False):
@@ -1757,13 +1860,11 @@ class TPUOffloadConnectorWorker:
         start_time = time.time()
 
         # 1. Swap Out the buffer
-        chunks_on_cpu = None
-        # D2H
-        chunks_on_cpu = []
-        for i in range(total_num_blocks_to_save):
-            chunks_on_cpu.append(
-                jax.device_put(flat_kv_caches_tpu[i],
-                               self.expanded_host_sharding))
+        # Note: The actual jax.device_put (D2H dispatch) has been moved to the
+        # main thread (start_save_kv / _start_batched_save_kv) to ensure
+        # deterministic, globally aligned dispatch order across nodes.
+        # Here in the background thread, we only need to wait for the transfer
+        # to complete.
         jax.block_until_ready(chunks_on_cpu)
         # no split
 
@@ -1829,9 +1930,11 @@ class TPUOffloadConnectorWorker:
         flat_kv_caches_tpu, manifest, total_num_blocks_to_save = gather_result
 
         # 2. ASYNC NON-BLOCKING: Single Batch Transfer
-        def _async_batch_transfer_task(*args, **kwargs):
+        def _async_batch_transfer_task(dependencies, chunks_on_cpu, total_num_blocks, manifest, is_batched=True):
             try:
-                self._transfer_and_register_cpu_chunks(*args, **kwargs)
+                for dep in dependencies:
+                    dep.result()
+                self._transfer_and_register_cpu_chunks(chunks_on_cpu, total_num_blocks, manifest, is_batched)
             except Exception as e:
                 logger.error(f"Error in batched transfer: {e}", exc_info=True)
 
@@ -1841,11 +1944,32 @@ class TPUOffloadConnectorWorker:
         # Note: We use manifest for the pending future tracking.
         # record_save will be handled in the main thread by _process_completed_saves.
 
+        # Dispatch to CPU (Main Thread)
+        chunks_on_cpu = []
+        if flat_kv_caches_tpu is not None:
+            for i in range(total_num_blocks_to_save):
+                chunks_on_cpu.append(
+                    jax.device_put(flat_kv_caches_tpu[i],
+                                   self.expanded_host_sharding))
+
+        # Collect dependencies to prevent WAW race
+        dependencies = set()
+        for info in manifest:
+            for chunk_id in info.dst_chunks:
+                if chunk_id in self._local_in_flight_saves:
+                    dependencies.add(self._local_in_flight_saves[chunk_id])
+
         future = self.save_executor.submit(_async_batch_transfer_task,
-                                           flat_kv_caches_tpu,
+                                           dependencies,
+                                           chunks_on_cpu,
                                            total_num_blocks_to_save,
                                            manifest,
                                            is_batched=True)
+        
+        for info in manifest:
+            for chunk_id in info.dst_chunks:
+                self._local_in_flight_saves[chunk_id] = future
+
         self._pending_save_futures.append((future, manifest))
 
     def _get_blocks_for_req_from_metadata(
@@ -1942,9 +2066,11 @@ class TPUOffloadConnectorWorker:
                                    is_final_save=meta.save_spec.is_final_save)
 
                 # Define a safe wrapper for the async part to ensure logging
-                def _async_transfer_task(req_id, *args):
+                def _async_transfer_task(req_id, dependencies, chunks_on_cpu, num_blocks, manifest, is_batched):
                     try:
-                        self._transfer_and_register_cpu_chunks(*args)
+                        for dep in dependencies:
+                            dep.result()
+                        self._transfer_and_register_cpu_chunks(chunks_on_cpu, num_blocks, manifest, is_batched)
                     except Exception as e:
                         raise ValueError(
                             f"Error transferring blocks for request {req_id}: {e}"
@@ -1954,11 +2080,28 @@ class TPUOffloadConnectorWorker:
                 # 2. ASYNC NON-BLOCKING: Transfer to CPU and Register
                 logger.debug(
                     f"Submitting transfer task for request {meta.req_id}")
+                # Dispatch to CPU (Main Thread)
+                chunks_on_cpu = []
+                for i in range(num_blocks_to_save):
+                    chunks_on_cpu.append(
+                        jax.device_put(flat_kv_caches_tpu[i],
+                                       self.expanded_host_sharding))
+
+                # Collect dependencies to prevent WAW race
+                dependencies = set()
+                for chunk_id in dst_chunks:
+                    if chunk_id in self._local_in_flight_saves:
+                        dependencies.add(self._local_in_flight_saves[chunk_id])
+
                 future = self.save_executor.submit(_async_transfer_task,
                                                    meta.req_id,
-                                                   flat_kv_caches_tpu,
+                                                   dependencies,
+                                                   chunks_on_cpu,
                                                    num_blocks_to_save, [info],
                                                    False)
+
+                for chunk_id in dst_chunks:
+                    self._local_in_flight_saves[chunk_id] = future
 
                 self._pending_save_futures.append((future, [info]))
                 self.metrics_collector.record_d2h_operation()
@@ -1989,6 +2132,12 @@ class TPUOffloadConnectorWorker:
                             self.offload_stats.record_save(
                                 req=info.req_id,
                                 saved_chunk_ids=info.dst_chunks)
+                            
+                            # Clean up local in-flight tracking safely
+                            for chunk_id in info.dst_chunks:
+                                if self._local_in_flight_saves.get(chunk_id) == future:
+                                    self._local_in_flight_saves.pop(chunk_id, None)
+                            
                             # TODO: Metrics data transfer complete
 
                     completed_count += 1
@@ -2040,6 +2189,7 @@ class TPUOffloadConnectorWorker:
 
         # Process each request that needs its KV cache loaded
         load_times = []
+        waited_futures = set()
         for meta in metadata.requests_meta:
             if not (meta.load_spec and meta.load_spec.can_load):
                 continue
@@ -2090,6 +2240,24 @@ class TPUOffloadConnectorWorker:
             assembled_kv_on_cpu = []
             for i in range(num_blocks_to_load):
                 src_chunk_id = src_chunks[i]
+                
+                # Check if this chunk is currently being saved locally
+                if src_chunk_id in self._local_in_flight_saves:
+                    future = self._local_in_flight_saves[src_chunk_id]
+                    if future not in waited_futures:
+                        logger.warning(
+                            f"Load of chunk {src_chunk_id} requested before save completed locally. "
+                            "Blocking worker main thread until local save finishes..."
+                        )
+                        # NOTE(amitmkumar): Condition C - Add a configurable timeout (e.g., 120s)
+                        # to future.result() to handle hanging futures gracefully.
+                        future.result()
+                        waited_futures.add(future)
+                    
+                    # Clean up the completed future tracking safely
+                    if self._local_in_flight_saves.get(src_chunk_id) == future:
+                        del self._local_in_flight_saves[src_chunk_id]
+
                 cached_value = self.cpu_backend.get(src_chunk_id)
                 if cached_value is not None:
                     assembled_kv_on_cpu.append(cached_value)
@@ -2116,7 +2284,7 @@ class TPUOffloadConnectorWorker:
                     dst_blocks,
                 )
             else:
-                self.runner.kv_caches = update_kv_caches_one(
+                self.runner.kv_caches = self._do_update(
                     self.runner.kv_caches,
                     raw_chunked_kv_on_tpu,
                     dst_blocks,
@@ -2157,6 +2325,7 @@ class TPUOffloadConnectorWorker:
         """
         Get the KV transfer stats for the connector.
         """
+        self._process_completed_saves()
         # Clear stats for next iteration
         if not self.offload_stats.is_empty():
             return self.offload_stats.clone_and_reset()
