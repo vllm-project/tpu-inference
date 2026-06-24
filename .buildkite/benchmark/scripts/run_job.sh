@@ -122,7 +122,7 @@ BM_JOB_STATUS=$EXIT_SUCCESS
 export BM_INFRA="true"
 
 .buildkite/scripts/run_in_docker.sh bash -c "
-  if [ -n \"\$KERNEL_AUTOTUNE_ID\" ]; then
+  if [[ $RUN_TYPE == PRE_KERNEL_AUTOTUNE_CASES_COLLECTION ]]; then
     pip install --upgrade google-cloud-spanner && \
     pip install --upgrade google-api-core && \
     pip install --upgrade google-auth && \
