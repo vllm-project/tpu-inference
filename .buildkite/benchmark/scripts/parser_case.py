@@ -21,7 +21,6 @@ CMD_MAP = {
     "vllm_serve": "vllm serve",
     "vllm_bench_serve": "vllm bench serve",
     "lm_eval": "lm_eval",
-    "benchmark_serving": "python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py",
     "vllm_bench_serve_with_accuracy": "vllm bench serve"
 }
 
