@@ -14,12 +14,26 @@ if [[ -z "${AUTH_TOKEN}" ]]; then
 	exit 1
 fi
 
-STEP_KEYS=$(
-	curl -fsSL \
+HTTP_CODE="$(
+	curl -sS \
+		-o /tmp/buildkite_jobs_response.json \
+		-w '%{http_code}' \
 		-H "Authorization: Bearer ${AUTH_TOKEN}" \
-		"$API_URL" \
-	| jq -r '.[].step_key // empty'
-)
+		"$API_URL"
+)"
+
+if [[ "${HTTP_CODE}" != "200" ]]; then
+	echo "Error: Buildkite API request failed with HTTP ${HTTP_CODE}."
+	if [[ "${HTTP_CODE}" == "401" ]]; then
+		echo "Hint: token is invalid for Buildkite REST API."
+		echo "Use BUILDKITE_API_TOKEN with read_builds scope."
+		echo "Note: BUILDKITE_AGENT_ACCESS_TOKEN may not have REST API access in your org configuration."
+	fi
+	echo "Request URL: ${API_URL}"
+	exit 22
+fi
+
+STEP_KEYS="$(jq -r '.[].step_key // empty' /tmp/buildkite_jobs_response.json)"
 
 echo "STEP_KEYS: $STEP_KEYS"
 
