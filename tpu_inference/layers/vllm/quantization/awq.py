@@ -22,14 +22,14 @@ from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe import \
+from vllm.model_executor.layers.fused_moe.layer import \
     FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
-from vllm.model_executor.layers.quantization.auto_awq import (AutoAWQConfig,
-                                                              AutoAWQLinearMethod)
+from vllm.model_executor.layers.quantization.awq import (AWQConfig,
+                                                         AWQLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
@@ -60,7 +60,7 @@ logger = init_logger(__name__)
 
 
 @register_quantization_config(AWQ)
-class VllmAWQConfig(AutoAWQConfig, VllmQuantConfig):
+class VllmAWQConfig(AWQConfig, VllmQuantConfig):
 
     @classmethod
     def get_name(cls):
@@ -88,7 +88,7 @@ class VllmAWQConfig(AutoAWQConfig, VllmQuantConfig):
                 return None
 
 
-class VllmAWQLinearMethod(AutoAWQLinearMethod):
+class VllmAWQLinearMethod(AWQLinearMethod):
 
     def __init__(self, quant_config: VllmAWQConfig,
                  linear_config: VllmQuantLinearConfig):
