@@ -38,7 +38,7 @@ steps:
   # ---------------------------------------------------------------------------
   - label: "Trigger Benchmark — Collect Kernel Cases"
     key: collect_kernel_cases
-    trigger: "tpu-commons/tpu-inference-benchmark"
+    trigger: "tpu-inference-benchmark"
     build:
       branch: "patrickji.kernel_autotune_pipeline"
       env:
@@ -52,7 +52,7 @@ steps:
   - label: "Trigger Kernel Tuning Pipeline"
     key: kernel_tuning
     depends_on: "collect_kernel_cases"
-    trigger: "tpu-commons/tpu-inference-kernel-tuning"
+    trigger: "tpu-inference-kernel-tuning"
     build:
       branch: "patrickji.kernel_autotune_pipeline"
       env:
@@ -82,7 +82,7 @@ steps:
   - label: "Trigger Benchmark — Evaluate Tuned Results"
     key: evaluate_tuned_results
     depends_on: "patch_kernel_autotune_result"
-    trigger: "tpu-commons/tpu-inference-benchmark"
+    trigger: "tpu-inference-benchmark"
     build:
       branch: "kernel_autotune.update_tuned_params_KERNEL_AUTOTUNE_ID_PLACEHOLDER"
       env:

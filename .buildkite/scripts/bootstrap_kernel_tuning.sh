@@ -103,7 +103,7 @@ echo "  HOST_NAME=${HOST_NAME:-}"
 TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-}"
 TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
 
-upload_pipeline_build_once
+# upload_pipeline_build_once
 
 if [ -n "${KERNEL_AUTO_TUNING_ENABLED:-}" ]; then
     echo "--- :pipeline: Uploading pipeline_kernel_auto_tuning.yml for kernel tuning"
