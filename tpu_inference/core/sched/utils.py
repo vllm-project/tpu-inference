@@ -50,4 +50,20 @@ def patch_vllm_scheduler_for_continue_decode():
                     scheduler_self.num_lookahead_tokens, max_decode_steps - 1)
 
         Scheduler.__init__ = patched_init
+
+        original_update_from_output = Scheduler.update_from_output
+
+        def patched_update_from_output(scheduler_self, scheduler_output,
+                                       model_runner_output):
+            for req_id, req_idx in model_runner_output.req_id_to_index.items():
+                request = scheduler_self.requests.get(req_id)
+                if request is not None and len(request._output_token_ids) > 0:
+                    if model_runner_output.sampled_token_ids:
+                        scheduler_output.num_scheduled_tokens[req_id] = len(
+                            model_runner_output.sampled_token_ids[req_idx])
+            return original_update_from_output(scheduler_self,
+                                               scheduler_output,
+                                               model_runner_output)
+
+        Scheduler.update_from_output = patched_update_from_output
         Scheduler._continue_decode_patched = True
