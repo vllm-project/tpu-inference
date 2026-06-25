@@ -62,7 +62,23 @@ upload_benchmark_pipeline() {
     # Set benchmark cases directory dynamically based on target_case_type.
     local case_folder=".buildkite/benchmark/cases/${folder_name}"
     local generator_script="${SCRIPT_DIR}/generate_bk_pipeline.py"
-    process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY" "" "$dependency_step"
+    local generated_group_keys=""
+    process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY" "" "$dependency_step" generated_group_keys
+
+    if [ -n "$generated_group_keys" ]; then
+        local group_keys_csv
+        group_keys_csv=$(printf "%s" "$generated_group_keys" | paste -sd, -)
+        buildkite-agent meta-data set "BENCHMARK_GROUP_KEYS" "$group_keys_csv"
+        if [ -n "$dependency_step" ]; then
+            buildkite-agent meta-data set "BENCHMARK_GROUP_KEYS_${dependency_step}" "$group_keys_csv"
+        fi
+        echo "--- Generated benchmark group keys:"
+        while IFS= read -r group_key; do
+            [ -n "$group_key" ] && echo "  - $group_key"
+        done <<< "$generated_group_keys"
+    else
+        echo "--- No benchmark group keys were generated."
+    fi
 
     # If the folder is not empty, upload the docker build pipeline.
     if [ "$(ls -A "$case_folder" 2>/dev/null)" ]; then

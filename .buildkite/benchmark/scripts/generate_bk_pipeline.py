@@ -288,6 +288,13 @@ def main():
         default=None,
         required=False,
         help="Optional Buildkite step key that all benchmark steps depend on")
+    parser.add_argument(
+        "--group-keys-file",
+        type=str,
+        default=None,
+        required=False,
+        help=("Optional file path. If provided, writes generated group keys "
+              "(one per line) for downstream shell consumers."))
     args = parser.parse_args()
 
     # Verify input file existence
@@ -367,6 +374,14 @@ def main():
             "steps": all_steps
         }]
     }
+
+    if args.group_keys_file:
+        group_keys = [
+            step.get("key", "") for step in grouped_pipeline.get("steps", [])
+            if step.get("key")
+        ]
+        with open(args.group_keys_file, "w") as key_file:
+            key_file.write("\n".join(group_keys))
 
     print(
         yaml.dump(grouped_pipeline,

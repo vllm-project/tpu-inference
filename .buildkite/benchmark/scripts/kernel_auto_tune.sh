@@ -35,52 +35,84 @@ get_tpu_from_device() {
     fi
 }
 
+setup_autotune_envs() {
+    local autotune_stage="${1:-}"
+
+    if [[ -z "${autotune_stage}" ]]; then
+        echo "Error: autotune_stage argument is required."
+        return 1
+    fi
+
+    KERNEL_AUTOTUNE_ID="$(buildkite-agent meta-data get KERNEL_AUTOTUNE_ID 2>/dev/null || true)"
+
+    if [[ -z "${KERNEL_AUTOTUNE_ID:-}" ]]; then
+        echo "Error: KERNEL_AUTOTUNE_ID meta-data is not set."
+        return 1
+    fi
+
+    KERNEL_AUTOTUNE_STAGE="${autotune_stage}"
+    EXTRA_ENVS="KERNEL_AUTOTUNE_ID=${KERNEL_AUTOTUNE_ID},KERNEL_AUTOTUNE_STAGE=${KERNEL_AUTOTUNE_STAGE}"
+    export KERNEL_AUTOTUNE_ID KERNEL_AUTOTUNE_STAGE EXTRA_ENVS
+    echo "🚀 EXTRA_ENVS set to ${EXTRA_ENVS}"
+}
+
+setup_depends_on_block() {
+    local group_keys_metadata_key="${1:-BENCHMARK_GROUP_KEYS_kernel_cases_collection}"
+    local default_dependency_key="${2:-}"
+    local group_keys_csv
+    local depends_on_block
+
+    group_keys_csv="$(buildkite-agent meta-data get "${group_keys_metadata_key}" 2>/dev/null || true)"
+    if [[ -z "${group_keys_csv}" ]]; then
+        echo "No collected benchmark group keys found; defaulting dependency to ${default_dependency_key}"
+        depends_on_block="\n            - \"${default_dependency_key}\""
+    else
+        depends_on_block=""
+        IFS=',' read -ra GROUP_KEYS <<< "${group_keys_csv}"
+        for key in "${GROUP_KEYS[@]}"; do
+            [[ -z "${key}" ]] && continue
+            depends_on_block="${depends_on_block}\n            - \"${key}\""
+        done
+    fi
+
+    printf '%s' "${depends_on_block}"
+}
+
 update_all_tuned_params_py() {
-    # Iterate over all keys in the dictionary
-    for key in "${!kernel_auto_tune_mapping[@]}"; do
-        target_file="${kernel_auto_tune_mapping[$key]}"
+    if [[ "${KERNEL_AUTOTUNE_STAGE:-}" == "PRE_KERNEL_AUTOTUNE_CASES_COLLECTION" ]]; then
+        # Iterate over all keys in the dictionary
+        for key in "${!kernel_auto_tune_mapping[@]}"; do
+            target_file="${kernel_auto_tune_mapping[$key]}"
 
-        echo "Processing $target_file with tuner: $key..."
+            echo "Processing $target_file with tuner: $key..."
 
-        # Step 1: Replace 'get_tuned_params' with '_get_tuned_params'
-        sed -i 's/get_tuned_params/_get_tuned_params/g' "$target_file"
+            # Step 1: Replace 'get_tuned_params' with '_get_tuned_params'
+            sed -i 's/get_tuned_params/_get_tuned_params/g' "$target_file"
 
-        # Step 2: Concatenate the update script to the end
-        # (Adding an empty echo first to guarantee we start on a fresh line)
-        echo "" >> "$target_file"
-        cat "$KERNEL_TUNED_PARAMS_UPDATE_SCRIPT" >> "$target_file"
+            # Step 2: Concatenate the update script to the end
+            # (Adding an empty echo first to guarantee we start on a fresh line)
+            echo "" >> "$target_file"
+            cat "$KERNEL_TUNED_PARAMS_UPDATE_SCRIPT" >> "$target_file"
 
-        tpu="$(get_tpu_from_device)"
+            tpu="$(get_tpu_from_device)"
 
-        # Steps 3, 4, and 5: Replace the placeholders
-        sed -i "s|KERNEL_TUNER_NAME_PLACEHOLDER|$key|g; \
-                s|CASE_SET_ID_PLACEHOLDER|$KERNEL_AUTOTUNE_ID|g; \
-                s|TPU_PLACEHOLDER|$tpu|g" "$target_file"
+            # Steps 3, 4, and 5: Replace the placeholders
+            sed -i "s|KERNEL_TUNER_NAME_PLACEHOLDER|$key|g; \
+                    s|CASE_SET_ID_PLACEHOLDER|$KERNEL_AUTOTUNE_ID|g; \
+                    s|TPU_PLACEHOLDER|$tpu|g" "$target_file"
 
-        echo "Successfully updated $target_file"
-        echo "----------------------------------------"
-    done
+            echo "🚀 Successfully updated $target_file"
+        done
+    else
+        echo "❌ Not in PRE_KERNEL_AUTOTUNE_CASES_COLLECTION stage, skipping update of tuned_params.py"
+        exit 1
+    fi
 }
 
 checkout_updated_tuned_params_py_branch() {
-    # EXTRA_ENVS="KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
-    # extract KERNEL_AUTOTUNE_STAGE from EXTRA_ENVS and set it as an environment variable
-    if [[ -n "${EXTRA_ENVS:-}" ]]; then
-        KERNEL_AUTOTUNE_STAGE=$(echo "$EXTRA_ENVS" | tr ' ,' '\n' | grep '^KERNEL_AUTOTUNE_STAGE=' | cut -d= -f2-)
-        if [[ -z "${KERNEL_AUTOTUNE_STAGE}" ]]; then
-            unset KERNEL_AUTOTUNE_STAGE
-        else
-            echo "🚀 KERNEL_AUTOTUNE_STAGE set to ${KERNEL_AUTOTUNE_STAGE}"
-        fi
-    fi
     if [[ "${KERNEL_AUTOTUNE_STAGE:-}" == "POST_KERNEL_AUTOTUNE_BM_RERUN" ]]; then
-        # use the KERNEL_AUTOTUNE_ID from the EXTRA_ENVS and construct the branch name and checkout the remote branch for the kernel autotune result evaluation. 
-        # This is to ensure that the benchmark runs with the correct tuned parameters.
-        # Extract the KERNEL_AUTOTUNE_ID from the EXTRA_ENVS
-        # Example EXTRA_ENVS="KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID"
-        KERNEL_AUTOTUNE_ID=$(echo "$EXTRA_ENVS" | tr ' ,' '\n' | grep '^KERNEL_AUTOTUNE_ID=' | cut -d= -f2-)
         if [ -z "$KERNEL_AUTOTUNE_ID" ]; then
-            echo "Error: KERNEL_AUTOTUNE_ID is not set in EXTRA_ENVS."
+            echo "Error: KERNEL_AUTOTUNE_ID is not set."
             exit 1
         fi
         # Construct the branch name, this should match the branch name used in the kernel_auto_tune_invoker.py
@@ -88,7 +120,10 @@ checkout_updated_tuned_params_py_branch() {
         git fetch
         git checkout "${BRANCH_NAME}"
         COMMIT_MESSAGE=$(git log -1 --pretty=%B)
-        echo "🚀 Running in POST_KERNEL_AUTOTUNE_BM_RERUN mode in branch ${BRANCH_NAME}"
         echo "Last commit message: ${COMMIT_MESSAGE}"
+        echo "🚀 POST_KERNEL_AUTOTUNE_BM_RERUN stage runs in branch ${BRANCH_NAME}"
+    else
+        echo "❌ Not in POST_KERNEL_AUTOTUNE_BM_RERUN stage, should not invoke this function"
+        exit 1
     fi
 }
