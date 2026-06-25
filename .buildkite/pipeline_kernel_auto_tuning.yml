@@ -13,70 +13,79 @@
 # limitations under the License.
 
 steps:
-  - label: "Kernel AutoTune Entry"
-    key: kernel_autotune_entry
+  - label: "Test Retrieve Steps Names"
+    key: test_retrieve_steps_names
     agents:
       queue: cpu
     priority: 200
-    depends_on: build_docker
+    depends_on: upload_pipeline 
     command: |
-      # export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$$(date +%Y-%m-%d-%H-%M)
-      export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-23-07-10"
-      
-      cat <<EOF | buildkite-agent pipeline upload
-      env:
-        KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
-      steps:
-        # - label: ":pipeline: Run Benchmarks For Collecting Tuning Cases"
-        #   agents:
-        #     queue: cpu
-        #   priority: 200
-        #   key: kernel_cases_collection
-        #   depends_on: kernel_autotune_entry
-        #   env:
-        #     KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
-        #     RUN_TYPE: "PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
-        #     EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID,KERNEL_AUTOTUNE_STAGE=PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
-        #   command: |
-        #     bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh kernel_cases_collection
-          
-        - label: "Invoke Kernel Tuners"
-          key: invoke_kernel_tuners
-          priority: 200
-          depends_on:
-            # - "kernel_cases_collection"
-            - "kernel_autotune_entry"
-          env:
-            USE_PREBUILT_IMAGE: "1"
-            TPU_VERSION: "tpu6e"
-            KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
-          secrets:
-            - GITHUB_PAT
-          agents:
-            queue: tpu_v6e_queue
-          commands:
-            - |
-              rm -f /tmp/kernel_tuning/generated_pipeline.yml
-            - |
-              .buildkite/scripts/run_in_docker.sh bash -c 'pip install --upgrade google-cloud-spanner google-api-core google-auth absl-py && python3 -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_invoker --auto_tune_id=$$KERNEL_AUTOTUNE_ID'
-            - |
-              # Upload the generated pipeline YAML from the temp dir on the host.
-              buildkite-agent artifact upload "/tmp/kernel_tuning/generated_pipeline.yml"
-              echo "Upload generated pipeline YAML to Buildkite artifacts with priority ${PRIORITY_KERNEL_TUNING}"
-              { 
-                echo "priority: ${PRIORITY_KERNEL_TUNING}"; 
-                cat /tmp/kernel_tuning/generated_pipeline.yml; 
-              } | buildkite-agent pipeline upload
+      bash tools/kernel/tuner/v1/scripts/retrieve_pipeline_step_keys.sh
 
-        - label: ":pipeline: Re-Run Benchmarks For Evaluating Tuning Results"
-          agents:
-            queue: cpu
-          priority: 200
-          key: invoke_kernel_autotune_result_evaluation
-          env:
-            RUN_TYPE: "POST_KERNEL_AUTOTUNE_BM_RERUN"
-            EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
-          depends_on: patch_kernel_autotune_result 
-          command: |
-            bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh invoke_kernel_autotune_result_evaluation
-      EOF
+  # - label: "Kernel AutoTune Entry"
+  #   key: kernel_autotune_entry
+  #   agents:
+  #     queue: cpu
+  #   priority: 200
+  #   depends_on: build_docker
+  #   command: |
+  #     # export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$$(date +%Y-%m-%d-%H-%M)
+  #     export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-23-07-10"
+      
+  #     cat <<EOF | buildkite-agent pipeline upload
+  #     env:
+  #       KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
+  #     steps:
+  #       # - label: ":pipeline: Run Benchmarks For Collecting Tuning Cases"
+  #       #   agents:
+  #       #     queue: cpu
+  #       #   priority: 200
+  #       #   key: kernel_cases_collection
+  #       #   depends_on: kernel_autotune_entry
+  #       #   env:
+  #       #     KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
+  #       #     RUN_TYPE: "PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
+  #       #     EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID,KERNEL_AUTOTUNE_STAGE=PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
+  #       #   command: |
+  #       #     bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh kernel_cases_collection
+          
+  #       - label: "Invoke Kernel Tuners"
+  #         key: invoke_kernel_tuners
+  #         priority: 200
+  #         depends_on:
+  #           # - "kernel_cases_collection"
+  #           - "kernel_autotune_entry"
+  #         env:
+  #           USE_PREBUILT_IMAGE: "1"
+  #           TPU_VERSION: "tpu6e"
+  #           KERNEL_AUTOTUNE_ID: "$$KERNEL_AUTOTUNE_ID"
+  #         secrets:
+  #           - GITHUB_PAT
+  #         agents:
+  #           queue: tpu_v6e_queue
+  #         commands:
+  #           - |
+  #             rm -f /tmp/kernel_tuning/generated_pipeline.yml
+  #           - |
+  #             .buildkite/scripts/run_in_docker.sh bash -c 'pip install --upgrade google-cloud-spanner google-api-core google-auth absl-py && python3 -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_invoker --auto_tune_id=$$KERNEL_AUTOTUNE_ID'
+  #           - |
+  #             # Upload the generated pipeline YAML from the temp dir on the host.
+  #             buildkite-agent artifact upload "/tmp/kernel_tuning/generated_pipeline.yml"
+  #             echo "Upload generated pipeline YAML to Buildkite artifacts with priority ${PRIORITY_KERNEL_TUNING}"
+  #             { 
+  #               echo "priority: ${PRIORITY_KERNEL_TUNING}"; 
+  #               cat /tmp/kernel_tuning/generated_pipeline.yml; 
+  #             } | buildkite-agent pipeline upload
+
+  #       - label: ":pipeline: Re-Run Benchmarks For Evaluating Tuning Results"
+  #         agents:
+  #           queue: cpu
+  #         priority: 200
+  #         key: invoke_kernel_autotune_result_evaluation
+  #         env:
+  #           # RUN_TYPE: "POST_KERNEL_AUTOTUNE_BM_RERUN"
+  #           EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
+  #         depends_on: patch_kernel_autotune_result 
+  #         command: |
+  #           bash .buildkite/benchmark/scripts/benchmark_bootstrap.sh invoke_kernel_autotune_result_evaluation
+  #     EOF
