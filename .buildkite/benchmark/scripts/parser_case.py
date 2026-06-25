@@ -20,7 +20,9 @@ import sys
 CMD_MAP = {
     "vllm_serve": "vllm serve",
     "vllm_bench_serve": "vllm bench serve",
-    "lm_eval": "lm_eval"
+    "lm_eval": "lm_eval",
+    "benchmark_serving": "python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py",
+    "vllm_bench_serve_with_accuracy": "vllm bench serve"
 }
 
 # Helper function to print export statement only if value is valid
@@ -170,7 +172,14 @@ def main():
     export_env_if_valid(srv_opts, "max-num-seqs", "MAX_NUM_SEQS")
     export_env_if_valid(srv_opts, "max-num-batched-tokens", "MAX_NUM_BATCHED_TOKENS")
     export_env_if_valid(srv_opts, "max-model-len", "MAX_MODEL_LEN")
-    cli_env = cli_opts.get("env", {})
+    cli_cmd_type = cli_opts.get("command_type", "vllm_bench_serve")
+    cli_env = cli_opts.get("env", {}).copy()
+    cli_resolved_args_pre = resolve_device_args(cli_opts.get("args", {}), current_machine)
+    if cli_cmd_type == "vllm_bench_serve_with_accuracy":
+        cli_env["RUN_ACCURACY"] = "mmlu"
+        if "mmlu-output-len" in cli_resolved_args_pre:
+            cli_env["MMLU_OUTPUT_LEN"] = str(cli_resolved_args_pre["mmlu-output-len"])
+
     cli_env_parts = [f"{k}={v}" for k, v in cli_env.items()]
     quoted_cli_env = ' '.join(shlex.quote(p) for p in cli_env_parts)
     print(f"CLIENT_CMD_ENVS=({quoted_cli_env})")
@@ -180,8 +189,6 @@ def main():
     srv_env_list = [f"{k}={v}" for k, v in srv_env.items()]
     srv_env_str = ' '.join(shlex.quote(item) for item in srv_env_list)
     print(f"SERVER_CMD_ENVS=({srv_env_str})")
-
-    cli_cmd_type = cli_opts.get("command_type", "vllm_bench_serve")
 
     # Output execution strategy based on command_type
     if cli_cmd_type == "lm_eval":
@@ -201,6 +208,9 @@ def main():
         srv_cmd_type = srv_opts.get("command_type", "")
         srv_resolved_args = resolve_device_args(srv_opts.get("args", {}), current_machine)
         cli_resolved_args = resolve_device_args(cli_opts.get("args", {}), current_machine)
+
+        if cli_cmd_type == "vllm_bench_serve_with_accuracy":
+            cli_resolved_args.pop("mmlu-output-len", None)
 
         srv_cmd = build_command(srv_cmd_type, srv_resolved_args)
         cli_cmd = build_command(cli_cmd_type, cli_resolved_args)

@@ -686,4 +686,48 @@ echo "✓ Throughput: $best_throughput"
 echo "✓ P99 E2EL: $best_e2el"
 echo "======================================"
 
+# Extract RUN_ACCURACY and MMLU_OUTPUT_LEN from CLIENT_CMD_ENVS array since they are not exported as env vars to host shell
+run_accuracy=""
+mmlu_output_len=""
+for env_item in "${CLIENT_CMD_ENVS[@]}"; do
+  if [[ "$env_item" =~ ^RUN_ACCURACY=(.+) ]]; then
+    run_accuracy="${BASH_REMATCH[1]}"
+  elif [[ "$env_item" =~ ^MMLU_OUTPUT_LEN=(.+) ]]; then
+    mmlu_output_len="${BASH_REMATCH[1]}"
+  fi
+done
+
+# If accuracy benchmark is requested, execute it sequentially after throughput is completed
+if [[ "$run_accuracy" == "mmlu" ]]; then
+  echo ""
+  echo "====================================================================="
+  echo "[INFO] RUN_ACCURACY=mmlu: Executing Accuracy Verification Phase"
+  echo "====================================================================="
+
+  # Sync dataset from GCS if it is not present in the workspace
+  DATASET_DIR="$ARTIFACT_FOLDER/dataset"
+  if [ ! -d "$DATASET_DIR/test" ]; then
+    echo "MMLU dataset test folder not found, executing gsutil sync..."
+    mkdir -p "$DATASET_DIR"
+    if command -v gsutil &> /dev/null; then
+      gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/mmlu/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset mmlu"
+    else
+      echo "Warning: gsutil not found. Skipping dataset sync."
+    fi
+  fi
+
+  # Run the custom local benchmark_serving.py client for accuracy
+  echo "Running accuracy benchmark..."
+  python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py \
+    --backend vllm \
+    --model "$MODEL" \
+    --dataset-name mmlu \
+    --dataset-path "$DATASET_DIR/test" \
+    --num-prompts 14000 \
+    --run-eval \
+    --temperature 0 \
+    --mmlu-output-len "${mmlu_output_len:-4}" \
+    --trust-remote-code >> "$BM_LOG" 2>&1 || echo "Warning: Accuracy benchmark failed."
+fi
+
 report_and_exit 0

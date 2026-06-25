@@ -178,13 +178,11 @@ fi
   # Metric data extraction from log file
   BM_LOG="$LOG_FOLDER/bm_log.txt"
 
-  if [[ "$RUN_TYPE" == *"ACCURACY"* ]]; then
-    # Accuracy run logic
-    echo "Accuracy run ($RUN_TYPE) detected. Parsing accuracy metrics."
-    AccuracyMetricsJSON=$(grep -a "AccuracyMetrics:" "$BM_LOG" | sed 's/AccuracyMetrics: //' || true)
-    if [[ -z "$AccuracyMetricsJSON" ]]; then
-       # Fallback: Try parsing the python-style dict printed under "Results" line (legacy benchmark_serving.py output)
-       AccuracyMetricsJSON=$(python3 -c '
+  # First, extract accuracy metrics from log if they exist (used for both accuracy runs and combined runs)
+  AccuracyMetricsJSON=$(grep -a "AccuracyMetrics:" "$BM_LOG" | sed 's/AccuracyMetrics: //' || true)
+  if [[ -z "$AccuracyMetricsJSON" ]]; then
+     # Fallback: Try parsing the python-style dict printed under "Results" line (legacy benchmark_serving.py output)
+     AccuracyMetricsJSON=$(python3 -c '
 import sys, ast, json
 try:
     with open(sys.argv[1], "r") as f:
@@ -202,7 +200,11 @@ for i, line in enumerate(lines):
             except Exception:
                 pass
 ' "$BM_LOG" || true)
-    fi
+  fi
+
+  if [[ "$RUN_TYPE" == *"ACCURACY"* ]]; then
+    # Accuracy run logic
+    echo "Accuracy run ($RUN_TYPE) detected. Parsing accuracy metrics."
     echo "AccuracyMetricsJSON: $AccuracyMetricsJSON"
     if [ -n "$AccuracyMetricsJSON" ]; then
       echo "AccuracyMetrics=$AccuracyMetricsJSON" > "$RESULT_FILE"
@@ -274,6 +276,11 @@ for i, line in enumerate(lines):
       "OutputTokenThroughput" "$output_token_throughput" \
       "TotalTokenThroughput" "$total_token_throughput"
     ) >> "$RESULT_FILE"
+
+    # Also append accuracy metrics to the same result file if they were collected in this run
+    if [ -n "$AccuracyMetricsJSON" ]; then
+      echo "AccuracyMetrics=$AccuracyMetricsJSON" >> "$RESULT_FILE"
+    fi
   fi
 )
 
