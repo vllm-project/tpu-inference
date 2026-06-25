@@ -379,11 +379,6 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=32,
         actual_lkv_dim=256,
         actual_r_dim=64,
-        total_num_pages=1506,
-        page_size_per_kv_packing=32,
-        kv_packing=32,
-        max_num_seqs=128,
-        pages_per_seq=3,
     ): TunableParams(
         decode_batch_size=4,
         num_kv_pages_per_block=3,
@@ -396,11 +391,6 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=32,
         actual_lkv_dim=256,
         actual_r_dim=64,
-        total_num_pages=1506,
-        page_size_per_kv_packing=32,
-        kv_packing=32,
-        max_num_seqs=128,
-        pages_per_seq=3,
     ): TunableParams(
         decode_batch_size=16,
         num_kv_pages_per_block=3,
@@ -413,11 +403,6 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=32,
         actual_lkv_dim=256,
         actual_r_dim=64,
-        total_num_pages=1506,
-        page_size_per_kv_packing=32,
-        kv_packing=32,
-        max_num_seqs=128,
-        pages_per_seq=3,
     ): TunableParams(
         decode_batch_size=8,
         num_kv_pages_per_block=3,
@@ -430,11 +415,6 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=32,
         actual_lkv_dim=256,
         actual_r_dim=64,
-        total_num_pages=1506,
-        page_size_per_kv_packing=32,
-        kv_packing=32,
-        max_num_seqs=128,
-        pages_per_seq=3,
     ): TunableParams(
         decode_batch_size=8,
         num_kv_pages_per_block=3,
@@ -447,11 +427,6 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=32,
         actual_lkv_dim=256,
         actual_r_dim=64,
-        total_num_pages=1506,
-        page_size_per_kv_packing=32,
-        kv_packing=32,
-        max_num_seqs=128,
-        pages_per_seq=3,
     ): TunableParams(
         decode_batch_size=16,
         num_kv_pages_per_block=3,
@@ -464,11 +439,6 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=32,
         actual_lkv_dim=256,
         actual_r_dim=64,
-        total_num_pages=1506,
-        page_size_per_kv_packing=32,
-        kv_packing=32,
-        max_num_seqs=128,
-        pages_per_seq=3,
     ): TunableParams(
         decode_batch_size=8,
         num_kv_pages_per_block=3,
@@ -481,11 +451,6 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=32,
         actual_lkv_dim=256,
         actual_r_dim=64,
-        total_num_pages=1506,
-        page_size_per_kv_packing=32,
-        kv_packing=32,
-        max_num_seqs=128,
-        pages_per_seq=3,
     ): TunableParams(
         decode_batch_size=16,
         num_kv_pages_per_block=3,
@@ -498,11 +463,6 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=32,
         actual_lkv_dim=256,
         actual_r_dim=64,
-        total_num_pages=1506,
-        page_size_per_kv_packing=32,
-        kv_packing=32,
-        max_num_seqs=128,
-        pages_per_seq=3,
     ): TunableParams(
         decode_batch_size=16,
         num_kv_pages_per_block=3,
@@ -515,11 +475,6 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=32,
         actual_lkv_dim=256,
         actual_r_dim=64,
-        total_num_pages=1506,
-        page_size_per_kv_packing=32,
-        kv_packing=32,
-        max_num_seqs=128,
-        pages_per_seq=3,
     ): TunableParams(
         decode_batch_size=16,
         num_kv_pages_per_block=3,
@@ -532,11 +487,6 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=32,
         actual_lkv_dim=256,
         actual_r_dim=64,
-        total_num_pages=1506,
-        page_size_per_kv_packing=32,
-        kv_packing=32,
-        max_num_seqs=128,
-        pages_per_seq=3,
     ): TunableParams(
         decode_batch_size=4,
         num_kv_pages_per_block=3,
@@ -549,11 +499,6 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         actual_num_q_heads=32,
         actual_lkv_dim=256,
         actual_r_dim=64,
-        total_num_pages=1506,
-        page_size_per_kv_packing=32,
-        kv_packing=32,
-        max_num_seqs=128,
-        pages_per_seq=3,
     ): TunableParams(
         decode_batch_size=16,
         num_kv_pages_per_block=3,
@@ -564,30 +509,15 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
 
 
 def get_tuned_params(tuning_key: TuningKey) -> TunableParams:
-    for k, v in tuned_params_mapping.items():
-        if (
-            k.case == tuning_key.case
-            and k.max_num_tokens == tuning_key.max_num_tokens
-            and k.actual_num_q_heads == tuning_key.actual_num_q_heads
-            and k.actual_lkv_dim == tuning_key.actual_lkv_dim
-            and k.actual_r_dim == tuning_key.actual_r_dim
-            and k.kv_dtype == tuning_key.kv_dtype
-            and k.q_dtype == tuning_key.q_dtype
-            and k.page_size_per_kv_packing == tuning_key.page_size_per_kv_packing
-            and k.kv_packing == tuning_key.kv_packing
-            and k.s_dtype == tuning_key.s_dtype
-            and k.soft_cap == tuning_key.soft_cap
-            and k.sliding_window == tuning_key.sliding_window
-            and k.p_same_dtype_as_v == tuning_key.p_same_dtype_as_v
-        ):
-            return v
-
-    logger.warning(
-        f"No tuned parameters found for the given tuning key: {tuning_key}, using default parameters"
-    )
-    return TunableParams(
-        decode_batch_size=4,
-        num_kv_pages_per_block=3,
-        num_queries_per_block=1,
-        vmem_limit_bytes=62914560,
-    )
+    if tuning_key in tuned_params_mapping:
+        return tuned_params_mapping[tuning_key]
+    else:
+        logger.warning(
+            f"No tuned parameters found for the given tuning key: {tuning_key}, using default parameters"
+        )
+        return TunableParams(
+            decode_batch_size=4,
+            num_kv_pages_per_block=3,
+            num_queries_per_block=1,
+            vmem_limit_bytes=62914560,
+        )
