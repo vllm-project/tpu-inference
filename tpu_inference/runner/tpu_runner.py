@@ -367,13 +367,29 @@ def _reconstruct_slots_for_request(
     req_state: CachedRequestState,
     num_tokens: int,
     block_size: int,
+    start_pos: int,
 ) -> np.ndarray:
-    """Reconstructs physical slot mappings for a request using vectorized NumPy."""
-    start_pos = req_state.num_computed_tokens
-    block_ids = req_state.block_ids[0] if req_state.block_ids else []
+    """Reconstructs physical KV-cache slots for ``num_tokens`` tokens of a
+    request using vectorized NumPy.
 
+    ``start_pos`` is the absolute sequence position of the first of these
+    tokens and is supplied by the caller, because the two call sites have
+    different token contracts: the routed-experts reconstruction passes a
+    single scheduler chunk (whose tokens end at ``num_computed_tokens``, so it
+    passes ``num_computed_tokens - num_tokens``), while the continue_decode
+    path passes an on-device decode burst (not reflected in
+    ``num_computed_tokens``, so it passes ``num_computed_tokens``). The slots
+    must match the scheduler-side read (``RoutedExpertsManager.get``, which is
+    block-relative from position 0).
+    """
     if num_tokens <= 0:
         return np.array([], dtype=np.int32)
+
+    assert start_pos >= 0, (
+        f"[routed-experts] start_pos must be non-negative, got {start_pos} "
+        f"(num_tokens={num_tokens}); slots would be wrong via numpy negative "
+        f"indexing")
+    block_ids = req_state.block_ids[0] if req_state.block_ids else []
 
     pos = np.arange(start_pos, start_pos + num_tokens, dtype=np.int32)
     block_idx = pos // block_size
@@ -405,6 +421,23 @@ def _reconstruct_routed_experts(
     block_size = runner.block_size
     total_active_tokens = scheduler_output.total_num_scheduled_tokens
     dp_size = runner.dp_size
+
+    # Absolute start position of each request's chunk = its PRE-step
+    # computed-token count, sourced from scheduler_output (not from
+    # req_state.num_computed_tokens). req_state.num_computed_tokens is advanced
+    # at different times across the two output paths that reach this function:
+    # it is already advanced past this step on the async get_output path, but is
+    # still the pre-step value on the sync _sample_from_logits path
+    # (async_scheduling=False, required by continue_decode). scheduler_output
+    # always carries the pre-step value, so it is correct for both; deriving
+    # start_pos as `num_computed_tokens - n` underflows to a negative value on a
+    # fresh prefill in the sync path.
+    chunk_start = {}
+    for new_req in scheduler_output.scheduled_new_reqs:
+        chunk_start[new_req.req_id] = new_req.num_computed_tokens
+    cached_reqs = scheduler_output.scheduled_cached_reqs
+    for i, rid in enumerate(cached_reqs.req_ids):
+        chunk_start[rid] = cached_reqs.num_computed_tokens[i]
 
     # 1. Compute global start offsets of every request in input batch order
     global_start_offsets = {}
@@ -439,12 +472,18 @@ def _reconstruct_routed_experts(
                                                              dp_end,
                                                              dtype=np.int32)
 
-            # Reconstruct slots for this request using vectorized NumPy
+            # Reconstruct slots for this request using vectorized NumPy. Use the
+            # pre-step chunk start from scheduler_output (see chunk_start above);
+            # the slots must match the scheduler-side block-relative read
+            # (RoutedExpertsManager.get, from position 0).
             req_state = runner.requests[req_id]
             if n > 0:
                 global_slots[
                     global_start:global_end] = _reconstruct_slots_for_request(
-                        req_state, n, block_size)
+                        req_state,
+                        n,
+                        block_size,
+                        start_pos=chunk_start[req_id])
 
     # 3. Perform global rank reordering and transpose in a single fancy indexing sweep!
     expert_indices_reordered = expert_indices_cpu[:, indices_map, :].transpose(
@@ -1478,10 +1517,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # Transpose to (layers, actual_len, top_k) and collect
                 expert_indices_list.append(req_experts.transpose(1, 0, 2))
 
-                # Reconstruct slots for this request
+                # Reconstruct slots for this request. The on-device decode
+                # burst length (actual_len) is decided on-device via EOS
+                # early-exit and is not reflected in num_computed_tokens, so the
+                # burst's tokens begin at num_computed_tokens.
                 if req_state is not None and actual_len > 0:
                     slots_arr = _reconstruct_slots_for_request(
-                        req_state, actual_len, self.block_size)
+                        req_state,
+                        actual_len,
+                        self.block_size,
+                        start_pos=req_state.num_computed_tokens)
                     expert_slots_list.append(slots_arr)
 
             if req_state is not None:

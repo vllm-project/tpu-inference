@@ -42,12 +42,12 @@
 /tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
 /tpu_inference/runner/tpu_runner.py @jrplatin @kyuyeunk @wenxindongwork @sixiang-google
 /tpu_inference/runner/persistent_batch_manager.py @jrplatin @wenxindongwork
-/tpu_inference/executors/ @sixiang-google @mrjunwan-lang
+/tpu_inference/executors/ @sixiang-google @mrjunwan-lang @Lumosis
 /tpu_inference/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
 /tpu_inference/layers/common/sharding.py @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
 
 # Worker Management
-/tpu_inference/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
+/tpu_inference/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork @Lumosis
 
 # Speculative Decoding
 /tpu_inference/spec_decode/ @Lumosis @gxd3
@@ -55,7 +55,7 @@
 /tpu_inference/runner/speculative_decoding_manager.py @Lumosis @gxd3
 
 # Platform Support
-/tpu_inference/platforms/ @sixiang-google @mrjunwan-lang
+/tpu_inference/platforms/ @sixiang-google @mrjunwan-lang @Lumosis
 
 # LoRA and Adapters
 /tpu_inference/lora/ @vanbasten23 @kyuyeunk

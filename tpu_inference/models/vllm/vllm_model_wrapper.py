@@ -123,7 +123,7 @@ def _maybe_patch_for_deepseek_v4(vllm_config: VllmConfig):
     # in amd/model.py (not CustomOp/register_oot hook).
     # Swap the class symbol for the TPU subclass before the
     # model is built.
-    from tpu_inference.layers.vllm.custom_ops.deepseek_v4_attention import \
+    from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_attention import \
         patch_deepseek_v4_mla_cls
     patch_deepseek_v4_mla_cls()
 

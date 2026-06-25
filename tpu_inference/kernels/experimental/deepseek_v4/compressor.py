@@ -16,21 +16,13 @@
 import jax
 import jax.numpy as jnp
 
-# isort: off
 from tpu_inference.kernels.experimental.deepseek_v4.compress_norm_rope import (
-    compress_norm_rope_store,
-    compress_norm_rope_store_indexer,
-    pack_state_cache,
-    unpack_state_cache,
-)
-from tpu_inference.kernels.experimental.deepseek_v4.compress_store import (
-    save_partial_states, )
-# isort: on
+    compress_norm_rope_store, compress_norm_rope_store_indexer,
+    pack_state_cache, unpack_state_cache)
 
 
-def _project_and_save(
-    hidden_states: jax.Array,  # [num_tokens, hidden_size] fp32
-    wkv_wgate: jax.Array,  # [2 * coff * head_dim, hidden_size] fp32
+def save_partial_states(
+    kv_score: jax.Array,  # [num_tokens, 2 * coff * head_dim] fp32
     ape: jax.Array,  # [compress_ratio, coff * head_dim] fp32
     positions: jax.Array,  # [num_tokens] int
     state_cache: jax.Array,  # [num_blocks, block_size, 2*coff*head_dim] fp32
@@ -39,34 +31,44 @@ def _project_and_save(
     overlap: bool,
     compress_ratio: int,
 ) -> jax.Array:
+    """Scatter ``[kv | score + ape]`` into ``state_cache``; skip ``slot < 0``."""
+
     coff = 1 + int(overlap)
     state_width = coff * head_dim
 
-    # Keep at full precision for testing precision for now.
-    kv_score = jnp.matmul(
-        hidden_states.astype(jnp.float32),
-        wkv_wgate.T,
-        precision=jax.lax.Precision.HIGHEST,
-    )
     # [num_tokens, 2 * coff * head_dim]
     kv = kv_score[:, :state_width]  # [num_tokens, coff * head_dim]
     score = kv_score[:, state_width:2 *
                      state_width]  # [num_tokens, coff * head_dim]
 
-    return save_partial_states(
-        kv=kv,
-        score=score,
-        ape=ape,
-        positions=positions,
-        state_cache=state_cache,
-        slot_mapping=slot_mapping,
-        compress_ratio=compress_ratio,
-    )
+    num_blocks, block_size, two_state_width = state_cache.shape
+    state_width = two_state_width // 2
+
+    if kv.shape[-1] != state_width or score.shape[-1] != state_width:
+        raise ValueError(
+            f"kv/score last dim must equal state_width={state_width}; got "
+            f"kv={kv.shape}, score={score.shape}, state_cache={state_cache.shape}"
+        )
+
+    cache_dtype = state_cache.dtype
+    kv = kv.astype(cache_dtype)
+    score = score.astype(cache_dtype)
+    ape = ape.astype(cache_dtype)
+
+    ape_rows = jnp.mod(positions, compress_ratio)
+    score_state = score + ape[ape_rows]
+    packed = jnp.concatenate([kv, score_state], axis=-1)
+
+    num_slots = num_blocks * block_size
+    flat = state_cache.reshape(num_slots, two_state_width)
+    valid = slot_mapping >= 0
+    slots = jnp.where(valid, slot_mapping, num_slots)  # OOB sentinel for pads
+    flat = flat.at[slots].set(packed, mode="drop")
+    return flat.reshape(num_blocks, block_size, two_state_width)
 
 
 def compressor_forward(
-        hidden_states: jax.Array,  # [num_tokens, hidden_size] fp32
-        wkv_wgate: jax.Array,  # [2*coff*head_dim, hidden_size] fp32
+        kv_score: jax.Array,  # [num_tokens, 2 * coff * head_dim] fp32
         ape: jax.Array,  # [compress_ratio, coff*head_dim] fp32
         norm_weight: jax.Array,  # [head_dim] fp32 RMSNorm gamma
         cos_sin_cache: jax.Array,  # [max_pos, rope_head_dim] fp32 RoPE table
@@ -93,13 +95,14 @@ def compressor_forward(
     state_dim = 2 * coff * head_dim
 
     state_view = unpack_state_cache(cache, state_block_size, state_dim)
-    state_view = _project_and_save(hidden_states, wkv_wgate, ape, positions,
-                                   state_view, slot_mapping, head_dim, overlap,
-                                   compress_ratio)
+    state_view = save_partial_states(kv_score, ape, positions, state_view,
+                                     slot_mapping, head_dim, overlap,
+                                     compress_ratio)
     cache = pack_state_cache(cache, state_view)
 
     cache = compress_norm_rope_store(
         cache=cache,
+        state_cache=state_view,
         positions=positions,
         slot_mapping=slot_mapping,
         block_table=block_table,
@@ -120,8 +123,7 @@ def compressor_forward(
 
 
 def compressor_forward_indexer(
-        hidden_states: jax.Array,  # [num_tokens, hidden_size] fp32
-        wkv_wgate: jax.Array,  # [2*coff*head_dim, hidden_size] fp32
+        kv_score: jax.Array,  # [num_tokens, 2 * coff * head_dim] fp32
         ape: jax.Array,  # [compress_ratio, coff*head_dim] fp32
         norm_weight: jax.Array,  # [head_dim] fp32 RMSNorm gamma
         cos_sin_cache: jax.Array,  # [max_pos, rope_head_dim] fp32 RoPE table
@@ -144,13 +146,14 @@ def compressor_forward_indexer(
     state_dim = 2 * coff * head_dim
 
     state_view = unpack_state_cache(cache, state_block_size, state_dim)
-    state_view = _project_and_save(hidden_states, wkv_wgate, ape, positions,
-                                   state_view, slot_mapping, head_dim, overlap,
-                                   compress_ratio)
+    state_view = save_partial_states(kv_score, ape, positions, state_view,
+                                     slot_mapping, head_dim, overlap,
+                                     compress_ratio)
     cache = pack_state_cache(cache, state_view)
 
     cache = compress_norm_rope_store_indexer(
         cache=cache,
+        state_cache=state_view,
         positions=positions,
         slot_mapping=slot_mapping,
         block_table=block_table,
