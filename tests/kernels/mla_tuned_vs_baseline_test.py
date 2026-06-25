@@ -29,7 +29,7 @@ from tpu_inference.kernels.mla.v2.tuned_params import (TunableParams,
 def _get_tuned_test_cases():
     test_cases = []
     for key in tuned_params_mapping.keys():
-        name = (f"tokens_{key.max_num_tokens}_"
+        name = (f"tokens_{key.max_num_tokens}_heads_{key.actual_num_q_heads}_"
                 f"pages_{key.total_num_pages}_"
                 f"seqs_{key.max_num_seqs}_"
                 f"pagesperseq_{key.pages_per_seq}")
@@ -72,7 +72,12 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
          cu_q_lens, distribution) = inputs
         ql_nope_transposed = jnp.transpose(ql_nope, (1, 0, 2))
 
-        def run_kernel(params):
+        @jax.jit(static_argnames=[
+            'decode_batch_size', 'num_kv_pages_per_block',
+            'num_queries_per_block', 'vmem_limit_bytes'
+        ])
+        def run_kernel(decode_batch_size, num_kv_pages_per_block,
+                       num_queries_per_block, vmem_limit_bytes):
             return mla_ragged_paged_attention(
                 ql_nope=ql_nope_transposed,
                 q_pe=q_pe,
@@ -91,26 +96,42 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
                 chunk_prefill_size=key.chunk_prefill_size,
                 s_dtype=key.s_dtype,
                 p_same_dtype_as_v=key.p_same_dtype_as_v,
-                decode_batch_size=params.decode_batch_size,
-                num_kv_pages_per_block=params.num_kv_pages_per_block,
-                num_queries_per_block=params.num_queries_per_block,
-                vmem_limit_bytes=params.vmem_limit_bytes,
+                decode_batch_size=decode_batch_size,
+                num_kv_pages_per_block=num_kv_pages_per_block,
+                num_queries_per_block=num_queries_per_block,
+                vmem_limit_bytes=vmem_limit_bytes,
             )
 
         print(f"\nCompiling baseline kernel for: {key}...")
-        jax.block_until_ready(run_kernel(baseline_params))
+        jax.block_until_ready(
+            run_kernel(baseline_params.decode_batch_size,
+                       baseline_params.num_kv_pages_per_block,
+                       baseline_params.num_queries_per_block,
+                       baseline_params.vmem_limit_bytes))
         print(f"Compiling tuned kernel for: {key}...")
-        jax.block_until_ready(run_kernel(tuned_params))
+        jax.block_until_ready(
+            run_kernel(tuned_params.decode_batch_size,
+                       tuned_params.num_kv_pages_per_block,
+                       tuned_params.num_queries_per_block,
+                       tuned_params.vmem_limit_bytes))
 
         iters = 50
         start_ns = time.perf_counter_ns()
         for _ in range(iters):
-            jax.block_until_ready(run_kernel(baseline_params))
+            jax.block_until_ready(
+                run_kernel(baseline_params.decode_batch_size,
+                           baseline_params.num_kv_pages_per_block,
+                           baseline_params.num_queries_per_block,
+                           baseline_params.vmem_limit_bytes))
         baseline_latency = (time.perf_counter_ns() - start_ns) / iters
 
         start_ns = time.perf_counter_ns()
         for _ in range(iters):
-            jax.block_until_ready(run_kernel(tuned_params))
+            jax.block_until_ready(
+                run_kernel(tuned_params.decode_batch_size,
+                           tuned_params.num_kv_pages_per_block,
+                           tuned_params.num_queries_per_block,
+                           tuned_params.vmem_limit_bytes))
         tuned_latency = (time.perf_counter_ns() - start_ns) / iters
 
         speedup = (baseline_latency - tuned_latency) / baseline_latency * 100

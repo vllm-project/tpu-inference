@@ -544,12 +544,21 @@ def mla_attention(
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
+        total_num_pages, page_size_per_kv_packing, kv_packing, _ = cache.shape
+        max_num_seqs = args[0].shape[0]
+        pages_per_seq = args[1].shape[0] // max_num_seqs
+
         batched_decode_tuning_key = TuningKey(
             case="batched_decode",
             max_num_tokens=q.shape[1],
             actual_num_q_heads=q.shape[0],
             actual_lkv_dim=q.shape[2],
             actual_r_dim=q_rope.shape[2],
+            total_num_pages=total_num_pages,
+            page_size_per_kv_packing=page_size_per_kv_packing,
+            kv_packing=kv_packing,
+            max_num_seqs=max_num_seqs,
+            pages_per_seq=pages_per_seq,
         )
         batched_decode_tuned_params = get_tuned_params(
             batched_decode_tuning_key)
