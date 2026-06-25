@@ -214,7 +214,6 @@ fi
 
     # Secondary copy upload to legacy GCS location if in multi-host mode
     if [[ "${IS_MULTI_HOST:-false}" == "true" ]]; then
-      # Extract configurations from SERVER_CMD_ENVS array since they are not exported as env vars to host shell
       impl_type="vllm"
       phased_profiling_dir=""
       force_moe_random_routing=""
