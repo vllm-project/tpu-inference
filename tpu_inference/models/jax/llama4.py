@@ -477,7 +477,8 @@ class Llama4ForCausalLM(nnx.Module):
         if self.rope_scaling:
             if "factor" in self.rope_scaling:
                 self.rope_scaling = dict(self.rope_scaling)
-                self.rope_scaling["scale_factor"] = self.rope_scaling.pop("factor")
+                self.rope_scaling["scale_factor"] = self.rope_scaling.pop(
+                    "factor")
             else:
                 self.rope_scaling = None
 

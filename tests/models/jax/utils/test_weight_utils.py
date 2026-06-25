@@ -17,6 +17,7 @@ import tempfile
 from unittest.mock import MagicMock
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import torch
 from flax import nnx
@@ -28,7 +29,8 @@ from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxLinear
-from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
+from tpu_inference.models.jax.utils.weight_utils import (
+    LoadableWithIterator, convert_torch_to_jax_with_view)
 
 
 class TorchMLP(nn.Module):
@@ -296,15 +298,21 @@ class TestJaxAutoWeightsLoader:
 
 
 def test_convert_torch_to_jax_with_view():
-    from tpu_inference.models.jax.utils.weight_utils import convert_torch_to_jax_with_view
-    import jax.numpy as jnp
-
     tensor = torch.randn(4, 4, dtype=torch.bfloat16)
     cast_type = jnp.bfloat16
 
+    # Test conversion under normal conditions
     jax_arr = convert_torch_to_jax_with_view(tensor, cast_type)
-
     assert jax_arr.dtype == jnp.bfloat16
     assert jax_arr.shape == (4, 4)
     assert jax_arr.device.platform == "cpu"
 
+    # Test conversion under an active JAX Mesh context
+    # This directly verifies that our set_mesh(None) suspension workaround works as expected
+    devices = jax.devices()
+    mesh = Mesh(devices, ('data', ))
+    with jax.set_mesh(mesh):
+        jax_arr_mesh = convert_torch_to_jax_with_view(tensor, cast_type)
+        assert jax_arr_mesh.dtype == jnp.bfloat16
+        assert jax_arr_mesh.shape == (4, 4)
+        assert jax_arr_mesh.device.platform == "cpu"
