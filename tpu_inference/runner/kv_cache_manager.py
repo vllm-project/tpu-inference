@@ -895,7 +895,7 @@ class KVCacheManager:
                             if contains_indexer_cache:
                                 # Indexer's compressor state cache kv cache must be overlay on
                                 # Indexer's compressed kv cache.
-                                # Main attn's compressor state cache kv cache and sliding windor
+                                # Main attn's compressor state cache kv cache and sliding window
                                 # cache must overlay on main attn's compressed kv cache.
                                 assert all(
                                     "indexer" in layer
