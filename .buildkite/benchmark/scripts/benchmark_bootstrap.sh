@@ -45,8 +45,17 @@ TIMEZONE="America/Los_Angeles"
 JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
 buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
 
-# Check whether the RUN_TYPE is set to POST_KERNEL_AUTOTUNE_BM_RERUN, if so checkout the tuned parameter patched branch
-if [[ "${RUN_TYPE:-}" == "POST_KERNEL_AUTOTUNE_BM_RERUN" ]]; then
+# EXTRA_ENVS="KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
+# extract KERNEL_AUTOTUNE_STAGE from EXTRA_ENVS and set it as an environment variable
+if [[ -n "${EXTRA_ENVS:-}" ]]; then
+    KERNEL_AUTOTUNE_STAGE=$(echo "$EXTRA_ENVS" | tr ' ,' '\n' | grep '^KERNEL_AUTOTUNE_STAGE=' | cut -d= -f2-)
+    if [[ -z "${KERNEL_AUTOTUNE_STAGE}" ]]; then
+        unset KERNEL_AUTOTUNE_STAGE
+    else
+        echo "🚀 KERNEL_AUTOTUNE_STAGE set to ${KERNEL_AUTOTUNE_STAGE}"
+    fi
+fi
+if [[ "${KERNEL_AUTOTUNE_STAGE:-}" == "POST_KERNEL_AUTOTUNE_BM_RERUN" ]]; then
     # use the KERNEL_AUTOTUNE_ID from the EXTRA_ENVS and construct the branch name and checkout the remote branch for the kernel autotune result evaluation. 
     # This is to ensure that the benchmark runs with the correct tuned parameters.
     # Extract the KERNEL_AUTOTUNE_ID from the EXTRA_ENVS
