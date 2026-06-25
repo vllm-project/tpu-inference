@@ -38,15 +38,11 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
-def clean_key_string(key: str, prefix: str = "") -> str:
+def clean_key_string(key: str) -> str:
     """
     Sanitizes the string and ensures the length does not exceed 100 characters.
     Buildkite keys may only contain alphanumeric characters, underscores, dashes and colons.
     """
-    # Prepend the prefix if provided
-    if prefix:
-        key = f"{prefix}-{key}"
-
     # Replace invalid characters with '-'
     # Note: We allow a-z, A-Z, 0-9, _, :, and -. Everything else becomes -
     sanitized = re.sub(r"[^a-zA-Z0-9_:\-]", "-", key)
@@ -189,8 +185,7 @@ def create_benchmark_steps(case_data: Dict[str, Any],
                            parent_dir: str,
                            used_keys: Set[str],
                            errors: List[str],
-                           no_verify: bool = False,
-                           key_prefix: str = "") -> List[Dict[str, Any]]:
+                           no_verify: bool = False) -> List[Dict[str, Any]]:
     """
     Generates a list of Buildkite steps for a case.
     """
@@ -243,7 +238,7 @@ def create_benchmark_steps(case_data: Dict[str, Any],
             continue
 
         # Define step key and check for internal collisions
-        step_safe_key = clean_key_string(step_label, prefix=key_prefix)
+        step_safe_key = clean_key_string(step_label)
         if not no_verify and step_safe_key in used_keys:
             errors.append(
                 f"Collision Error: Duplicate key '{step_safe_key}' detected "
@@ -282,19 +277,6 @@ def main():
                         type=str2bool,
                         default=False,
                         help="Skip validation rules")
-    parser.add_argument(
-        "--dependency-step",
-        type=str,
-        default=None,
-        required=False,
-        help="Optional Buildkite step key that all benchmark steps depend on")
-    parser.add_argument(
-        "--group-keys-file",
-        type=str,
-        default=None,
-        required=False,
-        help=("Optional file path. If provided, writes generated group keys "
-              "(one per line) for downstream shell consumers."))
     args = parser.parse_args()
 
     # Verify input file existence
@@ -314,9 +296,9 @@ def main():
     # Inject UPLOAD_DB environment variable if present in parent environment
     if "UPLOAD_DB" in os.environ:
         global_env["UPLOAD_DB"] = os.environ["UPLOAD_DB"]
+    # Global_env will be passed into docker container. This Extra_ENVS will be saved to DB when report the bm result.
     if "EXTRA_ENVS" in os.environ:
         global_env["EXTRA_ENVS"] = os.environ["EXTRA_ENVS"]
-    step_key_prefix = os.environ.get("GROUP_STEP_KEY_PREFIX", "")
 
     all_steps = []
     used_keys = set()  # Track keys for this file
@@ -338,8 +320,7 @@ def main():
                                    parent_dir,
                                    used_keys,
                                    errors,
-                                   no_verify=args.no_verify,
-                                   key_prefix=step_key_prefix))
+                                   no_verify=args.no_verify))
 
     # Final check: Ensure we actually produced steps and no errors occurred
     if errors:
@@ -364,7 +345,7 @@ def main():
     # Wrap everything in a single group
     # Group name and key both use parent_dir for absolute uniqueness
     group_display_name = f"{parent_dir}-{file_basename}"
-    group_key = clean_key_string(group_display_name, prefix=f'{step_key_prefix}-group')
+    group_key = clean_key_string(group_display_name)
 
     grouped_pipeline = {
         "steps": [{
