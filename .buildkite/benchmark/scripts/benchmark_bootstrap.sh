@@ -40,6 +40,8 @@ JOB_PRIORITY="$PRIORITY_BENCHMARK"
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
 
+BENCHMARK_TIME="$(date -u +"%Y-%m-%dT%H:%M:%S.%6NZ")"
+buildkite-agent meta-data set "BENCHMARK_TIME" "${BENCHMARK_TIME}"
 TIMEZONE="America/Los_Angeles"
 JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
 buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"

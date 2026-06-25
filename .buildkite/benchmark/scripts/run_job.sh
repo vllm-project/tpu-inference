@@ -37,6 +37,8 @@ CODE_HASH=$(buildkite-agent meta-data get "CODE_HASH")
 export CODE_HASH
 JOB_REFERENCE=$(buildkite-agent meta-data get "JOB_REFERENCE")
 export JOB_REFERENCE
+BENCHMARK_TIME=$(buildkite-agent meta-data get "BENCHMARK_TIME")
+export BENCHMARK_TIME
 export RUN_TYPE="${RUN_TYPE:-DAILY}"
 
 # Dynamically update the Buildkite step label
@@ -98,6 +100,7 @@ declare -a BENCHMARK_DOCKER_ARGS=(
   "-e" "RECORD_ID=$RECORD_ID"
   "-e" "RUN_TYPE=$RUN_TYPE"
   "-e" "CODE_HASH=${CODE_HASH}"
+  "-e" "BENCHMARK_TIME=${BENCHMARK_TIME}"
   "-e" "JOB_REFERENCE=${JOB_REFERENCE}"
   "-e" "BUILDKITE=${BUILDKITE}"
   "-e" "BUILDKITE_AGENT_NAME=${BUILDKITE_AGENT_NAME}"

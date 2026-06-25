@@ -252,6 +252,8 @@ fi
   fi
 )
 
+echo "[DEBUG] BENCHMARK_TIME=${BENCHMARK_TIME:-}"
+
 # Database Reporting Logic (ON CONFLICT (RecordId) DO UPDATE SET)
 if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANCE_ID:-}" ]]; then
   if [ "$EXIT_CODE" -ne 0 ]; then
@@ -338,6 +340,7 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
   SQL_STATUS=$(prepare_sql_val "$FINAL_STATUS" "FAILED")
   SQL_USER=$(prepare_sql_val "${USER:-buildkite-agent}" "buildkite-agent")
   SQL_JOB_REFERENCE=$(prepare_sql_val "${JOB_REFERENCE:-}" "''")
+  SQL_BENCHMARK_TIME=$(prepare_sql_val "${BENCHMARK_TIME:-}" "''")
   SQL_AGENT_NAME=$(prepare_sql_val "${BUILDKITE_AGENT_NAME:-}" "''")
   SQL_DEVICE=$(prepare_sql_val "${DEVICE:-}" "''")
   SQL_MODEL=$(prepare_sql_val "${MODEL:-}" "''")
@@ -361,7 +364,7 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
 
   SQL="INSERT INTO RunRecord (
       RecordId, Status, CreatedTime, LastUpdate, CreatedBy, JobReference, RunBy,
-      Device, Model, RunType, CodeHash,
+      Device, Model, RunType, CodeHash, BenchmarkTime,
       CaseName,
       MaxNumSeqs, MaxNumBatchedTokens, TensorParallelSize, MaxModelLen,
       Dataset, InputLen, OutputLen,
@@ -369,7 +372,7 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
       ExtraEnvs, AdditionalConfig, ExtraArgs, TryCount, Config $insert_cols
     ) VALUES (
       $SQL_RECORD_ID, $SQL_STATUS, PENDING_COMMIT_TIMESTAMP(), PENDING_COMMIT_TIMESTAMP(), $SQL_USER, $SQL_JOB_REFERENCE, $SQL_AGENT_NAME,
-      $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH,
+      $SQL_DEVICE, $SQL_MODEL, $SQL_RUN_TYPE, $SQL_CODE_HASH, $SQL_BENCHMARK_TIME,
       $SQL_CASE_NAME,
       $SQL_MAX_NUM_SEQS, $SQL_MAX_NUM_BATCHED_TOKENS, $SQL_TENSOR_PARALLEL_SIZE, $SQL_MAX_MODEL_LEN,
       $SQL_DATASET, $SQL_INPUT_LEN, $SQL_OUTPUT_LEN,

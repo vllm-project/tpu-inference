@@ -200,9 +200,11 @@ upload_benchmark_pipeline() {
     TPU_COMMIT_HASH=$(git rev-parse HEAD)
     CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_COMMIT_HASH}-"
     buildkite-agent meta-data set "CODE_HASH" "${CODE_HASH}"
+    BENCHMARK_TIME="$(date -u +"%Y-%m-%dT%H:%M:%S.%6NZ")"
     TIMEZONE="America/Los_Angeles"
     JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
     buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
+    buildkite-agent meta-data set "BENCHMARK_TIME" "${BENCHMARK_TIME}"
     echo "[BM-DEBUG] Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     echo "[BM-DEBUG] Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
 
