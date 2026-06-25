@@ -259,6 +259,16 @@ class EagleLlama3WeightLoader(BaseWeightLoader):
                 dtype=model.model.embed_tokens.embedding.dtype,
             )
 
+        # If the checkpoint doesn't contain draft_id_to_target_id (e.g. when draft_vocab_size == target_vocab_size),
+        # we initialize it to zeros so that `targets = base + zeros` acts as an identity mapping,
+        # which also allows the model to pass JAX JIT compilation.
+        if hasattr(model, "draft_id_to_target_id") and isinstance(
+                model.draft_id_to_target_id.value, jax.ShapeDtypeStruct):
+            model.draft_id_to_target_id.value = jnp.zeros(
+                model.draft_id_to_target_id.value.shape,
+                dtype=model.draft_id_to_target_id.value.dtype,
+            )
+
 
 class EagleLlama3ForCausalLM(nnx.Module):
     WeightLoader = EagleLlama3WeightLoader

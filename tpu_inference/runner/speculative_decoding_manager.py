@@ -182,7 +182,8 @@ class SpeculativeDecodingManager:
         if self.runner.speculative_config.method == "mtp":
             aux_hidden_states_for_drafter = (hidden_states, )
         else:
-            aux_hidden_states_for_drafter = aux_hidden_states
+            aux_hidden_states_for_drafter = tuple(aux_hidden_states) + (
+                hidden_states, )
 
         target_hidden_states, input_ids, last_token_indices, attn_metadata = self.runner.drafter.prepare_inputs(
             attn_metadata,

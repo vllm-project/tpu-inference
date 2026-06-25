@@ -58,6 +58,11 @@ class Eagle3Proposer:
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
 
+        eagle_config = getattr(self.draft_model_config.hf_config,
+                               "eagle_config", {})
+        self.use_aux_hidden_state = eagle_config.get("use_aux_hidden_state",
+                                                     True)
+
         self.runner = runner
         self.mesh = runner.mesh
         self.num_speculative_tokens = (
@@ -297,9 +302,14 @@ class Eagle3Proposer:
         if self.method == "mtp":
             target_hidden_states = aux_hidden_states[0]
         else:
-            target_hidden_states = jnp.concatenate(aux_hidden_states, axis=-1)
-            target_hidden_states = self.combine_hidden_states_fn(
-                state_leaves, target_hidden_states)
+            hidden_states = aux_hidden_states[-1]
+            actual_aux = aux_hidden_states[:-1]
+            if not getattr(self, "use_aux_hidden_state", True):
+                target_hidden_states = hidden_states
+            else:
+                target_hidden_states = jnp.concatenate(actual_aux, axis=-1)
+                target_hidden_states = self.combine_hidden_states_fn(
+                    state_leaves, target_hidden_states)
 
         input_ids, last_token_indices = self._prepare_input_ids(
             query_start_loc, target_token_ids, next_token_ids, num_reqs)
