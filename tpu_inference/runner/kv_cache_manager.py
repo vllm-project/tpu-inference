@@ -921,7 +921,8 @@ class KVCacheManager:
                                 # There are 21 CSA layers, 43 SWA caches,
                                 # since 43 % 21 !=0, there is one SWA cache
                                 # not sharing a KV tensor with other caches.
-                                assert "swa_cache" in layer_name
+                                assert "swa_cache" in kv_cache_tensor.shared_by[
+                                    0]
                                 assert len(kv_cache_tensor.shared_by) == 1
                                 block_size = (kv_caches[-1].shape[1] *
                                               kv_caches[-1].shape[2])
