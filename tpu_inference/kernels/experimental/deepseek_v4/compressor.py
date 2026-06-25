@@ -102,6 +102,7 @@ def compressor_forward(
 
     cache = compress_norm_rope_store(
         cache=cache,
+        state_cache=state_view,
         positions=positions,
         slot_mapping=slot_mapping,
         block_table=block_table,
@@ -152,6 +153,7 @@ def compressor_forward_indexer(
 
     cache = compress_norm_rope_store_indexer(
         cache=cache,
+        state_cache=state_view,
         positions=positions,
         slot_mapping=slot_mapping,
         block_table=block_table,
