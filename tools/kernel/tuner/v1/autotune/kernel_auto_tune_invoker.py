@@ -178,7 +178,8 @@ class KernelAutoTuneInvoker:
                 tpu = 'tpu6e' if 'tpu6e' in row['TPU'] else 'tpu7x'
                 if (kernel_tuner_name, tpu) in generated_cases:
                     continue
-                tuning_group_keys.append(f'{kernel_tuner_name}_{tpu}_tuning_group')
+                tuning_group_keys.append(
+                    f'{kernel_tuner_name}_{tpu}_tuning_group')
                 generated_cases.add((kernel_tuner_name, tpu))
                 supported_core_num = 1 if tpu == 'tpu6e' else 2
                 pipeline['steps'].append(
@@ -190,10 +191,11 @@ class KernelAutoTuneInvoker:
                         tpu_cores=supported_core_num,
                         case_set_desc=f'{kernel_tuner_name}_autotune',
                         parent_step_key=os.environ.get('BUILDKITE_STEP_KEY',
-                                                    None)))
+                                                       None)))
         pipeline['steps'].append(
             self._build_result_processing_step(
-                parent_step_keys=tuning_group_keys or [os.environ.get('BUILDKITE_STEP_KEY', None)]))
+                parent_step_keys=tuning_group_keys
+                or [os.environ.get('BUILDKITE_STEP_KEY', None)]))
         os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
         with open(OUTPUT_PATH, "w") as f:
             logger.info(

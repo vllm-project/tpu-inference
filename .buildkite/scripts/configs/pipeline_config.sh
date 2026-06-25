@@ -125,7 +125,6 @@ process_json_benchmark_cases() {
     fi
 
     # 2. Upload the captured YAML (stdout from python)
-    echo "--- TO_REMOVE debug generated py_output ${py_output}"
     if ! upload_with_priority <(echo "$py_output") "$priority"; then
       echo "🚨 Upload failed for $f"
       error_msgs+=("❌ Upload Failure for $f")

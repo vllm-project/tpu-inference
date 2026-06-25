@@ -45,36 +45,6 @@ TIMEZONE="America/Los_Angeles"
 JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
 buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
 
-# below should move to each benchmark case script
-# # EXTRA_ENVS="KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
-# # extract KERNEL_AUTOTUNE_STAGE from EXTRA_ENVS and set it as an environment variable
-# if [[ -n "${EXTRA_ENVS:-}" ]]; then
-#     KERNEL_AUTOTUNE_STAGE=$(echo "$EXTRA_ENVS" | tr ' ,' '\n' | grep '^KERNEL_AUTOTUNE_STAGE=' | cut -d= -f2-)
-#     if [[ -z "${KERNEL_AUTOTUNE_STAGE}" ]]; then
-#         unset KERNEL_AUTOTUNE_STAGE
-#     else
-#         echo "🚀 KERNEL_AUTOTUNE_STAGE set to ${KERNEL_AUTOTUNE_STAGE}"
-#     fi
-# fi
-# if [[ "${KERNEL_AUTOTUNE_STAGE:-}" == "POST_KERNEL_AUTOTUNE_BM_RERUN" ]]; then
-#     # use the KERNEL_AUTOTUNE_ID from the EXTRA_ENVS and construct the branch name and checkout the remote branch for the kernel autotune result evaluation. 
-#     # This is to ensure that the benchmark runs with the correct tuned parameters.
-#     # Extract the KERNEL_AUTOTUNE_ID from the EXTRA_ENVS
-#     # Example EXTRA_ENVS="KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID"
-#     KERNEL_AUTOTUNE_ID=$(echo "$EXTRA_ENVS" | tr ' ,' '\n' | grep '^KERNEL_AUTOTUNE_ID=' | cut -d= -f2-)
-#     if [ -z "$KERNEL_AUTOTUNE_ID" ]; then
-#         echo "Error: KERNEL_AUTOTUNE_ID is not set in EXTRA_ENVS."
-#         exit 1
-#     fi
-#     # Construct the branch name, this should match the branch name used in the kernel_auto_tune_invoker.py
-#     BRANCH_NAME="kernel_autotune.update_tuned_params_${KERNEL_AUTOTUNE_ID}"
-#     git fetch
-#     git checkout "${BRANCH_NAME}"
-#     COMMIT_MESSAGE=$(git log -1 --pretty=%B)
-#     echo "🚀 Running in POST_KERNEL_AUTOTUNE_BM_RERUN mode in branch ${BRANCH_NAME}"
-#     echo "Last commit message: ${COMMIT_MESSAGE}"
-# fi
-
 upload_benchmark_pipeline() {
     local dependency_step="${1:-}"
     local target_case_type="$BM_CASE_TYPE"
