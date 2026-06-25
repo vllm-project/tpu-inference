@@ -105,7 +105,7 @@ TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
 
 if [ -n "${KERNEL_AUTO_TUNING_ENABLED:-}" ]; then
     echo "--- :pipeline: Uploading pipeline_kernel_auto_tuning.yml for kernel tuning"
-    export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$$(date +%Y-%m-%d-%H-%M)
+    export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$(date +%Y-%m-%d-%H-%M)
     # export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-23-07-10"
     echo "🚀 KERNEL_AUTOTUNE_ID set to ${KERNEL_AUTOTUNE_ID}"
     buildkite-agent meta-data set "KERNEL_AUTOTUNE_ID" "${KERNEL_AUTOTUNE_ID}"
