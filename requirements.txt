@@ -5,12 +5,15 @@ pytest-mock
 absl-py
 numpy
 google-cloud-storage
-jax==0.10.0
-jaxlib==0.10.0
-libtpu==0.0.40
+jax==0.10.2
+jaxlib==0.10.2
+libtpu==0.0.42.1
 jaxtyping
+# Temporarily restrict fastapi version due to https://github.com/vllm-project/vllm/pull/45629
+# TODO(lk-chen): remove once LKG moves past above commit
+fastapi[standard]<0.137.0
 flax==0.12.4
-torchax==0.0.11
+torchax==0.0.13
 qwix==0.1.2
 torchvision==0.25.0
 pathwaysutils
@@ -21,5 +24,4 @@ gcsfs==2026.1.0
 hypothesis==6.151.9
 sortedcontainers==2.4.0
 # Upstream pins to 5.5.3 https://github.com/vllm-project/vllm/blob/de3fe8dc62f3d77eb8dab8125ca90436f606bccb/requirements/test/nightly-torch.txt#L32
-# TODO: unpin once transformers release with the fix https://github.com/huggingface/transformers/pull/45680
-transformers==5.5.3
+transformers>=5.8.0

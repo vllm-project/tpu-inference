@@ -467,7 +467,9 @@ def _ragged_paged_attention_kernel_loop(
             s = soft_cap * jnp.tanh(s / soft_cap)
 
         int_ty = jnp.int32
-        if get_dtype_packing(q_dtype) != 1 and get_tpu_version() >= 6:
+        max_kv_len = pages_per_seq * page_size
+        if (get_dtype_packing(q_dtype) != 1 and get_tpu_version() >= 6
+                and max_kv_len <= jnp.iinfo(jnp.int16).max):
             int_ty = jnp.int16
         processed_q_len_int = processed_q_len.astype(int_ty)
         processed_kv_len_int = processed_kv_len.astype(int_ty)

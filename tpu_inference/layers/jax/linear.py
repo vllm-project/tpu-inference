@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import jax
+import jax.numpy as jnp
 from flax import nnx
 
 from tpu_inference.layers.jax import JaxModule
@@ -169,3 +170,115 @@ class JaxLmHead(nnx.Einsum, JaxModule):
 
     def __call__(self, inputs: jax.Array) -> jax.Array:
         return jax.numpy.einsum(self.einsum_str, inputs, self.weight.value)
+
+
+class JaxMergedColumnParallelLinear(JaxLinear):
+    """Merged version of JaxLinear. This is used to fuse multiple
+    JaxLinear layers into one for better efficiency.
+
+    The einsum string is the same as JaxLinear, but the weight is expected to
+    have multiple output dimensions concatenated together, and the output will
+    be split accordingly.
+
+    Args:
+        input_size: input dimension of the linear layer.
+        output_sizes: a list of output dimensions for each fused linear layer.
+        use_bias: If false, skip adding bias.
+        param_dtype: Data type for the parameters.
+        quant_config: Quantization configuration.
+        prefix: Prefix for parameter names.
+    """
+
+    def __init__(self,
+                 input_size: int,
+                 output_sizes: list[int],
+                 rngs,
+                 *,
+                 use_bias: bool = True,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "",
+                 **kwargs):
+        # Must be set before super().__init__(): JaxEinsum.__init__ calls
+        # quant_config.get_quant_method(self), which reads self.output_sizes to
+        # build the merged linear's QuantLinearConfig.
+        self.output_sizes = output_sizes
+        if quant_config is None:
+            # When no quant_config is provided, UnquantizedConfig is inserted
+            # to ensure quant_method is hooked up, which is necessary to properly
+            # fuse sharded weights.
+            # Imported locally to avoid an import cycle (the quantization
+            # package imports this module).
+            from tpu_inference.layers.jax.quantization.unquantized import \
+                UnquantizedConfig
+            quant_config = UnquantizedConfig({})
+        super().__init__(input_size=input_size,
+                         output_size=sum(output_sizes),
+                         rngs=rngs,
+                         use_bias=use_bias,
+                         quant_config=quant_config,
+                         prefix=prefix,
+                         **kwargs)
+
+
+class JaxQKVParallelLinear(JaxMergedColumnParallelLinear):
+    """Fused QKV Parallel Linear layer for JAX-native models.
+
+    Performs fused Q, K, and V projections in a single HBM read pass and
+    partitions them locally per TPU device without incurring all-to-all collectives.
+    """
+
+    def __init__(self,
+                 *,
+                 hidden_size: int,
+                 num_heads: int,
+                 num_kv_heads: int,
+                 head_dim: int,
+                 use_bias: bool,
+                 dtype: jnp.dtype,
+                 rngs: nnx.Rngs,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+
+        self.q_size = num_heads * head_dim
+        self.k_size = num_kv_heads * head_dim
+        self.v_size = num_kv_heads * head_dim
+        super().__init__(
+            input_size=hidden_size,
+            output_sizes=[self.q_size, self.k_size, self.v_size],
+            rngs=rngs,
+            use_bias=use_bias,
+            quant_config=quant_config,
+            prefix=prefix,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.uniform(),
+                                              (None, "model")),
+            bias_init=nnx.with_partitioning(nnx.initializers.uniform(),
+                                            ("model", )) if use_bias else None,
+        )
+
+    def __call__(self, x: jax.Array) -> Tuple[jax.Array, jax.Array, jax.Array]:
+        # Single projection operation (loads inputs from HBM once)
+        outs = super().__call__(x)
+
+        # Slice the concatenated [Q, K, V] output directly into individual Q, K, V components.
+        # This is safe and 100% correct because super().__call__ (via apply_jax/_apply_fused)
+        # has already un-interleaved the TP-sharded outputs and concatenated them into
+        # a continuous [Q, K, V] layout across features.
+        q_sz = self.q_size
+        k_sz = self.k_size
+
+        q_flat = outs[..., :q_sz]
+        k_flat = outs[..., q_sz:q_sz + k_sz]
+        v_flat = outs[..., q_sz + k_sz:]
+
+        # Reshape directly to their global multi-head shapes (metadata change under JAX!)
+        q = q_flat.reshape(outs.shape[:-1] + (self.num_heads, self.head_dim))
+        k = k_flat.reshape(outs.shape[:-1] +
+                           (self.num_kv_heads, self.head_dim))
+        v = v_flat.reshape(outs.shape[:-1] +
+                           (self.num_kv_heads, self.head_dim))
+
+        return q, k, v

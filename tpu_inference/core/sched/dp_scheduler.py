@@ -68,6 +68,7 @@ class SchedulerCommand(Enum):
     GET_REQUEST_COUNTS = "get_request_counts"
     GET_TOKEN_COUNT = "get_token_count"
     GET_PENDING_PREFILL_TOKENS = "get_pending_prefill_tokens"
+    GET_MIN_REMAINING_OUTPUT = "get_min_remaining_output"
     PROBE_COMPUTED_BLOCKS = "probe_computed_blocks"
     RESET_ENCODER_CACHE = "reset_encoder_cache"
     SET_PAUSE_STATE = "set_pause_state"
@@ -144,16 +145,32 @@ def _scheduler_worker_process(
 ):
     """Worker process that manages a single scheduler instance."""
     # Initialize the scheduler in this process
-    scheduler = original_scheduler_cls(
-        vllm_config=vllm_config,
-        kv_cache_config=kv_cache_config,
-        structured_output_manager=structured_output_manager,
-        block_size=block_size,
-        hash_block_size=hash_block_size,
-        mm_registry=mm_registry,
-        include_finished_set=include_finished_set,
-        log_stats=log_stats,
-    )
+    import inspect
+    sig = inspect.signature(original_scheduler_cls)
+    scheduler_kwargs = {
+        "vllm_config": vllm_config,
+        "kv_cache_config": kv_cache_config,
+        "structured_output_manager": structured_output_manager,
+        "block_size": block_size,
+        "mm_registry": mm_registry,
+        "include_finished_set": include_finished_set,
+        "log_stats": log_stats,
+    }
+    if "hash_block_size" in sig.parameters:
+        scheduler_kwargs["hash_block_size"] = hash_block_size
+
+    import os
+
+    enable_continue_decode = False
+    if hasattr(vllm_config, "additional_config"):
+        enable_continue_decode = vllm_config.additional_config.get(
+            "enable_continue_decode", False)
+
+    if enable_continue_decode:
+        from tpu_inference.core.sched.utils import \
+            patch_vllm_scheduler_for_continue_decode
+        patch_vllm_scheduler_for_continue_decode()
+    scheduler = original_scheduler_cls(**scheduler_kwargs)
 
     _cached_scheduler_outputs: deque[SchedulerOutput] = deque()
 
@@ -175,7 +192,8 @@ def _scheduler_worker_process(
                     _send_result(None)  # Signal completion
 
                 case SchedulerCommand.SCHEDULE:
-                    output = scheduler.schedule()
+                    args, kwargs = data if data is not None else ((), {})
+                    output = scheduler.schedule(*args, **kwargs)
                     _cached_scheduler_outputs.append(output)
                     _send_result(output)
 
@@ -252,6 +270,19 @@ def _scheduler_worker_process(
                     for req in scheduler.waiting:
                         pending += req.num_prompt_tokens
                     _send_result(pending)
+
+                case SchedulerCommand.GET_MIN_REMAINING_OUTPUT:
+                    # Smallest (max_tokens - len(output_token_ids)) across
+                    # this rank's running reqs. Used as an admission
+                    # tiebreaker: lower = a running req closer to its
+                    # max_tokens, so this rank will likely free a slot
+                    # soonest.
+                    if not scheduler.running:
+                        _send_result(2**31 - 1)
+                    else:
+                        _send_result(
+                            min(r.max_tokens - len(r.output_token_ids)
+                                for r in scheduler.running))
 
                 case SchedulerCommand.PROBE_COMPUTED_BLOCKS:
                     # Probe for cached blocks without recording prefix cache stats.
@@ -598,12 +629,70 @@ class DPScheduler(SchedulerInterface):
 
         return pending
 
+    def _get_rank_inflight_reqs(self) -> Dict[int, int]:
+        """Per-rank count of in-flight requests (running + waiting)."""
+        for rank in range(self.dp_size):
+            self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
+
+        inflight: Dict[int, int] = {}
+        for rank in range(self.dp_size):
+            running, waiting = self._get_result(
+                rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            inflight[rank] = running + waiting
+
+        return inflight
+
+    def _get_rank_min_remaining_output(self) -> Dict[int, int]:
+        """Per-rank min (max_tokens - len(output_token_ids)) across running
+        reqs. Lower = a running req closer to its max_tokens, so this rank
+        will likely free a slot soonest. Used as an admission tiebreaker."""
+        for rank in range(self.dp_size):
+            self._send_command(rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+        result: Dict[int, int] = {}
+        for rank in range(self.dp_size):
+            result[rank] = self._get_result(
+                rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+        return result
+
+    def _get_rank_routing_state(
+            self) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, int]]:
+        """Per-rank (pending_prefill_tokens, inflight_reqs,
+        min_remaining_output) collected in a single round-trip.
+
+        Send all comments first and collect all results after to
+        allow pipelinening across ranks, minimizing the overhead."""
+        for rank in range(self.dp_size):
+            self._send_command(rank,
+                               SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
+            self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            self._send_command(rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+
+        pending: Dict[int, int] = {}
+        inflight: Dict[int, int] = {}
+        min_remaining: Dict[int, int] = {}
+        for rank in range(self.dp_size):
+            pending[rank] = self._get_result(
+                rank, SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
+            running, waiting = self._get_result(
+                rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            inflight[rank] = running + waiting
+            min_remaining[rank] = self._get_result(
+                rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
+        return pending, inflight, min_remaining
+
     def _find_best_rank_for_request(self, request: Request) -> int:
         """Find the best DP rank for a new request based on load balancing.
 
         Two-tier strategy:
         1. Prefix cache hit: assign to rank with best cache hit.
-        2. Otherwise: pick rank with the fewest pending prefill tokens.
+        2. Otherwise:
+           - Primary key: fewest pending prefill tokens (keeps prefill
+             balanced across ranks).
+           - Secondary key: fewest in-flight reqs (balances decode load
+             across ranks under DP lockstep once prefills finish).
+           - Tertiary key: rank whose running req is closest to its
+             max_tokens (smallest remaining output tokens), which is
+             most likely to free a slot soon.
         """
         # First, try to find a rank with prefix cache hit.
         if self.vllm_config.cache_config.enable_prefix_caching:
@@ -623,8 +712,9 @@ class DPScheduler(SchedulerInterface):
             if best_cache_tokens > 0:
                 return best_cache_rank
 
-        pending = self._get_rank_pending_prefill_tokens()
-        return min(pending, key=pending.get)
+        pending, inflight, min_remaining = self._get_rank_routing_state()
+        return min(range(self.dp_size),
+                   key=lambda r: (pending[r], inflight[r], min_remaining[r]))
 
     def add_request(self, request: Request) -> None:
         """
@@ -696,7 +786,7 @@ class DPScheduler(SchedulerInterface):
             return
 
     @time_function
-    def schedule(self) -> DPSchedulerOutput:
+    def schedule(self, *args, **kwargs) -> DPSchedulerOutput:
         """
         Main scheduling method that coordinates all DP rank schedulers.
 
@@ -719,7 +809,7 @@ class DPScheduler(SchedulerInterface):
 
         # Run each scheduler independently
         for rank in range(self.dp_size):
-            self._send_command(rank, SchedulerCommand.SCHEDULE)
+            self._send_command(rank, SchedulerCommand.SCHEDULE, (args, kwargs))
 
         # Collect outputs from all workers (unordered to avoid HOL blocking)
         rank_outputs = self._collect_results_unordered(
@@ -787,6 +877,53 @@ class DPScheduler(SchedulerInterface):
         for rank, output in enumerate(rank_outputs):
             req_ids_per_rank[rank] = list(output.num_scheduled_tokens.keys())
 
+        # Combine kv_connector_metadata from all DP rank outputs
+        combined_kv_connector_metadata = None
+        if rank_outputs:
+            num_blocks_per_rank = self.per_rank_kv_cache_configs[0].num_blocks
+
+        for rank, output in enumerate(rank_outputs):
+            meta = output.kv_connector_metadata
+            if meta is not None:
+                if combined_kv_connector_metadata is None:
+                    combined_kv_connector_metadata = type(meta)()
+
+                # Dynamically merge fields depending on the active connector type
+                if hasattr(meta, "requests_meta"):
+                    # Translate local block IDs to global logical block IDs
+                    rank_offset = rank * num_blocks_per_rank
+                    for req_meta in meta.requests_meta:
+                        if hasattr(req_meta, "local_block_ids"
+                                   ) and req_meta.local_block_ids:
+                            req_meta.local_block_ids = [
+                                b + rank_offset
+                                for b in req_meta.local_block_ids
+                            ]
+                        if hasattr(req_meta, "save_spec"
+                                   ) and req_meta.save_spec is not None:
+                            if hasattr(req_meta.save_spec, "src_blocks"
+                                       ) and req_meta.save_spec.src_blocks:
+                                req_meta.save_spec.src_blocks = [
+                                    b + rank_offset
+                                    for b in req_meta.save_spec.src_blocks
+                                ]
+                        if hasattr(req_meta, "load_spec"
+                                   ) and req_meta.load_spec is not None:
+                            if hasattr(req_meta.load_spec, "dst_blocks"
+                                       ) and req_meta.load_spec.dst_blocks:
+                                req_meta.load_spec.dst_blocks = [
+                                    b + rank_offset
+                                    for b in req_meta.load_spec.dst_blocks
+                                ]
+                    combined_kv_connector_metadata.requests_meta.extend(
+                        meta.requests_meta)
+                if hasattr(meta, "reqs_to_send"):
+                    combined_kv_connector_metadata.reqs_to_send.update(
+                        meta.reqs_to_send)
+                if hasattr(meta, "reqs_to_load"):
+                    combined_kv_connector_metadata.reqs_to_load.update(
+                        meta.reqs_to_load)
+
         return DPSchedulerOutput(
             scheduled_new_reqs=all_new_reqs,
             scheduled_cached_reqs=combined_cached_data,
@@ -800,6 +937,7 @@ class DPScheduler(SchedulerInterface):
             assigned_dp_rank=assigned_dp_rank,
             max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
             req_ids_per_rank=req_ids_per_rank,
+            kv_connector_metadata=combined_kv_connector_metadata,
         )
 
     def _combine_cached_request_data(

@@ -18,6 +18,7 @@ import time
 import jax
 import jax.numpy as jnp
 import numpy as np
+from absl import flags
 from vllm.utils.math_utils import cdiv
 
 from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
@@ -31,6 +32,21 @@ from tpu_inference.utils import align_to, get_dtype_packing
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+flags.DEFINE_integer("mla_total_num_pages", 1506,
+                     "Total number of pages in the cache.")
+flags.DEFINE_integer("mla_page_size_per_kv_packing", 256,
+                     "Page size per KV packing.")
+flags.DEFINE_integer("mla_kv_packing", 4, "Packing factor for KV.")
+flags.DEFINE_integer("mla_max_num_seqs", 160,
+                     "Maximum number of sequences in the batch.")
+flags.DEFINE_integer("mla_pages_per_seq", 9, "Number of pages per sequence.")
+flags.DEFINE_integer("mla_actual_num_q_heads", 128,
+                     "Actual number of Q heads.")
+flags.DEFINE_integer("mla_actual_lkv_dim", 512, "Actual NOPE head dimension.")
+flags.DEFINE_integer("mla_actual_r_dim", 64, "Actual ROPE head dimension.")
+flags.DEFINE_string("mla_kv_dtype", "float8_e4m3fn", "KV cache data type.")
+flags.DEFINE_string("mla_q_dtype", "float8_e4m3fn", "Q activation dtype.")
 
 
 def _generate_mla_inputs(
@@ -153,20 +169,23 @@ class MlaKernelTuner(KernelTunerBase):
         # The tuningKey and tunableParams in this list is constructed based on the real kernel execution logs during benchmarking.
         # The tunableParams currently represent the baseline configuration from the attention_interface.py.
         # From the log, only the max_num_tokens is different across different cases
-        for max_num_tokens in [4, 8, 16, 32, 64, 128, 160, 256, 512]:
+        for max_num_tokens in [
+                4, 8, 16, 32, 64, 128, 160, 256, 512, 1024, 2048
+        ]:
             tuning_set_from_log.append([
                 TuningKey(
                     max_num_tokens=max_num_tokens,
-                    actual_num_q_heads=128,
-                    actual_lkv_dim=512,
-                    actual_r_dim=64,
-                    kv_dtype="float8_e4m3fn",
-                    q_dtype="float8_e4m3fn",
-                    total_num_pages=1506,
-                    page_size_per_kv_packing=256,
-                    kv_packing=4,
-                    max_num_seqs=160,
-                    pages_per_seq=9,
+                    actual_num_q_heads=flags.FLAGS.mla_actual_num_q_heads,
+                    actual_lkv_dim=flags.FLAGS.mla_actual_lkv_dim,
+                    actual_r_dim=flags.FLAGS.mla_actual_r_dim,
+                    kv_dtype=flags.FLAGS.mla_kv_dtype,
+                    q_dtype=flags.FLAGS.mla_q_dtype,
+                    total_num_pages=flags.FLAGS.mla_total_num_pages,
+                    page_size_per_kv_packing=flags.FLAGS.
+                    mla_page_size_per_kv_packing,
+                    kv_packing=flags.FLAGS.mla_kv_packing,
+                    max_num_seqs=flags.FLAGS.mla_max_num_seqs,
+                    pages_per_seq=flags.FLAGS.mla_pages_per_seq,
                     s_dtype="bfloat16",
                     case="batched_decode",
                     soft_cap=None,

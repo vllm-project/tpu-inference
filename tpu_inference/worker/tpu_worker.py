@@ -116,6 +116,19 @@ class TPUWorker(WorkerBase):
         self.pp_config = PPConfig(vllm_config, rank, ip, prev_worker_ip,
                                   self.parallel_config.pipeline_parallel_size)
 
+        # If model_weights is set, and we are in a distributed environment on Ray,
+        # the driver might have overwritten `model` to its local cache path.
+        # We need to restore it to the original GCS URI (stored in `model_weights`)
+        # so this remote worker can pull it.
+        if (hasattr(self.model_config, "model_weights")
+                and self.model_config.model_weights
+                and isinstance(self.model_config.model, str)
+                and not os.path.exists(self.model_config.model)):
+            logger.info("Restoring model path to GCS URI: %s",
+                        self.model_config.model_weights)
+            self.model_config.model = self.model_config.model_weights
+            self.model_config.model_weights = None
+
         # Explicitly trigger RunAI download on the worker if needed.
         # This handles downloading config.json and other non-weight files to the
         # worker's local cache before VllmModelWrapper initialization.
@@ -336,9 +349,10 @@ class TPUWorker(WorkerBase):
         finally:
             self.parallel_config.data_parallel_size = saved_dp_size
 
+        pp_rank = 0 if self.parallel_config.pipeline_parallel_size == 1 else self.rank
         jax_parallel_state.init_pp_distributed_environment(
             self.pp_config.ip,
-            self.rank,
+            pp_rank,
             self.parallel_config.pipeline_parallel_size,
             self.devices[0],
             need_pp=self.parallel_config.pipeline_parallel_size > 1)
@@ -573,6 +587,7 @@ class TPUWorker(WorkerBase):
                  and self.model_runner.model_config.enforce_eager)):
             self.model_runner.compilation_manager._precompile_sampling()
             self.model_runner.compilation_manager._precompile_gather_logprobs()
+            self.model_runner.compilation_manager._flush_compilations()
 
         # Init kv cache connector here, because it requires `kv_cache_config`.
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)

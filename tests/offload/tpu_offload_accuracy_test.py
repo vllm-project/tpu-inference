@@ -142,9 +142,7 @@ def _test_kv_cache_cpu_offloading_accuracy(
             assert out_tokens1[i] == out_tokens2[
                 i], f"Token mismatch in request {i}"
 
-        del llm
-        # Waiting for TPUs to be released.
-        time.sleep(20)
+        llm.llm_engine.engine_core.shutdown()
         return pass1_time, pass2_time
 
 

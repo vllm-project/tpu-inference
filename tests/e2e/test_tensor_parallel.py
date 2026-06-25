@@ -91,8 +91,7 @@ def _run_inference(
     outputs = llm.generate(test_prompts, sampling_params)
     elapsed_time = time.time() - start_time
 
-    del llm
-    time.sleep(10)
+    llm.llm_engine.engine_core.shutdown()
     return outputs, elapsed_time
 
 

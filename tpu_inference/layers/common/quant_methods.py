@@ -14,7 +14,8 @@
 
 UNQUANTIZED = "unquantized"
 MXFP4 = "gpt_oss_mxfp4"
-AWQ = "awq"
+AWQ = "auto_awq"
 COMPRESSED_TENSORS = "compressed-tensors"
 FP8 = "fp8"
 NVFP4 = "modelopt_fp4"
+DSV4_FP8 = "deepseek_v4_fp8"

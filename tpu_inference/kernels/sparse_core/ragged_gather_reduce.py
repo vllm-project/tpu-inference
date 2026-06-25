@@ -21,6 +21,8 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
+from tpu_inference.kernels.sparse_core import core_map_helper
+
 
 # ceil up to the nearest multiple of b.
 def _align_to(a, b):
@@ -52,7 +54,7 @@ def _pad_inputs_if_needed(
     num_simd_lanes: int,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Pads inputs if needed."""
-    input_size = x.shape[0]
+    input_size = indices.shape[0]
     hidden_size = x.shape[1]
     aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
     row_tile_size = num_simd_lanes
@@ -64,7 +66,7 @@ def _pad_inputs_if_needed(
 
     x = jnp.pad(
         x,
-        ((0, pad_input_size), (0, aligned_hidden_size - hidden_size)),
+        ((0, 0), (0, aligned_hidden_size - hidden_size)),
         constant_values=0,
     )
     indices = jnp.pad(indices, (0, pad_input_size), constant_values=0)
@@ -141,7 +143,7 @@ def main_kernel(
     )
     def inner_kernel():
         core_id = pl.program_id(0)
-        row_partition_size = in_hbm_ref.shape[0] // num_row_partitions
+        row_partition_size = indices_hbm_ref.shape[0] // num_row_partitions
         row_partition_id = core_id // num_column_partitions
         col_partition_id = core_id % num_column_partitions
 
@@ -443,30 +445,30 @@ def ragged_gather_reduce(
 ) -> jax.Array:
     """Gathers `x` according to `indices`, applies weights and masks, and reduces.
 
-  This function performs a gathered lookup from `x` using `indices`, scales the
-  obtained rows by `topk_weights`, masks out any rows where `valid_rows_mask` is
-  False, and then groups every `reduce_group_size` rows together and reduces
-  them via summation.
+    This function performs a gathered lookup from `x` using `indices`, scales the
+    obtained rows by `topk_weights`, masks out any rows where `valid_rows_mask` is
+    False, and then groups every `reduce_group_size` rows together and reduces
+    them via summation.
 
-  The typical use case of this kernel is unpermute + local-reduction in the
-  MOE after GMM. Compared to maxtext.src.maxtext.kernels.gather_reduce_sc,
-  this kernel provides better performance if large sparsity exists in
-  `valid_rows_mask`. For example, expert_parallelism =8, 16 etc.
+    The typical use case of this kernel is unpermute + local-reduction in the
+    MOE after GMM. Compared to maxtext.src.maxtext.kernels.gather_reduce_sc,
+    this kernel provides better performance if large sparsity exists in
+    `valid_rows_mask`. For example, expert_parallelism =8, 16 etc.
 
-  Args:
-    x: A 2D JAX array of input features with shape `(input_size, hidden_size)`.
-    indices: A 1D JAX array of indices to gather with shape `(input_size,)`.
-    topk_weights: A 1D JAX array of weights to scale the gathered rows with
-      shape `(input_size,)`.
-    valid_rows_mask: A 1D boolean JAX array indicating which gathered rows are
-      valid, with shape `(input_size,)`.
-    reduce_group_size: An integer representing the number of consecutive rows to
-      reduce (sum) together.
+    Args:
+        x: A 2D JAX array of input features with shape `(input_size, hidden_size)`.
+        indices: A 1D JAX array of indices to gather with shape `(input_size,)`.
+        topk_weights: A 1D JAX array of weights to scale the gathered rows with
+        shape `(input_size,)`.
+        valid_rows_mask: A 1D boolean JAX array indicating which gathered rows are
+            valid, with shape `(input_size,)`.
+        reduce_group_size: An integer representing the number of consecutive rows to
+            reduce (sum) together.
 
-  Returns:
-    A 2D JAX array of reduced data with shape
-    `(input_size // reduce_group_size, hidden_size)`.
-  """
+    Returns:
+        A 2D JAX array of reduced data with shape
+        `(input_size // reduce_group_size, hidden_size)`.
+    """
 
     assert x.ndim == 2, "ragged_gather_reduce only supports 2d inputs."
     assert indices.ndim == 1, "ragged_gather_reduce only supports 1d indices."
@@ -545,7 +547,7 @@ def ragged_gather_reduce(
     )
     # Each output row from `main_kernel` will be of type float32, and then casted
     # to the input dtype when doing the filter operation.
-    out = pl.kernel(
+    out = core_map_helper.kernel(
         functools.partial(
             main_kernel,
             core_axis_name=vector_mesh.core_axis_name,
@@ -553,24 +555,32 @@ def ragged_gather_reduce(
             num_row_partitions=num_row_partitions,
             num_column_partitions=num_column_partitions,
         ),
-        out_shape=jax.ShapeDtypeStruct(
-            (x.shape[0] // reduce_group_size, x.shape[1]),
+        out_type=jax.ShapeDtypeStruct(
+            (indices.shape[0] // reduce_group_size, x.shape[1]),
             jnp.float32,
         ),
         compiler_params=pltpu.CompilerParams(
             use_tc_tiling_on_sc=True,
             disable_bounds_checks=True,
+            # SparseCore bitcast (i32<->f32) is rejected by Mosaic's
+            # apply-vector-layout pass; disable layout passes so it lowers, as
+            # the v2 kernel already does. jax flipped the CompilerParams default
+            # to needs_layout_passes=True (jax commit 7ca29680b, in 0.10.2),
+            # which broke this kernel's vector.bitcast.
+            needs_layout_passes=False,
         ),
-        scratch_shapes=[
-            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-            pltpu.VMEM((1, col_size), jnp.uint32),
-            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            pltpu.VMEM((num_simd_lanes, ), jnp.float32),
-            pltpu.VMEM((num_simd_lanes, ), jnp.int32),
-            pltpu.SemaphoreType.DMA((2, )),
-        ],
+        scratch_types=dict(
+            num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes, ),
+                                                           jnp.int32),
+            out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
+            prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
+            src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.int32),
+            topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes, ), jnp.float32),
+            sorted_by_validity_vmem_ref=pltpu.VMEM((num_simd_lanes, ),
+                                                   jnp.int32),
+            sem_ref=pltpu.SemaphoreType.DMA((2, )),
+        ),
         mesh=vector_mesh,
         name="sc_ragged_gather_reduce",
     )(
