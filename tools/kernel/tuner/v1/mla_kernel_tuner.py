@@ -95,7 +95,10 @@ def _generate_mla_inputs(
     padded_r_dim = align_to(r_dim, 128)
     padded_lkv_dim = align_to(lkv_dim, 128)
     padded_kv_dim = padded_lkv_dim + padded_r_dim
-    packing = get_dtype_packing(kv_dtype)
+    from tpu_inference import envs
+    packing = envs.MLA_KV_PACKING_SIZE
+    if packing is None:
+        packing = get_dtype_packing(kv_dtype)
     q_lens = [s[0] for s in seq_lens]
     kv_lens_list = [s[1] for s in seq_lens]
     total_q_len = sum(q_lens)
