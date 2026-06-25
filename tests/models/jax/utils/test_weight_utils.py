@@ -293,3 +293,18 @@ class TestJaxAutoWeightsLoader:
 
             received_keys = [name for name, _ in modified_weights]
             assert received_keys == expected_keys
+
+
+def test_convert_torch_to_jax_with_view():
+    from tpu_inference.models.jax.utils.weight_utils import convert_torch_to_jax_with_view
+    import jax.numpy as jnp
+
+    tensor = torch.randn(4, 4, dtype=torch.bfloat16)
+    cast_type = jnp.bfloat16
+
+    jax_arr = convert_torch_to_jax_with_view(tensor, cast_type)
+
+    assert jax_arr.dtype == jnp.bfloat16
+    assert jax_arr.shape == (4, 4)
+    assert jax_arr.device.platform == "cpu"
+

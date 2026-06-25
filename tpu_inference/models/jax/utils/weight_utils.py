@@ -129,8 +129,10 @@ def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor,
     bit representation using a dtype view map.
     """
     torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-    loaded_weight = jnp.array(
-        loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+    cpu_device = jax.devices("cpu")[0]
+    np_arr = loaded_weight.view(torch_view_type).numpy()
+    with jax.set_mesh(None):
+        loaded_weight = jax.device_put(np_arr, cpu_device).view(cast_type)
     return loaded_weight
 
 

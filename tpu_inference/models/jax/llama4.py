@@ -268,7 +268,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                 layer_name = ".".join([str(s) for s in path])
                 self.pp_missing_layers.append(layer_name)
 
-        with jax.default_device(jax.devices("cpu")[0]):
+        with jax.default_device(jax.devices("cpu")[0]), jax.set_mesh(None):
             for loaded_name, loaded_weight in self.get_weights_iterator():
                 is_moe_layer = False
                 layer_num = self._get_layer_num(loaded_name)
@@ -355,7 +355,7 @@ class Llama4WeightLoader(BaseWeightLoader):
                                                mesh=model_for_loading.mesh)
                 if self.is_verbose:
                     print_param_info(model_weight, loaded_name)
-            with jax.default_device(jax.devices("cpu")[0]):
+            with jax.default_device(jax.devices("cpu")[0]), jax.set_mesh(None):
                 for buffer_key, expert_map in self.expert_weights_buffer.items(
                 ):
                     sorted_exp_nums = sorted(expert_map.keys())
