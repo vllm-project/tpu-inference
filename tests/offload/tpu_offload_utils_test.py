@@ -20,10 +20,10 @@ import numpy as np
 from jax.sharding import NamedSharding, PartitionSpec
 
 from tpu_inference.offload.utils import (pre_update_kv_caches,
-                                         stack_kv_cache_cross_layers,
-                                         update_kv_caches,
                                          pure_jax_stack_kv_cache_cross_layers,
-                                         pure_jax_update_kv_caches_one)
+                                         pure_jax_update_kv_caches_one,
+                                         stack_kv_cache_cross_layers,
+                                         update_kv_caches)
 
 
 class TestTPUOffloadUtilsFn(unittest.TestCase):
@@ -239,11 +239,15 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
         shape_B = (self.num_blocks, self.block_size, heads_B, 2, self.head_dim)
 
         # Shardings
-        sharding_A = NamedSharding(self.mesh, self.partition_spec, memory_kind="device")
-        sharding_B = NamedSharding(self.mesh, self.partition_spec, memory_kind="device")
+        sharding_A = NamedSharding(self.mesh,
+                                   self.partition_spec,
+                                   memory_kind="device")
+        sharding_B = NamedSharding(self.mesh,
+                                   self.partition_spec,
+                                   memory_kind="device")
 
         initial_kv_caches = []
-        for i in range(4): # 4 layers
+        for i in range(4):  # 4 layers
             if i in grouped_indices[0]:
                 shape = shape_A
                 sharding = sharding_A
@@ -254,8 +258,7 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
             layer_data = jax.random.normal(jax.random.key(i),
                                            shape=shape,
                                            dtype=self.cache_dtype)
-            initial_kv_caches.append(
-                jax.device_put(layer_data, sharding))
+            initial_kv_caches.append(jax.device_put(layer_data, sharding))
 
         jax.block_until_ready(initial_kv_caches)
 
@@ -280,20 +283,27 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
 
             # Group 0
             # Shape should be (1, num_layers_in_group, block_size, heads_A, 2, head_dim)
-            self.assertEqual(output[b][0].shape, (1, 2, self.block_size, heads_A, 2, self.head_dim))
+            self.assertEqual(
+                output[b][0].shape,
+                (1, 2, self.block_size, heads_A, 2, self.head_dim))
             # Group 1
-            self.assertEqual(output[b][1].shape, (1, 2, self.block_size, heads_B, 2, self.head_dim))
+            self.assertEqual(
+                output[b][1].shape,
+                (1, 2, self.block_size, heads_B, 2, self.head_dim))
 
             block_id = src_blocks[b]
             # Verify data
             for g_idx, group in enumerate(grouped_indices):
                 for local_layer_idx, global_layer_idx in enumerate(group):
                     output_np = np.array(output[b][g_idx])
-                    initial_np = np.array(initial_kv_caches_baseline[global_layer_idx])
-                    np.testing.assert_array_equal(output_np[0, local_layer_idx],
-                                                  initial_np[block_id])
+                    initial_np = np.array(
+                        initial_kv_caches_baseline[global_layer_idx])
+                    np.testing.assert_array_equal(
+                        output_np[0, local_layer_idx], initial_np[block_id])
 
-        print("\nTest passed: hybrid stack_kv_cache_cross_layers correctly gathered and grouped.")
+        print(
+            "\nTest passed: hybrid stack_kv_cache_cross_layers correctly gathered and grouped."
+        )
 
     def test_update_kv_caches_hybrid(self):
         """
@@ -309,8 +319,12 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
         shape_A = (self.num_blocks, self.block_size, heads_A, 2, self.head_dim)
         shape_B = (self.num_blocks, self.block_size, heads_B, 2, self.head_dim)
 
-        sharding_A = NamedSharding(self.mesh, self.partition_spec, memory_kind="device")
-        sharding_B = NamedSharding(self.mesh, self.partition_spec, memory_kind="device")
+        sharding_A = NamedSharding(self.mesh,
+                                   self.partition_spec,
+                                   memory_kind="device")
+        sharding_B = NamedSharding(self.mesh,
+                                   self.partition_spec,
+                                   memory_kind="device")
 
         # Initial KV caches (zeros)
         initial_kv_caches = []
@@ -322,12 +336,18 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
                 shape = shape_B
                 sharding = sharding_B
             initial_kv_caches.append(
-                jax.device_put(jnp.zeros(shape, dtype=self.cache_dtype), sharding)
-            )
+                jax.device_put(jnp.zeros(shape, dtype=self.cache_dtype),
+                               sharding))
 
         # Create update data
-        expand_sharding_A = NamedSharding(self.mesh, PartitionSpec(None, None, None, "model"), memory_kind="device")
-        expand_sharding_B = NamedSharding(self.mesh, PartitionSpec(None, None, None, "model"), memory_kind="device")
+        expand_sharding_A = NamedSharding(self.mesh,
+                                          PartitionSpec(
+                                              None, None, None, "model"),
+                                          memory_kind="device")
+        expand_sharding_B = NamedSharding(self.mesh,
+                                          PartitionSpec(
+                                              None, None, None, "model"),
+                                          memory_kind="device")
 
         stacked_blocks = []
         for b in range(num_blocks_to_update):
@@ -336,25 +356,22 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
             block_groups.append(
                 jax.device_put(
                     jax.random.uniform(jax.random.PRNGKey(b * 2),
-                                       shape=(1, 2, self.block_size, heads_A, 2, self.head_dim),
+                                       shape=(1, 2, self.block_size, heads_A,
+                                              2, self.head_dim),
                                        dtype=self.cache_dtype),
-                    expand_sharding_A
-                )
-            )
+                    expand_sharding_A))
             # Group 1
             block_groups.append(
                 jax.device_put(
                     jax.random.uniform(jax.random.PRNGKey(b * 2 + 1),
-                                       shape=(1, 2, self.block_size, heads_B, 2, self.head_dim),
+                                       shape=(1, 2, self.block_size, heads_B,
+                                              2, self.head_dim),
                                        dtype=self.cache_dtype),
-                    expand_sharding_B
-                )
-            )
+                    expand_sharding_B))
             stacked_blocks.append(block_groups)
 
-        stacked_blocks_backup = [
-            [jnp.copy(g) for g in block_groups] for block_groups in stacked_blocks
-        ]
+        stacked_blocks_backup = [[jnp.copy(g) for g in block_groups]
+                                 for block_groups in stacked_blocks]
         jax.block_until_ready(stacked_blocks)
         jax.block_until_ready(stacked_blocks_backup)
 
@@ -372,25 +389,23 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
             jax.block_until_ready(updated_caches)
             initial_kv_caches = updated_caches
 
-        updated_caches = update_kv_caches(initial_kv_caches, stacked_blocks,
-                                          src_offsets, dest_offsets,
-                                          chunk_sizes, num_chunks, self.mesh,
-                                          self.partition_spec,
-                                          self.partition_spec,
-                                          self.replicated_device_sharding.spec,
-                                          grouped_indices)
+        updated_caches = update_kv_caches(
+            initial_kv_caches, stacked_blocks, src_offsets, dest_offsets,
+            chunk_sizes, num_chunks, self.mesh, self.partition_spec,
+            self.partition_spec, self.replicated_device_sharding.spec,
+            grouped_indices)
 
         jax.block_until_ready(updated_caches)
 
         # Verification
         for g_idx, group in enumerate(grouped_indices):
-            heads = heads_A if g_idx == 0 else heads_B
             for local_layer_idx, global_layer_idx in enumerate(group):
                 layer_cache = np.array(updated_caches[global_layer_idx])
 
                 # Check updated blocks
                 for b, block_idx in enumerate(update_indices):
-                    expected_block = stacked_blocks_backup[b][g_idx][0, local_layer_idx]
+                    expected_block = stacked_blocks_backup[b][g_idx][
+                        0, local_layer_idx]
                     actual_block = layer_cache[block_idx]
                     np.testing.assert_allclose(actual_block,
                                                expected_block,
@@ -405,7 +420,10 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
                                                    rtol=1e-2,
                                                    atol=1e-2)
 
-        print("\nTest passed: hybrid update_kv_caches correctly updated the cache.")
+        print(
+            "\nTest passed: hybrid update_kv_caches correctly updated the cache."
+        )
+
     def test_pure_jax_stack_kv_cache_cross_layers(self):
         """
         Verify gathering and stacking KV blocks using pure_jax_stack_kv_cache_cross_layers.
@@ -672,8 +690,12 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
         shape_A = (self.num_blocks, self.block_size, heads_A, 2, self.head_dim)
         shape_B = (self.num_blocks, self.block_size, heads_B, 2, self.head_dim)
 
-        sharding_A = NamedSharding(self.mesh, self.partition_spec, memory_kind="device")
-        sharding_B = NamedSharding(self.mesh, self.partition_spec, memory_kind="device")
+        sharding_A = NamedSharding(self.mesh,
+                                   self.partition_spec,
+                                   memory_kind="device")
+        sharding_B = NamedSharding(self.mesh,
+                                   self.partition_spec,
+                                   memory_kind="device")
 
         initial_kv_caches = []
         for i in range(4):
@@ -687,8 +709,7 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
             layer_data = jax.random.normal(jax.random.key(i),
                                            shape=shape,
                                            dtype=self.cache_dtype)
-            initial_kv_caches.append(
-                jax.device_put(layer_data, sharding))
+            initial_kv_caches.append(jax.device_put(layer_data, sharding))
 
         jax.block_until_ready(initial_kv_caches)
 
@@ -698,10 +719,9 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
 
         src_blocks_array = jnp.array(src_blocks)
 
-        _, output = pure_jax_stack_kv_cache_cross_layers(initial_kv_caches,
-                                                         src_blocks_array,
-                                                         num_blocks_to_gather,
-                                                         grouped_indices)
+        _, output = pure_jax_stack_kv_cache_cross_layers(
+            initial_kv_caches, src_blocks_array, num_blocks_to_gather,
+            grouped_indices)
         jax.block_until_ready(output)
 
         self.assertEqual(len(output), num_blocks_to_gather)
@@ -710,19 +730,26 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
             self.assertEqual(len(output[b]), len(grouped_indices))
 
             # Group 0
-            self.assertEqual(output[b][0].shape, (1, 2, self.block_size, heads_A, 2, self.head_dim))
+            self.assertEqual(
+                output[b][0].shape,
+                (1, 2, self.block_size, heads_A, 2, self.head_dim))
             # Group 1
-            self.assertEqual(output[b][1].shape, (1, 2, self.block_size, heads_B, 2, self.head_dim))
+            self.assertEqual(
+                output[b][1].shape,
+                (1, 2, self.block_size, heads_B, 2, self.head_dim))
 
             block_id = src_blocks[b]
             for g_idx, group in enumerate(grouped_indices):
                 for local_layer_idx, global_layer_idx in enumerate(group):
                     output_np = np.array(output[b][g_idx])
-                    initial_np = np.array(initial_kv_caches_baseline[global_layer_idx])
-                    np.testing.assert_array_equal(output_np[0, local_layer_idx],
-                                                  initial_np[block_id])
+                    initial_np = np.array(
+                        initial_kv_caches_baseline[global_layer_idx])
+                    np.testing.assert_array_equal(
+                        output_np[0, local_layer_idx], initial_np[block_id])
 
-        print("\nTest passed: pure_jax_stack_kv_cache_cross_layers hybrid correctly gathered and grouped.")
+        print(
+            "\nTest passed: pure_jax_stack_kv_cache_cross_layers hybrid correctly gathered and grouped."
+        )
 
     def test_pure_jax_update_kv_caches_one_hybrid(self):
         """
@@ -738,8 +765,12 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
         shape_A = (self.num_blocks, self.block_size, heads_A, 2, self.head_dim)
         shape_B = (self.num_blocks, self.block_size, heads_B, 2, self.head_dim)
 
-        sharding_A = NamedSharding(self.mesh, self.partition_spec, memory_kind="device")
-        sharding_B = NamedSharding(self.mesh, self.partition_spec, memory_kind="device")
+        sharding_A = NamedSharding(self.mesh,
+                                   self.partition_spec,
+                                   memory_kind="device")
+        sharding_B = NamedSharding(self.mesh,
+                                   self.partition_spec,
+                                   memory_kind="device")
 
         # Initial KV caches (zeros)
         initial_kv_caches = []
@@ -751,12 +782,18 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
                 shape = shape_B
                 sharding = sharding_B
             initial_kv_caches.append(
-                jax.device_put(jnp.zeros(shape, dtype=self.cache_dtype), sharding)
-            )
+                jax.device_put(jnp.zeros(shape, dtype=self.cache_dtype),
+                               sharding))
 
         # Create update data
-        expand_sharding_A = NamedSharding(self.mesh, PartitionSpec(None, None, None, "model"), memory_kind="device")
-        expand_sharding_B = NamedSharding(self.mesh, PartitionSpec(None, None, None, "model"), memory_kind="device")
+        expand_sharding_A = NamedSharding(self.mesh,
+                                          PartitionSpec(
+                                              None, None, None, "model"),
+                                          memory_kind="device")
+        expand_sharding_B = NamedSharding(self.mesh,
+                                          PartitionSpec(
+                                              None, None, None, "model"),
+                                          memory_kind="device")
 
         stacked_blocks = []
         for b in range(num_blocks_to_update):
@@ -765,25 +802,22 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
             block_groups.append(
                 jax.device_put(
                     jax.random.uniform(jax.random.PRNGKey(b * 2),
-                                       shape=(1, 2, self.block_size, heads_A, 2, self.head_dim),
+                                       shape=(1, 2, self.block_size, heads_A,
+                                              2, self.head_dim),
                                        dtype=self.cache_dtype),
-                    expand_sharding_A
-                )
-            )
+                    expand_sharding_A))
             # Group 1
             block_groups.append(
                 jax.device_put(
                     jax.random.uniform(jax.random.PRNGKey(b * 2 + 1),
-                                       shape=(1, 2, self.block_size, heads_B, 2, self.head_dim),
+                                       shape=(1, 2, self.block_size, heads_B,
+                                              2, self.head_dim),
                                        dtype=self.cache_dtype),
-                    expand_sharding_B
-                )
-            )
+                    expand_sharding_B))
             stacked_blocks.append(block_groups)
 
-        stacked_blocks_backup = [
-            [jnp.copy(g) for g in block_groups] for block_groups in stacked_blocks
-        ]
+        stacked_blocks_backup = [[jnp.copy(g) for g in block_groups]
+                                 for block_groups in stacked_blocks]
         jax.block_until_ready(stacked_blocks)
         jax.block_until_ready(stacked_blocks_backup)
 
@@ -804,7 +838,8 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
 
                 # Check updated blocks
                 for b, block_idx in enumerate(update_indices):
-                    expected_block = stacked_blocks_backup[b][g_idx][0, local_layer_idx]
+                    expected_block = stacked_blocks_backup[b][g_idx][
+                        0, local_layer_idx]
                     actual_block = layer_cache[block_idx]
                     np.testing.assert_allclose(actual_block,
                                                expected_block,
@@ -819,9 +854,10 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
                                                    rtol=1e-2,
                                                    atol=1e-2)
 
-        print("\nTest passed: pure_jax_update_kv_caches_one hybrid correctly updated the cache.")
+        print(
+            "\nTest passed: pure_jax_update_kv_caches_one hybrid correctly updated the cache."
+        )
 
 
 if __name__ == "__main__":
     unittest.main()
-

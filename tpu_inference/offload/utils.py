@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import functools
-from typing import List, Tuple, Any
+from typing import Any, List, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -95,9 +95,11 @@ def jitted_insert_kv_cache_slices(
     donate_argnames=('kv_caches', ),
 )
 def stack_kv_cache_cross_layers(
-        kv_caches: List[jax.Array], block_ids: jax.Array,
-        num_blocks: int,
-        grouped_indices: Tuple[Tuple[int, ...], ...] | None = None) -> Tuple[List[jax.Array], Any]:
+    kv_caches: List[jax.Array],
+    block_ids: jax.Array,
+    num_blocks: int,
+    grouped_indices: Tuple[Tuple[int, ...], ...] | None = None
+) -> Tuple[List[jax.Array], Any]:
     """
     Gathers KV blocks and stacks them within each shape group.
     """
@@ -119,7 +121,8 @@ def stack_kv_cache_cross_layers(
     stacked_groups = []
     for group in grouped_indices:
         group_layers = [gathered_kv_layers[i] for i in group]
-        stacked = jnp.stack(group_layers, axis=1)  # [num_blocks, num_layers_in_group, ...]
+        stacked = jnp.stack(group_layers,
+                            axis=1)  # [num_blocks, num_layers_in_group, ...]
         stacked_groups.append(stacked)
 
     # Split along axis 0 (num_blocks) for each group
@@ -131,7 +134,9 @@ def stack_kv_cache_cross_layers(
     # Transpose to [block_idx][group_idx]
     split_blocks_groups = []
     for b in range(num_blocks):
-        block_groups = [split_groups[g][b] for g in range(len(grouped_indices))]
+        block_groups = [
+            split_groups[g][b] for g in range(len(grouped_indices))
+        ]
         split_blocks_groups.append(block_groups)
 
     kv_caches = jax.lax.optimization_barrier(kv_caches)
@@ -250,13 +255,19 @@ def pre_update_kv_caches(
                      "replicated_sharding_spec", "grouped_indices"),
     donate_argnames=("kv_caches", ),
 )
-def update_kv_caches(kv_caches: List[jax.Array],
-                     stacked_blocks: Any, src_offsets: jax.Array,
-                     dest_offsets: jax.Array, chunk_sizes: jax.Array,
-                     num_chunks: jax.Array, mesh, src_sharding_spec,
-                     dest_sharding_spec,
-                     replicated_sharding_spec,
-                     grouped_indices: Tuple[Tuple[int, ...], ...] | None = None) -> List[jax.Array]:
+def update_kv_caches(
+    kv_caches: List[jax.Array],
+    stacked_blocks: Any,
+    src_offsets: jax.Array,
+    dest_offsets: jax.Array,
+    chunk_sizes: jax.Array,
+    num_chunks: jax.Array,
+    mesh,
+    src_sharding_spec,
+    dest_sharding_spec,
+    replicated_sharding_spec,
+    grouped_indices: Tuple[Tuple[int, ...], ...] | None = None
+) -> List[jax.Array]:
     """
     Updates KV caches by unstacking gathered blocks and copying slices.
 
@@ -278,7 +289,6 @@ def update_kv_caches(kv_caches: List[jax.Array],
       List of updated KV caches for each layer.
     """
     num_blocks = src_offsets.shape[0]
-    num_layers = len(kv_caches)
 
     if grouped_indices is None or len(grouped_indices) <= 1:
         # Default backward-compatible path (Single Group)
@@ -301,21 +311,22 @@ def update_kv_caches(kv_caches: List[jax.Array],
     else:
         # Multi-Group Path (Hybrid Attention)
         num_groups = len(grouped_indices)
-        
+
         # 1. Concatenate group-stacked blocks across axis 0 (blocks)
         concatenated_groups = []
         for g in range(num_groups):
             group_blocks = [stacked_blocks[b][g] for b in range(num_blocks)]
-            concatenated_g = jnp.concatenate(group_blocks, axis=0) # [num_blocks, num_layers_in_group, ...]
+            concatenated_g = jnp.concatenate(
+                group_blocks, axis=0)  # [num_blocks, num_layers_in_group, ...]
             concatenated_groups.append(concatenated_g)
-        
+
         # 2. Unstack each group and copy separately to avoid shape mismatch in chaining
         updated_kv_caches = list(kv_caches)
         for g, group in enumerate(grouped_indices):
             unstacked_g = jnp.unstack(concatenated_groups[g], axis=1)
             group_srcs = list(unstacked_g)
             group_dests = [kv_caches[i] for i in group]
-            
+
             group_updated = kv_transfer.multi_layer_copy(
                 src_array=group_srcs,
                 dest_array=group_dests,
@@ -327,10 +338,10 @@ def update_kv_caches(kv_caches: List[jax.Array],
                 src_sharding_spec=src_sharding_spec,
                 dest_sharding_spec=dest_sharding_spec,
                 replicated_sharding_spec=replicated_sharding_spec)
-            
+
             for local_idx, global_idx in enumerate(group):
                 updated_kv_caches[global_idx] = group_updated[local_idx]
-                
+
         return updated_kv_caches
 
 
@@ -340,9 +351,10 @@ def update_kv_caches(kv_caches: List[jax.Array],
     donate_argnames=('kv_caches', ),
 )
 def pure_jax_stack_kv_cache_cross_layers(
-        kv_caches: List[jax.Array], block_ids: jax.Array,
-        num_blocks: int,
-        grouped_indices: Tuple[Tuple[int, ...], ...] | None = None,
+    kv_caches: List[jax.Array],
+    block_ids: jax.Array,
+    num_blocks: int,
+    grouped_indices: Tuple[Tuple[int, ...], ...] | None = None,
 ) -> Tuple[List[jax.Array], Any]:
     """Gathers KV cache blocks across all layers for offloading, using pure JAX operations.
 
@@ -365,6 +377,7 @@ def pure_jax_stack_kv_cache_cross_layers(
             is shaped (1, num_layers_in_group, ...). Otherwise, it is a list of
             shape [num_blocks] of tensors shaped (1, num_layers, ...).
     """
+
     def _gather_blocks(layer_kv_cache):
         return layer_kv_cache.at[block_ids].get()
 
@@ -382,7 +395,8 @@ def pure_jax_stack_kv_cache_cross_layers(
     stacked_groups = []
     for group in grouped_indices:
         group_layers = [gathered_kv_layers[i] for i in group]
-        stacked = jnp.stack(group_layers, axis=1)  # [num_blocks, num_layers_in_group, ...]
+        stacked = jnp.stack(group_layers,
+                            axis=1)  # [num_blocks, num_layers_in_group, ...]
         stacked_groups.append(stacked)
 
     # Split along axis 0 (num_blocks) for each group
@@ -394,7 +408,9 @@ def pure_jax_stack_kv_cache_cross_layers(
     # Transpose to [block_idx][group_idx]
     split_blocks_groups = []
     for b in range(num_blocks):
-        block_groups = [split_groups[g][b] for g in range(len(grouped_indices))]
+        block_groups = [
+            split_groups[g][b] for g in range(len(grouped_indices))
+        ]
         split_blocks_groups.append(block_groups)
 
     kv_caches = jax.lax.optimization_barrier(kv_caches)
@@ -403,7 +419,8 @@ def pure_jax_stack_kv_cache_cross_layers(
 
 @functools.partial(
     jax.jit,
-    static_argnames=("mesh", "cached_kv_sharding_spec", "indices_sharding", "grouped_indices"),
+    static_argnames=("mesh", "cached_kv_sharding_spec", "indices_sharding",
+                     "grouped_indices"),
     donate_argnames=("kv_caches", ),
 )
 def pure_jax_update_kv_caches_one(
@@ -480,10 +497,11 @@ def pure_jax_update_kv_caches_one(
             unstacked_g = jnp.unstack(concatenated_groups[g], axis=1)
             group_srcs = list(unstacked_g)
             group_dests = [kv_caches[i] for i in group]
-            
-            group_updated = jax.tree.map(_update_layer, group_dests, group_srcs)
-            
+
+            group_updated = jax.tree.map(_update_layer, group_dests,
+                                         group_srcs)
+
             for local_idx, global_idx in enumerate(group):
                 updated_kv_caches[global_idx] = group_updated[local_idx]
-                
+
         return updated_kv_caches

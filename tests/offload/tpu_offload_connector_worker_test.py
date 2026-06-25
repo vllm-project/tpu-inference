@@ -131,7 +131,9 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         except RuntimeError:
             return None
 
-    def _create_connector(self, use_precompiled_swap_ops: bool = False, hybrid: bool = False):
+    def _create_connector(self,
+                          use_precompiled_swap_ops: bool = False,
+                          hybrid: bool = False):
         os.environ[
             "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE"] = "0" if use_precompiled_swap_ops else "1"
         os.environ["TPU_OFFLOAD_NUM_CPU_CHUNKS"] = str(self.num_cpu_chunks)
@@ -142,6 +144,7 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
         assert worker is not None
 
         if not hybrid:
+
             @functools.partial(jax.jit, out_shardings=self.device_sharding)
             def create_on_device(key):
                 return jax.random.uniform(key,
@@ -149,24 +152,33 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                                           dtype=self.cache_dtype)
 
             source_kv_cache = [
-                create_on_device(jax.random.key(i)) for i in range(self.num_layers)
+                create_on_device(jax.random.key(i))
+                for i in range(self.num_layers)
             ]
         else:
             mid = self.num_layers // 2
             heads_A = self.num_heads * 2
             heads_B = self.num_heads
-            shape_A = (self.num_blocks, self.block_size, heads_A, 2, self.head_size)
-            shape_B = (self.num_blocks, self.block_size, heads_B, 2, self.head_size)
-            sharding_A = NamedSharding(self.mesh, PartitionSpec(None, None, "model"))
-            sharding_B = NamedSharding(self.mesh, PartitionSpec(None, None, "model"))
+            shape_A = (self.num_blocks, self.block_size, heads_A, 2,
+                       self.head_size)
+            shape_B = (self.num_blocks, self.block_size, heads_B, 2,
+                       self.head_size)
+            sharding_A = NamedSharding(self.mesh,
+                                       PartitionSpec(None, None, "model"))
+            sharding_B = NamedSharding(self.mesh,
+                                       PartitionSpec(None, None, "model"))
 
             @functools.partial(jax.jit, out_shardings=sharding_A)
             def create_A(key):
-                return jax.random.uniform(key, shape=shape_A, dtype=self.cache_dtype)
+                return jax.random.uniform(key,
+                                          shape=shape_A,
+                                          dtype=self.cache_dtype)
 
             @functools.partial(jax.jit, out_shardings=sharding_B)
             def create_B(key):
-                return jax.random.uniform(key, shape=shape_B, dtype=self.cache_dtype)
+                return jax.random.uniform(key,
+                                          shape=shape_B,
+                                          dtype=self.cache_dtype)
 
             source_kv_cache = []
             for i in range(self.num_layers):
@@ -181,7 +193,6 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                                          mesh=self.mesh)
         worker.register_runner(mock_runner)
         return connector
-
 
     @parameterized.named_parameters(
         dict(testcase_name="_zero_blocks", num_blocks=0, expected_buckets=[]),
@@ -396,7 +407,8 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             hybrid=True,
         ),
         dict(
-            testcase_name="_multi_requests_multi_blocks_compile_jax_pinned_hybrid",
+            testcase_name=
+            "_multi_requests_multi_blocks_compile_jax_pinned_hybrid",
             num_blocks_to_save=5,
             num_requests=3,
             use_precompiled_swap_ops=True,
@@ -468,10 +480,11 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             requests_meta=requests_meta)
 
         with mock.patch.dict(os.environ, {
-                 "TPU_OFFLOAD_USE_UNPINNED_HOST":
-                 "1" if use_unpinned_host else "0"
-         }):
-            connector = self._create_connector(use_precompiled_swap_ops, hybrid)
+                "TPU_OFFLOAD_USE_UNPINNED_HOST":
+                "1" if use_unpinned_host else "0"
+        }):
+            connector = self._create_connector(use_precompiled_swap_ops,
+                                               hybrid)
             worker = connector.connector_worker
             connector.bind_connector_metadata(connector_metadata)
             logger.info(
@@ -515,7 +528,8 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                     if not hybrid:
                         np_cpu_kv_chunk = np.array(cpu_kv_chunk)
                         if len(np_cpu_kv_chunk.shape) == 6:
-                            np_cpu_kv_chunk = np.squeeze(np_cpu_kv_chunk, axis=0)
+                            np_cpu_kv_chunk = np.squeeze(np_cpu_kv_chunk,
+                                                         axis=0)
                         for layer_idx in range(self.num_layers):
                             tpu_kv_block = kv_caches[layer_idx][tpu_block_id]
                             self.assertArraysEqual(np.array(tpu_kv_block),
@@ -526,12 +540,14 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                             group_chunk = np.array(cpu_kv_chunk[g_idx])
                             if group_chunk.shape[0] == 1:
                                 group_chunk = np.squeeze(group_chunk, axis=0)
-                            for local_layer_idx, global_layer_idx in enumerate(group):
-                                tpu_kv_block = kv_caches[global_layer_idx][tpu_block_id]
+                            for local_layer_idx, global_layer_idx in enumerate(
+                                    group):
+                                tpu_kv_block = kv_caches[global_layer_idx][
+                                    tpu_block_id]
                                 expected = group_chunk[local_layer_idx]
-                                self.assertArraysEqual(np.array(tpu_kv_block), expected)
+                                self.assertArraysEqual(np.array(tpu_kv_block),
+                                                       expected)
             logger.info("Saved data verification completed.")
-
 
     @parameterized.named_parameters(
         # Pinned Host Cases
@@ -620,7 +636,8 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             hybrid=True,
         ),
         dict(
-            testcase_name="_multi_requests_multi_blocks_compile_jax_pinned_hybrid",
+            testcase_name=
+            "_multi_requests_multi_blocks_compile_jax_pinned_hybrid",
             num_blocks_to_operate=5,
             num_requests=3,
             use_precompiled_swap_ops=True,
@@ -658,7 +675,8 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                 "1" if use_unpinned_host else "0"
         }):
             # 1. Setup
-            connector = self._create_connector(use_precompiled_swap_ops, hybrid)
+            connector = self._create_connector(use_precompiled_swap_ops,
+                                               hybrid)
             worker = connector.connector_worker
             # Ground truth cache. We copy it to host early because the save
             # operation will donate via stack_kv_cache_cross_layers.
@@ -676,17 +694,27 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                 mid = self.num_layers // 2
                 heads_A = self.num_heads * 2
                 heads_B = self.num_heads
-                shape_A = (self.num_blocks, self.block_size, heads_A, 2, self.head_size)
-                shape_B = (self.num_blocks, self.block_size, heads_B, 2, self.head_size)
-                sharding_A = NamedSharding(self.mesh, PartitionSpec(None, None, "model"))
-                sharding_B = NamedSharding(self.mesh, PartitionSpec(None, None, "model"))
+                shape_A = (self.num_blocks, self.block_size, heads_A, 2,
+                           self.head_size)
+                shape_B = (self.num_blocks, self.block_size, heads_B, 2,
+                           self.head_size)
+                sharding_A = NamedSharding(self.mesh,
+                                           PartitionSpec(None, None, "model"))
+                sharding_B = NamedSharding(self.mesh,
+                                           PartitionSpec(None, None, "model"))
 
                 dst_kv_cache = []
                 for i in range(self.num_layers):
                     if i < mid:
-                        dst_kv_cache.append(jax.device_put(jnp.zeros(shape_A, dtype=self.cache_dtype), sharding_A))
+                        dst_kv_cache.append(
+                            jax.device_put(
+                                jnp.zeros(shape_A, dtype=self.cache_dtype),
+                                sharding_A))
                     else:
-                        dst_kv_cache.append(jax.device_put(jnp.zeros(shape_B, dtype=self.cache_dtype), sharding_B))
+                        dst_kv_cache.append(
+                            jax.device_put(
+                                jnp.zeros(shape_B, dtype=self.cache_dtype),
+                                sharding_B))
             jax.block_until_ready(dst_kv_cache)
 
             # 2. Simulate a save operation
