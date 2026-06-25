@@ -96,6 +96,7 @@ declare -a BENCHMARK_DOCKER_ARGS=(
   "-e" "ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts"
   "-e" "DEVICE=$DEVICE"
   "-e" "KERNEL_AUTOTUNE_ID=${KERNEL_AUTOTUNE_ID:-}"
+  "-e" "EXTRA_ENVS=${EXTRA_ENVS:-}"
   "-e" "RECORD_ID=$RECORD_ID"
   "-e" "CODE_HASH=${CODE_HASH}"
   "-e" "JOB_REFERENCE=${JOB_REFERENCE}"
@@ -120,15 +121,22 @@ BM_JOB_STATUS=$EXIT_SUCCESS
 
 export BM_INFRA="true"
 
+# DEBUG DO NOT COMMIT , REMOVE LATER
+echo "DEBUG: EXTRA_ENVS=${EXTRA_ENVS:-}"
+
+# DEBUG END
+
 # EXTRA_ENVS="KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
 .buildkite/scripts/run_in_docker.sh bash -c "
   if [[ \"$EXTRA_ENVS\" == *\"KERNEL_AUTOTUNE_STAGE=PRE_KERNEL_AUTOTUNE_CASES_COLLECTION\"* ]]; then
-    pip install --upgrade google-cloud-spanner && \
-    pip install --upgrade google-api-core && \
-    pip install --upgrade google-auth && \
-    pip install --upgrade absl-py && \
-    chmod +x .buildkite/benchmark/scripts/kernel_auto_tune.sh && \
-    .buildkite/benchmark/scripts/kernel_auto_tune.sh || exit 1
+    pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
+    source .buildkite/benchmark/scripts/kernel_auto_tune.sh && \
+    update_all_tuned_params_py || exit 1
+  fi && \
+  if [[ \"$EXTRA_ENVS\" == *\"KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN\"* ]]; then
+    pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
+    source .buildkite/benchmark/scripts/kernel_auto_tune.sh && \
+    checkout_updated_tuned_params_py_branch || exit 1
   fi && \
   echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
   chmod +x .buildkite/benchmark/scripts/run_bm.sh && \

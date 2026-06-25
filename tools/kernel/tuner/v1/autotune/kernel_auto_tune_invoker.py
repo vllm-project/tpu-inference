@@ -160,6 +160,7 @@ class KernelAutoTuneInvoker:
         }
 
     def generate_kernel_tuning_cases(self):
+        DEBUG_SKIP_TUNING = True
         pipeline = {"steps": []}
         autotune_cases = self.storage_manager.read_auto_tune_cases(
             case_set_id=self.auto_tune_id)
@@ -171,27 +172,28 @@ class KernelAutoTuneInvoker:
 
         generated_cases = set()
         tuning_group_keys = []
-        for row in autotune_cases:
-            kernel_tuner_name = row['KernelTunerName']
-            tpu = 'tpu6e' if 'tpu6e' in row['TPU'] else 'tpu7x'
-            if (kernel_tuner_name, tpu) in generated_cases:
-                continue
-            tuning_group_keys.append(f'{kernel_tuner_name}_{tpu}_tuning_group')
-            generated_cases.add((kernel_tuner_name, tpu))
-            supported_core_num = 1 if tpu == 'tpu6e' else 2
-            pipeline['steps'].append(
-                self._build_generate_tuning_cases_step(
-                    kernel_tuner_name=kernel_tuner_name,
-                    case_set_id=f'{kernel_tuner_name}_{self.auto_tune_id}',
-                    tpu_version=tpu,
-                    #(TODO): Only support kernel without communication for now and we don't have TPU 7x with 1 core queue
-                    tpu_cores=supported_core_num,
-                    case_set_desc=f'{kernel_tuner_name}_autotune',
-                    parent_step_key=os.environ.get('BUILDKITE_STEP_KEY',
-                                                   None)))
+        if not DEBUG_SKIP_TUNING:
+            for row in autotune_cases:
+                kernel_tuner_name = row['KernelTunerName']
+                tpu = 'tpu6e' if 'tpu6e' in row['TPU'] else 'tpu7x'
+                if (kernel_tuner_name, tpu) in generated_cases:
+                    continue
+                tuning_group_keys.append(f'{kernel_tuner_name}_{tpu}_tuning_group')
+                generated_cases.add((kernel_tuner_name, tpu))
+                supported_core_num = 1 if tpu == 'tpu6e' else 2
+                pipeline['steps'].append(
+                    self._build_generate_tuning_cases_step(
+                        kernel_tuner_name=kernel_tuner_name,
+                        case_set_id=f'{kernel_tuner_name}_{self.auto_tune_id}',
+                        tpu_version=tpu,
+                        #(TODO): Only support kernel without communication for now and we don't have TPU 7x with 1 core queue
+                        tpu_cores=supported_core_num,
+                        case_set_desc=f'{kernel_tuner_name}_autotune',
+                        parent_step_key=os.environ.get('BUILDKITE_STEP_KEY',
+                                                    None)))
         pipeline['steps'].append(
             self._build_result_processing_step(
-                parent_step_keys=tuning_group_keys))
+                parent_step_keys=tuning_group_keys or [os.environ.get('BUILDKITE_STEP_KEY', None)]))
         os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
         with open(OUTPUT_PATH, "w") as f:
             logger.info(

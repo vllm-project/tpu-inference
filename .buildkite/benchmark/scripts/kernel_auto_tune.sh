@@ -22,37 +22,73 @@ declare -A kernel_auto_tune_mapping
 kernel_auto_tune_mapping["mla_kernel_tuner"]="/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py"
 
 # Path to the script you want to append
-UPDATE_SCRIPT="/workspace/tpu_inference/tools/kernel/tuner/v1/autotune/update_tuned_params.py"
+KERNEL_TUNED_PARAMS_UPDATE_SCRIPT="/workspace/tpu_inference/tools/kernel/tuner/v1/autotune/update_tuned_params.py"
 
-# Iterate over all keys in the dictionary
-for key in "${!kernel_auto_tune_mapping[@]}"; do
-    target_file="${kernel_auto_tune_mapping[$key]}"
-    
-    echo "Processing $target_file with tuner: $key..."
-
-    # Step 1: Replace 'get_tuned_params' with '_get_tuned_params'
-    sed -i 's/get_tuned_params/_get_tuned_params/g' "$target_file"
-
-    # Step 2: Concatenate the update script to the end
-    # (Adding an empty echo first to guarantee we start on a fresh line)
-    echo "" >> "$target_file"
-    cat "$UPDATE_SCRIPT" >> "$target_file"
-
-    # Create tpu variable based on DEVICE
+get_tpu_from_device() {
     if [[ "$DEVICE" == *"6e"* ]]; then
-        tpu="tpu6e"
+        echo "tpu6e"
     elif [[ "$DEVICE" == *"7x"* ]]; then
-        tpu="tpu7x"
+        echo "tpu7x"
     else
-        echo "Error: DEVICE must contain '6e' or '7x'"
+        echo "Error: DEVICE must contain '6e' or '7x'" >&2
         exit 1
     fi
+}
 
-    # Steps 3, 4, and 5: Replace the placeholders
-    sed -i "s|KERNEL_TUNER_NAME_PLACEHOLDER|$key|g; \
-            s|CASE_SET_ID_PLACEHOLDER|$KERNEL_AUTOTUNE_ID|g; \
-            s|TPU_PLACEHOLDER|$tpu|g" "$target_file"
+update_all_tuned_params_py() {
+    # Iterate over all keys in the dictionary
+    for key in "${!kernel_auto_tune_mapping[@]}"; do
+        target_file="${kernel_auto_tune_mapping[$key]}"
 
-    echo "Successfully updated $target_file"
-    echo "----------------------------------------"
-done
+        echo "Processing $target_file with tuner: $key..."
+
+        # Step 1: Replace 'get_tuned_params' with '_get_tuned_params'
+        sed -i 's/get_tuned_params/_get_tuned_params/g' "$target_file"
+
+        # Step 2: Concatenate the update script to the end
+        # (Adding an empty echo first to guarantee we start on a fresh line)
+        echo "" >> "$target_file"
+        cat "$KERNEL_TUNED_PARAMS_UPDATE_SCRIPT" >> "$target_file"
+
+        tpu="$(get_tpu_from_device)"
+
+        # Steps 3, 4, and 5: Replace the placeholders
+        sed -i "s|KERNEL_TUNER_NAME_PLACEHOLDER|$key|g; \
+                s|CASE_SET_ID_PLACEHOLDER|$KERNEL_AUTOTUNE_ID|g; \
+                s|TPU_PLACEHOLDER|$tpu|g" "$target_file"
+
+        echo "Successfully updated $target_file"
+        echo "----------------------------------------"
+    done
+}
+
+checkout_updated_tuned_params_py_branch() {
+    # EXTRA_ENVS="KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
+    # extract KERNEL_AUTOTUNE_STAGE from EXTRA_ENVS and set it as an environment variable
+    if [[ -n "${EXTRA_ENVS:-}" ]]; then
+        KERNEL_AUTOTUNE_STAGE=$(echo "$EXTRA_ENVS" | tr ' ,' '\n' | grep '^KERNEL_AUTOTUNE_STAGE=' | cut -d= -f2-)
+        if [[ -z "${KERNEL_AUTOTUNE_STAGE}" ]]; then
+            unset KERNEL_AUTOTUNE_STAGE
+        else
+            echo "🚀 KERNEL_AUTOTUNE_STAGE set to ${KERNEL_AUTOTUNE_STAGE}"
+        fi
+    fi
+    if [[ "${KERNEL_AUTOTUNE_STAGE:-}" == "POST_KERNEL_AUTOTUNE_BM_RERUN" ]]; then
+        # use the KERNEL_AUTOTUNE_ID from the EXTRA_ENVS and construct the branch name and checkout the remote branch for the kernel autotune result evaluation. 
+        # This is to ensure that the benchmark runs with the correct tuned parameters.
+        # Extract the KERNEL_AUTOTUNE_ID from the EXTRA_ENVS
+        # Example EXTRA_ENVS="KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID"
+        KERNEL_AUTOTUNE_ID=$(echo "$EXTRA_ENVS" | tr ' ,' '\n' | grep '^KERNEL_AUTOTUNE_ID=' | cut -d= -f2-)
+        if [ -z "$KERNEL_AUTOTUNE_ID" ]; then
+            echo "Error: KERNEL_AUTOTUNE_ID is not set in EXTRA_ENVS."
+            exit 1
+        fi
+        # Construct the branch name, this should match the branch name used in the kernel_auto_tune_invoker.py
+        BRANCH_NAME="kernel_autotune.update_tuned_params_${KERNEL_AUTOTUNE_ID}"
+        git fetch
+        git checkout "${BRANCH_NAME}"
+        COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+        echo "🚀 Running in POST_KERNEL_AUTOTUNE_BM_RERUN mode in branch ${BRANCH_NAME}"
+        echo "Last commit message: ${COMMIT_MESSAGE}"
+    fi
+}
