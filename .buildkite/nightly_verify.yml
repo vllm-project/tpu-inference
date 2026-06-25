@@ -93,8 +93,6 @@ steps:
      key: record_verified_commit_hashes
      depends_on:
        - notify_test_results
-       - tpu6e_tpu_test_notification
-       - tpu7x_tpu_test_notification
      agents:
        queue: cpu
      secrets:
