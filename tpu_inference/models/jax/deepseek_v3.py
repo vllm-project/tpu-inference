@@ -530,7 +530,7 @@ class MLAEinsum(JaxEinsum):
                 self.weight_scale_inv,
                 (0, 1),
                 block_size=None,
-            ).T
+            )
             A, N, qk_nope_head_dim, v_head_dim = self.mla_layer.kv_lora_rank, self.mla_layer.N, self.mla_layer.qk_nope_head_dim, self.mla_layer.v_head_dim
             if dequantized_weight.shape != (A, N *
                                             (qk_nope_head_dim + v_head_dim)):

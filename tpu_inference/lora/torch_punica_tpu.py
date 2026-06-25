@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import functools
 import math
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch.nn.functional as F
 import torchax
-import vllm.lora.punica_wrapper.utils as _punica_utils
 from vllm.lora.punica_wrapper.utils import convert_mapping
-from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -19,11 +16,6 @@ if TYPE_CHECKING:
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from tpu_inference.lora.torch_lora_ops import bgmv_expand_slice, bgmv_shrink
-
-# Pin memory is unsupported on TPU; force `pin_memory` off for
-# `async_tensor_h2d` calls.
-_punica_utils.async_tensor_h2d = functools.partial(
-    _punica_utils.async_tensor_h2d, pin_memory=is_pin_memory_available())
 
 
 class PunicaWrapperTPU(PunicaWrapperBase):
@@ -51,6 +43,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
+
+    def _get_sampler_indices(self, x: torch.Tensor) -> torch.IntTensor:
+        return torch.narrow(self._sampler_indices, 0, 0, x.size(0))
 
     @property
     def embeddings_indices(self) -> torch.Tensor:
@@ -148,8 +143,17 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             lora_b_stacked (torch.Tensor): lora_b's weights.
             add_inputs (bool): Default to True.
         """
-        raise NotImplementedError(
-            "NYI: torch_punica_tpu.PunicaWrapperTPU.add_lora_embedding.")
+        y_orig = y
+        y = y.view(-1, y.shape[-1])
+        x = x.view(-1, x.shape[-1])
+
+        add_inputs = kwargs.get('add_inputs', add_inputs)
+
+        # Embedding layer only needs the expand operation as lookup in LoRA A is done beforehand.
+        y = bgmv_expand_slice(x, lora_b_stacked, y,
+                              self._get_token_lora_indices(x), 0, y.shape[-1],
+                              add_inputs)
+        return y.view(y_orig.shape)
 
     def add_lora_linear(self,
                         y: torch.Tensor,
@@ -226,8 +230,23 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
-        raise NotImplementedError(
-            "NYI: torch_punica_tpu.PunicaWrapperTPU.add_lora_logits.")
+
+        # Note: We use per-token indices here because the TPU bgmv ops expect a tensor
+        # of shape [num_tokens].
+
+        # Step 1: Shrink operation
+        buffer = bgmv_shrink(x, lora_a_stacked, self._get_sampler_indices(x),
+                             scale)
+
+        y_orig = y
+        y = y.view(-1, y.shape[-1])
+
+        # Step 2: Expand operation
+        y = bgmv_expand_slice(buffer, lora_b_stacked, y,
+                              self._get_sampler_indices(x), 0, y.shape[-1],
+                              True)
+
+        return y.view(y_orig.shape)
 
     @property
     def token_lora_indices(self) -> torch.Tensor:

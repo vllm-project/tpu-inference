@@ -10,6 +10,15 @@
 # waitForServerReady: Blocks execution until the server prints the READY_MESSAGE or times out.
 # This logic is shared across all benchmark scripts.
 waitForServerReady() {
+    # Reject non-integer TIMEOUT_SECONDS up front. Inside `[[ x -ge y ]]` the
+    # operands go through bash arithmetic evaluation, which will execute
+    # command-substitution syntax in the value if a caller ever sets it to
+    # something exotic. Easier to fail loudly than to rely on the caller.
+    if [[ ! "${TIMEOUT_SECONDS:-}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: TIMEOUT_SECONDS must be a non-negative integer, got: '${TIMEOUT_SECONDS:-}'" >&2
+        exit 1
+    fi
+
     # shellcheck disable=SC2155
     local start_time=$(date +%s)
     echo "Waiting for server ready message: '$READY_MESSAGE'"

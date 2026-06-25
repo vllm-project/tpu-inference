@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 import torch
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.models.gemma4_mm import \
@@ -33,15 +33,16 @@ from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import make_layers
-from tpu_inference.layers.jax.rope_interface import apply_rope
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM, Gemma4Model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     merge_multimodal_embeddings
 from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
                                                          StandardWeightLoader)
+from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -80,45 +81,44 @@ def apply_multidimensional_rope(
     positions: jax.Array,
     base_frequency: int,
     rotary_fraction: Optional[float] = None,
-    rope_scaling: Optional[dict] = None,
 ) -> jax.Array:
     """Applies multidimensional RoPE."""
 
     b, seq_len, num_heads, head_dim = inputs.shape
+    ndim = positions.shape[-1]
 
-    inputs_flat = inputs.reshape((b * seq_len, num_heads, head_dim))
-    positions_flat = positions.reshape((b * seq_len, positions.shape[-1]))
-
-    ndim = positions_flat.shape[-1]
     num_rotated_channels = head_dim
     if rotary_fraction is not None:
         num_rotated_channels = int(
             round(num_rotated_channels * rotary_fraction))
-    num_rotated_channels_per_dim = 2 * (num_rotated_channels // (2 * ndim))
 
-    split_points = [(k + 1) * num_rotated_channels_per_dim
-                    for k in range(ndim)]
-    if rotary_fraction is None:
-        split_points = split_points[:-1]
+    c_per_dim = 2 * (num_rotated_channels // (2 * ndim))
+    half_c = c_per_dim // 2
+    rot_dim = ndim * c_per_dim
 
-    x_parts = jnp.split(inputs_flat, split_points, axis=-1)
+    x_rot = inputs[..., :rot_dim]
+    x_unrot = inputs[..., rot_dim:]
 
-    y_parts = [
-        apply_rope(
-            inputs=x_parts[k],
-            positions=positions_flat[..., k],
-            head_dim=x_parts[k].shape[-1],
-            rope_theta=base_frequency,
-            rope_scaling=rope_scaling,
-        ) for k in range(ndim)
-    ]
+    x_reshaped = x_rot.reshape(b, seq_len, num_heads, ndim, 2, half_c)
+    x1, x2 = x_reshaped[..., 0, :], x_reshaped[..., 1, :]
 
-    if rotary_fraction is not None:
-        y_parts.append(x_parts[-1])
+    inv_freq = 1.0 / (base_frequency**(
+        jnp.arange(0, c_per_dim, 2, dtype=jnp.float32) / c_per_dim))
+    freqs = jnp.expand_dims(positions[..., None] * inv_freq, axis=2)
 
-    out_flat = jnp.concatenate(y_parts, axis=-1)
+    cos = jnp.cos(freqs).astype(inputs.dtype)
+    sin = jnp.sin(freqs).astype(inputs.dtype)
 
-    return out_flat.reshape((b, seq_len, num_heads, head_dim))
+    out1 = (x1 * cos) - (x2 * sin)
+    out2 = (x2 * cos) + (x1 * sin)
+
+    out_rotated = jnp.stack([out1, out2],
+                            axis=-2).reshape(b, seq_len, num_heads, rot_dim)
+
+    if x_unrot.shape[-1] > 0:
+        return jnp.concatenate([out_rotated, x_unrot], axis=-1)
+
+    return out_rotated
 
 
 class SegmentIds(NamedTuple):
@@ -150,35 +150,48 @@ class Gemma4VisionFlashAttention(JaxModule):
         rope_params = getattr(config, "rope_parameters",
                               {}).get("full_attention", {})
         self.rope_base_frequency = rope_params.get("rope_theta", 100.0)
-        self.rope_scaling = getattr(config, "rope_scaling", None)
 
         self.q_proj = JaxEinsum("BTD,DNH->BTNH",
                                 (self.features, self.num_heads, self.head_dim),
                                 param_dtype=dtype,
+                                kernel_init=nnx.with_partitioning(
+                                    init_fn,
+                                    (None, ShardingAxisName.VIT_MODEL, None)),
                                 rngs=rng,
                                 quant_config=quant_config)
         self.k_proj = JaxEinsum(
             "BTD,DKH->BTKH", (self.features, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
             quant_config=quant_config)
         self.v_proj = JaxEinsum(
             "BTD,DKH->BTKH", (self.features, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
             quant_config=quant_config)
         self.o_proj = JaxEinsum("BTNH,NHD->BTD",
                                 (self.num_heads, self.head_dim, self.features),
                                 param_dtype=dtype,
+                                kernel_init=nnx.with_partitioning(
+                                    init_fn,
+                                    (ShardingAxisName.VIT_MODEL, None, None)),
                                 rngs=rng,
                                 quant_config=quant_config)
 
         self.q_norm = JaxRmsNorm(self.head_dim,
                                  param_dtype=dtype,
+                                 scale_init=nnx.with_partitioning(
+                                     init_fn, (None, )),
                                  rngs=rng,
                                  quant_config=quant_config)
         self.k_norm = JaxRmsNorm(self.head_dim,
                                  param_dtype=dtype,
+                                 scale_init=nnx.with_partitioning(
+                                     init_fn, (None, )),
                                  rngs=rng,
                                  quant_config=quant_config)
         self.v_norm = JaxRmsNorm(self.head_dim,
@@ -213,15 +226,9 @@ class Gemma4VisionFlashAttention(JaxModule):
         value_proj = self.v_norm(value_proj)
 
         query_proj = apply_multidimensional_rope(
-            query_proj,
-            segment_pos,
-            base_frequency=self.rope_base_frequency,
-            rope_scaling=self.rope_scaling)
+            query_proj, segment_pos, base_frequency=self.rope_base_frequency)
         key_proj = apply_multidimensional_rope(
-            key_proj,
-            segment_pos,
-            base_frequency=self.rope_base_frequency,
-            rope_scaling=self.rope_scaling)
+            key_proj, segment_pos, base_frequency=self.rope_base_frequency)
 
         # Transpose for Flash Attention: (B, T, N, H) -> (B, N, T, H)
         q_BNTH = jnp.transpose(query_proj, (0, 2, 1, 3))
@@ -240,11 +247,13 @@ class Gemma4VisionFlashAttention(JaxModule):
 
         segment_ids = SegmentIds(q=segment_ids_val, kv=segment_ids_val)
 
-        outputs_BNTH = sharded_flash_attention(mesh=self.mesh,
-                                               causal=False,
-                                               sm_scale=1.0)(q_BNTH, k_BKTH,
-                                                             v_BKTH,
-                                                             segment_ids)
+        outputs_BNTH = sharded_flash_attention(
+            mesh=self.mesh,
+            causal=False,
+            sm_scale=1.0,
+            batch_axis=ShardingAxisName.VIT_BATCH,
+            head_axis=ShardingAxisName.VIT_MODEL,
+        )(q_BNTH, k_BKTH, v_BKTH, segment_ids)
 
         # Transpose back: (B, N, T, H) -> (B, T, N, H)
         outputs_BTNH = jnp.transpose(outputs_BNTH, (0, 2, 1, 3))
@@ -273,7 +282,8 @@ class Gemma4VisionPatchEmbedder(JaxModule):
             "...d,dh->...h",
             (3 * self.patch_size**2, config.hidden_size),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL)),
             bias_init=None,
             rngs=rngs,
             quant_config=quant_config,
@@ -285,7 +295,7 @@ class Gemma4VisionPatchEmbedder(JaxModule):
                               dtype=dtype))
 
     def _factorized_posemb(self, pixel_position_ids: jax.Array) -> jax.Array:
-        posemb = self.position_embedding_table.value
+        posemb = self.position_embedding_table.get_value()
         one_hot = jax.nn.one_hot(pixel_position_ids,
                                  posemb.shape[0],
                                  dtype=posemb.dtype)
@@ -332,7 +342,8 @@ class Gemma4VisionMLP(JaxModule):
             "...d,df->...f",
             (self.features, self.hidden_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL)),
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
@@ -342,7 +353,8 @@ class Gemma4VisionMLP(JaxModule):
             "...d,df->...f",
             (self.features, self.hidden_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL)),
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
@@ -352,7 +364,8 @@ class Gemma4VisionMLP(JaxModule):
             "...f,fd->...d",
             (self.hidden_dim, self.features),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (ShardingAxisName.VIT_MODEL, None)),
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
@@ -373,26 +386,34 @@ class Gemma4VisionEncoderLayer(JaxModule):
                  quant_config: Optional[VllmQuantConfig] = None):
         self.input_layernorm = JaxRmsNorm(config.hidden_size,
                                           param_dtype=dtype,
+                                          scale_init=nnx.with_partitioning(
+                                              init_fn, (None, )),
                                           rngs=rng,
                                           quant_config=quant_config)
 
         self.self_attn = Gemma4VisionFlashAttention(config, dtype, rng, mesh,
                                                     quant_config)
 
-        self.post_attention_layernorm = JaxRmsNorm(config.hidden_size,
-                                                   param_dtype=dtype,
-                                                   rngs=rng,
-                                                   quant_config=quant_config)
+        self.post_attention_layernorm = JaxRmsNorm(
+            config.hidden_size,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=quant_config)
 
-        self.pre_feedforward_layernorm = JaxRmsNorm(config.hidden_size,
-                                                    param_dtype=dtype,
-                                                    rngs=rng,
-                                                    quant_config=quant_config)
+        self.pre_feedforward_layernorm = JaxRmsNorm(
+            config.hidden_size,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=quant_config)
         self.mlp = Gemma4VisionMLP(config, dtype, rng, quant_config)
-        self.post_feedforward_layernorm = JaxRmsNorm(config.hidden_size,
-                                                     param_dtype=dtype,
-                                                     rngs=rng,
-                                                     quant_config=quant_config)
+        self.post_feedforward_layernorm = JaxRmsNorm(
+            config.hidden_size,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=quant_config)
 
     def __call__(self,
                  inputs: jax.Array,
@@ -501,7 +522,8 @@ class Gemma4VisionModel(JaxModule):
 
         if self.standardize:
             pooled_x, mask = outputs[0]
-            pooled_x = (pooled_x - self.std_bias.value) * self.std_scale.value
+            pooled_x = (pooled_x - self.std_bias.get_value()
+                        ) * self.std_scale.get_value()
             outputs = ((pooled_x, mask), )
 
         return outputs
@@ -522,7 +544,8 @@ class Gemma4MultimodalEmbedder(JaxModule):
             (vision_hidden_size, text_hidden_size),
             bias_shape=None,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL)),
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
@@ -546,9 +569,10 @@ class Gemma4MultimodalEmbedder(JaxModule):
 
 
 class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
-    packed_modules_mapping = {"__no_packing__": []}
+    packed_modules_mapping = Gemma4ForCausalLM.packed_modules_mapping
     WeightLoader = StandardWeightLoader
     supports_multimodal = True
+    supports_encoder_tp_data = True
     _processor_factory = getattr(PtGemma4MM, "_processor_factory", None)
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
@@ -557,7 +581,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
-        from tpu_inference.models.jax.gemma4 import Gemma4Model
+        vllm_config.sharding_config.apply_vision_sharding()
+
         self.model = Gemma4Model(
             vllm_config=vllm_config,
             rng=rng,
@@ -565,7 +590,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             prefix="model",
         )
         model_config = vllm_config.model_config
-
         vision_config = model_config.hf_config.vision_config
         self.image_token_id = getattr(model_config.hf_config, "image_token_id",
                                       258880)
@@ -654,40 +678,16 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                         )):
                     continue
 
-                # Handle packed QKV weights for the text tower.
-                # Note: KV-shared layers DO have full Q/K/V weights in the
-                # checkpoint — vllm-pytorch's Gemma4Attention constructs
-                # qkv_proj unconditionally. K/V are still computed and used
-                # for the current step's attention; the kernel skips writing
-                # them to the cache via update_kv_cache=False.
-                if "qkv_proj" in mapped_name:
+                # Handle packed QKV weights for the text tower when the model uses separate projections (e.g. k_eq_v layers)
+                if "qkv_proj" in mapped_name and "model.layers." in mapped_name:
                     m = re.search(r"layers\.(\d+)\.", mapped_name)
                     if m:
                         layer_idx = int(m.group(1))
                         if self.model.start_layer <= layer_idx < self.model.end_layer:
-                            jax_attn = self.model.layers[
-                                layer_idx - self.model.start_layer].self_attn
-                            q_size = jax_attn.num_heads * jax_attn.head_dim_original
-                            kv_size = jax_attn.num_kv_heads * jax_attn.head_dim_original
+                            jax_attn = self.model.layers[layer_idx].self_attn
 
-                            q_weight = weight[:q_size]
-                            k_weight = weight[q_size:q_size + kv_size]
-                            v_weight = weight[q_size + kv_size:q_size +
-                                              2 * kv_size]
-
-                            yield mapped_name.replace(
-                                "qkv_proj", "q_proj"), process_tensor(
-                                    mapped_name.replace("qkv_proj", "q_proj"),
-                                    q_weight)
-                            yield mapped_name.replace(
-                                "qkv_proj", "k_proj"), process_tensor(
-                                    mapped_name.replace("qkv_proj", "k_proj"),
-                                    k_weight)
-                            yield mapped_name.replace(
-                                "qkv_proj", "v_proj"), process_tensor(
-                                    mapped_name.replace("qkv_proj", "v_proj"),
-                                    v_weight)
-                            continue
+                            if jax_attn.qkv_proj is None:
+                                continue
 
                 yield mapped_name, process_tensor(mapped_name, weight)
 
@@ -736,6 +736,10 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             jnp.expand_dims(sort_idx, axis=-1),
             axis=1)
 
+        projected_vision_features = jax.lax.with_sharding_constraint(
+            projected_vision_features,
+            NamedSharding(self.mesh, PartitionSpec(None, None, None)))
+
         return projected_vision_features
 
     def _parse_and_validate_image_input(
@@ -771,14 +775,14 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         # Process images in fixed-size micro-batches of exactly `dp_size` so
         # every vision-tower call shares the same (B=dp_size, ...) JIT cache
-        # entry regardless of how many images this step has.
-        # Gemma4VisionFlashAttention's sharded_flash_attention has
-        # in_specs=P('data','model',None,None), which requires
-        # B % dp_size == 0; B=dp_size always satisfies that. The last
+        # entry regardless of how many images this step has. The last
         # micro-batch is right-padded with pixel_position_ids=POSITIONS_PAD_VALUE
         # entries so input_mask masks the padded entries out of the encoder.
         n_images = pixel_values.shape[0]
-        dp_size = self.mesh.shape[ShardingAxisName.BATCH]
+        dp_size = get_mesh_shape_product(self.mesh, ShardingAxisName.VIT_BATCH)
+        input_sharding = NamedSharding(
+            self.mesh, PartitionSpec(ShardingAxisName.VIT_BATCH, None, None))
+
         per_image_features = []
         for chunk_start in range(0, n_images, dp_size):
             chunk_end = min(chunk_start + dp_size, n_images)
@@ -790,6 +794,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 pv_chunk = jnp.pad(pv_chunk, ((0, pad_count), (0, 0), (0, 0)))
                 pp_chunk = jnp.pad(pp_chunk, ((0, pad_count), (0, 0), (0, 0)),
                                    constant_values=POSITIONS_PAD_VALUE)
+            pv_chunk = jax.device_put(pv_chunk, input_sharding)
+            pp_chunk = jax.device_put(pp_chunk, input_sharding)
             vt_output = self.get_single_image_embedding(pv_chunk, pp_chunk)
             for i in range(chunk_size):
                 per_image_features.append(vt_output[i])

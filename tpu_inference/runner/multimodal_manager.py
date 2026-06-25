@@ -22,8 +22,11 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
+from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     sanity_check_mm_encoder_outputs
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -132,7 +135,7 @@ class MultiModalManager:
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
         encoder_outputs = []
-        for _, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
+        for modality, num_items, mm_kwargs_group in group_and_batch_mm_kwargs(
                 mm_kwargs):
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -142,7 +145,7 @@ class MultiModalManager:
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
             curr_group_outputs = self.runner.embed_multimodal_fn(
-                self.runner.state_leaves, **mm_kwargs_group)
+                self.runner.state_leaves, modality=modality, **mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -266,6 +269,7 @@ class MultiModalManager:
 
         if not mm_embeds:
             return None, None
+
         is_mm_embed = jnp.array(is_mm_embed_cpu, dtype=jnp.bool_)
         assert target_pad_len == is_mm_embed.shape[0]
 

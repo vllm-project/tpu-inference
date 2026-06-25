@@ -327,17 +327,38 @@ inspect|cs=testing_tuning_infra_11|run=001> query_run_status
 #### Query minimum latency results
 
 ```
-query_min_latency [--case_set_id ID] [--run_id ID]
+query_min_latency [--case_set_id ID] [--run_id ID]  [--show FIELD ...]
 ```
 
-For each unique `TuningKey`, shows the best measured latency and the corresponding `TunableParam` configuration.
+For each unique `TuningKey`, shows the best measured latency and the corresponding `TunableParam` configuration. If repeatable --show option is specified, only the FIELDs are shown. Without --show option, all the fields in TuningKey and TunableParams are shown as a table.
 
 ```
-inspect|cs=testing_tuning_infra_11|run=001> query_min_latency
-  tuning_key={"key1": 1, "key2": 4}  best_latency_us=135516  warmup_us=189835  tunable_params={"param1": 7, "param2": 11}  case_id=1
-  tuning_key={"key1": 1, "key2": 5}  best_latency_us=81849   warmup_us=108349  tunable_params={"param1": 7, "param2": 10}  case_id=2
-  tuning_key={"key1": 2, "key2": 4}  best_latency_us=79251   warmup_us=180675  tunable_params={"param1": 7, "param2": 10}  case_id=4
-  tuning_key={"key1": 2, "key2": 5}  best_latency_us=105251  warmup_us=49820   tunable_params={"param1": 7, "param2": 11}  case_id=7
+inspect|cs=mla_tuning_0|run=4> query_min_latency --show max_num_tokens --show actual_num_q_heads --show actual_lkv_dim  --show actual_r_dim  --show decode_batch_size  --show num_kv_pages_per_block --show latency_us
+max_num_tokens  actual_num_q_heads  actual_lkv_dim  actual_r_dim  decode_batch_size  num_kv_pages_per_block  latency_us
+--------------  ------------------  --------------  ------------  -----------------  ----------------------  ----------
+128             128                 512             64            16                 1                       2059  
+...
+64              128                 512             64            16                 1                       2041  
+8               128                 512             64            8                  2                       2035
+```
+
+#### Query case latency
+
+```
+query_case_latency  Query latency for tuning cases with optional field filters
+                        (--case_set_id ID --run_id ID [--filter_key FIELD=VALUE ...] [--show FIELD ...] [--show_all])
+```
+
+FIELD can be any key in tuning_key or tunable_params. --show option behaves the same as above. --show_all includes all cases, even ones where tuning failed.
+
+```
+inspect|cs=mla_tuning_0|run=4> query_case_latency --filter_key max_num_tokens=4 --show max_num_tokens --show actual_num_q_heads --show actual_lkv_dim  --show actual_r_dim  --show decode_batch_size  --show num_kv_pages_per_block --show latency_us --show_all
+max_num_tokens  actual_num_q_heads  actual_lkv_dim  actual_r_dim  decode_batch_size  num_kv_pages_per_block  latency_us
+--------------  ------------------  --------------  ------------  -----------------  ----------------------  ----------
+4               128                 512             64            16                 1                       2078  
+4               128                 512             64            8                  1                       2111  
+...
+4               128                 512             64            32                 1                       FAILURE  
 ```
 
 #### Other

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -19,9 +20,15 @@ import pytest
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (PLACEHOLDER_TOKEN_ID,
-                                                 extract_last_sampled_tokens)
+                                                 extract_last_sampled_tokens,
+                                                 filter_speculative_logprobs)
 
 VOCAB_SIZE = 100
+
+
+def _make_mesh():
+    devices = np.array(jax.devices()).reshape((1, len(jax.devices())))
+    return jax.sharding.Mesh(devices, axis_names=('data', 'model'))
 
 
 def _build_inputs(seqs, num_speculative_tokens):
@@ -45,7 +52,6 @@ def _build_inputs(seqs, num_speculative_tokens):
     num_draft_cpu = np.asarray(num_draft, dtype=np.int32)
 
     metadata = SpecDecodeMetadata(
-        draft_token_ids=jnp.zeros(int(num_draft_cpu.sum()), dtype=jnp.int32),
         draft_lengths=jnp.asarray(num_draft_cpu),
         target_logits_indices=jnp.zeros(int(num_draft_cpu.sum()),
                                         dtype=jnp.int32),
@@ -66,6 +72,8 @@ def _reference(sampled, num_draft_cpu, vocab_size, max_num_seq):
         num_draft_cpu,
         batch_size,
         padded_tokens_length,
+        dp_size=1,
+        req_indices_dp={0: list(range(batch_size))},
     )
 
     last_sampled = np.full((max_num_seq, ),
@@ -126,8 +134,10 @@ def test_extract_last_sampled_tokens_matches_parse_output(
     max_num_seq = 8
     sampled, metadata, num_draft_cpu = _build_inputs(seqs, num_speculative)
 
-    last_sampled, num_rejected = extract_last_sampled_tokens(
-        metadata, sampled, num_speculative, VOCAB_SIZE, max_num_seq)
+    mesh = _make_mesh()
+    with jax.set_mesh(mesh):
+        last_sampled, num_rejected = extract_last_sampled_tokens(
+            metadata, sampled, num_speculative, VOCAB_SIZE, max_num_seq, mesh)
 
     ref_last, ref_num_rej = _reference(sampled, num_draft_cpu, VOCAB_SIZE,
                                        max_num_seq)
@@ -136,21 +146,86 @@ def test_extract_last_sampled_tokens_matches_parse_output(
     np.testing.assert_array_equal(np.asarray(num_rejected), ref_num_rej)
 
 
-def test_extract_last_sampled_tokens_no_spec_decode():
-    max_num_seq = 8
-    sampled = jnp.asarray([7, 11, 42], dtype=jnp.int32)
+def test_filter_speculative_logprobs():
+    # Setup inputs matching the manual trace
+    dp_size = 2
+    num_reqs = 3
+    vocab_size = 100
+    padded_tokens_length = 5
 
-    last_sampled, num_rejected = extract_last_sampled_tokens(
-        None,
-        sampled,
-        num_speculative_tokens=3,
-        vocab_size=VOCAB_SIZE,
-        max_num_seq=max_num_seq,
+    # log_token_ids: shape [14, 1]
+    log_token_ids = np.array(
+        [
+            # Rank 0 (draft)
+            [10],
+            [11],
+            [12],
+            [20],
+            [-1],
+            # Rank 0 (bonus)
+            [13],
+            [-1],
+            # Rank 1 (draft)
+            [30],
+            [31],
+            [-1],
+            [-1],
+            [-1],
+            # Rank 1 (bonus)
+            [-1],
+            [-1]
+        ],
+        dtype=np.int32)
+
+    # logprobs_arr: shape [14, 1]
+    logprobs_arr = np.array(
+        [[110.0], [111.0], [112.0], [120.0], [0.0], [113.0], [0.0], [130.0],
+         [131.0], [0.0], [0.0], [0.0], [0.0], [0.0]],
+        dtype=np.float32)
+
+    # selected_token_ranks: shape [14]
+    selected_token_ranks = np.array([1, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0],
+                                    dtype=np.int32)
+
+    metadata = SpecDecodeMetadata(
+        draft_lengths=jnp.zeros(num_reqs),  # Not used by the function
+        target_logits_indices=jnp.zeros(1),  # Not used
+        bonus_logits_indices=jnp.zeros(1),  # Not used
+        final_logits_indices=jnp.zeros(padded_tokens_length *
+                                       dp_size),  # Shape is used: [10]
     )
+    metadata.draft_lengths_cpu = np.array([3, 2, 4, 0], dtype=np.int32)
+    metadata.req_indices_dp = {
+        0: [0, 1],
+        1: [2, 3]  # 3 is padding req (>= num_reqs)
+    }
 
-    expected_last = np.array([7, 11, 42] + [PLACEHOLDER_TOKEN_ID] * 5,
-                             dtype=np.int32)
-    expected_num_rejected = np.zeros(max_num_seq, dtype=np.int32)
-    np.testing.assert_array_equal(np.asarray(last_sampled), expected_last)
-    np.testing.assert_array_equal(np.asarray(num_rejected),
-                                  expected_num_rejected)
+    # Call the function
+    (filtered_token_ids, filtered_logprobs, filtered_ranks,
+     cu_num_generated_tokens) = filter_speculative_logprobs(
+         log_token_ids=log_token_ids,
+         logprobs_arr=logprobs_arr,
+         selected_token_ranks=selected_token_ranks,
+         spec_decode_metadata=metadata,
+         vocab_size=vocab_size,
+         dp_size=dp_size,
+         num_reqs=num_reqs,
+     )
+
+    # Expected outputs
+    expected_token_ids = np.array([[10], [11], [12], [13], [20], [30], [31]],
+                                  dtype=np.int32)
+
+    expected_logprobs = np.array(
+        [[110.0], [111.0], [112.0], [113.0], [120.0], [130.0], [131.0]],
+        dtype=np.float32)
+
+    expected_ranks = np.array([1, 1, 1, 1, 1, 1, 1], dtype=np.int32)
+
+    expected_cu = [0, 4, 5, 7]
+
+    # Assertions
+    np.testing.assert_array_equal(filtered_token_ids, expected_token_ids)
+    np.testing.assert_array_equal(filtered_logprobs, expected_logprobs)
+    np.testing.assert_array_equal(filtered_ranks, expected_ranks)
+    assert cu_num_generated_tokens == expected_cu

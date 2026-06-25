@@ -35,7 +35,7 @@ class UnquantizedLinearMethod:
                      x_jax: jax.Array,
                      weight_jax: jax.Array,
                      bias_jax: Optional[jax.Array] = None,
-                     einsum_str: str = "...n,pn->...p") -> jax.Array:
+                     einsum_str: str = "...k,kn->...n") -> jax.Array:
         """Applies fused linear operation.
 
         Operates on a single large weight matrix that combines multiple logical
@@ -79,7 +79,7 @@ class UnquantizedLinearMethod:
         """
         outs = []
         for i, weight_jax in enumerate(weights):
-            out = jnp.einsum("...n,pn->...p", x_jax, weight_jax)
+            out = jnp.einsum("...k,kn->...n", x_jax, weight_jax)
             if bias_jax is not None:
                 out += bias_jax[i]
 

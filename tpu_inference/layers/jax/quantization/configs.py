@@ -174,7 +174,7 @@ class QuantLinearConfig(CommonQuantLinearConfig):
                 weight.get_metadata().get("sharding", ()))
         else:
             self.weight_sharding = jax.sharding.PartitionSpec(
-                *(self.out_features_sharding + self.in_features_sharding))
+                *(self.in_features_sharding + self.out_features_sharding))
 
         self.bias_sharding = jax.sharding.PartitionSpec(
             *self.out_features_sharding)

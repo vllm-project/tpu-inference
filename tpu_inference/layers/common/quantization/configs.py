@@ -12,26 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import jax
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference import envs
-from tpu_inference.utils import to_jax_dtype
+from tpu_inference.utils import get_mesh_shape_product, to_jax_dtype
 
 
 class QuantLinearConfig:
 
-    def __init__(self, *, enable_sp: bool, output_sizes: list[int]):
+    def __init__(self,
+                 *,
+                 enable_sp: bool,
+                 output_sizes: list[int],
+                 weight_sharding: P | None = None):
         # Output size across all TP ranks.
         self.output_sizes = output_sizes
-        self.weight_sharding = P(None, None)
+        self.weight_sharding = weight_sharding if weight_sharding is not None else P(
+            None, None)
         self.fuse_matmuls = True
         self.enable_sp = enable_sp
         self.input_sharding = None
         self.output_sharding = None
         self.mesh = None
 
-        self.bias_sharding = P(self.weight_sharding[0])
-        self.n_shards = len(output_sizes)
+        self.bias_sharding = P(self.weight_sharding[1])
+        # n_shards is always the TP degree for the weight's output axis, derived
+        # from the active mesh.  get_mesh_shape_product returns 1 when the axis
+        # is None or absent from the mesh, so no explicit fallback is needed.
+        self.n_shards = get_mesh_shape_product(
+            jax.sharding.get_abstract_mesh(), self.weight_sharding[1])
         self.enable_quantized_matmul_kernel = envs.ENABLE_QUANTIZED_MATMUL_KERNEL
         self.requant_block_size = envs.REQUANTIZE_BLOCK_SIZE
         self.requant_weight_dtype = to_jax_dtype(envs.REQUANTIZE_WEIGHT_DTYPE)

@@ -293,13 +293,18 @@ def ragged_conv1d(
     is_decode_only = distribution[0] == distribution[2]
 
     def decode_only_branch(_):
+        num_tokens = x.shape[0]
+        pad_size = max(0, num_tokens - state_indices.shape[0])
+        padded_state_indices = jnp.pad(state_indices, (0, pad_size),
+                                       mode='constant',
+                                       constant_values=0)
         return ragged_conv1d_decode_only(
             x,
             conv_state,
             conv_weight,
             conv_bias,
             query_start_loc,
-            state_indices,
+            padded_state_indices,
             distribution,
             has_initial_state,
             kernel_size=kernel_size,

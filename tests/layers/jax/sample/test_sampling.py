@@ -21,7 +21,10 @@ from jax.sharding import Mesh
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.jax.sample.sampling import (compute_logprobs,
+from tpu_inference.layers.jax.sample.sampling import (PromptLogprobsAsyncData,
+                                                      PromptLogprobsReqSnap,
+                                                      compute_logprobs,
+                                                      compute_prompt_logprobs,
                                                       gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
@@ -238,3 +241,54 @@ class TestProcessedLogprobs:
         processed = compute_logprobs(processed_logits)
 
         assert np.allclose(raw_logprobs, processed, atol=1e-6)
+
+
+class TestComputePromptLogprobs:
+
+    def test_compute_prompt_logprobs_success(self):
+        from unittest.mock import MagicMock
+
+        # Setup inputs
+        full_logits = jnp.array([
+            [1.0, 2.0, 3.0],
+            [3.0, 2.0, 1.0],
+            [0.0, 0.0, 1.0],
+        ],
+                                dtype=jnp.float32)
+        input_ids = jnp.array([0, 1, 2], dtype=jnp.int32)
+
+        num_prompt_logprobs = {"req1": 2}
+
+        # Mock CachedRequestState and VllmSchedulerOutput
+        mock_req_state = MagicMock()
+        mock_req_state.num_computed_tokens = 0
+        mock_req_state.num_prompt_tokens = 3
+        requests = {"req1": mock_req_state}
+
+        mock_scheduler_output = MagicMock()
+        mock_scheduler_output.num_scheduled_tokens = {"req1": 2}
+
+        req_ids_dp = {0: ["req1"]}
+        dp_size = 1
+
+        res = compute_prompt_logprobs(
+            full_logits=full_logits,
+            input_ids=input_ids,
+            num_prompt_logprobs=num_prompt_logprobs,
+            requests=requests,
+            scheduler_output=mock_scheduler_output,
+            req_ids_dp=req_ids_dp,
+            dp_size=dp_size,
+            max_logprobs=2,
+        )
+
+        assert res is not None
+        assert isinstance(res, PromptLogprobsAsyncData)
+        assert len(res.req_snaps) == 1
+        snap = res.req_snaps[0]
+        assert isinstance(snap, PromptLogprobsReqSnap)
+        assert snap.req_id == "req1"
+        assert snap.num_k == 2
+        assert snap.start_idx == 0
+        assert snap.num_logits == 2
+        assert snap.is_last_chunk is False

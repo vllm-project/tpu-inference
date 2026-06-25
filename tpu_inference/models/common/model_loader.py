@@ -73,6 +73,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.deepseek_v3 import DeepseekV3ForCausalLM
     from tpu_inference.models.jax.gemma4_mm import \
         Gemma4ForConditionalGeneration
+    from tpu_inference.models.jax.gemma4_mtp import Gemma4MTPForCausalLM
     from tpu_inference.models.jax.gpt_oss import GptOss
     from tpu_inference.models.jax.llama3 import LlamaForCausalLM
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
@@ -96,6 +97,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
     _MODEL_REGISTRY[
         "Gemma4ForConditionalGeneration"] = Gemma4ForConditionalGeneration
+    _MODEL_REGISTRY["Gemma4MTPModel"] = Gemma4MTPForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -114,6 +116,7 @@ def _get_nnx_model(
     rng: jax.Array,
     mesh: Mesh,
     pooler: Optional[Any] = None,
+    is_draft_model: bool = False,
 ) -> nnx.Module:
     """Instantiate the nnx JAX model and optionally pass the embedding/pooling layer.
 
@@ -127,6 +130,9 @@ def _get_nnx_model(
     Returns:
         nnx.Module: The instantiated JAX module.
     """
+
+    model_config = (vllm_config.speculative_config.draft_model_config
+                    if is_draft_model else vllm_config.model_config)
 
     def create_abstract_model() -> nnx.Module:
         """
@@ -269,22 +275,22 @@ def _get_nnx_model(
             loader = get_model_loader(vllm_config.load_config)
             if isinstance(model, LoadableWithIterator):
                 assert isinstance(model, JaxModule)
-                loader.load_weights(model, vllm_config.model_config)
+                loader.load_weights(model, model_config)
             elif isinstance(loader, RunaiModelStreamerLoader):
-                model_weights = vllm_config.model_config.model
-                if hasattr(vllm_config.model_config, "model_weights"):
-                    model_weights = vllm_config.model_config.model_weights
+                model_weights = model_config.model
+                if hasattr(model_config, "model_weights"):
+                    model_weights = model_config.model_weights
                 weights_iterator = loader._get_weights_iterator(
-                    model_weights, vllm_config.model_config.revision)
+                    model_weights, model_config.revision)
 
                 # We set the weights iterator at runtime, to prevent having to change
                 # every model's load_weights signature. This also prevents us from hitting
                 # a TypeError at runtime if you use the RunaiModelStreamerLoader with any
                 # flax_nnx model whose load_weights function does not accept the
                 # weights_iterator keyword argument.
-                vllm_config.model_config.runai_model_weights_iterator = weights_iterator
+                model_config.runai_model_weights_iterator = weights_iterator
                 model.load_weights(rng)
-                del vllm_config.model_config.runai_model_weights_iterator
+                del model_config.runai_model_weights_iterator
             else:
                 model.load_weights(rng)
             if hasattr(vllm_config, "pytorch_pooler"):
@@ -336,7 +342,8 @@ def get_flax_model(
                                vllm_config,
                                rng,
                                mesh,
-                               pooler=pooler)
+                               pooler=pooler,
+                               is_draft_model=is_draft_model)
     vllm_config.model_config.dtype = original_dtype
     kv_cache_sharding = NamedSharding(
         mesh,
@@ -403,7 +410,7 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image/video token's embeddings by VIT
-    def run_embed_multimodal(state_leaves, **kwargs):
+    def run_embed_multimodal(state_leaves, modality=None, **kwargs):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
         return model.embed_multimodal(**kwargs)

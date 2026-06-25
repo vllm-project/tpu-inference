@@ -55,10 +55,13 @@ TARGET_CASE_NAME=${2:-""}
 VLLM_PID=""
 CLEANUP_DONE="false"
 
-if [ -z "$CASE_FILE" ]; then
-    echo "Usage: $0 <case.json> [TARGET_CASE_NAME]"
+if [ -z "$CASE_FILE" ] || [ -z "$TARGET_CASE_NAME" ]; then
+    echo "Usage: $0 <case.json> <TARGET_CASE_NAME>"
     exit 1
 fi
+
+export TARGET_CASE_NAME
+echo "TARGET_CASE_NAME: $TARGET_CASE_NAME"
 
 # shellcheck disable=SC2317
 cleanup() {
@@ -107,16 +110,13 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-if [[ "${BUILDKITE:-false}" == "true" ]]; then
-  # TODO: Re-enable and check for compatible versions if running accuracy or lm-eval tasks.
-  # pip install evaluate==0.4.5 || true
-  # pip install rouge-score==0.1.2 || true
-  # # Install lm_eval with dependencies, version is same as https://github.com/vllm-project/vllm/blob/main/.buildkite/scripts/hardware_ci/run-tpu-v1-test.sh#L64
-  # pip install "lm-eval[api,math]>=0.4.9.2" || true
-
+if [ "${BUILDKITE:-false}" == "true" ]; then
+  ENV_CONTEXT="Buildkite environment"
   # Set umask so that any newly created files/directories have 777/666 permissions by default.
   # This ensures that the host user can delete artifacts created by the docker root user.
   umask 000
+else
+  ENV_CONTEXT="Local environment"
 fi
 
 if ! command -v gcloud &> /dev/null; then
@@ -154,6 +154,7 @@ mkdir -p "$VLLM_TORCH_PROFILER_DIR"
 PYTHON_PARSER="$SCRIPT_DIR/parser_case.py"
 # Evaluate the Python output to set variables in the current shell context
 eval "$(python3 "$PYTHON_PARSER" "$CASE_FILE" "$TARGET_CASE_NAME")"
+printf "[DEBUG] Check export %s %s %s" "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" "$MAX_MODEL_LEN \n"
 
 VLLM_LOG="$LOG_FOLDER/vllm_log.txt"
 BM_LOG="$LOG_FOLDER/bm_log.txt"
@@ -161,8 +162,13 @@ BEST_BM_LOG="$LOG_FOLDER/best_bm_log.txt"
 printf "[INFO] %-25s = %s\n" "VLLM_LOG" "$VLLM_LOG"
 printf "[INFO] %-25s = %s\n" "BM_LOG" "$BM_LOG"
 printf "[INFO] %-25s = %s\n" "ARTIFACT_FOLDER" "$ARTIFACT_FOLDER"
+printf "[DEBUG] ls=%s\n\n" "$(ls "$ARTIFACT_FOLDER/../")" || true
 
-echo "model: $MODEL"
+printf "[DEBUG] model: %s\n" "$MODEL"
+printf "[DEBUG] dataset: %s\n" "${DATASET:-}"
+printf "[DEBUG] lm_eval pre-cmd: %s\n" "${LM_EVAL_CMD:-}"
+printf "[DEBUG] tp size: %s\n" "${TENSOR_PARALLEL_SIZE:-}"
+printf "[DEBUG] CLIENT_CMD_ENVS: %s\n" "${CLIENT_CMD_ENVS[*]:-}"
 
 # Helper function to check if a value is in an array
 contains_element () {
@@ -270,7 +276,7 @@ fi
 DATASET_DIR="$ARTIFACT_FOLDER/dataset"
 mkdir -p "$DATASET_DIR"
 
-DATASETS=("custom" "custom-token" "mmlu" "mlperf" "math500" "sharegpt")
+DATASETS=("custom" "custom-token" "mmlu" "mlperf" "math500" "sharegpt" "mmmu-pro")
 # shellcheck disable=SC2153
 if contains_element "$DATASET" "${DATASETS[@]}"; then
   if [[ -z "${GCS_BUCKET:-}" ]]; then
@@ -296,6 +302,9 @@ if contains_element "$DATASET" "${DATASETS[@]}"; then
       "sharegpt")
         gsutil -m cp -r gs://"$GCS_BUCKET"/sharegpt/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
         ;;
+      "mmmu-pro")
+        gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/mmmu-pro/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset ${DATASET}"
+        ;;
     esac
   else
     echo "Warning: gsutil not found. Skipping dataset download from GCS."
@@ -316,9 +325,9 @@ fi
 
 if [ "$COMMAND_TYPE" = "lm_eval" ]; then
   {
-    ".buildkite/benchmark/lm_eval/$DATASET/run.sh"
+    ".buildkite/benchmark/lm_eval/$DATASET/run.sh" "$LOG_FOLDER"
     printf "AccuracyMetrics: "
-    tr -d '\n' < "/workspace/${DATASET}_accuracy.json"
+    tr -d '\n' < "${LOG_FOLDER}/${DATASET}_accuracy.json"
     echo ""
   } >> "$BM_LOG"
   echo "Finished running $DATASET benchmark."
@@ -537,11 +546,6 @@ run_benchmark(){
   echo "$throughput $p99_e2el"
 }
 
-if [ "${BUILDKITE:-false}" == "true" ]; then
-  ENV_CONTEXT="Buildkite environment"
-else
-  ENV_CONTEXT="Local environment"
-fi
 printf "[DEBUG] Checking folder structure (Environment: %s)...\n" "$ENV_CONTEXT"
 printf "[DEBUG] pwd=%s\n\nls $ARTIFACT_FOLDER=\n%s\n" "$(pwd)" "$(ls "$ARTIFACT_FOLDER")" || true
 printf "[DEBUG] ls $ARTIFACT_FOLDER/temp_logs=\n%s\n" "$(ls "$ARTIFACT_FOLDER"/temp_logs)" || true

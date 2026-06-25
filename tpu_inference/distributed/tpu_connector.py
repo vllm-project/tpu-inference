@@ -96,6 +96,8 @@ from tpu_inference.distributed.tpu_connector_stats import (
     TpuKVConnectorPromMetrics, TpuKVConnectorStats)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.tpu_runner import TPUModelRunner
+from tpu_inference.runner.utils import (get_kv_transfer_metadata,
+                                        trim_request_id_suffix)
 from tpu_inference.utils import device_array
 
 ReqId = str
@@ -707,7 +709,19 @@ class TPUConnectorWorker:
                 kv, req_meta.expiration_time, buffer_idx
             ]
             self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-            self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+
+            if jax.profiler.TraceAnnotation.is_enabled():
+                dims_str, kv_size_bytes = get_kv_transfer_metadata(kv)
+
+                with jax.profiler.TraceAnnotation(
+                        "KV_Cache_Await_Pull",
+                        uuid=req_meta.uuid,
+                        request_id=trim_request_id_suffix(req_id),
+                        bytes=kv_size_bytes,
+                        dimensions=dims_str):
+                    self.kv_transfer_server.await_pull(req_meta.uuid, kv)
+            else:
+                self.kv_transfer_server.await_pull(req_meta.uuid, kv)
 
     def _async_d2h_and_transfer(self, req_id: str, req_meta: SendMeta,
                                 kv_src: list[jax.Array],
@@ -757,7 +771,22 @@ class TPUConnectorWorker:
             dest_buffer, req_meta.expiration_time, buffer_idx
         ]
         self.kv_pull_uuid_to_req_id_map[req_meta.uuid] = req_id
-        self.kv_transfer_server.await_pull(req_meta.uuid, updated_dest_buffer)
+
+        if jax.profiler.TraceAnnotation.is_enabled():
+            dims_str, kv_size_bytes = get_kv_transfer_metadata(
+                updated_dest_buffer)
+
+            with jax.profiler.TraceAnnotation(
+                    "KV_Cache_Await_Pull",
+                    uuid=req_meta.uuid,
+                    request_id=trim_request_id_suffix(req_id),
+                    bytes=kv_size_bytes,
+                    dimensions=dims_str):
+                self.kv_transfer_server.await_pull(req_meta.uuid,
+                                                   updated_dest_buffer)
+        else:
+            self.kv_transfer_server.await_pull(req_meta.uuid,
+                                               updated_dest_buffer)
 
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
@@ -790,7 +819,18 @@ class TPUConnectorWorker:
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
         )
         start_time = time.perf_counter()
-        kv = conn.pull(req_meta.uuid, kv_spec)
+        if jax.profiler.TraceAnnotation.is_enabled():
+            dims_str, expected_bytes = get_kv_transfer_metadata(kv_spec)
+            with jax.profiler.TraceAnnotation(
+                    "KV_Cache_Pull",
+                    uuid=req_meta.uuid,
+                    request_id=trim_request_id_suffix(req_id),
+                    bytes=expected_bytes,
+                    dimensions=dims_str,
+                    source=f"{req_meta.remote_host}:{req_meta.remote_port}"):
+                kv = conn.pull(req_meta.uuid, kv_spec)
+        else:
+            kv = conn.pull(req_meta.uuid, kv_spec)
         kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
         end_time_0, end_time_1 = time.perf_counter(), None
         prepare_time_ms = (end_time_0 - start_time) * 1000

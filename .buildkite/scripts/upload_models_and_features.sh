@@ -22,6 +22,22 @@ FEATURE_LIST_KEY="feature-list"
 
 MODEL_IMPL_TYPE="${MODEL_IMPL_TYPE:-auto}"
 
+# Validate inputs that will later be interpolated into uploaded pipeline YAML.
+# Reject anything that isn't on the allowlist / numeric to prevent injection of
+# extra YAML keys (e.g. via embedded newlines or quotes) through env vars.
+case "${MODEL_IMPL_TYPE}" in
+  auto|flax_nnx|vllm) ;;
+  *)
+    echo "ERROR: MODEL_IMPL_TYPE must be one of auto|flax_nnx|vllm, got: '${MODEL_IMPL_TYPE}'"
+    exit 1
+    ;;
+esac
+
+if [[ ! "${JOB_PRIORITY:-1}" =~ ^-?[0-9]+$ ]]; then
+  echo "ERROR: JOB_PRIORITY must be an integer, got: '${JOB_PRIORITY:-}'"
+  exit 1
+fi
+
 failure_handler() {
   local exit_code=$?
   local line_no=$1
@@ -147,6 +163,7 @@ if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
     echo "steps:"
     echo "  - group: \"TPU v6e nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
     echo "    key: \"v6e-group\""
+    echo "    depends_on: \"build_docker\""
     echo "    steps:"
     printf "%s\n" "${pipeline_v6e_fragments[@]}" | sed 's/^/      /'
   } | buildkite-agent pipeline upload
@@ -169,6 +186,7 @@ if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
     echo "steps:"
     echo "  - group: \"TPU v7x nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
     echo "    key: \"v7x-group\""
+    echo "    depends_on: \"build_docker\""
     echo "    steps:"
     printf "%s\n" "${pipeline_v7x_fragments[@]}" | sed 's/^/      /'
   } | buildkite-agent pipeline upload

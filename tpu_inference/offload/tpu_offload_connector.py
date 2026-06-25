@@ -133,6 +133,8 @@ from tpu_inference.offload.cpu_backend import LocalCPUBackend
 from tpu_inference.offload.offload_manager import (LRUCacheManager,
                                                    StagingBufferManager)
 from tpu_inference.offload.utils import (CpuChunkId, ReqId,
+                                         pure_jax_stack_kv_cache_cross_layers,
+                                         pure_jax_update_kv_caches_one,
                                          stack_kv_cache_cross_layers,
                                          update_kv_caches_one)
 from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -142,7 +144,7 @@ logger = init_logger(__name__)
 # kv cache layout needed by cpu offloading mechanism
 REQUIRED_KV_CACHE_LAYOUT = "NHD"
 
-BLOCK_SIZE_BUCKETS = [1, 2, 4, 8, 16, 32, 64]
+BLOCK_SIZE_BUCKETS = envs.TPU_OFFLOAD_BLOCK_SIZE_BUCKETS
 
 # we keep our operations at vllm's block granularity,
 # and want to provide the following three preferences when handling
@@ -349,6 +351,32 @@ class KVOffloadConnectorStats(KVConnectorStats):
         return self.num_finished_blocks == 0
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        """
+        Aggregates metrics from another KVConnectorStats instance into this one.
+
+        This method merges dynamically calculated data such as `finished_save_chunks` and 
+        `finished_load_chunks` from the `other.data` dict. Note that `num_finished_blocks` 
+        is not directly aggregated because it is exposed as a dynamically calculated property.
+
+        Args:
+            other (KVConnectorStats): The other metrics container to aggregate from.
+
+        Returns:
+            KVConnectorStats: The updated instance (self) containing the aggregated stats.
+        """
+        if isinstance(other, KVOffloadConnectorStats):
+            other_saves = other.data.get("finished_save_chunks", {})
+            for k, v in other_saves.items():
+                if k not in self.data["finished_save_chunks"]:
+                    self.data["finished_save_chunks"][k] = []
+                self.data["finished_save_chunks"][k].extend(v)
+
+            other_loads = other.data.get("finished_load_chunks", {})
+            for k, v in other_loads.items():
+                if k not in self.data["finished_load_chunks"]:
+                    self.data["finished_load_chunks"][k] = []
+                self.data["finished_load_chunks"][k].extend(v)
+
         return self
 
     def reduce(self) -> dict[str, int | float]:
@@ -373,8 +401,13 @@ class KVOffloadConnectorStats(KVConnectorStats):
 
     @property
     def num_finished_blocks(self) -> int:
-        return len(self.data["finished_save_chunks"]) + len(
-            self.data["finished_load_chunks"])
+        finished_saves = sum(
+            len(chunks)
+            for chunks in self.data.get("finished_save_chunks", {}).values())
+        finished_loads = sum(
+            len(chunks)
+            for chunks in self.data.get("finished_load_chunks", {}).values())
+        return finished_saves + finished_loads
 
 
 # The metadata used for communicating between scheduler and worker connectors.
@@ -965,6 +998,13 @@ class TPUOffloadConnectorScheduler():
                 )
                 continue
 
+            # Ensure any remaining decode tokens are flushed before cleanup
+            save_spec = self._prepare_save_spec(tracker, is_finished=True)
+            if save_spec:
+                req_meta = self._create_request_meta(tracker, save_spec, None)
+                if req_meta:
+                    metadata.requests_meta.append(req_meta)
+
             # Pop tracker and other state first.
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
@@ -1132,6 +1172,23 @@ class TPUOffloadConnectorScheduler():
             f"TPUOffloadConnectorScheduler: getting workers' output: finished_sending: {connector_output.finished_sending}, finished_recving: {connector_output.finished_recving}"
         )
 
+        # Filter out worker events for requests that have already been cleaned up.
+        # This prevents the vLLM engine from crashing on `assert req_id in self.requests`
+        # when processing the final decode save or lagging responses.
+        if connector_output.finished_sending:
+            connector_output.finished_sending = {
+                req_id
+                for req_id in connector_output.finished_sending
+                if req_id in self._unfinished_requests
+            }
+
+        if connector_output.finished_recving:
+            connector_output.finished_recving = {
+                req_id
+                for req_id in connector_output.finished_recving
+                if req_id in self._unfinished_requests
+            }
+
         # per iteration, update the finished staging blocks
         if connector_output.kv_connector_stats and connector_output.kv_connector_stats.data is not None:
             assert isinstance(connector_output.kv_connector_stats,
@@ -1141,6 +1198,8 @@ class TPUOffloadConnectorScheduler():
 
             for req_id, saved_chunk_ids in connector_output.kv_connector_stats.data[
                     "finished_save_chunks"].items():
+                if req_id not in self._reqs_being_saved:
+                    continue
                 num_saved_chunks = len(saved_chunk_ids)
                 logger.debug(
                     f"  finished_save_chunks for {req_id}: {saved_chunk_ids}")
@@ -1166,6 +1225,8 @@ class TPUOffloadConnectorScheduler():
 
             for req_id, loaded_chunk_ids in connector_output.kv_connector_stats.data[
                     "finished_load_chunks"].items():
+                if req_id not in self._reqs_being_loaded:
+                    continue
                 num_loaded_chunks = len(loaded_chunk_ids)
                 logger.debug(
                     f"  finished_load_chunks for {req_id}: {num_loaded_chunks}"
@@ -1403,6 +1464,30 @@ class TPUOffloadConnectorWorker:
                 raise ValueError("Could not decompose with given buckets.")
         return decomposed_blocks
 
+    def _do_stack(self, kv_caches, block_ids_arr, num_blocks, grouped_indices=None):
+        if grouped_indices is None:
+            grouped_indices = self.grouped_layer_indices_tuple
+        if self.mesh.shape.get('attn_dp', 1) > 1:
+            return pure_jax_stack_kv_cache_cross_layers(
+                kv_caches, block_ids_arr, num_blocks, grouped_indices)
+        else:
+            return stack_kv_cache_cross_layers(kv_caches, block_ids_arr,
+                                               num_blocks, grouped_indices)
+
+    def _do_update(self, kv_caches, kv_cache_slices, dst_blocks, mesh,
+                   cached_kv_sharding_spec, indices_sharding, grouped_indices=None):
+        if grouped_indices is None:
+            grouped_indices = self.grouped_layer_indices_tuple
+        if self.mesh.shape.get('attn_dp', 1) > 1:
+            return pure_jax_update_kv_caches_one(kv_caches, kv_cache_slices,
+                                                 dst_blocks, mesh,
+                                                 cached_kv_sharding_spec,
+                                                 indices_sharding, grouped_indices)
+        else:
+            return update_kv_caches_one(kv_caches, kv_cache_slices, dst_blocks,
+                                        mesh, cached_kv_sharding_spec,
+                                        indices_sharding, grouped_indices)
+
     def _precompile_kv_swap_operations(self):
         """
         Pre-compiles the functions used for KV cache swapping
@@ -1426,7 +1511,7 @@ class TPUOffloadConnectorWorker:
                         dummy_block_ids_arr = jnp.array(dummy_block_ids)
 
                         # 1. gather / stack (for save)
-                        paged_kv_for_compilation, stacked_dummy_kv_caches_tpu = stack_kv_cache_cross_layers(
+                        paged_kv_for_compilation, stacked_dummy_kv_caches_tpu = self._do_stack(
                             paged_kv_for_compilation, dummy_block_ids_arr,
                             num_blocks, self.grouped_layer_indices_tuple)
                         if isinstance(stacked_dummy_kv_caches_tpu[0], list):
@@ -1443,7 +1528,7 @@ class TPUOffloadConnectorWorker:
                         jax.block_until_ready(stacked_dummy_kv_caches_tpu)
 
                         # 2. update / insert  kv (for load)
-                        updated_kv_caches = update_kv_caches_one(
+                        updated_kv_caches = self._do_update(
                             paged_kv_for_compilation,
                             stacked_dummy_kv_caches_tpu, dummy_block_ids,
                             self.mesh, self.cached_kv_sharding_spec,
@@ -1477,8 +1562,7 @@ class TPUOffloadConnectorWorker:
             return kv_caches, []
         if num_blocks in BLOCK_SIZE_BUCKETS:
             block_ids_arr = jnp.array(block_ids)
-            return stack_kv_cache_cross_layers(kv_caches, block_ids_arr,
-                                               num_blocks, self.grouped_layer_indices_tuple)
+            return self._do_stack(kv_caches, block_ids_arr, num_blocks)
 
         # 2. Report the latency of decomposed_block_sizes
         decomposed_block_buckets = self._decompose_into_buckets(block_ids)
@@ -1497,8 +1581,8 @@ class TPUOffloadConnectorWorker:
             _num_blocks = len(decomposed_block_bucket)
             block_slice = decomposed_block_slice_arr[i]
             # Update current_kv_caches with the latest valid handle
-            current_kv_caches, gathered_chunk = stack_kv_cache_cross_layers(
-                current_kv_caches, block_slice, len(decomposed_block_bucket), self.grouped_layer_indices_tuple)
+            current_kv_caches, gathered_chunk = self._do_stack(
+                current_kv_caches, block_slice, len(decomposed_block_bucket))
             gathered_chunks.extend(gathered_chunk)
 
         return current_kv_caches, gathered_chunks
@@ -1516,11 +1600,9 @@ class TPUOffloadConnectorWorker:
         if num_blocks == 0:
             return kv_caches
         if num_blocks in BLOCK_SIZE_BUCKETS:
-            return update_kv_caches_one(kv_caches, kv_cache_slices, dst_blocks,
-                                         self.mesh,
-                                         self.cached_kv_sharding_spec,
-                                         self.indices_sharding,
-                                         self.grouped_layer_indices_tuple)
+            return self._do_update(kv_caches, kv_cache_slices, dst_blocks,
+                                   self.mesh, self.cached_kv_sharding_spec,
+                                   self.indices_sharding)
 
         decomposed_block_buckets = self._decompose_into_buckets(dst_blocks)
         logger.debug(
@@ -1533,7 +1615,7 @@ class TPUOffloadConnectorWorker:
             bucket_size = len(decomposed_block_bucket)
             next_offset = block_offset + bucket_size
             slices_for_bucket = kv_cache_slices[block_offset:next_offset]
-            updated_kv_caches = update_kv_caches_one(
+            updated_kv_caches = self._do_update(
                 updated_kv_caches, slices_for_bucket, decomposed_block_bucket,
                 self.mesh, self.cached_kv_sharding_spec, self.indices_sharding,
                 self.grouped_layer_indices_tuple)
@@ -1643,9 +1725,8 @@ class TPUOffloadConnectorWorker:
                 self.runner.kv_caches, blocks_to_save)
         else:
             blocks_to_save_arr = jnp.array(blocks_to_save)
-            kv_caches, gathered_kv_caches_tpu = stack_kv_cache_cross_layers(
-                self.runner.kv_caches, blocks_to_save_arr, num_blocks_to_save,
-                self.grouped_layer_indices_tuple)
+            kv_caches, gathered_kv_caches_tpu = self._do_stack(
+                self.runner.kv_caches, blocks_to_save_arr, num_blocks_to_save)
         self.runner.kv_caches = kv_caches
 
         if gathered_kv_caches_tpu is not None:
@@ -1734,7 +1815,7 @@ class TPUOffloadConnectorWorker:
                 self.runner.kv_caches, all_src_blocks)
         else:
             all_src_blocks_arr = jnp.array(all_src_blocks)
-            kv_caches, gathered_kv_caches_tpu = stack_kv_cache_cross_layers(
+            kv_caches, gathered_kv_caches_tpu = self._do_stack(
                 self.runner.kv_caches, all_src_blocks_arr,
                 total_num_blocks_to_save, self.grouped_layer_indices_tuple)
         self.runner.kv_caches = kv_caches
@@ -2161,7 +2242,7 @@ class TPUOffloadConnectorWorker:
                     dst_blocks,
                 )
             else:
-                self.runner.kv_caches = update_kv_caches_one(
+                self.runner.kv_caches = self._do_update(
                     self.runner.kv_caches,
                     raw_chunked_kv_on_tpu,
                     dst_blocks,
@@ -2203,6 +2284,7 @@ class TPUOffloadConnectorWorker:
         """
         Get the KV transfer stats for the connector.
         """
+        self._process_completed_saves()
         # Clear stats for next iteration
         if not self.offload_stats.is_empty():
             return self.offload_stats.clone_and_reset()

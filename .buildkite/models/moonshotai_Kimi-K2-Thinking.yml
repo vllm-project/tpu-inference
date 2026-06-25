@@ -16,7 +16,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for moonshotai/Kimi-K2-Thinking"
     key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2-Thinking_UnitTest"
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+      queue: cpu  # TODO: replace with execution environment (e.g. "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}")
     soft_fail: true
     commands:
       - |
@@ -39,7 +39,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2-Thinking_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2-Thinking_UnitTest"
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+      queue: cpu  # TODO: replace with execution environment (e.g. "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}")
     soft_fail: true
     commands:
       - |
@@ -62,7 +62,7 @@ steps:
     key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2-Thinking_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2-Thinking_Accuracy"
     agents:
-      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+      queue: cpu  # TODO: replace with execution environment (e.g. "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}")
     soft_fail: true
     commands:
       - |

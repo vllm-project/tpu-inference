@@ -21,11 +21,25 @@ artifact — e.g. attaching to a bug, feeding into a tool that takes
 exactly one file, or sharing via a single URL. This script merges the
 XSpaces from each input into one output proto.
 
-Plane names are taken from each input as-is; xprof identifies devices/
-hosts by plane name, so coinciding names from peer DP ranks (e.g.
-`/device:TPU:0` on a single host) would conflict. Pass `--prefix-planes`
-to namespace each input's planes with its filename stem (e.g.
-`dp0_t1v-..-w-0: /device:TPU:0`) if you need to keep them distinct.
+For files sharing a host (the MPMD case — peer DP ranks on one worker),
+plane names collide (every rank has `/device:TPU:0`) and plane ids
+collide (JAX numbers devices per-process from 0). xprof's trace_viewer
+dedups by id, so a naive concat silently drops peer-rank data. To
+resolve:
+
+  * Planes whose name ends in `<prefix>:<id>` (`/device:TPU:0`, or any
+    future `/host:CPU:0`-style plane) are renumbered globally per host,
+    independently per prefix. With DP=4 × TP=2, the 4 ranks'
+    `/device:TPU:0,1` become `/device:TPU:0..7`. SparseCore indices are
+    per-chip and stay verbatim (e.g. `SparseCore 0`).
+  * Planes without a numeric suffix (`/host:CPU`,
+    `/device:CUSTOM:Megascale Trace`, `Task Environment`) get the rank
+    index appended: `/host:CPU 0`, `/host:CPU 1`, ...
+  * Plane ids are reassigned to be globally unique.
+
+Files from different hosts already have distinct hostnames, so no
+cross-host renaming is applied — only the per-host TPU/ rank logic runs
+independently within each host group.
 
 Usage:
     # Merge specific files
@@ -33,15 +47,23 @@ Usage:
 
     # Merge every .xplane.pb under a dir (typically plugins/profile/<ts>/)
     python scripts/merge_xprof.py path/to/plugins/profile/<ts> -o merged.xplane.pb
-
-    # Namespace per-input planes to avoid name collisions
-    python scripts/merge_xprof.py <inputs> -o merged.xplane.pb --prefix-planes
 """
 
 import argparse
 import os
+import re
 import sys
-from typing import List
+from collections import OrderedDict
+from typing import List, Tuple
+
+# Matches a plane name of the form `<prefix>:<id>` (e.g. `/device:TPU:0`,
+# `/host:CPU:2`), optionally followed by any whitespace-led trailing
+# segment (e.g. ` SparseCore 0`, ` Core:0`, ` Bar`). Group 1 is the
+# prefix (rewritten verbatim), group 2 is the id that gets bumped, group
+# 3 is the trailing segment which is preserved as-is — any indices
+# inside it are sub-device (per-chip) labels and not part of the global
+# renumbering scheme.
+_PREFIX_ID_RE = re.compile(r"^(\S+):(\d+)(\s+.*)?$")
 
 
 def _load_xplane_pb2():
@@ -101,55 +123,135 @@ def _load_xplane_pb2():
         "XSpace Python proto — they read xplane.pb via a C++ extension.")
 
 
-def _collect_inputs(paths: List[str]) -> List[str]:
-    """Expand input list: directories → every .xplane.pb under them (recursive)."""
+def _collect_inputs(paths: List[str], output: str) -> List[str]:
+    """Expand input list: directories → every .xplane.pb under them (recursive).
+
+    Excludes `output` if it lives under one of the input dirs — the common
+    workflow is to write `merged.xplane.pb` back into the source directory,
+    so a re-run that walks that dir would otherwise pick up the previous
+    merged file as a fresh input and double the output each time.
+    """
+    out_abs = os.path.abspath(output)
     files = []
     for p in paths:
         if os.path.isdir(p):
             for root, _, fnames in os.walk(p):
                 for fn in sorted(fnames):
                     if fn.endswith(".xplane.pb"):
-                        files.append(os.path.join(root, fn))
+                        full = os.path.join(root, fn)
+                        if os.path.abspath(full) == out_abs:
+                            continue
+                        files.append(full)
         elif os.path.isfile(p):
-            files.append(p)
+            if os.path.abspath(p) != out_abs:
+                files.append(p)
         else:
             raise FileNotFoundError(p)
     return files
 
 
-def _prefix_for(path: str) -> str:
-    """Return a short prefix derived from the file's stem (drop .xplane.pb)."""
-    base = os.path.basename(path)
-    if base.endswith(".xplane.pb"):
-        base = base[:-len(".xplane.pb")]
-    return base
+def _group_by_host(inputs: List[str],
+                   xplane_pb2) -> "OrderedDict[str, List[Tuple[str, object]]]":
+    """Read each input and group (path, XSpace) tuples by hostname.
 
-
-def merge(inputs: List[str], output: str, prefix_planes: bool) -> None:
-    xplane_pb2 = _load_xplane_pb2()
-    merged = xplane_pb2.XSpace()
-    total_planes = 0
-
+    The hostname comes from `XSpace.hostnames[0]` (JAX writes the worker
+    host there). Files missing a hostname are bucketed under the empty
+    string; they share one group, which means their planes will be
+    renumbered together — the safe default for unknown provenance.
+    Within each group, files are sorted alphabetically by basename so
+    the rank index is deterministic across runs.
+    """
+    groups: "OrderedDict[str, List[Tuple[str, object]]]" = OrderedDict()
     for path in inputs:
+        xs = xplane_pb2.XSpace()
         with open(path, "rb") as fh:
-            xs = xplane_pb2.XSpace()
             xs.ParseFromString(fh.read())
-        if prefix_planes:
-            prefix = _prefix_for(path)
+        host = xs.hostnames[0] if xs.hostnames else ""
+        groups.setdefault(host, []).append((path, xs))
+    for host in groups:
+        groups[host].sort(key=lambda pair: os.path.basename(pair[0]))
+    return groups
+
+
+def _rename_planes_in_host_group(files: List[Tuple[str, object]]) -> None:
+    """Rewrite plane names in place for one host's files.
+
+    Any plane whose name starts with `<prefix>:<id>` (optionally
+    followed by a whitespace-led trailing segment) is renumbered
+    globally across this host: each distinct prefix (`/device:TPU`,
+    `/host:CPU`, ...) has its own counter that increments as new local
+    ids are encountered, file by file in sort order. Within one file,
+    planes that share a prefix and local id (e.g. `/device:TPU:0` and
+    `/device:TPU:0 SparseCore 0`) receive the same new id; the trailing
+    segment is preserved verbatim, so any sub-device indices inside it
+    are left untouched. Planes that don't match the `<prefix>:<id>`
+    pattern get the file's rank index appended (`/host:CPU 0`,
+    `/host:CPU 1`, ...).
+    """
+    next_id_per_prefix: dict = {}
+    for rank_idx, (_, xs) in enumerate(files):
+        # Map of (prefix, local_id) → globally-allocated id, scoped to
+        # this file so SparseCore planes pick up the same new id as
+        # their owning device plane regardless of plane order.
+        local_to_global: dict = {}
+        for plane in xs.planes:
+            m = _PREFIX_ID_RE.match(plane.name)
+            if m:
+                prefix, local_id_str, sc_suffix = (m.group(1), m.group(2),
+                                                   m.group(3) or "")
+                key = (prefix, int(local_id_str))
+                if key not in local_to_global:
+                    local_to_global[key] = next_id_per_prefix.get(prefix, 0)
+                    next_id_per_prefix[prefix] = local_to_global[key] + 1
+                plane.name = f"{prefix}:{local_to_global[key]}{sc_suffix}"
+            else:
+                plane.name = f"{plane.name} {rank_idx}"
+
+
+def merge(inputs: List[str], output: str) -> None:
+    xplane_pb2 = _load_xplane_pb2()
+    host_groups = _group_by_host(inputs, xplane_pb2)
+
+    for host, files in host_groups.items():
+        _rename_planes_in_host_group(files)
+
+    # Stitch into one XSpace, assigning globally unique plane ids.
+    # xprof's trace_viewer dedups by id (not name), so peer-rank XSpaces
+    # that each numbered from the same id space (typical for JAX MPMD)
+    # would lose data without a fresh allocation here.
+    merged = xplane_pb2.XSpace()
+    next_id = 1
+    total_planes = 0
+    for host, files in host_groups.items():
+        if host:
+            merged.hostnames.append(host)
+        for path, xs in files:
             for plane in xs.planes:
-                plane.name = f"{prefix}: {plane.name}"
-        merged.planes.extend(xs.planes)
-        merged.errors.extend(xs.errors)
-        merged.warnings.extend(xs.warnings)
-        merged.hostnames.extend(xs.hostnames)
-        print(f"  + {path}: {len(xs.planes)} plane(s)")
-        total_planes += len(xs.planes)
+                plane.id = next_id
+                next_id += 1
+            merged.planes.extend(xs.planes)
+            merged.errors.extend(xs.errors)
+            merged.warnings.extend(xs.warnings)
+            print(f"  + {path}: {len(xs.planes)} plane(s)")
+            total_planes += len(xs.planes)
 
     out_dir = os.path.dirname(os.path.abspath(output))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    with open(output, "wb") as fh:
-        fh.write(merged.SerializeToString())
+    # Write atomically via .tmp + rename so a mid-write failure (ENOSPC,
+    # SIGKILL, etc.) doesn't leave a half-serialized file at `output`
+    # that downstream tools will silently treat as valid.
+    tmp_path = output + ".tmp"
+    try:
+        with open(tmp_path, "wb") as fh:
+            fh.write(merged.SerializeToString())
+        os.replace(tmp_path, output)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
     out_size_mb = os.path.getsize(output) / (1024 * 1024)
     print(f"Merged {len(inputs)} file(s) → {output} "
@@ -169,17 +271,10 @@ def main() -> int:
                         "--output",
                         required=True,
                         help="Output path for the merged .xplane.pb.")
-    parser.add_argument(
-        "--prefix-planes",
-        action="store_true",
-        help="Prefix each input's plane names with the input's filename "
-        "stem so coinciding names across DP ranks stay distinct in the "
-        "merged XSpace. Off by default to preserve original device names "
-        "(some xprof tools key off them).")
     args = parser.parse_args()
 
     try:
-        inputs = _collect_inputs(args.inputs)
+        inputs = _collect_inputs(args.inputs, args.output)
     except FileNotFoundError as e:
         print(f"error: input not found: {e}", file=sys.stderr)
         return 2
@@ -189,7 +284,7 @@ def main() -> int:
         return 2
 
     try:
-        merge(inputs, args.output, args.prefix_planes)
+        merge(inputs, args.output)
     except ImportError as e:
         print(f"error: {e}", file=sys.stderr)
         return 3

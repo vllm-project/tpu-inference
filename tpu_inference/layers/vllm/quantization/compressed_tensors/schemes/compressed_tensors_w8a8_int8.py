@@ -113,6 +113,7 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = t2j(layer.weight, use_dlpack=False)
+        weight = jnp.transpose(weight)
         delattr(layer, "weight")
 
         weight_scale = layer.weight_scale
@@ -148,6 +149,8 @@ class VllmCompressedTensorsW8A8Int8(CompressedTensorsW8A8Int8):
                 fused=self.linear_config.fuse_matmuls,
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
+                enable_kernel=self.linear_config.
+                enable_quantized_matmul_kernel,
             )
 
         weights = process_int8_linear_weights(weight, weight_scale, bias)

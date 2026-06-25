@@ -12,17 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import jax.numpy as jnp
 import pytest
 import torch
-from vllm.config import CacheConfig, CompilationMode, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 
 from tpu_inference.platforms.tpu_platform import TpuPlatform
 
 
 class TestTpuPlatform:
+
+    @pytest.fixture(autouse=True)
+    def _restore_multiprocess_dp_env(self):
+        saved = os.environ.get("TPU_MULTIPROCESS_DP")
+        yield
+        if saved is None:
+            os.environ.pop("TPU_MULTIPROCESS_DP", None)
+        else:
+            os.environ["TPU_MULTIPROCESS_DP"] = saved
 
     @pytest.fixture
     def vllm_config(self):
@@ -36,10 +46,13 @@ class TestTpuPlatform:
         vllm_config.model_config.use_mla = False
         vllm_config.scheduler_config = MagicMock(is_multimodal_model=False)
         vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.pipeline_parallel_size = 1
         vllm_config.sharding_config = MagicMock()
-        vllm_config.compilation_config = MagicMock(mode="dynamo_trace_once",
-                                                   backend="openxla")
+        vllm_config.compilation_config = MagicMock(backend="eager")
         vllm_config.kv_transfer_config = None
+        vllm_config.additional_config = {}
+        vllm_config.scheduler_config.async_scheduling = False
         return vllm_config
 
     @pytest.mark.parametrize("chip_name,expected_dtype", [
@@ -78,6 +91,25 @@ class TestTpuPlatform:
     def test_get_device_total_memory(self):
         with pytest.raises(NotImplementedError):
             TpuPlatform.get_device_total_memory()
+
+    @patch('tpu_inference.platforms.tpu_platform.jax.local_devices')
+    def test_mem_get_info(self, mock_local_devices):
+        mock_dev1 = MagicMock()
+        mock_dev1.memory_stats.return_value = {
+            'bytes_limit': 1000,
+            'bytes_in_use': 200
+        }
+        mock_dev2 = MagicMock()
+        mock_dev2.memory_stats.return_value = {
+            'bytes_limit': 1000,
+            'bytes_in_use': 300
+        }
+        mock_local_devices.return_value = [mock_dev1, mock_dev2]
+
+        free_mem, total_mem = TpuPlatform.mem_get_info()
+
+        assert total_mem == 2000
+        assert free_mem == 1500
 
     def test_get_infinity_values(self):
         min_val, max_val = TpuPlatform.get_infinity_values(jnp.float32)
@@ -177,8 +209,6 @@ class TestTpuPlatform:
 
         TpuPlatform.check_and_update_config(vllm_config)
 
-        assert vllm_config.compilation_config.mode == CompilationMode.DYNAMO_TRACE_ONCE
-        assert vllm_config.compilation_config.backend == "openxla"
         assert vllm_config.parallel_config.distributed_executor_backend == "uni"
         assert vllm_config.scheduler_config.disable_chunked_mm_input is False
 
@@ -302,6 +332,7 @@ class TestTpuPlatform:
     def test_check_and_update_config_mla_checks(self):
         vllm_config = MagicMock()
         vllm_config.model_config.use_mla = True
+        vllm_config.parallel_config.data_parallel_size = 1
         vllm_config.additional_config = {}
 
         expected_msg = r"MLA models require both the NEW_MODEL_DESIGN=1 environment.*"
@@ -390,3 +421,165 @@ class TestTpuPlatform:
                                 pytest.fail(
                                     f"MLA check failed unexpectedly when VLLM_MLA_DISABLE was set: {e}"
                                 )
+
+    @staticmethod
+    def _dp_config(data_parallel_size, enable_dp_attention, api_process_rank):
+        vllm_config = MagicMock()
+        vllm_config.parallel_config.data_parallel_size = data_parallel_size
+        vllm_config.parallel_config._api_process_rank = api_process_rank
+        vllm_config.additional_config = {
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": enable_dp_attention
+                }
+            }
+        }
+        return vllm_config
+
+    @pytest.mark.parametrize(
+        "api_rank,dp_size,dp_attn,pathways,expected",
+        [
+            (-1, 2, False, False, "1"),  # online serve (rank -1), DP>1 -> on
+            (0, 2, False, False, "0"),  # offline LLM() (rank 0) -> off
+            (-1, 1, False, False, "0"),  # no DP -> off
+            (-1, 2, True, False, "0"),  # attention DP -> off
+            (-1, 2, False, True, "0"),  # Pathways -> off
+        ],
+    )
+    def test_resolve_multiprocess_dp_derives_when_unset(
+            self, monkeypatch, api_rank, dp_size, dp_attn, pathways, expected):
+        monkeypatch.delenv("TPU_MULTIPROCESS_DP", raising=False)
+        monkeypatch.setattr(
+            "tpu_inference.platforms.tpu_platform.vllm_envs."
+            "VLLM_TPU_USING_PATHWAYS", pathways)
+        vllm_config = self._dp_config(dp_size, dp_attn, api_rank)
+
+        TpuPlatform._resolve_multiprocess_dp(vllm_config)
+
+        # DP <= 1 is a no-op (left unset); otherwise it pins a concrete value.
+        assert os.environ.get("TPU_MULTIPROCESS_DP") == (expected if dp_size
+                                                         > 1 else None)
+
+    @pytest.mark.parametrize("preset", ["0", "1"])
+    def test_resolve_multiprocess_dp_preserves_explicit(
+            self, monkeypatch, preset):
+        # An explicit setting in a supported (online) context must not be
+        # overwritten.
+        monkeypatch.setenv("TPU_MULTIPROCESS_DP", preset)
+        monkeypatch.setattr(
+            "tpu_inference.platforms.tpu_platform.vllm_envs."
+            "VLLM_TPU_USING_PATHWAYS", False)
+        vllm_config = self._dp_config(data_parallel_size=2,
+                                      enable_dp_attention=False,
+                                      api_process_rank=-1)
+
+        TpuPlatform._resolve_multiprocess_dp(vllm_config)
+
+        assert os.environ["TPU_MULTIPROCESS_DP"] == preset
+
+    def test_resolve_multiprocess_dp_explicit_online_worker_ok(
+            self, monkeypatch):
+        # An online API-server worker has _api_process_rank >= 0 (not -1) but
+        # inherits the explicit "1"; it must NOT be misread as offline and must
+        # not raise.
+        monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
+        monkeypatch.setattr(
+            "tpu_inference.platforms.tpu_platform.vllm_envs."
+            "VLLM_TPU_USING_PATHWAYS", False)
+        vllm_config = self._dp_config(data_parallel_size=2,
+                                      enable_dp_attention=False,
+                                      api_process_rank=2)
+
+        TpuPlatform._resolve_multiprocess_dp(vllm_config)  # must not raise
+
+        assert os.environ["TPU_MULTIPROCESS_DP"] == "1"
+
+    @pytest.mark.parametrize(
+        "dp_attn,pathways",
+        [
+            (True, False),  # attention DP
+            (False, True),  # Pathways
+        ])
+    def test_resolve_multiprocess_dp_explicit_incompatible_raises(
+            self, monkeypatch, dp_attn, pathways):
+        # An explicit TPU_MULTIPROCESS_DP=1 with attention DP or on Pathways
+        # must fail loudly rather than be silently downgraded.
+        monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
+        monkeypatch.setattr(
+            "tpu_inference.platforms.tpu_platform.vllm_envs."
+            "VLLM_TPU_USING_PATHWAYS", pathways)
+        vllm_config = self._dp_config(data_parallel_size=2,
+                                      enable_dp_attention=dp_attn,
+                                      api_process_rank=-1)
+
+        with pytest.raises(ValueError, match="TPU_MULTIPROCESS_DP=1"):
+            TpuPlatform._resolve_multiprocess_dp(vllm_config)
+
+    def test_resolve_multiprocess_dp_explicit_incompatible_no_dp_ok(
+            self, monkeypatch):
+        # With DP <= 1 there is no multi-process DP, so an explicit opt-in in
+        # an otherwise-unsupported context is irrelevant and must not raise.
+        monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
+        vllm_config = self._dp_config(data_parallel_size=1,
+                                      enable_dp_attention=True,
+                                      api_process_rank=0)
+
+        TpuPlatform._resolve_multiprocess_dp(vllm_config)  # must not raise
+
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_continue_decode"
+    )
+    def test_check_and_update_config_continue_decode_success(
+            self, mock_patch, mock_dp_update, mock_sharding, vllm_config):
+        vllm_config.additional_config = {"enable_continue_decode": True}
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.model_config.runner_type = "generate"  # not pooling
+        vllm_config.scheduler_config.async_scheduling = False
+        vllm_config.cache_config = None
+
+        TpuPlatform.check_and_update_config(vllm_config)
+
+        mock_patch.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "pp_size, runner_type, async_sched, expected_error",
+        [
+            (2, "generate", False,
+             "continue_decode is not supported with pipeline parallelism"),
+            (1, "pooling", False,
+             "continue_decode is not supported for pooling models"),
+            (1, "generate", True,
+             "continue_decode is not supported with async scheduling"),
+        ],
+    )
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_continue_decode"
+    )
+    def test_check_and_update_config_continue_decode_errors(
+        self,
+        mock_patch,
+        mock_dp_update,
+        mock_sharding,
+        vllm_config,
+        pp_size,
+        runner_type,
+        async_sched,
+        expected_error,
+    ):
+        vllm_config.additional_config = {"enable_continue_decode": True}
+        vllm_config.parallel_config.pipeline_parallel_size = pp_size
+        vllm_config.model_config.runner_type = runner_type
+        vllm_config.scheduler_config.async_scheduling = async_sched
+        vllm_config.cache_config = None
+
+        with pytest.raises(ValueError, match=expected_error):
+            TpuPlatform.check_and_update_config(vllm_config)
+        mock_patch.assert_not_called()

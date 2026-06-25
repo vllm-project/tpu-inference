@@ -116,6 +116,19 @@ class TPUWorker(WorkerBase):
         self.pp_config = PPConfig(vllm_config, rank, ip, prev_worker_ip,
                                   self.parallel_config.pipeline_parallel_size)
 
+        # If model_weights is set, and we are in a distributed environment on Ray,
+        # the driver might have overwritten `model` to its local cache path.
+        # We need to restore it to the original GCS URI (stored in `model_weights`)
+        # so this remote worker can pull it.
+        if (hasattr(self.model_config, "model_weights")
+                and self.model_config.model_weights
+                and isinstance(self.model_config.model, str)
+                and not os.path.exists(self.model_config.model)):
+            logger.info("Restoring model path to GCS URI: %s",
+                        self.model_config.model_weights)
+            self.model_config.model = self.model_config.model_weights
+            self.model_config.model_weights = None
+
         # Explicitly trigger RunAI download on the worker if needed.
         # This handles downloading config.json and other non-weight files to the
         # worker's local cache before VllmModelWrapper initialization.
@@ -309,23 +322,37 @@ class TPUWorker(WorkerBase):
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
-        with set_current_vllm_config(self.vllm_config):
-            temp_file = tempfile.mkstemp()[1]
-            init_distributed_environment(
-                world_size=1,
-                rank=0,
-                local_rank=0,
-                distributed_init_method=f"file://{temp_file}",
-                backend="gloo",
-            )
-            ensure_model_parallel_initialized(
-                tensor_model_parallel_size=1,
-                pipeline_model_parallel_size=1,
-            )
+        #
+        # For MoE under MPMD, vllm keeps parallel_config.data_parallel_size = N
+        # inside each spawned engine (so DPEngineCoreProc can coordinate across
+        # DP ranks). Without this guard, init_distributed_environment would see
+        # data_parallel_size > 1 and override our file:// init into a cross-DP
+        # gloo PG of size DP*TP, but only DP processes exist — TP=N is internal
+        # JAX sharding — so the gloo TCPStore blocks forever waiting for the
+        # missing TP-partner ranks. Force a singleton view for this init only.
+        saved_dp_size = self.parallel_config.data_parallel_size
+        self.parallel_config.data_parallel_size = 1
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                temp_file = tempfile.mkstemp()[1]
+                init_distributed_environment(
+                    world_size=1,
+                    rank=0,
+                    local_rank=0,
+                    distributed_init_method=f"file://{temp_file}",
+                    backend="gloo",
+                )
+                ensure_model_parallel_initialized(
+                    tensor_model_parallel_size=1,
+                    pipeline_model_parallel_size=1,
+                )
+        finally:
+            self.parallel_config.data_parallel_size = saved_dp_size
 
+        pp_rank = 0 if self.parallel_config.pipeline_parallel_size == 1 else self.rank
         jax_parallel_state.init_pp_distributed_environment(
             self.pp_config.ip,
-            self.rank,
+            pp_rank,
             self.parallel_config.pipeline_parallel_size,
             self.devices[0],
             need_pp=self.parallel_config.pipeline_parallel_size > 1)
@@ -484,6 +511,14 @@ class TPUWorker(WorkerBase):
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
 
+    def execute_dummy_batch(self) -> None:
+        # DPEngineCoreProc (used for MoE) invokes this when this rank is idle
+        # while other DP ranks have work, to keep ranks in lockstep across any
+        # cross-DP collective inside the model step. In MPMD on TPU, JAX has
+        # data_parallelism=1 inside each process, so the model step contains
+        # no cross-DP collective and no sync work is required here.
+        return
+
     def profile(self,
                 is_start: bool = True,
                 profile_prefix: str | None = None):
@@ -491,7 +526,12 @@ class TPUWorker(WorkerBase):
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
-            options.host_tracer_level = os.getenv("HOST_TRACER_LEVEL", 1)
+            if envs.PROFILE_SINGLE_DEVICE:
+                options.advanced_configuration = {
+                    "tpu_num_chips_to_profile_per_task": 1,
+                    "tpu_num_sparse_cores_to_trace": 1,
+                    "tpu_num_sparse_core_tiles_to_trace": 1,
+                }
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
         else:
@@ -547,6 +587,7 @@ class TPUWorker(WorkerBase):
                  and self.model_runner.model_config.enforce_eager)):
             self.model_runner.compilation_manager._precompile_sampling()
             self.model_runner.compilation_manager._precompile_gather_logprobs()
+            self.model_runner.compilation_manager._flush_compilations()
 
         # Init kv cache connector here, because it requires `kv_cache_config`.
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)

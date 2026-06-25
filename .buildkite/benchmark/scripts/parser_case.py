@@ -23,6 +23,14 @@ CMD_MAP = {
     "lm_eval": "lm_eval"
 }
 
+# Helper function to print export statement only if value is valid
+def export_env_if_valid(opts_dict, json_key, env_var_name):
+    val = opts_dict.get("args", {}).get(json_key)
+
+    # Validate value: allow 0, but exclude None, empty dict, or empty string
+    if val not in (None, {}, ""):
+        print(f"export {env_var_name}=\"{val}\"")
+
 def get_current_machine_type():
     """
     Returns the current machine type string (e.g., 'v6e-8', 'v7x-2') 
@@ -119,32 +127,26 @@ def main():
         print(f"echo 'Error reading JSON: {e}' >&2; exit 1")
         sys.exit(1)
 
-    is_multi_case = "benchmark_cases" in data
-
     # Resolve target case data
-    if is_multi_case:
-        if not target_case:
-            print(
-                "echo 'Error: TARGET_CASE_NAME required for multi-case config.' >&2; exit 1"
-            )
-            sys.exit(1)
+    if not target_case:
+        print(
+            "echo 'Error: TARGET_CASE_NAME required.' >&2; exit 1"
+        )
+        sys.exit(1)
 
-        cases = data.get("benchmark_cases", [])
-        case_data = next(
-            (c for c in cases if c.get("case_name") == target_case), None)
-        if not case_data:
-            print(
-                f"echo 'Error: Case \"{target_case}\" not found.' >&2; exit 1")
-            sys.exit(1)
+    cases = data.get("benchmark_cases", [])
+    case_data = next(
+        (c for c in cases if c.get("case_name") == target_case), None)
+    if not case_data:
+        print(
+            f"echo 'Error: Case \"{target_case}\" not found in \"{config_file}\".' >&2; exit 1")
+        sys.exit(1)
 
-        merged_env = data.get("global_env", {}).copy()
-        merged_env.update(case_data.get("env", {}))
+    merged_env = data.get("global_env", {}).copy()
+    merged_env.update(case_data.get("env", {}))
 
-        # Inject global_env into case_data so it will be included in the DB `Config`
-        case_data["global_env"] = data.get("global_env", {})
-    else:
-        case_data = data
-        merged_env = case_data.get("env", {})
+    # Inject global_env into case_data so it will be included in the DB `Config`
+    case_data["global_env"] = data.get("global_env", {})
 
     config_json_str = json.dumps(case_data)
     print(f"export CASE_CONFIG_JSON={shlex.quote(config_json_str)}")
@@ -157,24 +159,23 @@ def main():
     cli_opts = case_data.get("client_command_options", {})
 
     # Export specific environment for insert to db
-    dataset = cli_opts.get("args", {}).get("dataset-name", {})
-    print(f"export DATASET=\"{dataset}\"")
-    num_prompts = cli_opts.get("args", {}).get("num-prompts", {})
-    print(f"export NUM_PROMPTS=\"{num_prompts}\"")
-    additional_config = srv_opts.get("args", {}).get("additional-config", {})
-    print(f"export ADDITIONAL_CONFIG={shlex.quote(str(additional_config))}")
-    model = srv_opts.get("args", {}).get("model", {})
+    if "DATASET" not in merged_env:
+        export_env_if_valid(cli_opts, "dataset-name", "DATASET")
+    export_env_if_valid(cli_opts, "num-prompts", "NUM_PROMPTS")
+    export_env_if_valid(srv_opts, "additional-config", "ADDITIONAL_CONFIG")
+    model = srv_opts.get("args", {}).get("model")
+    if not model:
+        model = cli_opts.get("args", {}).get("model", {})
     print(f"export MODEL=\"{model}\"")
-    max_num_seqs = srv_opts.get("args", {}).get("max-num-seqs", {})
-    print(f"export MAX_NUM_SEQS=\"{max_num_seqs}\"")
-    max_num_batched_tokens = srv_opts.get("args", {}).get("max-num-batched-tokens", {})
-    print(f"export MAX_NUM_BATCHED_TOKENS=\"{max_num_batched_tokens}\"")
-    max_model_len = srv_opts.get("args", {}).get("max-model-len", {})
-    print(f"export MAX_MODEL_LEN=\"{max_model_len}\"")
+    export_env_if_valid(srv_opts, "max-num-seqs", "MAX_NUM_SEQS")
+    export_env_if_valid(srv_opts, "max-num-batched-tokens", "MAX_NUM_BATCHED_TOKENS")
+    export_env_if_valid(srv_opts, "max-model-len", "MAX_MODEL_LEN")
     cli_env = cli_opts.get("env", {})
     cli_env_parts = [f"{k}={v}" for k, v in cli_env.items()]
     quoted_cli_env = ' '.join(shlex.quote(p) for p in cli_env_parts)
     print(f"CLIENT_CMD_ENVS=({quoted_cli_env})")
+    # CLIENT_CMD_ENVS_STR for lm_eval
+    print(f"export CLIENT_CMD_ENVS_STR={shlex.quote(quoted_cli_env)}")
     srv_env = srv_opts.get("env", {})
     srv_env_list = [f"{k}={v}" for k, v in srv_env.items()]
     srv_env_str = ' '.join(shlex.quote(item) for item in srv_env_list)

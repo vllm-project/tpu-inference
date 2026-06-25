@@ -55,8 +55,8 @@ def _create_proposer(
     # Mock the runner, as the proposer needs it for initialization
     mock_runner = mock.MagicMock()
     # Create a real mesh for testing sharding-related logic
-    devices = np.array(jax.devices())
-    mock_runner.mesh = jax.sharding.Mesh(devices, axis_names=('model', ))
+    devices = np.array(jax.devices()).reshape((1, len(jax.devices())))
+    mock_runner.mesh = jax.sharding.Mesh(devices, axis_names=('data', 'model'))
     mock_runner.max_num_tokens = 8192
     mock_runner.max_model_len = 8192
     mock_runner.kv_cache_config.kv_cache_groups = [mock.MagicMock()]
@@ -132,8 +132,6 @@ def test_prepare_inputs():
         block_tables=jnp.array([]),  # This will be replaced by the mock
         request_distribution=None,
     )
-    attn_metadata.query_start_loc_cpu = qsl_cpu
-    attn_metadata.seq_lens_cpu = sl_cpu
 
     # Expected results
     expected_new_qsl = np.zeros(max_num_seqs + 1, dtype=np.int32)
@@ -152,10 +150,13 @@ def test_prepare_inputs():
     expected_last_token_indices = jnp.array(expected_new_qsl[1:] - 1)
 
     # Execute
-    target_hidden_states, input_ids, last_token_indices, updated_metadata = (
-        proposer.prepare_inputs(attn_metadata, input_ids, aux_hidden_states,
-                                last_sampled_token_id, next_prompt_token_id,
-                                is_in_prefill, num_rejected_tokens))
+    num_reqs_dp = jnp.array([num_reqs], dtype=jnp.int32)
+    with jax.set_mesh(proposer.mesh):
+        target_hidden_states, input_ids, last_token_indices, updated_metadata = (
+            proposer.prepare_inputs(attn_metadata, input_ids,
+                                    aux_hidden_states, last_sampled_token_id,
+                                    next_prompt_token_id, is_in_prefill,
+                                    num_rejected_tokens, num_reqs_dp))
 
     # Assertions
     assert jnp.array_equal(updated_metadata.query_start_loc,

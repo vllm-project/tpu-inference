@@ -7,9 +7,6 @@ import jax.numpy as jnp
 from jax._src import dtypes
 
 from tpu_inference.kernels.quantized_matmul.tuned_block_sizes import TunedValue
-from tpu_inference.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 def unfold_args(
@@ -67,75 +64,6 @@ def get_kernel_name(tuned_value: TunedValue):
     return (
         f"quantized_matmul_kernel_{batch_block_size}_{out_block_size}_{in_block_size}"
     )
-
-
-def xla_quantized_matmul(
-    x: jax.Array,
-    w_q: jax.Array,
-    w_scale: jax.Array,
-    quantize_activation=True,
-) -> jax.Array:
-    """
-    Reference (pure JAX) implementation of the quantized matmul kernel below.
-
-    Args:
-        x:  Activation.
-        w_q: Weight quantized array. [n_output_features, n_input_features]
-        w_s: Weight quantization scale. [n_output_features]
-        mesh: Mesh to shard on.
-        weight_sharding: PartitionSpec for the weight tensor.
-
-    Returns:
-        Output of the quantized matmul.
-    """
-    skip_scale = False
-    if w_scale is not None and w_scale.ndim == 2:
-        # If w_scale is 2D, we assume 2d-blockwise quantization. Because the scale
-        # is not constant along the contracting axis (different blocks in the same
-        # row have different scales), we mathematically cannot pull the scale out of
-        # the matmul summation. Thus, we must de-quantize the weights first before
-        # performing the matmul.
-        skip_scale = True
-        out_features, in_features = w_q.shape
-        out_blocks, in_blocks = w_scale.shape
-        block_size_out = out_features // out_blocks
-        block_size_in = in_features // in_blocks
-
-        w_q_reshaped = w_q.reshape(out_blocks, block_size_out, in_blocks,
-                                   block_size_in)
-        w_q = (w_q_reshaped.astype(jnp.float32) *
-               w_scale[:, jnp.newaxis, :, jnp.newaxis]).reshape(
-                   out_features, in_features).astype(x.dtype)
-
-        # in this case, we don't want to quantize the activations
-        quantize_activation = False
-        logger.info_once(
-            "Skipping activation quantization due to weight requantization being disabled."
-        )
-
-    if quantize_activation:
-        acc_dtype = jnp.float32
-        if quantize_activation and jnp.issubdtype(w_q.dtype, jnp.integer):
-            acc_dtype = jnp.int32
-
-        x_q, x_scale = quantize_tensor(x, w_q.dtype)
-        out = jax.lax.dot_general(
-            x_q,
-            w_q,
-            dimension_numbers=(((1, ), (1, )), ((), ())),
-            preferred_element_type=acc_dtype,
-        ).astype(jnp.float32)
-        out *= x_scale
-    else:
-        out = jax.lax.dot_general(
-            x,
-            w_q,
-            dimension_numbers=(((1, ), (1, )), ((), ())),
-            preferred_element_type=jnp.float32,
-        )
-    if not skip_scale:
-        out *= jnp.expand_dims(w_scale, 0)
-    return out.astype(x.dtype)
 
 
 def xla_quantized_batched_matmul(

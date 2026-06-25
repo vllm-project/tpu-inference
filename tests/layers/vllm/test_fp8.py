@@ -459,37 +459,38 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
             quant_config=quant_config,
             has_bias=False,
         )
-        vllm_fused_moe.moe_parallel_config.use_ep = use_ep
+        vllm_fused_moe.moe_config.moe_parallel_config.use_ep = use_ep
 
-    block_m, block_n = vllm_fused_moe.quant_method.quant_config.weight_block_size
+    block_m, block_n = vllm_fused_moe.routed_experts.quant_method.quant_config.weight_block_size
 
     w1_weight, w1_weight_scale = quantize_to_fp8_block_3d(
         w1, block_m, block_n, torch.float8_e4m3fn)
     w2_weight, w2_weight_scale = quantize_to_fp8_block_3d(
         w2, block_m, block_n, torch.float8_e4m3fn)
 
-    vllm_fused_moe.w13_weight.data = w1_weight
-    vllm_fused_moe.w2_weight.data = w2_weight
-    vllm_fused_moe.w13_weight_scale_inv.data = w1_weight_scale
-    vllm_fused_moe.w2_weight_scale_inv.data = w2_weight_scale
+    vllm_fused_moe.routed_experts.w13_weight.data = w1_weight
+    vllm_fused_moe.routed_experts.w2_weight.data = w2_weight
+    vllm_fused_moe.routed_experts.w13_weight_scale_inv.data = w1_weight_scale
+    vllm_fused_moe.routed_experts.w2_weight_scale_inv.data = w2_weight_scale
 
     expected = test_utils.ref_moe(a, score, w1, w2, None, None,
-                                  vllm_fused_moe.top_k,
-                                  vllm_fused_moe.renormalize,
+                                  vllm_fused_moe.routed_experts.top_k,
+                                  vllm_fused_moe.routed_experts.renormalize,
                                   vllm_fused_moe.activation.value)
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
-        assert isinstance(vllm_fused_moe.quant_method, VllmFp8MoEMethod)
+        assert isinstance(vllm_fused_moe.routed_experts.quant_method,
+                          VllmFp8MoEMethod)
         if use_ep:
-            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_EP
+            assert vllm_fused_moe.routed_experts.quant_method.moe_backend == MoEBackend.GMM_EP
         else:
-            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_TP
+            assert vllm_fused_moe.routed_experts.quant_method.moe_backend == MoEBackend.GMM_TP
 
         jax_a = a.to('jax')
         jax_score = score.to('jax')
 
-        vllm_fused_moe.quant_method.process_weights_after_loading(
-            vllm_fused_moe)
+        vllm_fused_moe.routed_experts.quant_method.process_weights_after_loading(
+            vllm_fused_moe.routed_experts)
         actual = vllm_fused_moe(jax_a, jax_score)
 
         torch.testing.assert_close(expected,
@@ -536,8 +537,8 @@ def test_blockwise_quant(requant_block_size, requant_weight_dtype):
     quant_method.process_weights_after_loading(linear_layer)
     weight_jax = jax_view(linear_layer.weight)
     weight_scale_jax = jax_view(linear_layer.weight_scale)
-    assert weight_jax.shape == (5120, 4096)
-    assert weight_scale_jax.shape == (4096 // requant_block_size, 1, 5120)
+    assert weight_jax.shape == (4096, 5120)
+    assert weight_scale_jax.shape == (1, 4096 // requant_block_size, 1, 5120)
     assert weight_jax.dtype == requant_weight_dtype
 
     # TODO: Check output similarity between quantized and unquantized ones.

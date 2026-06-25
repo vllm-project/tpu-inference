@@ -184,7 +184,7 @@ def _decode_kernel_main(
     state_indices_ref,  # [max_num_req] int32 (SMEM)
     a_log_hbm,  # [H_v, num_lanes] or None
     dt_bias_hbm,  # [H_v, num_lanes] or None
-    distribution_ref,  # [2] int32 (SMEM)
+    distribution_ref,  # [3] int32 (SMEM)
     _state_init_ref,  # [num_states, H_v, K, V] aliased to state_hbm
     o_hbm,  # [T, H_v, V]
     state_hbm,  # [num_states, H_v, K, V]
@@ -293,54 +293,53 @@ def _decode_kernel_main(
 
         # ── Step 2: Wait for current bt-block's state loads ──
         pltpu.make_async_copy(
-            state_hbm.at[pl.ds(0, block_len), :, :, :],
+            h_bufs_s.at[buf_idx, pl.ds(0, block_len), :, :, :],
             h_bufs_s.at[buf_idx, pl.ds(0, block_len), :, :, :],
             h_load_sems_s.at[buf_idx],
         ).wait()
 
         # ── Step 3: Compute ──
-        q_all = q_ref[...].astype(jnp.float32)
-        k_all = k_ref[...].astype(jnp.float32)
-        v_all = v_ref[...].astype(jnp.float32)
-        g_all = g_ref[...].astype(jnp.float32)
-
-        if apply_silu:
-            q_all = jax.nn.silu(q_all)
-            k_all = jax.nn.silu(k_all)
-            v_all = jax.nn.silu(v_all)
-
-        if b_ref is not None:
-            b_all = b_ref[...].astype(jnp.float32)
-            if V > b_all.shape[-1]:
-                beta_all = jax.nn.sigmoid(
-                    jnp.concatenate([b_all] * (V // b_all.shape[-1]), axis=-1))
-            else:
-                beta_all = jax.nn.sigmoid(b_all)
-
-        if use_qk_l2norm:
-            q_all = q_all / jnp.sqrt(
-                jnp.sum(q_all * q_all, axis=-1, keepdims=True) + 1e-6)
-            k_all = k_all / jnp.sqrt(
-                jnp.sum(k_all * k_all, axis=-1, keepdims=True) + 1e-6)
-        q_all = q_all * scale
-
-        qk_dot_all = jnp.sum(q_all * k_all, axis=-1, keepdims=True)
-
-        if repeat_factor > 1:
-            q_all = jnp.repeat(q_all, repeat_factor, axis=1)
-            k_all = jnp.repeat(k_all, repeat_factor, axis=1)
-            qk_dot_all = jnp.repeat(qk_dot_all, repeat_factor, axis=1)
+        # Inputs are sliced and processed inside the loop to avoid vreg spill to vmem
 
         for i_t in range(bt):
 
             @pl.when(i_t < block_len)
             def _process_token():
                 h0 = h_bufs_s[buf_idx, i_t].astype(jnp.float32)
-                q_t = q_all[i_t]
-                k_t = k_all[i_t]
-                v_t = v_all[i_t]
-                g_t = g_all[i_t]
-                qk_dot = qk_dot_all[i_t]
+
+                # Slice and process inputs for current token
+                q_t = q_ref[i_t]
+                k_t = k_ref[i_t]
+                v_t = v_ref[i_t]
+                g_t = g_ref[i_t]
+
+                if apply_silu:
+                    q_t = jax.nn.silu(q_t)
+                    k_t = jax.nn.silu(k_t)
+                    v_t = jax.nn.silu(v_t)
+
+                if use_qk_l2norm:
+                    q_t = q_t / jnp.sqrt(
+                        jnp.sum(q_t * q_t, axis=-1, keepdims=True) + 1e-6)
+                    k_t = k_t / jnp.sqrt(
+                        jnp.sum(k_t * k_t, axis=-1, keepdims=True) + 1e-6)
+                q_t = q_t * scale
+
+                qk_dot = jnp.sum(q_t * k_t, axis=-1, keepdims=True)
+
+                if repeat_factor > 1:
+                    q_t = jnp.repeat(q_t, repeat_factor, axis=0)
+                    k_t = jnp.repeat(k_t, repeat_factor, axis=0)
+                    qk_dot = jnp.repeat(qk_dot, repeat_factor, axis=0)
+
+                if b_ref is not None:
+                    b_t = b_ref[i_t].astype(jnp.float32)
+                    if V > b_t.shape[-1]:
+                        beta_t = jax.nn.sigmoid(
+                            jnp.concatenate([b_t] * (V // b_t.shape[-1]),
+                                            axis=-1))
+                    else:
+                        beta_t = jax.nn.sigmoid(b_t)
 
                 if use_gate_in_kernel:
                     g_val = g_t
@@ -350,7 +349,8 @@ def _decode_kernel_main(
                         gk = lower_bound / (1.0 +
                                             jnp.exp(-(a_val[:, None] * g_val)))
                     else:
-                        gk = -a_val[:, None] * jax.nn.softplus(g_val)
+                        gk = -a_val[:, None] * jax.nn.softplus(
+                            g_val.astype(jnp.float32)).astype(g_val.dtype)
                 else:
                     gk = g_t
 
@@ -366,7 +366,7 @@ def _decode_kernel_main(
 
                 v_diff = v_t - kh
                 if b_ref is not None:
-                    b_v = beta_all[i_t] * v_diff
+                    b_v = beta_t * v_diff
                 else:
                     b_v = v_diff
 
@@ -398,7 +398,8 @@ def _decode_kernel_main(
             pltpu.make_async_copy(
                 h_bufs_s.at[buf_idx,
                             pl.ds(0, prev_block_len), :, :, :],
-                state_hbm.at[pl.ds(0, prev_block_len), :, :, :],
+                h_bufs_s.at[buf_idx,
+                            pl.ds(0, prev_block_len), :, :, :],
                 h_store_sems_s.at[buf_idx],
             ).wait()
 
@@ -446,7 +447,8 @@ def _decode_kernel_main(
     pltpu.make_async_copy(
         h_bufs.at[last_buf_idx,
                   pl.ds(0, last_block_len), :, :, :],
-        state_hbm.at[pl.ds(0, last_block_len), :, :, :],
+        h_bufs.at[last_buf_idx,
+                  pl.ds(0, last_block_len), :, :, :],
         h_store_sems.at[last_buf_idx],
     ).wait()
 
@@ -461,7 +463,8 @@ def _decode_kernel_main(
         pltpu.make_async_copy(
             h_bufs.at[other_buf_idx,
                       pl.ds(0, other_block_len), :, :, :],
-            state_hbm.at[pl.ds(0, other_block_len), :, :, :],
+            h_bufs.at[other_buf_idx,
+                      pl.ds(0, other_block_len), :, :, :],
             h_store_sems.at[other_buf_idx],
         ).wait()
 
@@ -486,7 +489,7 @@ def fused_decoding_gdn(
     g: jax.Array,  # [T, H_v, K] float32
     initial_state: jax.Array,  # [num_states, H_v, K, V] float32
     state_indices: jax.Array,  # [max_num_req] int32
-    distribution: jax.Array,  # [2] int32
+    distribution: jax.Array,  # [3] int32
     b: jax.Array | None,  # [T, H_v, num_lanes] or None
     *,
     scale: float,
@@ -506,7 +509,7 @@ def fused_decoding_gdn(
         g: Per-key gating ``[T, H_v, K]``, float32.
         initial_state: State cache ``[num_states, H_v, K, V]`` float32.
         state_indices: ``i32[max_num_req]`` — indices into the state cache.
-        distribution: ``i32[2]`` — ``(decode_end, total)``.
+        distribution: ``i32[3]`` — ``(decode_end, prefill_end, mixed_end)``.
         b: Raw betas ``[T, H_v, num_lanes]`` (sigmoid applied inside kernel).
         scale: Scale factor.
         use_qk_l2norm_in_kernel: L2-normalize q, k inside the kernel.
@@ -688,9 +691,6 @@ def ragged_gated_delta_rule_decode_only(
         dt_bias = jnp.broadcast_to(dt_bias[:, None],
                                    (n_v, num_lanes)).astype(jnp.float32)
 
-    # (decode_end, prefill_end, mixed_end) → (decode_end, total)
-    fused_distribution = jnp.stack([distribution[0], distribution[2]])
-
     scale = d_k**-0.5
 
     output, new_recurrent_state = fused_decoding_gdn(
@@ -700,7 +700,7 @@ def ragged_gated_delta_rule_decode_only(
         g,
         recurrent_state,
         state_indices,
-        distribution=fused_distribution,
+        distribution=distribution,
         b=b,
         scale=scale,
         use_qk_l2norm_in_kernel=True,

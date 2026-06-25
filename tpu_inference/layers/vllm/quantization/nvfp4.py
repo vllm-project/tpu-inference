@@ -36,8 +36,8 @@ from jax.sharding import Mesh
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
+                                                  RoutedExperts)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import (
     QuantizationMethods, register_quantization_config)
@@ -47,16 +47,16 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config, ModelOptNvFp4FusedMoE, ModelOptNvFp4LinearMethod)
 from vllm.model_executor.utils import set_weight_attrs
 
+import tpu_inference.envs as envs
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, shard_moe_weights)
+    FusedMoEWeights, process_quantized_moe_weights, shard_moe_weights_to_tpu)
 from tpu_inference.layers.common.quant_methods import NVFP4
 from tpu_inference.layers.common.quantization import u8_unpack_e2m1
-from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.interface.moe import (
@@ -66,7 +66,7 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedFusedMoEMethod, VllmUnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product, t2j
+from tpu_inference.utils import t2j, to_jax_dtype
 
 logger = init_logger(__name__)
 
@@ -100,7 +100,7 @@ class VllmNvfp4Config(ModelOptNvFp4Config, VllmQuantConfig):
             if self.is_layer_excluded(prefix):
                 return VllmUnquantizedLinearMethod(linear_config)
             return VllmNvfp4LinearMethod(self, linear_config)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             if self.is_layer_excluded(prefix):
                 return VllmUnquantizedFusedMoEMethod(layer.moe_config)
             layer.moe_config = self.get_moe_config(layer)
@@ -122,8 +122,21 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
 
     def __init__(self, quant_config: 'VllmNvfp4Config',
                  linear_config: VllmQuantLinearConfig):
+        # Monkeypatch expose_input_quant_key in modelopt module safely on TPU
+        from vllm.model_executor.layers.quantization import \
+            modelopt as vllm_modelopt
+        original_expose = vllm_modelopt.expose_input_quant_key
+
+        def safe_expose_input_quant_key(layer, kernel):
+            if kernel is None:
+                return
+            original_expose(layer, kernel)
+
+        vllm_modelopt.expose_input_quant_key = safe_expose_input_quant_key
+
         VllmUnquantizedLinearMethod.__init__(self, linear_config)
         self.quant_config = quant_config
+        self.kernel = None
 
     def create_weights(self, layer, input_size_per_partition,
                        output_partition_sizes, input_size, output_size,
@@ -170,10 +183,12 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
         def _unpack_and_scale(weight_packed, weight_scale,
                               weight_global_scale):
             fp4 = u8_unpack_e2m1(weight_packed)  # (O, I) float4_e2m1fn
+            fp4 = jnp.transpose(fp4)
 
             # Combine FP8 block scale & FP32 global scale
             block_scale = weight_scale.astype(
                 jnp.float32) * weight_global_scale  # (O, I/group)
+            block_scale = jnp.transpose(block_scale)
 
             return fp4, block_scale
 
@@ -189,8 +204,8 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
             fused=self.linear_config.fuse_matmuls,
             output_sizes=self.linear_config.output_sizes,
             reorder_size=self.linear_config.n_shards,
+            enable_kernel=self.linear_config.enable_quantized_matmul_kernel,
         )
-
         weights = torch_view(
             shard_linear_weights(
                 weights,
@@ -319,7 +334,7 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         # the scale params are registered, so vLLM's MoE weight loader does
         # not see `quant_method` on them and rejects the load. Set them
         # explicitly here.
-        from vllm.model_executor.layers.fused_moe.layer import \
+        from vllm.model_executor.layers.fused_moe import \
             FusedMoeWeightScaleSupported
         for name in ("w13_weight_scale", "w2_weight_scale"):
             set_weight_attrs(
@@ -350,7 +365,7 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         return None
 
     def process_weights_after_loading(self, layer):
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
         # Drop unused activation-quant scales registered by upstream.
         for attr in ('w13_input_scale', 'w2_input_scale'):
             if hasattr(layer, attr):
@@ -367,52 +382,79 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         w2_bias = t2j(layer.w2_bias,
                       use_dlpack=False) if self.moe.has_bias else None
 
-        @jax.jit
-        def process_nvfp4_moe_weights(w13_weight, w13_weight_scale,
-                                      w13_global_scale, w2_weight,
-                                      w2_weight_scale, w2_global_scale,
-                                      w13_bias, w2_bias):
+        # Create FusedMoEWeights with original weights
+        weights = FusedMoEWeights(
+            w13_weight=w13_weight,
+            w13_weight_scale=w13_weight_scale,
+            w13_bias=w13_bias,
+            w2_weight=w2_weight,
+            w2_weight_scale=w2_weight_scale,
+            w2_bias=w2_bias,
+        )
+
+        # Shard weights to TPU before processing to avoid OOM
+        weights = shard_moe_weights_to_tpu(weights, self.mesh)
+
+        desired_quant_dtype = to_jax_dtype(
+            envs.MOE_REQUANTIZE_WEIGHT_DTYPE
+        ) if envs.MOE_REQUANTIZE_WEIGHT_DTYPE else None
+        requant_block_size = int(envs.MOE_REQUANTIZE_BLOCK_SIZE
+                                 ) if envs.MOE_REQUANTIZE_BLOCK_SIZE else None
+
+        @jax.jit(static_argnames=("desired_quant_dtype", "requant_block_size"))
+        def unpack_and_process(
+            weights: FusedMoEWeights,
+            w13_global_scale: jax.Array,
+            w2_global_scale: jax.Array,
+            desired_quant_dtype: jnp.dtype | None,
+            requant_block_size: int | None,
+        ) -> FusedMoEWeights:
             # Unpack packed uint8 -> native float4_e2m1fn (no value change).
-            w13_fp4 = u8_unpack_e2m1(w13_weight)
-            w2_fp4 = u8_unpack_e2m1(w2_weight)
+            w13_fp4 = u8_unpack_e2m1(weights.w13_weight)
+            w2_fp4 = u8_unpack_e2m1(weights.w2_weight)
 
             # Combine FP32 global × FP8 block -> single FP32 block scale.
             if w13_global_scale.ndim == 2:  # (E, 2) — separate w1/w3 globals.
-                half = w13_weight_scale.shape[1] // 2
-                w1_eff = w13_weight_scale[:, :half].astype(
+                half = weights.w13_weight_scale.shape[1] // 2
+                w1_eff = weights.w13_weight_scale[:, :half].astype(
                     jnp.float32) * w13_global_scale[:, 0:1].reshape(-1, 1, 1)
-                w3_eff = w13_weight_scale[:, half:].astype(
+                w3_eff = weights.w13_weight_scale[:, half:].astype(
                     jnp.float32) * w13_global_scale[:, 1:2].reshape(-1, 1, 1)
                 w13_scale_eff = jnp.concatenate([w1_eff, w3_eff], axis=1)
             else:
-                w13_scale_eff = w13_weight_scale.astype(
+                w13_scale_eff = weights.w13_weight_scale.astype(
                     jnp.float32) * w13_global_scale.reshape(-1, 1, 1)
-            w2_scale_eff = w2_weight_scale.astype(
+            w2_scale_eff = weights.w2_weight_scale.astype(
                 jnp.float32) * w2_global_scale.reshape(-1, 1, 1)
 
-            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
-            w13_reorder_size = get_mesh_shape_product(
-                self.mesh, ShardingAxisName.MLP_TENSOR)
-
-            weights = FusedMoEWeights(
+            weights_unpacked = FusedMoEWeights(
                 w13_weight=w13_fp4,
                 w13_weight_scale=w13_scale_eff,
-                w13_bias=w13_bias,
+                w13_bias=weights.w13_bias,
                 w2_weight=w2_fp4,
                 w2_weight_scale=w2_scale_eff,
-                w2_bias=w2_bias,
+                w2_bias=weights.w2_bias,
             )
-            return process_moe_weights(weights,
-                                       moe_backend=self.moe_backend,
-                                       w13_reorder_size=w13_reorder_size,
-                                       w13_interleave=w13_interleave)
 
-        weights = process_nvfp4_moe_weights(w13_weight, w13_weight_scale,
-                                            w13_global_scale, w2_weight,
-                                            w2_weight_scale, w2_global_scale,
-                                            w13_bias, w2_bias)
-        weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
+            return process_quantized_moe_weights(
+                weights=weights_unpacked,
+                moe_backend=self.moe_backend,
+                mesh=self.mesh,
+                activation=layer.activation,
+                weight_block_size=(1, 16),  # NVFP4 block size is 16
+                desired_quant_dtype=desired_quant_dtype,
+                requant_block_size=requant_block_size,
+            )
+
+        weights = unpack_and_process(
+            weights,
+            w13_global_scale,
+            w2_global_scale,
+            desired_quant_dtype,
+            requant_block_size,
+        )
+
+        weights = torch_view(weights)
 
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
@@ -438,4 +480,5 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
                               weights=weights,
                               quant_method_instance=self,
                               x=x,
-                              router_logits=router_logits)
+                              router_logits=router_logits,
+                              input_ids=kwargs.get("input_ids", None))

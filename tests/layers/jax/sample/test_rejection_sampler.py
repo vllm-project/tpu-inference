@@ -457,9 +457,34 @@ class RejectionSamplerTestHelper:
 
 
 @pytest.fixture
-def rejection_sampler():
-    """Fixture for the RejectionSampler."""
-    return RejectionSampler()
+def mesh():
+    """Fixture for the JAX mesh."""
+    devices = np.array(jax.devices()).reshape((1, len(jax.devices())))
+    return jax.sharding.Mesh(devices, axis_names=('data', 'model'))
+
+
+@pytest.fixture
+def rejection_sampler(mesh):
+    """Fixture for the RejectionSampler.
+
+    Wraps parse_output with dp_size=1 defaults so tests written against the
+    single-DP API don't need to thread DP plumbing through every call.
+    """
+    sampler = RejectionSampler(mesh)
+    original_parse_output = sampler.parse_output
+
+    def parse_output_with_dp_defaults(*args, **kwargs):
+        if "dp_size" not in kwargs:
+            kwargs["dp_size"] = 1
+        if "req_indices_dp" not in kwargs:
+            batch_size = kwargs.get("batch_size")
+            if batch_size is None and len(args) >= 4:
+                batch_size = args[3]
+            kwargs["req_indices_dp"] = {0: list(range(batch_size))}
+        return original_parse_output(*args, **kwargs)
+
+    sampler.parse_output = parse_output_with_dp_defaults
+    return sampler
 
 
 @pytest.fixture
@@ -1262,6 +1287,7 @@ class TestStatisticalDistributionValidation:
         k: int,
         vocab_size: int,
         num_samples: int,
+        mesh: jax.sharding.Mesh = None,
     ) -> jnp.ndarray:
         """Estimate probability distribution of rejection sampling output.
 
@@ -1275,7 +1301,10 @@ class TestStatisticalDistributionValidation:
         Returns:
             Estimated probability distribution [vocab_size]
         """
-        rejection_sampler = RejectionSampler()
+        if mesh is None:
+            devices = np.array(jax.devices()).reshape((1, len(jax.devices())))
+            mesh = jax.sharding.Mesh(devices, axis_names=('data', 'model'))
+        rejection_sampler = RejectionSampler(mesh)
 
         # Prepare inputs in the flattened format expected by TPU sampler
         num_tokens = num_samples * k
@@ -1326,7 +1355,9 @@ class TestStatisticalDistributionValidation:
             vocab_size=vocab_size,
             num_draft_tokens_cpu=np.asarray(num_draft_tokens),
             batch_size=num_samples,
-            padded_tokens_length=num_tokens)
+            padded_tokens_length=num_tokens,
+            dp_size=1,
+            req_indices_dp={0: list(range(num_samples))})
 
         # Flatten all main tokens (exclude bonus tokens)
         all_tokens = []

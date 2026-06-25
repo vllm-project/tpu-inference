@@ -21,7 +21,8 @@ from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
+                                                  RoutedExperts)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config)
@@ -33,8 +34,7 @@ from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 from vllm.model_executor.layers.quantization.mxfp4 import \
     GptOssMxfp4Config as Mxfp4Config
-from vllm.model_executor.layers.quantization.mxfp4 import \
-    GptOssMxfp4MoEMethod as Mxfp4MoEMethod
+from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
@@ -83,7 +83,7 @@ class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
                 "MXFP4 linear layer is not implemented - falling back to "
                 "UnquantizedLinearMethod.")
             return VllmUnquantizedLinearMethod(linear_config)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             moe_config = self.get_moe_config(layer)
             return VllmMxfp4MoEMethod(moe_config, self.mesh)
         elif isinstance(layer, Attention):
@@ -120,8 +120,8 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         return mxfp4_w4a16_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            w1_bias=layer.w13_bias,
-            w2_bias=layer.w2_bias,
+            w1_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
         )
 
     @property
@@ -129,25 +129,25 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         return True
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
-        assert isinstance(layer, FusedMoE)
-        assert layer.moe_config.has_bias, "mxfp4 quantization alwyas use bias."
+        assert isinstance(layer, RoutedExperts)
+        has_bias = layer.moe_config.has_bias
 
         w13_weight = t2j(layer.w13_weight, use_dlpack=False)
         w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
-        w13_bias = t2j(layer.w13_bias, use_dlpack=False)
+        w13_bias = t2j(layer.w13_bias, use_dlpack=False) if has_bias else None
 
         w2_weight = t2j(layer.w2_weight, use_dlpack=False)
         w2_weight_scale = t2j(layer.w2_weight_scale, use_dlpack=False)
-        w2_bias = t2j(layer.w2_bias, use_dlpack=False)
+        w2_bias = t2j(layer.w2_bias, use_dlpack=False) if has_bias else None
 
         @jax.jit
         def process_mxfp4_moe_weights(
             w13_weight: jax.Array,
             w13_weight_scale: jax.Array,
-            w13_bias: jax.Array,
+            w13_bias: jax.Array | None,
             w2_weight: jax.Array,
             w2_weight_scale: jax.Array,
-            w2_bias: jax.Array,
+            w2_bias: jax.Array | None,
         ) -> FusedMoEWeights:
             # Dequantize fp4 weights into fp32.
             w13_weight = dequantize_tensor_from_mxfp4_packed(
@@ -197,28 +197,31 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         layer.w2_weight_scale = Parameter(weights.w2_weight_scale,
                                           requires_grad=False)
 
-        layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
-        layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
+        if has_bias:
+            layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
+            layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
+        has_bias = layer.moe_config.has_bias
         weights = FusedMoEWeights(
             w13_weight=jax_view(layer.w13_weight),
             w13_weight_scale=jax_view(layer.w13_weight_scale),
-            w13_bias=jax_view(layer.w13_bias),
+            w13_bias=jax_view(layer.w13_bias) if has_bias else None,
             w2_weight=jax_view(layer.w2_weight),
             w2_weight_scale=jax_view(layer.w2_weight_scale),
-            w2_bias=jax_view(layer.w2_bias),
+            w2_bias=jax_view(layer.w2_bias) if has_bias else None,
         )
 
         return vllm_moe_apply(layer=layer,
                               weights=weights,
                               quant_method_instance=self,
                               x=x,
-                              router_logits=router_logits)
+                              router_logits=router_logits,
+                              input_ids=input_ids)

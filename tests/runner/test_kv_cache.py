@@ -142,18 +142,19 @@ def test_get_kv_cache_shape_with_mesh_mla(mesh: Mesh):
     Tests `get_kv_cache_shape_with_mesh` with `use_mla=True`.
     """
     total_num_pages = 64
-    page_size = 16
+    page_size = 128
     actual_num_kv_heads = 1  # Not used for MLA
     actual_head_dim = 512 + 128  # lkv_dim + r_dim
     kv_dtype = jnp.bfloat16
 
     # Expected shape calculation for MLA:
-    # kv_packing = 2 (for bfloat16)
+    # kv_packing = 32 (envs.MLA_KV_PACKING_SIZE)
+
     # shape[0] = total_num_pages = 64
-    # shape[1] = align_to(page_size, 2) // 2 = 16 // 2 = 8
-    # shape[2] = 2
+    # shape[1] = align_to(page_size, kv_packing) // kv_packing = 4
+    # shape[2] = kv_packing = 32
     # shape[3] = align_to(actual_head_dim, 128) = align_to(640, 128) = 640
-    expected_shape = (64, 8, 2, 640)
+    expected_shape = (64, 4, 32, 640)
 
     shape = get_kv_cache_shape_with_mesh(
         mesh,

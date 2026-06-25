@@ -43,6 +43,7 @@ def main(args: argparse.Namespace):
         temperature=0.0,
         ignore_eos=True,
         max_tokens=args.output_len,
+        prompt_logprobs=args.prompt_logprobs,
     )
     print(sampling_params)
     dummy_prompt_token_ids = np.random.randint(10000,
@@ -106,6 +107,12 @@ def parse_args():
         default="profiles",
         help=("path to save the JAX profiler output. Can be visualized "
               "with ui.perfetto.dev, Tensorboard, or XProf"),
+    )
+    parser.add_argument(
+        "--prompt-logprobs",
+        type=int,
+        default=None,
+        help="Number of prompt logprobs to return.",
     )
 
     parser = EngineArgs.add_cli_args(parser)

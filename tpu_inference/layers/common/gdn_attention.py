@@ -16,7 +16,6 @@ Bridge the torch gdn_attention_core op for gated deltanet attention TPU impl
 
 """
 import dataclasses
-import enum
 import functools
 from typing import Optional, Tuple
 
@@ -25,17 +24,11 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.layers.common.ragged_gated_delta_rule_wrapper as ragged_gated_delta_rule_wrapper
-from tpu_inference.layers.common.ragged_conv1d_jax import \
-    ragged_conv1d as ragged_conv1d_jax
+from tpu_inference.kernels.causal_conv1d import causal_conv1d
 from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
     ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
-
-
-class RaggedConv1dImpl(enum.Enum):
-    JAX = "ragged_conv1d_jax"
-
 
 RaggedGatedDeltaRuleImpl = ragged_gated_delta_rule_wrapper.RaggedGatedDeltaRuleImpl
 
@@ -43,7 +36,6 @@ RaggedGatedDeltaRuleImpl = ragged_gated_delta_rule_wrapper.RaggedGatedDeltaRuleI
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class GdnAttentionConfig:
-    ragged_conv1d_impl: RaggedConv1dImpl = RaggedConv1dImpl.JAX
     ragged_gated_delta_rule_impl: RaggedGatedDeltaRuleImpl = (
         RaggedGatedDeltaRuleImpl.CHUNKED_KERNEL_PD)
 
@@ -120,10 +112,7 @@ def run_jax_gdn_attention_local(
     query_lens = query_start_loc[1:max_reqs + 1] - query_start_loc[:max_reqs]
     has_initial_state = (seq_lens - query_lens) > 0
 
-    # TODO: Switch conv implementaion based on config once we have more than 1 impl
-    conv_impl = ragged_conv1d_jax
-
-    out_mixed_qkv, new_conv_state = conv_impl(
+    out_mixed_qkv, new_conv_state = causal_conv1d.ragged_causal_conv1d(
         mixed_qkv,
         conv_state,
         conv_weight,

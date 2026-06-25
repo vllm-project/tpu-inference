@@ -63,6 +63,16 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             compressed_tensors_w8a8_fp8 as vllm_ct_fp8
         vllm_ct_fp8.init_fp8_linear_kernel = lambda *args, **kwargs: None
 
+        # Monkeypatch expose_input_quant_key to handle None kernel on TPU/non-GPU platforms
+        original_expose = vllm_ct_fp8.expose_input_quant_key
+
+        def safe_expose_input_quant_key(layer, kernel):
+            if kernel is None:
+                return
+            original_expose(layer, kernel)
+
+        vllm_ct_fp8.expose_input_quant_key = safe_expose_input_quant_key
+
         CompressedTensorsW8A8Fp8.__init__(
             self,
             weight_quant=weight_quant,
@@ -93,8 +103,10 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = t2j(layer.weight, use_dlpack=False)
+        weight = jnp.transpose(weight)
         delattr(layer, "weight")
         weight_scale = t2j(layer.weight_scale, use_dlpack=False)
+        weight_scale = jnp.transpose(weight_scale)
         delattr(layer, "weight_scale")
 
         if layer.bias is not None and not layer.skip_bias_add:
@@ -122,9 +134,10 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                         self.linear_config.output_sizes):
                     end = start + output_size
                     weights.append(
-                        dequantize_tensor(weight[start:end], weight_scale[i]))
+                        dequantize_tensor(weight[:, start:end],
+                                          weight_scale[i]))
                     start = end
-                weight = jnp.concat(weights, axis=0)
+                weight = jnp.concat(weights, axis=1)
                 # Requantize into per-tensor.
                 weight, weight_scale = quantize_tensor(jnp.float8_e4m3fn,
                                                        weight, None)
@@ -149,6 +162,8 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
                 per_tensor=per_tensor,
+                enable_kernel=self.linear_config.
+                enable_quantized_matmul_kernel,
             )
 
         if self.weight_block_size is not None:
@@ -161,26 +176,11 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 output_sizes=tuple(self.linear_config.output_sizes),
                 requant_weight_dtype=self.linear_config.requant_weight_dtype,
                 fuse_matmuls=self.linear_config.fuse_matmuls,
-                n_shards=self.linear_config.n_shards)
+                n_shards=self.linear_config.n_shards,
+                enable_kernel=self.linear_config.enable_quantized_matmul_kernel
+            )
         else:
             weights = process_fp8_linear_weights(weight, weight_scale, bias)
-
-        if self.linear_config.enable_quantized_matmul_kernel and weights.weight_scale.ndim == 2:
-            if weights.weight_scale.shape[
-                    0] > 1 and weights.weight_scale.shape[1] > 1:
-                # The quantized_matmul_kernel expects weight scales shaped (n_blocks, 1, n_out_features) for blockwisze quantization.
-                if self.weight_block_size is not None:
-                    # process_blockwise_fp8_linear_weights returns weight_scale shaped (n_out_features, n_blocks)
-                    # We need it shaped (n_blocks, 1, n_out_features)
-                    weights.weight_scale = jnp.expand_dims(
-                        jnp.transpose(weights.weight_scale),
-                        axis=1,
-                    )
-                else:
-                    weights.weight_scale = jnp.expand_dims(
-                        jnp.transpose(weights.weight_scale),
-                        axis=1,
-                    )
 
         weights = torch_view(
             shard_linear_weights(
@@ -242,7 +242,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             outs = jax.lax.dot_general(
                 x_q,
                 weight_jax,
-                (((1, ), (1, )), ((), ())),
+                (((1, ), (0, )), ((), ())),
                 preferred_element_type=jnp.float32,
             )
             outs *= weight_scale_jax
@@ -283,7 +283,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 out = jax.lax.dot_general(
                     x_q,
                     weight_jax,
-                    (((1, ), (1, )), ((), ())),
+                    (((1, ), (0, )), ((), ())),
                     preferred_element_type=jnp.float32,
                 )
                 # TODO(kyuyeunk): Investigate performance gain from merging scales.
