@@ -31,7 +31,7 @@ spec:
           cloud.google.com/gke-tpu-topology: 2x2x2
         containers:
           - name: vllm-leader
-            image: gcr.io/gke-gkit-dev/tpu-inference:cpu-offload
+            image: <your-tpu-inference-image>
             imagePullPolicy: Always
             env:
             - name: TPU_MULTIHOST_BACKEND
@@ -60,20 +60,11 @@ spec:
               - |
                 bash /workspace/vllm/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE);
                 
-                # echo "=== Running TP Only Verification ==="
-                # python3 /workspace/tpu_inference/examples/offload/offline_inference_kv_cache_verification.py \
-                #   --model=meta-llama/Llama-3.1-8B \
-                #   --tensor-parallel-size=16 \
-                #   --max_model_len=1024 \
-                #   --seed=42 \
-                #   --kv-transfer-config '{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}'
-                
-                echo "=== Running TP + PP Verification ==="
+                echo "=== Running TP Only Verification ==="
                 python3 /workspace/tpu_inference/examples/offload/offline_inference_kv_cache_verification.py \
-                  --model=Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
-                  --tensor-parallel-size=8 \
-                  --pipeline-parallel-size=2 \
-                  --max_model_len=8192 \
+                  --model=meta-llama/Llama-3.1-8B \
+                  --tensor-parallel-size=16 \
+                  --max_model_len=1024 \
                   --seed=42 \
                   --kv-transfer-config '{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}'
             resources:
@@ -93,7 +84,7 @@ spec:
           cloud.google.com/gke-tpu-topology: 2x2x2
         containers:
           - name: vllm-worker
-            image: gcr.io/gke-gkit-dev/tpu-inference:cpu-offload
+            image: <your-tpu-inference-image>
             imagePullPolicy: Always
             command: ["/bin/sh", "-c"]
             args:
