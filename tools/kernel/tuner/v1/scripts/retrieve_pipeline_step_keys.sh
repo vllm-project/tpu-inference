@@ -6,14 +6,17 @@ BUILDKITE_ORGANIZATION_SLUG=${BUILDKITE_ORGANIZATION_SLUG:-tpu-commons}
 BUILDKITE_PIPELINE_SLUG=${BUILDKITE_PIPELINE_SLUG:-wip-tpu-inference-kernel-autotune}
 API_URL="https://api.buildkite.com/v2/organizations/${BUILDKITE_ORGANIZATION_SLUG}/pipelines/${BUILDKITE_PIPELINE_SLUG}/builds/${BUILDKITE_BUILD_NUMBER}/jobs"
 
-if [[ -z "${BUILDKITE_API_TOKEN:-}" ]]; then
-	echo "Error: BUILDKITE_API_TOKEN is not set."
+AUTH_TOKEN="${BUILDKITE_API_TOKEN:-${BUILDKITE_AGENT_ACCESS_TOKEN:-}}"
+
+if [[ -z "${AUTH_TOKEN}" ]]; then
+	echo "Error: no token found. Set BUILDKITE_API_TOKEN (preferred) or BUILDKITE_AGENT_ACCESS_TOKEN."
+	echo "Example: export BUILDKITE_API_TOKEN=<token-with-read_builds-scope>"
 	exit 1
 fi
 
 STEP_KEYS=$(
 	curl -fsSL \
-		-H "Authorization: Bearer ${BUILDKITE_API_TOKEN}" \
+		-H "Authorization: Bearer ${AUTH_TOKEN}" \
 		"$API_URL" \
 	| jq -r '.[].step_key // empty'
 )
