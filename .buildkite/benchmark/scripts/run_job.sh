@@ -127,7 +127,6 @@ BM_JOB_STATUS=$EXIT_SUCCESS
 
 export BM_INFRA="true"
 
-# Example EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
 .buildkite/scripts/run_in_docker.sh bash -c "
   if [[ \"$KERNEL_AUTOTUNE_STAGE\" == \"PRE_KERNEL_AUTOTUNE_CASES_COLLECTION\" ]]; then
     pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \

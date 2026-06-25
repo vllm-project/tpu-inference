@@ -67,15 +67,35 @@ steps:
     key: patch_kernel_autotune_result
     depends_on: "kernel_tuning"
     agents:
-      queue: cpu
+      queue: tpu_v6e_queue
     env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: tpu6e
       KERNEL_AUTOTUNE_ID: "KERNEL_AUTOTUNE_ID_PLACEHOLDER"
       KERNEL_AUTOTUNE_STAGE: "PATCH_KERNEL_AUTOTUNE_RESULT"
       EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=PATCH_KERNEL_AUTOTUNE_RESULT"
+    secrets: 
+      - GITHUB_PAT 
+    # priority: 200
     command: |
       echo "🚀 Patching kernel autotune results and creating evaluation branch."
-      # bash .buildkite/scripts/patch_kernel_autotune_result.sh
-
+      .buildkite/scripts/patch_kernel_autotune_result.sh bash -c '
+        set -e
+        branch_name="kernel_autotune.update_tuned_params_${KERNEL_AUTOTUNE_ID}"
+        repo_url="github.com/vllm-project/tpu-inference.git"
+        authenticated_repo_url="https://x-access-token:${GITHUB_PAT}@${repo_url}"
+        pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
+        apt install git -y
+        git remote set-url origin ${authenticated_repo_url}
+        git config user.name "Buildkite Bot"
+        git config user.email "buildkite-bot@users.noreply.github.com"
+        git checkout -b ${branch_name}
+        python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --auto_tune_id=${KERNEL_AUTOTUNE_ID} --process_step=PATCH_KERNEL_AUTOTUNE_RESULT
+        git add -u
+        git commit -m "Update tuned params for auto tune ID: {self.auto_tune_id}"
+        git push origin ${branch_name} --force
+      '
+  
   # ---------------------------------------------------------------------------
   # Stage 4: Re-run benchmarks on tuned branch for evaluation
   # ---------------------------------------------------------------------------
@@ -104,5 +124,23 @@ steps:
       EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=EVALUATE_AND_CREATE_PR"
     command: |
       echo "🚀 Evaluating tuning results and optionally creating a PR."
-      # bash .buildkite/scripts/evaluate_kernel_autotune_result.sh
+      .buildkite/scripts/patch_kernel_autotune_result.sh bash -c '
+        set -e
+        branch_name="kernel_autotune.update_tuned_params_${KERNEL_AUTOTUNE_ID}"
+        repo_url="github.com/vllm-project/tpu-inference.git"
+        authenticated_repo_url="https://x-access-token:${GITHUB_PAT}@${repo_url}"
+        pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
+        apt install git -y
+        git remote set-url origin ${authenticated_repo_url}
+        git config user.name "Buildkite Bot"
+        git config user.email "buildkite-bot@users.noreply.github.com"
+        result=$(python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --auto_tune_id=${KERNEL_AUTOTUNE_ID} --process_step=COMPARE_BM_METRICS)
+        # create pr and put result in pr body
+        if [[ "$result" == *"PR_CREATED"* ]]; then
+          pr_url=$(echo "$result" | grep -oP 'PR_CREATED:\K.*')
+          echo "PR created: $pr_url"
+        else
+          echo "No PR created. Result: $result"
+        fi
+      '
 
