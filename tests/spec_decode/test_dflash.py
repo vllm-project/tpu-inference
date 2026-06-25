@@ -13,7 +13,7 @@
 # limitations under the License.
 """Unit tests for the JAX DFlash speculative decoding proposer."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import jax
 import jax.numpy as jnp
@@ -26,7 +26,11 @@ from tpu_inference.spec_decode.jax.dflash import DFlashProposer
 
 def _make_single_device_mesh() -> jax.sharding.Mesh:
     devices = np.array(jax.devices()[:1])
-    m = jax.sharding.Mesh(devices, axis_names=("model", ))
+    device_mesh = devices.reshape((1, 1, 1, 1))
+    m = jax.sharding.Mesh(
+        device_mesh,
+        axis_names=('data', 'attn_dp', 'expert', 'model'),
+    )
     return m
 
 
@@ -107,43 +111,65 @@ class MockDraftModelInterface:
 
 
 # ----- Existing Minimal Tests -----
-def test_sample_block_draft_tokens_uses_target_model_logits():
+def test_propose_uses_target_model_logits():
     proposer = object.__new__(DFlashProposer)
     proposer.mesh = _make_single_device_mesh()
     proposer.num_speculative_tokens = 2
+    proposer.block_size = proposer.num_speculative_tokens + 1  # 3
+
+    # mock model_fn to return a dummy hidden_states tensor
+    # shape: (num_reqs * block_size, hidden_size) = (1 * 3, 8) = (3, 8)
+    hidden_states = jnp.ones((3, 8), dtype=jnp.bfloat16)
+    proposer.model_fn = lambda state, kv_caches, input_ids, target_hidden_states, attn_metadata: (
+        kv_caches, hidden_states, None, None)
 
     call_record = {}
-    target_state = jnp.array(0)
 
     def fake_compute_logits_fn(state, hidden_states, lora_metadata):
         call_record["shape"] = hidden_states.shape
+        # return logits of shape (2, 3) (matching flattened 2 draft tokens, 3 vocab size)
         return jnp.array([[0.0, 2.0, 1.0], [4.0, 1.0, 0.0]], dtype=jnp.float32)
 
     proposer.compute_logits_fn = fake_compute_logits_fn
 
-    hidden_states = jnp.ones((3, 8), dtype=jnp.bfloat16)
-    draft_token_ids = proposer._sample_block_draft_tokens(
-        target_state, hidden_states)
+    # Call JITted _propose
+    _, draft_token_ids = proposer._propose(
+        state_leaves=None,
+        kv_caches=[],
+        input_ids=None,
+        attn_metadata=None,
+        target_hidden_states=None,
+    )
 
     np.testing.assert_array_equal(np.asarray(draft_token_ids),
-                                  np.array([1, 0], dtype=np.int32))
+                                  np.array([[1, 0]], dtype=np.int32))
     assert call_record["shape"] == (2, 8)
 
 
-def test_sample_block_draft_tokens_returns_1d_int_ids():
+def test_propose_returns_2d_int_ids():
     proposer = object.__new__(DFlashProposer)
     proposer.mesh = _make_single_device_mesh()
     proposer.num_speculative_tokens = 2
+    proposer.block_size = proposer.num_speculative_tokens + 1  # 3
+
+    hidden_states = jnp.ones((3, 4), dtype=jnp.bfloat16)
+    proposer.model_fn = lambda state, kv_caches, input_ids, target_hidden_states, attn_metadata: (
+        kv_caches, hidden_states, None, None)
 
     proposer.compute_logits_fn = lambda _state, _hidden, _lora: jnp.array(
         [[1.0, 0.0], [0.0, 1.0]], dtype=jnp.float32)
 
-    hidden_states = jnp.ones((3, 4), dtype=jnp.bfloat16)
-    draft_token_ids = proposer._sample_block_draft_tokens(
-        jnp.array(0), hidden_states)
+    # Call _propose
+    _, draft_token_ids = proposer._propose(
+        state_leaves=None,
+        kv_caches=[],
+        input_ids=None,
+        attn_metadata=None,
+        target_hidden_states=None,
+    )
 
-    assert draft_token_ids.ndim == 1
-    assert draft_token_ids.shape == (2, )
+    assert draft_token_ids.ndim == 2
+    assert draft_token_ids.shape == (1, 2)
     assert jnp.issubdtype(draft_token_ids.dtype, jnp.integer)
 
 
@@ -190,136 +216,28 @@ def test_build_noise_block(mesh):
                                   np.array([10, 11, 12], dtype=np.int32))
 
 
-@patch("tpu_inference.spec_decode.jax.dflash.get_model")
-def test_dflash_proposer_multi_iteration_state_flow(mock_get_model, mesh):
-    """Verifies DFlashProposer's entire state-tracking, cache cropping, and padding flow across multiple speculative iterations."""
-    vllm_config = MockVllmConfig()
-    runner = MockRunner(mesh)
+def test_build_noise_block_batched():
+    proposer = object.__new__(DFlashProposer)
 
-    mock_mi = MockDraftModelInterface()
-    # combine_hidden_states_fn acts as identity for simplicity
-    mock_mi.combine_hidden_states_fn = lambda state, raw: raw
-    mock_get_model.return_value = mock_mi
+    # 2 requests in batch
+    seq_lens = jnp.array([10, 20], dtype=jnp.int32)
+    next_token_ids = jnp.array([100, 200], dtype=jnp.int32)
+    mask_token_id = 0
+    block_size = 3
 
-    proposer = DFlashProposer(vllm_config, runner)
+    noise_ids, noise_positions = proposer._build_noise_block(
+        seq_lens, next_token_ids, mask_token_id, block_size)
 
-    with jax.set_mesh(mesh):
-        proposer.load_model(target_model=None)
+    # The output is expected to be flattened across the batch.
+    assert noise_ids.shape == (6, )
+    assert noise_positions.shape == (6, )
 
-    # Initial proposer state
-    assert proposer._ctx_len == 0
-    assert proposer._cache_len == 0
-    assert proposer._prev_seq_len == 0
-
-    # ----------------- ITERATION 1: Initial prefix accepted up to length 10 -----------------
-    from tpu_inference.layers.common.attention_metadata import \
-        AttentionMetadata
-    attn_metadata_1 = AttentionMetadata(
-        input_positions=jnp.array([0]),
-        block_tables=jnp.array([0]),
-        seq_lens=jnp.array([10], dtype=jnp.int32),
-        query_start_loc=jnp.array([0]),
-        request_distribution=jnp.array([0]),
-    )
-
-    input_ids = jnp.array([0])
-    aux_hidden_states_1 = (jnp.ones((10, 32), dtype=jnp.bfloat16), )
-    next_token_ids_1 = jnp.array([42], dtype=jnp.int32)
-
-    with jax.set_mesh(mesh):
-        target_hidden_1, noise_ids_1, _, draft_metadata_1 = proposer.prepare_inputs(
-            attn_metadata_1,
-            input_ids,
-            aux_hidden_states_1,
-            next_token_ids_1,
-        )
-
-    # Check outputs of Iteration 1
-    new_ctx_1, cache_len_arr_1, actual_ctx_count_arr_1 = target_hidden_1
-    # Padding size for 10 is 16
-    assert new_ctx_1.shape == (16, 32)
-    assert int(cache_len_arr_1[0]) == 0
-    assert int(actual_ctx_count_arr_1[0]) == 10
-
-    # Check proposer state updates
-    assert proposer._ctx_len == 10
-    assert proposer._prev_seq_len == 10
-
-    # Check draft proposer attention metadata sharding positions
-    assert noise_ids_1.shape == (proposer.block_size, )
+    # Check input ids are padded with mask_token_id correctly
     np.testing.assert_array_equal(
-        np.asarray(draft_metadata_1.query_start_loc),
-        np.array([0, proposer.block_size], dtype=np.int32),
-    )
+        np.asarray(noise_ids), np.array([100, 0, 0, 200, 0, 0],
+                                        dtype=np.int32))
 
-    # Mock proposer model forward pass and logits sampler
-    dummy_kv = [
-        jnp.zeros((1, 4, 128, 16), dtype=jnp.bfloat16)
-        for _ in range(proposer.num_layers * 2)
-    ]
-    proposer._draft_kv_caches = dummy_kv
-
-    # model_fn returns draft_kv_caches, hidden_states (5 tokens, 32 hidden_size), and None
-    mock_mi.model_fn.return_value = (
-        dummy_kv,
-        jnp.ones((5, 32), dtype=jnp.bfloat16),
-        None,
-    )
-    # compute_logits_fn returns logits for 4 speculative tokens, vocabulary size 1000
-    mock_mi.compute_logits_fn.return_value = jnp.ones((4, 1000),
-                                                      dtype=jnp.float32)
-
-    # Call propose for Iteration 1
-    with jax.set_mesh(mesh):
-        _, draft_token_ids_1 = proposer.propose(
-            kv_caches=[],
-            input_ids=input_ids,
-            attn_metadata=draft_metadata_1,
-            last_token_indices=jnp.zeros(1),
-            target_hidden_states=target_hidden_1,
-        )
-
-    assert draft_token_ids_1.shape == (1, 4)
-    # Cache length is updated to prefix (10) + block size (5) = 15
-    assert proposer._cache_len == 15
-
-    # ----------------- ITERATION 2: Speculative Rejection & Cache Cropping -----------------
-    # Suppose out of 4 proposed tokens, the target model accepts 3.
-    # Therefore, new accepted sequence length is 10 prefix + 3 accepted = 13.
-    attn_metadata_2 = AttentionMetadata(
-        input_positions=jnp.array([0]),
-        block_tables=jnp.array([0]),
-        seq_lens=jnp.array([13], dtype=jnp.int32),
-        query_start_loc=jnp.array([0]),
-        request_distribution=jnp.array([0]),
-    )
-
-    # Target model passes the accumulated auxiliary hidden states (now length 13)
-    aux_hidden_states_2 = (jnp.ones((13, 32), dtype=jnp.bfloat16), )
-    next_token_ids_2 = jnp.array([99], dtype=jnp.int32)
-
-    with jax.set_mesh(mesh):
-        target_hidden_2, noise_ids_2, _, _ = proposer.prepare_inputs(
-            attn_metadata_2,
-            input_ids,
-            aux_hidden_states_2,
-            next_token_ids_2,
-        )
-
-    # Check outputs of Iteration 2
-    new_ctx_2, cache_len_arr_2, actual_ctx_count_arr_2 = target_hidden_2
-
-    # CRITICAL: Verify cache cropping logic
-    # The cache length must be cropped back to the PREVIOUS sequence length (10),
-    # preserving the accepted prefix and discarding the rejected noise entries in [10, 15)
-    assert proposer._cache_len == 10
-    assert int(cache_len_arr_2[0]) == 10
-
-    # The proposer correctly identifies that 3 new context tokens need to be sharded
-    assert int(actual_ctx_count_arr_2[0]) == 3
-    # Padding size for 3 is 16
-    assert new_ctx_2.shape == (16, 32)
-
-    # Check proposer state updates
-    assert proposer._ctx_len == 13
-    assert proposer._prev_seq_len == 13
+    # Check absolute position assignments per request
+    np.testing.assert_array_equal(
+        np.asarray(noise_positions),
+        np.array([10, 11, 12, 20, 21, 22], dtype=np.int32))
