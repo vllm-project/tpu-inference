@@ -122,20 +122,12 @@ process_json_benchmark_cases() {
       return
     fi
 
-    # Collect generated group keys for this file.
-    if [ -s "$group_key_file" ]; then
-      mapfile -t file_group_keys < "$group_key_file"
-      all_group_keys+=("${file_group_keys[@]}")
-    fi
-
-
     # 2. Upload the captured YAML (stdout from python)
     if ! upload_with_priority <(echo "$py_output") "$priority"; then
       echo "🚨 Upload failed for $f"
       error_msgs+=("❌ Upload Failure for $f")
       return
     fi
-
   }
 
   # 1. Process files from case_folder (Baseline: non-blocking business validation)
