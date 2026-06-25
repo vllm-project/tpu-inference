@@ -398,7 +398,7 @@ class DPScheduler(SchedulerInterface):
         self.structured_output_manager = structured_output_manager
 
         # DP state
-        self.dp_size = vllm_config.sharding_config.total_dp_size
+        self.dp_size = vllm_config.sharding_config.model_dp_size
         self.assigned_dp_rank: Dict[str, int] = {}  # req_id -> dp_rank
         self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
@@ -1538,7 +1538,7 @@ def update_vllm_config_for_dp_scheduler(vllm_config: Any) -> None:
     """
     Update vLLM configuration to use DPScheduler when DP size > 1.
     """
-    dp_size = vllm_config.sharding_config.total_dp_size
+    dp_size = vllm_config.sharding_config.model_dp_size
 
     if dp_size > 1:
         if vllm_config.scheduler_config.async_scheduling:
