@@ -40,6 +40,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         kv_dtype,
         num_pages,
         *,
+        distribution: jax.Array | None = None,
         bq_sz=64,
         bkv_sz=256,
         bq_csz=32,
@@ -47,6 +48,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         vmem_limit_bytes=100 * 1024 * 1024,
         max_num_batched_tokens=512,
         max_num_seq=8,
+        chunk_prefill_size: int | None = None,
         sliding_window: int | None = None,
         soft_cap: float | None = None,
         q_scale: float | None = None,
@@ -54,6 +56,12 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         v_scale: float | None = None,
         use_causal_mask: bool = True,
     ):
+        """Universal test execution harness.
+
+        Generates structured test inputs, builds an artificial KV cache filled with NaN,
+        runs both the reference baseline and the TPU-accelerated kernel, and validates
+        that the resulting matrices and cache contents align within expected numeric margins.
+        """
         rng = np.random.default_rng(1234)
 
         def gen_random(shape, dtype):
@@ -147,7 +155,10 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                             (0, max_num_seq + 1 - cu_q_lens.shape[0]))
         kv_lens = jnp.array(kv_lens, dtype=jnp.int32)
         kv_lens = jnp.pad(kv_lens, (0, max_num_seq - kv_lens.shape[0]))
-        distribution = jnp.array([0, 0, len(seq_lens)], dtype=jnp.int32)
+
+        if distribution is None:
+            distribution = [0, 0, len(seq_lens)]
+        distribution = jnp.array(distribution, dtype=jnp.int32)
 
         args = (
             q,
@@ -178,8 +189,10 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             *args,
             **kwargs,
             m_block_sizes=(bq_sz, bkv_sz, bq_csz, bkv_csz),
+            chunk_prefill_size=chunk_prefill_size,
             vmem_limit_bytes=vmem_limit_bytes,
         )
+
         output = output[:cu_q_lens[distribution[-1]]]
 
         dtype_bits = dtypes.itemsize_bits(jnp.dtype(kv_dtype))
@@ -308,41 +321,43 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             (1, 87),
             (1, 1328),
         ]
+        distribution = [len(seq_lens), len(seq_lens), len(seq_lens)]
         num_heads = (32, 8)
         head_dim = 128
         page_size = 16
         num_pages = 1000
 
-        self._test_ragged_paged_attention(
-            seq_lens,
-            num_heads,
-            head_dim,
-            page_size,
-            dtype,
-            dtype,
-            num_pages,
-        )
+        self._test_ragged_paged_attention(seq_lens,
+                                          num_heads,
+                                          head_dim,
+                                          page_size,
+                                          dtype,
+                                          dtype,
+                                          num_pages,
+                                          distribution=distribution)
 
     @parameterized.product(dtype=[jnp.float32, jnp.bfloat16], )
-    def test_ragged_paged_attention_prefill_only(self, dtype):
+    def test_ragged_paged_attention_fixed_chunked_prefill_only(self, dtype):
+        chunk_prefill_size = 16
         seq_lens = [
-            (5, 18),
-            (15, 129),
-            (120, 597),
-            (100, 122),
-            (21, 64),
-            (32, 322),
-            (251, 463),
-            (40, 181),
-            (64, 1107),
-            (99, 123),
-            (10, 31),
-            (5, 18),
-            (3, 1229),
-            (120, 229),
-            (9, 87),
-            (2, 1328),
+            (chunk_prefill_size, 18),
+            (chunk_prefill_size, 129),
+            (chunk_prefill_size, 597),
+            (chunk_prefill_size, 122),
+            (chunk_prefill_size, 64),
+            (chunk_prefill_size, 322),
+            (chunk_prefill_size, 463),
+            (chunk_prefill_size, 181),
+            (chunk_prefill_size, 1107),
+            (chunk_prefill_size, 123),
+            (chunk_prefill_size, 31),
+            (chunk_prefill_size, 18),
+            (chunk_prefill_size, 1229),
+            (chunk_prefill_size, 229),
+            (chunk_prefill_size, 87),
+            (chunk_prefill_size, 1328),
         ]
+        distribution = [0, len(seq_lens), len(seq_lens)]
         num_heads = (32, 8)
         head_dim = 128
         page_size = 16
@@ -356,28 +371,60 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             dtype,
             dtype,
             num_pages,
+            distribution=distribution,
+            chunk_prefill_size=chunk_prefill_size,
+        )
+
+    @parameterized.product(
+        dtype=[jnp.float32, jnp.bfloat16],
+        seq_len=[16, 32, 128],
+    )
+    def test_ragged_paged_attention_pure_prefill(self, dtype, seq_len):
+        # The fixed-prefill bucket has one static q_len per invocation. Test
+        # q_len == kv_len separately for several page-boundary-relevant sizes.
+        seq_lens = [(seq_len, seq_len)]
+        distribution = [0, len(seq_lens), len(seq_lens)]
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        num_pages = 1000
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+            distribution=distribution,
+            chunk_prefill_size=seq_len,
         )
 
     @parameterized.product(dtype=[jnp.float32, jnp.bfloat16], )
     def test_ragged_paged_attention_mixed(self, dtype):
-        seq_lens = [
-            (5, 18),
+        decode_seq_len = [
             (1, 129),
-            (120, 597),
             (1, 122),
             (1, 64),
-            (32, 322),
-            (251, 463),
             (1, 181),
-            (1, 1107),
-            (99, 123),
-            (1, 31),
-            (5, 18),
-            (3, 1229),
-            (117, 229),
-            (1, 87),
-            (1, 1328),
         ]
+        prefill_seq_len = [
+            (32, 120),
+            (32, 322),
+            (32, 99),
+        ]
+        mixed_seq_len = [
+            (5, 18),
+            (120, 597),
+            (251, 463),
+            (117, 229),
+        ]
+        seq_lens = decode_seq_len + prefill_seq_len + mixed_seq_len
+        num_decode = len(decode_seq_len)
+        num_prefill = len(prefill_seq_len)
+        distribution = [num_decode, num_decode + num_prefill, len(seq_lens)]
+
         num_heads = (32, 8)
         head_dim = 128
         page_size = 16
@@ -391,12 +438,14 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             dtype,
             dtype,
             num_pages,
+            distribution=distribution,
+            chunk_prefill_size=32,
         )
 
     @parameterized.product(
         num_seqs=[1, 17],
-        num_heads=[(32, 8), (12, 2), (5, 1), (3, 3)],
-        head_dim=[80, 240],
+        num_heads=[(32, 8), (12, 2), (5, 1), (3, 3), (32, 1)],
+        head_dim=[64, 80, 128, 240, 256],
         dtype=[jnp.float32, jnp.bfloat16],
     )
     def test_ragged_paged_attention_complex(
@@ -477,6 +526,35 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             soft_cap=soft_cap,
         )
 
+    @parameterized.product(
+        dtype=[jnp.float32, jnp.bfloat16],
+        seq_lens=[
+            [(1, 1)],
+            [(1, 15)],
+            [(1, 16)],
+            [(1, 17)],
+            [(8, 31)],
+            [(8, 32)],
+            [(8, 33)],
+            [(1, 1), (1, 16), (1, 17)],
+        ],
+    )
+    def test_ragged_paged_attention_boundary_seq_lens(self, dtype, seq_lens):
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        num_pages = 1000
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+        )
+
     def test_ragged_paged_attention_sliding_window_should_be_positive(self):
         dtype = jnp.float32
         seq_lens = [(192, 328), (128, 180), (64, 255)]
@@ -528,6 +606,124 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                 num_pages,
                 soft_cap=0.0,
             )
+
+    def test_ragged_paged_attention_zero_length_query(self):
+        """Verifies zero query length is rejected.
+
+        This can occur in chunked prefill or dynamic scheduling scenarios where
+        a sequence is temporarily paused but its history is preserved in the cache.
+        Ensures slicing and pointer arithmetic handle zero-size intervals gracefully.
+        """
+        seq_lens = [(128, 256), (0, 64)]
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        dtype = jnp.bfloat16
+        num_pages = 1000
+
+        with self.assertRaisesRegex(ValueError, "Require 0 < q_len"):
+            self._test_ragged_paged_attention(
+                seq_lens,
+                num_heads,
+                head_dim,
+                page_size,
+                dtype,
+                dtype,
+                num_pages,
+            )
+
+    def test_ragged_paged_attention_deep_context(self):
+        """Verifies memory alignment, index stability, and tiling over massive page spans.
+
+        Simulates a deep generation step (decode) with a very large sequence length,
+        forcing the kernel to process many pages per sequence (kv_len >> page_size).
+        """
+        seq_lens = [(1, 2048)]
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        dtype = jnp.bfloat16
+        num_pages = 2000
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+        )
+
+    def test_ragged_paged_attention_extreme_mqa(self):
+        """Forces maximum broadcasting behavior along the head axis.
+
+        Uses a single KV head (Multi-Query Attention, num_kv_heads=1) with standard
+        dimensions to validate maximum GQA/MQA broadcast mapping inside the kernel.
+        """
+        seq_lens = [(64, 128)]
+        num_heads = (32, 1)
+        head_dim = 128
+        page_size = 16
+        dtype = jnp.bfloat16
+        num_pages = 1000
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+        )
+
+    def test_ragged_paged_attention_asymmetric_gqa_ratio(self):
+        """Validates non-power-of-two GQA head broadcast logic.
+
+        Forces an odd head allocation ratio (6 Q-heads to 2 KV-heads = 3) to
+        ensure hardware vector layout tiling handles uneven broadcasting smoothly.
+        """
+        seq_lens = [(64, 128), (32, 64)]
+        num_heads = (6, 2)
+        head_dim = 128
+        page_size = 16
+        dtype = jnp.bfloat16
+        num_pages = 1000
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+        )
+
+    def test_ragged_paged_attention_sparse_batch_over_allocation(self):
+        """Validates token masking when actual tokens are much fewer than allocated max.
+
+        Simulates a scenario where max_num_batched_tokens is highly padded (512),
+        but the actual dynamic batch contains only a few active layout elements.
+        """
+        seq_lens = [(2, 10)]  # Only 2 active query tokens
+        num_heads = (32, 8)
+        head_dim = 128
+        page_size = 16
+        dtype = jnp.bfloat16
+        num_pages = 1000
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+            max_num_batched_tokens=512,  # Force high padding space
+        )
 
     # ------------------------------------------------------------------
     # KV-share path (`update_kv_cache=False`) regression tests.
