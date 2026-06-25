@@ -209,6 +209,8 @@ def _make_inputs(
     # Small projection weights keep the post-GEMM magnitudes reasonable.
     wkv_wgate = (rng.standard_normal(
         (2 * state_width, hidden_size), dtype=np.float32) * 0.05)
+    # The projection now happens outside the kernel; feed it the result.
+    kv_score = (hidden_states @ wkv_wgate.T).astype(np.float32)
     ape = rng.standard_normal((compress_ratio, state_width), dtype=np.float32)
     norm_weight = rng.standard_normal(head_dim, dtype=np.float32)
 
@@ -221,8 +223,7 @@ def _make_inputs(
                                             rope_head_dim, quant_block)
     cache = np.zeros(cache_shape, dtype=np.uint8)
 
-    return dict(hidden_states=hidden_states,
-                wkv_wgate=wkv_wgate,
+    return dict(kv_score=kv_score,
                 ape=ape,
                 norm_weight=norm_weight,
                 cos_sin_cache=cos_sin_cache,
@@ -285,8 +286,7 @@ def _naive_reference(kw):
     coff = 1 + int(kw["overlap"])
     state_width = coff * kw["head_dim"]
 
-    hidden = kw["hidden_states"].astype(np.float32)
-    kv_score = hidden @ kw["wkv_wgate"].astype(np.float32).T
+    kv_score = kw["kv_score"].astype(np.float32)
     kv = kv_score[:, :state_width]
     score = kv_score[:, state_width:2 * state_width]
 
@@ -369,11 +369,9 @@ def test_compressor_forward_eval_shape():
     kw = _make_inputs(4, True, seq_len=8)
     jkw = _to_jax(kw)
 
-    def fn(hidden_states, wkv_wgate, ape, norm_weight, cos_sin_cache,
-           positions, slot_mapping, block_table, token_to_req_indices,
-           kv_slot_mapping, cache):
-        return compressor_forward(hidden_states=hidden_states,
-                                  wkv_wgate=wkv_wgate,
+    def fn(kv_score, ape, norm_weight, cos_sin_cache, positions, slot_mapping,
+           block_table, token_to_req_indices, kv_slot_mapping, cache):
+        return compressor_forward(kv_score=kv_score,
                                   ape=ape,
                                   norm_weight=norm_weight,
                                   cos_sin_cache=cos_sin_cache,
@@ -391,11 +389,10 @@ def test_compressor_forward_eval_shape():
                                   rms_eps=kw["rms_eps"],
                                   quant_block=kw["quant_block"])
 
-    out_cache = jax.eval_shape(fn, jkw["hidden_states"], jkw["wkv_wgate"],
-                               jkw["ape"], jkw["norm_weight"],
-                               jkw["cos_sin_cache"], jkw["positions"],
-                               jkw["slot_mapping"], jkw["block_table"],
-                               jkw["token_to_req_indices"],
+    out_cache = jax.eval_shape(fn, jkw["kv_score"], jkw["ape"],
+                               jkw["norm_weight"], jkw["cos_sin_cache"],
+                               jkw["positions"], jkw["slot_mapping"],
+                               jkw["block_table"], jkw["token_to_req_indices"],
                                jkw["kv_slot_mapping"], jkw["cache"])
     assert out_cache.shape == kw["cache"].shape
     assert out_cache.dtype == jnp.uint8

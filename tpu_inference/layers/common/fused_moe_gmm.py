@@ -24,6 +24,8 @@ import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives import \
     hierarchical_reduce_scatter as hier_rs
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
+from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
+    dense_gather_reduce
 from tpu_inference.kernels.sparse_core.ragged_gather import \
     ragged_gather as ragged_gather_v1
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce import \
@@ -314,13 +316,12 @@ def moe_gmm_local(x: jax.Array,
                                                     cur_weights.reshape(-1),
                                                     cur_mask.reshape(-1), topk)
         else:
-            token_hidden_full = gmm2_res[cur_indices]
-            cur_sorted = token_hidden_full.reshape(
-                (-1, topk, gmm2_res.shape[-1]))
-            cur_topk_weights = jnp.expand_dims(cur_weights, axis=-1)
-            cur_weighted = cur_sorted * cur_topk_weights
-            cur_masked = jnp.where(cur_mask, cur_weighted, 0.0)
-            chunk_hidden = cur_masked.sum(axis=-2)
+            chunk_hidden = dense_gather_reduce(
+                gmm2_res,
+                topk_argsort_revert_indices,
+                topk_weights,
+                topk,
+            )
 
         if enable_rs_kernel:
             # Fallback to psum-scatter for small token sizes to avoid Mosaic compilation.
