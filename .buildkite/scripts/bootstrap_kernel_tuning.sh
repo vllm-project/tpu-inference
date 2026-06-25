@@ -103,7 +103,7 @@ echo "  HOST_NAME=${HOST_NAME:-}"
 TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-}"
 TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
 
-if [ -n "${KERNEL_AUTO_TUNING_ENABLED:-}" ]; then
+if [ -n "${BOOTSTRAP_KERNEL_AUTOTUNING:-}" ]; then
     echo "--- :pipeline: Uploading pipeline_kernel_auto_tuning.yml for kernel tuning"
     export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$(date +%Y-%m-%d-%H-%M)
     # export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-23-07-10"
