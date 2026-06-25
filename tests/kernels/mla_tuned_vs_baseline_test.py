@@ -30,7 +30,6 @@ def _get_tuned_test_cases():
     test_cases = []
     for key in tuned_params_mapping.keys():
         name = (f"tokens_{key.max_num_tokens}_"
-                f"pages_{key.total_num_pages}_"
                 f"seqs_{key.max_num_seqs}_"
                 f"pagesperseq_{key.pages_per_seq}")
         test_cases.append(dict(testcase_name=name, key=key))
@@ -64,7 +63,7 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
             page_size=key.page_size_per_kv_packing * key.kv_packing,
             q_dtype=jnp.dtype(key.q_dtype),
             kv_dtype=jnp.dtype(key.kv_dtype),
-            num_pages=key.total_num_pages,
+            num_pages=key.pages_per_seq * key.max_num_seqs,
             rng=rng,
         )
 
