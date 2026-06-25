@@ -20,6 +20,7 @@ Works for both the ``flax_nnx`` (JAX) and ``vllm`` (torchax) backends.
 """
 
 import time
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -52,6 +53,21 @@ def is_pathways_dummy_load() -> bool:
     return load_format in ("dummy", "pathways_dummy")
 
 
+@partial(jax.jit, static_argnames=("shape", "dtype"))
+def _generate_dummy_weights_kernel(
+    key: jax.Array,
+    shape: tuple[int, ...],
+    dtype: jnp.dtype,
+) -> jax.Array:
+    return jax.random.uniform(
+        key,
+        shape=shape,
+        dtype=dtype,
+        minval=_LOW,
+        maxval=_HIGH,
+    )
+
+
 def create_dummy_weights_on_tpu(
     sharding: NamedSharding,
     weight_shape: tuple[int, ...],
@@ -62,19 +78,8 @@ def create_dummy_weights_on_tpu(
     The values are drawn uniformly from ``[_LOW, _HIGH]``.
     """
     key = jax.random.PRNGKey(_SEED)
-
-    @jax.jit(out_shardings=sharding)
-    def _generate(key):
-        return jax.random.uniform(
-            key,
-            shape=weight_shape,
-            dtype=weight_dtype,
-            minval=_LOW,
-            maxval=_HIGH,
-        )
-
-    tpu_array = _generate(key)
-    return tpu_array
+    tpu_array = _generate_dummy_weights_kernel(key, weight_shape, weight_dtype)
+    return jax.lax.with_sharding_constraint(tpu_array, sharding)
 
 
 def load_dummy_weights_jax(model, mesh: Mesh) -> None:
