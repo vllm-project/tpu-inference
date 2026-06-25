@@ -81,7 +81,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 try:
-    from api.jax.kv_cache_manager import KVCacheManager as KVCacheManager
+    from tpu_raiden.api.jax.kv_cache_manager import KVCacheManager as KVCacheManager
     _RAIDEN_IMPORT_ERROR = None
 except Exception as _exc:  # pylint: disable=broad-except
     KVCacheManager = None
@@ -494,8 +494,8 @@ class TPUConnectorWorker:
     def register_runner(self, runner: TPUModelRunner):
         if KVCacheManager is None:
             raise ImportError(
-                "KVCacheManager is not importable. Add the tpu-raiden "
-                "export to PYTHONPATH so 'api.jax.kv_cache_manager' resolves "
+                "KVCacheManager is not importable. Ensure tpu-raiden is correctly "
+                "installed or added to PYTHONPATH so 'tpu_raiden.api.jax.kv_cache_manager' resolves "
                 "(and set RAIDEN_PRELOAD_ENGINE=1 so sitecustomize.py preloads "
                 f"the kv_cache_manager .so first). Original error: {_RAIDEN_IMPORT_ERROR}"
             )
