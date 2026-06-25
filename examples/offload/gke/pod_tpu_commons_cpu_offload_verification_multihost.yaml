@@ -15,9 +15,7 @@
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata:
-  name: tpu-job-host-offload-multi-host-unit-tests
-  # This LeaderWorkerSet runs the distributed multi-host unit tests for
-  # TPUOffloadConnector across a Ray cluster spanning multiple TPU pods.
+  name: tpu-offload-verification-multihost
 spec:
   replicas: 1
   leaderWorkerTemplate:
@@ -32,8 +30,8 @@ spec:
           cloud.google.com/gke-tpu-accelerator: tpu7x
           cloud.google.com/gke-tpu-topology: 2x2x2
         containers:
-          - name: tpu-job-leader
-            image: <your-tpu-inference-container-image>
+          - name: vllm-leader
+            image: gcr.io/gke-gkit-dev/tpu-inference:cpu-offload
             imagePullPolicy: Always
             env:
             - name: TPU_MULTIHOST_BACKEND
@@ -48,10 +46,10 @@ spec:
               value: vllm
             - name: JAX_PLATFORMS
               value: ""
-            - name: VLLM_LOGGING_LEVEL
-              value: "DEBUG"
             - name: IS_TPU_MULTIHOST
               value: "true"
+            - name: VLLM_LOGGING_LEVEL
+              value: "DEBUG"
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -61,9 +59,23 @@ spec:
             args:
               - |
                 bash /workspace/vllm/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE);
-
-                pytest -sv tests/offload/tpu_offload_accuracy_test.py
-                pytest -sv tests/offload/tpu_offload_performance_test.py
+                
+                # echo "=== Running TP Only Verification ==="
+                # python3 /workspace/tpu_inference/examples/offload/offline_inference_kv_cache_verification.py \
+                #   --model=meta-llama/Llama-3.1-8B \
+                #   --tensor-parallel-size=16 \
+                #   --max_model_len=1024 \
+                #   --seed=42 \
+                #   --kv-transfer-config '{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}'
+                
+                echo "=== Running TP + PP Verification ==="
+                python3 /workspace/tpu_inference/examples/offload/offline_inference_kv_cache_verification.py \
+                  --model=Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
+                  --tensor-parallel-size=8 \
+                  --pipeline-parallel-size=2 \
+                  --max_model_len=8192 \
+                  --seed=42 \
+                  --kv-transfer-config '{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}'
             resources:
               limits:
                 google.com/tpu: "4"
@@ -80,8 +92,8 @@ spec:
           cloud.google.com/gke-tpu-accelerator: tpu7x
           cloud.google.com/gke-tpu-topology: 2x2x2
         containers:
-          - name: tpu-job-worker
-            image: <your-tpu-inference-container-image>
+          - name: vllm-worker
+            image: gcr.io/gke-gkit-dev/tpu-inference:cpu-offload
             imagePullPolicy: Always
             command: ["/bin/sh", "-c"]
             args:
@@ -103,10 +115,10 @@ spec:
               value: vllm
             - name: JAX_PLATFORMS
               value: ""
-            - name: VLLM_LOGGING_LEVEL
-              value: "DEBUG"
             - name: IS_TPU_MULTIHOST
               value: "true"
+            - name: VLLM_LOGGING_LEVEL
+              value: "DEBUG"
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -126,7 +138,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: tpu-job-host-offload-multi-host-unit-tests
+  name: tpu-offload-verification-multihost
   namespace: default
 spec:
   clusterIP: None
@@ -144,6 +156,6 @@ spec:
     protocol: TCP
     targetPort: 6379
   selector:
-    leaderworkerset.sigs.k8s.io/name: tpu-job-host-offload-multi-host-unit-tests
+    leaderworkerset.sigs.k8s.io/name: tpu-offload-verification-multihost
   sessionAffinity: None
   type: ClusterIP

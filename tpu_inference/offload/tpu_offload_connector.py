@@ -103,7 +103,7 @@ import copy
 import random
 import time
 from collections import defaultdict
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
@@ -1427,8 +1427,9 @@ class TPUOffloadConnectorWorker:
         self.finished_save_reqs: set[ReqId] = set()
         # Tracks if wait_for_save has been called for the current step's metadata.
         self._processed_save_for_step = False
-        # On-going asynchronous save operations tracking futures and their associated manifest.
-        self._pending_save_futures: list[tuple[Future, list[SaveReqInfo]]] = []
+        # On-going asynchronous save operations tracking lists of JAX arrays, their associated manifest and start time.
+        self._pending_save_futures: list[tuple[list[jax.Array],
+                                               list[SaveReqInfo], float]] = []
 
         # record finished save / load blocks (with req_ids) for each iteration
         self.offload_stats = KVOffloadConnectorStats()
@@ -1894,96 +1895,6 @@ class TPUOffloadConnectorWorker:
 
         return gathered_kv_caches_tpu, manifest, total_num_blocks_to_save
 
-    def _transfer_and_register_cpu_chunks(self,
-                                          flat_kv_caches_tpu: Any,
-                                          total_num_blocks_to_save: int,
-                                          manifest: list[SaveReqInfo],
-                                          is_batched: bool = False):
-        """
-        Asynchronously transfers KV blocks from TPU to CPU, unstitches them,
-        and registers them with the CPU RAM backend store.
-
-        Unstitching Mechanism:
-        1. Unified Transfer: A single large swap operation moves total_num_blocks_to_save
-           from TPU to CPU.
-        2. Sequential Slicing: The logic iterates through the manifest.
-        3. Request Decomposition: Slices 'num_blocks' from the unified buffer
-           and maps them to their respective 'dst_chunks' IDs.
-           For non-batched save (is_batched=False), we expect only one
-           request metadata in the manifest.
-
-        The following diagram illustrates the batched save case (is_batched=True).
-        TPU HBM (Non-Contiguous)          Unified Staging Buffer (TPU)
-        +-------+                         +-------+-------+-------+-------+-------+
-        | Req A | B1, B2                  | B1    | B2    | B3    | B4    | B5    |
-        | Req B | B3, B4, B5      ====>   +-------+-------+-------+-------+-------+
-        +-------+                         | <--- Req A -->| <------ Req B ------> |
-                                          +-------+-------+-------+-------+-------+
-                                                             ||
-                                                             || DMA (Single Call)
-                                                             ||
-                                           Unified Host Buffer (CPU RAM)
-                                          +-------+-------+-------+-------+-------+
-                                          | B1    | B2    | B3    | B4    | B5    |
-                                          +-------+-------+-------+-------+-------+
-                                                             ||
-              Unstitching Logic <============================++
-                      ||
-                      ||
-        Local CPU Backend (Cache)
-        +---------------------------------------+
-        | ID: C100 (B1) | ID: C101 (B2) | ...   |  <-- Req A chunks
-        +---------------------------------------+
-        """
-        start_time = time.time()
-
-        # 1. Swap Out the buffer
-        chunks_on_cpu = None
-        # D2H
-        chunks_on_cpu = []
-        for i in range(total_num_blocks_to_save):
-            chunks_on_cpu.append(
-                jax.device_put(flat_kv_caches_tpu[i],
-                               self.expanded_host_sharding))
-        jax.block_until_ready(chunks_on_cpu)
-        # no split
-
-        duration = time.time() - start_time
-        logger.debug(f"Successfully saved {total_num_blocks_to_save} blocks "
-                     f"to CPU in {duration:.4f} seconds.")
-        self.metrics_collector.record_d2h_transfer_latency(duration)
-
-        total_size_bytes = sum(
-            self._chunk_nbytes(chunk) for chunk in chunks_on_cpu)
-        logger.debug(
-            f"Total size of chunks_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
-        )
-        self.metrics_collector.record_d2h_bytes(total_size_bytes)
-
-        if duration > 0:
-            bw_gbps = (total_size_bytes / (1024**3)) / duration
-            self.metrics_collector.record_d2h_transfer_bw(bw_gbps)
-
-        # 2. Unstitch and Register
-        post_transfer_start_time = time.time()
-        block_offset = 0
-        for info in manifest:
-            for i in range(info.num_blocks):
-                chunk_id = info.dst_chunks[i]
-                self.cpu_backend.add(chunk_id, chunks_on_cpu[block_offset + i])
-                logger.debug(f" Saving to CPU chunk: "
-                             f"chunk_id={chunk_id}, "
-                             f" local_chunk_idx={block_offset + i}")
-
-            block_offset += info.num_blocks
-
-        post_transfer_duration = time.time() - post_transfer_start_time
-
-        log_prefix = "Batch" if is_batched else f"Request {manifest[0].req_id}"
-        logger.debug(
-            f"{log_prefix}: e2e host processing of {total_num_blocks_to_save} chunks took {post_transfer_duration:.4f} seconds."
-        )
-
     def _chunk_nbytes(self, chunk):
         if isinstance(chunk, list):
             return sum(s.nbytes for s in chunk)
@@ -2010,24 +1921,26 @@ class TPUOffloadConnectorWorker:
         flat_kv_caches_tpu, manifest, total_num_blocks_to_save = gather_result
 
         # 2. ASYNC NON-BLOCKING: Single Batch Transfer
-        def _async_batch_transfer_task(*args, **kwargs):
-            try:
-                self._transfer_and_register_cpu_chunks(*args, **kwargs)
-            except Exception as e:
-                logger.error(f"Error in batched transfer: {e}", exc_info=True)
-
         logger.debug(
-            f"Submitting batched transfer task for {len(manifest)} requests, {total_num_blocks_to_save} blocks total."
+            f"Queueing batched transfer for {len(manifest)} requests, {total_num_blocks_to_save} blocks total."
         )
-        # Note: We use manifest for the pending future tracking.
-        # record_save will be handled in the main thread by _process_completed_saves.
+        start_time = time.time()
+        chunks_on_cpu = []
+        # We launch the D2H device_put transfers directly on the main thread.
+        # For the multi-host case, this guarantees that all hosts (e.g., Host 0 ... Host N)
+        # enqueue the resharding operations in the exact same step-by-step order,
+        # avoiding launch group mismatches. Because device_put is non-blocking,
+        # it returns immediately and queues the transfer asynchronously on the
+        # hardware stream.
+        for i in range(total_num_blocks_to_save):
+            chunks_on_cpu.append(
+                jax.device_put(flat_kv_caches_tpu[i],
+                               self.expanded_host_sharding))
 
-        future = self.save_executor.submit(_async_batch_transfer_task,
-                                           flat_kv_caches_tpu,
-                                           total_num_blocks_to_save,
-                                           manifest,
-                                           is_batched=True)
-        self._pending_save_futures.append((future, manifest))
+        # Track the list of JAX arrays (representing active transfers) for status polling later.
+        self._pending_save_futures.append(
+            (chunks_on_cpu, manifest, start_time))
+        self.metrics_collector.record_d2h_operation()
 
     def _get_blocks_for_req_from_metadata(
             self, info: SaveReqInfo,
@@ -2055,10 +1968,8 @@ class TPUOffloadConnectorWorker:
           reclaim the KV blocks.
 
         Stage 2: Swap-Out (Asynchronous/Non-Blocking)
-        - Submits a background task to the ThreadPoolExecutor to perform
-          the Device-to-Host (D2H) transfer.
-        - The background thread moves data from HBM to Host RAM and
-          registers the chunks in the LocalCPUBackend.
+        - Queues Host transfers directly on the main thread using asynchronous
+          device_put operations without blocking.
         """
         # assert self.cpu_backend, "please initialize cpu_backend first."
         # This method is idempotent. If the save operations for the current
@@ -2122,26 +2033,22 @@ class TPUOffloadConnectorWorker:
                                    dst_chunks=dst_chunks,
                                    is_final_save=meta.save_spec.is_final_save)
 
-                # Define a safe wrapper for the async part to ensure logging
-                def _async_transfer_task(req_id, *args):
-                    try:
-                        self._transfer_and_register_cpu_chunks(*args)
-                    except Exception as e:
-                        raise ValueError(
-                            f"Error transferring blocks for request {req_id}: {e}"
-                        )
-                    return req_id
-
                 # 2. ASYNC NON-BLOCKING: Transfer to CPU and Register
                 logger.debug(
-                    f"Submitting transfer task for request {meta.req_id}")
-                future = self.save_executor.submit(_async_transfer_task,
-                                                   meta.req_id,
-                                                   flat_kv_caches_tpu,
-                                                   num_blocks_to_save, [info],
-                                                   False)
+                    f"Queueing transfer task for request {meta.req_id}")
+                start_time = time.time()
+                chunks_on_cpu = []
+                # Queue the D2H device_put transfers directly on the main thread.
+                # Since device_put is non-blocking, it returns immediately and queues
+                # the copy asynchronously on the hardware stream.
+                for i in range(num_blocks_to_save):
+                    chunks_on_cpu.append(
+                        jax.device_put(flat_kv_caches_tpu[i],
+                                       self.expanded_host_sharding))
 
-                self._pending_save_futures.append((future, [info]))
+                # Track the active transfers and manifest for polling.
+                self._pending_save_futures.append(
+                    (chunks_on_cpu, [info], start_time))
                 self.metrics_collector.record_d2h_operation()
 
         self._processed_save_for_step = True
@@ -2155,33 +2062,67 @@ class TPUOffloadConnectorWorker:
         if not self._pending_save_futures:
             return
 
-        start_time = time.time()
         completed_count = 0
-        remaining_futures: list[tuple[Future, list[SaveReqInfo]]] = []
-        # TODO: Metrics data transfer operation in process
-        for future, manifest in self._pending_save_futures:
-            if future.done():
-                # Ensure the task finished successfully.
-                try:
-                    future.result()
-                    # Record saves for all requests in the manifest
-                    for info in manifest:
-                        if info.num_blocks > 0:
-                            self.offload_stats.record_save(
-                                req=info.req_id,
-                                saved_chunk_ids=info.dst_chunks)
-                            # TODO: Metrics data transfer complete
+        remaining_futures = []
+        for chunks_on_cpu, manifest, start_time in self._pending_save_futures:
+            # Poll each JAX array using is_ready(), which checks status non-blockingly.
+            # Only process when all chunks in this transfer task are fully ready.
+            if all(chunk.is_ready() for chunk in chunks_on_cpu):
+                duration = time.time() - start_time
+                total_num_blocks_to_save = len(chunks_on_cpu)
+                logger.debug(
+                    f"Successfully saved {total_num_blocks_to_save} blocks "
+                    f"to CPU in {duration:.4f} seconds.")
+                self.metrics_collector.record_d2h_transfer_latency(duration)
 
-                    completed_count += 1
-                except Exception as e:
-                    raise ValueError(f"A save operation failed: {e}")
+                total_size_bytes = sum(
+                    self._chunk_nbytes(chunk) for chunk in chunks_on_cpu)
+                logger.debug(
+                    f"Total size of chunks_on_cpu: {total_size_bytes / 1024**2:.2f} MB"
+                )
+                self.metrics_collector.record_d2h_bytes(total_size_bytes)
+
+                if duration > 0:
+                    bw_gbps = (total_size_bytes / (1024**3)) / duration
+                    self.metrics_collector.record_d2h_transfer_bw(bw_gbps)
+
+                # Unstitch and Register
+                # Now that the copy is complete, we register the chunks in the CPU memory backend.
+                post_transfer_start_time = time.time()
+                block_offset = 0
+                for info in manifest:
+                    for i in range(info.num_blocks):
+                        chunk_id = info.dst_chunks[i]
+                        self.cpu_backend.add(chunk_id,
+                                             chunks_on_cpu[block_offset + i])
+                        logger.debug(f" Saving to CPU chunk: "
+                                     f"chunk_id={chunk_id}, "
+                                     f" local_chunk_idx={block_offset + i}")
+                    block_offset += info.num_blocks
+
+                post_transfer_duration = time.time() - post_transfer_start_time
+                log_prefix = "Batch" if len(
+                    manifest) > 1 else f"Request {manifest[0].req_id}"
+                logger.debug(
+                    f"{log_prefix}: e2e host processing of {total_num_blocks_to_save} chunks took {post_transfer_duration:.4f} seconds."
+                )
+
+                # Record saves for all requests in the manifest
+                for info in manifest:
+                    if info.num_blocks > 0:
+                        self.offload_stats.record_save(
+                            req=info.req_id, saved_chunk_ids=info.dst_chunks)
+                    if info.is_final_save:
+                        self.finished_save_reqs.add(info.req_id)
+
+                completed_count += 1
             else:
-                remaining_futures.append((future, manifest))
+                # If the transfer is still running, leave it in the queue for next step's polling.
+                remaining_futures.append((chunks_on_cpu, manifest, start_time))
 
         if completed_count > 0:
-            duration = time.time() - start_time
-            logger.debug(f"collected {completed_count} save operation "
-                         f"completions in {duration:.4f} seconds.")
+            logger.debug(
+                f"collected {completed_count} save operation completions.")
 
         self._pending_save_futures = remaining_futures
 
