@@ -344,8 +344,26 @@ def pure_jax_stack_kv_cache_cross_layers(
         num_blocks: int,
         grouped_indices: Tuple[Tuple[int, ...], ...] | None = None,
 ) -> Tuple[List[jax.Array], Any]:
-    """
-    Gathers KV cache blocks across all layers for offloading, using pure JAX operations.
+    """Gathers KV cache blocks across all layers for offloading, using pure JAX operations.
+
+    This function extracts the specified blocks from each layer's KV cache,
+    stacks them along the layer dimension (optionally grouped by shape for hybrid models),
+    and then splits them back into individual blocks. It returns the original
+    (but donated/barriered) caches and a list of the gathered block tensors.
+
+    Args:
+        kv_caches: List of original KV caches for each layer.
+        block_ids: Array of block indices to extract.
+        num_blocks: Total number of blocks to gather (used for static dimensioning).
+        grouped_indices: Optional tuple of tuples indicating shape-grouped layer indices.
+
+    Returns:
+        A tuple containing:
+          - The original list of KV caches (passed through an optimization barrier).
+          - A list of extracted block tensors. If grouped_indices is provided, this will
+            be a nested list of shape [num_blocks][num_groups], where each group chunk
+            is shaped (1, num_layers_in_group, ...). Otherwise, it is a list of
+            shape [num_blocks] of tensors shaped (1, num_layers, ...).
     """
     def _gather_blocks(layer_kv_cache):
         return layer_kv_cache.at[block_ids].get()
@@ -397,9 +415,27 @@ def pure_jax_update_kv_caches_one(
     indices_sharding: PartitionSpec | None = None,
     grouped_indices: Tuple[Tuple[int, ...], ...] | None = None,
 ) -> List[jax.Array]:
-    """
-    Updates the physical KV cache by inserting stacked blocks into specified 
-    indices using pure JAX scatter.
+    """Updates the physical KV cache by inserting stacked blocks into specified indices using pure JAX scatter.
+
+    This function shards the target block indices onto the provided device mesh,
+    concatenates and un-stacks the provided source blocks back into per-layer arrays
+    (handling grouped shapes for hybrid models), and then scatters these slices into
+    the physical KV cache tensors at the specified indices.
+
+    Args:
+        kv_caches: List of physical KV caches for each layer.
+        stacked_blocks: List of block tensors to insert, typically retrieved from offload storage.
+                        Can be nested list [block_idx][group_idx] if grouped_indices is provided.
+        block_indices: List of destination block indices in the physical cache.
+        mesh: JAX Mesh object used for sharding operations.
+        cached_kv_sharding_spec: Pre-cached sharding spec (unused in this pure JAX
+                                 impl, kept for signature compatibility).
+        indices_sharding: Optional NamedSharding or PartitionSpec to place the indices
+                            array on the device mesh.
+        grouped_indices: Optional tuple of tuples indicating shape-grouped layer indices.
+
+    Returns:
+        List of updated KV caches for each layer.
     """
     indices_arr = jnp.array(block_indices, dtype=jnp.int32)
 
