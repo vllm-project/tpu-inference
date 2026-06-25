@@ -96,10 +96,7 @@ process_json_benchmark_cases() {
   local generator="${2:-}"
   local priority="${3:-}"
   local extra_files="${4:-}" # Optional: newline-separated list of files
-  local dependency_step="${5:-}" # Optional: Buildkite step key that all benchmark steps depend on
-  local group_keys_output_var="${6:-}" # Optional: output variable name to store generated group keys (newline-separated)
   local error_msgs=()
-  local all_group_keys=()
 
   echo "--- Generating dynamic pipelines from $case_folder and $extra_files"
 
@@ -108,7 +105,6 @@ process_json_benchmark_cases() {
   _process_benchmark_file() {
     local f="$1"
     local no_verify="${2:-false}"
-    local dependency_step="${3:-}"
 
     if [ ! -f "$f" ]; then
       # If the file does not exist (e.g., deleted in the current PR), skip it gracefully.
@@ -119,14 +115,10 @@ process_json_benchmark_cases() {
     echo "--- Processing case file: $f (no-verify: $no_verify)"
     
     local py_output
-    local group_key_file
-    group_key_file=$(mktemp)
-
     # 1. Generate pipeline and capture output/exit code (including stderr)
-    if ! py_output=$(python3 "$generator" --input "$f" --no-verify "$no_verify" --dependency-step "$dependency_step" --group-keys-file "$group_key_file" 2>&1); then
+    if ! py_output=$(python3 "$generator" --input "$f" --no-verify "$no_verify" 2>&1); then
       echo "🚨 Generator failed for $f"
       error_msgs+=("❌ Generation Failure in $f:\n$py_output")
-      rm -f "$group_key_file"
       return
     fi
 
@@ -141,11 +133,9 @@ process_json_benchmark_cases() {
     if ! upload_with_priority <(echo "$py_output") "$priority"; then
       echo "🚨 Upload failed for $f"
       error_msgs+=("❌ Upload Failure for $f")
-      rm -f "$group_key_file"
       return
     fi
 
-    rm -f "$group_key_file"
   }
 
   # 1. Process files from case_folder (Baseline: non-blocking business validation)
@@ -159,7 +149,7 @@ process_json_benchmark_cases() {
         echo "--- Skipping $f in folder pass (will be verified in extra_files pass)"
         continue
       fi
-      _process_benchmark_file "$f" "true" "$dependency_step"
+      _process_benchmark_file "$f" "true"
     done
   fi
 
@@ -167,7 +157,7 @@ process_json_benchmark_cases() {
   if [ -n "$extra_files" ]; then
     while IFS= read -r f; do
       [ -z "$f" ] && continue
-      _process_benchmark_file "$f" "false" "$dependency_step"
+      _process_benchmark_file "$f" "false"
     done <<< "$extra_files"
   fi
 
@@ -176,14 +166,5 @@ process_json_benchmark_cases() {
     local final_report
     final_report=$(printf "%b\n\n" "${error_msgs[@]}")
     upload_blocking_failure_step "❌ Benchmark Pipeline Generation Failures" "$final_report"
-  fi
-
-  # Optionally return all generated group keys (newline-separated) via caller-provided variable.
-  if [ -n "$group_keys_output_var" ]; then
-    local joined_group_keys=""
-    if [ ${#all_group_keys[@]} -gt 0 ]; then
-      joined_group_keys=$(printf "%s\n" "${all_group_keys[@]}")
-    fi
-    printf -v "$group_keys_output_var" '%s' "$joined_group_keys"
   fi
 }
