@@ -19,7 +19,8 @@
         "OUTPUT_LEN": 1024,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler"
+        "CREATED_BY": "bm-scheduler",
+        "MODEL_NAME": "DeepSeek-R1"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -79,7 +80,8 @@
         "OUTPUT_LEN": 8192,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler"
+        "CREATED_BY": "bm-scheduler",
+        "MODEL_NAME": "DeepSeek-R1"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -140,7 +142,8 @@
         "OUTPUT_LEN": 8192,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler"
+        "CREATED_BY": "bm-scheduler",
+        "MODEL_NAME": "DeepSeek-R1"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -203,7 +206,8 @@
         "OUTPUT_LEN": 1024,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler"
+        "CREATED_BY": "bm-scheduler",
+        "MODEL_NAME": "DeepSeek-R1"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -263,7 +267,8 @@
         "OUTPUT_LEN": 8192,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler"
+        "CREATED_BY": "bm-scheduler",
+        "MODEL_NAME": "Qwen3-Coder-480B-A35B-Instruct"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -303,7 +308,8 @@
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
         "CREATED_BY": "bm-scheduler",
-        "UPLOAD_DB": "false"
+        "UPLOAD_DB": "false",
+        "MODEL_NAME": "DeepSeek-R1"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -366,7 +372,8 @@
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
         "CREATED_BY": "bm-scheduler",
-        "UPLOAD_DB": "false"
+        "UPLOAD_DB": "false",
+        "MODEL_NAME": "DeepSeek-R1"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -429,7 +436,8 @@
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
         "CREATED_BY": "bm-scheduler",
-        "UPLOAD_DB": "false"
+        "UPLOAD_DB": "false",
+        "MODEL_NAME": "DeepSeek-R1"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -493,7 +501,8 @@
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
         "CREATED_BY": "bm-scheduler",
-        "UPLOAD_DB": "false"
+        "UPLOAD_DB": "false",
+        "MODEL_NAME": "DeepSeek-R1"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -556,7 +565,8 @@
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
         "CREATED_BY": "bm-scheduler",
-        "UPLOAD_DB": "false"
+        "UPLOAD_DB": "false",
+        "MODEL_NAME": "DeepSeek-R1"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -621,7 +631,8 @@
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
         "CREATED_BY": "bm-scheduler",
-        "UPLOAD_DB": "false"
+        "UPLOAD_DB": "false",
+        "MODEL_NAME": "DeepSeek-R1"
       },
       "server_command_options": {
         "command_type": "vllm_serve",

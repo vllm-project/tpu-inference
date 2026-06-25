@@ -211,6 +211,27 @@ fi
     cp "$VLLM_LOG" "$ARTIFACT_VLLM"
     buildkite-agent artifact upload "$ARTIFACT_VLLM"
     rm -f "$ARTIFACT_VLLM"
+
+    # Secondary copy upload to legacy GCS location if in multi-host mode
+    if [[ "${IS_MULTI_HOST:-false}" == "true" ]]; then
+      impl_type="${MODEL_IMPL_TYPE:-vllm}"
+      run_mode="benchmark"
+      if [[ -n "${PHASED_PROFILING_DIR:-}" ]]; then
+        run_mode="xprof"
+      fi
+      routing_tag=""
+      if [[ "${FORCE_MOE_RANDOM_ROUTING:-}" == "1" ]]; then
+        routing_tag="_force-moe-random-routing"
+      fi
+      status_tag="SUCCESS"
+      if [[ "$BM_JOB_STATUS" -ne 0 ]]; then
+        status_tag="FAILED"
+      fi
+
+      legacy_gcs_uri="gs://tpu-commons-ci/logs/${MODEL_NAME:-unknown}_${INPUT_LEN:-0}_${OUTPUT_LEN:-0}_${impl_type}_${CODE_HASH:-unknown}_${status_tag}_${run_mode}${routing_tag}_${JOB_REFERENCE}_vllm_serve.log"
+      echo "--- Uploading copy of server log to legacy GCS location: $legacy_gcs_uri"
+      gsutil cp "$VLLM_LOG" "$legacy_gcs_uri" || echo "Warning: Failed to upload vllm_serve.log to legacy GCS location."
+    fi
   else
     echo "Warning: $VLLM_LOG not found, skipping upload."
   fi
