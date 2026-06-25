@@ -197,13 +197,26 @@ fi
 
     # Secondary copy upload to legacy GCS location if in multi-host mode
     if [[ "${IS_MULTI_HOST:-false}" == "true" ]]; then
-      impl_type="${MODEL_IMPL_TYPE:-vllm}"
+      # Extract configurations from SERVER_CMD_ENVS array since they are not exported as env vars to host shell
+      impl_type="vllm"
+      phased_profiling_dir=""
+      force_moe_random_routing=""
+      for env_item in "${SERVER_CMD_ENVS[@]}"; do
+        if [[ "$env_item" =~ ^MODEL_IMPL_TYPE=(.+) ]]; then
+          impl_type="${BASH_REMATCH[1]}"
+        elif [[ "$env_item" =~ ^PHASED_PROFILING_DIR=(.+) ]]; then
+          phased_profiling_dir="${BASH_REMATCH[1]}"
+        elif [[ "$env_item" =~ ^FORCE_MOE_RANDOM_ROUTING=(.+) ]]; then
+          force_moe_random_routing="${BASH_REMATCH[1]}"
+        fi
+      done
+
       run_mode="benchmark"
-      if [[ -n "${PHASED_PROFILING_DIR:-}" ]]; then
+      if [[ -n "$phased_profiling_dir" ]]; then
         run_mode="xprof"
       fi
       routing_tag=""
-      if [[ "${FORCE_MOE_RANDOM_ROUTING:-}" == "1" ]]; then
+      if [[ "$force_moe_random_routing" == "1" ]]; then
         routing_tag="_force-moe-random-routing"
       fi
       status_tag="SUCCESS"
