@@ -33,12 +33,7 @@ class LocalDbManager(StorageManager):
     logged for visibility.
     """
 
-    def __init__(self,
-                 instance_id='vllm-bm-inst',
-                 database_id='tune-gmm',
-                 worker_id=None,
-                 dry_run=False,
-                 db_path=None):
+    def __init__(self, worker_id=None, dry_run=False, db_path=None):
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
@@ -341,3 +336,61 @@ class LocalDbManager(StorageManager):
             Current timestamp in seconds.
         """
         return int(time.time())
+
+    def close(self):
+        """Closes the database manager, ensuring all buffered data is flushed."""
+        self.flush()
+        logger.info(
+            f'Database at {self.db_path} closed with {self.current_case_id} cases, {self.invalid_count} invalid cases.'
+        )
+
+    def get_all_cases(self, case_set_id) -> list[tuple[int, str]]:
+        """Returns all cases in the given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+
+        Returns:
+            A list of all cases in the case set in the formate of [CaseId, CaseKeyValue].
+        """
+        table = self._read_table('KernelTuningCases')
+        return [(row['CaseId'], row['CaseKeyValue']) for row in table
+                if row['ID'] == case_set_id]
+
+    def add_auto_tune_case(self,
+                           case_set_id: str,
+                           case_id: int,
+                           case_kv: str,
+                           tpu: str = None):
+        """Adds a new auto-tune case to the database.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            case_id: Unique integer identifier for the case within the case set.
+            case_kv: String representing the key-value pair of the tuning case.
+            tpu: Optional TPU identifier where this case will be executed.
+        """
+        raise NotImplementedError(
+            "Not implemented in LocalDbManager. This method is intended for SpannerStorageManager used in auto-tuning scenarios."
+        )
+
+    def read_auto_tune_cases(self,
+                             case_set_id: str,
+                             kernel_tuner_name: str = None,
+                             tpu: str = None) -> list[dict]:
+        """Reads tuning cases from the AutoTuneCase table for a given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            kernel_tuner_name: Optional name of the kernel tuner.
+            tpu: Optional TPU identifier.
+
+        Returns:
+            List of tuning cases. For example, each case is represented as a dict with keys:
+                'CaseKeyValue': tuning case string,
+                'KernelTunerName': name of the kernel tuner,
+                'TPU': TPU identifier.
+        """
+        raise NotImplementedError(
+            "Not implemented in LocalDbManager. This method is intended for SpannerStorageManager used in auto-tuning scenarios."
+        )

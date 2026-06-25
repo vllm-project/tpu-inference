@@ -274,10 +274,8 @@ class StorageManager:
     def read_auto_tune_cases(self,
                              case_set_id: str,
                              kernel_tuner_name: str = None,
-                             tpu: str = None):
+                             tpu: str = None) -> list[dict]:
         """Reads tuning cases from the AutoTuneCase table for a given case set.
-
-        Used for debugging and analysis of tuning runs.
 
         Args:
             case_set_id: Unique string identifier for the case set.
@@ -285,7 +283,21 @@ class StorageManager:
             tpu: Optional TPU identifier.
 
         Returns:
-            List of tuning cases.
+            List of tuning cases. For example, each case is represented as a dict with keys:
+                'CaseKeyValue': tuning case string,
+                'KernelTunerName': name of the kernel tuner,
+                'TPU': TPU identifier.
         """
         raise NotImplementedError(
             "Subclasses must implement read_auto_tune_cases")
+
+    def get_all_cases(self, case_set_id) -> list[tuple[int, str]]:
+        """Returns all cases in the given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+
+        Returns:
+            A list of all cases in the case set in the formate of [CaseId, CaseKeyValue].
+        """
+        raise NotImplementedError("Subclasses must implement get_all_cases")

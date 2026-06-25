@@ -26,14 +26,11 @@ class SpannerStorageManager(StorageManager):
     # actually contains tuning cases for different kernels, not just gmm. We
     # can consider to rename it in the future for better clarity.
     def __init__(self,
+                 gcp_project_id,
+                 spanner_instance_id,
+                 spanner_database_id,
                  worker_id=None,
-                 dry_run=False,
-                 gcp_project_id=None,
-                 spanner_instance_id=None,
-                 spanner_database_id=None):
-        gcp_project_id = gcp_project_id
-        spanner_instance_id = spanner_instance_id
-        spanner_database_id = spanner_database_id
+                 dry_run=False):
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
