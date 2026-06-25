@@ -27,7 +27,6 @@ from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
@@ -36,6 +35,8 @@ from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear, JaxLmHead,
                                              JaxMergedColumnParallelLinear,
                                              JaxQKVParallelLinear)
 from tpu_inference.layers.jax.moe.moe import JaxMoE
+from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
+                                                select_moe_backend)
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import (apply_rope,
@@ -184,6 +185,41 @@ class Gemma4MoE(JaxMoE):
         noop_router = JaxModule()
         noop_router.num_experts_per_tok = config.top_k_experts
 
+        # Determine expert axis name for expert parallelism
+        expert_axis_name = getattr(ShardingAxisName, "ATTN_DATA_EXPERT", None)
+        # Check if the expert axis exists in the mesh shape
+        if expert_axis_name is not None:
+            if isinstance(expert_axis_name, str):
+                if expert_axis_name not in mesh.shape:
+                    expert_axis_name = None
+            else:
+                if any(axis not in mesh.shape for axis in expert_axis_name):
+                    expert_axis_name = None
+
+        potential_ep = get_expert_parallelism(expert_axis_name, mesh)
+
+        # Derive whether EP is enabled from model config or runtime state
+        vllm_config = getattr(quant_config, "vllm_config", None)
+        if vllm_config is not None and getattr(vllm_config, "parallel_config",
+                                               None) is not None:
+            use_ep = getattr(vllm_config.parallel_config,
+                             "enable_expert_parallel", False)
+        else:
+            use_ep = potential_ep > 1
+
+        # Compute the correct expert_axis_name, num_expert_parallelism, and weight sharding
+        if use_ep:
+            num_expert_parallelism = potential_ep
+            edf_sharding = (expert_axis_name, None, None)
+            efd_sharding = (expert_axis_name, None, None)
+        else:
+            num_expert_parallelism = 1
+            expert_axis_name = None
+            edf_sharding = (None, None, None)
+            efd_sharding = (None, None, None)
+
+        moe_backend = select_moe_backend(use_ep)
+
         # FusedMoE experts with custom Gemma4 routing
         JaxMoE.__init__(
             self,
@@ -197,14 +233,12 @@ class Gemma4MoE(JaxMoE):
             mesh=mesh,
             activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
             activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-            edf_sharding=(None, None, None),
-            efd_sharding=(None, None, None),
+            edf_sharding=edf_sharding,
+            efd_sharding=efd_sharding,
             apply_expert_weight_before_computation=False,
-            expert_axis_name=None,
-            # Disable EP for MVP, can enable later if needed
-            # TODO: Enable EP
-            num_expert_parallelism=1,
-            moe_backend=MoEBackend.GMM_TP,
+            expert_axis_name=expert_axis_name,
+            num_expert_parallelism=num_expert_parallelism,
+            moe_backend=moe_backend,
             scoring_func=
             "softmax",  # vLLM implementation has a custom routing function, here we just use "softmax" for MVP
             renormalize=True,
