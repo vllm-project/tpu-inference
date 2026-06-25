@@ -34,7 +34,8 @@
           "USE_UNFUSED_MEGABLOCKS": "0",
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
@@ -97,7 +98,8 @@
           "USE_UNFUSED_MEGABLOCKS": "0",
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
@@ -134,7 +136,6 @@
         }
       }
     },
-
     {
       "case_name": "run_deepseek_v3_8k_1k",
       "ci_queue": [
@@ -162,7 +163,8 @@
           "USE_UNFUSED_MEGABLOCKS": "0",
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
@@ -227,7 +229,8 @@
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
           "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/jax/1k-1k",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "gs://tpu-commons-ci/deepseek/r1",
@@ -293,7 +296,8 @@
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
           "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/jax/1k-8k",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "gs://tpu-commons-ci/deepseek/r1",
@@ -359,7 +363,8 @@
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
           "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/jax/8k-1k",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "gs://tpu-commons-ci/deepseek/r1",

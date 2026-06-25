@@ -33,7 +33,8 @@
           "MODEL_IMPL_TYPE": "vllm",
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
@@ -95,7 +96,8 @@
           "MODEL_IMPL_TYPE": "vllm",
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
@@ -159,7 +161,8 @@
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
           "FORCE_MOE_RANDOM_ROUTING": "1",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
@@ -223,7 +226,8 @@
           "MODEL_IMPL_TYPE": "vllm",
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
@@ -287,7 +291,8 @@
           "max-num-batched-tokens": 1024
         },
         "env": {
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         }
       },
       "client_command_options": {
@@ -330,7 +335,8 @@
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
           "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/1k-1k",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "gs://tpu-commons-ci/deepseek/r1",
@@ -395,7 +401,8 @@
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
           "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/1k-8k",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "gs://tpu-commons-ci/deepseek/r1",
@@ -461,7 +468,8 @@
           "TPU_BACKEND_TYPE": "jax",
           "FORCE_MOE_RANDOM_ROUTING": "1",
           "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/1k-8k-random-routing",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "gs://tpu-commons-ci/deepseek/r1",
@@ -526,7 +534,8 @@
           "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
           "TPU_BACKEND_TYPE": "jax",
           "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/8k-1k",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "gs://tpu-commons-ci/deepseek/r1",
@@ -593,7 +602,8 @@
           "FORCE_MOE_RANDOM_ROUTING": "1",
           "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/decoode-9k-context-random-routing",
           "PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD": "1024",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "gs://tpu-commons-ci/deepseek/r1",
@@ -660,7 +670,8 @@
           "FORCE_MOE_RANDOM_ROUTING": "1",
           "PHASED_PROFILING_DIR": "gs://tpu-commons-ci/xprof/deepseek-r1/torchax/decoode-9k-context-random-routing",
           "PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD": "9100",
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800"
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
           "model": "gs://tpu-commons-ci/deepseek/r1",
