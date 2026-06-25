@@ -103,18 +103,17 @@ echo "  HOST_NAME=${HOST_NAME:-}"
 TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-}"
 TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
 
-# upload_pipeline_build_once
-
 if [ -n "${KERNEL_AUTO_TUNING_ENABLED:-}" ]; then
     echo "--- :pipeline: Uploading pipeline_kernel_auto_tuning.yml for kernel tuning"
-    # export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$$(date +%Y-%m-%d-%H-%M)
-    export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-23-07-10"
+    export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$$(date +%Y-%m-%d-%H-%M)
+    # export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-23-07-10"
     echo "🚀 KERNEL_AUTOTUNE_ID set to ${KERNEL_AUTOTUNE_ID}"
     buildkite-agent meta-data set "KERNEL_AUTOTUNE_ID" "${KERNEL_AUTOTUNE_ID}"
     sed "s/KERNEL_AUTOTUNE_ID_PLACEHOLDER/${KERNEL_AUTOTUNE_ID}/g" \
         .buildkite/pipeline_kernel_auto_tuning_template.yml \
         | buildkite-agent pipeline upload
 else
+    upload_pipeline_build_once
     echo "--- :pipeline: Uploading pipeline_kernel_tuner.yml for kernel tuning"
     set_jax_envs "${TPU_VERSION}" "${TPU_CORES}"
     buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuner.yml
