@@ -97,7 +97,6 @@ declare -a BENCHMARK_DOCKER_ARGS=(
   "-e" "DEVICE=$DEVICE"
   "-e" "KERNEL_AUTOTUNE_ID=${KERNEL_AUTOTUNE_ID:-}"
   "-e" "RECORD_ID=$RECORD_ID"
-  "-e" "RUN_TYPE=$RUN_TYPE"
   "-e" "CODE_HASH=${CODE_HASH}"
   "-e" "JOB_REFERENCE=${JOB_REFERENCE}"
   "-e" "BUILDKITE=${BUILDKITE}"
@@ -121,8 +120,9 @@ BM_JOB_STATUS=$EXIT_SUCCESS
 
 export BM_INFRA="true"
 
+# EXTRA_ENVS="KERNEL_AUTOTUNE_ID=$$KERNEL_AUTOTUNE_ID,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
 .buildkite/scripts/run_in_docker.sh bash -c "
-  if [[ $RUN_TYPE == PRE_KERNEL_AUTOTUNE_CASES_COLLECTION ]]; then
+  if [[ \"$EXTRA_ENVS\" == *\"KERNEL_AUTOTUNE_STAGE=PRE_KERNEL_AUTOTUNE_CASES_COLLECTION\"* ]]; then
     pip install --upgrade google-cloud-spanner && \
     pip install --upgrade google-api-core && \
     pip install --upgrade google-auth && \
