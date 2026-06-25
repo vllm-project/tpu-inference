@@ -272,7 +272,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         mapping.prompt_mapping = self._pad_prompt_mapping(
             mapping.prompt_mapping)
 
-        # Compute mapping using NumPy to avoid PyTorch JAX devices linking errors
+        # Compute LoRA routing mapping on CPU using NumPy and pad to a static shape.
+        # This prevents massive XLA recompilations caused by fluctuating sub-batch
+        # shapes unique to dynamic LoRA during live continuous batching.
         import jax
         import jax.numpy as jnp
         import numpy as np
