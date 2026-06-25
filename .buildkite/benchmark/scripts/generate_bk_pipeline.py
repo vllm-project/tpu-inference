@@ -351,18 +351,10 @@ def main():
         "steps": [{
             "group": group_display_name,
             "key": group_key,
-            "depends_on": args.dependency_step or "build_docker",
+            "depends_on": "build_docker",
             "steps": all_steps
         }]
     }
-
-    if args.group_keys_file:
-        group_keys = [
-            step.get("key", "") for step in grouped_pipeline.get("steps", [])
-            if step.get("key")
-        ]
-        with open(args.group_keys_file, "w") as key_file:
-            key_file.write("\n".join(group_keys))
 
     print(
         yaml.dump(grouped_pipeline,
