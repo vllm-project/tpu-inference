@@ -186,6 +186,7 @@ class TestPersistentBatchManager(unittest.TestCase):
             vocab_size=128,
             block_sizes=[16],
         )
+        input_batch.has_mamba_layers = True
         input_batch.add_request(req)
         slot = int(input_batch.mamba_state_indices_cpu[0])
 
@@ -214,6 +215,7 @@ class TestPersistentBatchManager(unittest.TestCase):
             vocab_size=128,
             block_sizes=[16],
         )
+        input_batch.has_mamba_layers = True
         input_batch.add_request(req)
         slot = int(input_batch.mamba_state_indices_cpu[0])
 
@@ -243,6 +245,7 @@ class TestPersistentBatchManager(unittest.TestCase):
             vocab_size=128,
             block_sizes=[16],
         )
+        input_batch.has_mamba_layers = True
         input_batch.add_request(req)
         slot = int(input_batch.mamba_state_indices_cpu[0])
 
@@ -279,6 +282,7 @@ class TestPersistentBatchManager(unittest.TestCase):
             vocab_size=128,
             block_sizes=[16],
         )
+        input_batch.has_mamba_layers = True
         input_batch.add_request(req)
         slot = int(input_batch.mamba_state_indices_cpu[0])
 
