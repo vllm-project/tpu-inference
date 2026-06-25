@@ -160,7 +160,7 @@ fi
 
   # Handle log file
   
-  if [[ -n "${GCS_BUCKET:-}" ]]; then
+  if [[ -n "${GCS_BUCKET:-}" && "${SERVER_ALREADY_RUNNING:-false}" != "true" ]]; then
     if command -v gsutil &> /dev/null; then
       echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
       gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT"
@@ -168,7 +168,11 @@ fi
       echo "Warning: gsutil not found. Skipping log upload to GCS."
     fi
   else
-    echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
+    if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
+      echo "Multi-host mode detected (SERVER_ALREADY_RUNNING=true). Skipping unified GCS upload; logs will be uploaded to the legacy GCS location by host script."
+    else
+      echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
+    fi
   fi
 
   # Metric data extraction from log file
