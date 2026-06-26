@@ -118,6 +118,7 @@ if [ -n "${BOOTSTRAP_KERNEL_AUTOTUNING:-}" ]; then
         | buildkite-agent pipeline upload
 elif [ -n "${BOOTSTRAP_ALL_KERNEL_TUNING:-}" ]; then
     # If BOOTSTRAP_ALL_KERNEL_TUNING is set
+    upload_pipeline_build_once
     echo "--- :pipeline: Uploading pipeline_kernel_tuner.yml for bootstrap all kernel tuning"
     buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
 else

@@ -29,7 +29,6 @@
 #     "https://api.buildkite.com/v2/organizations/tpu-commons/pipelines/tpu-inference-kernel-tuning/builds" \
 #     -d "{\"commit\": \"$(git rev-parse HEAD)\", \"branch\": \"$(git rev-parse --abbrev-ref HEAD)\", \"message\": \"my test\"}"
 #
-
 steps:
   # -----------------------------------------------------------------
   # -----------------------------------------------------------------
@@ -37,24 +36,31 @@ steps:
     key: bootstrap_all_kernel_tuning_pipeline
     if: '"${BOOTSTRAP_ALL_KERNEL_TUNING:-}" == "1"'
     agents:
-      queue: cpu
+      queue: tpu_v6e_queue
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: tpu6e
     commands: |
-      generator_script="./tools/kernel/tuner/v1/autotune/bootstrap_kernel_tuners.py"
-      python3 -m pip install --upgrade google-cloud-spanner google-api-core google-auth absl-py
-      if [[ ! -f "$$generator_script" ]]; then
-        echo "🚨 Bootstrap script not found at $$generator_script"
-        exit 1
-      fi
-      python3 "$$generator_script" --auto_tune_id "$KERNEL_AUTOTUNE_ID"
-      if ! py_output=$(python3 "$$generator_script" --auto_tune_id "$KERNEL_AUTOTUNE_ID" 2>&1); then
-        echo "🚨 Failed to bootstrap all kernel tuning for autotune ${KERNEL_AUTOTUNE_ID}"
-        exit 1
-      fi
+      .buildkite/scripts/patch_kernel_autotune_result.sh bash -c '
+        generator_script="./tools/kernel/tuner/v1/autotune/bootstrap_kernel_tuners.py"
+        pip install --upgrade google-cloud-spanner google-api-core google-auth absl-py
+        if [[ ! -f "$$generator_script" ]]; then
+          echo "🚨 Bootstrap script not found at $$generator_script"
+          exit 1
+        fi
+        if ! py_output=$(python3 "$$generator_script" --auto_tune_id "$KERNEL_AUTOTUNE_ID" 2>&1); then
+          echo "🚨 Failed to bootstrap all kernel tuning for autotune ${KERNEL_AUTOTUNE_ID}"
+          exit 1
+        fi
+        echo "$$py_output" | buildkite-agent pipeline upload
+        echo "Upload generated pipeline YAML to Buildkite artifacts with priority ${PRIORITY_KERNEL_TUNING}"
+        # priority="${PRIORITY_KERNEL_TUNING:-0}"
 
-      if ! upload_with_priority <(echo "$$py_output") "$$priority"; then
-        echo "🚨 Upload failed for all kernel tuning for autotune ${KERNEL_AUTOTUNE_ID}"
-        exit 1
-      fi
+        # if ! upload_with_priority <(echo "$$py_output") "$$priority"; then
+        #   echo "🚨 Upload failed for all kernel tuning for autotune ${KERNEL_AUTOTUNE_ID}"
+        #   exit 1
+        # fi
+      '
 
 
   # -----------------------------------------------------------------
