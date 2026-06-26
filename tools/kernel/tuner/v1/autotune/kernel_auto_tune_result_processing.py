@@ -43,7 +43,7 @@ _AUTOTUNE_ID = flags.DEFINE_string(
 )
 _PROCESS_STEP = flags.DEFINE_string(
     'process_step', 'PATCH_KERNEL_AUTOTUNE_RESULT',
-    'The process step to run. Options: COMPARE_BM_METRICS, PATCH_KERNEL_AUTOTUNE_RESULT'
+    'The process step to run. Options: EVALUATE_AND_CREATE_PR, PATCH_KERNEL_AUTOTUNE_RESULT'
 )
 
 
@@ -55,8 +55,8 @@ class KernelAutoTuneResultProcessor:
         self.spanner_instance_id = _SPANNER_INSTANCE_ID.value
         self.spanner_database_id = _SPANNER_DATABASE_ID.value
         assert _PROCESS_STEP.value in [
-            'COMPARE_BM_METRICS', 'PATCH_KERNEL_AUTOTUNE_RESULT'
-        ], f"Invalid process step: {_PROCESS_STEP.value}. Must be one of ['COMPARE_BM_METRICS', 'PATCH_KERNEL_AUTOTUNE_RESULT']"
+            'EVALUATE_AND_CREATE_PR', 'PATCH_KERNEL_AUTOTUNE_RESULT'
+        ], f"Invalid process step: {_PROCESS_STEP.value}. Must be one of ['EVALUATE_AND_CREATE_PR', 'PATCH_KERNEL_AUTOTUNE_RESULT']"
         self.process_step = _PROCESS_STEP.value
 
     def _get_spanner_db(self, project, instance_id, database_id):
@@ -260,6 +260,7 @@ class KernelAutoTuneResultProcessor:
             self.update_best_results(best_results, kernel_tuner_name)
 
     def compare_benchmark_metrics(self):
+        # 
         logger.info("Comparing benchmark metrics")
         query = """
             SELECT OutputTokenThroughput  
@@ -277,7 +278,7 @@ class KernelAutoTuneResultProcessor:
     def execute(self):
         if self.process_step == 'PATCH_KERNEL_AUTOTUNE_RESULT':
             self.patch_tuned_results()
-        elif self.process_step == 'COMPARE_BM_METRICS':
+        elif self.process_step == 'EVALUATE_AND_CREATE_PR':
             return self.compare_benchmark_metrics()
 
 

@@ -122,6 +122,9 @@ steps:
       KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
       KERNEL_AUTOTUNE_STAGE: "EVALUATE_AND_CREATE_PR"
       EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=EVALUATE_AND_CREATE_PR"
+      GCP_PROJECT_ID: "cloud-tpu-inference-test"
+      SPANNER_INSTANCE_ID: "vllm-bm-inst"
+      SPANNER_DATABASE_ID: "vllm-bm-bk-runs"
     command: |
       echo "🚀 Evaluating tuning results and optionally creating a PR."
       .buildkite/scripts/run_in_docker.sh bash -c '
@@ -134,7 +137,13 @@ steps:
         git remote set-url origin $${authenticated_repo_url}
         git config user.name "Buildkite Bot"
         git config user.email "buildkite-bot@users.noreply.github.com"
-        result=$$(python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --auto_tune_id=$${KERNEL_TUNING_AUTOTUNE_ID} --process_step=COMPARE_BM_METRICS)
+        result=$$(python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing \
+          --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} \
+          --process_step=$${KERNEL_AUTOTUNE_STAGE}) \
+          --gcp_project_id=$${GCP_PROJECT_ID} \
+          --spanner_instance_id=$${SPANNER_INSTANCE_ID} \
+          --spanner_database_id=$${SPANNER_DATABASE_ID} \
+
         # create pr and put result in pr body
         if [[ "$$result" == *"PR_CREATED"* ]]; then
           pr_url=$$(echo "$$result" | grep -oP 'PR_CREATED:\K.*')
