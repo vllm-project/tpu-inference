@@ -28,6 +28,8 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
 
+GBYTES = 1024 * 1024 * 1024
+
 
 class TestQwen3MoeForCausalLM:
 
@@ -86,11 +88,20 @@ class TestQwen3MoeForCausalLM:
             loader = get_model_loader(vllm_config.load_config)
             # Monitor device memory during weight loading to catch
             # regressions.
+            # The 4GB floor is sized off the observed load-time transient.
+            # On tpu6e the heaviest pp shard (pp_rank=3, world=4) peaks at a
+            # ~3.00GB delta during MoE expert-weight processing, so a 3GB
+            # floor left zero headroom and flaked (peak_delta=3.000 GB >
+            # max=3.000 GB) on sub-MB run-to-run allocation jitter while
+            # still passing on tpu7x. 4GB gives ~1GB (~33%) headroom over the
+            # real transient and still catches a gross regression (e.g.
+            # holding the weights twice).
             with assert_weight_loading_memory_bounded(
                     model,
                     description=f"load_weights({model_name})",
                     threshold_multiplier=0.3,
-            ), set_current_vllm_config(vllm_config):
+                    min_threshold_bytes=4 *
+                    GBYTES), set_current_vllm_config(vllm_config):
                 loader.load_weights(model, model_config)
 
         layer_idx = model.model.start_layer

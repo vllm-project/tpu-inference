@@ -19,7 +19,6 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
-import torch
 from jax.sharding import Mesh
 
 from tpu_inference.runner.input_batch import InputBatch
@@ -57,6 +56,7 @@ class TPUSupportedSamplingMetadata:
         mesh: Mesh,
         input_batch: InputBatch,
         padded_num_reqs: int,
+        req_indices_dp: dict,
         sharding: Optional[jax.sharding.Sharding] = None,
     ) -> "TPUSupportedSamplingMetadata":
         needs_logprobs = input_batch.max_num_logprobs > 0 if input_batch.max_num_logprobs else False
@@ -74,13 +74,24 @@ class TPUSupportedSamplingMetadata:
             return cls(do_sampling=False,
                        logprobs=needs_logprobs,
                        _cache_collision_dummy=cache_collision_dummy)
-        num_reqs = input_batch.num_reqs
 
-        def fill_slice(cpu_torch_tensor: torch.Tensor,
-                       fill_val: float) -> torch.Tensor:
-            # Pad value is the default one.
-            cpu_torch_tensor[num_reqs:padded_num_reqs] = fill_val
-            return cpu_torch_tensor
+        def fill_slice(cpu_tensor_np: np.ndarray,
+                       fill_val: float) -> np.ndarray:
+            out_tensor = np.full((padded_num_reqs, ),
+                                 fill_val,
+                                 dtype=cpu_tensor_np.dtype)
+
+            dp_size = len(req_indices_dp)
+            assert padded_num_reqs % dp_size == 0, f"padded_num_reqs ({padded_num_reqs}) must be divisible by dp_size ({dp_size})"
+            padded_num_reqs_per_dp_rank = padded_num_reqs // dp_size
+            for dp_rank in range(dp_size):
+                req_indices = req_indices_dp.get(dp_rank, [])
+                if req_indices:
+                    start_idx = dp_rank * padded_num_reqs_per_dp_rank
+                    out_tensor[start_idx:start_idx +
+                               len(req_indices)] = cpu_tensor_np[req_indices]
+
+            return out_tensor
 
         temp_tensor = fill_slice(input_batch.temperature_cpu,
                                  DEFAULT_SAMPLING_PARAMS["temperature"])

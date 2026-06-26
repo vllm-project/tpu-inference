@@ -26,6 +26,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
+from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
@@ -35,6 +36,7 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
@@ -259,6 +261,9 @@ class CompilationManager:
                 self._flush_compilations()
                 if self.runner.speculative_config:
                     self._precompile_speculative_decoding()
+                    self._flush_compilations()
+                if self.runner.enable_continue_decode:
+                    self._precompile_continue_decode()
                     self._flush_compilations()
         finally:
             self._finalize_compilation()
@@ -1161,11 +1166,13 @@ class CompilationManager:
                 self._run_compilation(
                     f"worker{self.runner.rank} extract_draft_token_ids",
                     self.runner._extract_draft_token_ids,
+                    self.runner,
                     input_ids,
                     final_logits_indices,
                     target_logits_indices,
                     num_tokens=num_tokens,
                     num_logits=num_logits,
+                    warmup_handler=self._skip_self_arg_warmup_handler,
                 )
 
     def _precompile_extract_last_sampled_tokens(self) -> None:
@@ -1584,4 +1591,186 @@ class CompilationManager:
                 arange,
                 num_reqs=num_reqs,
                 warmup_handler=self._skip_self_arg_warmup_handler,
+            )
+
+    def _precompile_continue_decode(self) -> None:
+        logger.info("Precompiling continue_decode loop.")
+        dp_size = self.runner.vllm_config.sharding_config.total_dp_size
+        dp_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+
+        user_max_decode_steps = self.runner.vllm_config.additional_config.get(
+            "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
+
+        # We only need to compile once for user_max_decode_steps
+
+        # We also need to construct TPUSupportedSamplingMetadata
+        # For greedy decoding, we can use empty parameters
+        _cache_collision_dummy = jnp.zeros((2, ), dtype=jnp.int32)
+        _cache_collision_dummy = device_array(self.runner.mesh,
+                                              _cache_collision_dummy)
+        sampling_metadata = TPUSupportedSamplingMetadata(
+            temperature=None,
+            top_k=None,
+            top_p=None,
+            _cache_collision_dummy=_cache_collision_dummy,
+            do_sampling=False,
+            logprobs=False)
+
+        for num_reqs in self.runner.num_reqs_paddings:
+            init_tokens = self._create_dummy_tensor((num_reqs, ), jnp.int32,
+                                                    dp_sharding)
+            active_mask = self._create_dummy_tensor((num_reqs, ), jnp.bool_,
+                                                    dp_sharding)
+
+            seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
+                                                 jnp.int32, dp_sharding)
+            query_start_loc = self._create_dummy_tensor(
+                (self.runner.max_num_reqs + dp_size, ), jnp.int32, dp_sharding)
+
+            request_distribution = np.array([0, 0, 0] * dp_size,
+                                            dtype=np.int32)
+            request_distribution = device_array(self.runner.mesh,
+                                                request_distribution,
+                                                sharding=dp_sharding)
+
+            if self.runner.kv_cache_config.has_mamba_layers:
+                mamba_state_indices = device_array(
+                    self.runner.mesh,
+                    np.zeros(self.runner.max_num_reqs, dtype=np.int32),
+                    sharding=dp_sharding)
+            else:
+                mamba_state_indices = None
+
+            def build_block_table(kv_cache_gid: int) -> jax.Array:
+                block_table_obj = self.runner.input_batch.block_table[
+                    kv_cache_gid]
+                shape = (self.runner.max_num_reqs,
+                         block_table_obj.max_num_blocks_per_req)
+                block_tables = np.zeros(shape, dtype=np.int32)
+                block_tables = block_tables.reshape(-1)
+                block_tables = device_array(self.runner.mesh,
+                                            block_tables,
+                                            sharding=dp_sharding)
+                return block_tables
+
+            if len(self.runner.kv_cache_config.kv_cache_groups) <= 1:
+                no_kv_cache = len(
+                    self.runner.kv_cache_config.kv_cache_groups) == 0
+                block_tables = build_block_table(
+                    0) if not no_kv_cache else None
+                attn_metadata = AttentionMetadata(
+                    input_positions=init_tokens,
+                    block_tables=block_tables,
+                    seq_lens=seq_lens,
+                    query_start_loc=query_start_loc,
+                    request_distribution=request_distribution,
+                    mamba_state_indices=mamba_state_indices,
+                    padded_num_reqs=num_reqs,
+                )
+            else:
+                attn_metadata = {
+                    name:
+                    AttentionMetadata(
+                        input_positions=init_tokens,
+                        block_tables=build_block_table(gid),
+                        seq_lens=seq_lens,
+                        query_start_loc=query_start_loc,
+                        request_distribution=request_distribution,
+                        mamba_state_indices=mamba_state_indices,
+                        padded_num_reqs=num_reqs,
+                    )
+                    for gid, kv_cache_group in enumerate(
+                        self.runner.kv_cache_config.kv_cache_groups)
+                    for name in kv_cache_group.layer_names
+                }
+
+            init_state = TpuSamplingState(
+                current_tokens=init_tokens,
+                active_mask=active_mask,
+                attn_metadata=attn_metadata,
+                step_counter=self.runner.zero_array,
+            )
+
+            lora_metadata = self.runner.lora_utils.extract_lora_metadata()
+
+            # Compile once for the max steps using JAX array for dynamic bound
+            max_decode_steps_arr = jnp.array(user_max_decode_steps,
+                                             dtype=jnp.int32)
+
+            def continue_decode_wrapper(
+                state,
+                model_fn,
+                compute_logits_fn,
+                sample_fn,
+                mesh,
+                sampling_metadata,
+                init_state,
+                kv_caches,
+                max_decode_steps,
+                static_max_decode_steps,
+                eos_token_id,
+                padding_token_id,
+                rng,
+                layer_name_to_kvcache_index,
+                lora_metadata,
+                is_first_rank,
+                is_last_rank,
+                dp_size,
+                collect_expert_indices,
+            ):
+                generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices = continue_decode(
+                    state=state,
+                    model_fn=model_fn,
+                    compute_logits_fn=compute_logits_fn,
+                    sample_fn=sample_fn,
+                    mesh=mesh,
+                    sampling_metadata=sampling_metadata,
+                    init_state=init_state,
+                    kv_caches=kv_caches,
+                    max_decode_steps=max_decode_steps,
+                    static_max_decode_steps=static_max_decode_steps,
+                    eos_token_id=eos_token_id,
+                    padding_token_id=padding_token_id,
+                    rng=rng,
+                    layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+                    lora_metadata=lora_metadata,
+                    is_first_rank=is_first_rank,
+                    is_last_rank=is_last_rank,
+                    dp_size=dp_size,
+                    collect_expert_indices=collect_expert_indices,
+                )
+                self.runner.kv_caches = final_kv_caches
+                return generated_tokens
+
+            def continue_decode_warmup(_fn, _args, _call_kwargs):
+                new_args = list(_args)
+                new_args[7] = self.runner.kv_caches
+                return _fn(*new_args, **_call_kwargs)
+
+            self._run_compilation(
+                f"worker{self.runner.rank} continue_decode_steps_{user_max_decode_steps}_reqs_{num_reqs}",
+                continue_decode_wrapper,
+                self.runner.state_leaves,
+                getattr(self.runner.model, "step_fn_no_options",
+                        self.runner.model_fn),
+                self.runner.compute_logits_fn,
+                sample,
+                self.runner.mesh,
+                sampling_metadata,
+                init_state,
+                self.runner.kv_caches,
+                max_decode_steps_arr,
+                user_max_decode_steps,
+                self.runner.eos_token_id,
+                self.runner.pad_token_id,
+                self.runner.rng_params_for_sampling,
+                tuple(self.runner.layer_name_to_kvcache_index.items()),
+                lora_metadata,
+                self.runner.is_first_rank,
+                self.runner.is_last_rank,
+                self.runner.dp_size,
+                getattr(self.runner.vllm_config.model_config,
+                        "enable_return_routed_experts", False),
+                warmup_handler=continue_decode_warmup,
             )

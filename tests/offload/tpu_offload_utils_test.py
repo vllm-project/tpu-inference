@@ -20,6 +20,8 @@ import numpy as np
 from jax.sharding import NamedSharding, PartitionSpec
 
 from tpu_inference.offload.utils import (pre_update_kv_caches,
+                                         pure_jax_stack_kv_cache_cross_layers,
+                                         pure_jax_update_kv_caches_one,
                                          stack_kv_cache_cross_layers,
                                          update_kv_caches)
 
@@ -215,6 +217,256 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
                                                atol=1e-2)
 
         print("\nTest passed: update_kv_caches correctly updated the cache.")
+
+    def test_pure_jax_stack_kv_cache_cross_layers(self):
+        """
+        Verify gathering and stacking KV blocks using pure_jax_stack_kv_cache_cross_layers.
+        """
+        num_blocks_to_gather = 3
+        src_blocks = [2, 4, 6]
+
+        initial_kv_caches = []
+        for i in range(self.num_layers):
+            layer_data = jax.random.normal(jax.random.key(i + 100),
+                                           shape=self.cache_shape,
+                                           dtype=self.cache_dtype)
+            initial_kv_caches.append(
+                jax.device_put(layer_data, self.device_sharding))
+
+        jax.block_until_ready(initial_kv_caches)
+
+        initial_kv_caches_baseline = [
+            np.array(cache) for cache in initial_kv_caches
+        ]
+        src_blocks_array = jnp.array(src_blocks)
+
+        kv_caches_out, output = pure_jax_stack_kv_cache_cross_layers(
+            initial_kv_caches, src_blocks_array, num_blocks_to_gather)
+        jax.block_until_ready(output)
+        jax.block_until_ready(kv_caches_out)
+
+        self.assertEqual(len(output), num_blocks_to_gather)
+        for i in range(num_blocks_to_gather):
+            self.assertEqual(output[i].shape[1], self.num_layers)
+            self.assertEqual(output[i].shape[2:], self.cache_shape[1:])
+
+            block_id = src_blocks[i]
+            for j in range(self.num_layers):
+                output_np = np.array(output[i])
+                initial_np = np.array(initial_kv_caches_baseline[j])
+                np.testing.assert_array_equal(output_np[0, j],
+                                              initial_np[block_id])
+
+        for j in range(self.num_layers):
+            np.testing.assert_array_equal(np.array(kv_caches_out[j]),
+                                          initial_kv_caches_baseline[j])
+
+        print("\nTest passed: pure_jax_stack_kv_cache_cross_layers "
+              "correctly gathered blocks and passed through kv_caches.")
+
+    def test_pure_jax_update_kv_caches_one(self):
+        """
+        Verify pure_jax_update_kv_caches_one correctly scatters the blocks back into the KV cache.
+        """
+        num_blocks_to_update = 2
+        update_indices = [2, 5]
+
+        initial_kv_caches = [
+            jax.device_put(jnp.zeros(self.cache_shape, dtype=self.cache_dtype),
+                           self.device_sharding)
+            for _ in range(self.num_layers)
+        ]
+
+        stacked_blocks = [
+            jax.device_put(
+                jax.random.uniform(jax.random.PRNGKey(i + 200),
+                                   shape=(1, self.num_layers,
+                                          *self.block_shape),
+                                   dtype=self.cache_dtype),
+                self.expand_device_sharding)
+            for i in range(num_blocks_to_update)
+        ]
+        stacked_blocks_backup = [jnp.copy(sb) for sb in stacked_blocks]
+
+        jax.block_until_ready(initial_kv_caches)
+        jax.block_until_ready(stacked_blocks)
+        jax.block_until_ready(stacked_blocks_backup)
+
+        updated_caches = pure_jax_update_kv_caches_one(
+            initial_kv_caches,
+            stacked_blocks,
+            update_indices,
+            self.mesh,
+            indices_sharding=jax.sharding.PartitionSpec())
+
+        jax.block_until_ready(updated_caches)
+
+        for layer_idx in range(self.num_layers):
+            layer_cache = np.array(updated_caches[layer_idx])
+
+            for i, block_idx in enumerate(update_indices):
+                expected_block = np.array(stacked_blocks_backup[i])[0,
+                                                                    layer_idx]
+                actual_block = layer_cache[block_idx]
+                np.testing.assert_allclose(actual_block,
+                                           expected_block,
+                                           rtol=1e-2,
+                                           atol=1e-2)
+
+            for block_idx in range(self.num_blocks):
+                if block_idx not in update_indices:
+                    np.testing.assert_allclose(layer_cache[block_idx],
+                                               0,
+                                               rtol=1e-2,
+                                               atol=1e-2)
+
+        print("\nTest passed: pure_jax_update_kv_caches_one "
+              "correctly scattered the blocks.")
+
+    def test_pure_jax_stack_kv_cache_cross_layers_single_block(self):
+        """
+        Edge Case: Verify gathering exactly 1 block.
+        """
+        num_blocks_to_gather = 1
+        src_blocks = [5]
+
+        initial_kv_caches = []
+        for i in range(self.num_layers):
+            layer_data = jax.random.normal(jax.random.key(i + 300),
+                                           shape=self.cache_shape,
+                                           dtype=self.cache_dtype)
+            initial_kv_caches.append(
+                jax.device_put(layer_data, self.device_sharding))
+
+        jax.block_until_ready(initial_kv_caches)
+        initial_kv_caches_baseline = [
+            np.array(cache) for cache in initial_kv_caches
+        ]
+        src_blocks_array = jnp.array(src_blocks)
+
+        kv_caches_out, output = pure_jax_stack_kv_cache_cross_layers(
+            initial_kv_caches, src_blocks_array, num_blocks_to_gather)
+        jax.block_until_ready(output)
+
+        self.assertEqual(len(output), 1)
+        self.assertEqual(output[0].shape[1], self.num_layers)
+
+        for j in range(self.num_layers):
+            output_np = np.array(output[0])
+            initial_np = np.array(initial_kv_caches_baseline[j])
+            np.testing.assert_array_equal(output_np[0, j], initial_np[5])
+
+    def test_pure_jax_update_kv_caches_one_out_of_order(self):
+        """
+        Edge Case: Verify pure_jax_update_kv_caches_one scatters correctly when indices are out of order.
+        """
+        num_blocks_to_update = 2
+        update_indices = [5, 2]  # Out of order!
+
+        initial_kv_caches = [
+            jax.device_put(jnp.zeros(self.cache_shape, dtype=self.cache_dtype),
+                           self.device_sharding)
+            for _ in range(self.num_layers)
+        ]
+
+        stacked_blocks = [
+            jax.device_put(
+                jax.random.uniform(jax.random.PRNGKey(i + 400),
+                                   shape=(1, self.num_layers,
+                                          *self.block_shape),
+                                   dtype=self.cache_dtype),
+                self.expand_device_sharding)
+            for i in range(num_blocks_to_update)
+        ]
+        stacked_blocks_backup = [jnp.copy(sb) for sb in stacked_blocks]
+        jax.block_until_ready(stacked_blocks)
+
+        updated_caches = pure_jax_update_kv_caches_one(
+            initial_kv_caches,
+            stacked_blocks,
+            update_indices,
+            self.mesh,
+            indices_sharding=jax.sharding.PartitionSpec())
+        jax.block_until_ready(updated_caches)
+
+        for layer_idx in range(self.num_layers):
+            layer_cache = np.array(updated_caches[layer_idx])
+            # Check block 5 is stacked_blocks[0]
+            np.testing.assert_allclose(
+                layer_cache[5],
+                np.array(stacked_blocks_backup[0])[0, layer_idx],
+                rtol=1e-2,
+                atol=1e-2)
+            # Check block 2 is stacked_blocks[1]
+            np.testing.assert_allclose(
+                layer_cache[2],
+                np.array(stacked_blocks_backup[1])[0, layer_idx],
+                rtol=1e-2,
+                atol=1e-2)
+
+    def test_pure_jax_update_kv_caches_one_sharding_types(self):
+        """
+        Edge Case: Verify pure_jax_update_kv_caches_one accepts None, PartitionSpec, and NamedSharding for indices_sharding.
+        """
+        update_indices = [1]
+
+        def get_fresh_inputs():
+            caches = [
+                jax.device_put(
+                    jnp.zeros(self.cache_shape, dtype=self.cache_dtype),
+                    self.device_sharding) for _ in range(self.num_layers)
+            ]
+            blocks = [
+                jax.device_put(
+                    jnp.ones((1, self.num_layers, *self.block_shape),
+                             dtype=self.cache_dtype),
+                    self.expand_device_sharding)
+            ]
+            return caches, blocks
+
+        # Test None
+        c1, b1 = get_fresh_inputs()
+        out_none = pure_jax_update_kv_caches_one(c1,
+                                                 b1,
+                                                 update_indices,
+                                                 self.mesh,
+                                                 indices_sharding=None)
+
+        # Test PartitionSpec
+        c2, b2 = get_fresh_inputs()
+        out_ps = pure_jax_update_kv_caches_one(
+            c2,
+            b2,
+            update_indices,
+            self.mesh,
+            indices_sharding=jax.sharding.PartitionSpec())
+
+        # Test NamedSharding
+        c3, b3 = get_fresh_inputs()
+        named_sharding = NamedSharding(self.mesh,
+                                       jax.sharding.PartitionSpec(),
+                                       memory_kind='device')
+        out_ns = pure_jax_update_kv_caches_one(c3,
+                                               b3,
+                                               update_indices,
+                                               self.mesh,
+                                               indices_sharding=named_sharding)
+
+        jax.block_until_ready([out_none, out_ps, out_ns])
+
+        # All should have successfully scattered 1 into index 1
+        np.testing.assert_allclose(np.array(out_none[0])[1],
+                                   1.0,
+                                   rtol=1e-2,
+                                   atol=1e-2)
+        np.testing.assert_allclose(np.array(out_ps[0])[1],
+                                   1.0,
+                                   rtol=1e-2,
+                                   atol=1e-2)
+        np.testing.assert_allclose(np.array(out_ns[0])[1],
+                                   1.0,
+                                   rtol=1e-2,
+                                   atol=1e-2)
 
 
 if __name__ == "__main__":

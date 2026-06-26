@@ -24,7 +24,7 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE, RoutedExperts
 
 # yapf: disable
 from tests.layers.common import utils as test_utils
@@ -75,9 +75,9 @@ def setup_environment():
 
 def initialize_layer_weights(layer: torch.nn.Module):
     torch.manual_seed(42)
-    assert isinstance(layer, FusedMoE)
+    assert isinstance(layer, RoutedExperts)
 
-    e = layer.num_experts
+    e = layer.global_num_experts
     h = layer.hidden_size
     i = layer.intermediate_size_per_partition
 
@@ -141,20 +141,20 @@ def test_fused_moe_method(mesh, num_tokens, intermediate_size, hidden_size,
                          top_k=topk,
                          hidden_size=hidden_size,
                          intermediate_size=intermediate_size)
-        layer.moe_parallel_config.use_ep = use_ep
+        layer.moe_config.moe_parallel_config.use_ep = use_ep
     weight_quant = quant_config.target_scheme_map['Linear']['weights']
     input_quant = quant_config.target_scheme_map['Linear']['input_activations']
-    moe = quant_config.get_moe_config(layer)
+    moe = quant_config.get_moe_config(layer.routed_experts)
     method = VllmCompressedTensorsW8A8Fp8MoEMethod(weight_quant, input_quant,
                                                    moe, mesh)
-    method.create_weights(layer,
+    method.create_weights(layer.routed_experts,
                           num_experts,
                           hidden_size,
                           intermediate_size,
                           params_dtype=torch.float8_e4m3fn)
 
-    initialize_layer_weights(layer)
-    method.process_weights_after_loading(layer)
+    initialize_layer_weights(layer.routed_experts)
+    method.process_weights_after_loading(layer.routed_experts)
 
     def unquantize_weight_for_ref(weight, scale):
         return (weight.to(torch.float32) * scale.squeeze(1)).transpose(
@@ -165,13 +165,15 @@ def test_fused_moe_method(mesh, num_tokens, intermediate_size, hidden_size,
         x = torch.ones((seqlen, hidden_size), dtype=torch.bfloat16).to('jax')
         router_logits = torch.randn((seqlen, num_experts),
                                     dtype=torch.bfloat16).to('jax')
-        result = method.apply_monolithic(layer, x, router_logits)
+        result = method.apply_monolithic(layer.routed_experts, x,
+                                         router_logits)
         expected = test_utils.ref_moe(
             x.to(torch.float32).cpu(),
             router_logits.to(torch.float32).cpu(),
-            unquantize_weight_for_ref(layer.w13_weight,
-                                      layer.w13_weight_scale),
-            unquantize_weight_for_ref(layer.w2_weight, layer.w2_weight_scale),
+            unquantize_weight_for_ref(layer.routed_experts.w13_weight,
+                                      layer.routed_experts.w13_weight_scale),
+            unquantize_weight_for_ref(layer.routed_experts.w2_weight,
+                                      layer.routed_experts.w2_weight_scale),
             w1_bias=None,
             w2_bias=None,
             top_k=topk,

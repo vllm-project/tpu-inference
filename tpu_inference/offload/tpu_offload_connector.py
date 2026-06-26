@@ -351,6 +351,19 @@ class KVOffloadConnectorStats(KVConnectorStats):
         return self.num_finished_blocks == 0
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        """
+        Aggregates metrics from another KVConnectorStats instance into this one.
+
+        This method merges dynamically calculated data such as `finished_save_chunks` and 
+        `finished_load_chunks` from the `other.data` dict. Note that `num_finished_blocks` 
+        is not directly aggregated because it is exposed as a dynamically calculated property.
+
+        Args:
+            other (KVConnectorStats): The other metrics container to aggregate from.
+
+        Returns:
+            KVConnectorStats: The updated instance (self) containing the aggregated stats.
+        """
         # NOTE: This method is functionally critical for control flow in multi-node setups.
         # In addition to passive metrics, this stats object carries completion signals
         # (finished chunk IDs) from Workers to the Scheduler. Aggregation ensures

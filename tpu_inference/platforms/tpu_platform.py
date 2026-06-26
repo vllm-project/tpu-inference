@@ -4,6 +4,7 @@ import os
 import random
 from typing import TYPE_CHECKING, Optional, Tuple, Union
 
+import jax
 import jax.numpy as jnp
 import numpy
 import torch
@@ -109,9 +110,13 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "eager"
 
     supported_quantization: list[str] = [
-        "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4", "modelopt_fp4",
-        "deepseek_v4_fp8"
+        "compressed-tensors", "auto_awq", "fp8", "gpt_oss_mxfp4",
+        "modelopt_fp4", "deepseek_v4_fp8"
     ]
+
+    def set_device(self, device: torch.device) -> None:
+        # No-op on TPU since JAX/libtpu handles device management internally.
+        pass
 
     additional_env_vars: list[str] = [
         "PHASED_PROFILING_DIR",
@@ -173,6 +178,24 @@ class TpuPlatform(Platform):
                 "Automatically using fp8_e5m2 for FP8 KV cache on TPU v6e.")
             return torch.float8_e5m2
         return torch.float8_e4m3fn
+
+    @classmethod
+    def mem_get_info(cls) -> Tuple[int, int]:
+        """
+        Returns (free_memory, total_memory) in bytes for the specified TPU device.
+        """
+        # Fetch TPU memory statistics via JAX
+        # On TPU SPMD, we need to aggregate both the limit and usage across all
+        # local devices because global tensor dimensions are used for budget calculations.
+        total_memory = 0
+        bytes_in_use = 0
+        for d in jax.local_devices():
+            stats = d.memory_stats()
+            total_memory += stats.get('bytes_limit', 0)
+            bytes_in_use += stats.get('bytes_in_use', 0)
+
+        free_memory = total_memory - bytes_in_use
+        return free_memory, total_memory
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -304,11 +327,20 @@ class TpuPlatform(Platform):
                     MultiprocExecutor
                 parallel_config.distributed_executor_backend = MultiprocExecutor
         elif multihost_backend == "ray":
-            from tpu_inference.executors.ray_distributed_executor import \
-                RayDistributedExecutor
-            parallel_config.distributed_executor_backend = RayDistributedExecutor
-            logger.info(
-                "Force using RayDistributedExecutor for JAX on multihost.")
+            # Check if we should use Ray Executor V2 (V1-multiproc compatible)
+            if vllm_envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND:
+                from tpu_inference.executors.ray_distributed_executor_v2 import \
+                    RayDistributedExecutorV2
+                parallel_config.distributed_executor_backend = RayDistributedExecutorV2
+                logger.info(
+                    "Force using RayDistributedExecutorV2 for JAX on multihost."
+                )
+            else:
+                from tpu_inference.executors.ray_distributed_executor import \
+                    RayDistributedExecutor
+                parallel_config.distributed_executor_backend = RayDistributedExecutor
+                logger.info(
+                    "Force using RayDistributedExecutor for JAX on multihost.")
         else:
             logger.warning(
                 f"Unknown TPU multihost backend: {multihost_backend}. "
@@ -333,10 +365,32 @@ class TpuPlatform(Platform):
                     f"Unsupported kv_connector "
                     f"'{kv_transfer_config.kv_connector}' for the TPU "
                     f"platform. Expected one of {allowed}.")
+
+        enable_continue_decode = vllm_config.additional_config.get(
+            "enable_continue_decode", False)
+        is_pooling_model = vllm_config.model_config.runner_type == "pooling"
+        async_scheduling = vllm_config.scheduler_config.async_scheduling
+
         # Late initialization to avoid circular import.
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
+
+        if enable_continue_decode:
+            if parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "continue_decode is not supported with pipeline parallelism"
+                )
+            if is_pooling_model:
+                raise ValueError(
+                    "continue_decode is not supported for pooling models")
+            if async_scheduling:
+                raise ValueError(
+                    "continue_decode is not supported with async scheduling")
+
+            from tpu_inference.core.sched.utils import \
+                patch_vllm_scheduler_for_continue_decode
+            patch_vllm_scheduler_for_continue_decode()
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:

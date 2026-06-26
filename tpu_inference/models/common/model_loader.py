@@ -410,7 +410,7 @@ def get_flax_model(
 
     # Multi-modal support only
     # This function calculates the image/video token's embeddings by VIT
-    def run_embed_multimodal(state_leaves, **kwargs):
+    def run_embed_multimodal(state_leaves, modality=None, **kwargs):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
         return model.embed_multimodal(**kwargs)

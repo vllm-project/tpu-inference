@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import dataclasses
+import os
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -24,8 +25,8 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mla import MLAAttention
-from vllm.models.deepseek_v4.attention import (DeepseekV4IndexerCache,
-                                               DeepseekV4MLAAttention)
+from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
+                                               DeepseekV4IndexerCache)
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
@@ -35,6 +36,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
                                         MLAAttentionSpec, SlidingWindowSpec)
 
+from tpu_inference import envs as tpu_envs
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -61,8 +63,12 @@ DEFAULT_KV_CACHE_LAYOUT = "NHD"
 def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
     return isinstance(attn_module, DeepseekV4IndexerCache) or isinstance(
         attn_module, DeepseekV4SWACache) or isinstance(
-            attn_module, DeepseekV4MLAAttention) or isinstance(
+            attn_module, DeepseekV4Attention) or isinstance(
                 attn_module, CompressorStateCache)
+
+
+def is_ds_v4(vllm_config):
+    return "DeepseekV4ForCausalLM" in (vllm_config.model_config.architectures)
 
 
 class KVCacheManager:
@@ -451,17 +457,15 @@ class KVCacheManager:
                               getattr(model_config, "hf_config", None))
         if self.use_mla:
             # Individually pad the RopE and latents
-            if "DeepseekV4ForCausalLM" in (
-                    self.runner.vllm_config.model_config.architectures):
-                mla_head_size = common_utils.align_to(text_config.head_dim,
-                                                      128)
+            qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
+            padded_kv_lora_rank = common_utils.align_to(
+                getattr(text_config, "kv_lora_rank", 0), 128)
+            if tpu_envs.MLA_TRANSPOSE_KV_CACHE:
+                mla_qk_rope_head_dim = qk_rope_head_dim
             else:
-                qk_rope_head_dim = getattr(text_config, "qk_rope_head_dim", 0)
-                padded_kv_lora_rank = common_utils.align_to(
-                    text_config.kv_lora_rank, 128)
-                padded_qk_rope_head_dim = common_utils.align_to(
+                mla_qk_rope_head_dim = common_utils.align_to(
                     qk_rope_head_dim, 128)
-                mla_head_size = padded_kv_lora_rank + padded_qk_rope_head_dim
+            mla_head_size = padded_kv_lora_rank + mla_qk_rope_head_dim
 
         if len(self.runner.vllm_config.compilation_config.
                static_forward_context) == 0:
@@ -527,23 +531,38 @@ class KVCacheManager:
                         head_size,
                         sliding_window=sliding_window)
 
-            if self.runner.speculative_config and self.runner.speculative_config.method == "eagle3":
-                draft_model_config = self.runner.speculative_config.draft_model_config
-                hf_config = draft_model_config.hf_config
-                num_kv_heads = common_utils.get_padded_num_heads(
-                    hf_config.num_key_value_heads, model_cnt)
-                head_size = common_utils.get_padded_head_dim(
-                    hf_config.hidden_size // hf_config.num_attention_heads)
-                # Eagle3 has only 1 layer
-                for i in range(1):
-                    if self.use_mla:
-                        kv_cache_spec[
-                            f"draft_layer.{i}"] = self._create_attention_spec(
-                                block_size, 1, mla_head_size)
-                    else:
-                        kv_cache_spec[
-                            f"draft_layer.{i}"] = self._create_attention_spec(
-                                block_size, num_kv_heads, head_size)
+            speculative_config = self.runner.speculative_config
+            if speculative_config:
+                method = speculative_config.method
+                draft_model_config = speculative_config.draft_model_config
+                draft_hf_config = draft_model_config.hf_config
+
+                if speculative_config.use_gemma4_mtp():
+                    from tpu_inference.models.common.kv_share import \
+                        compute_mtp_kv_share_map
+
+                    # Gemma4-MTP draft layers share target verifier model caches entirely.
+                    # Compute cross-model redirects and register them directly in shared_kv_cache_layers.
+                    redirects = compute_mtp_kv_share_map(
+                        draft_hf_config, text_config)
+                    for draft_layer, target_layer in redirects.items():
+                        self.shared_kv_cache_layers[draft_layer] = target_layer
+                elif method == "eagle3":
+                    num_kv_heads = common_utils.get_padded_num_heads(
+                        draft_hf_config.num_key_value_heads, model_cnt)
+                    head_size = common_utils.get_padded_head_dim(
+                        draft_hf_config.hidden_size //
+                        draft_hf_config.num_attention_heads)
+                    # Eagle3 has only 1 layer
+                    for i in range(1):
+                        if self.use_mla:
+                            kv_cache_spec[
+                                f"draft_layer.{i}"] = self._create_attention_spec(
+                                    block_size, 1, mla_head_size)
+                        else:
+                            kv_cache_spec[
+                                f"draft_layer.{i}"] = self._create_attention_spec(
+                                    block_size, num_kv_heads, head_size)
         else:
             # Else propagate attention modules from compilation config.
             layers = get_layers_from_vllm_config(
@@ -594,10 +613,8 @@ class KVCacheManager:
                 if is_cache_for_ds_v4(attn_module):
                     spec = attn_module.get_kv_cache_spec(
                         self.runner.vllm_config)
-                    assert spec is not None
-                    head_size = common_utils.align_to(spec.head_size, 128)
-                    kv_cache_spec[layer_name] = self._create_attention_spec(
-                        spec.block_size, 1, head_size)
+                    if spec is not None:
+                        kv_cache_spec[layer_name] = spec
                     continue
 
                 if disable_sliding_window:
@@ -770,6 +787,18 @@ class KVCacheManager:
                             spec.num_kv_heads, spec.head_size, spec.dtype,
                             self.use_mla)
                 num_blocks = kv_cache_tensor.size // total_group_page_size
+            elif kv_cache_tensor.block_stride:
+                # DeepseekV4 packed layout: vLLM overlays every cache
+                # (main MLA latent + indexer k_cache + compressor state +
+                # SWA) into one contiguous per-block backing buffer, so each
+                # KVCacheTensor reports the *full* packed `size`, the combined
+                # per-block stride (== sum of all packed page sizes), and its
+                # own `offset`. `size` is a multiple of `block_stride`, not of
+                # any single layer's page size, and every packed layer shares
+                # the same `num_blocks`.
+                assert kv_cache_tensor.size % kv_cache_tensor.block_stride == 0
+                num_blocks = (kv_cache_tensor.size //
+                              kv_cache_tensor.block_stride)
             else:
                 # If sharing KV cache, compute `num_blocks` using the page size
                 # of the first layer.
@@ -853,13 +882,56 @@ class KVCacheManager:
                     # is True, we should init a new kv cache for each layer in shared_by
                     if j == 0 or duplicate_shared_layers:
                         # NOTE: we'll multiply the num_kv_heads by 2 in the function
-                        head_size = layer_spec.head_size
+                        block_size = layer_spec.storage_block_size
+
+                        if is_ds_v4(self.runner.vllm_config):
+                            os.environ["MLA_TRANSPOSE_KV_CACHE"] = "False"
+                            # DSV4 FP8 format is packed as unit8
+                            os.environ["MLA_KV_PACKING_SIZE"] = "4"
+
+                            contains_indexer_cache = any(
+                                "indexer" in layer
+                                for layer in kv_cache_tensor.shared_by)
+                            if contains_indexer_cache:
+                                # Indexer's compressor state cache kv cache must be overlay on
+                                # Indexer's compressed kv cache.
+                                # Main attn's compressor state cache kv cache and sliding window
+                                # cache must overlay on main attn's compressed kv cache.
+                                assert all(
+                                    "indexer" in layer
+                                    for layer in kv_cache_tensor.shared_by
+                                ), " kv_cache_tensor.shared_by: " + str(
+                                    kv_cache_tensor.shared_by)
+
+                            mla_spec = None
+                            for layer in kv_cache_tensor.shared_by:
+                                if isinstance(layer_name_to_spec[layer],
+                                              MLAAttentionSpec):
+                                    mla_spec = layer_name_to_spec[layer]
+                                    break
+                            # In DSV4, compressor-state-cache and sliding-window-cache
+                            # overlay on the same tensor as the main kv cache.
+                            # The created kv cache will based on the shape of the
+                            # main kv cache's spec.
+                            if mla_spec is not None:
+                                layer_spec = mla_spec
+                                block_size = layer_spec.storage_block_size
+                            if mla_spec is None:
+                                # Edge case handling: for DSV4 Flash,
+                                # There are 21 CSA layers, 43 SWA caches,
+                                # since 43 % 21 !=0, there is one SWA cache
+                                # not sharing a KV tensor with other caches.
+                                assert "swa_cache" in kv_cache_tensor.shared_by[
+                                    0]
+                                assert len(kv_cache_tensor.shared_by) == 1
+                                block_size = (kv_caches[-1].shape[1] *
+                                              kv_caches[-1].shape[2])
 
                         kv_cache = create_kv_caches(
                             num_blocks=num_blocks,
-                            block_size=layer_spec.block_size,
+                            block_size=block_size,
                             num_kv_heads=layer_spec.num_kv_heads,
-                            head_size=head_size,
+                            head_size=layer_spec.head_size,
                             mesh=self.runner.mesh,
                             layer_names=[f'kv_cache_tensor.{i}'],
                             cache_dtype=t2j_dtype(layer_spec.dtype),
@@ -948,7 +1020,7 @@ class KVCacheManager:
 
         # Explicitly delete each JAX array to release HBM.
         for kv_cache in kv_caches:
-            kv_cache.delete()
+            jax.tree.map(lambda x: x.delete(), kv_cache)
         self.runner.kv_caches.clear()
         self.runner.layer_name_to_kvcache_index.clear()
 
