@@ -1128,10 +1128,22 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                 "model.", "lm_head")) and
             "vision" not in clean_name  # Exclude vision tower weights for now
         )
-        return super().load_weights(
+        loaded = super().load_weights(
             (name, tensor) for name, tensor in stripped_weights
             if not ("layers." in name and not any(
                 layer_prefix in name for layer_prefix in allowed_layers)))
+
+        # Ground-truth logging for expert parameter sharding configuration
+        logger.info(f"--- Global Topology Mesh Configuration: {self.mesh} ---")
+        for name, param in self.model.named_parameters():
+            if "experts" in name and "kernel" in name:
+                val = param.get_value()
+                if hasattr(val, "sharding"):
+                    logger.info(
+                        f"[SHARDING] {name} | Shape: {val.shape} | Layout: {val.sharding}"
+                    )
+
+        return loaded
 
     def __call__(
         self,

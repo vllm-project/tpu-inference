@@ -121,7 +121,7 @@ done
 # ceil(TP_SIZE / CORES_PER_CHIP) whole chips; with TP_SIZE=2 and
 # CORES_PER_CHIP=2 that's exactly 1 chip per rank.
 CORES_PER_CHIP=${CORES_PER_CHIP:-2}
-CHIPS_PER_RANK=$(( (TP_SIZE + CORES_PER_CHIP - 1) / CORES_PER_CHIP ))
+CHIPS_PER_RANK=${CHIPS_PER_RANK:-$(( (TP_SIZE + CORES_PER_CHIP - 1) / CORES_PER_CHIP ))}
 
 # PROXY_PORT defaults to 8000 (vllm bench serve's own default --port) so
 # benchmark clients need no extra --port flag; rank servers start above it.

@@ -691,7 +691,19 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
                 yield mapped_name, process_tensor(mapped_name, weight)
 
-        return super().load_weights(filter_weights(weights))
+        loaded = super().load_weights(filter_weights(weights))
+
+        # Ground-truth logging for expert parameter sharding configuration
+        logger.info(f"--- Global Topology Mesh Configuration: {self.mesh} ---")
+        for name, param in self.model.named_parameters():
+            if "experts" in name and "kernel" in name:
+                val = param.get_value()
+                if hasattr(val, "sharding"):
+                    logger.info(
+                        f"[SHARDING] {name} | Shape: {val.shape} | Layout: {val.sharding}"
+                    )
+
+        return loaded
 
     def embed_input_ids(self,
                         input_ids: jax.Array,
