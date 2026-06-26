@@ -262,7 +262,7 @@ class TestMMEncoderJITManagerInit:
     def test_jit_forward_is_callable(self):
         """_jit_forward is a callable built once at init (not per-call)."""
         manager = _make_manager()
-        assert callable(manager._jit_forward)
+        assert callable(manager.model._jit_forward)
 
 
 def _image_mm_kwargs(t=1, h=4, w=4):
