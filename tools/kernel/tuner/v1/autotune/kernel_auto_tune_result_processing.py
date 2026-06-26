@@ -54,6 +54,7 @@ _PROCESS_STEP = flags.DEFINE_string(
 
 REPORT_OUTPUT_PATH_PREFIX = "/tmp/kernel_tuning/kernel_auto_tune_report"
 
+
 class KernelAutoTuneResultProcessor:
 
     def __init__(self):
@@ -649,7 +650,7 @@ class KernelAutoTuneResultProcessor:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w") as f:
             f.write(pr_body)
-            
+
         if should_create_pr:
             try:
                 pr_url = self._create_or_update_pr(pr_body)
@@ -671,6 +672,7 @@ class KernelAutoTuneResultProcessor:
 
 
 if __name__ == "__main__":
+
     def _main(_):
         result = KernelAutoTuneResultProcessor().execute()
         if result is not None:

@@ -33,82 +33,83 @@ env:
   KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
 
 steps:
-  # # ---------------------------------------------------------------------------
-  # # Stage 1: Collect kernel tuning cases
-  # # ---------------------------------------------------------------------------
-  # - label: "Trigger Benchmark — Collect Kernel Cases"
-  #   key: collect_kernel_cases
-  #   trigger: "tpu-inference-benchmark"
-  #   build:
-  #     branch: "patrickji.kernel_autotune_pipeline"
-  #     env:
-  #       KERNEL_AUTOTUNE_STAGE: "PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
-  #       EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
-  #       KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
+  # ---------------------------------------------------------------------------
+  # Stage 1: Collect kernel tuning cases
+  # ---------------------------------------------------------------------------
+  - label: "Trigger Benchmark — Collect Kernel Cases"
+    key: collect_kernel_cases
+    trigger: "tpu-inference-benchmark"
+    build:
+      branch: "patrickji.kernel_autotune_pipeline"
+      env:
+        KERNEL_AUTOTUNE_STAGE: "PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
+        EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
+        KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
 
   # ---------------------------------------------------------------------------
   # Stage 2: Run kernel tuning
   # ---------------------------------------------------------------------------
-  # - label: "Tune Collected Cases"
-  #   key: tune_collected_cases
-  #   # depends_on: "collect_kernel_cases"
-  #   trigger: "tpu-inference-kernel-tuning"
-  #   build:
-  #     branch: "patrickji.kernel_autotune_pipeline"
-  #     env:
-  #       BOOTSTRAP_ALL_KERNEL_TUNING: "1"
-  #       KERNEL_TUNING_KERNEL_AUTOTUNE_STAGE: "BOOTSTRAP_ALL_KERNEL_TUNING"
-  #       KERNEL_TUNING_EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=BOOTSTRAP_KERNEL_TUNING"
-  #       KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
+  - label: "Tune Collected Cases"
+    key: tune_collected_cases
+    depends_on: "collect_kernel_cases"
+    trigger: "tpu-inference-kernel-tuning"
+    priority: 200
+    build:
+      branch: "patrickji.kernel_autotune_pipeline"
+      env:
+        BOOTSTRAP_ALL_KERNEL_TUNING: "1"
+        KERNEL_TUNING_KERNEL_AUTOTUNE_STAGE: "BOOTSTRAP_ALL_KERNEL_TUNING"
+        KERNEL_TUNING_EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=BOOTSTRAP_KERNEL_TUNING"
+        KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
 
   # ---------------------------------------------------------------------------
   # Stage 3: Patch tuned results and create evaluation branch
   # ---------------------------------------------------------------------------
-  # - label: "Patch Kernel Tuning Result"
-  #   key: patch_kernel_tuning_result
-  #   depends_on:
-  #     # - "tune_collected_cases"
-  #     - "build_docker"
-  #   agents:
-  #     queue: tpu_v6e_queue
-  #   env:
-  #     KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
-  #     USE_PREBUILT_IMAGE: "1"
-  #     TPU_VERSION: tpu6e
-  #   secrets: 
-  #     - GITHUB_PAT 
-  #   # priority: 200
-  #   command: |
-  #     echo "🚀 Patching kernel autotune results and creating evaluation branch."
-  #     .buildkite/scripts/run_in_docker.sh bash -c '
-  #       branch_name="kernel_autotune.update_tuned_params_$${KERNEL_TUNING_AUTOTUNE_ID}"
-  #       repo_url="github.com/vllm-project/tpu-inference.git"
-  #       authenticated_repo_url="https://x-access-token:$${GITHUB_PAT}@$${repo_url}"
-  #       pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
-  #       apt install git -y
-  #       git remote set-url origin $${authenticated_repo_url}
-  #       git config user.name "Buildkite Bot"
-  #       git config user.email "buildkite-bot@users.noreply.github.com"
-  #       git checkout -b $${branch_name}
-  #       python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} --process_step=PATCH_KERNEL_AUTOTUNE_RESULT
-  #       git add -u
-  #       git commit -m "Update tuned params for auto tune ID: $${KERNEL_TUNING_AUTOTUNE_ID}"
-  #       git push origin $${branch_name} --force
-  #     '
+  - label: "Patch Kernel Tuning Result"
+    key: patch_kernel_tuning_result
+    depends_on:
+      - "tune_collected_cases"
+      - "build_docker"
+    agents:
+      queue: tpu_v6e_queue
+    env:
+      KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: tpu6e
+    secrets: 
+      - GITHUB_PAT 
+    priority: 200
+    command: |
+      echo "🚀 Patching kernel autotune results and creating evaluation branch."
+      .buildkite/scripts/run_in_docker.sh bash -c '
+        branch_name="kernel_autotune.update_tuned_params_$${KERNEL_TUNING_AUTOTUNE_ID}"
+        repo_url="github.com/vllm-project/tpu-inference.git"
+        authenticated_repo_url="https://x-access-token:$${GITHUB_PAT}@$${repo_url}"
+        pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
+        apt install git -y
+        git remote set-url origin $${authenticated_repo_url}
+        git config user.name "Buildkite Bot"
+        git config user.email "buildkite-bot@users.noreply.github.com"
+        git checkout -b $${branch_name}
+        python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} --process_step=PATCH_KERNEL_AUTOTUNE_RESULT
+        git add -u
+        git commit -m "Update tuned params for auto tune ID: $${KERNEL_TUNING_AUTOTUNE_ID}"
+        git push origin $${branch_name} --force
+      '
   
   # ---------------------------------------------------------------------------
   # Stage 4: Re-run benchmarks on tuned branch for evaluation
   # ---------------------------------------------------------------------------
-  # - label: "Trigger Benchmark — Evaluate Tuned Results"
-  #   key: evaluate_tuned_results
-  #   # depends_on: "patch_kernel_tuning_result"
-  #   trigger: "tpu-inference-benchmark"
-  #   build:
-  #     branch: "kernel_autotune.update_tuned_params_KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
-  #     env:
-  #       KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
-  #       KERNEL_AUTOTUNE_STAGE: "POST_KERNEL_AUTOTUNE_BM_RERUN"
-  #       EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
+  - label: "Trigger Benchmark — Evaluate Tuned Results"
+    key: evaluate_tuned_results
+    depends_on: "patch_kernel_tuning_result"
+    trigger: "tpu-inference-benchmark"
+    build:
+      branch: "kernel_autotune.update_tuned_params_KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
+      env:
+        KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
+        KERNEL_AUTOTUNE_STAGE: "POST_KERNEL_AUTOTUNE_BM_RERUN"
+        EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
 
   # ---------------------------------------------------------------------------
   # Stage 5: Evaluate results and optionally create a PR
@@ -116,7 +117,7 @@ steps:
   - label: "Evaluate Tuning Results and Create PR"
     key: evaluate_and_create_pr
     depends_on: 
-      # - "evaluate_tuned_results"
+      - "evaluate_tuned_results"
       - "build_docker"
     agents:
       queue: tpu_v6e_queue
@@ -149,15 +150,13 @@ steps:
           git config user.email "buildkite-bot@users.noreply.github.com"
           git checkout -B $${branch_name}
 
-          set +e
+          eval_status=0
           result=$$(python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing \
             --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} \
             --process_step=$${KERNEL_TUNING_AUTOTUNE_STAGE} \
             --gcp_project_id=$${KERNEL_TUNING_GCP_PROJECT_ID} \
             --spanner_instance_id=$${KERNEL_TUNING_SPANNER_INSTANCE_ID} \
-            --spanner_database_id=$${KERNEL_TUNING_SPANNER_DATABASE_ID} 2>&1)
-          eval_status=$$?
-          set -e
+            --spanner_database_id=$${KERNEL_TUNING_SPANNER_DATABASE_ID} 2>&1) || eval_status=$$?
 
           if [[ $$eval_status -ne 0 ]]; then
             echo "Evaluation command failed with status $$eval_status"
@@ -170,7 +169,7 @@ steps:
             pr_url=$$(printf "%s\n" "$$result" | sed -n "s/^PR_CREATED://p" | head -n 1)
             echo "PR created: $$pr_url"
           else
-            echo "No PR created. Result: $$result"
+            echo "No PR created."
           fi
         '
       - |
