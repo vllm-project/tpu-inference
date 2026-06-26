@@ -29,7 +29,7 @@ KERNEL_TUNING_ENV_VARS=(
 )
 
 # Validation logic only activated when pipeline is manually triggered. 
-if [[ -z "${KERNEL_TUNING_KERNEL_AUTOTUNE_ID:-}" ]]; then
+if [[ -z "${KERNEL_TUNING_AUTOTUNE_ID:-}" ]]; then
     for entry in "${KERNEL_TUNING_ENV_VARS[@]}"; do
         # Extract the variable name from the 'NAME=VALUE' string, skip '-e' 
         if [[ "$entry" = "-e" ]]; then
