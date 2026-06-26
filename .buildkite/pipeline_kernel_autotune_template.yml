@@ -36,7 +36,7 @@ steps:
   # ---------------------------------------------------------------------------
   # Stage 1: Collect kernel tuning cases
   # ---------------------------------------------------------------------------
-  - label: "Trigger Benchmark — Collect Kernel Cases"
+  - label: "Benchmark Run — Collect Kernel Cases"
     key: collect_kernel_cases
     trigger: "tpu-inference-benchmark"
     build:
@@ -99,7 +99,7 @@ steps:
   # ---------------------------------------------------------------------------
   # Stage 4: Re-run benchmarks on tuned branch for evaluation
   # ---------------------------------------------------------------------------
-  - label: "Trigger Benchmark — Evaluate Tuned Results"
+  - label: "Benchmark Run — Evaluate Tuned Results"
     key: evaluate_tuned_results
     depends_on: "patch_kernel_tuning_result"
     trigger: "tpu-inference-benchmark"
