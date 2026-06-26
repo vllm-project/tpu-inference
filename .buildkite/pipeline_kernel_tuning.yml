@@ -39,8 +39,8 @@ steps:
     agents:
       queue: cpu
     commands: |
-      SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-      local generator_script="${SCRIPT_DIR}/../tools/kernel/tuner/v1/autotune/bootstrap_kernel_tuners.py"
+      SCRIPT_DIR="$(cd "$(dirname "$${BASH_SOURCE[0]}")" && pwd)"
+      generator_script="$${SCRIPT_DIR}/../tools/kernel/tuner/v1/autotune/bootstrap_kernel_tuners.py"
       if [[ ! -f "$generator_script" ]]; then
         echo "🚨 Bootstrap script not found at $generator_script"
         exit 1
