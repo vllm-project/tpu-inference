@@ -102,15 +102,19 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
         jax.block_until_ready(run_kernel(tuned_params))
 
         iters = 50
-        start_ns = time.perf_counter_ns()
+        baseline_latencies = []
         for _ in range(iters):
+            start_ns = time.perf_counter_ns()
             jax.block_until_ready(run_kernel(baseline_params))
-        baseline_latency = (time.perf_counter_ns() - start_ns) / iters
+            baseline_latencies.append(time.perf_counter_ns() - start_ns)
+        baseline_latency = min(baseline_latencies)
 
-        start_ns = time.perf_counter_ns()
+        tuned_latencies = []
         for _ in range(iters):
+            start_ns = time.perf_counter_ns()
             jax.block_until_ready(run_kernel(tuned_params))
-        tuned_latency = (time.perf_counter_ns() - start_ns) / iters
+            tuned_latencies.append(time.perf_counter_ns() - start_ns)
+        tuned_latency = min(tuned_latencies)
 
         speedup = (baseline_latency - tuned_latency) / baseline_latency * 100
 
