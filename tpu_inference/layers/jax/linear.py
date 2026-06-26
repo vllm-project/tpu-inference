@@ -70,8 +70,12 @@ class JaxEinsum(nnx.Einsum, JaxModule):
         # `self.weight` such that `named_parameters()` can match the names in HF models.
         self.weight = self.kernel
         delattr(self, 'kernel')
-        if hasattr(self.weight, 'out_sharding'):
-            self.weight.set_metadata('sharding', self.weight.out_sharding)
+        out_sharding = (
+            self.weight.get_metadata("out_sharding", None)
+            or self.weight.get_metadata("sharding", None)
+        )
+        if out_sharding is not None:
+            self.weight.set_metadata("sharding", out_sharding)
         self.prefix = prefix
 
         if quant_config is None:
@@ -163,8 +167,12 @@ class JaxLmHead(nnx.Einsum, JaxModule):
         # HF stores this weight under `lm_head.weight`; alias for named_parameters().
         self.weight = self.kernel
         delattr(self, 'kernel')
-        if hasattr(self.weight, "out_sharding"):
-            self.weight.set_metadata('sharding', self.weight.out_sharding)
+        out_sharding = (
+            self.weight.get_metadata("out_sharding", None)
+            or self.weight.get_metadata("sharding", None)
+        )
+        if out_sharding is not None:
+            self.weight.set_metadata("sharding", out_sharding)
         self.prefix = prefix
         self.quant_method = None
 
