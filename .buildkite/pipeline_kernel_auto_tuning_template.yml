@@ -99,32 +99,37 @@ steps:
   # ---------------------------------------------------------------------------
   # Stage 4: Re-run benchmarks on tuned branch for evaluation
   # ---------------------------------------------------------------------------
-  - label: "Trigger Benchmark — Evaluate Tuned Results"
-    key: evaluate_tuned_results
-    # depends_on: "patch_kernel_tuning_result"
-    trigger: "tpu-inference-benchmark"
-    build:
-      branch: "kernel_autotune.update_tuned_params_KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
-      env:
-        KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
-        KERNEL_AUTOTUNE_STAGE: "POST_KERNEL_AUTOTUNE_BM_RERUN"
-        EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
+  # - label: "Trigger Benchmark — Evaluate Tuned Results"
+  #   key: evaluate_tuned_results
+  #   # depends_on: "patch_kernel_tuning_result"
+  #   trigger: "tpu-inference-benchmark"
+  #   build:
+  #     branch: "kernel_autotune.update_tuned_params_KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
+  #     env:
+  #       KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
+  #       KERNEL_AUTOTUNE_STAGE: "POST_KERNEL_AUTOTUNE_BM_RERUN"
+  #       EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=POST_KERNEL_AUTOTUNE_BM_RERUN"
 
   # ---------------------------------------------------------------------------
   # Stage 5: Evaluate results and optionally create a PR
   # ---------------------------------------------------------------------------
   - label: "Evaluate Tuning Results and Create PR"
     key: evaluate_and_create_pr
-    depends_on: "evaluate_tuned_results"
+    depends_on: 
+      # - "evaluate_tuned_results"
+      - "build_docker"
     agents:
-      queue: cpu
+      queue: tpu_v6e_queue
     env:
+      USE_PREBUILT_IMAGE: "1"
       KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
       KERNEL_AUTOTUNE_STAGE: "EVALUATE_AND_CREATE_PR"
       EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=EVALUATE_AND_CREATE_PR"
       GCP_PROJECT_ID: "cloud-tpu-inference-test"
       SPANNER_INSTANCE_ID: "vllm-bm-inst"
       SPANNER_DATABASE_ID: "vllm-bm-bk-runs"
+    secrets: 
+      - GITHUB_PAT 
     command: |
       echo "🚀 Evaluating tuning results and optionally creating a PR."
       .buildkite/scripts/run_in_docker.sh bash -c '
@@ -139,10 +144,10 @@ steps:
         git config user.email "buildkite-bot@users.noreply.github.com"
         result=$$(python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing \
           --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} \
-          --process_step=$${KERNEL_AUTOTUNE_STAGE}) \
+          --process_step=$${KERNEL_AUTOTUNE_STAGE} \
           --gcp_project_id=$${GCP_PROJECT_ID} \
           --spanner_instance_id=$${SPANNER_INSTANCE_ID} \
-          --spanner_database_id=$${SPANNER_DATABASE_ID} \
+          --spanner_database_id=$${SPANNER_DATABASE_ID}) 
 
         # create pr and put result in pr body
         if [[ "$$result" == *"PR_CREATED"* ]]; then

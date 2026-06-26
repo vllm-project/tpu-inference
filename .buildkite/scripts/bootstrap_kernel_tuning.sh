@@ -109,8 +109,8 @@ if [ -n "${BOOTSTRAP_KERNEL_AUTOTUNING:-}" ]; then
     # This includes the steps for collecting kernel tuning cases, running kernel tuning, 
     # patching the tuned results, and evaluating the tuned results.
 
-    # export KERNEL_TUNING_AUTOTUNE_ID=KERNEL_AUTOTUNE_$(date +%Y-%m-%d-%H-%M)
-    # export KERNEL_TUNING_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-23-07-10"
+    # export KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_$(date +%Y-%m-%d-%H-%M)
+    # export KERNEL_TUNING_AUTOTUNE_ID="KERNEL_TUNING_AUTOTUNE_2026-06-23-07-10"
     export KERNEL_TUNING_AUTOTUNE_ID="KERNEL_TUNING_AUTOTUNE_2026-06-25-22-22"
     echo "🚀 KERNEL_TUNING_AUTOTUNE_ID set to ${KERNEL_TUNING_AUTOTUNE_ID}"
     sed "s/KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER/${KERNEL_TUNING_AUTOTUNE_ID}/g" \

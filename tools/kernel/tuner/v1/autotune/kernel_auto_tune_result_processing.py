@@ -14,8 +14,14 @@
 
 import ast
 import dataclasses
+import html
 import json
 import logging
+import os
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from absl import app, flags
@@ -50,7 +56,7 @@ _PROCESS_STEP = flags.DEFINE_string(
 class KernelAutoTuneResultProcessor:
 
     def __init__(self):
-        self.auto_tune_id = _AUTOTUNE_ID.value
+        self.autotune_id = _AUTOTUNE_ID.value
         self.gcp_project_id = _GCP_PROJECT_ID.value
         self.spanner_instance_id = _SPANNER_INSTANCE_ID.value
         self.spanner_database_id = _SPANNER_DATABASE_ID.value
@@ -154,11 +160,12 @@ class KernelAutoTuneResultProcessor:
             tunable_params = TunableParams(**item['tunable_params'])
             tuning_key_to_params[tuning_key] = tunable_params
 
-        # Before updating the file, log how many existing entries will be updated and how many new entries will be added.
+        # Before updating the file, log how many existing entries will be
+        # updated and how many new entries will be added.
         existing_keys = set(module.tuned_params_mapping.keys())
         new_keys = set(tuning_key_to_params.keys())
         may_updated_keys = existing_keys.intersection(new_keys)
-        # check whether the may_updated_keys have different values in the new mapping
+        # Check whether the overlapping keys have different values.
         existing_params_updated = 0
         for key in may_updated_keys:
             if module.tuned_params_mapping[key] != tuning_key_to_params[key]:
@@ -254,32 +261,393 @@ class KernelAutoTuneResultProcessor:
 
     def patch_tuned_results(self):
         for kernel_tuner_name in kernel_auto_tune_mapping.keys():
-            case_set_id = f"{kernel_tuner_name}_{self.auto_tune_id}"
+            case_set_id = f"{kernel_tuner_name}_{self.autotune_id}"
             logger.info(f"Processing results for case set ID: {case_set_id}")
             best_results = self.get_best_results(case_set_id)
             self.update_best_results(best_results, kernel_tuner_name)
 
-    def compare_benchmark_metrics(self):
-        # 
+    def _github_request(self,
+                        method: str,
+                        path: str,
+                        token: str,
+                        payload: dict | None = None) -> dict:
+        url = f"https://api.github.com{path}"
+        body = None
+        headers = {
+            'Accept': 'application/vnd.github+json',
+            'Authorization': f'Bearer {token}',
+            'X-GitHub-Api-Version': '2022-11-28',
+            'User-Agent': 'tpu-inference-kernel-autotune-bot',
+        }
+        if payload is not None:
+            body = json.dumps(payload).encode('utf-8')
+            headers['Content-Type'] = 'application/json'
+
+        req = urllib.request.Request(url,
+                                     data=body,
+                                     headers=headers,
+                                     method=method)
+        try:
+            with urllib.request.urlopen(req) as resp:
+                raw = resp.read().decode('utf-8')
+                if not raw:
+                    return {}
+                return json.loads(raw)
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode('utf-8', errors='replace')
+            raise RuntimeError(
+                f"GitHub API request failed: method={method}, path={path}, "
+                f"status={exc.code}, body={error_body}") from exc
+
+    def _create_or_update_pr(self, pr_body: str) -> str | None:
+        token = os.environ.get('GITHUB_PAT', '').strip()
+        if not token:
+            logger.warning("GITHUB_PAT is not set; skipping PR creation.")
+            return None
+
+        owner = os.environ.get('KERNEL_AUTOTUNE_PR_OWNER', 'vllm-project')
+        repo = os.environ.get('KERNEL_AUTOTUNE_PR_REPO', 'tpu-inference')
+        head_branch = (
+            os.environ.get('KERNEL_AUTOTUNE_PR_HEAD_BRANCH', '').strip()
+            or f"kernel_autotune.update_tuned_params_{self.autotune_id}")
+        base_branch = (
+            os.environ.get('KERNEL_AUTOTUNE_PR_BASE_BRANCH', '').strip()
+            or os.environ.get('BUILDKITE_PULL_REQUEST_BASE_BRANCH', '').strip()
+            or 'main')
+        pr_title = (
+            os.environ.get('KERNEL_AUTOTUNE_PR_TITLE', '').strip()
+            or f"Kernel autotune update for {self.autotune_id}")
+
+        encoded_head = urllib.parse.quote(f"{owner}:{head_branch}", safe='')
+        encoded_base = urllib.parse.quote(base_branch, safe='')
+        existing = self._github_request(
+            'GET',
+            f"/repos/{owner}/{repo}/pulls?state=open&head={encoded_head}&base={encoded_base}",
+            token,
+        )
+        if existing:
+            pr_number = existing[0]['number']
+            updated = self._github_request(
+                'PATCH',
+                f"/repos/{owner}/{repo}/pulls/{pr_number}",
+                token,
+                payload={
+                    'title': pr_title,
+                    'body': pr_body,
+                    'base': base_branch,
+                },
+            )
+            logger.info("Updated existing PR #%s", pr_number)
+            return updated.get('html_url')
+
+        created = self._github_request(
+            'POST',
+            f"/repos/{owner}/{repo}/pulls",
+            token,
+            payload={
+                'title': pr_title,
+                'head': head_branch,
+                'base': base_branch,
+                'body': pr_body,
+                'maintainer_can_modify': True,
+            },
+        )
+        logger.info("Created new PR for branch %s", head_branch)
+        return created.get('html_url')
+
+    def evaluate_benchmark_metrics_and_create_pr_body(self):
         logger.info("Comparing benchmark metrics")
-        query = """
-            SELECT OutputTokenThroughput  
-            FROM RunRecord rr where rr.status = 'COMPLETED' and rr.run_type like 'KERNEL_AUTOTUNE'
+
+        monitor_metrics = {
+            'Throughput',
+            'MedianITL',
+        }
+        all_metrics = [
+            'Throughput',
+            'MedianITL',
+            'MedianTPOT',
+            'MedianTTFT',
+            'MedianETEL',
+            'P99ITL',
+            'P99TPOT',
+            'P99TTFT',
+            'P99ETEL',
+            'OutputTokenThroughput',
+            'TotalTokenThroughput',
+        ]
+        lower_is_better_metrics = {
+            'MedianITL',
+            'MedianTPOT',
+            'MedianTTFT',
+            'MedianETEL',
+            'P99ITL',
+            'P99TPOT',
+            'P99TTFT',
+            'P99ETEL',
+        }
+        threshold = 0.004  # 0.4%
+
+        from google.cloud import \
+            spanner as gspanner  # pylint: disable=import-outside-toplevel
+
+        postfix_match = re.search(r'(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})$',
+                                  self.autotune_id)
+        autotune_postfix = postfix_match.group(1) if postfix_match else self.autotune_id
+        autotune_like = f"%{autotune_postfix}%"
+
+        metric_columns_sql = ', '.join(all_metrics)
+        query = f"""
+            SELECT
+                rr.Config,
+                rr.Status,
+                {metric_columns_sql}
+            FROM RunRecord rr
+            WHERE rr.ExtraEnvs LIKE @autotune_like
+              AND rr.ExtraEnvs LIKE @stage_like
         """
+
         db = self._get_spanner_db(self.gcp_project_id,
                                   self.spanner_instance_id,
                                   self.spanner_database_id)
-        with db.snapshot() as snap:
-            for r in snap.execute_sql(query):
-                print(r)
-                return
-        return "Comparison of benchmark metrics completed."
+
+        warnings: list[str] = []
+
+        def _normalize_config(config_value) -> str:
+            if isinstance(config_value, (dict, list)):
+                return json.dumps(config_value, sort_keys=True)
+            if isinstance(config_value, str):
+                try:
+                    parsed = json.loads(config_value)
+                    return json.dumps(parsed, sort_keys=True)
+                except json.JSONDecodeError:
+                    return config_value
+            return repr(config_value)
+
+        def _to_float(value):
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _fetch_stage_records(stage: str):
+            stage_like = f"%{stage}%"
+            grouped = {}
+            with db.snapshot() as snap:
+                rows = snap.execute_sql(
+                    query,
+                    params={
+                        'autotune_like': autotune_like,
+                        'stage_like': stage_like,
+                    },
+                    param_types={
+                        'autotune_like': gspanner.param_types.STRING,
+                        'stage_like': gspanner.param_types.STRING,
+                    })
+                for row in rows:
+                    config_key = _normalize_config(row[0])
+                    record = {
+                        'status': row[1],
+                        'metrics': {
+                            metric: _to_float(row[idx + 2])
+                            for idx, metric in enumerate(all_metrics)
+                        },
+                    }
+                    grouped.setdefault(config_key, []).append(record)
+            return grouped
+
+        def _pick_record(records, stage_label: str, config_key: str):
+            if len(records) > 1:
+                warnings.append(
+                    f"Found {len(records)} rows for stage={stage_label}, config={config_key}. "
+                    "Using first COMPLETED row when available."
+                )
+            completed = [r for r in records if r['status'] == 'COMPLETED']
+            if completed:
+                return completed[0]
+            return records[0]
+
+        pre_stage = 'PRE_KERNEL_AUTOTUNE_CASES_COLLECTION'
+        post_stage = 'POST_KERNEL_AUTOTUNE_BM_RERUN'
+        pre_by_config = _fetch_stage_records(pre_stage)
+        post_by_config = _fetch_stage_records(post_stage)
+
+        all_config_keys = sorted(set(pre_by_config) | set(post_by_config))
+
+        rows = []
+        monitor_improved = False
+        has_regression = False
+        hard_blocker = False
+
+        for config_key in all_config_keys:
+            pre_records = pre_by_config.get(config_key, [])
+            post_records = post_by_config.get(config_key, [])
+
+            if not pre_records:
+                warnings.append(
+                    f"No baseline row found for config={config_key}; skipping comparison."
+                )
+                hard_blocker = True
+                continue
+            if not post_records:
+                warnings.append(
+                    f"No tuned row found for config={config_key}; skipping comparison."
+                )
+                hard_blocker = True
+                continue
+
+            pre = _pick_record(pre_records, pre_stage, config_key)
+            post = _pick_record(post_records, post_stage, config_key)
+
+            if pre['status'] != 'COMPLETED' or post['status'] != 'COMPLETED':
+                warnings.append(
+                    f"Config={config_key} skipped because status is not COMPLETED "
+                    f"(pre={pre['status']}, post={post['status']})."
+                )
+                hard_blocker = True
+                continue
+
+            for metric in all_metrics:
+                baseline = pre['metrics'][metric]
+                tuned = post['metrics'][metric]
+                delta_pct = None
+                improved = False
+                regressed = False
+                verdict = 'NO_DATA'
+
+                if baseline is None or tuned is None:
+                    verdict = 'MISSING'
+                elif baseline == 0.0:
+                    verdict = 'BASELINE_ZERO'
+                else:
+                    if metric in lower_is_better_metrics:
+                        # Positive means better (lower latency after tuning).
+                        delta_pct = (baseline - tuned) / baseline
+                    else:
+                        # Positive means better (higher throughput after tuning).
+                        delta_pct = (tuned - baseline) / baseline
+
+                    improved = delta_pct > 0
+                    regressed = delta_pct < -threshold
+                    if regressed:
+                        verdict = 'REGRESSION'
+                    elif improved:
+                        verdict = 'IMPROVED'
+                    else:
+                        verdict = 'NEUTRAL'
+
+                if metric in monitor_metrics and improved:
+                    monitor_improved = True
+
+                if regressed:
+                    has_regression = True
+
+                rows.append({
+                    'config': config_key,
+                    'metric': metric,
+                    'baseline': baseline,
+                    'tuned': tuned,
+                    'delta_pct': delta_pct,
+                    'monitor': metric in monitor_metrics,
+                    'verdict': verdict,
+                })
+
+        should_create_pr = monitor_improved and not has_regression and not hard_blocker
+
+        def _fmt_float(value):
+            if value is None:
+                return 'N/A'
+            return f"{value:.6g}"
+
+        def _fmt_pct(value):
+            if value is None:
+                return 'N/A'
+            sign = '+' if value >= 0 else ''
+            return f"{sign}{value * 100:.3f}%"
+
+        def _verdict_cell(verdict, monitor=False):
+            styles = {
+                'IMPROVED': 'color:#0B6E4F;font-weight:600;',
+                'REGRESSION': 'color:#B42318;font-weight:700;',
+                'NEUTRAL': 'color:#344054;',
+                'MISSING': 'color:#667085;',
+                'BASELINE_ZERO': 'color:#667085;',
+                'NO_DATA': 'color:#667085;',
+            }
+            text = verdict
+            if monitor and verdict in {'IMPROVED', 'REGRESSION'}:
+                text = f"MONITOR_{verdict}"
+            return f"<td style=\"{styles.get(verdict, '')}\">{html.escape(text)}</td>"
+
+        chunks = [
+            '<h2>Kernel Auto-Tuning Benchmark Evaluation</h2>',
+            f'<p><b>Autotune ID:</b> {html.escape(self.autotune_id)}</p>',
+            f'<p><b>Autotune postfix filter:</b> {html.escape(autotune_postfix)}</p>',
+            f"<p><b>Decision:</b> {'CREATE_PR' if should_create_pr else 'DO_NOT_CREATE_PR'}</p>",
+        ]
+
+        if warnings:
+            chunks.append('<h3>Warnings</h3>')
+            chunks.append('<ul>')
+            for warning in warnings:
+                chunks.append(f'<li>{html.escape(warning)}</li>')
+            chunks.append('</ul>')
+
+        if not rows:
+            chunks.append('<p>No comparable benchmark rows were found.</p>')
+        else:
+            rows_by_config = {}
+            for row in rows:
+                rows_by_config.setdefault(row['config'], []).append(row)
+
+            chunks.append('<h3>Per-Config Metric Comparison</h3>')
+            for config_key in sorted(rows_by_config):
+                chunks.append('<details>')
+                chunks.append('<summary><b>Config</b></summary>')
+                chunks.append(
+                    f"<pre>{html.escape(config_key)}</pre>"
+                )
+                chunks.append(
+                    '<table border="1" cellspacing="0" cellpadding="4">'
+                    '<thead><tr>'
+                    '<th>Metric</th><th>Baseline</th><th>Tuned</th><th>Delta</th><th>Verdict</th>'
+                    '</tr></thead><tbody>'
+                )
+                for row in rows_by_config[config_key]:
+                    metric_label = html.escape(row['metric'])
+                    if row['monitor']:
+                        metric_label = f'<b>{metric_label}</b>'
+                    chunks.append('<tr>')
+                    chunks.append(f'<td>{metric_label}</td>')
+                    chunks.append(f"<td>{_fmt_float(row['baseline'])}</td>")
+                    chunks.append(f"<td>{_fmt_float(row['tuned'])}</td>")
+                    chunks.append(f"<td>{_fmt_pct(row['delta_pct'])}</td>")
+                    chunks.append(
+                        _verdict_cell(row['verdict'], monitor=row['monitor']))
+                    chunks.append('</tr>')
+                chunks.append('</tbody></table>')
+                chunks.append('</details>')
+
+        pr_body = '\n'.join(chunks)
+        if should_create_pr:
+            try:
+                pr_url = self._create_or_update_pr(pr_body)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.exception("Failed to create/update PR")
+                return f"NO_PR_CREATED\nPR creation failed: {exc}\n{pr_body}"
+
+            if pr_url:
+                return f"PR_CREATED:{pr_url}\n{pr_body}"
+            return f"NO_PR_CREATED\nPR creation skipped (missing GITHUB_PAT).\n{pr_body}"
+
+        return f"NO_PR_CREATED\nBenchmark gates not met.\n{pr_body}"
 
     def execute(self):
         if self.process_step == 'PATCH_KERNEL_AUTOTUNE_RESULT':
             self.patch_tuned_results()
         elif self.process_step == 'EVALUATE_AND_CREATE_PR':
-            return self.compare_benchmark_metrics()
+            return self.evaluate_benchmark_metrics_and_create_pr_body()
 
 
 if __name__ == "__main__":
