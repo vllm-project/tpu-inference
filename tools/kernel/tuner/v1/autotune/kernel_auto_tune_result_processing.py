@@ -37,8 +37,8 @@ _SPANNER_INSTANCE_ID = flags.DEFINE_string(
 _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'spanner_database_id', 'tune-gmm',
     'The Spanner database ID to use. Only used when --run_locally is false.')
-_AUTO_TUNE_ID = flags.DEFINE_string(
-    'auto_tune_id', '',
+_AUTOTUNE_ID = flags.DEFINE_string(
+    'autotune_id', '',
     'The auto tune ID to use for this run, for example, "KERNEL_AUTOTUNE_2026-06-23-07-10".'
 )
 _PROCESS_STEP = flags.DEFINE_string(
@@ -50,7 +50,7 @@ _PROCESS_STEP = flags.DEFINE_string(
 class KernelAutoTuneResultProcessor:
 
     def __init__(self):
-        self.auto_tune_id = _AUTO_TUNE_ID.value
+        self.auto_tune_id = _AUTOTUNE_ID.value
         self.gcp_project_id = _GCP_PROJECT_ID.value
         self.spanner_instance_id = _SPANNER_INSTANCE_ID.value
         self.spanner_database_id = _SPANNER_DATABASE_ID.value
