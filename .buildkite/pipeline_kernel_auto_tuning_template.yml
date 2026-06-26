@@ -101,7 +101,7 @@ steps:
   # ---------------------------------------------------------------------------
   - label: "Trigger Benchmark — Evaluate Tuned Results"
     key: evaluate_tuned_results
-    depends_on: "patch_kernel_tuning_result"
+    # depends_on: "patch_kernel_tuning_result"
     trigger: "tpu-inference-benchmark"
     build:
       branch: "kernel_autotune.update_tuned_params_KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
