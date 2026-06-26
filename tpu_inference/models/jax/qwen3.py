@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from itertools import islice
 from typing import List, Optional, Tuple
 
 import jax
@@ -319,6 +320,65 @@ class Qwen3Model(Qwen2Model):
         else:
             self.norm = PPMissingLayer()
 
+        self._init_aux_hidden_state_layers(vllm_config)
+
+    def _init_aux_hidden_state_layers(self, vllm_config):
+        self.aux_hidden_state_layers = []
+        self.capture_aux_after_layer = False
+        if vllm_config.speculative_config:
+            method = getattr(vllm_config.speculative_config, "method", None)
+            # Aux layer indices are GLOBAL (over all PP ranks). The forward
+            # loop converts the local enumeration index `i` to global via
+            # `self.start_layer + i` before testing membership; using
+            # `hf_config.num_hidden_layers` (global) here keeps the IDs
+            # stable across ranks.
+            target_num_layers = (
+                vllm_config.model_config.hf_config.num_hidden_layers)
+            if method == "eagle3":
+                self.aux_hidden_state_layers = (2, target_num_layers // 2,
+                                                target_num_layers - 3)
+            elif method == "dflash":
+                from tpu_inference.models.jax.qwen3_dflash import \
+                    _get_dflash_target_layer_ids
+                draft_hf_config = (vllm_config.speculative_config.
+                                   draft_model_config.hf_config)
+                self.aux_hidden_state_layers = tuple(
+                    _get_dflash_target_layer_ids(draft_hf_config,
+                                                 target_num_layers))
+                self.capture_aux_after_layer = True
+
+    def __call__(
+        self,
+        kv_caches: List[jax.Array],
+        input_ids: Optional[jax.Array],
+        attention_metadata,
+        inputs_embeds: Optional[jax.Array] = None,
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
+        if inputs_embeds is not None:
+            x = inputs_embeds
+        else:
+            x = self.embed_tokens(input_ids)
+
+        aux_hidden_states = []
+        for i, layer in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer)):
+            global_layer_idx = self.start_layer + i
+            if (not self.capture_aux_after_layer
+                    and global_layer_idx in self.aux_hidden_state_layers):
+                aux_hidden_states.append(x)
+            kv_cache = kv_caches[i]
+            kv_cache, x = layer(
+                kv_cache,
+                x,
+                attention_metadata,
+            )
+            kv_caches[i] = kv_cache
+            if (self.capture_aux_after_layer
+                    and global_layer_idx in self.aux_hidden_state_layers):
+                aux_hidden_states.append(x)
+        x = self.norm(x)
+        return kv_caches, x, aux_hidden_states
+
 
 class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
 
@@ -373,7 +433,7 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
         if not is_first_rank:
             assert intermediate_tensors is not None
             inputs_embeds = intermediate_tensors["hidden_states"]
-        kv_caches, x = self.model(
+        kv_caches, x, aux_hidden_states = self.model(
             kv_caches,
             input_ids,
             attention_metadata,
@@ -381,7 +441,7 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
         )
         if not is_last_rank:
             x = JaxIntermediateTensors(tensors={"hidden_states": x}, )
-        return kv_caches, x, [], None
+        return kv_caches, x, aux_hidden_states, None
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         # Only use lm_head if it's a real projection layer (not a PPMissingLayer placeholder)
