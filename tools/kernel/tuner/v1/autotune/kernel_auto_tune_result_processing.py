@@ -20,8 +20,10 @@ from pathlib import Path
 
 from absl import app, flags
 
-from tools.kernel.tuner.v1.autotune.kernel_auto_tune_config import \
-    kernel_auto_tune_mapping
+kernel_auto_tune_mapping = {
+    'mla_kernel_tuner': '/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py',
+}
+
 
 logger = logging.getLogger(__name__)
 
