@@ -51,7 +51,7 @@ steps:
   # ---------------------------------------------------------------------------
   - label: "Tune Collected Cases"
     key: tune_collected_cases
-    depends_on: "collect_kernel_cases"
+    # depends_on: "collect_kernel_cases"
     trigger: "tpu-inference-kernel-tuning"
     build:
       branch: "patrickji.kernel_autotune_pipeline"
