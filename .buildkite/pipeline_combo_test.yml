@@ -85,3 +85,14 @@ steps:
           - |
             .buildkite/scripts/run_in_docker.sh \
               bash -c 'python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/combo/test_combo_structured_sampling_params.py'
+
+      - label: "${TPU_VERSION:-tpu6e} Correctness: Out-Of-Tree + Multimodal"
+        key: "${TPU_VERSION:-tpu6e}_Combo_OOT_Multimodal_Correctness"
+        agents:
+          queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+        env:
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+        commands:
+          - |
+            .buildkite/scripts/run_in_docker.sh \
+              python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_combo_oot_multimodal.py::test_oot_multimodal_full_stack_verification
