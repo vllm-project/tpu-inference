@@ -26,7 +26,7 @@ from pathlib import Path
 
 from absl import app, flags
 
-kernel_auto_tune_mapping = {
+kernel_autotune_mapping = {
     'mla_kernel_tuner':
     '/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py',
 }
@@ -45,14 +45,14 @@ _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'The Spanner database ID to use. Only used when --run_locally is false.')
 _AUTOTUNE_ID = flags.DEFINE_string(
     'autotune_id', '',
-    'The auto tune ID to use for this run, for example, "KERNEL_AUTOTUNE_2026-06-23-07-10".'
+    'The autotune ID to use for this run, for example, "KERNEL_AUTOTUNE_2026-06-23-07-10".'
 )
 _PROCESS_STEP = flags.DEFINE_string(
     'process_step', 'PATCH_KERNEL_AUTOTUNE_RESULT',
     'The process step to run. Options: EVALUATE_AND_CREATE_PR, PATCH_KERNEL_AUTOTUNE_RESULT'
 )
 
-REPORT_OUTPUT_PATH_PREFIX = "/tmp/kernel_tuning/kernel_auto_tune_report"
+REPORT_OUTPUT_PATH_PREFIX = "/tmp/kernel_tuning/kernel_autotune_report"
 
 
 class KernelAutoTuneResultProcessor:
@@ -134,11 +134,11 @@ class KernelAutoTuneResultProcessor:
             best_tunable_params (list[dict]): A list of dictionaries containing the best tunable parameters for each case.
             kernel_tuner_name (str): The name of the kernel tuner.
         """
-        if kernel_tuner_name not in kernel_auto_tune_mapping:
+        if kernel_tuner_name not in kernel_autotune_mapping:
             raise ValueError(
-                f"Kernel tuner name '{kernel_tuner_name}' not found in kernel_auto_tune_mapping."
+                f"Kernel tuner name '{kernel_tuner_name}' not found in kernel_autotune_mapping."
             )
-        file_path = kernel_auto_tune_mapping[kernel_tuner_name]
+        file_path = kernel_autotune_mapping[kernel_tuner_name]
         # Dynamically import the tuned params module from file_path.
         import importlib.util
         spec = importlib.util.spec_from_file_location("tuned_params_module",
@@ -262,7 +262,7 @@ class KernelAutoTuneResultProcessor:
         return repr(value)
 
     def patch_tuned_results(self):
-        for kernel_tuner_name in kernel_auto_tune_mapping.keys():
+        for kernel_tuner_name in kernel_autotune_mapping.keys():
             case_set_id = f"{kernel_tuner_name}_{self.autotune_id}"
             logger.info(f"Processing results for case set ID: {case_set_id}")
             best_results = self.get_best_results(case_set_id)

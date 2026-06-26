@@ -33,7 +33,7 @@ _RUN_LOCALLY = flags.DEFINE_bool(
     'If true, uses local storage instead of cloud storage.')
 _AUTOTUNE_MODE = flags.DEFINE_bool(
     'autotune_mode', False,
-    'If true, runs the kernel tuner in auto-tune mode, which reads tuning cases from Spanner and generates Buildkite pipeline YAML for tuning jobs. '
+    'If true, runs the kernel tuner in autotune mode, which reads tuning cases from Spanner and generates Buildkite pipeline YAML for tuning jobs. '
 )
 _KERNEL_TUNER_NAME = flags.DEFINE_string('kernel_tuner_name',
                                          'example_kernel_tuner',

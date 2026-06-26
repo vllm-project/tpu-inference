@@ -357,12 +357,12 @@ class LocalDbManager(StorageManager):
         return [(row['CaseId'], row['CaseKeyValue']) for row in table
                 if row['ID'] == case_set_id]
 
-    def add_auto_tune_case(self,
+    def add_autotune_case(self,
                            case_set_id: str,
                            case_id: int,
                            case_kv: str,
                            tpu: str = None):
-        """Adds a new auto-tune case to the database.
+        """Adds a new autotune case to the database.
 
         Args:
             case_set_id: Unique string identifier for the case set.
@@ -374,7 +374,7 @@ class LocalDbManager(StorageManager):
             "Not implemented in LocalDbManager. This method is intended for SpannerStorageManager used in auto-tuning scenarios."
         )
 
-    def read_auto_tune_cases(self,
+    def read_autotune_cases(self,
                              case_set_id: str,
                              kernel_tuner_name: str = None,
                              tpu: str = None) -> list[dict]:

@@ -327,7 +327,7 @@ class SpannerStorageManager(StorageManager):
         """
         return spanner.COMMIT_TIMESTAMP
 
-    def add_auto_tune_case(self, case_set_id: str, case_str: str,
+    def add_autotune_case(self, case_set_id: str, case_str: str,
                            kernel_tuner_name: str, tpu: str):
         """Adds a tuning case to the AutoTuneCase table for logging purposes.
 
@@ -354,7 +354,7 @@ class SpannerStorageManager(StorageManager):
                               'TPU'),
                      values=[(case_set_id, case_str, kernel_tuner_name, tpu)])
 
-    def read_auto_tune_cases(self,
+    def read_autotune_cases(self,
                              case_set_id,
                              kernel_tuner_name=None,
                              tpu=None):

@@ -191,11 +191,11 @@ class KernelTunerBase(ABC):
 
     def generate_autotune_cases(self) -> list[TuningCase]:
         tuning_set = []
-        # The case_set_id is constructed as {kernel_tuner_name}_{auto_tune_case_set_id} in the bootstrap_kernel_tuners.py
-        auto_tune_case_set_id = self.run_config.case_set_id.lstrip(
+        # The case_set_id is constructed as {kernel_tuner_name}_{autotune_case_set_id} in the bootstrap_kernel_tuners.py
+        autotune_case_set_id = self.run_config.case_set_id.lstrip(
             f'{self.tuner_config.kernel_tuner_name}_')
-        autotune_cases = self.storage_manager.read_auto_tune_cases(
-            case_set_id=auto_tune_case_set_id,
+        autotune_cases = self.storage_manager.read_autotune_cases(
+            case_set_id=autotune_case_set_id,
             kernel_tuner_name=self.tuner_config.kernel_tuner_name,
             tpu=self.run_config.tpu_version)
         bucket_by_key = []

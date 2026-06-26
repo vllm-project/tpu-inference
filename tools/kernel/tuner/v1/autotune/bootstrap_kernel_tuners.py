@@ -24,7 +24,7 @@ from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
 logger = logging.getLogger(__name__)
 
 # invoke the kernel tuning pipeline for each kernel
-# when in auto tune mode, the kernel tuner will read the cases from spanner instead
+# when in autotune mode, the kernel tuner will read the cases from spanner instead
 
 
 class LiteralString(str):
@@ -48,7 +48,7 @@ _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'spanner_database_id', 'tune-gmm',
     'The Spanner database ID to use. Only used when --run_locally is false.')
 _AUTOTUNE_ID = flags.DEFINE_string('autotune_id', '',
-                                    'The auto tune ID to use for this run.')
+                                    'The autotune ID to use for this run.')
 
 OUTPUT_PATH = "/tmp/kernel_tuning/generated_pipeline.yml"
 
@@ -106,12 +106,12 @@ class BootstrapKernelTuners:
 
     def generate_kernel_tuning_cases(self):
         pipeline = {"steps": []}
-        autotune_cases = self.storage_manager.read_auto_tune_cases(
+        autotune_cases = self.storage_manager.read_autotune_cases(
             case_set_id=self.autotune_id)
         tpus = set(case['TPU'] for case in autotune_cases)
         assert all(
             'tpu6e' in tpu or 'tpu7x' in tpu for tpu in tpus
-        ), f'Unsupported TPU versions found in auto-tune cases: {tpus}. Supported versions are tpu6e and tpu7x.'
+        ), f'Unsupported TPU versions found in autotune cases: {tpus}. Supported versions are tpu6e and tpu7x.'
         tpus = set('tpu6e' if 'tpu6e' in tpu else 'tpu7x' for tpu in tpus)
 
         generated_cases = set()

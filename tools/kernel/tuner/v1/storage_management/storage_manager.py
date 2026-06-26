@@ -252,7 +252,7 @@ class StorageManager:
         """Closes any open connections or resources held by the storage manager."""
         raise NotImplementedError("Subclasses must implement close")
 
-    def add_auto_tune_case(self,
+    def add_autotune_case(self,
                            case_set_id: str,
                            case_str: str,
                            kernel_tuner_name: str,
@@ -269,9 +269,9 @@ class StorageManager:
             tpu: Optional TPU identifier.
         """
         raise NotImplementedError(
-            "Subclasses must implement add_auto_tune_case")
+            "Subclasses must implement add_autotune_case")
 
-    def read_auto_tune_cases(self,
+    def read_autotune_cases(self,
                              case_set_id: str,
                              kernel_tuner_name: str = None,
                              tpu: str = None) -> list[dict]:
@@ -289,7 +289,7 @@ class StorageManager:
                 'TPU': TPU identifier.
         """
         raise NotImplementedError(
-            "Subclasses must implement read_auto_tune_cases")
+            "Subclasses must implement read_autotune_cases")
 
     def get_all_cases(self, case_set_id) -> list[tuple[int, str]]:
         """Returns all cases in the given case set.
