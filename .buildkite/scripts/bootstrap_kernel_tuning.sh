@@ -117,7 +117,8 @@ if [ -n "${BOOTSTRAP_KERNEL_AUTOTUNING:-}" ]; then
         .buildkite/pipeline_kernel_auto_tuning_template.yml \
         | buildkite-agent pipeline upload
 elif [ -n "${BOOTSTRAP_ALL_KERNEL_TUNING:-}" ]; then
-    # If BOOTSTRAP_ALL_KERNEL_TUNING is set
+    # If BOOTSTRAP_ALL_KERNEL_TUNING is set, we invokes one kernel tuning run for each (kernel, tpu_version, tpu_cores),
+    # meaning it will trigger multiple single kernel tuning run in the else block below.
     upload_pipeline_build_once
     echo "--- :pipeline: Uploading pipeline_kernel_tuner.yml for bootstrap all kernel tuning"
     buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml

@@ -17,15 +17,6 @@
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
 
-ci_cache_tag_exists() {
-  local image_repo="$1"
-  local cache_tag="$2"
-
-  gcloud artifacts docker tags list "$image_repo" \
-    --filter="tag=${cache_tag}" \
-    --format='value(tag)' 2>/dev/null | grep -Fxq "$cache_tag"
-}
-
 cleanup_docker_resource() {
   # Define defaults and get the parameter
   DEFAULT_IMAGES=("vllm-tpu")
@@ -145,19 +136,6 @@ setup_environment() {
   fi
  
   local CACHE_TAG="${TPU_INFERENCE_HASH}-${LOCAL_TPU_VERSION}"
-
-  # If this cache tag already exists in CI registry, reuse it and skip build/push.
-  if [[ "$push_to_ci_cache" == "true" ]]; then
-    gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
-    if ci_cache_tag_exists "${CI_IMAGE_REPO}" "${CACHE_TAG}"; then
-      echo "CI cache image ${CI_IMAGE_REPO}:${CACHE_TAG} already exists. Skipping Docker build and push."
-      docker pull "${CI_IMAGE_REPO}:${CACHE_TAG}"
-      docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
-      docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:latest"
-      docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:${CACHE_TAG}"
-      return 0
-    fi
-  fi
 
   # ==========================================
   # Pull-Only Mode for TPU execution nodes
