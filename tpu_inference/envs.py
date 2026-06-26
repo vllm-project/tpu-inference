@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
+    TPU_RAIDEN_IMPORT_FIRST: bool = True
 
 
 def env_with_choices(
@@ -427,6 +428,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES", "auto"),
     "MLA_TRANSPOSE_KV_CACHE":
     env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
+    # Engine-first XLA load: when true, tpu_inference/__init__.py imports the Raiden
+    # engine extension before the first `import jax`, so its embedded XLA runtime comes
+    # up before jaxlib's libjax_common.so and the two XLA copies don't collide in static
+    # initializers. Enabled by default;
+    # harmless when tpu_raiden is not installed (import is skipped quietly).
+    "TPU_RAIDEN_IMPORT_FIRST":
+    env_bool("TPU_RAIDEN_IMPORT_FIRST", default=True),
 }
 
 

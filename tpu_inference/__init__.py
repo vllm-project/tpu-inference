@@ -17,6 +17,23 @@
 # other modules are imported.
 import tpu_inference.env_override  # noqa: F401
 from tpu_inference import envs
+
+# Engine-first XLA load (TPU_RAIDEN_IMPORT_FIRST, default on): import Raiden's engine
+# extension here -- the earliest tpu_inference entry point, before any submodule (e.g.
+# platforms/tpu_platform.py) runs `import jax` and loads jaxlib's libjax_common.so.
+if envs.TPU_RAIDEN_IMPORT_FIRST:
+    try:
+        import tpu_raiden.frameworks.jax._tpu_raiden_jax  # noqa: F401
+    except ModuleNotFoundError:
+        # Expected in processes without tpu_raiden on the path (e.g. the benchmark
+        # client). Only the EngineCore workers need the engine-first load; skip quietly.
+        pass
+    except Exception as _raiden_exc:  # pragma: no cover - best-effort preload
+        import sys as _sys
+        print(
+            f"[TPU_RAIDEN_IMPORT_FIRST] engine preload failed: {_raiden_exc}",
+            file=_sys.stderr)
+
 from tpu_inference import tpu_info as ti
 from tpu_inference.logger import init_logger
 
