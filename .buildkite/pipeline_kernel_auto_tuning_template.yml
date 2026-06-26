@@ -142,6 +142,7 @@ steps:
         git remote set-url origin $${authenticated_repo_url}
         git config user.name "Buildkite Bot"
         git config user.email "buildkite-bot@users.noreply.github.com"
+        git checkout -b $${branch_name}
         result=$$(python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing \
           --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} \
           --process_step=$${KERNEL_AUTOTUNE_STAGE} \
