@@ -652,4 +652,9 @@ class KernelAutoTuneResultProcessor:
 
 
 if __name__ == "__main__":
-    app.run(lambda _: KernelAutoTuneResultProcessor().execute())  # pylint: disable=no-value-for-parameter
+    def _main(_):
+        result = KernelAutoTuneResultProcessor().execute()
+        if result is not None:
+            print(result)
+
+    app.run(_main)  # pylint: disable=no-value-for-parameter
