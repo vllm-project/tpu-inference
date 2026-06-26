@@ -272,9 +272,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         mapping.prompt_mapping = self._pad_prompt_mapping(
             mapping.prompt_mapping)
 
-        # Compute LoRA routing mapping on CPU using NumPy and pad to a static shape.
-        # This prevents massive XLA recompilations caused by fluctuating sub-batch
-        # shapes unique to dynamic LoRA during live continuous batching.
+        # Compute LoRA routing mapping on CPU using NumPy and transfer via jax.device_put.
+        # We bypass upstream's convert_mapping because it relies on async_tensor_h2d,
+        # which defaults to pin_memory=True. PyTorch XLA lacks CUDA-style pinned memory
+        # hooks, causing a fatal PrivateUse1HooksInterface RuntimeError on TPUs.
         import jax
         import jax.numpy as jnp
         import numpy as np
