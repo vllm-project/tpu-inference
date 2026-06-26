@@ -31,12 +31,31 @@
 #
 
 steps:
+  # -----------------------------------------------------------------
+  # -----------------------------------------------------------------
+  - label: "Bootstrap All Kernel Tuning Pipeline"
+    key: bootstrap_all_kernel_tuning_pipeline
+    if: "${BOOTSTRAP_ALL_KERNEL_TUNING:-}" == "1"
+    agents:
+      queue: cpu
+    commands: |
+      local py_output
+      if ! py_output=$(python3 ./tools/kernel/tuner/v1/kernel_tuner_runner.py --auto_tune_id "$KERNEL_AUTOTUNE_ID" 2>&1); then
+        echo "🚨 Failed to bootstrap all kernel tuning for autotune ${KERNEL_AUTOTUNE_ID}"
+        exit 1
+      fi
+
+      if ! upload_with_priority <(echo "$py_output") "$priority"; then
+        echo "🚨 Upload failed for all kernel tuning for autotune ${KERNEL_AUTOTUNE_ID}"
+        exit 1
+      fi
 
 
   # -----------------------------------------------------------------
   # -----------------------------------------------------------------
   - label: ":docker: Tuning Cases Generation and Pipeline Upload (${TPU_VERSION:-tpu6e})"
     key: generate_tuning_cases_and_yml
+    if: "${BOOTSTRAP_ALL_KERNEL_TUNING:-}" == ""
     depends_on: build_docker
     env:
       USE_PREBUILT_IMAGE: "1"

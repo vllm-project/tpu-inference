@@ -33,29 +33,30 @@ env:
   KERNEL_AUTOTUNE_ID: "KERNEL_AUTOTUNE_ID_PLACEHOLDER"
 
 steps:
-  # ---------------------------------------------------------------------------
-  # Stage 1: Collect kernel tuning cases
-  # ---------------------------------------------------------------------------
-  - label: "Trigger Benchmark — Collect Kernel Cases"
-    key: collect_kernel_cases
-    trigger: "tpu-inference-benchmark"
-    build:
-      branch: "patrickji.kernel_autotune_pipeline"
-      env:
-        KERNEL_AUTOTUNE_ID: "KERNEL_AUTOTUNE_ID_PLACEHOLDER"
-        KERNEL_AUTOTUNE_STAGE: "PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
-        EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
+  # # ---------------------------------------------------------------------------
+  # # Stage 1: Collect kernel tuning cases
+  # # ---------------------------------------------------------------------------
+  # - label: "Trigger Benchmark — Collect Kernel Cases"
+  #   key: collect_kernel_cases
+  #   trigger: "tpu-inference-benchmark"
+  #   build:
+  #     branch: "patrickji.kernel_autotune_pipeline"
+  #     env:
+  #       KERNEL_AUTOTUNE_ID: "KERNEL_AUTOTUNE_ID_PLACEHOLDER"
+  #       KERNEL_AUTOTUNE_STAGE: "PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
+  #       EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
 
   # ---------------------------------------------------------------------------
   # Stage 2: Run kernel tuning
   # ---------------------------------------------------------------------------
-  - label: "Trigger Kernel Tuning Pipeline"
-    key: kernel_tuning
+  - label: "Tune Collected Cases"
+    key: tune_collected_cases
     depends_on: "collect_kernel_cases"
     trigger: "tpu-inference-kernel-tuning"
     build:
       branch: "patrickji.kernel_autotune_pipeline"
       env:
+        BOOTSTRAP_ALL_KERNEL_TUNING: "1"
         KERNEL_AUTOTUNE_ID: "KERNEL_AUTOTUNE_ID_PLACEHOLDER"
         KERNEL_AUTOTUNE_STAGE: "KERNEL_TUNING"
         EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=KERNEL_TUNING"
@@ -63,9 +64,9 @@ steps:
   # ---------------------------------------------------------------------------
   # Stage 3: Patch tuned results and create evaluation branch
   # ---------------------------------------------------------------------------
-  - label: "Patch Kernel Autotune Result"
-    key: patch_kernel_autotune_result
-    depends_on: "kernel_tuning"
+  - label: "Patch Kernel Tuning Result"
+    key: patch_kernel_tuning_result
+    depends_on: "tune_collected_cases"
     agents:
       queue: tpu_v6e_queue
     env:
@@ -101,7 +102,7 @@ steps:
   # ---------------------------------------------------------------------------
   - label: "Trigger Benchmark — Evaluate Tuned Results"
     key: evaluate_tuned_results
-    depends_on: "patch_kernel_autotune_result"
+    depends_on: "patch_kernel_tuning_result"
     trigger: "tpu-inference-benchmark"
     build:
       branch: "kernel_autotune.update_tuned_params_KERNEL_AUTOTUNE_ID_PLACEHOLDER"
