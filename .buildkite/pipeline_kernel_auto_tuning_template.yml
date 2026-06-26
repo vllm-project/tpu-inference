@@ -130,32 +130,38 @@ steps:
       KERNEL_TUNING_SPANNER_DATABASE_ID: "vllm-bm-bk-runs"
     secrets: 
       - GITHUB_PAT 
-    command: |
-      echo "🚀 Evaluating tuning results and optionally creating a PR."
-      .buildkite/scripts/run_in_docker.sh bash -c '
-        set -e
-        branch_name="kernel_autotune.update_tuned_params_$${KERNEL_TUNING_AUTOTUNE_ID}"
-        repo_url="github.com/vllm-project/tpu-inference.git"
-        authenticated_repo_url="https://x-access-token:$${GITHUB_PAT}@$${repo_url}"
-        pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
-        apt install git -y
-        git remote set-url origin $${authenticated_repo_url}
-        git config user.name "Buildkite Bot"
-        git config user.email "buildkite-bot@users.noreply.github.com"
-        git checkout -b $${branch_name}
-        result=$$(python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing \
-          --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} \
-          --process_step=$${KERNEL_TUNING_AUTOTUNE_STAGE} \
-          --gcp_project_id=$${KERNEL_TUNING_GCP_PROJECT_ID} \
-          --spanner_instance_id=$${KERNEL_TUNING_SPANNER_INSTANCE_ID} \
-          --spanner_database_id=$${KERNEL_TUNING_SPANNER_DATABASE_ID}) 
+    command:
+      - |
+        # remove the existing generated HTML reports in the temp dir on the host. 
+        rm -f "/tmp/kernel_tuning/*.html"
+      - |
+        echo "🚀 Evaluating tuning results and optionally creating a PR."
+        .buildkite/scripts/run_in_docker.sh bash -c '
+          set -e
+          branch_name="kernel_autotune.update_tuned_params_$${KERNEL_TUNING_AUTOTUNE_ID}"
+          repo_url="github.com/vllm-project/tpu-inference.git"
+          authenticated_repo_url="https://x-access-token:$${GITHUB_PAT}@$${repo_url}"
+          pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
+          apt install git -y
+          git remote set-url origin $${authenticated_repo_url}
+          git config user.name "Buildkite Bot"
+          git config user.email "buildkite-bot@users.noreply.github.com"
+          git checkout -b $${branch_name}
+          result=$$(python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing \
+            --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} \
+            --process_step=$${KERNEL_TUNING_AUTOTUNE_STAGE} \
+            --gcp_project_id=$${KERNEL_TUNING_GCP_PROJECT_ID} \
+            --spanner_instance_id=$${KERNEL_TUNING_SPANNER_INSTANCE_ID} \
+            --spanner_database_id=$${KERNEL_TUNING_SPANNER_DATABASE_ID}) 
 
-        # create pr and put result in pr body
-        if [[ "$$result" == *"PR_CREATED"* ]]; then
-          pr_url=$$(echo "$$result" | grep -oP 'PR_CREATED:\K.*')
-          echo "PR created: $$pr_url"
-        else
-          echo "No PR created. Result: $$result"
-        fi
-      '
-
+          # create pr and put result in pr body
+          if [[ "$$result" == *"PR_CREATED"* ]]; then
+            pr_url=$$(echo "$$result" | grep -oP 'PR_CREATED:\K.*')
+            echo "PR created: $$pr_url"
+          else
+            echo "No PR created. Result: $$result"
+          fi
+        '
+      - |
+        # Upload the generated HTML reports from the temp dir on the host.
+        buildkite-agent artifact upload "/tmp/kernel_tuning/*.html"

@@ -52,6 +52,7 @@ _PROCESS_STEP = flags.DEFINE_string(
     'The process step to run. Options: EVALUATE_AND_CREATE_PR, PATCH_KERNEL_AUTOTUNE_RESULT'
 )
 
+REPORT_OUTPUT_PATH_PREFIX = "/tmp/kernel_tuning/kernel_auto_tune_report"
 
 class KernelAutoTuneResultProcessor:
 
@@ -625,6 +626,11 @@ class KernelAutoTuneResultProcessor:
                 chunks.append('</details>')
 
         pr_body = '\n'.join(chunks)
+        output_path = f"{REPORT_OUTPUT_PATH_PREFIX}_{self.autotune_id}.html"
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as f:
+            f.write(pr_body)
+            
         if should_create_pr:
             try:
                 pr_url = self._create_or_update_pr(pr_body)
