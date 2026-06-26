@@ -78,7 +78,6 @@ class BootstrapKernelTuners:
             "build": {
                 "branch": os.environ.get('BUILDKITE_BRANCH', 'patrickji.kernel_autotune_pipeline'),
                 "env": {
-                    "BOOTSTRAP_ALL_KERNEL_TUNING": "1",
                     "KERNEL_TUNING_KERNEL_AUTOTUNE_ID": self.auto_tune_id,
                     "KERNEL_TUNING_KERNEL_AUTOTUNE_STAGE": "KERNEL_TUNING",
                     "KERNEL_TUNING_EXTRA_ENVS": f"KERNEL_AUTOTUNE_ID={self.auto_tune_id},KERNEL_AUTOTUNE_STAGE=KERNEL_TUNING",
@@ -127,6 +126,12 @@ class BootstrapKernelTuners:
                     sort_keys=False,
                     default_flow_style=False,
                     width=float('inf')))
+        os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+        with open(OUTPUT_PATH, "w") as f:
+            logger.info(
+                f"Writing generated pipeline \n {yaml.dump(pipeline, default_flow_style=False, sort_keys=False)} \n to {OUTPUT_PATH}"
+            )
+            yaml.dump(pipeline, f, default_flow_style=False, sort_keys=False)
 
 
 if __name__ == "__main__":
