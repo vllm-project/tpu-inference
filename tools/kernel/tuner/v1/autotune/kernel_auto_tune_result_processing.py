@@ -21,9 +21,9 @@ from pathlib import Path
 from absl import app, flags
 
 kernel_auto_tune_mapping = {
-    'mla_kernel_tuner': '/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py',
+    'mla_kernel_tuner':
+    '/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py',
 }
-
 
 logger = logging.getLogger(__name__)
 

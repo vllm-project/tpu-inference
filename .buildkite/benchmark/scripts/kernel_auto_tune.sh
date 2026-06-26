@@ -22,7 +22,7 @@ declare -A kernel_auto_tune_mapping
 kernel_auto_tune_mapping["mla_kernel_tuner"]="/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py"
 
 # Path to the script you want to append
-KERNEL_TUNED_PARAMS_UPDATE_SCRIPT="/workspace/tpu_inference/tools/kernel/tuner/v1/autotune/update_tuned_params.py"
+KERNEL_TUNED_PARAMS_UPDATE_SCRIPT="/workspace/tpu_inference/tools/kernel/tuner/v1/autotune/update_tuned_params_template.py"
 
 get_tpu_from_device() {
     if [[ "$DEVICE" == *"6e"* ]]; then

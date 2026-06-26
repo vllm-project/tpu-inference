@@ -63,30 +63,43 @@ class BootstrapKernelTuners:
             spanner_database_id=_SPANNER_DATABASE_ID.value)
 
     def _build_trigger_kernel_tuner_pipeline(self,
-                                          kernel_tuner_name: str,
-                                          case_set_id: str,
-                                          tpu_version: str,
-                                          tpu_cores: int,
-                                          case_set_desc: str,
-                                          max_execution_minutes: int = 20,
-                                          job_priority: int = -10) -> dict:
+                                             kernel_tuner_name: str,
+                                             case_set_id: str,
+                                             tpu_version: str,
+                                             tpu_cores: int,
+                                             case_set_desc: str,
+                                             max_execution_minutes: int = 20,
+                                             job_priority: int = -10) -> dict:
 
         return {
-            "label": f"Tune Collected Cases For ({kernel_tuner_name}, {tpu_version}-{tpu_cores})",
-            "key": f"tune_collected_cases_{kernel_tuner_name}_{tpu_version}_{tpu_cores}",
+            "label":
+            f"Tune Collected Cases For ({kernel_tuner_name}, {tpu_version}-{tpu_cores})",
+            "key":
+            f"tune_collected_cases_{kernel_tuner_name}_{tpu_version}_{tpu_cores}",
             "trigger": "tpu-inference-kernel-tuning",
             "build": {
-                "branch": os.environ.get('BUILDKITE_BRANCH', 'patrickji.kernel_autotune_pipeline'),
+                "branch":
+                os.environ.get('BUILDKITE_BRANCH',
+                               'patrickji.kernel_autotune_pipeline'),
                 "env": {
-                    "KERNEL_TUNING_AUTOTUNE_MODE": True,
-                    "KERNEL_TUNING_KERNEL_TUNER_NAME": kernel_tuner_name,
-                    "KERNEL_TUNING_CASE_SET_ID": case_set_id,
-                    "KERNEL_TUNING_RUN_ID": '000',
-                    "KERNEL_TUNING_TPU_VERSION": tpu_version,
-                    "KERNEL_TUNING_TPU_CORES": str(tpu_cores),
-                    "KERNEL_TUNING_CASE_SET_DESC": case_set_desc,
-                    "KERNEL_TUNING_MAX_EXECUTION_MINUTES": str(max_execution_minutes),
-                    "KERNEL_TUNING_JOB_PRIORITY": str(job_priority),
+                    "KERNEL_TUNING_AUTOTUNE_MODE":
+                    True,
+                    "KERNEL_TUNING_KERNEL_TUNER_NAME":
+                    kernel_tuner_name,
+                    "KERNEL_TUNING_CASE_SET_ID":
+                    case_set_id,
+                    "KERNEL_TUNING_RUN_ID":
+                    '000',
+                    "KERNEL_TUNING_TPU_VERSION":
+                    tpu_version,
+                    "KERNEL_TUNING_TPU_CORES":
+                    str(tpu_cores),
+                    "KERNEL_TUNING_CASE_SET_DESC":
+                    case_set_desc,
+                    "KERNEL_TUNING_MAX_EXECUTION_MINUTES":
+                    str(max_execution_minutes),
+                    "KERNEL_TUNING_JOB_PRIORITY":
+                    str(job_priority),
                 }
             }
         }
@@ -108,8 +121,7 @@ class BootstrapKernelTuners:
             tpu = 'tpu6e' if 'tpu6e' in row['TPU'] else 'tpu7x'
             if (kernel_tuner_name, tpu) in generated_cases:
                 continue
-            tuning_group_keys.append(
-                f'{kernel_tuner_name}_{tpu}_tuning_group')
+            tuning_group_keys.append(f'{kernel_tuner_name}_{tpu}_tuning_group')
             generated_cases.add((kernel_tuner_name, tpu))
             supported_core_num = 1 if tpu == 'tpu6e' else 2
             pipeline['steps'].append(
@@ -122,9 +134,9 @@ class BootstrapKernelTuners:
                     case_set_desc=f'{kernel_tuner_name}_autotune'))
         print(
             yaml.dump(pipeline,
-                    sort_keys=False,
-                    default_flow_style=False,
-                    width=float('inf')))
+                      sort_keys=False,
+                      default_flow_style=False,
+                      width=float('inf')))
         os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
         with open(OUTPUT_PATH, "w") as f:
             logger.info(
