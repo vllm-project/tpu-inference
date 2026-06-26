@@ -68,7 +68,7 @@ steps:
   
    - label: "Commit support matrices if is nightly build or release tag specified"
      <<: *run-on-nightly-or-tag
-     if: build.branch == "main"
+     if: (build.env("NIGHTLY") == "1" && build.branch == "main") || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
      key: commit_support_matrices
      depends_on:
        - "v6_generate_matrices"
