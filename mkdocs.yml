@@ -55,20 +55,27 @@ theme:
     - toc.follow
 
 nav:
-  - Home: README.md
-  - Getting Started:
-    - TPU Setup: getting_started/tpu_setup.md
-    - Installation: getting_started/installation.md
-    - Quickstart: getting_started/quickstart.md
-    - 'Out-of-Tree Usage': getting_started/out-of-tree.md
-  - 'Recommended Models and Features': recommended_models_features.md
-  - Developer Guides:
-    - 'JAX Model Development': developer_guides/jax_model_development.md
-    - 'Torch Model Development': developer_guides/torchax_model_development.md
-  - 'Recipes (External)':
-    - 'v7x (Ironwood)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM
-    - 'v6e (Trillium)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM
-  - 'Profiling' : profiling.md
+  - 'Home': README.md
+  - 'Getting Started':
+    - 'TPU Setup': getting_started/tpu_setup.md
+    - 'Installation': getting_started/installation.md
+    - 'Serving model': getting_started/quickstart.md
+  - 'Features and Usage':
+    - 'Recommended Models': recommended_models.md
+    - 'Recommended Features': recommended_features.md
+    - 'Deploying model on GCE':
+      - 'v7x setup (Ironwood)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM
+      - 'v6e setup (Trillium)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM
+    - 'Code Examples':
+      - 'Multi Modal Inference': https://github.com/vllm-project/tpu-inference/blob/main/examples/multi_modal_inference.py
+      - 'Offline LoRA': https://github.com/vllm-project/tpu-inference/blob/main/examples/offline_lora_inference.py
+  - 'Developers Guides':
+    - 'Contributing to vLLM TPU': developers_guide/contributing.md
+    - 'Adding a New Model to CI': developers_guide/buildkite.md
+    - 'JAX Model Development': developers_guide/jax_model_development.md
+    - 'Torchax Model Development': developers_guide/torchax_model_development.md
+    - 'Profiling' : developers_guide/profiling.md
+
 plugins:
   - search
   - same-dir
@@ -95,6 +102,8 @@ markdown_extensions:
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      check_paths: true
   - pymdownx.snippets
   # For emoji and icons
   - pymdownx.emoji:
@@ -106,6 +115,9 @@ markdown_extensions:
   # For math rendering
   - mdx_math:
       enable_dollar_delimiter: true
+
+extra_css:
+  - mkdocs/stylesheets/extra.css
 
 extra_javascript:
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
