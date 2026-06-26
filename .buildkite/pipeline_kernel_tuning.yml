@@ -35,7 +35,7 @@ steps:
   # -----------------------------------------------------------------
   - label: "Bootstrap All Kernel Tuning Pipeline"
     key: bootstrap_all_kernel_tuning_pipeline
-    if: "${BOOTSTRAP_ALL_KERNEL_TUNING:-}" == "1"
+    if: '"${BOOTSTRAP_ALL_KERNEL_TUNING:-}" == "1"'
     agents:
       queue: cpu
     commands: |
@@ -55,7 +55,7 @@ steps:
   # -----------------------------------------------------------------
   - label: ":docker: Tuning Cases Generation and Pipeline Upload (${TPU_VERSION:-tpu6e})"
     key: generate_tuning_cases_and_yml
-    if: "${BOOTSTRAP_ALL_KERNEL_TUNING:-}" == ""
+    if: '"${BOOTSTRAP_ALL_KERNEL_TUNING:-}" == ""'
     depends_on: build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
