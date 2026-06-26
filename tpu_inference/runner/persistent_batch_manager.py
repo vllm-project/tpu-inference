@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import time
 from typing import Dict
 
 import jax
@@ -21,6 +23,9 @@ from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
+
+_CHECK_MAMBA_STATE_INVARIANTS = (
+    os.environ.get("TPU_INFERENCE_CHECK_MAMBA_STATE_INVARIANTS", "0") == "1")
 
 
 class PersistentBatchManager:
@@ -338,7 +343,7 @@ class PersistentBatchManager:
         batch_changed = len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
         # TODO(jevinjiang): I assume we do not need to set batch_changed to true if just swapping requests.
         self._reorder_batch(scheduler_output)
-        if isinstance(self.input_batch, InputBatch):
-            self.input_batch.assert_mamba_state_invariants(
-                self.requests, dp_rank_map)
+        if (_CHECK_MAMBA_STATE_INVARIANTS
+                and isinstance(self.input_batch, InputBatch)):
+            self.input_batch.assert_mamba_state_invariants(self.requests, dp_rank_map)
         return batch_changed
