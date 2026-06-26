@@ -54,6 +54,7 @@ steps:
         echo "🚨 Bootstrap script not found at $$generator_script"
         exit 1
       fi
+      python3 "$$generator_script" --auto_tune_id "$KERNEL_AUTOTUNE_ID"
       if ! py_output=$(python3 "$$generator_script" --auto_tune_id "$KERNEL_AUTOTUNE_ID" 2>&1); then
         echo "🚨 Failed to bootstrap all kernel tuning for autotune ${KERNEL_AUTOTUNE_ID}"
         exit 1
