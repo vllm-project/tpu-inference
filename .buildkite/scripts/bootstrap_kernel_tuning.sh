@@ -119,13 +119,13 @@ if [ -n "${BOOTSTRAP_KERNEL_AUTOTUNING:-}" ]; then
 elif [ -n "${BOOTSTRAP_ALL_KERNEL_TUNING:-}" ]; then
     # If BOOTSTRAP_ALL_KERNEL_TUNING is set
     echo "--- :pipeline: Uploading pipeline_kernel_tuner.yml for bootstrap all kernel tuning"
-    buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuner.yml
+    buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
 else
     # Start a single kernel tuning run for a specific kernel, tpu_version and tpu_cores
     upload_pipeline_build_once
     echo "--- :pipeline: Uploading pipeline_kernel_tuner.yml for kernel tuning"
     set_jax_envs "${TPU_VERSION}" "${TPU_CORES}"
-    buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuner.yml
+    buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
     set_jax_envs "unset" ""
 fi
 
