@@ -55,7 +55,7 @@ update_all_tuned_params_py() {
 
             # Steps 3, 4, and 5: Replace the placeholders
             sed -i "s|KERNEL_TUNER_NAME_PLACEHOLDER|$key|g; \
-                    s|CASE_SET_ID_PLACEHOLDER|$KERNEL_AUTOTUNE_ID|g; \
+                    s|CASE_SET_ID_PLACEHOLDER|$KERNEL_TUNING_AUTOTUNE_ID|g; \
                     s|TPU_PLACEHOLDER|$tpu|g" "$target_file"
 
             echo "🚀 Successfully updated $target_file"
@@ -68,12 +68,12 @@ update_all_tuned_params_py() {
 
 checkout_updated_tuned_params_py_branch() {
     if [[ "${KERNEL_AUTOTUNE_STAGE:-}" == "POST_KERNEL_AUTOTUNE_BM_RERUN" ]]; then
-        if [ -z "$KERNEL_AUTOTUNE_ID" ]; then
-            echo "Error: KERNEL_AUTOTUNE_ID is not set."
+        if [ -z "$KERNEL_TUNING_AUTOTUNE_ID" ]; then
+            echo "Error: KERNEL_TUNING_AUTOTUNE_ID is not set."
             exit 1
         fi
         # Construct the branch name which matches the one created by the kernel_auto_tune_result_processing.py
-        BRANCH_NAME="kernel_autotune.update_tuned_params_${KERNEL_AUTOTUNE_ID}"
+        BRANCH_NAME="kernel_autotune.update_tuned_params_${KERNEL_TUNING_AUTOTUNE_ID}"
         git fetch
         git checkout "${BRANCH_NAME}"
         COMMIT_MESSAGE=$(git log -1 --pretty=%B)

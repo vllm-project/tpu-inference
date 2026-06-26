@@ -109,12 +109,11 @@ if [ -n "${BOOTSTRAP_KERNEL_AUTOTUNING:-}" ]; then
     # This includes the steps for collecting kernel tuning cases, running kernel tuning, 
     # patching the tuned results, and evaluating the tuned results.
 
-    # export KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_$(date +%Y-%m-%d-%H-%M)
-    # export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-23-07-10"
-    export KERNEL_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-25-22-22"
-    echo "🚀 KERNEL_AUTOTUNE_ID set to ${KERNEL_AUTOTUNE_ID}"
-    buildkite-agent meta-data set "KERNEL_AUTOTUNE_ID" "${KERNEL_AUTOTUNE_ID}"
-    sed "s/KERNEL_AUTOTUNE_ID_PLACEHOLDER/${KERNEL_AUTOTUNE_ID}/g" \
+    # export KERNEL_TUNING_AUTOTUNE_ID=KERNEL_AUTOTUNE_$(date +%Y-%m-%d-%H-%M)
+    # export KERNEL_TUNING_AUTOTUNE_ID="KERNEL_AUTOTUNE_2026-06-23-07-10"
+    export KERNEL_TUNING_AUTOTUNE_ID="KERNEL_TUNING_AUTOTUNE_2026-06-25-22-22"
+    echo "🚀 KERNEL_TUNING_AUTOTUNE_ID set to ${KERNEL_TUNING_AUTOTUNE_ID}"
+    sed "s/KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER/${KERNEL_TUNING_AUTOTUNE_ID}/g" \
         .buildkite/pipeline_kernel_auto_tuning_template.yml \
         | buildkite-agent pipeline upload
 elif [ -n "${BOOTSTRAP_ALL_KERNEL_TUNING:-}" ]; then

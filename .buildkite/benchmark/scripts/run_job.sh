@@ -90,7 +90,7 @@ trap cleanup_artifact_log EXIT
 
 # Prepare environment variables for the Docker container.
 declare -a KERNEL_TUNING_ARGS=(
-  "-e" "KERNEL_AUTOTUNE_ID=${KERNEL_AUTOTUNE_ID:-}"
+  "-e" "KERNEL_TUNING_AUTOTUNE_ID=${KERNEL_TUNING_AUTOTUNE_ID:-}"
   "-e" "KERNEL_AUTOTUNE_STAGE=${KERNEL_AUTOTUNE_STAGE:-}"
 )
 
