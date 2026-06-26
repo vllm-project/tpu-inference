@@ -389,9 +389,16 @@ class TPUWorker(WorkerBase):
         self.stats_logger = None
         if self.vllm_config.kv_transfer_config is not None:
             kv_transfer_config = self.vllm_config.kv_transfer_config
-            if (kv_transfer_config.kv_connector == "TPUOffloadConnector"
-                    and kv_transfer_config.kv_connector_module_path
-                    == "tpu_inference.offload.tpu_offload_connector"):
+            is_offload_connector = (
+                (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+                 and kv_transfer_config.kv_connector_module_path
+                 == "tpu_inference.offload.tpu_offload_connector")
+                or
+                (kv_transfer_config.kv_connector == "RaidenOffloadConnector"
+                 and kv_transfer_config.kv_connector_module_path
+                 == "tpu_inference.offload.raiden_offload_connector")
+            )
+            if is_offload_connector:
 
                 # Start the background thread (logging every TPU_OFFLOAD_METRICS_LOG_INTERVAL seconds)
                 self.stats_logger = TPUKVCacheStatsLogger(
@@ -425,8 +432,16 @@ class TPUWorker(WorkerBase):
 
         if self.vllm_config.kv_transfer_config is not None:
             kv_transfer_config = self.vllm_config.kv_transfer_config
-            if kv_transfer_config.kv_connector == "TPUOffloadConnector" and \
-               kv_transfer_config.kv_connector_module_path == "tpu_inference.offload.tpu_offload_connector":
+            is_offload_connector = (
+                (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+                 and kv_transfer_config.kv_connector_module_path
+                 == "tpu_inference.offload.tpu_offload_connector")
+                or
+                (kv_transfer_config.kv_connector == "RaidenOffloadConnector"
+                 and kv_transfer_config.kv_connector_module_path
+                 == "tpu_inference.offload.raiden_offload_connector")
+            )
+            if is_offload_connector:
                 # If kv offloading is enabled, we need to account for the memory used by the KV transfer buffer.
                 staging_buffer_pages = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
 
