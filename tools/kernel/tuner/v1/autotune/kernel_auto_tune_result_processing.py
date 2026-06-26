@@ -476,6 +476,7 @@ class KernelAutoTuneResultProcessor:
         all_config_keys = sorted(set(pre_by_config) | set(post_by_config))
 
         rows = []
+        status_by_config = {}
         monitor_improved = False
         has_regression = False
         hard_blocker = False
@@ -506,6 +507,11 @@ class KernelAutoTuneResultProcessor:
                     f"(pre={pre['status']}, post={post['status']}).")
                 hard_blocker = True
                 continue
+
+            status_by_config[config_key] = {
+                'baseline_status': pre['status'],
+                'tuned_status': post['status'],
+            }
 
             for metric in all_metrics:
                 baseline = pre['metrics'][metric]
@@ -547,8 +553,6 @@ class KernelAutoTuneResultProcessor:
                     'metric': metric,
                     'baseline': baseline,
                     'tuned': tuned,
-                    'baseline_status': pre['status'],
-                    'tuned_status': post['status'],
                     'delta_pct': delta_pct,
                     'monitor': metric in monitor_metrics,
                     'verdict': verdict,
@@ -610,18 +614,27 @@ class KernelAutoTuneResultProcessor:
                 chunks.append(
                     '<table border="1" cellspacing="0" cellpadding="4">'
                     '<thead><tr>'
-                    '<th>Metric</th><th>Baseline Status</th><th>Tuned Status</th><th>Baseline</th><th>Tuned</th><th>Delta</th><th>Verdict</th>'
+                    '<th>Metric</th><th>Baseline</th><th>Tuned</th><th>Delta</th><th>Verdict</th>'
                     '</tr></thead><tbody>')
+                status = status_by_config.get(config_key, {
+                    'baseline_status': 'UNKNOWN',
+                    'tuned_status': 'UNKNOWN',
+                })
+                chunks.append('<tr>')
+                chunks.append('<td><b>RunStatus</b></td>')
+                chunks.append(
+                    f"<td>{html.escape(str(status['baseline_status']))}</td>")
+                chunks.append(
+                    f"<td>{html.escape(str(status['tuned_status']))}</td>")
+                chunks.append('<td>N/A</td>')
+                chunks.append('<td>N/A</td>')
+                chunks.append('</tr>')
                 for row in rows_by_config[config_key]:
                     metric_label = html.escape(row['metric'])
                     if row['monitor']:
                         metric_label = f'<b>{metric_label}</b>'
                     chunks.append('<tr>')
                     chunks.append(f'<td>{metric_label}</td>')
-                    chunks.append(
-                        f"<td>{html.escape(str(row['baseline_status']))}</td>")
-                    chunks.append(
-                        f"<td>{html.escape(str(row['tuned_status']))}</td>")
                     chunks.append(f"<td>{_fmt_float(row['baseline'])}</td>")
                     chunks.append(f"<td>{_fmt_float(row['tuned'])}</td>")
                     chunks.append(f"<td>{_fmt_pct(row['delta_pct'])}</td>")

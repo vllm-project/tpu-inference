@@ -115,9 +115,9 @@ steps:
   # ---------------------------------------------------------------------------
   - label: "Evaluate Tuning Results and Create PR"
     key: evaluate_and_create_pr
-    depends_on: 
+    # depends_on: 
       # - "evaluate_tuned_results"
-      - "build_docker"
+      # - "build_docker"
     agents:
       queue: tpu_v6e_queue
     env:
