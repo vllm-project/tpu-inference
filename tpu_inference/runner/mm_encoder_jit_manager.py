@@ -54,14 +54,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Callable
 
 import jax
+import jax.numpy as jnp
 import torch
 import torchax
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.ir import enable_torch_wrap
+from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import to_torch_dtype
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -194,6 +197,46 @@ class _TorchaxEncoderModelAdapter:
         return getattr(self._model, name)
 
 
+class JaxEncoderModelAdapter:
+    """Wrap a JAX/flax SupportsEncoderCudaGraph model for MMEncoderJITManager.
+    Mirrors ``_TorchaxEncoderModelAdapter`` but routes budget execution and
+    eager fallback directly through the JAX model.
+    """
+
+    def __init__(self, jax_model: Any):
+        self._model = jax_model
+
+    def run_budget_forward(self, padded_torch: dict[str, Any]) -> jax.Array:
+        jax_inputs = {}
+        for k, v in padded_torch.items():
+            if isinstance(v, torch.Tensor):
+                if v.dtype == torch.bfloat16:
+                    jax_inputs[k] = jnp.asarray(v.contiguous().view(
+                        torch.int16).numpy().view(jnp.bfloat16))
+                else:
+                    jax_inputs[k] = jnp.asarray(v.numpy())
+            else:
+                jax_inputs[k] = v
+        return self._model.encoder_cudagraph_forward(jax_inputs)
+
+    def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> jax.Array:
+        return self._model.encoder_eager_forward(mm_kwargs)
+
+    def postprocess_encoder_output(self,
+                                   output: jax.Array,
+                                   indices: list[int],
+                                   per_item_out_tokens: list[int],
+                                   dest,
+                                   clone: bool = False,
+                                   batch_mm_kwargs=None) -> None:
+        self._model.postprocess_encoder_output(output, indices,
+                                               per_item_out_tokens, dest,
+                                               clone, batch_mm_kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._model, name)
+
+
 class MMEncoderJITManager(EncoderCudaGraphManager):
     """Per-budget XLA-cache manager for the vision encoder forward."""
 
@@ -238,10 +281,11 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         # Reuse upstream budget derivation + validation. Capture inputs are
         # built on CPU; the JIT path moves them to TPU via t2j, so we never
         # run the encoder on a CUDA device.
+        torch_dtype = to_torch_dtype(vllm_config.model_config.dtype)
         super().__init__(
             vllm_config=vllm_config,
             device=torch.device("cpu"),
-            dtype=vllm_config.model_config.dtype,
+            dtype=torch_dtype,
             model=adapter,
         )
 
@@ -249,7 +293,7 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         # host-side padding. The values inside templates are dummy; only
         # tensor.shape / tensor.dtype matter (to us and to XLA's cache key).
         capture_device = torch.device("cpu")
-        capture_dtype = vllm_config.model_config.dtype
+        capture_dtype = torch_dtype
         self.budget_templates: dict[int, dict[str, torch.Tensor]] = {}
         for budget in self.token_budgets:
             capture = self.model.prepare_encoder_cudagraph_capture_inputs(
@@ -385,3 +429,30 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         expects from ``runner.embed_multimodal_fn(...)``.
         """
         return self._execute_local(mm_kwargs)
+
+    def precompile_vision_encoder(self, run_compilation: Callable) -> None:
+        for budget in self.token_budgets:
+            run_compilation(
+                "mm_encoder_jit",
+                self._capture_budget_graph,
+                budget,
+                budget=budget,
+            )
+
+
+def maybe_create_mm_encoder_jit_manager(
+    vllm_config: "VllmConfig",
+    vllm_model: Any,
+    vllm_runner: "torch.nn.Module | None",
+    params_and_buffers: Any,
+) -> "MMEncoderJITManager | None":
+    if not vllm_config.compilation_config.cudagraph_mm_encoder:
+        return None
+    if not supports_encoder_cudagraph(vllm_model):
+        return None
+    return MMEncoderJITManager(
+        vllm_config=vllm_config,
+        vllm_runner=vllm_runner,
+        vllm_model=vllm_model,
+        params_and_buffers=params_and_buffers,
+    )
