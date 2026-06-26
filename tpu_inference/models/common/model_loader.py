@@ -482,6 +482,8 @@ def get_flax_model(
                                         modality=modality,
                                         **kwargs)
     else:
+        # TODO(kwang3939): implement SupportsEncoderCudaGraph for Qwen2.5-VL and enforce
+        # all JAX multimodal models to go through MMEncoderJITManager.
         embed_multimodal_fn = run_embed_multimodal
 
     lora_manager, model = None, None
