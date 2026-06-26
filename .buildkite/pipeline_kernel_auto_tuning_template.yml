@@ -49,17 +49,17 @@ steps:
   # ---------------------------------------------------------------------------
   # Stage 2: Run kernel tuning
   # ---------------------------------------------------------------------------
-  - label: "Tune Collected Cases"
-    key: tune_collected_cases
-    # depends_on: "collect_kernel_cases"
-    trigger: "tpu-inference-kernel-tuning"
-    build:
-      branch: "patrickji.kernel_autotune_pipeline"
-      env:
-        BOOTSTRAP_ALL_KERNEL_TUNING: "1"
-        KERNEL_TUNING_KERNEL_AUTOTUNE_ID: "KERNEL_AUTOTUNE_ID_PLACEHOLDER"
-        KERNEL_TUNING_KERNEL_AUTOTUNE_STAGE: "BOOTSTRAP_ALL_KERNEL_TUNING"
-        KERNEL_TUNING_EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=BOOTSTRAP_KERNEL_TUNING"
+  # - label: "Tune Collected Cases"
+  #   key: tune_collected_cases
+  #   # depends_on: "collect_kernel_cases"
+  #   trigger: "tpu-inference-kernel-tuning"
+  #   build:
+  #     branch: "patrickji.kernel_autotune_pipeline"
+  #     env:
+  #       BOOTSTRAP_ALL_KERNEL_TUNING: "1"
+  #       KERNEL_TUNING_KERNEL_AUTOTUNE_ID: "KERNEL_AUTOTUNE_ID_PLACEHOLDER"
+  #       KERNEL_TUNING_KERNEL_AUTOTUNE_STAGE: "BOOTSTRAP_ALL_KERNEL_TUNING"
+  #       KERNEL_TUNING_EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=BOOTSTRAP_KERNEL_TUNING"
 
   # ---------------------------------------------------------------------------
   # Stage 3: Patch tuned results and create evaluation branch
@@ -80,8 +80,7 @@ steps:
     # priority: 200
     command: |
       echo "🚀 Patching kernel autotune results and creating evaluation branch."
-      .buildkite/scripts/patch_kernel_autotune_result.sh bash -c '
-        set -e
+      .buildkite/scripts/run_in_docker.sh bash -c '
         branch_name="kernel_autotune.update_tuned_params_${KERNEL_AUTOTUNE_ID}"
         repo_url="github.com/vllm-project/tpu-inference.git"
         authenticated_repo_url="https://x-access-token:${GITHUB_PAT}@${repo_url}"
@@ -93,7 +92,7 @@ steps:
         git checkout -b ${branch_name}
         python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --auto_tune_id=${KERNEL_AUTOTUNE_ID} --process_step=PATCH_KERNEL_AUTOTUNE_RESULT
         git add -u
-        git commit -m "Update tuned params for auto tune ID: {self.auto_tune_id}"
+        git commit -m "Update tuned params for auto tune ID: ${KERNEL_AUTOTUNE_ID}"
         git push origin ${branch_name} --force
       '
   
