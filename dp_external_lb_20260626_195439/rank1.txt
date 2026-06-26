@@ -1,0 +1,2 @@
+INFO 06-26 19:55:05 [__init__.py:59] TPU info: node_name=jiries-v7x-8 | tpu_type=tpu7x-8 | worker_id=0 | num_chips=8 | num_cores_per_chip=2
+WARNING 06-26 19:55:06 [tpu_platform.py:408] Pin memory is not supported on TPU.

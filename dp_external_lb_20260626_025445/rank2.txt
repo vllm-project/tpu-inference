@@ -1,0 +1,39 @@
+INFO 06-26 02:55:31 [__init__.py:59] TPU info: node_name=jiries-v7x-8 | tpu_type=tpu7x-8 | worker_id=0 | num_chips=8 | num_cores_per_chip=2
+WARNING 06-26 02:55:32 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 06-26 02:55:37 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 06-26 02:55:37 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+INFO 06-26 02:55:38 [attention_interface.py:52] Using experimental batched RPA kernel
+WARNING 06-26 02:55:39 [interface.py:358] Failed to import from vllm._C: ImportError('libcuda.so.1: cannot open shared object file: No such file or directory')
+WARNING 06-26 02:55:39 [interface.py:358] Failed to import from vllm._C: ImportError('libcuda.so.1: cannot open shared object file: No such file or directory')
+WARNING 06-26 02:55:39 [interface.py:358] Failed to import from vllm._C: ImportError('libcuda.so.1: cannot open shared object file: No such file or directory')
+WARNING 06-26 02:55:39 [interface.py:358] Failed to import from vllm._C: ImportError('libcuda.so.1: cannot open shared object file: No such file or directory')
+INFO 06-26 02:55:39 [fused_moe_gmm.py:56] fused_moe_gmm SparseCore kernels: gather=v2 gather_reduce=v2
+INFO 06-26 02:55:39 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 06-26 02:55:39 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 06-26 02:55:39 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 06-26 02:55:39 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 06-26 02:55:39 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+(APIServer pid=909848) INFO 06-26 02:55:39 [api_utils.py:339] 
+(APIServer pid=909848) INFO 06-26 02:55:39 [api_utils.py:339]        █     █     █▄   ▄█
+(APIServer pid=909848) INFO 06-26 02:55:39 [api_utils.py:339]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.23.1rc1.dev320+gf59db6373
+(APIServer pid=909848) INFO 06-26 02:55:39 [api_utils.py:339]   █▄█▀ █     █     █     █  model   google/gemma-4-26B-A4B-it
+(APIServer pid=909848) INFO 06-26 02:55:39 [api_utils.py:339]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=909848) INFO 06-26 02:55:39 [api_utils.py:339] 
+(APIServer pid=909848) INFO 06-26 02:55:39 [api_utils.py:273] non-default args: {'model_tag': 'google/gemma-4-26B-A4B-it', 'port': 8102, 'model': 'google/gemma-4-26B-A4B-it', 'max_model_len': 1524, 'tensor_parallel_size': 2, 'enable_expert_parallel': True, 'block_size': 256, 'gpu_memory_utilization': 0.9, 'kv_cache_dtype': 'fp8', 'enable_prefix_caching': False, 'limit_mm_per_prompt': {'image': 0, 'video': 0, 'audio': 0}, 'max_num_batched_tokens': 16384, 'max_num_seqs': 1024, 'async_scheduling': True, 'additional_config': {'quantization': {'qwix': {'rules': [{'module_path': '.*', 'weight_qtype': 'float8_e4m3fn', 'act_qtype': 'float8_e4m3fn'}]}}, 'sharding': {'sharding_strategy': {'expert_parallelism': 2}}}}
+(APIServer pid=909848) INFO 06-26 02:55:40 [model.py:598] Resolved architecture: Gemma4ForConditionalGeneration
+(APIServer pid=909848) INFO 06-26 02:55:40 [model.py:1725] Using max model len 1524
+(APIServer pid=909848) INFO 06-26 02:55:40 [cache.py:280] Using fp8 data type to store kv cache. It reduces the GPU memory footprint and boosts the performance. Meanwhile, it may cause accuracy drop without a proper scaling factor
+(APIServer pid=909848) INFO 06-26 02:55:40 [scheduler.py:252] Chunked prefill is enabled with max_num_batched_tokens=16384.
+(APIServer pid=909848) INFO 06-26 02:55:40 [config.py:99] Gemma4 model has heterogeneous head dimensions (head_dim=256, global_head_dim=512). FA4 not available, forcing TRITON_ATTN backend.
+(APIServer pid=909848) INFO 06-26 02:55:40 [vllm.py:1006] Asynchronous scheduling is enabled.
+(APIServer pid=909848) WARNING 06-26 02:55:40 [vllm.py:1110] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(APIServer pid=909848) INFO 06-26 02:55:40 [kernel.py:276] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(APIServer pid=909848) INFO 06-26 02:55:40 [tpu_platform.py:233] Initialized sharding configuration: ShardingConfigManager(total_devices=4, sharding_strategy=ShardingStrategy(tensor_parallelism=2, expert_parallelism=2, sequence_parallelism=1, data_parallelism=1, attention_data_parallelism=1, attention_data_expert_parallelism=1, decode_context_parallelism=1), mm_encoder_tp_mode=weights, device_indexes=None)
+(APIServer pid=909848) INFO 06-26 02:55:40 [tpu_platform.py:320] Force using UniProcExecutor for JAX on single host without pipeline parallelism.
+(APIServer pid=909848) WARNING 06-26 02:55:40 [tpu_platform.py:352] TPU does not support running Multimodal models without setting `--disable_chunked_mm_input`. If you are serving a multimodal model, please explicitly add the `--disable-chunked-mm-input` flag to your server command to avoid execution failures.
+(APIServer pid=909848) INFO 06-26 02:55:40 [compilation.py:310] Enabled custom fusions: norm_quant, act_quant
+(APIServer pid=909848) INFO 06-26 02:55:42 [registry.py:134] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+INFO 06-26 02:55:46 [__init__.py:59] TPU info: node_name=jiries-v7x-8 | tpu_type=tpu7x-8 | worker_id=0 | num_chips=8 | num_cores_per_chip=2
+WARNING 06-26 02:55:47 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 06-26 02:55:51 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 06-26 02:55:51 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.

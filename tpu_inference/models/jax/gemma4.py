@@ -220,6 +220,17 @@ class Gemma4MoE(JaxMoE):
 
         moe_backend = select_moe_backend(use_ep)
 
+        # High-signal single-execution log of the layout decision flow
+        logger.info_once(
+            f"[Gemma4MoE Init] Mesh shape: {mesh.shape} | "
+            f"Initial expert_axis_name: {getattr(ShardingAxisName, 'ATTN_DATA_EXPERT', None)} | "
+            f"Resolved expert_axis_name: {expert_axis_name} | "
+            f"potential_ep: {potential_ep} | "
+            f"enable_expert_parallel: {getattr(vllm_config.parallel_config, 'enable_expert_parallel', None) if (vllm_config is not None and getattr(vllm_config, 'parallel_config', None) is not None) else 'N/A'} | "
+            f"Final use_ep: {use_ep} | "
+            f"num_expert_parallelism: {num_expert_parallelism} | "
+            f"Selected moe_backend: {moe_backend}")
+
         # FusedMoE experts with custom Gemma4 routing
         JaxMoE.__init__(
             self,
