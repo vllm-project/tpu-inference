@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, should_ignore_layer)
 
+import tpu_inference.envs as envs
 from tpu_inference.layers.common.quant_methods import COMPRESSED_TENSORS
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
     VllmCompressedTensorsMoEMethod
@@ -126,17 +127,44 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional[QuantizeMethodBase]:
-        if should_ignore_layer(prefix,
-                               ignore=self.ignore,
-                               fused_mapping=self.packed_modules_mapping):
+        is_ignored = should_ignore_layer(
+            prefix,
+            ignore=self.ignore,
+            fused_mapping=self.packed_modules_mapping)
+        force_quantization = any(t in prefix
+                                 for t in envs.QUANTIZE_ON_LOAD_PREFIXES)
+        if force_quantization:
+            logger.info_once(f"Force on-load quantization for layer: {prefix}")
+
+        if is_ignored and not force_quantization:
             return VllmUnquantizedConfig.get_quant_method(self, layer, prefix)
 
         match layer:
             case LinearBase():
-                scheme = self.get_scheme(layer=layer, layer_name=prefix)
-                if scheme is None:
-                    return VllmUnquantizedConfig.get_quant_method(
-                        self, layer, prefix)
+                if force_quantization:
+                    from compressed_tensors.quantization import (
+                        QuantizationArgs, QuantizationStrategy)
+
+                    # TODO (jacobplatin): we shouldn't hardcode w8a8-fp8 here
+                    weight_quant = QuantizationArgs(
+                        num_bits=8,
+                        type="float",
+                        # This is a dummy value since we'll requantize anywaays
+                        strategy=QuantizationStrategy.TENSOR,
+                        dynamic=False,
+                        symmetric=True)
+                    scheme = VllmCompressedTensorsW8A8Fp8(
+                        weight_quant=weight_quant,
+                        is_static_input_scheme=False,
+                        linear_config=self.get_linear_config(layer),
+                        quantize_on_load=True,
+                    )
+                else:
+                    scheme = self.get_scheme(layer=layer, layer_name=prefix)
+                    if scheme is None:
+                        return VllmUnquantizedConfig.get_quant_method(
+                            self, layer, prefix)
+                print(f"Using scheme: {scheme}")
                 layer.scheme = scheme
                 return CompressedTensorsLinearMethod(self)
             case RoutedExperts():
