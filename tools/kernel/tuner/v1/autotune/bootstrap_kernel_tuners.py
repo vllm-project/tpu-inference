@@ -78,12 +78,10 @@ class BootstrapKernelTuners:
             "build": {
                 "branch": os.environ.get('BUILDKITE_BRANCH', 'patrickji.kernel_autotune_pipeline'),
                 "env": {
-                    # "KERNEL_TUNING_AUTOTUNE_ID": self.auto_tune_id,
                     "KERNEL_TUNING_AUTOTUNE_MODE": True,
-                    # "KERNEL_TUNING_KERNEL_AUTOTUNE_STAGE": "KERNEL_TUNING",
-                    # "KERNEL_TUNING_EXTRA_ENVS": f"KERNEL_AUTOTUNE_ID={self.auto_tune_id},KERNEL_AUTOTUNE_STAGE=KERNEL_TUNING",
                     "KERNEL_TUNING_KERNEL_TUNER_NAME": kernel_tuner_name,
                     "KERNEL_TUNING_CASE_SET_ID": case_set_id,
+                    "KERNEL_TUNING_RUN_ID": '000',
                     "KERNEL_TUNING_TPU_VERSION": tpu_version,
                     "KERNEL_TUNING_TPU_CORES": str(tpu_cores),
                     "KERNEL_TUNING_CASE_SET_DESC": case_set_desc,
