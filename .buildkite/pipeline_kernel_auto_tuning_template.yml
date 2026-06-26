@@ -66,22 +66,22 @@ steps:
   # ---------------------------------------------------------------------------
   - label: "Patch Kernel Tuning Result"
     key: patch_kernel_tuning_result
-    depends_on: "tune_collected_cases"
+    depends_on:
+      # - "tune_collected_cases"
+      - "build_docker"
     agents:
       queue: tpu_v6e_queue
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: tpu6e
-      KERNEL_AUTOTUNE_ID: "KERNEL_AUTOTUNE_ID_PLACEHOLDER"
-      KERNEL_AUTOTUNE_STAGE: "PATCH_KERNEL_AUTOTUNE_RESULT"
-      EXTRA_ENVS: "KERNEL_AUTOTUNE_ID=KERNEL_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=PATCH_KERNEL_AUTOTUNE_RESULT"
+      KERNEL_TUNING_KERNEL_AUTOTUNE_ID: "KERNEL_AUTOTUNE_ID_PLACEHOLDER"
     secrets: 
       - GITHUB_PAT 
     # priority: 200
     command: |
       echo "🚀 Patching kernel autotune results and creating evaluation branch."
       .buildkite/scripts/run_in_docker.sh bash -c '
-        branch_name="kernel_autotune.update_tuned_params_${KERNEL_AUTOTUNE_ID}"
+        branch_name="kernel_autotune.update_tuned_params_${KERNEL_TUNING_KERNEL_AUTOTUNE_ID}"
         repo_url="github.com/vllm-project/tpu-inference.git"
         authenticated_repo_url="https://x-access-token:${GITHUB_PAT}@${repo_url}"
         pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
@@ -90,9 +90,9 @@ steps:
         git config user.name "Buildkite Bot"
         git config user.email "buildkite-bot@users.noreply.github.com"
         git checkout -b ${branch_name}
-        python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --auto_tune_id=${KERNEL_AUTOTUNE_ID} --process_step=PATCH_KERNEL_AUTOTUNE_RESULT
+        python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --auto_tune_id=${KERNEL_TUNING_KERNEL_AUTOTUNE_ID} --process_step=PATCH_KERNEL_AUTOTUNE_RESULT
         git add -u
-        git commit -m "Update tuned params for auto tune ID: ${KERNEL_AUTOTUNE_ID}"
+        git commit -m "Update tuned params for auto tune ID: ${KERNEL_TUNING_KERNEL_AUTOTUNE_ID}"
         git push origin ${branch_name} --force
       '
   

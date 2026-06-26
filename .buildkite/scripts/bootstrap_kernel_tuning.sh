@@ -104,6 +104,7 @@ TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-}"
 TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
 
 if [ -n "${BOOTSTRAP_KERNEL_AUTOTUNING:-}" ]; then
+    upload_pipeline_build_once
     # If BOOTSTRAP_KERNEL_AUTOTUNING is set, we are in the kernel autotuning pipeline.
     # This includes the steps for collecting kernel tuning cases, running kernel tuning, 
     # patching the tuned results, and evaluating the tuned results.
