@@ -848,13 +848,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Cache a zero scalar JAX array to avoid eager allocation overhead during continue_decode cycles.
         self.zero_array = jnp.array(0, dtype=jnp.int32)
 
-    def add_lora(self, lora_request: Any) -> bool:
-        import torch
-        from torch.utils._mode_utils import no_dispatch
-
-        with no_dispatch(), torch._C.DisableTorchFunction():
-            return super().add_lora(lora_request)
-
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
             model = get_model(
