@@ -41,6 +41,15 @@ steps:
     commands: |
       SCRIPT_DIR="$(cd "$(dirname "$${BASH_SOURCE[0]}")" && pwd)"
       generator_script="$${SCRIPT_DIR}/../tools/kernel/tuner/v1/autotune/bootstrap_kernel_tuners.py"
+      echo "Debug: pwd=$(pwd)"
+      echo "Debug: BUILDKITE_BUILD_CHECKOUT_PATH=$${BUILDKITE_BUILD_CHECKOUT_PATH:-<unset>}"
+      echo "Debug: BASH_SOURCE[0]=$${BASH_SOURCE[0]:-<unset>}"
+      echo "Debug: SCRIPT_DIR=$${SCRIPT_DIR}"
+      echo "Debug: generator_script=$${generator_script}"
+      echo "Debug: ls -la $${SCRIPT_DIR}"
+      ls -la "$${SCRIPT_DIR}" || true
+      echo "Debug: ls -la ./tools/kernel/tuner/v1/autotune"
+      ls -la ./tools/kernel/tuner/v1/autotune || true
       if [[ ! -f "$generator_script" ]]; then
         echo "🚨 Bootstrap script not found at $generator_script"
         exit 1
