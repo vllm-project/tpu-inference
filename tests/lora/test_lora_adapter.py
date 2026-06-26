@@ -13,11 +13,15 @@
 # limitations under the License.
 
 import gc
+import json
 import os
+import tempfile
 import time
 
 import pytest
+import torch
 import vllm
+from safetensors.torch import save_file
 from vllm.lora.request import LoRARequest
 
 # -------------------------------------------------------------------------
@@ -57,7 +61,7 @@ def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
         enable_lora=True,
         max_loras=num_loras,
         async_scheduling=0,
-        max_lora_rank=32,
+        max_lora_rank=128,
     )
 
 
@@ -160,6 +164,71 @@ def test_dynamic_lora_lru_eviction(tp):
     llm.llm_engine.engine_core.shutdown()
     del llm
     gc.collect()
+
+
+@skip_multihost
+@pytest.mark.parametrize("tp", TP)
+def test_dynamic_lora_with_bundled_base_weights(tp):
+    """
+    Ensures that adapters with bundled base weights (using custom prefixes) 
+    do not crash the server during loading due to exact-match allow-list failures.
+    """
+    llm = setup_vllm(1, tp)
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # 1. Create a minimal dummy adapter config
+            # We target "q_proj" with rank 8 so the engine expects a specific shape
+            config = {
+                "r": 8,
+                "lora_alpha": 16,
+                "target_modules": ["q_proj"],
+                "peft_type": "LORA",
+            }
+            with open(os.path.join(tmp_dir, "adapter_config.json"), "w") as f:
+                json.dump(config, f)
+
+            # 2. Create a dummy safetensors file
+            # Qwen2.5-3B-Instruct q_proj dimensions:
+            # In_features: 2048, Out_features: 2048
+            # LoRA A shape: (r, in_features) -> (8, 2048)
+            # LoRA B shape: (out_features, r) -> (2048, 8)
+            tensors = {
+                # THE CURE: A valid LoRA weight so the adapter isn't totally empty.
+                # (Sized exactly for Qwen2.5-3B so PyTorch doesn't throw a shape mismatch)
+                "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight":
+                torch.zeros((8, 2048)),
+                "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight":
+                torch.zeros((2048, 8)),
+
+                # THE POISON: This exact prefix crashes unpatched vLLM.
+                # Our patch correctly categorizes it as a base weight and skips it.
+                "base_model.model.lm_head.weight":
+                torch.zeros((1, 1))
+            }
+
+            # Save the dummy adapter locally
+            safetensors_path = os.path.join(tmp_dir,
+                                            "adapter_model.safetensors")
+            save_file(tensors, safetensors_path)
+
+            # 3. Attempt to load the poisoned adapter
+            lora_id = 1
+            req = LoRARequest(f"lora_adapter_{lora_id}", lora_id, tmp_dir)
+
+            # Without our patch, this will throw "ValueError: unsupported LoRA weight"
+            # on the `lm_head.weight` tensor.
+            # With our patch, it skips the base weight safely, loads the valid q_proj
+            # LoRA weights, and succeeds!
+            success = llm.llm_engine.add_lora(req)
+
+            assert success is True
+            assert lora_id in llm.llm_engine.list_loras()
+
+    finally:
+        llm.llm_engine.engine_core.shutdown()
+        del llm
+        gc.collect()
 
 
 @skip_multihost
