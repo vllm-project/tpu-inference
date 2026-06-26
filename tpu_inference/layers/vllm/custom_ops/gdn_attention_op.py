@@ -59,7 +59,15 @@ def gdn_attention_core_tpu(
        in the cache.
     """
     fc = get_forward_context()
-    attn_metadata = fc.attn_metadata[layer_name]
+    # attn_metadata = fc.attn_metadata[layer_name]
+    key = list(fc.attn_metadata.keys())[0]
+    first_attn_metadata = fc.attn_metadata[key]
+
+    padded_num_reqs = first_attn_metadata.padded_num_reqs
+    request_distribution = first_attn_metadata.request_distribution
+    query_start_loc = first_attn_metadata.query_start_loc
+    seq_lens = first_attn_metadata.seq_lens
+    state_indices = first_attn_metadata.mamba_state_indices
 
     layer_module = fc.no_compile_layers[layer_name]
     vllm_context = get_vllm_model_wrapper_context()
@@ -114,9 +122,8 @@ def gdn_attention_core_tpu(
     #     requests into lower-index slots after earlier ones finish), the
     #     slot id moves with the request so the kernel still reads/writes
     #     the slot that holds this request's real state.
-    state_indices = attn_metadata.mamba_state_indices.astype(jnp.int32)
-
-    padded_num_reqs_per_dp = attn_metadata.padded_num_reqs // dp_size
+    state_indices = state_indices.astype(jnp.int32)
+    padded_num_reqs_per_dp = padded_num_reqs // dp_size
 
     # Slice the state indices to the padded_num_reqs, which is the actual number
     # of requests padded to the bucket.
@@ -124,9 +131,9 @@ def gdn_attention_core_tpu(
                                                    padded_num_reqs_per_dp,
                                                    dp_size)
     query_start_loc_sliced = truncate_sharded_tensor(
-        attn_metadata.query_start_loc, padded_num_reqs_per_dp + 1, dp_size)
-    seq_lens_sliced = truncate_sharded_tensor(attn_metadata.seq_lens,
-                                              padded_num_reqs_per_dp, dp_size)
+        query_start_loc, padded_num_reqs_per_dp + 1, dp_size)
+    seq_lens_sliced = truncate_sharded_tensor(seq_lens, padded_num_reqs_per_dp,
+                                              dp_size)
 
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
@@ -141,7 +148,7 @@ def gdn_attention_core_tpu(
          j_dt_bias,
          state_indices_sliced,
          query_start_loc_sliced,
-         attn_metadata.request_distribution,
+         request_distribution,
          seq_lens_sliced,
          n_kq,
          n_v,
