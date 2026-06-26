@@ -39,8 +39,13 @@ steps:
     agents:
       queue: cpu
     commands: |
-      python3 ./tools/kernel/tuner/v1/autotune/bootstrap_kernel_tuners.py --auto_tune_id "$KERNEL_AUTOTUNE_ID"
-      if ! py_output=$(python3 ./tools/kernel/tuner/v1/autotune/bootstrap_kernel_tuners.py --auto_tune_id "$KERNEL_AUTOTUNE_ID" 2>&1); then
+      SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+      local generator_script="${SCRIPT_DIR}/../tools/kernel/tuner/v1/autotune/bootstrap_kernel_tuners.py"
+      if [[ ! -f "$generator_script" ]]; then
+        echo "🚨 Bootstrap script not found at $generator_script"
+        exit 1
+      fi
+      if ! py_output=$(python3 "$generator_script" --auto_tune_id "$KERNEL_AUTOTUNE_ID" 2>&1); then
         echo "🚨 Failed to bootstrap all kernel tuning for autotune ${KERNEL_AUTOTUNE_ID}"
         exit 1
       fi
