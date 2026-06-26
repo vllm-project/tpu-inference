@@ -835,7 +835,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         return config
 
     def get_max_frames_per_video(self) -> int:
-        return 1  # images only
+        raise NotImplementedError("Video not yet supported.")
 
     def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
         if "pixel_values_videos" in mm_kwargs:
