@@ -599,6 +599,100 @@ class TestTPUJaxRunner:
         assert req_mock3.output_token_ids == [5, 6, 301, 302, 303, 304, 305]
 
 
+    def test_mesh_devices_sorting(self):
+        class MockDevice:
+
+            def __init__(self, coords, core_on_chip):
+                self.coords = coords
+                self.core_on_chip = core_on_chip
+                self.device_kind = "unknown"
+                self.platform = "tpu"
+
+            def __repr__(self):
+                return (f"MockDevice(coords={self.coords}, "
+                        f"core_on_chip={self.core_on_chip})")
+
+        device_0 = MockDevice((1, 0, 0), 0)
+        device_1 = MockDevice((0, 0, 1), 0)
+        device_2 = MockDevice((0, 0, 0), 1)
+        device_3 = MockDevice((0, 0, 0), 0)
+        device_4 = MockDevice((1, 0, 0), 1)
+        device_5 = MockDevice((0, 0, 1), 1)
+        device_6 = MockDevice((1, 1, 0), 0)
+        device_7 = MockDevice((1, 1, 0), 1)
+
+        unordered_devices = [
+            device_0, device_1, device_2, device_3, device_4, device_5,
+            device_6, device_7
+        ]
+        expected_sorted_devices = [
+            device_3, device_2, device_0, device_4, device_6, device_7,
+            device_1, device_5
+        ]
+
+        model_config = ModelConfig(tokenizer_mode="auto",
+                                   trust_remote_code=False,
+                                   seed=0,
+                                   dtype='bfloat16')
+        cache_config = CacheConfig(
+            block_size=16,
+            gpu_memory_utilization=0.9,
+            cache_dtype="auto",
+        )
+        scheduler_config = SchedulerConfig(max_num_seqs=16,
+                                           max_model_len=1024,
+                                           is_encoder_decoder=False)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=1,
+            tensor_parallel_size=1,
+        )
+        speculative_config = SpeculativeConfig(
+            model='ngram',
+            num_speculative_tokens=5,
+            prompt_lookup_max=4,
+        )
+        vllm_config = VllmConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            scheduler_config=scheduler_config,
+            parallel_config=parallel_config,
+            speculative_config=speculative_config,
+            observability_config={},
+            additional_config={},
+        )
+
+        mock_sharding_config = MagicMock()
+        mock_sharding_config.model_dp_size = 8
+        mock_sharding_config.total_dp_size = 8
+        mock_sharding_config.attn_dp_size = 1
+        mock_sharding_config.attn_dp_expert_size = 1
+        mock_sharding_config.expert_size = 1
+        mock_sharding_config.tp_size = 1
+        mock_sharding_config.decode_cp_size = 1
+        vllm_config.sharding_config = mock_sharding_config
+        mesh_shape = (8, 1, 1, 1, 1, 1)
+
+        # Case A: envs.NEW_MODEL_DESIGN = True and envs.TPU_MESH_SORT_BY_COORDS = True
+        with patch('tpu_inference.runner.tpu_runner.envs.NEW_MODEL_DESIGN', True), \
+             patch('tpu_inference.runner.tpu_runner.envs.TPU_MESH_SORT_BY_COORDS', True):
+            runner_a = TPUModelRunner(vllm_config, devices=unordered_devices)
+            assert runner_a.mesh.devices.shape == mesh_shape
+            flat_results_a = runner_a.mesh.devices.flatten().tolist()
+            assert flat_results_a == expected_sorted_devices
+
+        # Case B: envs.NEW_MODEL_DESIGN = True and envs.TPU_MESH_SORT_BY_COORDS = False
+        # Assume create_device_mesh returns a dummy array
+        dummy_mesh_array = np.array(unordered_devices).reshape(mesh_shape)
+
+        with patch('tpu_inference.runner.tpu_runner.envs.NEW_MODEL_DESIGN', True), \
+             patch('tpu_inference.runner.tpu_runner.envs.TPU_MESH_SORT_BY_COORDS', False), \
+             patch('tpu_inference.runner.tpu_runner.mesh_utils.create_device_mesh', return_value=dummy_mesh_array):
+            runner_b = TPUModelRunner(vllm_config, devices=unordered_devices)
+            assert runner_b.mesh.devices.shape == mesh_shape
+            flat_results_b = runner_b.mesh.devices.flatten().tolist()
+            assert flat_results_b == unordered_devices
+
+
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:
 
     def setup_method(self):

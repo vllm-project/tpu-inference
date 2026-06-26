@@ -612,6 +612,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             sharding_config.decode_cp_size,
         )
 
+        if envs.TPU_MESH_SORT_BY_COORDS:
+            sorted_devices = sorted(
+                self.devices, key=lambda x: (x.coords[::-1], x.core_on_chip)
+            )
+            return np.array(sorted_devices).reshape(mesh_shape)
+
         # Attempt to create a physically optimized mesh. Fall back to a simple
         # logical reshape for non-power-of-two device counts (e.g., DP=6) to
         # bypass strict physical topology constraints.
