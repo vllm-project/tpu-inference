@@ -123,11 +123,11 @@ steps:
     env:
       USE_PREBUILT_IMAGE: "1"
       KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
-      KERNEL_AUTOTUNE_STAGE: "EVALUATE_AND_CREATE_PR"
+      KERNEL_TUNING_AUTOTUNE_STAGE: "EVALUATE_AND_CREATE_PR"
       EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=EVALUATE_AND_CREATE_PR"
-      GCP_PROJECT_ID: "cloud-tpu-inference-test"
-      SPANNER_INSTANCE_ID: "vllm-bm-inst"
-      SPANNER_DATABASE_ID: "vllm-bm-bk-runs"
+      KERNEL_TUNING_GCP_PROJECT_ID: "cloud-tpu-inference-test"
+      KERNEL_TUNING_SPANNER_INSTANCE_ID: "vllm-bm-inst"
+      KERNEL_TUNING_SPANNER_DATABASE_ID: "vllm-bm-bk-runs"
     secrets: 
       - GITHUB_PAT 
     command: |
@@ -145,10 +145,10 @@ steps:
         git checkout -b $${branch_name}
         result=$$(python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing \
           --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} \
-          --process_step=${KERNEL_AUTOTUNE_STAGE} \
-          --gcp_project_id=${GCP_PROJECT_ID} \
-          --spanner_instance_id=${SPANNER_INSTANCE_ID} \
-          --spanner_database_id=${SPANNER_DATABASE_ID}) 
+          --process_step=$${KERNEL_TUNING_AUTOTUNE_STAGE} \
+          --gcp_project_id=$${KERNEL_TUNING_GCP_PROJECT_ID} \
+          --spanner_instance_id=$${KERNEL_TUNING_SPANNER_INSTANCE_ID} \
+          --spanner_database_id=$${KERNEL_TUNING_SPANNER_DATABASE_ID}) 
 
         # create pr and put result in pr body
         if [[ "$$result" == *"PR_CREATED"* ]]; then
