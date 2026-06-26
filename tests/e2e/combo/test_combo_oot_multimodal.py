@@ -17,6 +17,7 @@ import os
 from dataclasses import asdict
 
 import pytest
+from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.model_executor.models.qwen2_5_vl import \
     Qwen2_5_VLForConditionalGeneration as VllmOfficialTorchModel
@@ -27,7 +28,6 @@ from vllm.multimodal.image import convert_image_mode
 from tpu_inference.models.common.model_loader import _MODEL_REGISTRY
 from tpu_inference.models.jax.qwen2_5_vl import \
     Qwen2_5_VLForConditionalGeneration as TpuOfficialJaxModel
-from vllm import LLM, EngineArgs, SamplingParams
 
 try:
     from vllm.model_executor.models.interfaces_base import is_vllm_model

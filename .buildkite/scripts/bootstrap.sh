@@ -1,17 +1,17 @@
 #!/bin/bash
-# Copyright 2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# # Copyright 2025 Google LLC
+# #
+# # Licensed under the Apache License, Version 2.0 (the "License");
+# # you may not use this file except in compliance with the License.
+# # You may obtain a copy of the License at
+# #
+# #     http://www.apache.org/licenses/LICENSE-2.0
+# #
+# # Unless required by applicable law or agreed to in writing, software
+# # distributed under the License is distributed on an "AS IS" BASIS,
+# # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# # See the License for the specific language governing permissions and
+# # limitations under the License.
 
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
@@ -131,6 +131,7 @@ source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 
 # Evaluate which file paths were changed in the PR to dynamically trigger kernel tests.
 # These variables are interpolated into pipeline_jax.yml to skip steps without provisioning TPUs.
+
 # export RUN_KERNEL_TESTS=0
 # export RUN_KERNEL_COLLECTIVES_TESTS=0
 
@@ -353,5 +354,3 @@ set_jax_envs unset
 set_jax_envs v7
 upload_with_priority .buildkite/pipeline_combo_test.yml 10
 set_jax_envs unset
-
-echo "--- Buildkite Bootstrap Finished"
