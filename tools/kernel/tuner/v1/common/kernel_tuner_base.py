@@ -88,6 +88,8 @@ class TunerConfig:
     tuning_key_class: any = None
     tunable_params_class: any = None
     kernel_tuner_name: str = None
+    # When support autotune and run_config.autotune_mode is True,
+    # the kernel tuner will read the cases from spanner using the case_set_id and kernel_tuner_name
     support_autotune: bool = False
     support_bayesian_optimization: bool = False
 
@@ -189,7 +191,7 @@ class KernelTunerBase(ABC):
 
     def generate_autotune_cases(self) -> list[TuningCase]:
         tuning_set = []
-        # The case_set_id is constructed as {kernel_tuner_name}_{auto_tune_case_set_id} in the kernel_auto_tune_invoker.py
+        # The case_set_id is constructed as {kernel_tuner_name}_{auto_tune_case_set_id} in the bootstrap_kernel_tuners.py
         auto_tune_case_set_id = self.run_config.case_set_id.lstrip(
             f'{self.tuner_config.kernel_tuner_name}_')
         autotune_cases = self.storage_manager.read_auto_tune_cases(
