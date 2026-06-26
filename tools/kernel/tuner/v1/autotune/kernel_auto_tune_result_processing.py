@@ -310,13 +310,11 @@ class KernelAutoTuneResultProcessor:
         head_branch = (
             os.environ.get('KERNEL_AUTOTUNE_PR_HEAD_BRANCH', '').strip()
             or f"kernel_autotune.update_tuned_params_{self.autotune_id}")
-        base_branch = (
-            os.environ.get('KERNEL_AUTOTUNE_PR_BASE_BRANCH', '').strip()
-            or os.environ.get('BUILDKITE_PULL_REQUEST_BASE_BRANCH', '').strip()
-            or 'main')
-        pr_title = (
-            os.environ.get('KERNEL_AUTOTUNE_PR_TITLE', '').strip()
-            or f"Kernel autotune update for {self.autotune_id}")
+        base_branch = (os.environ.get(
+            'KERNEL_AUTOTUNE_PR_BASE_BRANCH', '').strip() or os.environ.get(
+                'BUILDKITE_PULL_REQUEST_BASE_BRANCH', '').strip() or 'main')
+        pr_title = (os.environ.get('KERNEL_AUTOTUNE_PR_TITLE', '').strip()
+                    or f"Kernel autotune update for {self.autotune_id}")
 
         encoded_head = urllib.parse.quote(f"{owner}:{head_branch}", safe='')
         encoded_base = urllib.parse.quote(base_branch, safe='')
@@ -392,7 +390,8 @@ class KernelAutoTuneResultProcessor:
 
         postfix_match = re.search(r'(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})$',
                                   self.autotune_id)
-        autotune_postfix = postfix_match.group(1) if postfix_match else self.autotune_id
+        autotune_postfix = postfix_match.group(
+            1) if postfix_match else self.autotune_id
         autotune_like = f"%{autotune_postfix}%"
 
         metric_columns_sql = ', '.join(all_metrics)
@@ -435,16 +434,17 @@ class KernelAutoTuneResultProcessor:
             stage_like = f"%{stage}%"
             grouped = {}
             with db.snapshot() as snap:
-                rows = snap.execute_sql(
-                    query,
-                    params={
-                        'autotune_like': autotune_like,
-                        'stage_like': stage_like,
-                    },
-                    param_types={
-                        'autotune_like': gspanner.param_types.STRING,
-                        'stage_like': gspanner.param_types.STRING,
-                    })
+                rows = snap.execute_sql(query,
+                                        params={
+                                            'autotune_like': autotune_like,
+                                            'stage_like': stage_like,
+                                        },
+                                        param_types={
+                                            'autotune_like':
+                                            gspanner.param_types.STRING,
+                                            'stage_like':
+                                            gspanner.param_types.STRING,
+                                        })
                 for row in rows:
                     config_key = _normalize_config(row[0])
                     record = {
@@ -461,8 +461,7 @@ class KernelAutoTuneResultProcessor:
             if len(records) > 1:
                 warnings.append(
                     f"Found {len(records)} rows for stage={stage_label}, config={config_key}. "
-                    "Using first COMPLETED row when available."
-                )
+                    "Using first COMPLETED row when available.")
             completed = [r for r in records if r['status'] == 'COMPLETED']
             if completed:
                 return completed[0]
@@ -503,8 +502,7 @@ class KernelAutoTuneResultProcessor:
             if pre['status'] != 'COMPLETED' or post['status'] != 'COMPLETED':
                 warnings.append(
                     f"Config={config_key} skipped because status is not COMPLETED "
-                    f"(pre={pre['status']}, post={post['status']})."
-                )
+                    f"(pre={pre['status']}, post={post['status']}).")
                 hard_blocker = True
                 continue
 
@@ -605,15 +603,12 @@ class KernelAutoTuneResultProcessor:
             for config_key in sorted(rows_by_config):
                 chunks.append('<details>')
                 chunks.append('<summary><b>Config</b></summary>')
-                chunks.append(
-                    f"<pre>{html.escape(config_key)}</pre>"
-                )
+                chunks.append(f"<pre>{html.escape(config_key)}</pre>")
                 chunks.append(
                     '<table border="1" cellspacing="0" cellpadding="4">'
                     '<thead><tr>'
                     '<th>Metric</th><th>Baseline</th><th>Tuned</th><th>Delta</th><th>Verdict</th>'
-                    '</tr></thead><tbody>'
-                )
+                    '</tr></thead><tbody>')
                 for row in rows_by_config[config_key]:
                     metric_label = html.escape(row['metric'])
                     if row['monitor']:
