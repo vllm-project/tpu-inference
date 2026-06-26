@@ -50,16 +50,16 @@ steps:
       ls -la "$${SCRIPT_DIR}" || true
       echo "Debug: ls -la ./tools/kernel/tuner/v1/autotune"
       ls -la ./tools/kernel/tuner/v1/autotune || true
-      if [[ ! -f "$generator_script" ]]; then
-        echo "🚨 Bootstrap script not found at $generator_script"
+      if [[ ! -f "$$generator_script" ]]; then
+        echo "🚨 Bootstrap script not found at $$generator_script"
         exit 1
       fi
-      if ! py_output=$(python3 "$generator_script" --auto_tune_id "$KERNEL_AUTOTUNE_ID" 2>&1); then
+      if ! py_output=$(python3 "$$generator_script" --auto_tune_id "$KERNEL_AUTOTUNE_ID" 2>&1); then
         echo "🚨 Failed to bootstrap all kernel tuning for autotune ${KERNEL_AUTOTUNE_ID}"
         exit 1
       fi
 
-      if ! upload_with_priority <(echo "$py_output") "$priority"; then
+      if ! upload_with_priority <(echo "$$py_output") "$$priority"; then
         echo "🚨 Upload failed for all kernel tuning for autotune ${KERNEL_AUTOTUNE_ID}"
         exit 1
       fi
