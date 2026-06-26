@@ -330,75 +330,59 @@ def _ragged_paged_attention_kernel_loop(
     debug_mode: bool = False,
     return_lse: bool = False,
 ):
-
-    idx = 0
-
-    # 1. Unpack Scalars
-    kv_lens_ref = refs[idx]
-    idx += 1
-    page_indices_ref = refs[idx]
-    idx += 1
-    cu_q_lens_ref = refs[idx]
-    idx += 1
-    distribution_ref = refs[idx]
-    idx += 1
-    sem_ids_ref = refs[idx]
-    idx += 1
-    bo_ids_ref = refs[idx]
-    idx += 1
-    bkv_update_ids_ref = refs[idx]
-    idx += 1
-
-    # Unpack based on cp state.
+    # Unpack Scalars.
+    num_scalar = 7
+    (
+        kv_lens_ref,  # i32[max_num_seqs]
+        page_indices_ref,  # i32[max_num_seqs * pages_per_seq]
+        cu_q_lens_ref,  # i32[max_num_seqs + 1]
+        distribution_ref,  # i32[3] (decode_end, prefill_end, mixed_end)
+        sem_ids_ref,  # i32[3] (bq_sem_idx, bkv_sem_idx, bo_sem_idx)
+        bo_ids_ref,  # i32[4] (bo_sem_0_seq_idx, bo_sem_1_seq_idx, bo_sem_0_bo_idx, bo_sem_1_bo_idx)
+        bkv_update_ids_ref,  # i32[6 or 8] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz [, bkv_sem_0_src, bkv_sem_1_src])
+    ) = refs[:num_scalar]
     if cp_group_size is not None:
-        cp_rank_ref = refs[idx]
-        idx += 1
+        cp_rank_ref = refs[num_scalar]  # i32[1]
+        num_scalar += 1
         cp_rank = cp_rank_ref[0]
 
-    # 2. Unpack Inputs
-    q_hbm_ref = refs[idx]
-    idx += 1
-    kv_hbm_ref = refs[idx]
-    idx += 1
-    kv_cache_hbm_ref = refs[idx]
-    idx += 1
+    # Unpack Inputs, Outputs.
+    num_inputs_outputs = 5 if not return_lse else 7
+    if not return_lse:
+        (
+            q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, nqpkv//q_packing, q_packing, head_dim]
+            kv_hbm_ref,  # [max_num_tokens, num_kv_heads_x2//kv_packing, kv_packing, head_dim]
+            kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_x2//kv_packing, kv_packing, head_dim]
+            o_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, nqpkv//q_packing, q_packing, head_dim]
+            updated_kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_x2//kv_packing, kv_packing, head_dim]
+        ) = refs[num_scalar:num_scalar + num_inputs_outputs]
+        lse_hbm_in_ref = lse_hbm_ref = None
+    else:
+        (
+            q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, nqpkv//q_packing, q_packing, head_dim]
+            kv_hbm_ref,  # [max_num_tokens, num_kv_heads_x2//kv_packing, kv_packing, head_dim]
+            kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_x2//kv_packing, kv_packing, head_dim]
+            lse_hbm_in_ref,  # [actual_num_kv_heads, max_num_tokens * nqpkv, 128] (input alias)
+            o_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, nqpkv//q_packing, q_packing, head_dim]
+            updated_kv_cache_hbm_ref,  # [total_num_pages, page_size, num_kv_heads_x2//kv_packing, kv_packing, head_dim]
+            lse_hbm_ref,  # [actual_num_kv_heads, max_num_tokens * nqpkv, 128]
+        ) = refs[num_scalar:num_scalar + num_inputs_outputs]
 
-    # Unpack based on return_lse.
-    if return_lse:
-        _lse_hbm_in_ref = refs[idx]
-        idx += 1
-
-    # 3. Unpack Outputs
-    o_hbm_ref = refs[idx]
-    idx += 1
-    updated_kv_cache_hbm_ref = refs[idx]
-    idx += 1
-
-    # Unpack based on return_lse.
-    if return_lse:
-        lse_hbm_ref = refs[idx]
-        idx += 1
-
-    # 4. Unpack Scratches (VMEM & Semaphores)
-    bkv_x2_ref = refs[idx]
-    idx += 1
-    bq_x2_ref = refs[idx]
-    idx += 1
-    bo_x2_ref = refs[idx]
-    idx += 1
-    sems = refs[idx]
-    idx += 1
-    l_ref = refs[idx]
-    idx += 1
-    m_ref = refs[idx]
-    idx += 1
-    acc_ref = refs[idx]
-    idx += 1
-
-    # Unpack based on cp state.
+    # Unpack Scratches.
+    scratch_start = num_scalar + num_inputs_outputs
+    num_scratches = 7
+    (
+        bkv_x2_ref,  # [2, bkv_sz, num_kv_heads_x2//kv_packing (+1), kv_packing, head_dim]
+        bq_x2_ref,  # [2, actual_num_kv_heads, bq_sz, nqpkv//q_packing, q_packing, head_dim]
+        bo_x2_ref,  # [2, actual_num_kv_heads, bq_sz, nqpkv//q_packing, q_packing, head_dim]
+        sems,  # [4 or 5, 2] DMA semaphores (5 when return_lse)
+        l_ref,  # [actual_num_kv_heads, bq_sz * nqpkv, 128]
+        m_ref,  # [actual_num_kv_heads, bq_sz * nqpkv, 128]
+        acc_ref,  # [actual_num_kv_heads, bq_sz * nqpkv, head_dim]
+    ) = refs[scratch_start:scratch_start + num_scratches]
     if cp_group_size is not None:
-        kv_shuffle_vmem_ref = refs[idx]
-        idx += 1
+        kv_shuffle_vmem_ref = refs[scratch_start + num_scratches]
+        # [bkv_sz // cp_group_size, num_kv_heads_x2//kv_packing, kv_packing, head_dim]
 
     assert q_hbm_ref.shape == o_hbm_ref.shape
     assert q_hbm_ref.shape[-1] == kv_cache_hbm_ref.shape[-1]
