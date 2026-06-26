@@ -1,2 +1,0 @@
-buildkite-test-collector
-hf_transfer
