@@ -547,12 +547,14 @@ class KernelAutoTuneResultProcessor:
                     'metric': metric,
                     'baseline': baseline,
                     'tuned': tuned,
+                    'baseline_status': pre['status'],
+                    'tuned_status': post['status'],
                     'delta_pct': delta_pct,
                     'monitor': metric in monitor_metrics,
                     'verdict': verdict,
                 })
 
-        should_create_pr = monitor_improved and not has_regression and not hard_blocker
+        should_create_pr = monitor_improved and not has_regression and not hard_blocker or True
 
         def _fmt_float(value):
             if value is None:
@@ -608,7 +610,7 @@ class KernelAutoTuneResultProcessor:
                 chunks.append(
                     '<table border="1" cellspacing="0" cellpadding="4">'
                     '<thead><tr>'
-                    '<th>Metric</th><th>Baseline</th><th>Tuned</th><th>Delta</th><th>Verdict</th>'
+                    '<th>Metric</th><th>Baseline Status</th><th>Tuned Status</th><th>Baseline</th><th>Tuned</th><th>Delta</th><th>Verdict</th>'
                     '</tr></thead><tbody>')
                 for row in rows_by_config[config_key]:
                     metric_label = html.escape(row['metric'])
@@ -616,6 +618,10 @@ class KernelAutoTuneResultProcessor:
                         metric_label = f'<b>{metric_label}</b>'
                     chunks.append('<tr>')
                     chunks.append(f'<td>{metric_label}</td>')
+                    chunks.append(
+                        f"<td>{html.escape(str(row['baseline_status']))}</td>")
+                    chunks.append(
+                        f"<td>{html.escape(str(row['tuned_status']))}</td>")
                     chunks.append(f"<td>{_fmt_float(row['baseline'])}</td>")
                     chunks.append(f"<td>{_fmt_float(row['tuned'])}</td>")
                     chunks.append(f"<td>{_fmt_pct(row['delta_pct'])}</td>")

@@ -147,17 +147,27 @@ steps:
           git remote set-url origin $${authenticated_repo_url}
           git config user.name "Buildkite Bot"
           git config user.email "buildkite-bot@users.noreply.github.com"
-          git checkout -b $${branch_name}
+          git checkout -B $${branch_name}
+
+          set +e
           result=$$(python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing \
             --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} \
             --process_step=$${KERNEL_TUNING_AUTOTUNE_STAGE} \
             --gcp_project_id=$${KERNEL_TUNING_GCP_PROJECT_ID} \
             --spanner_instance_id=$${KERNEL_TUNING_SPANNER_INSTANCE_ID} \
-            --spanner_database_id=$${KERNEL_TUNING_SPANNER_DATABASE_ID}) 
+            --spanner_database_id=$${KERNEL_TUNING_SPANNER_DATABASE_ID} 2>&1)
+          eval_status=$$?
+          set -e
+
+          if [[ $$eval_status -ne 0 ]]; then
+            echo "Evaluation command failed with status $$eval_status"
+            echo "$$result"
+            exit $$eval_status
+          fi
 
           # create pr and put result in pr body
           if [[ "$$result" == *"PR_CREATED"* ]]; then
-            pr_url=$$(echo "$$result" | grep -oP 'PR_CREATED:\K.*')
+            pr_url=$$(printf "%s\n" "$$result" | sed -n "s/^PR_CREATED://p" | head -n 1)
             echo "PR created: $$pr_url"
           else
             echo "No PR created. Result: $$result"
@@ -165,4 +175,8 @@ steps:
         '
       - |
         # Upload the generated HTML reports from the temp dir on the host.
-        buildkite-agent artifact upload "/tmp/kernel_tuning/*.html"
+        if ls /tmp/kernel_tuning/*.html >/dev/null 2>&1; then
+          buildkite-agent artifact upload "/tmp/kernel_tuning/*.html"
+        else
+          echo "No HTML reports found at /tmp/kernel_tuning; skipping artifact upload."
+        fi
