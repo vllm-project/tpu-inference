@@ -525,28 +525,64 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
             int,  # result_id for async scheduling
     ]:
         assert self.vllm_config is not None
-        if not self.vllm_config.scheduler_config.async_scheduling:
-            return super().execute_model_ray(execute_model_input)
 
         # This method is used by Ray Compiled Graph to execute the model,
         # and it needs a special logic of self.setup_device_if_necessary()
         self.setup_device_if_necessary()
         assert self.worker is not None, "Worker is not initialized"
+
         if len(execute_model_input) == 3:
-            scheduler_output, grammar_output, intermediate_tensors = (
-                execute_model_input)
+            scheduler_output, grammar_output, _ = execute_model_input
         else:
             scheduler_output, grammar_output = execute_model_input
+
+        # 1. Receive intermediate tensors if we are not the first rank
+        if self.vllm_config.parallel_config.pipeline_parallel_size > 1 and self.worker.rank > 0:
+            uuid = self.worker.model_runner.get_uuid_for_jax_transfer(
+                scheduler_output, self.worker.rank - 1,
+                self.worker.step_counter)
+            tensor_spec = self.worker.model_runner.get_intermediate_tensor_spec(
+                scheduler_output)
+            intermediate_tensors_dict = get_pp_group().recv_tensor_dict(
+                uuid, tensor_spec)
+            intermediate_tensors = JaxIntermediateTensors(
+                intermediate_tensors_dict)
+        else:
             intermediate_tensors = None
+
+        # 2. Execute the model
         assert self.worker.model_runner is not None
         output = self.worker.model_runner.execute_model(
             scheduler_output, intermediate_tensors)
-        assert self._is_last_rank()
-        if output is None:
-            output = self.worker.model_runner.sample_tokens(grammar_output)
-        self.result_id += 1
-        self._execute_model_outputs[self.result_id] = output
-        return self.result_id
+
+        # 3. Send intermediate tensors if we are not the last rank
+        if isinstance(output, JaxIntermediateTensors):
+            assert self.vllm_config.parallel_config.pipeline_parallel_size > 1
+            assert not self._is_last_rank()
+            uuid = self.worker.model_runner.get_uuid_for_jax_transfer(
+                scheduler_output, self.worker.rank, self.worker.step_counter)
+            get_pp_group().send_tensor_dict(uuid, output.tensors)
+            self.worker.step_counter += 1
+            output = None
+        else:
+            self.worker.step_counter += 1
+
+        # 4. If we are the last rank, perform token sampling if needed
+        if self._is_last_rank():
+            if output is None:
+                output = self.worker.model_runner.sample_tokens(grammar_output)
+
+        # 5. Format return value based on async scheduling
+        if self.vllm_config.scheduler_config.async_scheduling:
+            self.result_id += 1
+            self._execute_model_outputs[self.result_id] = output
+            return self.result_id
+        else:
+            if isinstance(output, AsyncTPUModelRunnerOutput):
+                output = output.get_output()
+            if not self._is_last_rank():
+                return scheduler_output, grammar_output, None
+            return output
 
     # Method to get the actual output for async scheduling.
     def get_execute_model_output(self, result_id) -> ModelRunnerOutput:
