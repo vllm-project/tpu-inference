@@ -90,7 +90,7 @@ steps:
         git config user.name "Buildkite Bot"
         git config user.email "buildkite-bot@users.noreply.github.com"
         git checkout -b $${branch_name}
-        python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} --process_step=PATCH_KERNEL_AUTOTUNE_RESULT
+        python -m tools.kernel.tuner.v1.autotune.autotune_result_processing --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} --process_step=PATCH_KERNEL_AUTOTUNE_RESULT
         git add -u
         git commit -m "Update tuned params for auto tune ID: $${KERNEL_TUNING_AUTOTUNE_ID}"
         git push origin $${branch_name} --force
@@ -150,7 +150,7 @@ steps:
           git checkout -B $${branch_name}
 
           eval_status=0
-          result=$$(python -m tools.kernel.tuner.v1.autotune.kernel_auto_tune_result_processing \
+          result=$$(python -m tools.kernel.tuner.v1.autotune.autotune_result_processing \
             --autotune_id=$${KERNEL_TUNING_AUTOTUNE_ID} \
             --process_step=$${KERNEL_TUNING_AUTOTUNE_STAGE} \
             --gcp_project_id=$${KERNEL_TUNING_GCP_PROJECT_ID} \
