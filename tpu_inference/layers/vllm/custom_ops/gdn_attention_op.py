@@ -23,11 +23,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
     QwenGatedDeltaNetAttention
 
-from tpu_inference import envs
-from tpu_inference.layers.common.gdn_attention import (GdnAttentionConfig,
-                                                       run_jax_gdn_attention)
-from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import \
-    RaggedGatedDeltaRuleImpl
+from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
     reorder_concatenated_tensor_for_sharding, truncate_sharded_tensor)
@@ -120,11 +116,6 @@ def gdn_attention_core_tpu(
     #     the slot that holds this request's real state.
     state_indices = attn_metadata.mamba_state_indices.astype(jnp.int32)
 
-    config = GdnAttentionConfig(
-        ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl(
-            envs.RAGGED_GATED_DELTA_RULE_IMPL))
-    logger.info_once(f"GDN Attention Config: {config}")
-
     padded_num_reqs_per_dp = attn_metadata.padded_num_reqs // dp_size
 
     # Slice the state indices to the padded_num_reqs, which is the actual number
@@ -158,7 +149,7 @@ def gdn_attention_core_tpu(
          d_v,
          kernel_size,
          mesh=mesh,
-         config=config)
+     )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]
         new_conv_state = jnp.concatenate(
