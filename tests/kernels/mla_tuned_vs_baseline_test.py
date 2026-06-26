@@ -29,6 +29,9 @@ from tpu_inference.kernels.mla.v2.tuned_params import (TunableParams,
 def _get_tuned_test_cases():
     test_cases = []
     for key in tuned_params_mapping.keys():
+        # Current performance test only for batch_decode.
+        if key.case != "batched_decode":
+            continue
         name = (f"tokens_{key.max_num_tokens}_"
                 f"seqs_{key.max_num_seqs}_"
                 f"pagesperseq_{key.pages_per_seq}")
