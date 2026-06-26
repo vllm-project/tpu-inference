@@ -119,7 +119,7 @@ steps:
       EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=EVALUATE_AND_CREATE_PR"
     command: |
       echo "🚀 Evaluating tuning results and optionally creating a PR."
-      .buildkite/scripts/patch_kernel_autotune_result.sh bash -c '
+      .buildkite/scripts/run_in_docker.sh bash -c '
         set -e
         branch_name="kernel_autotune.update_tuned_params_$${KERNEL_TUNING_AUTOTUNE_ID}"
         repo_url="github.com/vllm-project/tpu-inference.git"
