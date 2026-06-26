@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# type: ignore
+
 from tools.kernel.tuner.v1.common.kernel_tuner_base import TuningCase
 from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
     SpannerStorageManager
