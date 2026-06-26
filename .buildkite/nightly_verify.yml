@@ -92,7 +92,8 @@ steps:
        - bash .buildkite/scripts/notify_test_results.sh
 
    - label: "Record verified commit hashes"
-     if: build.branch == "main" && build.env("NIGHTLY") == "1"
+     # GITHUB_PAT is main/tag-only - see commit_support_matrices above.
+     if: build.env("NIGHTLY") == "1" && build.branch == "main"
      key: record_verified_commit_hashes
      depends_on:
        - notify_test_results
