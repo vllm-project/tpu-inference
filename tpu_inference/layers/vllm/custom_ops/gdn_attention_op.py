@@ -41,8 +41,6 @@ logger = init_logger(__name__)
 
 
 def _attn_metadata_values_equal(a: object, b: object) -> bool:
-    if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
-        return a.shape == b.shape and torch.equal(a, b)
     if isinstance(a, (jax.core.Tracer, jax.Array)) and isinstance(
             b, (jax.core.Tracer, jax.Array)):
         return a.shape == b.shape and a.dtype == b.dtype
