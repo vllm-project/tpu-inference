@@ -81,8 +81,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 try:
-    from tpu_raiden.api.jax.kv_cache_manager import \
-        KVCacheManager as KVCacheManager
+    from tpu_raiden.api.jax.kv_cache_manager import KVCacheManager
     _RAIDEN_IMPORT_ERROR = None
 except Exception as _exc:  # pylint: disable=broad-except
     KVCacheManager = None
