@@ -142,7 +142,8 @@ if [[ "$IS_MULTI_HOST" == "true" ]]; then
       -e GCP_DATABASE_ID=${GCP_DATABASE_ID:-} \
       -e GCP_REGION=${GCP_REGION:-} \
       -e GCS_BUCKET=${GCS_BUCKET:-} \
-      -e UPLOAD_DB=${UPLOAD_DB:-true}"
+      -e UPLOAD_DB=${UPLOAD_DB:-true} \
+      -e IS_MULTI_HOST=true"
 
     # Re-use parser_case.py to resolve the server command for this case on host.
     PYTHON_PARSER="$(pwd)/.buildkite/benchmark/scripts/parser_case.py"
