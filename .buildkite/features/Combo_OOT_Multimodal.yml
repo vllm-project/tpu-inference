@@ -1,0 +1,66 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+steps:
+  - label: "${TPU_VERSION:-tpu6e} Correctness: Out-Of-Tree + Multimodal"
+    key: "${TPU_VERSION:-tpu6e}_Combo_OOT_Multimodal_Correctness"
+    depends_on: "build_docker"
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_combo_oot_multimodal.py::test_oot_multimodal_full_stack_verification
+
+  - label: "${TPU_VERSION:-tpu6e} Correctness tests for Multimodal Inputs"
+    key: "${TPU_VERSION:-tpu6e}_Multimodal_Inputs_CorrectnessTest"
+    depends_on: "build_docker"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    commands:
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py
+
+  # - label: "${TPU_VERSION:-tpu6e} Performance: Out-Of-Tree + Multimodal"
+  #   key: "${TPU_VERSION:-tpu6e}_Combo_OOT_Multimodal_Performance"
+  #   depends_on: "${TPU_VERSION:-tpu6e}_Combo_OOT_Multimodal_Correctness"
+  #   soft_fail: true
+  #   agents:
+  #     queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+  #   env:
+  #     TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+  #   commands:
+  #     - |
+  #       .buildkite/scripts/run_in_docker.sh \
+  #         python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_combo_oot_multimodal.py::test_oot_multimodal_performance
+
+  # - label: "${TPU_VERSION:-tpu6e} Record results for OOT Multimodal Combo"
+  #   key: "${TPU_VERSION:-tpu6e}_record_oot_multimodal_combo"
+  #   depends_on:
+  #     - "${TPU_VERSION:-tpu6e}_Combo_OOT_Multimodal_Correctness"
+  #     - "${TPU_VERSION:-tpu6e}_Combo_OOT_Multimodal_Performance"
+  #   env:
+  #     CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+  #     CI_TARGET: "OOT Multimodal Combo"
+  #     CI_STAGE: "CorrectnessTest"
+  #     CI_CATEGORY: "feature support matrix"
+  #   agents:
+  #     queue: cpu
+  #   commands:
+  #     - |
+  #       .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Combo_OOT_Multimodal_Correctness
+  #       .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Combo_OOT_Multimodal_Performance
