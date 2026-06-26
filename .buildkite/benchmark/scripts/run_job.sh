@@ -130,12 +130,12 @@ export BM_INFRA="true"
 .buildkite/scripts/run_in_docker.sh bash -c "
   if [[ \"$KERNEL_AUTOTUNE_STAGE\" == \"PRE_KERNEL_AUTOTUNE_CASES_COLLECTION\" ]]; then
     pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
-    source .buildkite/benchmark/scripts/kernel_auto_tune.sh && \
+    source .buildkite/benchmark/scripts/kernel_autotune.sh && \
     update_all_tuned_params_py || exit 1
   fi && \
   if [[ \"$KERNEL_AUTOTUNE_STAGE\" == \"POST_KERNEL_AUTOTUNE_BM_RERUN\" ]]; then
     pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
-    source .buildkite/benchmark/scripts/kernel_auto_tune.sh && \
+    source .buildkite/benchmark/scripts/kernel_autotune.sh && \
     checkout_updated_tuned_params_py_branch || exit 1
   fi && \
   echo always > /sys/kernel/mm/transparent_hugepage/enabled && \

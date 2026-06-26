@@ -47,7 +47,7 @@ _SPANNER_INSTANCE_ID = flags.DEFINE_string(
 _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'spanner_database_id', 'tune-gmm',
     'The Spanner database ID to use. Only used when --run_locally is false.')
-_AUTO_TUNE_ID = flags.DEFINE_string('auto_tune_id', '',
+_AUTOTUNE_ID = flags.DEFINE_string('autotune_id', '',
                                     'The auto tune ID to use for this run.')
 
 OUTPUT_PATH = "/tmp/kernel_tuning/generated_pipeline.yml"
@@ -55,8 +55,8 @@ OUTPUT_PATH = "/tmp/kernel_tuning/generated_pipeline.yml"
 
 class BootstrapKernelTuners:
 
-    def __init__(self, auto_tune_id: str):
-        self.auto_tune_id = auto_tune_id
+    def __init__(self):
+        self.autotune_id = _AUTOTUNE_ID.value
         self.storage_manager = SpannerStorageManager(
             gcp_project_id=_GCP_PROJECT_ID.value,
             spanner_instance_id=_SPANNER_INSTANCE_ID.value,
@@ -107,7 +107,7 @@ class BootstrapKernelTuners:
     def generate_kernel_tuning_cases(self):
         pipeline = {"steps": []}
         autotune_cases = self.storage_manager.read_auto_tune_cases(
-            case_set_id=self.auto_tune_id)
+            case_set_id=self.autotune_id)
         tpus = set(case['TPU'] for case in autotune_cases)
         assert all(
             'tpu6e' in tpu or 'tpu7x' in tpu for tpu in tpus
@@ -127,7 +127,7 @@ class BootstrapKernelTuners:
             pipeline['steps'].append(
                 self._build_trigger_kernel_tuner_pipeline(
                     kernel_tuner_name=kernel_tuner_name,
-                    case_set_id=f'{kernel_tuner_name}_{self.auto_tune_id}',
+                    case_set_id=f'{kernel_tuner_name}_{self.autotune_id}',
                     tpu_version=tpu,
                     #(TODO): Only support kernel without communication for now and we don't have TPU 7x with 1 core queue
                     tpu_cores=supported_core_num,
@@ -146,5 +146,5 @@ class BootstrapKernelTuners:
 
 
 if __name__ == "__main__":
-    app.run(lambda _: BootstrapKernelTuners(auto_tune_id=_AUTO_TUNE_ID.value).
+    app.run(lambda _: BootstrapKernelTuners().
             generate_kernel_tuning_cases())

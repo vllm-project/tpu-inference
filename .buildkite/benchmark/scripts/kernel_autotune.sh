@@ -16,10 +16,10 @@
 set -Eeuo pipefail
 
 # Define the dictionary
-declare -A kernel_auto_tune_mapping
+declare -A kernel_autotune_mapping
 # The key should be one of tools.kernel.tuner.v1.kernel_tuner_runner.KERNEL_TUNER_REGISTRY keys, and the value is the corresponding file path to be updated.
-# This must be kept in sync with the tools/kernel/tuner/v1/autotune/autotune_result_processing.py's kernel_auto_tune_mapping dictionary.
-kernel_auto_tune_mapping["mla_kernel_tuner"]="/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py"
+# This must be kept in sync with the tools/kernel/tuner/v1/autotune/autotune_result_processing.py's kernel_autotune_mapping dictionary.
+kernel_autotune_mapping["mla_kernel_tuner"]="/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py"
 
 # Path to the script you want to append
 KERNEL_TUNED_PARAMS_UPDATE_SCRIPT="/workspace/tpu_inference/tools/kernel/tuner/v1/autotune/update_tuned_params_template.py"
@@ -38,8 +38,8 @@ get_tpu_from_device() {
 update_all_tuned_params_py() {
     if [[ "${KERNEL_AUTOTUNE_STAGE:-}" == "PRE_KERNEL_AUTOTUNE_CASES_COLLECTION" ]]; then
         # Iterate over all keys in the dictionary
-        for key in "${!kernel_auto_tune_mapping[@]}"; do
-            target_file="${kernel_auto_tune_mapping[$key]}"
+        for key in "${!kernel_autotune_mapping[@]}"; do
+            target_file="${kernel_autotune_mapping[$key]}"
 
             echo "Processing $target_file with tuner: $key..."
 
