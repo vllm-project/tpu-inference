@@ -164,12 +164,14 @@ class LRUCacheManager:
     def allocate_for_save(
         self, chunk_hashes: list[ChunkHash]
     ) -> Tuple[list[CPUChunk], list[int]] | None:
-        # filter out chunks that are already stored
-        num_chunks = len(chunk_hashes)
-        new_chunk_idxs = [
-            i for i in range(num_chunks)
-            if chunk_hashes[i] not in self.cpu_cache
-        ]
+        # Deduplicate chunk_hashes while keeping track of original indices
+        seen_hashes = {}
+        new_chunk_idxs = []
+        for i, chunk_hash in enumerate(chunk_hashes):
+            if chunk_hash not in self.cpu_cache:
+                if chunk_hash not in seen_hashes:
+                    seen_hashes[chunk_hash] = i
+                    new_chunk_idxs.append(i)
 
         num_new_chunks = len(new_chunk_idxs)
         if num_new_chunks == 0:
@@ -224,7 +226,11 @@ class LRUCacheManager:
         """ After store completion, mark the chunk to be ready to load."""
         for chunk_hash in chunk_hashes:
             chunk = self.cpu_cache[chunk_hash]
-            assert not chunk.is_ready_to_load
+            if chunk.is_ready_to_load:
+                logger.warning(
+                    f"Chunk {chunk_hash} is already ready to load. Ignoring duplicate confirmation in OffloadManager."
+                )
+                continue
             # mark ready to load
             chunk.touch()
             assert chunk.is_ready_to_load
@@ -232,19 +238,15 @@ class LRUCacheManager:
     def complete_load(self, chunk_hashes: list[ChunkHash]) -> None:
         for chunk_hash in chunk_hashes:
             chunk = self.cpu_cache[chunk_hash]
-            assert chunk.is_in_use
+            if not chunk.is_in_use:
+                logger.warning(
+                    f"Chunk {chunk_hash} is not in use (ref_cnt={chunk.ref_cnt}). Ignoring duplicate load confirmation in OffloadManager."
+                )
+                continue
             chunk.untouch()
 
     def mark_completion(self, chunk_ids, operation: Literal['save',
                                                             'load']) -> None:
-        try:
-            chunk_hashes = [
-                self.chunk_pool.allocated_id_to_hash_map[chunk_id]
-                for chunk_id in chunk_ids
-            ]
-        except Exception as e:
-            raise ValueError(f' failed to retrieve chunk hashes: {e}')
-
         chunk_hashes = []
         unknown_chunk_ids = []
         for chunk_id in chunk_ids:
@@ -401,8 +403,9 @@ class StagingBufferManager():
                 num_freed_blocks = num_finished_blocks
             if self._blocks_for_load[req_id] < num_freed_blocks:
                 logger.warning(
-                    f" Req({req_id}) has {num_finished_blocks} load staging buffer to free, but only has {self._blocks_for_load[req_id]} on record."
+                    f" Req({req_id}) has {num_finished_blocks} load staging buffer to free, but only has {self._blocks_for_load[req_id]} on record. Capping to recorded value."
                 )
+                num_freed_blocks = max(0, self._blocks_for_load[req_id])
 
             self._blocks_for_load[req_id] -= num_freed_blocks
             if self._blocks_for_load[req_id] <= 0:
@@ -421,8 +424,9 @@ class StagingBufferManager():
                 num_freed_blocks = num_finished_blocks
             if self._blocks_for_save[req_id] < num_freed_blocks:
                 logger.warning(
-                    f" Req({req_id}) has {num_finished_blocks} save staging buffer to free, but only has {self._blocks_for_save[req_id]} on record."
+                    f" Req({req_id}) has {num_finished_blocks} save staging buffer to free, but only has {self._blocks_for_save[req_id]} on record. Capping to recorded value."
                 )
+                num_freed_blocks = max(0, self._blocks_for_save[req_id])
 
             self._blocks_for_save[req_id] -= num_freed_blocks
             if self._blocks_for_save[req_id] <= 0:
