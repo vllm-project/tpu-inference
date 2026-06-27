@@ -105,6 +105,10 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     for arch in architectures:
         if arch in _MODEL_REGISTRY:
             return _MODEL_REGISTRY[arch]
+        if arch == "KerasVLLMAdapter":
+            from keras_hub.src.vllm.adapter import KerasVLLMAdapter
+            _MODEL_REGISTRY[arch] = KerasVLLMAdapter
+            return KerasVLLMAdapter
     raise UnsupportedArchitectureError(
         f"Model architectures {architectures} not "
         "registered in tpu-inference. Falling back to vLLM-native "
