@@ -436,6 +436,14 @@ class VllmModelWrapper:
                     self.model, lora_metadata, self.vllm_config.lora_config)
                 if not is_first_rank:
                     intermediate_tensors = intermediate_tensors.to_torch()
+
+                # Inject the Pallas Paged Attention kernel into the metadata so
+                # the KerasHub adapter can extract it dynamically.
+                if not hasattr(attn_metadata, "paged_attention_func"):
+                    from tpu_inference.layers.vllm.backends.flash_attn import \
+                        _jax_attn_func
+                    attn_metadata.paged_attention_func = _jax_attn_func
+
                 output_from_torch = torch.func.functional_call(
                     self.model,
                     torch_view(params_and_buffers),
