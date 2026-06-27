@@ -178,7 +178,8 @@ class RpaConfigs:
         word_size_bytes = 4
         fixed_bytes *= word_size_bytes
 
-        smem_limit_bytes = pltpu.get_tpu_info().smem_capacity_bytes - 32 * 1024
+        smem_limit_bytes = (pltpu.get_tpu_info().smem_capacity_bytes -
+                            32 * 1024) // 3
         available_bytes = smem_limit_bytes - fixed_bytes
 
         # Per step per batch item:
@@ -193,7 +194,7 @@ class RpaConfigs:
 
         num_lanes = pltpu.get_tpu_info().num_lanes
         max_steps_ub = max(1, max_steps_ub // num_lanes) * num_lanes
-        return max_steps_ub
+        return int(max_steps_ub)
 
     @property
     def bkv_p(self) -> int:
