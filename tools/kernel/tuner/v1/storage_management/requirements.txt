@@ -2,3 +2,5 @@ google-cloud-spanner
 google-api-core
 google-auth
 absl-py
+tensorflow
+optuna

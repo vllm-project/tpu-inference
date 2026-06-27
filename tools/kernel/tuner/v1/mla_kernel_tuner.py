@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import itertools
 import logging
 import time
 
@@ -159,83 +160,98 @@ def _generate_mla_inputs(
 class MlaKernelTuner(KernelTunerBase):
 
     def __init__(self, run_config: RunConfig):
-        self.tuner_config = TunerConfig(tuning_key_class=TuningKey,
-                                        tunable_params_class=TunableParams,
-                                        kernel_tuner_name="mla_kernel_tuner",
-                                        support_autotune=True,
-                                        support_bayesian_optimization=False)
+        self.tuner_config = TunerConfig(
+            tuning_key_class=TuningKey,
+            tunable_params_class=TunableParams,
+            kernel_tuner_name="mla_kernel_tuner",
+            support_autotune=True,
+            support_bayesian_optimization=True,
+            # Search space per TuningKey has O(80) combinations with default
+            # flags (8 decode_batch_size × 5 num_kv_pages_per_block × 2
+            # vmem_limit_bytes).  50 trials covers ~63 % of the space while
+            # letting optuna exploit the model after the initial warm-up.
+            n_bayesian_trials=50,
+        )
         super().__init__(tuner_config=self.tuner_config, run_config=run_config)
 
     def get_search_space(self, tuning_key: TuningKey) -> dict:
-        return {}
+        """Return the tunable-parameter search space for a given TuningKey.
+
+        The space has four dimensions:
+
+        * ``decode_batch_size``: powers of 2 from 1 up to
+          ``tuning_key.max_num_seqs`` (inclusive).  Larger batches amortise
+          per-sequence overhead but increase memory pressure.
+        * ``num_kv_pages_per_block``: powers of 2 from 1 up to
+          ``2^(pages_per_seq.bit_length() - 1)`` plus 3 when
+          ``pages_per_seq >= 3``.  Controls how many KV pages are processed
+          per flash-attention block.
+        * ``num_queries_per_block``: always ``[1]`` for batched-decode (one
+          query per step minimises latency).
+        * ``vmem_limit_bytes``: ``[60 MiB, 64 MiB]`` — the baseline uses 64
+          MiB; 60 MiB allows the compiler a touch more flexibility.
+        """
+        # decode_batch_size: powers of 2 in [1, max_num_seqs]
+        decode_batch_sizes = []
+        dbs = 1
+        while dbs <= tuning_key.max_num_seqs:
+            decode_batch_sizes.append(dbs)
+            dbs *= 2
+
+        # num_kv_pages_per_block: powers of 2 + optional 3
+        num_kv_pages_per_block_values = sorted(
+            set([2**j for j in range(tuning_key.pages_per_seq.bit_length())] +
+                ([3] if tuning_key.pages_per_seq >= 3 else [])))
+
+        return {
+            'decode_batch_size': decode_batch_sizes,
+            'num_kv_pages_per_block': num_kv_pages_per_block_values,
+            'num_queries_per_block': [1],
+            'vmem_limit_bytes': [60 * 1024 * 1024, 64 * 1024 * 1024],
+        }
 
     def generate_cases(self) -> list[TuningCase]:
-        tuning_set_from_log = []
-        # The tuningKey and tunableParams in this list is constructed based on the real kernel execution logs during benchmarking.
-        # The tunableParams currently represent the baseline configuration from the attention_interface.py.
-        # From the log, only the max_num_tokens is different across different cases
+        """Generate all tuning cases as the Cartesian product of the search space.
+
+        For each ``max_num_tokens`` value the TuningKey is constructed from
+        the absl flags, then ``get_search_space`` provides the candidate
+        values for every TunableParams field.  ``itertools.product`` over
+        those values produces every combination.  In sweep mode all
+        combinations are evaluated; in Bayesian mode optuna uses the same
+        search space to select a smarter subset.
+        """
+        tuning_cases = []
         for max_num_tokens in [
                 4, 8, 16, 32, 64, 128, 160, 256, 512, 1024, 2048
         ]:
-            tuning_set_from_log.append([
-                TuningKey(
-                    max_num_tokens=max_num_tokens,
-                    actual_num_q_heads=flags.FLAGS.mla_actual_num_q_heads,
-                    actual_lkv_dim=flags.FLAGS.mla_actual_lkv_dim,
-                    actual_r_dim=flags.FLAGS.mla_actual_r_dim,
-                    kv_dtype=flags.FLAGS.mla_kv_dtype,
-                    q_dtype=flags.FLAGS.mla_q_dtype,
-                    page_size_per_kv_packing=flags.FLAGS.
-                    mla_page_size_per_kv_packing,
-                    kv_packing=flags.FLAGS.mla_kv_packing,
-                    max_num_seqs=flags.FLAGS.mla_max_num_seqs,
-                    pages_per_seq=flags.FLAGS.mla_pages_per_seq,
-                    s_dtype="bfloat16",
-                    case="batched_decode",
-                    soft_cap=None,
-                    chunk_prefill_size=None,
-                    sliding_window=None,
-                    p_same_dtype_as_v=True,
-                ),
-                TunableParams(
-                    decode_batch_size=4,
-                    num_kv_pages_per_block=3,
-                    num_queries_per_block=1,
-                    vmem_limit_bytes=64 * 1024 * 1024,
-                )
-            ])
-
-        tuning_cases = []
-        for tuning_key, baseline_tunable_params in tuning_set_from_log:
-            # for batched decode, the batch size is the same as the max num of sequences
-            batch_size = tuning_key.max_num_seqs
-            # add the baseline case from log for comparison
-            tuning_cases.append(
-                TuningCase(tuning_key=tuning_key,
-                           tunable_params=baseline_tunable_params))
-
-            # increase number of KV pages per block(flashatt processing block) by powers of two
-            for num_kv_pages_per_block in [
-                    2**j for j in range(tuning_key.pages_per_seq.bit_length())
-            ] + ([3] if tuning_key.pages_per_seq >= 3 else []):
-                decode_batch_size = 1
-                while decode_batch_size <= batch_size:
-                    tunable_params = TunableParams(
-                        decode_batch_size=decode_batch_size,
-                        num_kv_pages_per_block=
-                        num_kv_pages_per_block,  # process one sequence (one block) at a time
-                        num_queries_per_block=
-                        1,  # for batched decode, process one query at a time to minimize latency
-                        vmem_limit_bytes=60 * 1024 *
-                        1024,  # set a medium vmem limit to allow some flexibility for the kernel to choose the best configuration
-                    )
-                    logger.debug(
-                        f"Generated tuning case with tuning_key={tuning_key} and tunable_params={tunable_params}"
-                    )
-                    tuning_cases.append(
-                        TuningCase(tuning_key=tuning_key,
-                                   tunable_params=tunable_params))
-                    decode_batch_size *= 2  # increase decode batch size by powers of two
+            tuning_key = TuningKey(
+                max_num_tokens=max_num_tokens,
+                actual_num_q_heads=flags.FLAGS.mla_actual_num_q_heads,
+                actual_lkv_dim=flags.FLAGS.mla_actual_lkv_dim,
+                actual_r_dim=flags.FLAGS.mla_actual_r_dim,
+                kv_dtype=flags.FLAGS.mla_kv_dtype,
+                q_dtype=flags.FLAGS.mla_q_dtype,
+                page_size_per_kv_packing=flags.FLAGS.
+                mla_page_size_per_kv_packing,
+                kv_packing=flags.FLAGS.mla_kv_packing,
+                max_num_seqs=flags.FLAGS.mla_max_num_seqs,
+                pages_per_seq=flags.FLAGS.mla_pages_per_seq,
+                s_dtype="bfloat16",
+                case="batched_decode",
+                soft_cap=None,
+                chunk_prefill_size=None,
+                sliding_window=None,
+                p_same_dtype_as_v=True,
+            )
+            search_space = self.get_search_space(tuning_key)
+            for params_combo in itertools.product(*search_space.values()):
+                params_dict = dict(zip(search_space.keys(), params_combo))
+                tunable_params = TunableParams(**params_dict)
+                logger.debug(
+                    f"Generated tuning case: {tuning_key=}, {tunable_params=}")
+                tuning_cases.append(
+                    TuningCase(tuning_key=tuning_key,
+                               tunable_params=tunable_params))
         logger.info(f"Generated {len(tuning_cases)} tuning cases.")
         return tuning_cases
 

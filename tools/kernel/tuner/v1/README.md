@@ -11,7 +11,7 @@ To add a new kernel to the tuning framework, create a new file (e.g. `my_kernel_
 ### Step 1 — Define `TuningKey` and `TunableParams`
 
 `TuningKey` describes the fixed properties of a kernel invocation (shapes, types, etc.).  
-`TunableParams` describes the parameters you want to search over (tile sizes, etc.).  
+`TunableParams` describes the parameters you want to search over (tile sizes, etc.).  Must implement `__ge__(self, other)` and `__le__(self, other)` function.
 Both must be `@dataclass` so the framework can serialize/deserialize them.
 
 ```python
@@ -35,43 +35,76 @@ import itertools
 import time
 
 from tools.kernel.tuner.v1.common.kernel_tuner_base import (
-    KernelTunerBase, TuningCase, TuningStatus)
+    KernelTunerBase, TunerConfig, TuningCase, TuningStatus)
 
 
 class MyKernelTuner(KernelTunerBase):
 
-    def __init__(self, storage_manager):
-        super().__init__(
+    def __init__(self, run_config):
+        self.tuner_config = TunerConfig(
             tuning_key_class=MyTuningKey,
             tunable_params_class=MyTunableParams,
-            storage_manager=storage_manager,
-            job_bucket_size=50,          # number of cases per distributed worker
             kernel_tuner_name="my_kernel_tuner",  # must match KERNEL_TUNER_REGISTRY key
+            support_bayesian_optimization=True,   # opt-in to Bayesian optimization
+            n_bayesian_trials=50,                 # optuna trials per TuningKey bucket
         )
+        self.run_config = run_config
+        super().__init__(tuner_config=self.tuner_config, run_config=run_config)
 ```
 
-### Step 3 — Implement the three abstract methods
+`support_bayesian_optimization=True` switches `measure_latency` from a full sweep to
+an [optuna](https://optuna.org/)-powered Bayesian search.  Set it to `False` (or omit
+it) to keep the original sweep behaviour.  The mode can also be overridden at runtime
+with the `--bayesian_optimization` flag (see Section 2).
+
+### Step 3 — Implement the abstract methods
+
+#### `get_search_space(tuning_key) -> dict`  *(required for Bayesian optimization)*
+
+Returns the tunable parameter search space for a given `TuningKey` as a dictionary
+mapping each `TunableParams` field name to a list of candidate values.  Both
+`generate_cases` (to enumerate all combinations) and the Bayesian optimizer (to
+build the optuna search space) call this method, so the search space only needs to
+be defined in one place.
+
+The search space can be **static** or **dynamic** (key-dependent):
+
+```python
+    def get_search_space(self, tuning_key: MyTuningKey) -> dict:
+        # Example: wider tile_n range for larger seq_len
+        tile_n_values = [16, 32, 64]
+        if tuning_key.seq_len >= 256:
+            tile_n_values = [32, 64, 128, 256]
+        return {
+            'tile_m': [16, 32, 64],
+            'tile_n': tile_n_values,
+        }
+```
+
+Optuna calls `trial.suggest_categorical(param_name, values)` for each entry, so
+every suggested combination is guaranteed to map to a pre-generated case ID in the
+database.
 
 #### `generate_cases() -> list[TuningCase]`
 
-Returns the full Cartesian search space as a flat list of `TuningCase` objects. It's recommend to prune as much as invalid tuning cases, like cases will result in OOO or cases that doesn't satisfy data alignment requirements, at this stage to reduce the searhing cases.
-This is called once to populate the case set; results are persisted so re-runs with the same case_set_id will skip this step.
+Returns the full Cartesian search space as a flat list of `TuningCase` objects.
+Call `get_search_space` here so the two stay in sync:
 
 ```python
     def generate_cases(self) -> list[TuningCase]:
         cases = []
-        for bs, sl, tm, tn in itertools.product(
-            [1, 2, 4],    # batch_size values
-            [128, 256],   # seq_len values
-            [16, 32],     # tile_m values
-            [16, 32],     # tile_n values
-        ):
-            cases.append(TuningCase(
-                MyTuningKey(batch_size=bs, seq_len=sl),
-                MyTunableParams(tile_m=tm, tile_n=tn),
-            ))
+        for bs, sl in itertools.product([1, 2, 4], [128, 256]):
+            tuning_key = MyTuningKey(batch_size=bs, seq_len=sl)
+            search_space = self.get_search_space(tuning_key)
+            for combo in itertools.product(*search_space.values()):
+                params = dict(zip(search_space.keys(), combo))
+                cases.append(TuningCase(tuning_key, MyTunableParams(**params)))
         return cases
 ```
+
+It is recommended to prune invalid tuning cases (cases that will OOM, or cases that
+do not satisfy alignment requirements) at this stage to reduce the search space.
+Results are persisted so re-runs with the same `case_set_id` skip this step.
 
 #### `generate_inputs(tuning_key: MyTuningKey) -> dict`
 
@@ -145,31 +178,58 @@ On Buildkite, set `KERNEL_TUNING_KERNEL_TUNER_NAME=my_kernel_tuner` in the build
 Install dependencies first:
 
 ```bash
-pip install absl-py
+pip install absl-py optuna
 ```
 
-We recomend run the tuner with local storage first to make sure the customized kernel_tuner is setup correctly. Since it's for debug purpose, the `case_set_id` will be auto-generated from the current timestamp if not provided.
+We recommend running the tuner with local storage first to verify the customized
+kernel_tuner is set up correctly.
+
+**Bayesian optimization** (default for `example_kernel_tuner`):
 
 ```bash
 python -m tools.kernel.tuner.v1.kernel_tuner_runner \
+  --run_locally \
   --kernel_tuner_name=example_kernel_tuner \
-  --run_locally=True \
-  --case_set_id=my_local_run \
-  --case_set_desc="My local tuning run"
+  --case_set_id=my_bayes_run_1 \
+  --case_set_desc="Bayesian optimization run" \
+  --run_id=0 \
+  --tpu_version=tpu7x \
+  --tpu_cores=2 \
+  --bayesian_optimization=True
 ```
+
+**Full sweep** (evaluate every pre-generated case):
+
+```bash
+python -m tools.kernel.tuner.v1.kernel_tuner_runner \
+  --run_locally \
+  --kernel_tuner_name=example_kernel_tuner \
+  --case_set_id=my_sweep_run_1 \
+  --case_set_desc="Full sweep run" \
+  --run_id=0 \
+  --tpu_version=tpu7x \
+  --tpu_cores=2 \
+  --bayesian_optimization=False
+```
+
+> Each `case_set_id` is persisted and cannot be reused with a different description,
+> so use a distinct ID when switching between modes.
 
 **Key flags:**
 
 | Flag | Default | Description |
 |---|---|---|
-| `--kernel_tuner_name` | `example_kernel_tuner` | Which tuner to run. Available: `example_kernel_tuner` and refer to Section 4 to implement your own tuner. |
+| `--kernel_tuner_name` | `example_kernel_tuner` | Which tuner to run. |
 | `--run_locally` | `False` | Use local JSON storage instead of Spanner. |
-| `--case_set_id` | _(timestamp)_ as str | Identifier for this set of tuning cases. Auto-generated if omitted. Required when run in distributed tuning mode.|
+| `--case_set_id` | _(required)_ | Identifier for this set of tuning cases. |
 | `--case_set_desc` | `""` | Human-readable description. |
 | `--run_id` | `"0"` | Run ID within the case set. |
+| `--tpu_version` | `""` | TPU generation, e.g. `tpu6e` or `tpu7x`. |
+| `--tpu_cores` | `0` | Number of TPU cores. |
+| `--bayesian_optimization` | _(tuner default)_ | `True` = Bayesian optimization (optuna). `False` = full sweep. Omit to use the tuner's `TunerConfig` default. |
 | `--debug` | `False` | Print results after each case iteration. |
 
-Local results are written to JSON files in the working directory located at /tmp/kernel_tuner_run_{case_set_id}.
+Local results are written to JSON files under `/tmp/kernel_tuner_run_{case_set_desc}_{timestamp}/`.
 
 ---
 
@@ -327,7 +387,7 @@ inspect|cs=testing_tuning_infra_11|run=001> query_run_status
 #### Query minimum latency results
 
 ```
-query_min_latency [--case_set_id ID] [--run_id ID]  [--show FIELD ...]
+query_min_latency [--case_set_id ID] [--run_id ID] [--show FIELD ...] [--show-baseline]
 ```
 
 For each unique `TuningKey`, shows the best measured latency and the corresponding `TunableParam` configuration. If repeatable --show option is specified, only the FIELDs are shown. Without --show option, all the fields in TuningKey and TunableParams are shown as a table.
@@ -342,11 +402,28 @@ max_num_tokens  actual_num_q_heads  actual_lkv_dim  actual_r_dim  decode_batch_s
 8               128                 512             64            8                  2                       2035
 ```
 
+**`--show-baseline`** adds two extra columns that compare the best-tuned result
+against the `is_baseline=True` case for each `TuningKey`:
+
+| Extra column | Description |
+|---|---|
+| `baseline_latency` | Latency of the baseline case (us). `N/A` if no baseline was measured for that key. |
+| `latency_improvement%` | `(baseline − best) / baseline × 100`. Positive = faster after tuning. `N/A` if no baseline. |
+
+```
+inspect|cs=mla_tuning_0|run=4> query_min_latency --show max_num_tokens --show latency_us --show-baseline
+max_num_tokens  latency_us  baseline_latency  latency_improvement%
+--------------  ----------  ----------------  --------------------
+4               2035        2500              +18.6%
+8               2041        2490              +18.0%
+128             2059        N/A               N/A
+```
+
 #### Query case latency
 
 ```
 query_case_latency  Query latency for tuning cases with optional field filters
-                        (--case_set_id ID --run_id ID [--filter_key FIELD=VALUE ...] [--show FIELD ...] [--show_all])
+                        (--case_set_id ID --run_id ID [--filter_key FIELD=VALUE ...] [--show FIELD ...] [--show_all] [--show-baseline])
 ```
 
 FIELD can be any key in tuning_key or tunable_params. --show option behaves the same as above. --show_all includes all cases, even ones where tuning failed.
@@ -361,6 +438,22 @@ max_num_tokens  actual_num_q_heads  actual_lkv_dim  actual_r_dim  decode_batch_s
 4               128                 512             64            32                 1                       FAILURE  
 ```
 
+**`--show-baseline`** adds the same two extra columns as in `query_min_latency`.
+For non-`SUCCESS` rows both columns show `N/A`.
+
+```
+inspect|cs=mla_tuning_0|run=4> query_case_latency --filter_key max_num_tokens=4 \
+    --show latency_us --show decode_batch_size --show-baseline
+decode_batch_size  latency_us  baseline_latency  latency_improvement%
+-----------------  ----------  ----------------  --------------------
+16                 2078        2500              +16.9%
+8                  2111        2500              +15.6%
+```
+
+The baseline for a `TuningKey` is the `TuningCase` whose `is_baseline` field was set
+to `True` when it was created (typically the currently-deployed default parameters).
+If no such case exists in the run, both columns show `N/A`.
+
 #### Other
 
 ```
@@ -370,17 +463,65 @@ exit / quit  Exit the CLI
 
 ---
 
-## 5. Future Work
+## 5. Bayesian Optimization
 
-### Online Search Optimizer
+Instead of sweeping every pre-generated case, the framework supports
+**Bayesian optimization** via [optuna](https://optuna.org/) (TPE sampler) to
+converge to near-optimal configurations in far fewer trials.
 
-The current framework exhaustively sweeps a pre-defined Cartesian search space. A natural next step is an **online search optimizer** that adaptively narrows the search space while jobs are still running.
+### How it works
 
-For example:
-- A new `SearchOptimizer` interface could subscribe to completed bucket results from Spanner in real time (or at the end of each round).
-- The optimizer could be plugged in as an optional component of `KernelTunerBase`, overriding a default no-op `suggest_next_cases(completed_results) -> list[TuningCase]` method.
+1. `generate_cases` enumerates all combinations from `get_search_space` and stores
+   them in the database as usual.  In Bayesian mode each bucket covers **exactly one
+   `TuningKey`** so optuna can optimize per-key independently.
+2. `measure_latency` creates an optuna `Study(direction="minimize")` and runs up to
+   `n_bayesian_trials` trials.  Each trial calls
+   `trial.suggest_categorical(param, values)` for every field in `get_search_space`,
+   guaranteeing the suggested combination maps to a pre-stored `case_id`.
+3. Every trial result is written back to the database with the correct `case_id`, so
+   `query_min_latency` and all other inspection tools work identically for both modes.
+4. **OOM early-stop is preserved**: if a smaller `TunableParams` combination already
+   produced `FAILED_OOM`, any larger combination suggested by optuna is immediately
+   pruned and logged as `SKIPPED`.
 
-This could potentially dramatically reduce the number of cases needed for large search spaces while still converging to near-optimal configurations.
+### Enabling it
+
+**Per-tuner default** — set in `TunerConfig` inside the tuner's `__init__`:
+
+```python
+self.tuner_config = TunerConfig(
+    ...
+    support_bayesian_optimization=True,
+    n_bayesian_trials=50,   # optuna trials per TuningKey bucket
+)
+```
+
+**Runtime override** — the `--bayesian_optimization` flag overrides the tuner's
+default without modifying source code (see Section 2 for full examples):
+
+```bash
+# Force Bayesian optimization
+python -m tools.kernel.tuner.v1.kernel_tuner_runner ... --bayesian_optimization=True
+
+# Force full sweep
+python -m tools.kernel.tuner.v1.kernel_tuner_runner ... --bayesian_optimization=False
+```
+
+### Choosing `n_bayesian_trials`
+
+| Search-space size | Suggested `n_bayesian_trials` |
+|---|---|
+| ≤ 25 combinations | 15 – 20 (≈ 60 – 80 % coverage) |
+| 25 – 100 combinations | 30 – 50 |
+| > 100 combinations | 50 – 100 |
+
+Optuna's TPE sampler needs roughly 10 – 20 warm-up (random) trials before it starts
+exploiting the model, so `n_bayesian_trials` should be at least 20 for effective
+optimization.
+
+---
+
+## 6. Future Work
 
 ### Warm-Starting from Previous Runs
 
@@ -404,7 +545,7 @@ To support this, the framework could be extended with:
 
 ---
 
-## 5. End-to-End Autotuning Pipeline
+## 7. End-to-End Autotuning Pipeline
 
 The v1 tuner framework is integrated into a fully automated Buildkite pipeline that continuously optimizes kernel parameters based on real-world workload traces. The pipeline operates in 5 stages and automatically creates Pull Requests with improved configurations.
 

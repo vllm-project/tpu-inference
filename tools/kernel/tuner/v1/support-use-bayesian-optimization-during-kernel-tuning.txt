@@ -1,0 +1,90 @@
+This is a design doc of using Bayesian optimization for tuning kernels.
+Please refer to how the current kernel tuner works through the README.md file. But overall how the tuning works is:
+1. program entry point is the kernel_tuner_runner.py, this can be invoked via command line like 
+   python -m tools.kernel.tuner.v1.kernel_tuner_runner --run_locally --kernel_tuner_name=batched_rpa_kernel_tuner --case_set_desc=batched_rpa_kernel_tuning_setup --case_set_id=batched_rpa_2 --run_id=0 --tpu_version=tpu7x --tpu_cores=2
+2. After the invoked, it will go through 2 steps, 1st step is generating the tuning cases(a tuningkey and tunableparams pair) and create buckets(a set of tuning cases).
+ and 2nd step is running each tuning case and measure the latency. currently we sweep through all the tuning cases. With select the cases with the same tuningkey and has the minimal latency to be the best tunableparams for that tuningkey. 
+
+The kernel_tuner_runner is the entrypoint to invoke the kernel tuner defined in the kernel_tuner_runner's KERNEL_TUNER_REGISTRY. each kernel tuner is a subclass of the common/kernel_tuner_base.py. 
+The kernel_tuner_base defines the common infra for different kernel tuners like storage management, latency measurement, error handling etc. the subclass override several abstract member functions to generate kernel specific tunable cases,
+setup the kernel input according to the tuningkey, kernel invocation for each kernel case. 
+
+Currently the tuning case bucket can be created with fixed size, for example, each bucket can have 500 tuning cases. this is for balacing the load across multiple machines when we need to sweep hundreds of thousands of tuning cases. now we want to 
+ Sweeping all the tuning cases is not an efficient way to do kernel tuning. for example, after somepoint, keep increasing a tunable param will only make the latency larger so there is no point to sweep beyond that. The bayesian optimization technique
+ seems to be a good optimization tool/methodology here. When using bayesian optimization, for the optimization target, it's based on the tuningkey. so to make it easier, the bucket should be for one tuningkey. all the tunable params combination 
+ for the same tuningkey should be put into the one bucket. and one bucket should only contains all the tuning cases with the same tuningkey. 
+
+I want you to use optuna, which is currently the industry standard for this exact problem. some code snippets:
+import optuna
+
+# 1. This is your "Black Box" function
+def run_my_blackbox(learning_rate, depth, strategy):
+    """
+    This function represents your actual system.
+    It could be training a model, running a physics simulation, 
+    or executing a trading backtest.
+    """
+    # Simulate a result based on the inputs
+    if strategy == "aggressive":
+        score = (learning_rate * 100) - (depth ** 2)
+    else:
+        score = (learning_rate * 50) - (depth * 1.5)
+        
+    return score
+
+# 2. Define the Objective for the Optimizer
+def objective(trial):
+    # Define your search space using the 'trial' object
+    
+    # Continuous variable between 0.001 and 0.1 (log scale is often best for small floats)
+    lr = trial.suggest_float("learning_rate", 1e-3, 1e-1, log=True)
+    
+    # Integer variable between 1 and 10
+    depth = trial.suggest_int("depth", 1, 10)
+    
+    # Categorical variable 
+    strategy = trial.suggest_categorical("strategy", ["conservative", "aggressive"])
+    
+    # Run the black box with the suggested parameters
+    result = run_my_blackbox(lr, depth, strategy)
+    
+    # Return the target value you want to optimize
+    return result
+
+# 3. Run the Optimization
+if __name__ == "__main__":
+    # Create a study (set direction to "maximize" or "minimize" your target)
+    study = optuna.create_study(direction="maximize")
+    
+    # Run 50 experiments (trials)
+    study.optimize(objective, n_trials=50)
+    
+    # Output the results
+    print("\nOptimization Complete!")
+    print(f"Best Target Value: {study.best_value}")
+    print(f"Optimal Parameters: {study.best_params}")
+
+
+The search space doesn't need to be static, it can be dynamic like this in each trial.
+def objective(trial):
+    algorithm_type = trial.suggest_categorical("algo_type", ["Type_A", "Type_B"])
+    
+    if algorithm_type == "Type_A":
+        # The optimizer will only search for 'alpha' if Type_A is chosen
+        alpha = trial.suggest_float("alpha", 0.0, 1.0)
+        return run_type_a(alpha)
+    else:
+        # The optimizer searches for 'beta' if Type_B is chosen
+        beta = trial.suggest_int("beta", 10, 100)
+        return run_type_b(beta)
+
+I don't want to have parallel processing. The parallel processing will be performed in bucket level when i use buildkite pipeline. 
+
+You should modify the example_kernel_tuner.py to to make it support bayesian optimization. the original sweeping way should also be supported. 
+you should modify the example_kernel_tuner.py to make the search space large enough to test the new support of bayesian optimization.
+When using optuna as the bayesian optimization tool for tuning the kernel, don't forget to log the trial's result back into the database.
+In the current setup, we support OOM early stop where for the same tuningkey, if a smaller tunableparams already hit OOM, a larger tunablePrams 
+should stop and report OOM also.  
+
+Please implements the get_search_space in each kernel tuner and refactor the kernel tuner when generate the cases in generate_cases. This generate_cases function
+should use the get_search_space to get the possible tunableparams for a specific tuningkey. and the search space should be used in bayesian optimization above. 
