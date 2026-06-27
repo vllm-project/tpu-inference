@@ -100,6 +100,15 @@ _MAX_EXECUTION_MINUTES = flags.DEFINE_integer(
     'Only used when the kernel tuning job is scheduled through Buildkite. The maximum execution time in minutes for each kernel tuning job. If the job exceeds this time, it will save the job progresss, generate a new job to be scheduled by Buildkite and exit.'
 )
 
+_USE_BAYESIAN_OPTIMIZATION = flags.DEFINE_boolean(
+    'use_bayesian_optimization', False,
+    ' whether to use Bayesian optimization (optuna) instead of sweeping '
+    'all tuning cases.  When True, the kernel tuner uses optuna to intelligently '
+    'select which tunable-parameter combinations to evaluate.  When False, every '
+    'case is evaluated (full sweep).  When not specified (None), the default set '
+    'by each kernel tuner\'s TunerConfig.support_bayesian_optimization is used.'
+)
+
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system
 # if we have more kernel tuners. For example, we can define an interface for
@@ -141,21 +150,23 @@ def main(argv):
     tpu_queue_multi = get_tpu_queue_by_version_and_cores(
         tpu_version, tpu_cores, tpu_queue_multi)
 
-    run_config = RunConfig(case_set_id=case_set_id,
-                           run_id=run_id,
-                           case_set_desc=case_set_desc,
-                           tpu_version=tpu_version,
-                           tpu_cores=tpu_cores,
-                           tpu_queue_multi=tpu_queue_multi,
-                           run_locally=_RUN_LOCALLY.value,
-                           job_priority=_JOB_PRIORITY.value,
-                           max_execution_minutes=_MAX_EXECUTION_MINUTES.value,
-                           gcp_project_id=_GCP_PROJECT_ID.value,
-                           spanner_instance_id=_SPANNER_INSTANCE_ID.value,
-                           spanner_database_id=_SPANNER_DATABASE_ID.value,
-                           worker_id=_WORKER_ID.value,
-                           autotune_mode=_AUTOTUNE_MODE.value,
-                           debug=_DEBUG.value)
+    run_config = RunConfig(
+        case_set_id=case_set_id,
+        run_id=run_id,
+        case_set_desc=case_set_desc,
+        tpu_version=tpu_version,
+        tpu_cores=tpu_cores,
+        tpu_queue_multi=tpu_queue_multi,
+        run_locally=_RUN_LOCALLY.value,
+        job_priority=_JOB_PRIORITY.value,
+        max_execution_minutes=_MAX_EXECUTION_MINUTES.value,
+        gcp_project_id=_GCP_PROJECT_ID.value,
+        spanner_instance_id=_SPANNER_INSTANCE_ID.value,
+        spanner_database_id=_SPANNER_DATABASE_ID.value,
+        worker_id=_WORKER_ID.value,
+        autotune_mode=_AUTOTUNE_MODE.value,
+        use_bayesian_optimization=_USE_BAYESIAN_OPTIMIZATION.value,
+        debug=_DEBUG.value)
     kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
     kernel_tuner = kernel_tuner_cls(run_config=run_config)
 

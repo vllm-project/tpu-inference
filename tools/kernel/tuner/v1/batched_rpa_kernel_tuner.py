@@ -204,6 +204,8 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             tuning_key_class=TuningKey,
             tunable_params_class=TunableParams,
             kernel_tuner_name="batched_rpa_kernel_tuner",
+            support_bayesian_optimization=True,
+            n_bayesian_trials=100,
             # (TODO) This only measure prefill case, need to refactor to support decode case as well
             # maybe make this jit_kernel_pattern a runtime TuningKey dependent attribute
             jit_kernel_pattern=r"RPAm-",

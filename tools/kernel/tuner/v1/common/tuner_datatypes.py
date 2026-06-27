@@ -37,6 +37,34 @@ class TuningStatus(Enum):
     SKIPPED = 'SKIPPED'
 
 
+@dataclass
+class CaseResult:
+    case_set_id: str
+    run_id: str
+    case_id: int
+    processed_status: str
+    worker_id: str
+    latency: int
+    warmup_time: int
+    total_time: int
+    processed_at: int
+    tpu: str
+
+    def to_tuple(self) -> tuple:
+        return (
+            self.case_set_id,
+            self.run_id,
+            self.case_id,
+            self.processed_status,
+            self.worker_id,
+            self.latency,
+            self.warmup_time,
+            self.total_time,
+            self.processed_at,
+            self.tpu,
+        )
+
+
 class TuningCase:
 
     def __init__(self,
@@ -74,6 +102,14 @@ class TunerConfig:
     support_autotune: bool = False
     support_bayesian_optimization: bool = False
     jit_kernel_pattern: str = None
+    # Number of Bayesian optimization trials (optuna) to run per tuning key bucket.
+    # Only used when support_bayesian_optimization is True.
+    n_bayesian_trials: int = 50
+    # Early stopping patience (number of consecutive trials without min_delta_ratio relative improvement).
+    # None by default (early stopping disabled unless explicitly specified).
+    bayesian_early_stopping_patience: int = None
+    # Early stopping relative improvement threshold ratio (e.g., 0.05 for 5% improvement).
+    bayesian_early_stopping_min_delta_ratio: float = 0.10
 
 
 @dataclass
@@ -93,4 +129,5 @@ class RunConfig:
     spanner_database_id: str = None
     worker_id: str = None
     autotune_mode: bool = False
+    use_bayesian_optimization: bool = False
     debug: bool = False
