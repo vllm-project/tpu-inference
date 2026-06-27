@@ -150,12 +150,8 @@ def test_attention_sink(monkeypatch, mesh):
     _test_attention(monkeypatch, mesh, 64, True)
 
 
-def test_attention_sink_no_64_raises_error(monkeypatch, mesh):
-    with pytest.raises(
-            NotImplementedError,
-            match="Attention sink support is only available when head_dim==64"
-    ):
-        _test_attention(monkeypatch, mesh, 128, True)
+def test_attention_sink_hd128(monkeypatch, mesh):
+    _test_attention(monkeypatch, mesh, 128, True)
 
 
 # ---- Tests for `sharded_ragged_paged_attention` ----

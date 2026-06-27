@@ -22,6 +22,9 @@ from tpu_inference.utils import get_device_name
 
 logger = init_logger(__name__)
 
+_MAX_FALLBACK_BKV_P = 32
+_MAX_SLIDING_WINDOW_FALLBACK_BKV_P = 1
+
 # key
 #   - device_name
 #     - page_size
@@ -4380,6 +4383,13 @@ def get_tuned_block_sizes(
                 bkv_p, bq = (4096 // page_size, 32)
             case _:
                 bkv_p, bq = (2048 // page_size, 32)
+        # Fallback values are guesses for untuned shapes. Keep them bounded so
+        # missing entries, especially sliding-window entries, do not spill VMEM.
+        bkv_p = min(
+            bkv_p,
+            _MAX_SLIDING_WINDOW_FALLBACK_BKV_P
+            if sliding_window is not None else _MAX_FALLBACK_BKV_P,
+        )
 
     # We should consider the actual page_per_seq and max_num_tokens.
     # If page_per_seq < bkv_p or max_num_tokens < bq, using the bkv_p or bq may

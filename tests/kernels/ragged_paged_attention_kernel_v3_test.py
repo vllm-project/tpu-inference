@@ -53,6 +53,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         k_scale: float | None = None,
         v_scale: float | None = None,
         use_causal_mask: bool = True,
+        use_attention_sink: bool = False,
     ):
         rng = np.random.default_rng(1234)
 
@@ -82,6 +83,9 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                        kv_dtype)
         v = gen_random((max_num_batched_tokens, num_kv_heads, head_dim),
                        kv_dtype)
+        attention_sink = (
+            gen_random((num_q_heads, ), jnp.float32)
+            if use_attention_sink else None)
         page_cnt = 0
         page_indices_list = []
         kv_pages_list = []
@@ -158,6 +162,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             page_indices,
             cu_q_lens,
             distribution,
+            attention_sink,
         )
 
         kwargs = {
@@ -448,6 +453,37 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             dtype,
             num_pages,
             sliding_window=sliding_window,
+        )
+
+    @parameterized.product(
+        sliding_window=[None, 5],
+        num_heads=[(5, 1), (8, 4)],
+    )
+    def test_ragged_paged_attention_with_attention_sink(
+        self,
+        sliding_window: int | None,
+        num_heads: tuple[int, int],
+    ):
+        num_seqs = 5
+        dtype = jnp.bfloat16
+        rng = np.random.default_rng(1234)
+        q_lens = rng.integers(1, 100, num_seqs)
+        kv_lens = q_lens + rng.integers(0, 50, num_seqs)
+        seq_lens = list(zip(q_lens.tolist(), kv_lens.tolist()))
+        head_dim = 128
+        page_size = 16
+        num_pages = 1000
+
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            head_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+            sliding_window=sliding_window,
+            use_attention_sink=True,
         )
 
     @parameterized.product(soft_cap=[None, 50.0], )

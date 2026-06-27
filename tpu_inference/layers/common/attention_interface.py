@@ -384,10 +384,6 @@ def sharded_ragged_paged_attention(
     func = ragged_paged_attention_hd64 if use_hd64 else ragged_paged_attention
 
     if attention_sink is not None:
-        if not use_hd64:
-            raise NotImplementedError(
-                "Attention sink support is only available when head_dim==64")
-
         in_specs += (P(ShardingAxisName.ATTN_HEAD), )
         args += (attention_sink, )
 

@@ -387,7 +387,7 @@ class TestPallasAttentionBackendImpl:
             assert impl.sinks is not None
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
 
-    def test_forward_with_attention_sink_head_dim_128_raises_error(self, mesh):
+    def test_forward_with_attention_sink_head_dim_128(self, mesh):
         head_dim = 128
         sinks = torch.rand([NUM_HEADS], dtype=torch.float32)
 
@@ -411,10 +411,6 @@ class TestPallasAttentionBackendImpl:
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
                 mesh=mesh,
-                layer_name_to_kvcache_index={'0': 0}
-        ), pytest.raises(
-                NotImplementedError,
-                match=
-                "Attention sink support is only available when head_dim==64"):
+                layer_name_to_kvcache_index={'0': 0}):
             assert impl.sinks is not None
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
