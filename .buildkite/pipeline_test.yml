@@ -1,5 +1,7 @@
 steps:
   - label: "🚀 Trigger GitHub Workflow"
+    agents:
+      queue: cpu_64_core
     command: |
       curl -L \
         -X POST \
