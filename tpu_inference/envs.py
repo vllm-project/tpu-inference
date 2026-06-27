@@ -427,6 +427,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES", "auto"),
     "MLA_TRANSPOSE_KV_CACHE":
     env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
+    "MIXED_Q_SPLIT":
+    lambda: int(os.getenv("MIXED_Q_SPLIT", "1")),
+    "MIXED_NUM_QUERIES_PER_BLOCK":
+    lambda: int(os.getenv("MIXED_NUM_QUERIES_PER_BLOCK", "16")),
 }
 
 

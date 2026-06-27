@@ -299,6 +299,10 @@ class TestPallasMLAttentionBackendImpl:
         assert outputs is not None
         assert new_kv_cache is not None
 
+    @patch("tpu_inference.envs.MIXED_Q_SPLIT", 2)
+    def test_forward_with_mixed_q_split_2(self, mesh):
+        self.test_forward(mesh)
+
     def test_forward_with_fp8_kv_cache(self, mesh):
         impl = PallasMLAttentionBackendImpl(
             num_heads=NUM_HEADS,
