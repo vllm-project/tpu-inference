@@ -19,7 +19,6 @@ from typing import Any, Callable, Optional
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import torch
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import \
     Qwen3OmniMoeConfig
@@ -82,49 +81,6 @@ def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
         return embed_multimodal_func_jax
 
 
-class GridTHW(tuple):
-    """Tensor-like wrapper for image/video grid_thw arguments.
-
-    - tuple subclass so isinstance(x, tuple) is True — passes vLLM's
-    tensor_schema type check (e.g. https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2026). 
-    - Implements a minimal tensor-like API (ndim, shape, tolist, prod) expected by vLLM's
-    _process_image_input (https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2072)
-
-    We cannot use torch.Tensor[tuple] because jax.jit would complain.
-    """
-
-    def __new__(cls, values):
-
-        def _nested_to_tuple(v):
-            if isinstance(v, (list, tuple)):
-                return tuple(_nested_to_tuple(x) for x in v)
-            return int(v)
-
-        flat: tuple = _nested_to_tuple(values)
-        return super().__new__(cls, flat)
-
-    # ---- tensor-like API expected by _process_image_input ----
-
-    @property
-    def ndim(self):
-        return 2
-
-    @property
-    def shape(self):
-        return (len(self), 3)
-
-    def tolist(self):
-        return [list(row) for row in self]
-
-    def prod(self, dim=-1):
-        if dim in (-1, 1):
-            return np.array([row[0] * row[1] * row[2] for row in self])
-        raise NotImplementedError(f"GridTHW.prod({dim}) not supported")
-
-    def __repr__(self):
-        return f"GridTHW({tuple(self)})"
-
-
 def maybe_precompile_vision_encoder_fn(
         params: Any, embed_multimodal_fn: Optional[Callable], vllm_model,
         vllm_config: VllmConfig) -> Optional[Callable]:
@@ -167,7 +123,7 @@ def maybe_precompile_vision_encoder_fn(
 
             dummy_pixel_values = jnp.ones((num_patches, patch_input_dim),
                                           dtype=jax_dtype)
-            dummy_image_grid_thw = GridTHW([(1, h, w)])
+            dummy_image_grid_thw = ((1, h, w), )
 
             run_compilation_fn(
                 f"vllm embed_multimodal {dummy_image_grid_thw}",
@@ -187,14 +143,19 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
     """Convert certain kwargs to JIT-friendly formats, if needed.
     
     Specifically, convert "image_grid_thw", "video_grid_thw", and "grid_thw" to
-    GridTHW instances, which are tuple subclasses that can be hashed in jax.jit.
+    standard Python tuples, which are hashable in jax.jit and safe for XLA.
     """
     if not has_jittable_vision(vllm_model):
         return kwargs
 
     for k, v in kwargs.items():
         if k in ("image_grid_thw", "video_grid_thw", "grid_thw"):
-            kwargs[k] = GridTHW(v.tolist())
+            if isinstance(v, torch.Tensor):
+                kwargs[k] = tuple(tuple(row) for row in v.tolist())
+            elif isinstance(v, (list, tuple)):
+                kwargs[k] = tuple(
+                    tuple(row) if isinstance(row, (list, tuple)) else row
+                    for row in v)
 
         elif k == "audio_feature_lengths" and isinstance(v, torch.Tensor):
             kwargs[k] = tuple(v.tolist())
