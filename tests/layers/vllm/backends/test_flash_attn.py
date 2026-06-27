@@ -172,6 +172,18 @@ class TestPallasAttentionBackendImpl:
                 attn_type=AttentionType.ENCODER,
             )
 
+    def test_init_with_encoder_only_attention_does_not_raise_error(self):
+        PallasAttentionBackendImpl(
+            num_heads=32,
+            head_size=128,
+            scale=0.088,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            attn_type=AttentionType.ENCODER_ONLY,
+        )
+
     def test_forward(self, mesh):
         impl = PallasAttentionBackendImpl(
             num_heads=NUM_HEADS,
@@ -417,4 +429,35 @@ class TestPallasAttentionBackendImpl:
                 match=
                 "Attention sink support is only available when head_dim==64"):
             assert impl.sinks is not None
+            impl.forward(layer, query, key, value, torch.tensor([]), metadata)
+
+    def test_forward_encoder_only(self, mesh):
+        impl = PallasAttentionBackendImpl(
+            num_heads=NUM_HEADS,
+            head_size=HEAD_DIM,
+            scale=0.088,
+            num_kv_heads=NUM_HEADS,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            attn_type=AttentionType.ENCODER_ONLY,
+        )
+
+        layer = MagicMock()
+        layer.layer_name = "0"
+
+        query, key, value, _, metadata = create_inputs(
+            mesh, num_kv_heads=NUM_HEADS)
+        metadata.padded_num_reqs = MAX_NUM_SEQS
+
+        from vllm.config import VllmConfig
+        vllm_config = MagicMock(spec=VllmConfig)
+        vllm_config.model_config = MagicMock()
+        vllm_config.model_config.max_model_len = 128
+
+        with torchax.default_env(), set_vllm_model_wrapper_context(
+                kv_caches=[],
+                mesh=mesh,
+                layer_name_to_kvcache_index={'0': 0},
+                vllm_config=vllm_config):
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
