@@ -13,19 +13,22 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for PP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for PP (single-host)"
+    key: "${BK_KEY}_PP_CorrectnessTest_Single_Host"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for PP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Single_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for PP (single-host)"
+    key: "${BK_KEY}_record_PP_CorrectnessTest_Single_Host"
+    depends_on: "${BK_KEY}_PP_CorrectnessTest_Single_Host"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "PP"
       CI_STAGE: "Single-Host CorrectnessTest"
@@ -34,22 +37,25 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_PP_CorrectnessTest_Single_Host
 
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for PP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Single_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for PP (single-host)"
+    key: "${BK_KEY}_PP_PerformanceTest_Single_Host"
+    depends_on: "${BK_KEY}_record_PP_CorrectnessTest_Single_Host"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for PP (single-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_PP_PerformanceTest_Single_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Single_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for PP (single-host)"
+    key: "${BK_KEY}_record_PP_PerformanceTest_Single_Host"
+    depends_on: "${BK_KEY}_PP_PerformanceTest_Single_Host"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "PP"
       CI_STAGE: "Single-Host PerformanceTest"
@@ -58,21 +64,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Single_Host
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_PP_PerformanceTest_Single_Host
 
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for PP (multi-host)"
-    key: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Multi_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for PP (multi-host)"
+    key: "${BK_KEY}_PP_CorrectnessTest_Multi_Host"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for PP (multi-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Multi_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Multi_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for PP (multi-host)"
+    key: "${BK_KEY}_record_PP_CorrectnessTest_Multi_Host"
+    depends_on: "${BK_KEY}_PP_CorrectnessTest_Multi_Host"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "PP"
       CI_STAGE: "Multi-Host CorrectnessTest"
@@ -81,21 +90,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Multi_Host
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for PP (multi-host)"
-    key: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Multi_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Multi_Host"
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_PP_CorrectnessTest_Multi_Host
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for PP (multi-host)"
+    key: "${BK_KEY}_PP_PerformanceTest_Multi_Host"
+    depends_on: "${BK_KEY}_record_PP_CorrectnessTest_Multi_Host"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for PP (multi-host)"
-    key: "${TPU_VERSION:-tpu6e}_record_PP_PerformanceTest_Multi_Host"
-    depends_on: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Multi_Host"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for PP (multi-host)"
+    key: "${BK_KEY}_record_PP_PerformanceTest_Multi_Host"
+    depends_on: "${BK_KEY}_PP_PerformanceTest_Multi_Host"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "PP"
       CI_STAGE: "Multi-Host PerformanceTest"
@@ -104,4 +116,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Multi_Host
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_PP_PerformanceTest_Multi_Host

@@ -13,10 +13,11 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for KV Cache Offload"
-    key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for KV Cache Offload"
+    key: "${BK_KEY}KV_Cache_Offload_CorrectnessTest"
     soft_fail: true
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       USE_V6E8_QUEUE: "True"
     agents:
       queue: tpu_v6e_8_queue
@@ -24,10 +25,11 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for KV Cache Offload"
-    key: "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
-    depends_on: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for KV Cache Offload"
+    key: "${BK_KEY}record_KV_Cache_Offload_CorrectnessTest"
+    depends_on: "${BK_KEY}KV_Cache_Offload_CorrectnessTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "KV Cache Offload"
       CI_STAGE: "CorrectnessTest"
@@ -36,22 +38,25 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}KV_Cache_Offload_CorrectnessTest
 
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for KV Cache Offload"
-    key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for KV Cache Offload"
+    key: "${BK_KEY}KV_Cache_Offload_PerformanceTest"
+    depends_on: "${BK_KEY}record_KV_Cache_Offload_CorrectnessTest"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: tpu_v6e_8_queue
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
           python3 -m pytest -s -v /workspace/tpu_inference/tests/offload/tpu_offload_performance_test.py
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for KV Cache Offload"
-    key: "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for KV Cache Offload"
+    key: "${BK_KEY}record_KV_Cache_Offload_PerformanceTest"
+    depends_on: "${BK_KEY}KV_Cache_Offload_PerformanceTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "KV Cache Offload"
       CI_STAGE: "PerformanceTest"
@@ -60,4 +65,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}KV_Cache_Offload_PerformanceTest

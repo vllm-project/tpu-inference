@@ -14,18 +14,21 @@
 
 steps:
   # --- Single-Host Tests ---
-  - label: "${{TPU_VERSION:-tpu6e}} Correctness tests for {FEATURE_NAME} (single-host)"
-    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
+  - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Correctness tests for {FEATURE_NAME} (single-host)"
+    key: "${{BK_KEY}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
     agents:
       queue: cpu  # TODO: replace with execution environment (e.g. "{QUEUE}")
     commands:
       - echo "placeholder" # TODO : replace with your single-host correctness test command
 
-  - label: "${{TPU_VERSION:-tpu6e}} Record correctness test result for {FEATURE_NAME} (single-host)"
-    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
+  - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Record correctness test result for {FEATURE_NAME} (single-host)"
+    key: "${{BK_KEY}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
+    depends_on: "${{BK_KEY}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
     env:
+      MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
       CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
       CI_TARGET: "{FEATURE_NAME}"
       CI_STAGE: "Single-Host CorrectnessTest"
@@ -34,21 +37,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host
+        .buildkite/scripts/record_step_result.sh ${{BK_KEY}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host
 
-  - label: "${{TPU_VERSION:-tpu6e}} Performance tests for {FEATURE_NAME} (single-host)"
-    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
+  - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Performance tests for {FEATURE_NAME} (single-host)"
+    key: "${{BK_KEY}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host"
+    depends_on: "${{BK_KEY}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Single_Host"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
     agents:
       queue: cpu  # TODO: replace with execution environment (e.g. "{QUEUE}")
     commands:
       - echo "placeholder" # TODO : replace with your single-host performance test command
 
-  - label: "${{TPU_VERSION:-tpu6e}} Record performance test result for {FEATURE_NAME} (single-host)"
-    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host"
+  - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Record performance test result for {FEATURE_NAME} (single-host)"
+    key: "${{BK_KEY}}_record_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host"
+    depends_on: "${{BK_KEY}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host"
     env:
+      MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
       CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
       CI_TARGET: "{FEATURE_NAME}"
       CI_STAGE: "Single-Host PerformanceTest"
@@ -57,21 +63,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host
+        .buildkite/scripts/record_step_result.sh ${{BK_KEY}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Single_Host
 
   # --- Multi-Host Tests ---
-  - label: "${{TPU_VERSION:-tpu6e}} Correctness tests for {FEATURE_NAME} (multi-host)"
-    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
+  - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Correctness tests for {FEATURE_NAME} (multi-host)"
+    key: "${{BK_KEY}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
     agents:
       queue: cpu  # TODO: replace with execution environment (e.g. "{QUEUE}")
     commands:
       - echo "placeholder" # TODO : replace with your multi-host correctness test command
 
-  - label: "${{TPU_VERSION:-tpu6e}} Record correctness test result for {FEATURE_NAME} (multi-host)"
-    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
+  - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Record correctness test result for {FEATURE_NAME} (multi-host)"
+    key: "${{BK_KEY}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
+    depends_on: "${{BK_KEY}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
     env:
+      MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
       CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
       CI_TARGET: "{FEATURE_NAME}"
       CI_STAGE: "Multi-Host CorrectnessTest"
@@ -80,21 +89,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host
+        .buildkite/scripts/record_step_result.sh ${{BK_KEY}}_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host
 
-  - label: "${{TPU_VERSION:-tpu6e}} Performance tests for {FEATURE_NAME} (multi-host)"
-    key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
+  - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Performance tests for {FEATURE_NAME} (multi-host)"
+    key: "${{BK_KEY}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host"
+    depends_on: "${{BK_KEY}}_record_{SANITIZED_FEATURE_NAME}_CorrectnessTest_Multi_Host"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
     agents:
       queue: cpu  # TODO: replace with execution environment (e.g. "{QUEUE}")
     commands:
       - echo "placeholder" # TODO : replace with your multi-host performance test command
 
-  - label: "${{TPU_VERSION:-tpu6e}} Record performance test result for {FEATURE_NAME} (multi-host)"
-    key: "${{TPU_VERSION:-tpu6e}}_record_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host"
-    depends_on: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host"
+  - label: "${{TPU_VERSION:-tpu6e}} ${{MODEL_IMPL_TYPE:-vllm}} Record performance test result for {FEATURE_NAME} (multi-host)"
+    key: "${{BK_KEY}}_record_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host"
+    depends_on: "${{BK_KEY}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host"
     env:
+      MODEL_IMPL_TYPE: "${{MODEL_IMPL_TYPE:-vllm}}"
       CI_TPU_VERSION: "${{TPU_VERSION:-tpu6e}}"
       CI_TARGET: "{FEATURE_NAME}"
       CI_STAGE: "Multi-Host PerformanceTest"
@@ -103,4 +115,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${{TPU_VERSION:-tpu6e}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host
+        .buildkite/scripts/record_step_result.sh ${{BK_KEY}}_{SANITIZED_FEATURE_NAME}_PerformanceTest_Multi_Host

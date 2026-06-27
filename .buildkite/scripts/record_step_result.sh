@@ -22,12 +22,6 @@ fi
 
 STEP_KEY="$1"
 
-# Determine the prefix based on hardware version to prevent data collisions.
-TPU_METADATA_PREFIX="v6"
-if echo "${CI_TPU_VERSION}" | grep -qi "tpu7x"; then
-  TPU_METADATA_PREFIX="v7"
-fi
-
 echo "--- Checking ${STEP_KEY} Outcome (Hardware: ${CI_TPU_VERSION:-v6})"
 
 # Try to get the custom string you saved
@@ -55,15 +49,22 @@ case $OUTCOME in
   "not enough HBM")
     message="not enough HBM"
     ;;
+  "transformers version too low")
+    message="transformers version too low"
+    ;;
   *)
     message="❌ Failing"
     ;;
 esac
 
 # Save the results using the hardware-specific prefix.
-buildkite-agent meta-data set "${TPU_METADATA_PREFIX}${CI_TARGET}_category" "${CI_CATEGORY}"
-buildkite-agent meta-data set "${TPU_METADATA_PREFIX}${CI_TARGET}:${CI_STAGE}" "${message}"
+SAFE_TARGET=$(echo "$CI_TARGET" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
+SAFE_STAGE=$(echo "$CI_STAGE" | tr '/:.[[:space:]]' '_' | sed 's/^_//;s/_$//;s/__\+/_/g')
+SAFE_META_KEY="result_${CI_TPU_VERSION}_${MODEL_IMPL_TYPE}_${SAFE_TARGET}_${SAFE_STAGE}"
 
-if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "unverified" ] && [ "${OUTCOME}" != "not enough HBM" ]; then
+buildkite-agent meta-data set "${CI_TPU_VERSION}_${SAFE_TARGET}_category" "${CI_CATEGORY}"
+buildkite-agent meta-data set "${SAFE_META_KEY}" "${message}"
+
+if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] && [ "${OUTCOME}" != "unverified" ] && [ "${OUTCOME}" != "not enough HBM" ] && [ "${OUTCOME}" != "transformers version too low" ]; then
     exit 1
 fi

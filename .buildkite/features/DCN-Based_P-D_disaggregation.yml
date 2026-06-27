@@ -13,10 +13,11 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Correctness tests for DCN-based P/D disaggregation"
-    key: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for DCN-based P/D disaggregation"
+    key: "${BK_KEY}_DCN_based_P-D_disaggregation_CorrectnessTest"
     soft_fail: true
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       MODEL: "Qwen/Qwen3-0.6B"
       INPUT_LEN: 100
@@ -29,10 +30,11 @@ steps:
       - |
         .buildkite/scripts/run_disagg.sh
 
-  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for DCN-based P/D disaggregation"
-    key: "${TPU_VERSION:-tpu6e}_record_DCN_based_P-D_disaggregation_CorrectnessTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for DCN-based P/D disaggregation"
+    key: "${BK_KEY}_record_DCN_based_P-D_disaggregation_CorrectnessTest"
+    depends_on: "${BK_KEY}_DCN_based_P-D_disaggregation_CorrectnessTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "DCN-based P/D disaggregation"
       CI_STAGE: "CorrectnessTest"
@@ -41,12 +43,13 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_DCN_based_P-D_disaggregation_CorrectnessTest
 
-  - label: "${TPU_VERSION:-tpu6e} Performance tests for DCN-based P/D disaggregation"
-    key: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance tests for DCN-based P/D disaggregation"
+    key: "${BK_KEY}_DCN_based_P-D_disaggregation_PerformanceTest"
     soft_fail: true
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       MODEL: "Qwen/Qwen3-0.6B"
       INPUT_LEN: 1024
@@ -61,10 +64,11 @@ steps:
       - |
         .buildkite/scripts/run_disagg.sh
 
-  - label: "${TPU_VERSION:-tpu6e} Record performance test result for DCN-based P/D disaggregation"
-    key: "${TPU_VERSION:-tpu6e}_record_DCN_based_P-D_disaggregation_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for DCN-based P/D disaggregation"
+    key: "${BK_KEY}_record_DCN_based_P-D_disaggregation_PerformanceTest"
+    depends_on: "${BK_KEY}_DCN_based_P-D_disaggregation_PerformanceTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "DCN-based P/D disaggregation"
       CI_STAGE: "PerformanceTest"
@@ -73,4 +77,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_DCN_based_P-D_disaggregation_PerformanceTest
