@@ -120,6 +120,22 @@ def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
                 f"FusedMoE does not support {scoring_fn} scoring function")
 
 
+def apply_nongated_act(activation: str, x: jax.Array) -> jax.Array:
+    base = (activation[:-len("_no_mul")] if activation.endswith("_no_mul") else activation)
+    match base:
+        case "relu2":
+            return jax.nn.relu(x)**2
+        case "silu":
+            return jax.nn.silu(x)
+        case "gelu":
+            return jax.nn.gelu(x, approximate=False)
+        case "gelu_tanh":
+            return jax.nn.gelu(x, approximate=True)
+        case _:
+            raise NotImplementedError(
+                f"Unsupported non-gated activation: {activation}")
+
+
 def gmm_wrapper(lhs,
                 rhs,
                 rhs_scale,
@@ -205,7 +221,10 @@ def moe_gmm_local(x: jax.Array,
 
     assert parallelism in ["tp", "ep"]
 
-    # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
+    # GMM1: gated activations fuse act(gate) * up inside the kernel (w1 is the
+    # W_up | W_gate concat, intermediate x 2). Non-gated activations (is_act_and_mul=False) do a plain
+    # up-projection (fuse_act=None, intermediate x 1) and apply act() in JAX.
+    is_gated = not activation.endswith("_no_mul")
     gmm1_res = gmm_wrapper(
         x,
         w1,
@@ -213,9 +232,11 @@ def moe_gmm_local(x: jax.Array,
         w1_bias,
         group_sizes,
         group_offset,
-        fuse_act=activation,
+        fuse_act=activation if is_gated else None,
         preferred_element_type=x.dtype,
     )
+    if not is_gated:
+        gmm1_res = apply_nongated_act(activation, gmm1_res)
 
     # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
     # once, not applying to every shard. So we set w2_bias to 0 to all shards other than

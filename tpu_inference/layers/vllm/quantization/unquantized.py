@@ -381,8 +381,11 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         assert shard_id is not None, "Expecting shard_id argument"
         # Keep track of loaded weights for MoE layers, e.g. (('0', 'w1'), ('0', 'w2'), ('0', 'w3'), ('1', 'w1'), ...)
         layer._loaded_weights.add((expert_id, shard_id))
-        if len(layer._loaded_weights) == layer.global_num_experts * len(
-            ('w1', 'w2', 'w3')):
+
+        # Non-gated MoE (is_act_and_mul=False)
+        # loads only w1 (up) and w2 (down) per expert; gated SwiGLU loads w1, w2, w3.
+        num_shards = 3 if layer.moe_config.is_act_and_mul else 2
+        if len(layer._loaded_weights) == layer.global_num_experts * num_shards:
             logger.debug(f"Start sharding weights for layer {type(layer)}")
             self.process_weights_after_loading(layer)
             logger.debug(f"Complete sharding weights for layer {type(layer)}")

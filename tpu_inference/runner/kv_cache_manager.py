@@ -757,13 +757,20 @@ class KVCacheManager:
                     if non_mtp_tensors:
                         # assert that each kv_cache_tensor in kv_cache_config.kv_cache_tensors has the same number of shared layers
                         # This is needed for models like Qwen3.5 where every 4 layers share the same KV cache (3 linear attn and 1 full attn)
-                        num_shared_layers = len(non_mtp_tensors[0].shared_by)
-                        for kv_cache_tensor in non_mtp_tensors:
-                            assert len(
-                                kv_cache_tensor.shared_by
-                            ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
+                        # Uniform groups are the common case, but hybrid models with irregular attention spacing (e.g. Nemotron-H: MEMEM*EMEMEM*...)
+                        # produce non-uniform groups. That is supported: each tensor's num_blocks is sized from its own shared_by
+                        # below, and layer indices use a running counter (not i * group_size), so both cases work.
+                        group_sizes = {
+                            len(t.shared_by)
+                            for t in non_mtp_tensors
+                        }
+                        if len(group_sizes) > 1:
+                            logger.warning_once(
+                                "Non-uniform KV-cache group sizes %s (hybrid model with irregular attention spacing); "
+                                "handled via per-group sizing.", tuple(sorted(group_sizes)))
                     break
 
+        flat_layer_idx = 0
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             if duplicate_shared_layers:
                 total_group_page_size = 0
@@ -952,8 +959,13 @@ class KVCacheManager:
                 if j == 0 or duplicate_shared_layers:
                     num_blocks_list.append(mamba_num_blocks if isinstance(
                         layer_spec, MambaSpec) else num_blocks)
-                layer_idx = (i * num_shared_layers
-                             ) + j if duplicate_shared_layers else i
+                if duplicate_shared_layers:
+                    # one kv_caches entry was appended per layer above, in order;
+                    # the running counter matches that position (works for both uniform and non-uniform group sizes).
+                    layer_idx = flat_layer_idx
+                    flat_layer_idx += 1
+                else:
+                    layer_idx = i
                 self.runner.layer_name_to_kvcache_index[layer_name] = layer_idx
         if self.shared_kv_cache_layers:
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
