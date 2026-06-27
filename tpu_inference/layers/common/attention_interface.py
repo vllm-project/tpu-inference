@@ -383,6 +383,7 @@ def sharded_ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    soft_cap: float | None = None,
     update_kv_cache: bool = True,
 ):
     """Shards along KV heads."""
@@ -441,6 +442,7 @@ def sharded_ragged_paged_attention(
         kwargs = dict(
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,
+            soft_cap=soft_cap,
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
@@ -475,6 +477,7 @@ def attention(
     k_scale: float | None = None,
     v_scale: float | None = None,
     sinks: jax.Array | None = None,
+    soft_cap: float | None = None,
     update_kv_cache: bool = True,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
@@ -514,6 +517,7 @@ def attention(
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
+        soft_cap=soft_cap,
         update_kv_cache=update_kv_cache,
     )
 
