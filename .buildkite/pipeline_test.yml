@@ -2,11 +2,13 @@ steps:
   - label: "🚀 Trigger GitHub Workflow"
     agents:
       queue: cpu_64_core
+    secrets:
+      - GITHUB_PAT
     command: |
       curl -L \
         -X POST \
         -H "Accept: application/vnd.github+json" \
-        -H "Authorization: Bearer $$GH_TOKEN" \
+        -H "Authorization: Bearer $$GITHUB_PAT" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         https://api.github.com/repos/vllm-project/tpu-inference/actions/workflows/create-pr.yml/dispatches \
         -d '{
