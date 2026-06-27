@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Optional, Union
 import torch
 import torch.nn.functional as F
 import torchax
-from vllm.lora.punica_wrapper.utils import convert_mapping
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -226,9 +225,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             y (torch.Tensor): Output tensor.
             x (torch.Tensor): Input tensor.
             lora_a_stacked (torch.Tensor): lora_a's weights.
-            lora_b_stacked (torch.Tensor):lora_b's weights.
+            lora_b_stacked (torch.Tensor): lora_b's weights.
             scale (float): Scaling factor.
-            buffer (Optional[torch.Tensor]):Default to None.
+            buffer (Optional[torch.Tensor]): Default to None.
         """
 
         # Note: We use per-token indices here because the TPU bgmv ops expect a tensor
@@ -273,21 +272,73 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         mapping.prompt_mapping = self._pad_prompt_mapping(
             mapping.prompt_mapping)
 
-        (
-            base_indices,
-            sampler_indices,
-            sampler_indices_padded,
-            embeddings_indices,
-            indices_len,
-        ) = convert_mapping(
-            mapping,
-            lora_index_to_id,
-            max_loras,
-            vocab_size,
-            0,  # extra_vocab_size
-            "cpu",
-        )
+        # Compute LoRA routing mapping on CPU using NumPy and transfer via jax.device_put.
+        # We bypass upstream's convert_mapping because it relies on async_tensor_h2d,
+        # which defaults to pin_memory=True. PyTorch XLA lacks CUDA-style pinned memory
+        # hooks, causing a fatal PrivateUse1HooksInterface RuntimeError on TPUs.
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        import torchax
+
+        index_mapping_indices: list[int] = list(mapping.index_mapping)
+        embedding_indices = index_mapping_indices.copy()
+        lora_indices = index_mapping_indices.copy()
+
+        prompt_mapping: list[int] = [
+            lora_index_to_id.index(x) if x > 0 else -1
+            for x in mapping.prompt_mapping
+        ]
+        for i in range(len(index_mapping_indices)):
+            lora_idx = (lora_index_to_id.index(index_mapping_indices[i])
+                        if index_mapping_indices[i] > 0 else -1)
+            embedding_indices[
+                i] = lora_idx if index_mapping_indices[i] > 0 else 0
+            lora_indices[i] = lora_idx
+
+        # Calculate shapes and mapping arrays in numpy
+        indices = np.array(
+            [index_mapping_indices, lora_indices, embedding_indices],
+            dtype=np.int64)
+        prompt_mapping_arr = np.array(prompt_mapping, dtype=np.int64)
+
+        extra_vocab_size = 0  # default mapping parameter
+        mapped_0 = indices[2] * extra_vocab_size
+        mapped_1 = indices[2] * (vocab_size + extra_vocab_size)
+        embeddings_indices_arr = np.stack([mapped_0, mapped_1])
+
+        embeddings_indices_arr = np.where(embeddings_indices_arr == -1,
+                                          max_loras - 1,
+                                          embeddings_indices_arr)
+        base_indices_arr = indices[1]
+        sampler_indices_arr = prompt_mapping_arr
+        sampler_indices_padded_arr = np.where(sampler_indices_arr == -1,
+                                              max_loras - 1,
+                                              sampler_indices_arr)
+
+        indices_len = [
+            len(index_mapping_indices),
+            len(lora_indices),
+            len(lora_indices),
+            embeddings_indices_arr.shape[1],
+        ]
+
+        # Convert the NumPy results directly into Torchax (JAX-backed) Tensors in the default env context
+        try:
+            from torchax.interop import jax_view
+        except ImportError:
+            from torch_xla2.interop import jax_view
+
         with torchax.default_env():
+            base_indices = jax_view(jax.device_put(
+                jnp.array(base_indices_arr)))
+            sampler_indices = jax_view(
+                jax.device_put(jnp.array(sampler_indices_arr)))
+            sampler_indices_padded = jax_view(
+                jax.device_put(jnp.array(sampler_indices_padded_arr)))
+            embeddings_indices = jax_view(
+                jax.device_put(jnp.array(embeddings_indices_arr)))
+
             self._token_lora_indices = self._pad_to_shape(
                 base_indices, self._token_lora_indices.shape,
                 dims=1).to(self.device)
