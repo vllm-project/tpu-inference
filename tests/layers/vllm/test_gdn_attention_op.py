@@ -15,13 +15,15 @@
 from unittest.mock import MagicMock, patch
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
 from jax.sharding import Mesh
 
-from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
-    VllmGatedDeltaNetAttention
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import (
+    VllmGatedDeltaNetAttention, get_common_attn_metadata_entries)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     set_vllm_model_wrapper_context
 
@@ -163,6 +165,53 @@ class TestVllmGatedDeltaNetAttention:
 
         assert torch.all(output[:num_tokens] == 5)
         assert torch.all(output[num_tokens:] == 0)
+
+    def test_get_common_attn_metadata_entries(self):
+        metadata_1 = AttentionMetadata(
+            input_positions=jax.numpy.array([0, 1]),
+            block_tables=jax.numpy.array([0, 1, 2]),
+            seq_lens=jax.numpy.array([1, 2]),
+            query_start_loc=jax.numpy.array([0, 1, 2]),
+            request_distribution=jax.numpy.array([0, 0, 2]),
+            mamba_state_indices=jax.numpy.array([0, 1]),
+        )
+        metadata_2 = AttentionMetadata(
+            input_positions=jax.numpy.array([2, 3]),
+            block_tables=None,
+            seq_lens=jax.numpy.array([1, 2]),
+            query_start_loc=jax.numpy.array([0, 1, 2]),
+            request_distribution=jax.numpy.array([0, 1, 1]),
+            mamba_state_indices=jax.numpy.array([1, 0]),
+        )
+
+        common_metadata = get_common_attn_metadata_entries({
+            "layer1": metadata_1,
+            "layer2": metadata_2
+        })
+        assert isinstance(common_metadata, AttentionMetadata)
+        assert common_metadata.seq_lens is not None
+        assert common_metadata.query_start_loc is not None
+        assert common_metadata.padded_num_reqs == -1
+        assert jnp.array_equal(common_metadata.seq_lens, metadata_1.seq_lens)
+        assert jnp.array_equal(common_metadata.query_start_loc,
+                               metadata_1.query_start_loc)
+        assert common_metadata.input_positions is None
+        assert common_metadata.block_tables is None
+        assert common_metadata.request_distribution is None
+        assert common_metadata.mamba_state_indices is None
+
+        common_metadata_list = get_common_attn_metadata_entries([{
+            "layer1":
+            metadata_1
+        }, {
+            "layer2":
+            metadata_2
+        }])
+        assert isinstance(common_metadata_list, AttentionMetadata)
+        assert jnp.array_equal(common_metadata_list.seq_lens,
+                               metadata_1.seq_lens)
+        assert jnp.array_equal(common_metadata_list.query_start_loc,
+                               metadata_1.query_start_loc)
 
     @patch(
         "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.gdn_attention_core_tpu"
