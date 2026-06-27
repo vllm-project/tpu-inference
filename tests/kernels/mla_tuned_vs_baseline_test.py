@@ -50,7 +50,7 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
             decode_batch_size=4,
             num_kv_pages_per_block=3,
             num_queries_per_block=1,
-            vmem_limit_bytes=64 * 1024 * 1024,
+            vmem_limit_bytes=tuned_params.vmem_limit_bytes,
         )
 
         kv_len = key.pages_per_seq * key.page_size_per_kv_packing * key.kv_packing
@@ -102,19 +102,16 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
         jax.block_until_ready(run_kernel(tuned_params))
 
         iters = 50
-        baseline_latencies = []
-        for _ in range(iters):
-            start_ns = time.perf_counter_ns()
-            jax.block_until_ready(run_kernel(baseline_params))
-            baseline_latencies.append(time.perf_counter_ns() - start_ns)
-        baseline_latency = min(baseline_latencies)
+        # Warmup is done during compiling steps above.
+        start_ns = time.perf_counter_ns()
+        baseline_results = [run_kernel(baseline_params) for _ in range(iters)]
+        jax.block_until_ready(baseline_results[-1])
+        baseline_latency = (time.perf_counter_ns() - start_ns) / iters
 
-        tuned_latencies = []
-        for _ in range(iters):
-            start_ns = time.perf_counter_ns()
-            jax.block_until_ready(run_kernel(tuned_params))
-            tuned_latencies.append(time.perf_counter_ns() - start_ns)
-        tuned_latency = min(tuned_latencies)
+        start_ns = time.perf_counter_ns()
+        tuned_results = [run_kernel(tuned_params) for _ in range(iters)]
+        jax.block_until_ready(tuned_results[-1])
+        tuned_latency = (time.perf_counter_ns() - start_ns) / iters
 
         speedup = (baseline_latency - tuned_latency) / baseline_latency * 100
 
