@@ -69,7 +69,7 @@ Choose your developer frontend path depending on your background and model:
 **Set up your workspace in 60 seconds:**
 ```bash
 git clone https://github.com/vllm-project/tpu-inference.git && cd tpu-inference
-pip install -e ".[dev]"
+pip install -e .
 pip install pre-commit && pre-commit install
 ```
 

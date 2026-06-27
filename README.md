@@ -916,13 +916,14 @@ If you're ready to write code, implementing or fixing a model is the highest-imp
 2. **Select Your Path & Set Up:** Read the [Torchax Guide](docs/developer_guides/torchax_model_development.md) (for PyTorch models) or [JAX Guide](docs/developer_guides/jax_model_development.md) (for native JAX models), then initialize your workspace:
    ```bash
    git clone https://github.com/vllm-project/tpu-inference.git && cd tpu-inference
-   pip install -e ".[dev]" && pre-commit install
+   pip install -e .
+   pip install pre-commit && pre-commit install
    ```
 3. **Verify & Submit PR:** Implement your model, verify it locally with `pytest tests/models/jax/test_your_model_name.py`, and open a pull request. **Ensure you include/update the model's unit test in `tests/models/`!** Once merged, the README matrix will automatically update to ✅ Passing within 24 hours.
 
 ---
 
-### 💡 Other Ways to Get Involved
+### Other Ways to Get Involved
 Even if you're not ready to write model code, you can make a huge difference:
 * **🐞 Submit Bugs & Suggest Features:** Spotted a bug or have an optimization idea? Open a [new issue](https://github.com/vllm-project/tpu-inference/new/choose) to let us know.
 * **👀 Provide PR Feedback:** Lend your expertise by reviewing [open pull requests](https://github.com/vllm-project/tpu-inference/pulls) and helping us improve quality.
