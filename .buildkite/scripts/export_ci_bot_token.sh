@@ -1,10 +1,24 @@
 #!/bin/bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 # Function to generate a GitHub App Installation Access Token
 generate_installation_token() {
     # 1. Generate the JWT using embedded Python
     local jwt
-    jwt=$(python3 <<EOF
+    if ! jwt=$(python3 <<EOF
 import jwt
 import time
 import os
@@ -14,7 +28,7 @@ app_id = os.environ.get('GITHUB_CI_BOT_APP_ID')
 pem_key = os.environ.get('GITHUB_CI_BOT_PEM')
 
 if not app_id or not pem_key:
-    print("Error: GITHUB_CI_BOT_APP_ID or GITHUB_CI_BOT_PEM environment variables are missing.", file=sys.stderr)
+    print("Error: Secrets GITHUB_CI_BOT_APP_ID or GITHUB_CI_BOT_PEM are missing.", file=sys.stderr)
     sys.exit(1)
 
 payload = {
@@ -32,10 +46,7 @@ except Exception as e:
     print(f"JWT Encoding Error: {e}", file=sys.stderr)
     sys.exit(1)
 EOF
-)
-
-    # Check if Python script failed
-    if [ $? -ne 0 ]; then
+); then
         echo "Failed to generate JWT." >&2
         return 1
     fi
@@ -83,23 +94,7 @@ EOF
 # ==========================================
 
 # Assuming GITHUB_CI_BOT_PEM and GITHUB_CI_BOT_APP_ID are already exported in your CI env:
-echo "Generating GitHub App token..."
-
+echo "🚀 Generating CI Bot token..."
 # Capture the output of the function into a variable
-GITHUB_TOKEN=$(generate_installation_token)
-
-if [ $? -eq 0 ]; then
-    echo "Successfully generated token."
-    
-    # Mask the token in CI logs (GitHub Actions format, remove if using another CI like Jenkins/GitLab)
-    echo "::add-mask::$GITHUB_TOKEN"
-    
-    # Export it for subsequent steps in your script to use
-    export GITHUB_TOKEN
-    
-    # Test the token (Optional)
-    # curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/rate_limit
-else
-    echo "Failed to generate GitHub App token. Exiting."
-    exit 1
-fi
+GITHUB_CI_BOT_TOKEN="$(generate_installation_token)"
+export GITHUB_CI_BOT_TOKEN

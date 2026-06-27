@@ -253,10 +253,10 @@ class StorageManager:
         raise NotImplementedError("Subclasses must implement close")
 
     def add_autotune_case(self,
-                           case_set_id: str,
-                           case_str: str,
-                           kernel_tuner_name: str,
-                           tpu: str = None):
+                          case_set_id: str,
+                          case_str: str,
+                          kernel_tuner_name: str,
+                          tpu: str = None):
         """Adds a tuning case to the AutoTuneCase table for logging purposes.
 
         Called by the autotuning pipeline to log the tuning key and tuned params
@@ -272,9 +272,9 @@ class StorageManager:
             "Subclasses must implement add_autotune_case")
 
     def read_autotune_cases(self,
-                             case_set_id: str,
-                             kernel_tuner_name: str = None,
-                             tpu: str = None) -> list[dict]:
+                            case_set_id: str,
+                            kernel_tuner_name: str = None,
+                            tpu: str = None) -> list[dict]:
         """Reads tuning cases from the AutoTuneCase table for a given case set.
 
         Args:

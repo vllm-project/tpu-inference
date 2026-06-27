@@ -76,14 +76,16 @@ steps:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: tpu6e
     secrets: 
-      - GITHUB_PAT 
+      - GITHUB_CI_BOT_APP_ID
+      - GITHUB_CI_BOT_PEM 
     priority: 200
     command: |
+      source .buildkite/scripts/export_ci_bot_token.sh
       echo "🚀 Patching kernel autotune results and creating evaluation branch."
       .buildkite/scripts/run_in_docker.sh bash -c '
         branch_name="kernel_autotune.update_tuned_params_$${KERNEL_TUNING_AUTOTUNE_ID}"
         repo_url="github.com/vllm-project/tpu-inference.git"
-        authenticated_repo_url="https://x-access-token:$${GITHUB_PAT}@$${repo_url}"
+        authenticated_repo_url="https://x-access-token:$${GITHUB_CI_BOT_TOKEN}@$${repo_url}"
         pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
         apt install git -y
         git remote set-url origin $${authenticated_repo_url}
@@ -129,19 +131,21 @@ steps:
       KERNEL_TUNING_SPANNER_INSTANCE_ID: "vllm-bm-inst"
       KERNEL_TUNING_SPANNER_DATABASE_ID: "vllm-bm-bk-runs"
     secrets: 
-      - GITHUB_PAT 
+      - GITHUB_CI_BOT_APP_ID
+      - GITHUB_CI_BOT_PEM 
     command:
       - |
         # remove the existing generated HTML reports in the temp dir on the host. 
         rm -f "/tmp/kernel_tuning/*.html"
       - |
+        source .buildkite/scripts/export_ci_bot_token.sh
         echo "🚀 Evaluating tuning results and optionally creating a PR."
         .buildkite/scripts/run_in_docker.sh bash -c '
           set -e
           set -x
           branch_name="kernel_autotune.update_tuned_params_$${KERNEL_TUNING_AUTOTUNE_ID}"
           repo_url="github.com/vllm-project/tpu-inference.git"
-          authenticated_repo_url="https://x-access-token:$${GITHUB_PAT}@$${repo_url}"
+          authenticated_repo_url="https://x-access-token:$${GITHUB_CI_BOT_TOKEN}@$${repo_url}"
           pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
           apt install git -y
           git remote set-url origin $${authenticated_repo_url}

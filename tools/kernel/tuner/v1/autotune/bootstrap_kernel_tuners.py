@@ -48,7 +48,7 @@ _SPANNER_DATABASE_ID = flags.DEFINE_string(
     'spanner_database_id', 'tune-gmm',
     'The Spanner database ID to use. Only used when --run_locally is false.')
 _AUTOTUNE_ID = flags.DEFINE_string('autotune_id', '',
-                                    'The autotune ID to use for this run.')
+                                   'The autotune ID to use for this run.')
 
 OUTPUT_PATH = "/tmp/kernel_tuning/generated_pipeline.yml"
 
@@ -146,5 +146,4 @@ class BootstrapKernelTuners:
 
 
 if __name__ == "__main__":
-    app.run(lambda _: BootstrapKernelTuners().
-            generate_kernel_tuning_cases())
+    app.run(lambda _: BootstrapKernelTuners().generate_kernel_tuning_cases())

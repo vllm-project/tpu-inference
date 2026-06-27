@@ -358,10 +358,10 @@ class LocalDbManager(StorageManager):
                 if row['ID'] == case_set_id]
 
     def add_autotune_case(self,
-                           case_set_id: str,
-                           case_id: int,
-                           case_kv: str,
-                           tpu: str = None):
+                          case_set_id: str,
+                          case_id: int,
+                          case_kv: str,
+                          tpu: str = None):
         """Adds a new autotune case to the database.
 
         Args:
@@ -375,9 +375,9 @@ class LocalDbManager(StorageManager):
         )
 
     def read_autotune_cases(self,
-                             case_set_id: str,
-                             kernel_tuner_name: str = None,
-                             tpu: str = None) -> list[dict]:
+                            case_set_id: str,
+                            kernel_tuner_name: str = None,
+                            tpu: str = None) -> list[dict]:
         """Reads tuning cases from the AutoTuneCase table for a given case set.
 
         Args:

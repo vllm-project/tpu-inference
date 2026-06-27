@@ -328,7 +328,7 @@ class SpannerStorageManager(StorageManager):
         return spanner.COMMIT_TIMESTAMP
 
     def add_autotune_case(self, case_set_id: str, case_str: str,
-                           kernel_tuner_name: str, tpu: str):
+                          kernel_tuner_name: str, tpu: str):
         """Adds a tuning case to the AutoTuneCase table for logging purposes.
 
         Called by the autotuning pipeline to log the tuning key and tuned params
@@ -355,9 +355,9 @@ class SpannerStorageManager(StorageManager):
                      values=[(case_set_id, case_str, kernel_tuner_name, tpu)])
 
     def read_autotune_cases(self,
-                             case_set_id,
-                             kernel_tuner_name=None,
-                             tpu=None):
+                            case_set_id,
+                            kernel_tuner_name=None,
+                            tpu=None):
         """ Reads tuning cases from the KernelAutoTuneCases table for a given case set.
         """
         query = "SELECT DISTINCT CaseKeyValue, KernelTunerName, TPU FROM KernelAutoTuneCases WHERE CaseSetId = @id"

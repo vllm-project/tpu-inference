@@ -34,6 +34,6 @@ def get_tuned_params(tuning_key: TuningKey) -> TunableParams:
         spanner_instance_id='vllm-bm-inst',
         spanner_database_id='tune-gmm')
     storage_manager.add_autotune_case(CASE_SET_ID, str(tuning_case),
-                                       KERNEL_TUNER_NAME, TPU)
+                                      KERNEL_TUNER_NAME, TPU)
     storage_manager.close()
     return tunable_params
