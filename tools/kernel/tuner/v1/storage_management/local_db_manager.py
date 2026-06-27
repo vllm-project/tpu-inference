@@ -359,16 +359,16 @@ class LocalDbManager(StorageManager):
 
     def add_autotune_case(self,
                           case_set_id: str,
-                          case_id: int,
-                          case_kv: str,
+                          case_str: str,
+                          kernel_tuner_name: str,
                           tpu: str = None):
-        """Adds a new autotune case to the database.
+        """Adds a tuning case to the AutoTuneCase table for logging purposes.
 
         Args:
             case_set_id: Unique string identifier for the case set.
-            case_id: Unique integer identifier for the case within the case set.
-            case_kv: String representing the key-value pair of the tuning case.
-            tpu: Optional TPU identifier where this case will be executed.
+            case_str: String encoding of the tuning case (e.g. in 'key:value' format).
+            kernel_tuner_name: Name of the kernel tuner.
+            tpu: Optional TPU identifier.
         """
         raise NotImplementedError(
             "Not implemented in LocalDbManager. This method is intended for SpannerStorageManager used in auto-tuning scenarios."

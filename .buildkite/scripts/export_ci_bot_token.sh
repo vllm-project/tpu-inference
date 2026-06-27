@@ -16,9 +16,13 @@
 
 # Function to generate a GitHub App Installation Access Token
 generate_installation_token() {
-    # 1. Generate the JWT using embedded Python
+    # 1. Generate the JWT using embedded Python inside a docker container
+    # to avoid host environment missing 'PyJWT' package.
     local jwt
-    if ! jwt=$(python3 <<EOF
+    if ! jwt=$(sudo docker run --rm -i \
+        -e GITHUB_CI_BOT_APP_ID \
+        -e GITHUB_CI_BOT_PEM \
+        python:3.11-alpine sh -c "pip install -q PyJWT && python3" <<EOF
 import jwt
 import time
 import os

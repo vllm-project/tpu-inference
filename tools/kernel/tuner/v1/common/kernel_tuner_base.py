@@ -253,7 +253,6 @@ class KernelTunerBase(ABC):
             "Specific kernel tuner should implement this to generate the cases for the given case_set_id and desc, and return a list of TuningCase objects representing the tuning cases."
         )
 
-    @abstractmethod
     def get_search_space(self, tuning_key: TuningKey) -> dict:
         """Get the search space for the given kernel tuner with the specified tuning key. The search space is a dictionary where the keys are the tunable parameter names and the values are lists of possible values for each parameter.
 
@@ -266,9 +265,7 @@ class KernelTunerBase(ABC):
         Returns:
             A dictionary representing the search space for the kernel tuner.
         """
-        raise NotImplementedError(
-            "Specific kernel tuner must implement this to return the search space for the kernel tuner if it supports bayesian optimization."
-        )
+        return {}
 
     def _generate_tuning_jobs(self) -> list[tuple[int, int]]:
         """Partitions the full case set into fixed-size work buckets.
