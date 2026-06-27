@@ -50,7 +50,7 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
             decode_batch_size=4,
             num_kv_pages_per_block=3,
             num_queries_per_block=1,
-            vmem_limit_bytes=64 * 1024 * 1024,
+            vmem_limit_bytes=tuned_params.vmem_limit_bytes,
         )
 
         kv_len = key.pages_per_seq * key.page_size_per_kv_packing * key.kv_packing
