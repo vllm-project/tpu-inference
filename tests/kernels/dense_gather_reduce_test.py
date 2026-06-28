@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import itertools
+import types
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -21,8 +23,9 @@ from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
-    dense_gather_reduce
+from tpu_inference.kernels.sparse_core import dense_gather_reduce as dgr_mod
+from tpu_inference.kernels.sparse_core.dense_gather_reduce import (
+    dense_gather_reduce, is_compatible)
 
 jax.config.parse_flags_with_absl()
 
@@ -222,6 +225,40 @@ class DenseGatherReduceTest(jtu.JaxTestCase):
             print("DEBUG ACTUAL (first 32 rows):\n", actual[:32, :])
             print("DEBUG DESIRED (first 32 rows):\n", desired[:32, :])
             raise e
+
+
+class IsCompatibleTest(absltest.TestCase):
+    """Hardware-independent tests for the is_compatible() fallback gate.
+
+    These mock get_tpu_info() so they run on any platform (incl. CPU/v6e),
+    unlike DenseGatherReduceTest which needs SparseCore hardware.
+    """
+
+    def _fake_tpu_info(self, generation, num_lanes=16, num_cores=1,
+                       num_subcores=1):
+        sparse_core = types.SimpleNamespace(num_lanes=num_lanes,
+                                            num_cores=num_cores,
+                                            num_subcores=num_subcores)
+        return types.SimpleNamespace(generation=generation,
+                                     sparse_core=sparse_core)
+
+    def test_v6e_falls_back(self):
+        # Qwen3-30B-A3B-like inputs: out_size divisible by topk, bf16.
+        op = jnp.zeros((4096, 128), jnp.bfloat16)
+        idx = jnp.zeros((4096, ), jnp.int32)
+        # v6e (generation 6) must be rejected so the MoE path uses _jax_fallback
+        # instead of tripping the zero-height output-block "swap" crash.
+        with mock.patch.object(dgr_mod.pltpu, "get_tpu_info",
+                               return_value=self._fake_tpu_info(generation=6)):
+            self.assertFalse(is_compatible(op, idx, reduce_group_size=8))
+
+    def test_v7x_compatible(self):
+        op = jnp.zeros((4096, 128), jnp.bfloat16)
+        idx = jnp.zeros((4096, ), jnp.int32)
+        # generation 7 with a valid SparseCore config passes all gates.
+        with mock.patch.object(dgr_mod.pltpu, "get_tpu_info",
+                               return_value=self._fake_tpu_info(generation=7)):
+            self.assertTrue(is_compatible(op, idx, reduce_group_size=8))
 
 
 if __name__ == "__main__":

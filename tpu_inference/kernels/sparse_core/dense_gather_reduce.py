@@ -41,7 +41,20 @@ def is_compatible(
     if op.shape[0] % reduce_group_size != 0:
         return False
 
-    sc_info = pltpu.get_tpu_info().sparse_core
+    tpu_info = pltpu.get_tpu_info()
+    # dense_gather_reduce is not supported on TPUv6e (matches the skip in
+    # tests/kernels/dense_gather_reduce_test.py). Concretely the kernel's output
+    # BlockSpec row dimension is (num_lanes // reduce_group_size) // packing (see
+    # out_rows_per_step / out_specs in _sc_gather_reduce); for sub-32-bit dtypes
+    # packing > 1 (bf16 -> 2), so v6e SparseCore with reduce_group_size close to
+    # num_lanes (e.g. Qwen3-30B-A3B topk=8) floors this to 0, yielding a
+    # zero-height output block and crashing AOT lowering with "Invalid shape for
+    # `swap`". Excluding v6e here routes those models through _jax_fallback (the
+    # pre-#2979 path) instead of the MoE GMM path tripping the crash.
+    if tpu_info.generation == 6:
+        return False
+
+    sc_info = tpu_info.sparse_core
     if sc_info is None:
         return False
 
