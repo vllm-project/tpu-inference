@@ -24,7 +24,6 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
     QwenGatedDeltaNetAttention
 
 from tpu_inference import envs
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.gdn_attention import (GdnAttentionConfig,
                                                        run_jax_gdn_attention)
 from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import \
@@ -38,55 +37,6 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
-
-
-def _attn_metadata_values_equal(a: object, b: object) -> bool:
-    if isinstance(a, (jax.core.Tracer, jax.Array)) and isinstance(
-            b, (jax.core.Tracer, jax.Array)):
-        return a.shape == b.shape and a.dtype == b.dtype
-    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
-        return len(a) == len(b) and all(
-            _attn_metadata_values_equal(x, y) for x, y in zip(a, b))
-    return a == b
-
-
-def get_common_attn_metadata_entries(
-    attn_metadata: dict[str, object] | list[dict[str, object]]
-) -> AttentionMetadata:
-    """Return an AttentionMetadata object with only the shared fields populated."""
-    if isinstance(attn_metadata, list):
-        all_metadata = []
-        for per_layer in attn_metadata:
-            if not isinstance(per_layer, dict):
-                raise TypeError(
-                    f"Expected attn_metadata list elements to be dict, got "
-                    f"{type(per_layer).__name__}")
-            all_metadata.extend(per_layer.values())
-    elif isinstance(attn_metadata, dict):
-        all_metadata = list(attn_metadata.values())
-    else:
-        raise TypeError(
-            f"Expected attn_metadata to be dict or list[dict], got "
-            f"{type(attn_metadata).__name__}")
-
-    if not all_metadata:
-        return AttentionMetadata(input_positions=None)
-
-    common_field_names = set(vars(all_metadata[0]).keys())
-    for metadata in all_metadata[1:]:
-        common_field_names &= set(vars(metadata).keys())
-        if not common_field_names:
-            return AttentionMetadata(input_positions=None)
-
-    common_metadata = AttentionMetadata(input_positions=None)
-    for field_name in common_field_names:
-        reference_value = getattr(all_metadata[0], field_name)
-        if all(
-                _attn_metadata_values_equal(reference_value,
-                                            getattr(metadata, field_name))
-                for metadata in all_metadata[1:]):
-            setattr(common_metadata, field_name, reference_value)
-    return common_metadata
 
 
 def gdn_attention_core_tpu(
@@ -113,14 +63,14 @@ def gdn_attention_core_tpu(
        in the cache.
     """
     fc = get_forward_context()
-    layer_attn_metadata = fc.attn_metadata[layer_name]
-    common_metadata = get_common_attn_metadata_entries(fc.attn_metadata)
+    layer_attn_metadata = fc.shared_attn_metadata
+    assert layer_attn_metadata is not None, "shared_attn_metadata must be set in forward context"
 
-    padded_num_reqs = common_metadata.padded_num_reqs if common_metadata.padded_num_reqs is not None else layer_attn_metadata.padded_num_reqs
-    request_distribution = common_metadata.request_distribution if common_metadata.request_distribution is not None else layer_attn_metadata.request_distribution
-    query_start_loc = common_metadata.query_start_loc if common_metadata.query_start_loc is not None else layer_attn_metadata.query_start_loc
-    seq_lens = common_metadata.seq_lens if common_metadata.seq_lens is not None else layer_attn_metadata.seq_lens
-    state_indices = common_metadata.mamba_state_indices if common_metadata.mamba_state_indices is not None else layer_attn_metadata.mamba_state_indices
+    padded_num_reqs = layer_attn_metadata.padded_num_reqs
+    request_distribution = layer_attn_metadata.request_distribution
+    query_start_loc = layer_attn_metadata.query_start_loc
+    seq_lens = layer_attn_metadata.seq_lens
+    state_indices = layer_attn_metadata.mamba_state_indices
 
     layer_module = fc.no_compile_layers[layer_name]
     vllm_context = get_vllm_model_wrapper_context()
