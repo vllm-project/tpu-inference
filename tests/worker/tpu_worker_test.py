@@ -186,6 +186,17 @@ class TestTPUWorker:
                            distributed_init_method="test_method")
         assert worker.profile_dir is None
 
+    def test_init_with_gcs_profiler_dir_on_rank_zero(self, mock_vllm_config):
+        """GCS profiler dirs are accepted without local mkdir."""
+        gcs_dir = "gs://my-bucket/profiles"
+        mock_vllm_config.profiler_config.profiler = "torch"
+        mock_vllm_config.profiler_config.torch_profiler_dir = gcs_dir
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method")
+        assert worker.profile_dir == gcs_dir
+
     #
     # --- Device and Cache Initialization Tests ---
     #
