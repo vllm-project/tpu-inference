@@ -88,6 +88,20 @@ class _Scratch:
         return getattr(self, dataclasses.fields(self)[index].name)
 
 
+class _CostModelConstants:
+    # Limit on the number of outer loop pipeline iterations. Too many iterations
+    # cause high cumulative pipeline overhead (e.g., from frequent pipeline
+    # startup/teardown bubbles). We try to find partitioning that does not exceed
+    # this limit on iterations.
+    MAX_ITERATIONS: int = 40
+
+    # Upper cap on the column chunk size processed per inner pipeline step.
+    # While larger chunk sizes help utilize bandwidth better, excessively large
+    # chunk sizes cause large pipeline bubbles. We cap it here to balance
+    # efficiency and bubble sizes.
+    MAX_COL_CHUNK_SIZE: int = 1024
+
+
 # ceil up to the nearest multiple of b.
 def _align_to(a, b):
     return pl.cdiv(a, b) * b
@@ -107,8 +121,9 @@ def _fallback_implementation(
     return out
 
 
-def _calculate_num_column_partitions(hidden_size: int, num_cores: int,
-                                     num_lanes: int) -> int:
+def _calculate_num_column_partitions(hidden_size: int, input_size: int,
+                                     num_cores: int, num_lanes: int,
+                                     num_simd_lanes: int) -> int:
     """Calculates the number of row partitions."""
     # Each column partition should be multiple of 128 (number of lanes) due to
     # DMA requirements.
@@ -123,8 +138,39 @@ def _calculate_num_column_partitions(hidden_size: int, num_cores: int,
            and hidden_size % (num_lanes * num_column_partitions * 2) == 0
            and hidden_size //
            (num_column_partitions * 2 * num_lanes) >= preferred_num_stages):
-        num_column_partitions *= 2
+        next_candidate = num_column_partitions * 2
+        next_row_partitions = num_cores // next_candidate
+
+        # Calculate exactly how many pipeline invocations (outer loop)
+        num_row_subchunks, row_chunk_size = _calculate_row_tiling(
+            input_size, num_simd_lanes, next_row_partitions)
+        num_iterations = input_size // (row_chunk_size * next_row_partitions)
+
+        # Ensure we satisfy the hardware constraint (num_row_partitions <= num_simd_lanes) first.
+        if num_cores // num_column_partitions > num_simd_lanes:
+            num_column_partitions = next_candidate
+            continue
+
+        # Too many iterations cause high cumulative pipeline overhead. Set the
+        # limit based on empirical data.
+        if num_iterations > _CostModelConstants.MAX_ITERATIONS:
+            break
+
+        num_column_partitions = next_candidate
+
     return num_column_partitions
+
+
+def _calculate_row_tiling(
+    input_size: int,
+    num_simd_lanes: int,
+    num_row_partitions: int,
+) -> tuple[int, int]:
+    """Calculates the number of row subchunks and row chunk size."""
+    base_block_size = num_simd_lanes * num_row_partitions
+    num_row_subchunks = max(1, min(4, pl.cdiv(input_size, base_block_size)))
+    row_chunk_size = num_simd_lanes * num_row_subchunks
+    return num_row_subchunks, row_chunk_size
 
 
 def _calculate_col_chunk_size(col_size: int, num_simd_lanes: int) -> int:
@@ -145,6 +191,9 @@ def _calculate_col_chunk_size(col_size: int, num_simd_lanes: int) -> int:
     # uint32 gather buffer, double-buffered by emit_pipeline.
     bytes_per_col = num_simd_lanes * 4 * 2
     max_safe_col = (target_bytes // bytes_per_col // 128) * 128
+
+    # Larger chunk sizes cause larger pipeline bubbles, so cap it at 1024.
+    max_safe_col = min(max_safe_col, _CostModelConstants.MAX_COL_CHUNK_SIZE)
 
     start_col = (min(col_size, max_safe_col) // 128) * 128
     for chunk in range(start_col, 127, -128):
@@ -577,19 +626,12 @@ def ragged_gather_reduce(
     num_cores = sc_info.num_cores * sc_info.num_subcores
 
     num_column_partitions = _calculate_num_column_partitions(
-        hidden_size, num_cores, num_lanes)
+        hidden_size, input_size, num_cores, num_lanes, num_simd_lanes)
     num_row_partitions = num_cores // num_column_partitions
     assert (num_row_partitions <= num_simd_lanes
             ), f"{num_row_partitions=} must be <= {num_simd_lanes=}"
-    base_block_size = num_simd_lanes * num_row_partitions
-    num_row_subchunks = max(
-        1,
-        min(
-            4,
-            pl.cdiv(input_size, base_block_size),
-        ),
-    )
-    row_chunk_size = num_simd_lanes * num_row_subchunks
+    num_row_subchunks, row_chunk_size = _calculate_row_tiling(
+        input_size, num_simd_lanes, num_row_partitions)
 
     aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
     col_size = aligned_hidden_size // num_column_partitions
