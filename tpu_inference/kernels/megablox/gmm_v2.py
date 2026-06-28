@@ -92,6 +92,10 @@ def align_to(x, a):
     return pl.cdiv(x, a) * a
 
 
+def idx_window_len(tile_m: int) -> int:
+    return align_to(127 + tile_m, 128)
+
+
 # Define data classes.
 
 
@@ -605,6 +609,133 @@ def inner_kernel(
     )
 
 
+def gathered_inner_kernel(
+    # In (pipelined)
+    tiled_rhs_ref: RhsRef,
+    # Out (pipelined)
+    tiled_out_ref: jax.Array,
+    # Scratch: the standard refs, plus the per-row gather double buffer
+    # (gather_buf [2, tile_m, tile_k] fp32 + sem) and its index window
+    # (gather_idx_smem int32[win_len] in SMEM + sem).
+    partial_out_ref: jax.Array,
+    acc_ref: jax.Array,
+    metadata_ref: MetadataRef,
+    gather_buf: jax.Array,
+    gather_sem: jax.Array,
+    gather_idx_smem: jax.Array,
+    gather_idx_sem: jax.Array,
+    *,
+    cfgs: GmmConfigs,
+    # Closed over (not pipelined): fp32 source pool [size_lhs_src, size_k]
+    # and the full int32[size_m] index array, both in HBM.
+    lhs_hbm: jax.Array,
+    gather_idx_hbm: jax.Array,
+):
+    """Inner kernel for the FUSED-PERMUTE path: the LHS tile is GATHERED row by
+    row from `lhs_hbm` using `gather_idx_hbm`, double-buffered behind the MXU,
+    instead of being read as a contiguous (already-permuted) block.
+
+    The gathered `[tile_m, tile_k]` VMEM buffer is handed to the *unchanged*
+    `inner_kernel` -- everything downstream (relayout, matmul, group mask,
+    partial_out accumulation, output write) is identical to the contiguous path.
+
+    Per-row f32 DMAs are the only option on the TC (no tiled indirect DMA); the
+    double buffer hides the next tile's gather behind this tile's matmul.
+    """
+
+    tile_m = cfgs.tiles.tile_m
+    tile_k = cfgs.tiles.tile_k
+    sublane = cfgs.dims.size_lhs_sublane
+    win_len = idx_window_len(tile_m)
+
+    n_id = pl.program_id(0)
+    gm_id = pl.program_id(1)
+    k_id = pl.program_id(2)
+    num_n = pl.num_programs(0)
+    num_gm = pl.num_programs(1)
+    num_k = pl.num_programs(2)
+
+    # Linear step in the (num_n, num_gm, num_k) row-major grid.
+    s = (n_id * num_gm + gm_id) * num_k + k_id
+    num_steps = num_n * num_gm * num_k
+    slot = lax.rem(s, 2)
+    nslot = lax.rem(s + 1, 2)
+
+    # Indices of the NEXT grid step (to prefetch its LHS rows). LHS depends only
+    # on (gm, k); n is irrelevant to which rows are gathered.
+    k1 = k_id + 1
+    carry_k = k1 == num_k
+    k1 = jnp.where(carry_k, 0, k1)
+    gm1 = jnp.where(carry_k, gm_id + 1, gm_id)
+    carry_gm = gm1 == num_gm
+    gm1 = jnp.where(carry_gm, 0, gm1)
+
+    def start_gather(buf_slot, sem, gm, k):
+        # Rows of this gm tile start at the sublane-aligned floor of m_start, to
+        # match the contiguous LHS index map; out-of-group rows are masked out
+        # downstream so gathering neighbouring indices is harmless.
+        m_start = metadata_ref.gm_id_to_m_offset[gm]
+        m_offset = m_start - m_start % sublane
+        # The full index array can be too large to scalar-prefetch into SMEM, so
+        # it stays in HBM and each tile streams in only its own window. The copy
+        # must start 128-aligned: floor m_offset to 128 (the window still covers
+        # the tile) and use `delta` to re-index the per-row reads.
+        aligned_start = (m_offset // 128) * 128
+        delta = m_offset - aligned_start
+        pltpu.make_async_copy(gather_idx_hbm.at[pl.ds(aligned_start, win_len)],
+                              gather_idx_smem, gather_idx_sem.at[0]).start()
+        pltpu.make_async_copy(gather_idx_hbm.at[pl.ds(aligned_start, win_len)],
+                              gather_idx_smem, gather_idx_sem.at[0]).wait()
+        k_base = k * tile_k
+        for r in range(tile_m):
+            pos = jnp.clip(delta + r, 0, win_len - 1)
+            row = gather_idx_smem[pos]
+            pltpu.make_async_copy(
+                lhs_hbm.at[row, pl.ds(k_base, tile_k)],
+                buf_slot.at[r],
+                sem,
+            ).start()
+
+    def wait_gather(buf_slot, sem):
+        for r in range(tile_m):
+            # Only the dst shape + sem matter for the wait; addresses are ignored.
+            pltpu.make_async_copy(
+                lhs_hbm.at[0, pl.ds(0, tile_k)],
+                buf_slot.at[r],
+                sem,
+            ).wait()
+
+    @pl.when(s == 0)
+    def _():
+        start_gather(gather_buf.at[0], gather_sem.at[0], gm_id, k_id)
+
+    @pl.when(s + 1 < num_steps)
+    def _():
+        start_gather(gather_buf.at[nslot], gather_sem.at[nslot], gm1, k1)
+
+    wait_gather(gather_buf.at[slot], gather_sem.at[slot])
+
+    # Hand the gathered tile to the shared compute path. gather_buf[slot] is a
+    # [tile_m, tile_k] array; inner_kernel's `reshape(-1, tile_k)` is a no-op.
+    lhs_tile = gather_buf[slot]
+
+    # Unquantized matmul: down-cast the gathered fp32 rows to the rhs dtype so the
+    # MXU runs e.g. bf16 x bf16. Lossless when the source rows were only widened
+    # to fp32 for per-row addressability. The quantized path quantizes from fp32.
+    if cfgs.lhs_cfgs.quant_dtype is None and not cfgs.rhs_cfgs.has_scale:
+        lhs_tile = lhs_tile.astype(cfgs.rhs_cfgs.dtype)
+
+    inner_kernel(
+        lhs_tile,
+        tiled_rhs_ref,
+        tiled_out_ref,
+        partial_out_ref,
+        acc_ref,
+        metadata_ref,
+        cfgs=cfgs,
+    )
+
+
 def fill_metadata(
     lhs_group_sizes_ref: jax.Array,  # int32[size_lhs_group]
     group_offset_ref: jax.Array,  # int32[1]
@@ -881,6 +1012,96 @@ def kernel_main(
         zero_out_end(out_ref, semaphore_ref, zero_size, dims=cfgs.dims)
 
 
+def kernel_main_gather(
+    # Scalar prefetch
+    lhs_group_sizes_ref: jax.Array,  # int32[size_lhs_group]
+    group_offset_ref: jax.Array,  # int32[1]
+    # In
+    lhs_ref: jax.Array,  # [size_lhs_src, size_k] fp32 source pool (HBM)
+    gather_idx_hbm: jax.Array,  # int32[size_m] full index array (HBM)
+    rhs_ref: WeightsRef,  # [size_group, size_k, size_n]
+    # Out
+    out_ref: jax.Array,  # [size_m, size_n]
+    # Scratch memory
+    partial_out_ref: jax.Array,
+    acc_ref: jax.Array,
+    metadata_ref: MetadataRef,
+    gather_buf: jax.Array,  # [2, tile_m, tile_k] fp32
+    gather_sem: jax.Array,  # DMA sem [2]
+    gather_idx_smem: jax.Array,  # int32[win_len] SMEM idx window
+    gather_idx_sem: jax.Array,  # DMA sem [1] for the idx-window copy
+    zero_ref: jax.Array | None,
+    semaphore_ref: jax.Array | None,
+    *,
+    cfgs: GmmConfigs,
+):
+    """Entry point for the FUSED-PERMUTE GMM kernel.
+
+    Mirrors `kernel_main` but the LHS is gathered per-row from `lhs_ref` (the
+    original, un-permuted source pool) using `gather_idx_hbm`, instead of being
+    pipelined as a contiguous block. `lhs_ref` and `gather_idx_hbm` are closed
+    over by the inner body, so the LHS is NOT an `emit_pipeline` input; the index
+    array stays in HBM and is chunked into SMEM per tile (see gathered_inner_kernel).
+    """
+
+    if cfgs.rhs_cfgs.should_bitcast:
+        rhs_weight = rhs_ref.weight.bitcast(jnp.uint32)
+        rhs_ref = dataclasses.replace(rhs_ref, weight=rhs_weight)
+
+    num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
+    num_n = pl.cdiv(cfgs.out_size_n, cfgs.tiles.tile_n)
+
+    num_gm = fill_metadata(
+        lhs_group_sizes_ref,
+        group_offset_ref,
+        metadata_ref,
+        cfgs=cfgs,
+    )
+
+    if cfgs.zero_init:
+        zero_size = zero_out_start(
+            out_ref,
+            zero_ref,
+            semaphore_ref,
+            metadata_ref,
+            num_gm,
+            dims=cfgs.dims,
+        )
+
+    # Only the rhs/out block specs are used; the lhs is gathered manually.
+    (_, rhs_spec), out_spec = generate_block_specs(metadata_ref, cfgs)
+
+    if cfgs.fuse_act is not None:
+        rhs_up_ref = jax.tree.map(lambda x: x.at[..., cfgs.out_size_n:],
+                                  rhs_ref)
+        rhs_ref = FusedWeightsRef(gate=rhs_ref, up=rhs_up_ref)
+        rhs_spec = FusedWeightsRef(gate=rhs_spec, up=rhs_spec)
+
+    body = functools.partial(
+        gathered_inner_kernel,
+        cfgs=cfgs,
+        lhs_hbm=lhs_ref,
+        gather_idx_hbm=gather_idx_hbm,
+    )
+
+    pipeline_fn = pltpu.emit_pipeline(
+        body,
+        grid=(num_n, num_gm, num_k),
+        in_specs=(rhs_spec, ),
+        out_specs=out_spec,
+    )
+
+    out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, out_ref.shape[-1])
+    scratches = [
+        partial_out_ref, acc_ref, metadata_ref, gather_buf, gather_sem,
+        gather_idx_smem, gather_idx_sem
+    ]
+    pipeline_fn(rhs_ref, out_in, scratches=scratches)
+
+    if cfgs.zero_init:
+        zero_out_end(out_ref, semaphore_ref, zero_size, dims=cfgs.dims)
+
+
 def calculate_tiling(
     dims: Dimensions,
     lhs_cfgs: InputConfigs,
@@ -1002,15 +1223,28 @@ def validate_inputs(
     group_sizes: jax.Array,
     group_offset: jax.Array,
     fuse_act: str | None = None,
+    gather_indices: jax.Array | None = None,
 ) -> Dimensions:
     """Validates the inputs for the GMM kernel."""
 
-    size_m = lhs.shape[0]
     size_group, size_k, size_n = rhs.shape
     size_lhs_group = group_sizes.shape[0]
 
+    if gather_indices is not None:
+        # Fused permute: lhs is the un-permuted source pool [size_lhs_src, size_k];
+        # the number of (grouped) output rows is len(gather_indices). Per-row gather
+        # needs individually addressable fp32 rows.
+        assert lhs.dtype == jnp.float32, (
+            f"gather_indices requires fp32 lhs, got {lhs.dtype}")
+        assert gather_indices.ndim == 1
+        size_m = gather_indices.shape[0]
+        assert lhs.ndim == 2 and lhs.shape[1] == size_k, (
+            f"{lhs.shape=} must be [size_lhs_src, {size_k=}]")
+    else:
+        size_m = lhs.shape[0]
+        assert lhs.shape == (size_m, size_k)
+
     assert size_group <= size_lhs_group
-    assert lhs.shape == (size_m, size_k)
     assert rhs.shape == (size_group, size_k, size_n)
     if rhs_bias is not None:
         assert rhs_bias.shape == (size_group, 1, size_n)
@@ -1099,11 +1333,12 @@ def make_gmm_configs(
     maybe_quantize_lhs: bool,
     zero_initialize: bool,
     fuse_act: str | None = None,
+    gather_indices: jax.Array | None = None,
 ):
     """Fills the GMM config for the GMM kernel."""
 
     dims = validate_inputs(lhs, rhs, rhs_scale, rhs_bias, group_sizes,
-                           group_offset, fuse_act)
+                           group_offset, fuse_act, gather_indices)
 
     if rhs_scale is not None:
         has_scale = True
@@ -1208,6 +1443,7 @@ def gmm_v2(
     | None = None,  # [size_group, num_blocks, 1, out_size]
     rhs_bias: jax.Array | None = None,  # [size_group, 1, out_size]
     group_offset: jax.Array | None = None,  # int32[1]
+    gather_indices: jax.Array | None = None,  # int32[size_m]
     *,
     tile_info: TileSizes | TileFn = calculate_tiling,
     vmem_limit_bytes: int | None = None,
@@ -1225,12 +1461,21 @@ def gmm_v2(
     triple buffering on weights to better utilize memory.
 
     Args:
-        lhs: lhs with shape [size_m, size_k].
+        lhs: lhs with shape [size_m, size_k]. When ``gather_indices`` is given,
+            lhs is instead the un-permuted source pool [size_lhs_src, size_k]
+            (fp32) and the gather produces the [size_m, size_k] grouped LHS
+            on the fly -- see ``gather_indices``.
         rhs: rhs with shape [size_group, size_k, size_n].
         group_sizes: The group sizes of lhs rows of shape [size_lhs_group,].
         rhs_scale: The rhs scale of shape [size_group, num_blocks, 1, out_size].
         rhs_bias: The rhs bias of shape [size_group, 1, out_size].
         group_offset: Optional. The group offset of shape [1,].
+        gather_indices: Optional int32[size_m] (FUSED PERMUTE). When provided,
+            grouped output row ``j`` reads its LHS from ``lhs[gather_indices[j]]``
+            via per-row double-buffered DMAs hidden behind the MXU, instead of a
+            contiguous (pre-permuted) block. ``size_m == len(gather_indices)``;
+            requires fp32 lhs (per-row addressability). Equivalent to
+            ``gmm_v2(lhs[gather_indices], rhs, group_sizes, ...)``.
         tile_info: The tile sizes or tile function to use.
         vmem_limit_bytes: Optional vmem limit in bytes.
         precision: Unused. Exists for compatibility reasons.
@@ -1269,9 +1514,20 @@ def gmm_v2(
         maybe_quantize_lhs=maybe_quantize_lhs,
         zero_initialize=zero_initialize,
         fuse_act=fuse_act,
+        gather_indices=gather_indices,
     )
     dims = cfgs.dims
     tiles = cfgs.tiles
+
+    # Fused-permute fallback: the per-row gather re-reads the LHS once per n-tile
+    # (n is the outermost grid axis), so for num_n > 1 it loses to a single
+    # contiguous read -- fall back to an explicit permute. The gather path is taken
+    # only when the output fits a single n-tile (num_n == 1).
+    if gather_indices is not None:
+        num_n_tiles = pl.cdiv(cfgs.out_size_n, tiles.tile_n)
+        if num_n_tiles > 1:
+            lhs = lhs[gather_indices]
+            gather_indices = None
 
     # Prepare block specs.
     rhs_scale_spec = rhs_bias_spec = None
@@ -1285,7 +1541,7 @@ def gmm_v2(
     # Initialize scratch shapes.
     max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
     acc_cols = 2 * tiles.tile_n if cfgs.fuse_act is not None else tiles.tile_n
-    scratch_shapes = [
+    base_scratch = [
         # partial_out_ref
         pltpu.VMEM((dims.size_lhs_sublane, tiles.tile_n), cfgs.out_dtype),
         # acc_ref
@@ -1316,33 +1572,23 @@ def gmm_v2(
         tile_zero_m = target_zero_ref_bytes // num_lanes // out_bytes
         tile_zero_m = min(tile_zero_m, dims.size_m)
 
-        scratch_shapes += [
+        zero_scratch = [
             pltpu.VMEM((tile_zero_m, num_lanes), cfgs.out_dtype),
             pltpu.SemaphoreType.DMA((1, )),
         ]
     else:
-        scratch_shapes += [None, None]
+        zero_scratch = [None, None]
 
     aligned_n = align_to(cfgs.out_size_n, num_lanes)
     out_init = jax.ShapeDtypeStruct((dims.size_m, aligned_n), cfgs.out_dtype)
     rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
 
-    return pl.pallas_call(
-        functools.partial(kernel_main, cfgs=cfgs),
-        out_shape=out_init,
-        grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=2,
-            in_specs=[
-                pl.BlockSpec(memory_space=pltpu.HBM),
-                WeightsRef(
-                    weight=pl.BlockSpec(memory_space=pltpu.HBM),
-                    scale=rhs_scale_spec,
-                    bias=rhs_bias_spec,
-                ),
-            ],
-            out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
-            scratch_shapes=scratch_shapes,
-        ),
+    rhs_in_spec = WeightsRef(
+        weight=pl.BlockSpec(memory_space=pltpu.HBM),
+        scale=rhs_scale_spec,
+        bias=rhs_bias_spec,
+    )
+    common_params = dict(
         compiler_params=pltpu.CompilerParams(
             vmem_limit_bytes=vmem_limit_bytes,
             disable_bounds_checks=True,
@@ -1350,4 +1596,54 @@ def gmm_v2(
         name=get_scope_name(cfgs),
         cost_estimate=get_cost_estimate(cfgs),
         metadata=get_metadata(cfgs),
+    )
+
+    if gather_indices is not None:
+        # Fused permute: extra (2, tile_m, tile_k) double buffer + DMA sems for the
+        # per-row gather, plus an SMEM window for this tile's index chunk (the index
+        # array is an HBM input, not scalar-prefetched).
+        gw_len = idx_window_len(tiles.tile_m)
+        gather_scratch = [
+            pltpu.VMEM((2, tiles.tile_m, tiles.tile_k), jnp.float32),
+            pltpu.SemaphoreType.DMA((2, )),
+            pltpu.SMEM((gw_len, ), jnp.int32),
+            pltpu.SemaphoreType.DMA((1, )),
+        ]
+        scratch_shapes = base_scratch + gather_scratch + zero_scratch
+        # Pad so the 128-aligned index window DMA never reads past the array end.
+        gather_idx = gather_indices.astype(jnp.int32)
+        pad_m = align_to(dims.size_m, 128) + gw_len - dims.size_m
+        if pad_m:
+            gather_idx = jnp.pad(gather_idx, (0, pad_m))
+        return pl.pallas_call(
+            functools.partial(kernel_main_gather, cfgs=cfgs),
+            out_shape=out_init,
+            grid_spec=pltpu.PrefetchScalarGridSpec(
+                num_scalar_prefetch=2,
+                in_specs=[
+                    pl.BlockSpec(memory_space=pltpu.HBM),  # lhs source pool
+                    pl.BlockSpec(memory_space=pltpu.HBM),  # gather_idx (HBM)
+                    rhs_in_spec,
+                ],
+                out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
+                scratch_shapes=scratch_shapes,
+            ),
+            **common_params,
+        )(group_sizes, group_offset, lhs, gather_idx,
+          rhs_weights)[:, :cfgs.out_size_n]
+
+    scratch_shapes = base_scratch + zero_scratch
+    return pl.pallas_call(
+        functools.partial(kernel_main, cfgs=cfgs),
+        out_shape=out_init,
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=2,
+            in_specs=[
+                pl.BlockSpec(memory_space=pltpu.HBM),
+                rhs_in_spec,
+            ],
+            out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
+            scratch_shapes=scratch_shapes,
+        ),
+        **common_params,
     )(group_sizes, group_offset, lhs, rhs_weights)[:, :cfgs.out_size_n]
