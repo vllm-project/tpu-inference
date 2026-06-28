@@ -40,6 +40,7 @@ steps:
     key: collect_kernel_cases
     trigger: "tpu-inference-benchmark"
     build:
+      branch: "${BUILDKITE_BRANCH}"
       env:
         KERNEL_AUTOTUNE_STAGE: "PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
         EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
@@ -53,6 +54,7 @@ steps:
     depends_on: "collect_kernel_cases"
     trigger: "tpu-inference-kernel-tuning"
     build:
+      branch: "${BUILDKITE_BRANCH}"
       env:
         BOOTSTRAP_ALL_KERNEL_TUNING: "1"
         KERNEL_TUNING_KERNEL_AUTOTUNE_STAGE: "BOOTSTRAP_ALL_KERNEL_TUNING"
