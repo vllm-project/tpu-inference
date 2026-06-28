@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+set -euo pipefail
 # Function to generate a GitHub App Installation Access Token
 generate_installation_token() {
     # 1. Generate the JWT using embedded Python inside a docker container

@@ -20,7 +20,7 @@
 #       | buildkite-agent pipeline upload
 #
 # Pipeline overview:
-# 1. Trigger tpu-inference-benchmark (branch: patrickji.kernel_autotune_pipeline)
+# 1. Trigger tpu-inference-benchmark 
 #    KERNEL_AUTOTUNE_STAGE=PRE_KERNEL_AUTOTUNE_CASES_COLLECTION — collects kernel tuning cases.
 # 2. Trigger tpu-inference-kernel-tuning
 #    KERNEL_AUTOTUNE_STAGE=KERNEL_TUNING — tunes the collected cases and generates an evaluation pipeline.
@@ -40,7 +40,6 @@ steps:
     key: collect_kernel_cases
     trigger: "tpu-inference-benchmark"
     build:
-      branch: "patrickji.kernel_autotune_pipeline"
       env:
         KERNEL_AUTOTUNE_STAGE: "PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
         EXTRA_ENVS: "KERNEL_TUNING_AUTOTUNE_ID=KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER,KERNEL_AUTOTUNE_STAGE=PRE_KERNEL_AUTOTUNE_CASES_COLLECTION"
@@ -54,7 +53,6 @@ steps:
     depends_on: "collect_kernel_cases"
     trigger: "tpu-inference-kernel-tuning"
     build:
-      branch: "patrickji.kernel_autotune_pipeline"
       env:
         BOOTSTRAP_ALL_KERNEL_TUNING: "1"
         KERNEL_TUNING_KERNEL_AUTOTUNE_STAGE: "BOOTSTRAP_ALL_KERNEL_TUNING"
@@ -79,6 +77,10 @@ steps:
       - GITHUB_CI_BOT_APP_ID
       - GITHUB_CI_BOT_PEM 
     priority: 200
+    retry:
+      automatic:
+        - exit_status: "*"
+          limit: 2
     command: |
       source .buildkite/scripts/export_ci_bot_token.sh
       echo "🚀 Patching kernel autotune results and creating evaluation branch."
@@ -122,6 +124,10 @@ steps:
       - "build_docker"
     agents:
       queue: tpu_v6e_queue
+    retry:
+      automatic:
+        - exit_status: "*"
+          limit: 2
     env:
       USE_PREBUILT_IMAGE: "1"
       KERNEL_TUNING_AUTOTUNE_ID: "KERNEL_TUNING_AUTOTUNE_ID_PLACEHOLDER"
@@ -130,6 +136,7 @@ steps:
       KERNEL_TUNING_GCP_PROJECT_ID: "cloud-tpu-inference-test"
       KERNEL_TUNING_SPANNER_INSTANCE_ID: "vllm-bm-inst"
       KERNEL_TUNING_SPANNER_DATABASE_ID: "vllm-bm-bk-runs"
+      KERNEL_TUNING_METRIC_IMPROVEMENT_THRESHOLD: ${KERNEL_TUNING_METRIC_IMPROVEMENT_THRESHOLD:-0.004}
     secrets: 
       - GITHUB_CI_BOT_APP_ID
       - GITHUB_CI_BOT_PEM 
@@ -148,7 +155,12 @@ steps:
           authenticated_repo_url="https://x-access-token:$${GITHUB_CI_BOT_TOKEN}@$${repo_url}"
           pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
           apt install git -y
+          
+          # Disable tracing temporarily to avoid leaking the token in the logs
+          set +x
           git remote set-url origin $${authenticated_repo_url}
+          set -x
+
           git config user.name "Buildkite Bot"
           git config user.email "buildkite-bot@users.noreply.github.com"
           git checkout -B $${branch_name}
@@ -159,6 +171,7 @@ steps:
             --process_step=$${KERNEL_TUNING_AUTOTUNE_STAGE} \
             --gcp_project_id=$${KERNEL_TUNING_GCP_PROJECT_ID} \
             --spanner_instance_id=$${KERNEL_TUNING_SPANNER_INSTANCE_ID} \
+            --metric_improvement_threshold=$${KERNEL_TUNING_METRIC_IMPROVEMENT_THRESHOLD} \
             --spanner_database_id=$${KERNEL_TUNING_SPANNER_DATABASE_ID} 2>&1) || eval_status=$$?
 
           if [[ $$eval_status -ne 0 ]]; then

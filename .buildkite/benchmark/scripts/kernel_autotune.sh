@@ -17,9 +17,14 @@ set -Eeuo pipefail
 
 # Define the dictionary
 declare -A kernel_autotune_mapping
-# The key should be one of tools.kernel.tuner.v1.kernel_tuner_runner.KERNEL_TUNER_REGISTRY keys, and the value is the corresponding file path to be updated.
-# This must be kept in sync with the tools/kernel/tuner/v1/autotune/autotune_result_processing.py's kernel_autotune_mapping dictionary.
-kernel_autotune_mapping["mla_kernel_tuner"]="/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py"
+# Load the mapping dynamically from the Python config file to ensure they stay in sync
+while IFS="=" read -r key value; do
+    kernel_autotune_mapping["$key"]="$value"
+done < <(PYTHONPATH=. python3 -c "
+from tools.kernel.tuner.v1.autotune.kernel_autotune_config import kernel_autotune_mapping
+for k, v in kernel_autotune_mapping.items():
+    print(f'{k}={v}')
+")
 
 # Path to the script you want to append
 KERNEL_TUNED_PARAMS_UPDATE_SCRIPT="/workspace/tpu_inference/tools/kernel/tuner/v1/autotune/update_tuned_params_template.py"
@@ -35,16 +40,25 @@ get_tpu_from_device() {
     fi
 }
 
+
 update_all_tuned_params_py() {
     if [[ "${KERNEL_AUTOTUNE_STAGE:-}" == "PRE_KERNEL_AUTOTUNE_CASES_COLLECTION" ]]; then
+        # Validate all target tuned_params.py files have the expected structure
+        # (def get_tuned_params, tuned_params_mapping dict, no _get_tuned_params)
+        # before any patching begins. Reuses the Python test to avoid duplicating logic.
+        echo "--- Validating target tuned_params.py file structure..."
+        python3 -m pytest tools/kernel/tuner/v1/tests/test_tuned_params_structure.py -v
+        echo "✅ All target files validated successfully."
+
         # Iterate over all keys in the dictionary
         for key in "${!kernel_autotune_mapping[@]}"; do
             target_file="${kernel_autotune_mapping[$key]}"
 
             echo "Processing $target_file with tuner: $key..."
 
-            # Step 1: Replace 'get_tuned_params' with '_get_tuned_params'
-            sed -i 's/get_tuned_params/_get_tuned_params/g' "$target_file"
+            # Step 1: Rename the function 'get_tuned_params' → '_get_tuned_params'
+            # Uses 'def ' prefix to only match the function definition, not calls.
+            sed -i 's/def get_tuned_params/def _get_tuned_params/g' "$target_file"
 
             # Step 2: Concatenate the update script to the end
             # (Adding an empty echo first to guarantee we start on a fresh line)
@@ -52,6 +66,14 @@ update_all_tuned_params_py() {
             cat "$KERNEL_TUNED_PARAMS_UPDATE_SCRIPT" >> "$target_file"
 
             tpu="$(get_tpu_from_device)"
+
+            # Verify all placeholders are present before substitution.
+            for placeholder in KERNEL_TUNER_NAME_PLACEHOLDER CASE_SET_ID_PLACEHOLDER TPU_PLACEHOLDER; do
+                if ! grep -q "$placeholder" "$target_file"; then
+                    echo "Error: Placeholder '$placeholder' not found in $target_file. The template may not have been appended correctly." >&2
+                    return 1
+                fi
+            done
 
             # Steps 3, 4, and 5: Replace the placeholders
             sed -i "s|KERNEL_TUNER_NAME_PLACEHOLDER|$key|g; \

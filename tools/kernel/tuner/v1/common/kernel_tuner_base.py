@@ -192,7 +192,7 @@ class KernelTunerBase(ABC):
     def generate_autotune_cases(self) -> list[TuningCase]:
         tuning_set = []
         # The case_set_id is constructed as {kernel_tuner_name}_{autotune_case_set_id} in the bootstrap_kernel_tuners.py
-        autotune_case_set_id = self.run_config.case_set_id.lstrip(
+        autotune_case_set_id = self.run_config.case_set_id.removeprefix(
             f'{self.tuner_config.kernel_tuner_name}_')
         autotune_cases = self.storage_manager.read_autotune_cases(
             case_set_id=autotune_case_set_id,
@@ -313,12 +313,18 @@ class KernelTunerBase(ABC):
                 # For Bayesian optimization, partition the cases by key.
                 buckets = []
                 previous_tuning_key = None
-                for case_id, case in enumerate(cases):
-                    if previous_tuning_key is None or case.tuning_key != previous_tuning_key:
-                        buckets.append((case_id, case_id + 1))
-                        previous_tuning_key = case.tuning_key
+                for idx, row in enumerate(cases):
+                    # row is a tuple of (CaseId, CaseKeyValue)
+                    case_key_value = row[1]
+                    tuning_case = TuningCase.from_string(
+                        case_key_value, self.tuner_config.tuning_key_class,
+                        self.tuner_config.tunable_params_class)
+
+                    if previous_tuning_key is None or tuning_case.tuning_key != previous_tuning_key:
+                        buckets.append((idx, idx + 1))
+                        previous_tuning_key = tuning_case.tuning_key
                     else:
-                        buckets[-1] = (buckets[-1][0], case_id + 1)
+                        buckets[-1] = (buckets[-1][0], idx + 1)
             else:
                 total_cases = len(cases)
                 buckets = [(i,

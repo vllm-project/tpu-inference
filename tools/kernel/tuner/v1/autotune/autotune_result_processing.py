@@ -26,10 +26,8 @@ from pathlib import Path
 
 from absl import app, flags
 
-kernel_autotune_mapping = {
-    'mla_kernel_tuner':
-    '/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py',
-}
+from tools.kernel.tuner.v1.autotune.kernel_autotune_config import \
+    kernel_autotune_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +49,9 @@ _PROCESS_STEP = flags.DEFINE_string(
     'process_step', 'PATCH_KERNEL_AUTOTUNE_RESULT',
     'The process step to run. Options: EVALUATE_AND_CREATE_PR, PATCH_KERNEL_AUTOTUNE_RESULT'
 )
+_METRIC_IMPROVEMENT_THRESHOLD = flags.DEFINE_float(
+    'metric_improvement_threshold', 0.004,
+    'The metric improvement threshold to use for this run.')
 
 REPORT_OUTPUT_PATH_PREFIX = "/tmp/kernel_tuning/kernel_autotune_report"
 
@@ -66,12 +67,17 @@ class KernelAutoTuneResultProcessor:
             'EVALUATE_AND_CREATE_PR', 'PATCH_KERNEL_AUTOTUNE_RESULT'
         ], f"Invalid process step: {_PROCESS_STEP.value}. Must be one of ['EVALUATE_AND_CREATE_PR', 'PATCH_KERNEL_AUTOTUNE_RESULT']"
         self.process_step = _PROCESS_STEP.value
+        self._spanner_db = None
 
     def _get_spanner_db(self, project, instance_id, database_id):
-        from google.cloud import \
-            spanner as gspanner  # pylint: disable=import-outside-toplevel
-        client = gspanner.Client(project=project, disable_builtin_metrics=True)
-        return client.instance(instance_id).database(database_id)
+        if self._spanner_db is None:
+            from google.cloud import \
+                spanner as gspanner  # pylint: disable=import-outside-toplevel
+            client = gspanner.Client(project=project,
+                                     disable_builtin_metrics=True)
+            self._spanner_db = client.instance(instance_id).database(
+                database_id)
+        return self._spanner_db
 
     def get_best_results(self, case_set_id) -> list[dict]:
         """
@@ -304,7 +310,8 @@ class KernelAutoTuneResultProcessor:
     def _create_or_update_pr(self, pr_body: str) -> str | None:
         token = os.environ.get('GITHUB_CI_BOT_TOKEN', '').strip()
         if not token:
-            logger.warning("GITHUB_CI_BOT_TOKEN is not set; skipping PR creation.")
+            logger.warning(
+                "GITHUB_CI_BOT_TOKEN is not set; skipping PR creation.")
             return None
 
         owner = os.environ.get('KERNEL_AUTOTUNE_PR_OWNER', 'vllm-project')
@@ -385,7 +392,7 @@ class KernelAutoTuneResultProcessor:
             'P99TTFT',
             'P99ETEL',
         }
-        threshold = 0.004  # 0.4%
+        threshold = _METRIC_IMPROVEMENT_THRESHOLD.value
 
         from google.cloud import \
             spanner as gspanner  # pylint: disable=import-outside-toplevel
