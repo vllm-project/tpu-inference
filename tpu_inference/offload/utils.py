@@ -18,7 +18,7 @@ from typing import List, Tuple
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec
-from vllm.config import get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import \
     KVConnectorFactory
 
@@ -168,7 +168,7 @@ def update_kv_caches_one(
     replicated_sharding: PartitionSpec | None = None,
 ) -> List[jax.Array]:
     """Update KV caches using cached sharding spec to avoid recompilation.
-    
+
     Args:
         kv_caches: List of KV cache arrays
         stacked_blocks: List of stacked KV blocks
@@ -374,3 +374,62 @@ def pure_jax_update_kv_caches_one(
         return jax.lax.scatter(cache_layer, indices_arr, slices, dim_nums)
 
     return jax.tree.map(_update_layer, kv_caches, layer_slices_list)
+
+
+class FileMapper:
+    """
+    FileMapper maps KV blocks (given by their hash) to file names.
+
+    Inspired by llmd_fs_backend/file_mapper.py
+    """
+
+    def __init__(self, root_dir: str, vllm_config: VllmConfig):
+        """
+        Initialize the file mapper for a specific worker.
+        All KV data files will be nested under a unique base path.
+
+        Base path format:
+            <root_dir>
+            /<model_name>
+            /<dtype>
+
+        Args:
+            root_dir: the directory on shared storage under which
+              everything will be stored.
+            vllm_config: a VllmConfig. This is where details like the
+              model name will be found.
+        """
+        self._root_dir = root_dir
+        self._model_name = vllm_config.model_config.model
+        dtype = str(vllm_config.cache_config.cache_dtype).replace("torch.", "")
+        if dtype == 'auto':
+            dtype = str(vllm_config.model_config.dtype).split('.')[-1]
+
+        self._dtype = dtype
+        self._base_path = (f"{self._root_dir}"
+                           f"/{self._model_name}"
+                           f"/{self._dtype}")
+
+    @property
+    def dtype(self):
+        return self._dtype
+
+    def get_file_name(self, block_hash: int | bytes) -> str:
+        """
+        Return the file path for a KV block.
+        The path is built using hash-based subdirectories:
+        <base>/<hhh>/<hh>/<hash>.bin, to limit directory fan-out.
+
+        Args:
+            block_hash: Hash identifying the KV-cache block (int or bytes).
+
+        Returns:
+            Full file path for the given block.
+        """
+        if isinstance(block_hash, bytes):  # convert bytes to int
+            block_hash = int.from_bytes(block_hash, "big")
+        assert isinstance(block_hash, int)
+
+        block_hash_hex = f"{block_hash & ((1 << 64) - 1):016x}"
+        subfolder1, subfolder2 = block_hash_hex[:3], block_hash_hex[3:5]
+        return f"{self._base_path}/{subfolder1}/{subfolder2}/{block_hash_hex}.bin"

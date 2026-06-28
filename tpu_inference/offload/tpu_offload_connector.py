@@ -129,10 +129,11 @@ if TYPE_CHECKING:
 
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
+from tpu_inference.offload import fs_manager
 from tpu_inference.offload.cpu_backend import LocalCPUBackend
-from tpu_inference.offload.offload_manager import (LRUCacheManager,
+from tpu_inference.offload.offload_manager import (ChunkHash, LRUCacheManager,
                                                    StagingBufferManager)
-from tpu_inference.offload.utils import (CpuChunkId, ReqId,
+from tpu_inference.offload.utils import (CpuChunkId, FileMapper, ReqId,
                                          pure_jax_stack_kv_cache_cross_layers,
                                          pure_jax_update_kv_caches_one,
                                          stack_kv_cache_cross_layers,
@@ -163,6 +164,7 @@ class SaveSpec:
     num_total_tokens: int
     src_blocks: list[int]
     dst_chunks: list[int]
+    dst_hashes: list[ChunkHash]
     # final save for the (newly) finished request
     is_final_save: bool = False
     # A direct signal to the worker to skip the data transfer but still
@@ -175,6 +177,7 @@ class LoadSpec:
     """Internal scheduler state for a potential load operation."""
     num_matched_tokens: int
     src_chunks: list[int]
+    src_chunk_hashes: list[ChunkHash]
     dst_blocks: list[int]
     can_load: bool = False
     num_skip_leading_tokens: int = 0
@@ -239,11 +242,13 @@ class SaveReqInfo:
             unstitching.
         dst_chunks: The specific CPU cache chunk IDs where these blocks must be
             registered.
+        dst_hashes: The chunk hash for each dst chunk.
         is_final_save: Signal to indicate if this is the last save for the request.
     """
     req_id: str
     num_blocks: int
     dst_chunks: list[int]
+    dst_hashes: list[ChunkHash]
     is_final_save: bool
 
 
@@ -576,8 +581,17 @@ class TPUOffloadConnectorScheduler():
 
         # offloading manager
         self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
-        self.offload_manager = LRUCacheManager(
-            num_cpu_chunks=self.num_cpu_chunks)
+        cpu_manager = LRUCacheManager(num_cpu_chunks=self.num_cpu_chunks)
+        fs_base_path = vllm_config.kv_transfer_config.get_from_extra_config(
+            fs_manager.BASE_PATH_CONFIG, None)
+
+        if fs_base_path:
+            self.offload_manager = fs_manager.TieredCacheManager(
+                cpu_manager,
+                FileMapper(fs_base_path, vllm_config),
+            )
+        else:
+            self.offload_manager = cpu_manager
 
         self._request_trackers: dict[ReqId, RequestTracker] = {}
         # This dictionary holds the full vLLM Request object for all requests
@@ -689,10 +703,12 @@ class TPUOffloadConnectorScheduler():
                 # NOTE(jcgu): put dummy chunk / block ids;
                 # fill real ids later when the requests gets scheduled
                 src_chunk_ids = [-1] * num_blocks_to_load
+                src_chunk_hashes = [None] * num_blocks_to_load
                 dummy_dst_blocks = [-1] * num_blocks_to_load
                 self._pre_load_specs[request.request_id] = LoadSpec(
                     num_matched_tokens=num_matched_tokens,
                     src_chunks=src_chunk_ids,
+                    src_chunk_hashes=src_chunk_hashes,
                     dst_blocks=dummy_dst_blocks,
                     num_skip_leading_tokens=num_computed_tokens,
                 )
@@ -775,12 +791,14 @@ class TPUOffloadConnectorScheduler():
             chunks_to_load = self.offload_manager.prepare_load(
                 block_hashes_to_load)
             src_chunk_ids = [chunk.chunk_id for chunk in chunks_to_load]
+            src_chunk_hashes = [chunk.chunk_hash for chunk in chunks_to_load]
 
             # get dst block ids
             dst_blocks = all_blocks[skip_leading_blocks:num_matched_blocks]
 
             # update load spec
             load_spec.src_chunks = src_chunk_ids
+            load_spec.src_chunk_hashes = src_chunk_hashes
             load_spec.dst_blocks = dst_blocks
             load_spec.can_load = True
             self.load_specs[request.request_id] = load_spec
@@ -914,6 +932,9 @@ class TPUOffloadConnectorScheduler():
                         num_skip_leading_blocks:adjusted_num_total_blocks]
 
                     dst_chunks = [chunk.chunk_id for chunk in chunks_for_save]
+                    dst_hashes = [
+                        chunk.chunk_hash for chunk in chunks_for_save
+                    ]
                     src_blocks = [src_block_ids[idx] for idx in chunk_idxs]
 
                     # This is a real save operation.
@@ -924,6 +945,7 @@ class TPUOffloadConnectorScheduler():
                         skip_save=False,
                         src_blocks=src_blocks,
                         dst_chunks=dst_chunks,
+                        dst_hashes=dst_hashes,
                     )
                     self._reqs_being_saved[req_id] |= set(dst_chunks)
                     num_allocated_blocks = self.staging_buffer_manager.allocate(
@@ -948,6 +970,7 @@ class TPUOffloadConnectorScheduler():
                 num_total_tokens=tracker.save_watermark,
                 src_blocks=[],
                 dst_chunks=[],
+                dst_hashes=[],
                 is_final_save=True,
                 skip_save=True,
             )
@@ -1298,6 +1321,8 @@ class TPUOffloadConnectorWorker:
     def __init__(self, vllm_config: VllmConfig,
                  connector: "TPUOffloadConnector"):
         logger.info("TPUOffloadConnectorWorker: Entering __init__")
+        self.save_executor = None
+
         self.vllm_config = vllm_config
         self.connector = connector
         self.block_size = vllm_config.cache_config.block_size
@@ -1311,7 +1336,14 @@ class TPUOffloadConnectorWorker:
 
         # cpu cache
         self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
-        self.cpu_backend = LocalCPUBackend(num_cpu_chunks=self.num_cpu_chunks)
+        cpu_backend = LocalCPUBackend(num_cpu_chunks=self.num_cpu_chunks)
+        fs_base_path = vllm_config.kv_transfer_config.get_from_extra_config(
+            fs_manager.BASE_PATH_CONFIG, None)
+        if fs_base_path:
+            mapper = FileMapper(fs_base_path, vllm_config)
+            self.cpu_backend = fs_manager.TieredBackend(mapper, cpu_backend)
+        else:
+            self.cpu_backend = cpu_backend
         model_name = self.vllm_config.model_config.model
         logger.debug(
             f"Model name is {model_name}, KV block_size={self.block_size}")
@@ -1338,7 +1370,8 @@ class TPUOffloadConnectorWorker:
 
     def __del__(self):
         logger.info("TPUOffloadConnectorWorker: Entering __del__")
-        self.save_executor.shutdown(wait=True)
+        if self.save_executor:
+            self.save_executor.shutdown(wait=True)
 
     def register_runner(self, runner: TPUModelRunner):
         logger.info("TPUOffloadConnectorWorker: Entering register_runner")
@@ -1597,18 +1630,20 @@ class TPUOffloadConnectorWorker:
     def _prepare_save_plan(
         self,
         meta: TPUReqMeta,
-    ) -> tuple[list[int], list[int]] | None:
+    ) -> tuple[list[int], list[int], list[ChunkHash]] | None:
         """
         Validate and plan the blocks for the save operation for the given request.
         Returns:
-            Optional[tuple[list[int], list[int]]]: A tuple containing the list of
-                source TPU blocks and destination CPU chunks if the save operation
-                is valid and contains data to be gathered. Returns None if the
+            Optional[tuple[list[int], list[int], list[ChunkHash]]: A tuple
+                containing the list of source TPU blocks, destination CPU
+                chunks, and corresponding chunk hashes if the save operation is
+                valid and contains data to be gathered. Returns None if the
                 request should be skipped or contains no new tokens to gather.
-        """
+                """
         save_spec = meta.save_spec
         blocks_to_save = save_spec.src_blocks
         dst_chunks = save_spec.dst_chunks
+        dst_hashes = save_spec.dst_hashes
         req_id = meta.req_id
         full_block_ids = meta.local_block_ids
         full_token_ids = meta.token_ids
@@ -1662,7 +1697,7 @@ class TPUOffloadConnectorWorker:
                 f"Request({req_id}): blocks_to_save {blocks_to_save} contains blocks not present in local_block_ids {full_block_ids}"
             )
 
-        return blocks_to_save, dst_chunks
+        return blocks_to_save, dst_chunks, dst_hashes
 
     def _gather_tpu_blocks(self, req_id: ReqId, full_block_ids: list[int],
                            full_token_ids: list[int],
@@ -1688,7 +1723,7 @@ class TPUOffloadConnectorWorker:
             # save plan is validate
             return None
 
-        blocks_to_save, dst_chunks = plan
+        blocks_to_save, dst_chunks, dst_hashes = plan
         num_blocks_to_save = len(blocks_to_save)
 
         if self.use_bucketed_swap_ops:
@@ -1706,7 +1741,7 @@ class TPUOffloadConnectorWorker:
             )
 
         # We return the data needed for the next phase
-        return gathered_kv_caches_tpu, num_blocks_to_save, dst_chunks, blocks_to_save
+        return gathered_kv_caches_tpu, num_blocks_to_save, dst_chunks, blocks_to_save, dst_hashes
 
     def _batched_gather_tpu_blocks(
         self, metadata: TPUOffloadConnectorMetadata
@@ -1753,7 +1788,7 @@ class TPUOffloadConnectorWorker:
             if plan is None:
                 continue
 
-            blocks_to_save, dst_chunks = plan
+            blocks_to_save, dst_chunks, dst_hashes = plan
             num_blocks_to_save = len(blocks_to_save)
 
             all_src_blocks.extend(blocks_to_save)
@@ -1761,6 +1796,7 @@ class TPUOffloadConnectorWorker:
                 SaveReqInfo(req_id=meta.req_id,
                             num_blocks=num_blocks_to_save,
                             dst_chunks=dst_chunks,
+                            dst_hashes=dst_hashes,
                             is_final_save=meta.save_spec.is_final_save))
 
             logger.debug(
@@ -1868,7 +1904,9 @@ class TPUOffloadConnectorWorker:
         for info in manifest:
             for i in range(info.num_blocks):
                 chunk_id = info.dst_chunks[i]
-                self.cpu_backend.add(chunk_id, chunks_on_cpu[block_offset + i])
+                chunk_hash = info.dst_hashes[i]
+                self.cpu_backend.add(chunk_id, chunk_hash,
+                                     chunks_on_cpu[block_offset + i])
                 logger.debug(f" Saving to CPU chunk: "
                              f"chunk_id={chunk_id}, "
                              f" local_chunk_idx={block_offset + i}")
@@ -2012,12 +2050,13 @@ class TPUOffloadConnectorWorker:
 
                 # Unpack results from the sync step
                 (flat_kv_caches_tpu, num_blocks_to_save, dst_chunks,
-                 blocks_to_save) = gather_result
+                 blocks_to_save, dst_hashes) = gather_result
 
                 # Create a single-item manifest for the unified transfer function
                 info = SaveReqInfo(req_id=meta.req_id,
                                    num_blocks=num_blocks_to_save,
                                    dst_chunks=dst_chunks,
+                                   dst_hashes=dst_hashes,
                                    is_final_save=meta.save_spec.is_final_save)
 
                 # Define a safe wrapper for the async part to ensure logging
@@ -2128,6 +2167,7 @@ class TPUOffloadConnectorWorker:
                 "TPUOffloadConnectorWorker: Starting KV cache load process.")
             dst_blocks = meta.load_spec.dst_blocks
             src_chunks = meta.load_spec.src_chunks
+            src_hashes = meta.load_spec.src_chunk_hashes
             num_blocks_to_load = len(dst_blocks)
             num_matched_tokens = meta.load_spec.num_matched_tokens
             num_skip_leading_tokens = meta.load_spec.num_skip_leading_tokens
@@ -2169,7 +2209,10 @@ class TPUOffloadConnectorWorker:
             assembled_kv_on_cpu = []
             for i in range(num_blocks_to_load):
                 src_chunk_id = src_chunks[i]
-                cached_value = self.cpu_backend.get(src_chunk_id)
+                src_chunk_hash = src_hashes[i]
+                # This should be made async so that FS loads can be async.
+                cached_value = self.cpu_backend.get(src_chunk_id,
+                                                    src_chunk_hash)
                 if cached_value is not None:
                     assembled_kv_on_cpu.append(cached_value)
                 else:
