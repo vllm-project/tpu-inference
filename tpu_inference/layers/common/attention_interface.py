@@ -553,7 +553,6 @@ def mla_attention(
             actual_r_dim=q_rope.shape[2],
             kv_dtype=cache.dtype.name,
             q_dtype=q.dtype.name,
-            total_num_pages=cache.shape[0],
             page_size_per_kv_packing=cache.shape[1],
             kv_packing=cache.shape[2],
             max_num_seqs=md.padded_num_reqs // dp_size,

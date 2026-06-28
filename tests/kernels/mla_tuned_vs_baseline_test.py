@@ -30,7 +30,6 @@ def _get_tuned_test_cases():
     test_cases = []
     for key in tuned_params_mapping.keys():
         name = (f"tokens_{key.max_num_tokens}_"
-                f"pages_{key.total_num_pages}_"
                 f"seqs_{key.max_num_seqs}_"
                 f"pagesperseq_{key.pages_per_seq}")
         test_cases.append(dict(testcase_name=name, key=key))
@@ -51,7 +50,7 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
             decode_batch_size=4,
             num_kv_pages_per_block=3,
             num_queries_per_block=1,
-            vmem_limit_bytes=64 * 1024 * 1024,
+            vmem_limit_bytes=tuned_params.vmem_limit_bytes,
         )
 
         kv_len = key.pages_per_seq * key.page_size_per_kv_packing * key.kv_packing
@@ -64,7 +63,7 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
             page_size=key.page_size_per_kv_packing * key.kv_packing,
             q_dtype=jnp.dtype(key.q_dtype),
             kv_dtype=jnp.dtype(key.kv_dtype),
-            num_pages=key.total_num_pages,
+            num_pages=key.pages_per_seq * key.max_num_seqs,
             rng=rng,
         )
 
@@ -103,15 +102,19 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
         jax.block_until_ready(run_kernel(tuned_params))
 
         iters = 50
-        start_ns = time.perf_counter_ns()
+        baseline_latencies = []
         for _ in range(iters):
+            start_ns = time.perf_counter_ns()
             jax.block_until_ready(run_kernel(baseline_params))
-        baseline_latency = (time.perf_counter_ns() - start_ns) / iters
+            baseline_latencies.append(time.perf_counter_ns() - start_ns)
+        baseline_latency = min(baseline_latencies)
 
-        start_ns = time.perf_counter_ns()
+        tuned_latencies = []
         for _ in range(iters):
+            start_ns = time.perf_counter_ns()
             jax.block_until_ready(run_kernel(tuned_params))
-        tuned_latency = (time.perf_counter_ns() - start_ns) / iters
+            tuned_latencies.append(time.perf_counter_ns() - start_ns)
+        tuned_latency = min(tuned_latencies)
 
         speedup = (baseline_latency - tuned_latency) / baseline_latency * 100
 
