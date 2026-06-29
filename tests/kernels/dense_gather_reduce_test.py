@@ -227,38 +227,44 @@ class DenseGatherReduceTest(jtu.JaxTestCase):
             raise e
 
 
-class IsCompatibleTest(absltest.TestCase):
+class IsCompatibleTest(parameterized.TestCase):
     """Hardware-independent tests for the is_compatible() fallback gate.
 
-    These mock get_tpu_info() so they run on any platform (incl. CPU/v6e),
-    unlike DenseGatherReduceTest which needs SparseCore hardware.
+    These mock get_tpu_info() so they run on any platform, unlike
+    DenseGatherReduceTest which needs SparseCore hardware. They target the
+    output-block packing gate: the kernel's output BlockSpec row dim is
+    (num_lanes // reduce_group_size) // packing, which must be >= 1.
     """
 
-    def _fake_tpu_info(self, generation, num_lanes=16, num_cores=1,
-                       num_subcores=1):
+    def _fake_tpu_info(self, num_lanes, num_cores=1, num_subcores=1):
         sparse_core = types.SimpleNamespace(num_lanes=num_lanes,
                                             num_cores=num_cores,
                                             num_subcores=num_subcores)
-        return types.SimpleNamespace(generation=generation,
-                                     sparse_core=sparse_core)
+        return types.SimpleNamespace(sparse_core=sparse_core)
 
-    def test_v6e_falls_back(self):
-        # Qwen3-30B-A3B-like inputs: out_size divisible by topk, bf16.
-        op = jnp.zeros((4096, 128), jnp.bfloat16)
+    # (num_lanes, dtype, reduce_group_size, expected_is_compatible)
+    @parameterized.named_parameters(
+        # v6e SparseCore (num_lanes=8). bf16 packing=2: 8//8//2 = 0 -> the
+        # Qwen3-30B-A3B crash -> must fall back.
+        ("v6e_bf16_topk8_degenerate", 8, jnp.bfloat16, 8, False),
+        # Same v6e lanes but f32 (packing=1): 8//8//1 = 1 -> kernel is valid,
+        # must NOT be blocked just because it is v6e.
+        ("v6e_f32_topk8_ok", 8, jnp.float32, 8, True),
+        # v6e lanes, bf16, smaller group: 8//4//2 = 1 -> valid.
+        ("v6e_bf16_topk4_ok", 8, jnp.bfloat16, 4, True),
+        # v7x-like (num_lanes=16), bf16: 16//8//2 = 1 -> valid.
+        ("v7x_bf16_topk8_ok", 16, jnp.bfloat16, 8, True),
+    )
+    def test_output_block_packing_gate(self, num_lanes, dtype,
+                                       reduce_group_size, expected):
+        op = jnp.zeros((4096, 128), dtype)
         idx = jnp.zeros((4096, ), jnp.int32)
-        # v6e (generation 6) must be rejected so the MoE path uses _jax_fallback
-        # instead of tripping the zero-height output-block "swap" crash.
-        with mock.patch.object(dgr_mod.pltpu, "get_tpu_info",
-                               return_value=self._fake_tpu_info(generation=6)):
-            self.assertFalse(is_compatible(op, idx, reduce_group_size=8))
-
-    def test_v7x_compatible(self):
-        op = jnp.zeros((4096, 128), jnp.bfloat16)
-        idx = jnp.zeros((4096, ), jnp.int32)
-        # generation 7 with a valid SparseCore config passes all gates.
-        with mock.patch.object(dgr_mod.pltpu, "get_tpu_info",
-                               return_value=self._fake_tpu_info(generation=7)):
-            self.assertTrue(is_compatible(op, idx, reduce_group_size=8))
+        with mock.patch.object(
+                dgr_mod.pltpu, "get_tpu_info",
+                return_value=self._fake_tpu_info(num_lanes=num_lanes)):
+            self.assertEqual(
+                is_compatible(op, idx, reduce_group_size=reduce_group_size),
+                expected)
 
 
 if __name__ == "__main__":
