@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
@@ -28,11 +29,12 @@ from tpu_inference.utils import to_jax_dtype
 if TYPE_CHECKING:
     from tpu_inference.layers.common.process_weights.moe_weights import (
         FusedMoEWeights, UnfusedMoEWeights)
-    from tpu_inference.layers.jax.moe.moe import JaxMoE
+    from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
 else:
     FusedMoEWeights = None
     UnfusedMoEWeights = None
     JaxMoE = None
+    JaxRoutedExperts = None
 
 logger = init_logger(__name__)
 
@@ -70,7 +72,7 @@ class MoEBackend(Enum):
 
 
 def moe_apply(
-    layer,
+    layer: Union[RoutedExperts, JaxRoutedExperts, JaxMoE],
     x: jax.Array,
     gating_output: Union[jax.Array, Tuple[jax.Array, jax.Array]],
     weights: Union[FusedMoEWeights, UnfusedMoEWeights],
