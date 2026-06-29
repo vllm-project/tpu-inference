@@ -108,6 +108,8 @@ cleanup() {
   echo "   -> Cleaning workers..."
   if [[ ${#WORKER_IPS_ARRAY[@]} -gt 0 && -n "${WORKER_IPS_ARRAY[0]}" ]]; then
     for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
+      echo "==================== Ray Worker logs from worker node ${worker_ip} ===================="
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker exec node bash -c 'tail -n 100 /tmp/ray/session_*/logs/worker-*.err /tmp/ray/session_*/logs/ray_process_exit.log 2>/dev/null || true'" || true
       echo "==================== Docker logs from worker node ${worker_ip} ===================="
       ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker logs node" || echo "Failed to fetch logs from worker ${worker_ip}"
       echo "=================================================================================="

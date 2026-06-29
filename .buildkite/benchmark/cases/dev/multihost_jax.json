@@ -19,7 +19,8 @@
         "OUTPUT_LEN": 1024,
         "PREFIX_LEN": 0,
         "CREATED_BY": "bm-scheduler",
-        "MODEL_NAME": "DeepSeek-R1"
+        "MODEL_NAME": "DeepSeek-R1",
+        "DEVICE": "tpu7x-16"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
