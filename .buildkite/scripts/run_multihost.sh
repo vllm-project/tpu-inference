@@ -294,6 +294,11 @@ if [ "$#" -ge 1 ]; then
           "${DOCKER_IMAGE}" \
           python3 .buildkite/benchmark/scripts/parser_case.py "$CASE_FILE" "$TARGET_CASE_NAME" > "$TEMP_EXPORT_FILE" || {
               echo "Error running parser_case.py inside container."
+              if [[ -f "$TEMP_EXPORT_FILE" ]]; then
+                  echo "===== Content of $TEMP_EXPORT_FILE ====="
+                  cat "$TEMP_EXPORT_FILE"
+                  echo "========================================"
+              fi
               exit 1
           }
           
