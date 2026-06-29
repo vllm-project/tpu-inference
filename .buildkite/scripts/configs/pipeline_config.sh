@@ -110,13 +110,6 @@ process_json_benchmark_cases() {
       return
     fi
 
-    # for test
-    # Print generated pipeline YML for debugging
-    echo "==================== GENERATED PIPELINE YML FOR $f ===================="
-    echo "$py_output"
-    echo "========================================================================"
-    # test end
-
     # 2. Upload the captured YAML (stdout from python)
     if ! upload_with_priority <(echo "$py_output") "$priority"; then
       echo "🚨 Upload failed for $f"
