@@ -108,6 +108,9 @@ cleanup() {
   echo "   -> Cleaning workers..."
   if [[ ${#WORKER_IPS_ARRAY[@]} -gt 0 && -n "${WORKER_IPS_ARRAY[0]}" ]]; then
     for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
+      echo "==================== Docker logs from worker node ${worker_ip} ===================="
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker logs node" || echo "Failed to fetch logs from worker ${worker_ip}"
+      echo "=================================================================================="
       ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
     done
   fi
