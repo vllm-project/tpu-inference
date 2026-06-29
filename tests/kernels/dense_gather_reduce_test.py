@@ -260,7 +260,8 @@ class IsCompatibleTest(parameterized.TestCase):
         op = jnp.zeros((4096, 128), dtype)
         idx = jnp.zeros((4096, ), jnp.int32)
         with mock.patch.object(
-                dgr_mod.pltpu, "get_tpu_info",
+                dgr_mod.pltpu,
+                "get_tpu_info",
                 return_value=self._fake_tpu_info(num_lanes=num_lanes)):
             self.assertEqual(
                 is_compatible(op, idx, reduce_group_size=reduce_group_size),
