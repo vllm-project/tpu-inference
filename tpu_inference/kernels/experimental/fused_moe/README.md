@@ -1,7 +1,6 @@
 # Fused MoE kernels (experimental)
 
-Two TPU Pallas kernels for expert-parallel (EP) Mixture-of-Experts, both built
-on the shared `gmm_v2_gather_scatter` grouped-matmul base. They demonstrate
+Two TPU Pallas kernels for expert-parallel (EP) Mixture-of-Experts. They demonstrate
 fusing the EP collective communication directly into the GMM compute.
 
 ## `fused_moe/` — full fused MoE kernel (ready for usage)
@@ -9,10 +8,10 @@ fusing the EP collective communication directly into the GMM compute.
 `fused_moe_func_rs` runs the entire EP MoE in a single Pallas call:
 
 ```
-gather -> GMM1 -> activation -> GMM2 -> ICI reduce-scatter
+gather -> GMM1 -> activation -> GMM2 -> ICI A2A
 ```
 
-The reduce-scatter is fused into the kernel, replacing the usual post-kernel
+The A2A is fused into the kernel, replacing the usual post-kernel
 all-reduce/psum in EP MoE. It supports bf16 and quantized (fp8) weights, an
 optional post-expert RMSNorm, and sequence-parallel in/out (toggle with
 `TPU_MOE_ENABLE_SP`). This is the production-oriented kernel — use it as the MoE
@@ -37,8 +36,6 @@ builds on. It is provided as a reference/example rather than a complete MoE
 layer; the paired GMM2 + ICI reduce-scatter kernels live in the same module.
 
 ## Future work
-
-Two directions, both prototyped in the experimental codebase:
 
 - **Fuse the upstream all-gather** into the kernel so it overlaps with compute,
   using a persistent token cache (each token crosses to a receiver at most once)
