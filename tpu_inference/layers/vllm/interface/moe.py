@@ -16,6 +16,8 @@ from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
                                                   RoutedExperts)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import \
+    get_layer_from_name
 
 from tpu_inference import envs
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
@@ -112,13 +114,17 @@ def vllm_moe_apply(layer: RoutedExperts,
     extra_kwargs = dict(quant_method_instance.extra_backend_kwargs)
     extra_kwargs["scatter_results"] = is_dp
     extra_kwargs["moe_chunk_size"] = envs.VLLM_MOE_CHUNK_SIZE
+    # ``apply_monolithic`` hands us the ``RoutedExperts`` submodule, but the
+    # reduction decision lives on its parent runner. Both are built with the
+    # same ``layer_name`` and the runner registers itself in the forward context
+    # under that name, so we resolve it from there.
+    runner = get_layer_from_name(layer.layer_name)
     # Defer the tensor-parallel all-reduce inside the GMM kernel exactly when the
     # runner does NOT expect the fused output to be reduced -- the deferred path
     # where the shared and fused outputs are summed and reduced together in a
     # single collective downstream. This is the inverse of (and tied to)
     # ``VllmMoERunner._fused_output_is_reduced`` so the two never drift.
-    extra_kwargs[
-        "defer_all_reduce"] = not layer.runner._fused_output_is_reduced
+    extra_kwargs["defer_all_reduce"] = not runner._fused_output_is_reduced
 
     if getattr(layer, "hash_indices_table", None) is not None:
         assert input_ids is not None, "input_ids must be provided when hash_indices_table is present in the layer"

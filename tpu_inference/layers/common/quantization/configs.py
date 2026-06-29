@@ -25,7 +25,7 @@ class QuantLinearConfig:
                  *,
                  enable_sp: bool,
                  output_sizes: list[int],
-                 weight_sharding: P | None = None
+                 weight_sharding: P | None = None,
                  defer_all_reduce: bool = False):
         # Output size across all TP ranks.
         self.output_sizes = output_sizes

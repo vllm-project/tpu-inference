@@ -357,32 +357,12 @@ def moe_gmm_local(x: jax.Array,
                                            tiled=True).astype(x.dtype)
             else:
                 out = chunk_hidden.astype(x.dtype)
-    # Then global reduction on all ranks for all tokens and all experts
-    if defer_all_reduce:
-        # The caller defers the tensor-/expert-parallel all-reduce (e.g. to
-        # fuse it with a shared-expert reduction downstream). Return the
-        # per-shard partial sums; the output spec leaves the reduction axis
-        # replicated, matching the unreduced representation the caller expects.
-        out = out.astype(x.dtype)
-    elif enable_rs_kernel:
-        reduction_axes = reduction_axis if isinstance(
-            reduction_axis, tuple) else (reduction_axis, )
-        num_devices = 1
-        for axis in reduction_axes:
-            num_devices *= jax.lax.axis_size(axis)
-
-        # Fallback to psum-scatter for small token sizes to avoid Mosaic compilation.
-        # The threshold is chosen based on the tile dimension (8) in the
-        # hierarchical reduce-scatter kernel.
-        if out.shape[0] // num_devices < 8:
-            out = jax.lax.psum_scatter(out,
-                                       axis_name=reduction_axis,
-                                       scatter_dimension=0,
-                                       tiled=True).astype(x.dtype)
         else:
-            out = jax.lax.psum(chunk_hidden,
-                               axis_name=reduction_axis).astype(x.dtype)
-
+            if not defer_all_reduce:
+                out = jax.lax.psum(chunk_hidden,
+                                   axis_name=reduction_axis).astype(x.dtype)
+            else:
+                out = chunk_hidden.astype(x.dtype)
         out_list.append(out)
 
     return jnp.concatenate(out_list,
