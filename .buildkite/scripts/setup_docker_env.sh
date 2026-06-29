@@ -135,7 +135,13 @@ setup_environment() {
     fi
   fi
 
-  local CI_IMAGE_REPO="us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/${IMAGE_NAME}"
+  local CI_IMAGE_REPO
+  if [[ "${IMAGE_NAME}" == *"/"* ]]; then
+    # If IMAGE_NAME is a full GCR path, replace the product repo name with the CI cache repo name
+    CI_IMAGE_REPO="${IMAGE_NAME/tpu-inference/tpu-inference-ci}"
+  else
+    CI_IMAGE_REPO="us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/${IMAGE_NAME}"
+  fi
   local LOCAL_TPU_VERSION="${TPU_VERSION:-tpu6e}" 
 
   local DOCKERFILE_NAME="Dockerfile"
