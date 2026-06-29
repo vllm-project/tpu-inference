@@ -51,7 +51,7 @@ from tpu_inference.kernels.experimental.batched_rpa.wrapper import \
 from tpu_inference.utils import get_dtype_packing
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO)
 
 
 def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
@@ -212,12 +212,12 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             bkv_sz = prefill_tunable_params.bkv_sz
             n_buffer = prefill_tunable_params.n_buffer
 
-            for prefill_batch_size in [1, 2]:
-                for bq_sz in range(512, 8193, 512):
-                    for bq_c_sz in range(128, bq_sz + 1, 128):
+            for prefill_batch_size in [1, 2, 3]:
+                for bq_sz in range(256, 2049, 256):
+                    for bq_c_sz in [8, 16, 32, 64, 128]:
                         if bq_sz % bq_c_sz != 0:
                             continue
-                        for bkv_sz in range(512, 8193, 512):
+                        for bkv_sz in range(256, 2048, 256):
                             if bkv_sz % prefill_tuning_key.page_size != 0:  # requirement from scheduler
                                 continue
                             for n_buffer in [2, 3]:
@@ -260,29 +260,15 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                 input_cache['queries'], input_cache[
                     'kv_cache'] = jax.block_until_ready(
                         ragged_paged_attention(
-                            input_cache['queries'],
-                            input_cache['keys'],
-                            input_cache['values'],
-                            input_cache['kv_cache'],
-                            input_cache['kv_lens'],
-                            input_cache['page_indices'],
-                            input_cache['cu_q_lens'],
-                            input_cache['distribution'],
-                            sm_scale=input_cache['sm_scale'],
-                            sliding_window=input_cache['sliding_window'],
-                            soft_cap=input_cache['soft_cap'],
-                            mask_value=input_cache['mask_value'],
-                            q_scale=input_cache['q_scale'],
-                            k_scale=input_cache['k_scale'],
-                            v_scale=input_cache['v_scale'],
+                            **jax.tree.map(
+                                lambda x: x.copy()
+                                if isinstance(x, jax.Array) else x,
+                                input_cache),
                             chunk_prefill_size=None,  # not used inside
                             decode_block_sizes=None,
                             prefill_block_sizes=prefill_block_sizes,
                             vmem_limit_bytes=
                             None,  # use default vmem limit from the wrapper
-                            out_dtype=input_cache['out_dtype'],
-                            use_causal_mask=input_cache['use_causal_mask'],
-                            update_kv_cache=input_cache['update_kv_cache'],
                         ))
             end_ns = time.perf_counter_ns()
             latency_ns = (end_ns - start_ns)
