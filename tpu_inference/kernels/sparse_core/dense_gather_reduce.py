@@ -48,17 +48,8 @@ def is_compatible(
     if sc_info.num_lanes % reduce_group_size != 0:
         return False
 
-    # The kernel's output BlockSpec row dimension is
-    # (num_lanes // reduce_group_size) // packing (see out_rows_per_step and the
-    # out_specs in _sc_gather_reduce). For sub-32-bit dtypes packing > 1 (bf16 ->
-    # 2), so when num_lanes // reduce_group_size < packing this floors to 0,
-    # producing a zero-height output block that the kernel body (which still
-    # writes one row) cannot store into -> AOT lowering crashes with "Invalid
-    # shape for `swap`". This is exactly what regressed Qwen3-30B-A3B (topk=8,
-    # bf16) on v6e SparseCore (num_lanes=8 -> 8//8//2 = 0). Gate on the arithmetic
-    # rather than the TPU generation: configs that leave >=1 packed output row
-    # (larger num_lanes, smaller reduce_group_size, or f32 with packing=1) keep
-    # using the kernel; only the degenerate ones fall back to _jax_fallback.
+    # The output block has (num_lanes // reduce_group_size) // packing rows;
+    # fall back to JAX when that is 0 (the kernel can't emit a zero-row block).
     packing = 32 // jax.dtypes.itemsize_bits(op.dtype)
     if (sc_info.num_lanes // reduce_group_size) // packing < 1:
         return False
