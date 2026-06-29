@@ -237,6 +237,10 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     echo "--- Distributing and starting Ray Worker on ${worker_ip}"
 
     # Prune Worker Node BEFORE it tries to pull the new giant image
+    echo "   -> Checking Worker VM Mount Directories..."
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "ls -ld /mnt/disks/checkpoint || echo 'Checkpoint directory /mnt/disks/checkpoint does not exist on Worker VM'" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "ls -la /mnt/disks/checkpoint || echo 'Cannot list /mnt/disks/checkpoint on Worker VM'" || true
+
     echo "   -> Pruning Docker on worker to free disk space..."
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
     

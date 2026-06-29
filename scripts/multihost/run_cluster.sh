@@ -106,7 +106,7 @@ trap cleanup EXIT
 # Build the Ray start command based on the node role.
 # The head node manages the cluster and accepts connections on port 6379,
 # while workers connect to the head's address.
-RAY_START_CMD="ray start --block"
+RAY_START_CMD="(echo always > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true) && ray start --block"
 if [ "${NODE_TYPE}" == "--head" ]; then
     RAY_START_CMD+=" --head --port=6379"
 else
