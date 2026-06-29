@@ -419,13 +419,18 @@ class VllmModelWrapper:
                 List[jax.Array], jax.Array, List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             lora_metadata = torch_view(lora_metadata)
+            # Fix for MoE models under DP > 1: extract num_tokens to prevent
+            # AssertionError in set_forward_context.
+            num_tokens = input_ids.shape[0] if input_ids is not None else (
+                input_embeds.shape[0] if input_embeds is not None else None)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index,
                     vllm_config=self.vllm_config), set_forward_context(
                         attn_metadata=attn_metadata,
-                        vllm_config=self.vllm_config):
+                        vllm_config=self.vllm_config,
+                        num_tokens=num_tokens):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
                 original_lora_metadata = replace_lora_metadata(
@@ -480,12 +485,16 @@ class VllmModelWrapper:
         ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
                    Optional[jax.Array]]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
+            # Fix for MoE models under DP > 1: extract num_tokens to prevent
+            # AssertionError in set_forward_context.
+            num_tokens = input_ids.shape[0] if input_ids is not None else None
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index
             ), set_forward_context(attn_metadata=attn_metadata,
-                                   vllm_config=self.vllm_config):
+                                   vllm_config=self.vllm_config,
+                                   num_tokens=num_tokens):
                 kwargs = {
                     "input_ids": torch_view(input_ids),
                     "positions": torch_view(attn_metadata.input_positions),
