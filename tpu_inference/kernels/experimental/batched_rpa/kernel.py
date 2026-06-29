@@ -421,6 +421,7 @@ def rpa_kernel(
                 kv_lens_ref=kv_lens_ref,
             ),
             grid=(safe_steps, ),
+            dimension_semantics=("arbitrary", ),
             in_specs=(q_alloc.spec, kv_cache_alloc.spec),
             out_specs=(o_alloc.spec, ),
         )
