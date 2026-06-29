@@ -102,8 +102,8 @@ class DenseGatherReduceTest(jtu.JaxTestCase):
             sc_info = None
         if sc_info is None:
             self.skipTest("SparseCore is not available")
-        if tpu_info.generation == 6:
-            self.skipTest("dense_gather_reduce is not supported on TPUv6e")
+        # EXPERIMENT (not for merge): drop the blanket v6e skip so guard-permitted
+        # configs exercise the kernel on v6e and degenerate ones use the fallback.
 
     @parameterized.parameters(*_test_cases)
     def test_sc_dense_gather_reduce(self, out_size, hidden_size, dtype,
