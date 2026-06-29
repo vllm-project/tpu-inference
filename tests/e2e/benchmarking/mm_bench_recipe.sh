@@ -28,6 +28,7 @@ block_size="${BLOCK_SIZE:-}"
 # gemma-4-E2B-it where we want kernel/attention perf without vision overhead.
 # Default "mm" preserves the existing Qwen-VL etc. multimodal recipe.
 bench_dataset="${BENCH_DATASET:-mm}"
+compilation_config="${COMPILATION_CONFIG:-}"
 if [ "$bench_dataset" = "text" ]; then
   dataset_name="random"
 else
@@ -121,6 +122,9 @@ if [ -n "$max_num_seqs" ]; then
 fi
 if [ -n "$block_size" ]; then
     vllm_cmd+=(--block-size "$block_size")
+fi
+if [ -n "$compilation_config" ]; then
+    vllm_cmd+=(--compilation-config "$compilation_config")
 fi
 "${vllm_cmd[@]}" 2>&1 | tee -a "$LOG_FILE" &
 
