@@ -104,9 +104,9 @@ process_json_benchmark_cases() {
     
     local py_output
     # 1. Generate pipeline and capture output/exit code (including stderr)
-    if ! py_output=$(python3 "$generator" --input "$f" --no-verify "$no_verify" 2>&1); then
+    if ! py_output=$(python3 "$generator" --input "$f" --no-verify "$no_verify"); then
       echo "🚨 Generator failed for $f"
-      error_msgs+=("❌ Generation Failure in $f:\n$py_output")
+      error_msgs+=("❌ Generation Failure in $f")
       return
     fi
 
