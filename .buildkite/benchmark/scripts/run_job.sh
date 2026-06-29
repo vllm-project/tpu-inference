@@ -240,7 +240,8 @@ fi
 
       legacy_gcs_uri="gs://tpu-commons-ci/logs/${MODEL_NAME:-unknown}_${INPUT_LEN:-0}_${OUTPUT_LEN:-0}_${impl_type}_${CODE_HASH:-unknown}_${status_tag}_${run_mode}${routing_tag}_${JOB_REFERENCE}_vllm_serve.log"
       echo "--- Uploading copy of server log to legacy GCS location: $legacy_gcs_uri"
-      gsutil cp "$VLLM_LOG" "$legacy_gcs_uri" || echo "Warning: Failed to upload vllm_serve.log to legacy GCS location."
+      # for test skip upload
+      # gsutil cp "$VLLM_LOG" "$legacy_gcs_uri" || echo "Warning: Failed to upload vllm_serve.log to legacy GCS location."
     fi
   else
     echo "Warning: $VLLM_LOG not found, skipping upload."
