@@ -551,9 +551,15 @@ class TPUWorker(WorkerBase):
             self.profile_step_counter = 0
         else:
             if self.is_profiling:
-                logger.info("Stopping JAX profiler trace.")
-                jax.profiler.stop_trace()
-                self.is_profiling = False
+                try:
+                    logger.info("Stopping JAX profiler trace.")
+                    jax.profiler.stop_trace()
+                except Exception as e:
+                    logger.warning("Failed to stop JAX profiler trace: %s", e)
+                finally:
+                    self.is_profiling = False
+            else:
+                logger.info("Profiler is already stopped (likely due to step-wise capture limit). Bypassing.")
 
     def load_model(self) -> None:
         self.model_runner.load_model()
