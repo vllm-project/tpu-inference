@@ -267,39 +267,82 @@ echo "--- Starting vLLM server on head node"
 MODEL="${TEST_MODEL:-gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39}"
 VLLM_PORT="8000"
 
-VLLM_SERVE_CMD="vllm serve ${MODEL} \
-  --port ${VLLM_PORT} \
-  --tensor-parallel-size ${TENSOR_PARALLEL_SIZE:-16} \
-  --trust-remote-code \
-  --no-enable-prefix-caching \
-  --kv_cache_dtype=fp8 \
-  --async-scheduling \
-  --load-format=runai_streamer \
-  --max-model-len 1024"
+VLLM_SERVE_CMD=""
+CLIENT_BENCH_CMD=""
 
-# Override VLLM_SERVE_CMD if provided as the first argument
 if [ "$#" -ge 1 ]; then
-    VLLM_SERVE_CMD="$1"
-    echo "Using provided VLLM_SERVE_CMD: $VLLM_SERVE_CMD"
-    # Shift so that remaining args are treated as the benchmark command
-    shift
-    
-    # Rewrite generation config if GCS path is used
-    if [[ "${VLLM_SERVE_CMD}" =~ --generation-config[=\ ]+gs://([^ ]+) ]]; then
-        gcs_path="gs://${BASH_REMATCH[1]}"
-        config_url="${gcs_path%/*}"
-        config_dir_name=$(basename "${config_url}")
-        config_file_name=$(basename "${gcs_path}")
-
-        echo "--- Detected GCS generation-config: $gcs_path"
-        echo "--- Pre-downloading config to workspace inside container..."
-
-        download_cmd="if ! command -v gsutil &> /dev/null; then curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null; export PATH=\"\$PATH:/root/google-cloud-sdk/bin\"; fi && mkdir -p /workspace && gsutil -m cp -r ${config_url} /workspace/ && "
+    if [[ "$1" == *.json ]]; then
+        # JSON configuration mode (New pipeline)
+        CASE_FILE="$1"
+        TARGET_CASE_NAME="$2"
+        echo "--- Multi-host JSON case configuration detected: $CASE_FILE ($TARGET_CASE_NAME)"
         
-        VLLM_SERVE_CMD=$(echo "${VLLM_SERVE_CMD}" | sed -E "s|--generation-config[=\ ]+gs://[^ ]+|--generation-config /workspace/${config_dir_name}/${config_file_name}|g")
-        VLLM_SERVE_CMD="${download_cmd}${VLLM_SERVE_CMD}"
-        echo "Rewritten VLLM_SERVE_CMD: $VLLM_SERVE_CMD"
+        TEMP_EXPORT_FILE="/tmp/temp_env_exports.sh"
+        rm -f "$TEMP_EXPORT_FILE"
+        
+        # Run parser_case.py inside the container to resolve server/client commands
+        docker run --rm \
+          --privileged \
+          --net host \
+          -v "$(pwd):/workspace" \
+          -w /workspace \
+          "${DOCKER_IMAGE}" \
+          python3 .buildkite/benchmark/scripts/parser_case.py "$CASE_FILE" "$TARGET_CASE_NAME" > "$TEMP_EXPORT_FILE" || {
+              echo "Error running parser_case.py inside container."
+              exit 1
+          }
+          
+        # shellcheck source=/dev/null
+        source "$TEMP_EXPORT_FILE"
+        rm -f "$TEMP_EXPORT_FILE"
+        
+        # Convert SERVER_CMD array to a single string VLLM_SERVE_CMD
+        for env_item in "${SERVER_CMD_ENVS[@]}"; do
+            VLLM_SERVE_CMD+="$(printf '%q ' "$env_item")"
+        done
+        for cmd_item in "${SERVER_CMD[@]}"; do
+            VLLM_SERVE_CMD+="$(printf '%q ' "$cmd_item")"
+        done
+        
+        # Set client benchmark command from CLIENT_CMD resolved by parser
+        CLIENT_BENCH_CMD="$CLIENT_CMD"
+        
+    else
+        # Legacy mode (raw server/client commands passed)
+        VLLM_SERVE_CMD="$1"
+        shift
+        if [ "$#" -gt 0 ]; then
+            CLIENT_BENCH_CMD="${*:-}"
+        fi
+        
+        # Rewrite generation config if GCS path is used (legacy logic)
+        if [[ "${VLLM_SERVE_CMD}" =~ --generation-config[=\ ]+gs://([^ ]+) ]]; then
+            gcs_path="gs://${BASH_REMATCH[1]}"
+            config_url="${gcs_path%/*}"
+            config_dir_name=$(basename "${config_url}")
+            config_file_name=$(basename "${gcs_path}")
+
+            echo "--- Detected GCS generation-config: $gcs_path"
+            echo "--- Pre-downloading config to workspace inside container..."
+
+            download_cmd="if ! command -v gsutil &> /dev/null; then curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null; export PATH=\"\$PATH:/root/google-cloud-sdk/bin\"; fi && mkdir -p /workspace && gsutil -m cp -r ${config_url} /workspace/ && "
+            
+            VLLM_SERVE_CMD=$(echo "${VLLM_SERVE_CMD}" | sed -E "s|--generation-config[=\ ]+gs://[^ ]+|--generation-config /workspace/${config_dir_name}/${config_file_name}|g")
+            VLLM_SERVE_CMD="${download_cmd}${VLLM_SERVE_CMD}"
+            echo "Rewritten VLLM_SERVE_CMD: $VLLM_SERVE_CMD"
+        fi
     fi
+else
+    # Fallback default serve command
+    VLLM_SERVE_CMD="vllm serve ${MODEL} \
+      --port ${VLLM_PORT} \
+      --tensor-parallel-size ${TENSOR_PARALLEL_SIZE:-16} \
+      --trust-remote-code \
+      --no-enable-prefix-caching \
+      --kv_cache_dtype=fp8 \
+      --async-scheduling \
+      --load-format=runai_streamer \
+      --max-model-len 1024"
 fi
 
 # Launch vllm serve in the background inside the local 'node' container
@@ -312,7 +355,12 @@ docker exec \
 wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log"
 
 # 5. Run Benchmarks / Validation
-if [ "$#" -gt 0 ]; then
+if [ -n "${CLIENT_BENCH_CMD}" ]; then
+  echo "--- Running Benchmark Command on Head Node"
+  docker exec \
+    -e HF_HOME=/root/.cache/huggingface \
+    node bash -c "${CLIENT_BENCH_CMD}"
+elif [ "$#" -gt 0 ]; then
   echo "--- Running provided Benchmark Command on Head Node"
   COMMAND_ARGS=("$@")
   
@@ -331,3 +379,18 @@ else
 fi
 
 echo "--- Tests completed successfully"
+
+# Write GCS upload metadata variables to a temp file for run_job.sh
+METADATA_FILE="/tmp/multihost_run_metadata.sh"
+rm -f "$METADATA_FILE"
+if [[ -n "${SERVER_CMD_ENVS:-}" ]]; then
+  {
+    echo "export MODEL_NAME='${MODEL_NAME:-}'"
+    echo "export INPUT_LEN='${INPUT_LEN:-}'"
+    echo "export OUTPUT_LEN='${OUTPUT_LEN:-}'"
+    echo "declare -a SERVER_CMD_ENVS=()"
+    for env_item in "${SERVER_CMD_ENVS[@]}"; do
+        echo "SERVER_CMD_ENVS+=('$(printf '%q' "$env_item")')"
+    done
+  } >> "$METADATA_FILE"
+fi

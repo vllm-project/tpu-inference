@@ -152,27 +152,24 @@ if [[ "$IS_MULTI_HOST" == "true" ]]; then
       -e UPLOAD_DB=${UPLOAD_DB:-true} \
       -e IS_MULTI_HOST=true"
 
-    # Re-use parser_case.py to resolve the server command for this case on host.
-    PYTHON_PARSER="$(pwd)/.buildkite/benchmark/scripts/parser_case.py"
-    eval "$(python3 "$PYTHON_PARSER" "$CASE_FILE" "$TARGET_CASE_NAME")"
-
-    # Convert SERVER_CMD array to a single string for run_multihost.sh.
-    FULL_SERVER_CMD=""
-    for env_item in "${SERVER_CMD_ENVS[@]}"; do
-        FULL_SERVER_CMD+="$(printf '%q ' "$env_item")"
-    done
-    for cmd_item in "${SERVER_CMD[@]}"; do
-        FULL_SERVER_CMD+="$(printf '%q ' "$cmd_item")"
-    done
-
-    # The client command will execute run_bm.sh inside the container
-    CLIENT_CMD="SERVER_ALREADY_RUNNING=true ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts bash /workspace/tpu_inference/.buildkite/benchmark/scripts/run_bm.sh '$CASE_FILE' '$TARGET_CASE_NAME'"
-
     echo "Executing run_multihost.sh on host..."
-    .buildkite/scripts/run_multihost.sh "$FULL_SERVER_CMD" "$CLIENT_CMD" || {
+    .buildkite/scripts/run_multihost.sh "$CASE_FILE" "$TARGET_CASE_NAME" || {
         echo "Error running multihost benchmark."
         BM_JOB_STATUS=$EXIT_FAILURE
     }
+
+    # Source the environment variables resolved inside the container from the metadata file
+    METADATA_FILE="/tmp/multihost_run_metadata.sh"
+    if [ -f "$METADATA_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$METADATA_FILE"
+        rm -f "$METADATA_FILE"
+    fi
+
+    # Move the server log from /tmp (saved by run_multihost.sh) to artifacts folder
+    if [ -f /tmp/vllm_serve.log ]; then
+        mv /tmp/vllm_serve.log "$LOG_FOLDER/vllm_log.txt"
+    fi
 else
     echo "--- Running job in docker via run_in_docker.sh (Single-Host Mode)"
     .buildkite/scripts/run_in_docker.sh bash -c "
