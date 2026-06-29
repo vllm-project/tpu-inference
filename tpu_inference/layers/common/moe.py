@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
