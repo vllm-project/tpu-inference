@@ -171,6 +171,8 @@ class TPUWorker(WorkerBase):
 
         # step_counter is used to calculate uuid to transfer intermediate tensors.
         self.step_counter = 0
+        self.is_profiling = False
+        self.profile_step_counter = 0
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -487,6 +489,16 @@ class TPUWorker(WorkerBase):
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
 
+        if self.is_profiling:
+            self.profile_step_counter += 1
+            active_profiler_steps = envs.VLLM_ACTIVE_PROFILER_STEPS
+            if active_profiler_steps > 0 and self.profile_step_counter >= active_profiler_steps:
+                logger.info(
+                    "Stopping profiler automatically after %d steps.",
+                    self.profile_step_counter,
+                )
+                self.profile(is_start=False)
+
         if isinstance(output, JaxIntermediateTensors):
             assert self.parallel_config.pipeline_parallel_size > 1
             assert not get_pp_group().is_last_rank
@@ -523,6 +535,7 @@ class TPUWorker(WorkerBase):
                 is_start: bool = True,
                 profile_prefix: str | None = None):
         if is_start:
+            logger.info("Starting JAX profiler trace, saving to %s", self.profile_dir)
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
@@ -534,8 +547,13 @@ class TPUWorker(WorkerBase):
                 }
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
+            self.is_profiling = True
+            self.profile_step_counter = 0
         else:
-            jax.profiler.stop_trace()
+            if self.is_profiling:
+                logger.info("Stopping JAX profiler trace.")
+                jax.profiler.stop_trace()
+                self.is_profiling = False
 
     def load_model(self) -> None:
         self.model_runner.load_model()

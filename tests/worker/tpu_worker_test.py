@@ -373,6 +373,7 @@ class TestTPUWorker:
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test")
+        worker.is_profiling = True
         worker.profile(is_start=False)
         mock_jax.profiler.stop_trace.assert_called_once()
 

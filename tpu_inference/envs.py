@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     VLLM_MOE_CHUNK_SIZE: int = 0
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
     PROFILE_SINGLE_DEVICE: bool = False
+    VLLM_ACTIVE_PROFILER_STEPS: int = -1
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
 
@@ -416,6 +417,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Profile a single device instead of all devices.
     "PROFILE_SINGLE_DEVICE":
     env_bool("PROFILE_SINGLE_DEVICE", default=False),
+    # Number of active profiling steps to capture.
+    "VLLM_ACTIVE_PROFILER_STEPS":
+    lambda: int(os.getenv("VLLM_ACTIVE_PROFILER_STEPS") or "-1"),
     "LORA_MODULE_PATH":
     lambda: os.getenv("LORA_MODULE_PATH", ""),
     "MLA_KV_PACKING_SIZE":
