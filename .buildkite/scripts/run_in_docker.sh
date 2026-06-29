@@ -60,6 +60,7 @@ ENV_VARS=(
   -e USE_BATCHED_RPA_KERNEL="${USE_BATCHED_RPA_KERNEL:-}"
   -e GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"
   -e BUILDKITE_STEP_KEY="${BUILDKITE_STEP_KEY:-}"
+  -e COMPILATION_CONFIG="${COMPILATION_CONFIG:-}"
   -e HOST_NAME="${HOST_NAME:-}"
   -e GCS_BUCKET="${GCS_BUCKET:-}"
   -e GITHUB_CI_BOT_TOKEN="${GITHUB_CI_BOT_TOKEN:-}"
@@ -138,7 +139,7 @@ if ! mkdir -p "$LOCAL_JAX_CACHE_DIR"; then
   exit 1
 fi
 echo "[INFO] Pulling JAX Cache from GCS to local directory..."
-# Parallel CI builds‘ pushes are safe because JAX's compilation cache 
+# Parallel CI builds‘ pushes are safe because JAX's compilation cache
 # entries are content-addressed. Concurrent pushes are thus idempotent;
 gcloud storage rsync \
   --recursive \
@@ -162,9 +163,9 @@ trap 'docker kill "$IMAGE_NAME" 2>/dev/null || true' EXIT INT TERM
 
 # -----------------------------------------------------------------------------
 # JAX Cache Env Variables Explanation:
-# - VLLM_XLA_CACHE_PATH: Prevents vLLM's CompilationManager from overriding our 
+# - VLLM_XLA_CACHE_PATH: Prevents vLLM's CompilationManager from overriding our
 #   path with its default.
-# - JAX_COMPILATION_CACHE_DIR: Serves as a global catch-all for unit tests that 
+# - JAX_COMPILATION_CACHE_DIR: Serves as a global catch-all for unit tests that
 #   initiate models and bypass vLLM's CompilationManager logic entirely.
 # -----------------------------------------------------------------------------
 
