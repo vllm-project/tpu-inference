@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import itertools
+import types
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -21,8 +23,9 @@ from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
-    dense_gather_reduce
+from tpu_inference.kernels.sparse_core import dense_gather_reduce as dgr_mod
+from tpu_inference.kernels.sparse_core.dense_gather_reduce import (
+    dense_gather_reduce, is_compatible)
 
 jax.config.parse_flags_with_absl()
 
@@ -222,6 +225,47 @@ class DenseGatherReduceTest(jtu.JaxTestCase):
             print("DEBUG ACTUAL (first 32 rows):\n", actual[:32, :])
             print("DEBUG DESIRED (first 32 rows):\n", desired[:32, :])
             raise e
+
+
+class IsCompatibleTest(parameterized.TestCase):
+    """Hardware-independent tests for the is_compatible() fallback gate.
+
+    These mock get_tpu_info() so they run on any platform, unlike
+    DenseGatherReduceTest which needs SparseCore hardware. They target the
+    output-block packing gate: the kernel's output BlockSpec row dim is
+    (num_lanes // reduce_group_size) // packing, which must be >= 1.
+    """
+
+    def _fake_tpu_info(self, num_lanes, num_cores=1, num_subcores=1):
+        sparse_core = types.SimpleNamespace(num_lanes=num_lanes,
+                                            num_cores=num_cores,
+                                            num_subcores=num_subcores)
+        return types.SimpleNamespace(sparse_core=sparse_core)
+
+    # (num_lanes, dtype, reduce_group_size, expected_is_compatible)
+    @parameterized.named_parameters(
+        # v6e SparseCore (num_lanes=8). bf16 packing=2: 8//8//2 = 0 -> the
+        # Qwen3-30B-A3B crash -> must fall back.
+        ("v6e_bf16_topk8_degenerate", 8, jnp.bfloat16, 8, False),
+        # Same v6e lanes but f32 (packing=1): 8//8//1 = 1 -> kernel is valid,
+        # must NOT be blocked just because it is v6e.
+        ("v6e_f32_topk8_ok", 8, jnp.float32, 8, True),
+        # v6e lanes, bf16, smaller group: 8//4//2 = 1 -> valid.
+        ("v6e_bf16_topk4_ok", 8, jnp.bfloat16, 4, True),
+        # v7x-like (num_lanes=16), bf16: 16//8//2 = 1 -> valid.
+        ("v7x_bf16_topk8_ok", 16, jnp.bfloat16, 8, True),
+    )
+    def test_output_block_packing_gate(self, num_lanes, dtype,
+                                       reduce_group_size, expected):
+        op = jnp.zeros((4096, 128), dtype)
+        idx = jnp.zeros((4096, ), jnp.int32)
+        with mock.patch.object(
+                dgr_mod.pltpu,
+                "get_tpu_info",
+                return_value=self._fake_tpu_info(num_lanes=num_lanes)):
+            self.assertEqual(
+                is_compatible(op, idx, reduce_group_size=reduce_group_size),
+                expected)
 
 
 if __name__ == "__main__":

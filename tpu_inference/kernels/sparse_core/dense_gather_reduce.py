@@ -48,6 +48,12 @@ def is_compatible(
     if sc_info.num_lanes % reduce_group_size != 0:
         return False
 
+    # The output block has (num_lanes // reduce_group_size) // packing rows;
+    # fall back to JAX when that is 0 (the kernel can't emit a zero-row block).
+    packing = 32 // jax.dtypes.itemsize_bits(op.dtype)
+    if (sc_info.num_lanes // reduce_group_size) // packing < 1:
+        return False
+
     num_cores = 1 if single_sc else sc_info.num_cores
     num_subcores = sc_info.num_subcores
     row_wave_size = row_chunk_size * num_cores * num_subcores
