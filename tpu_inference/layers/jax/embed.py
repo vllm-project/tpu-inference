@@ -43,7 +43,7 @@ class JaxEmbed(nnx.Embed, JaxModule):
         if hasattr(self.weight, "out_sharding"):
             self.weight.set_metadata('sharding', self.weight.out_sharding)
 
-	self.quant_method = None
+        self.quant_method = None
         if quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
             if quant_method is not None:
