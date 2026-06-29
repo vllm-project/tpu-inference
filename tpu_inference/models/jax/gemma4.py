@@ -27,7 +27,6 @@ from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
@@ -35,7 +34,7 @@ from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear, JaxLmHead,
                                              JaxMergedColumnParallelLinear,
                                              JaxQKVParallelLinear)
-from tpu_inference.layers.jax.moe.moe import JaxMoE
+from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import (apply_rope,
@@ -161,15 +160,13 @@ class Gemma4Router(JaxModule):
         return router_logits
 
 
-class Gemma4MoE(JaxMoE):
+class Gemma4MoE(JaxRoutedExperts):
     """Mixture of Experts for Gemma4 using FusedMoE.
 
-    Wraps FusedMoE with custom routing. The router projection is
-    external (Gemma4Router) — this class only handles expert dispatch.
-
-    Gemma4 routing: softmax over ALL experts → top-k → renormalize.
-    per_expert_scale is folded into routing weights for mathematical
-    correctness with FusedMoE's fused kernel.
+    The router projection is external (Gemma4Router); this class only
+    handles expert dispatch.  use_ep and moe_backend are derived from
+    the vLLM parallel config by JaxRoutedExperts so the EP/TP backend
+    matches the torchax path automatically.
     """
 
     def __init__(
@@ -181,11 +178,7 @@ class Gemma4MoE(JaxMoE):
         quant_config,
         prefix: str = "",
     ) -> None:
-        noop_router = JaxModule()
-        noop_router.num_experts_per_tok = config.top_k_experts
-
-        # FusedMoE experts with custom Gemma4 routing
-        JaxMoE.__init__(
+        JaxRoutedExperts.__init__(
             self,
             dtype=dtype,
             num_local_experts=config.num_experts,
@@ -193,23 +186,11 @@ class Gemma4MoE(JaxMoE):
             intermediate_size_moe=config.moe_intermediate_size,
             hidden_act="gelu",
             rngs=rngs,
-            router=noop_router,
             mesh=mesh,
-            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-            activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-            edf_sharding=(None, None, None),
-            efd_sharding=(None, None, None),
-            apply_expert_weight_before_computation=False,
-            expert_axis_name=None,
-            # Disable EP for MVP, can enable later if needed
-            # TODO: Enable EP
-            num_expert_parallelism=1,
-            moe_backend=MoEBackend.GMM_TP,
-            scoring_func=
-            "softmax",  # vLLM implementation has a custom routing function, here we just use "softmax" for MVP
+            top_k=config.top_k_experts,
+            scoring_func="softmax",
             renormalize=True,
             enable_return_routed_experts=True,
-            num_experts_per_tok=config.top_k_experts,
             quant_config=quant_config,
             prefix=prefix)
 
