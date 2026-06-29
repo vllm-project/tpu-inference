@@ -7,6 +7,7 @@
 import difflib
 import gc
 import os
+import traceback
 from dataclasses import asdict
 
 import pytest
@@ -134,5 +135,14 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
         # shutdown the first engine's worker keeps the TPU and the second
         # LLM(...) fails with "TPU already in use by pid <first>". Mirrors the
         # teardown in tests/e2e/test_continue_decode.py.
-        llm.llm_engine.engine_core.shutdown()
+        #
+        # Guard the shutdown so a teardown failure cannot mask a body
+        # AssertionError (the similarity check) -- surface it loudly instead of
+        # swallowing it.
+        try:
+            llm.llm_engine.engine_core.shutdown()
+        except Exception:
+            print("[multimodal-test] engine_core.shutdown() failed during "
+                  "teardown (non-fatal):")
+            traceback.print_exc()
         gc.collect()
