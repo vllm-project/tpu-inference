@@ -32,10 +32,24 @@ def export_env_if_valid(opts_dict, json_key, env_var_name):
     if val not in (None, {}, ""):
         print(f"export {env_var_name}=\"{val}\"")
 
-def get_current_machine_type():
+def normalize_device_name(device_name):
+    """
+    Normalizes device name from cases config (e.g., 'tpu7x-16' -> 'v7x-16')
+    """
+    if not device_name:
+        return None
+    normalized = device_name.lower()
+    if normalized.startswith("tpu"):
+        normalized = normalized[3:]
+    if not normalized.startswith("v") and len(normalized) > 0:
+        normalized = f"v{normalized}"
+    return normalized
+
+
+def get_current_machine_type(fallback_device=None):
     """
     Returns the current machine type string (e.g., 'v6e-8', 'v7x-2') 
-    using the tpu_info library.
+    using the tpu_info library, falling back to the case config if needed.
     """
     try:
         from tpu_info import device
@@ -55,14 +69,18 @@ def get_current_machine_type():
                 num_devices = num_chips * chip_type.value.devices_per_chip
 
             machine_type = f"{name}-{num_devices}"
-            print(f"echo '[DEBUG] Detected machine type: {machine_type}' >&2")
+            print(f"echo '[DEBUG] Detected machine type via tpu_info: {machine_type}' >&2")
             return machine_type
         else:
             print(f"echo '[WARNING] No TPU chips detected: chip_type={chip_type}, num_chips={num_chips}' >&2")
     except ImportError:
-        print("echo '[WARNING] tpu_info library not found. Cannot determine machine type.' >&2")
+        print("echo '[WARNING] tpu_info library not found. Cannot determine machine type via library.' >&2")
     except Exception as e:
-        print(f"echo '[WARNING] Failed to determine machine type: {e}' >&2")
+        print(f"echo '[WARNING] Failed to determine machine type via library: {e}' >&2")
+
+    if fallback_device:
+        print(f"echo '[DEBUG] Falling back to case config device: {fallback_device}' >&2")
+        return fallback_device
     return None
 
 
@@ -118,9 +136,6 @@ def main():
     config_file = sys.argv[1]
     target_case = sys.argv[2] if len(sys.argv) > 2 else None
 
-    # Determine current machine type from tpu_info
-    current_machine = get_current_machine_type()
-
     try:
         with open(config_file, 'r') as f:
             data = json.load(f)
@@ -142,6 +157,15 @@ def main():
         print(
             f"echo 'Error: Case \"{target_case}\" not found in \"{config_file}\".' >&2; exit 1")
         sys.exit(1)
+
+    # Resolve fallback device from config
+    device_env = case_data.get("env", {}).get("DEVICE")
+    if not device_env:
+        device_env = data.get("global_env", {}).get("DEVICE")
+    fallback_machine = normalize_device_name(device_env)
+
+    # Determine current machine type
+    current_machine = get_current_machine_type(fallback_machine)
 
     merged_env = data.get("global_env", {}).copy()
     merged_env.update(case_data.get("env", {}))
