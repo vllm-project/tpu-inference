@@ -69,7 +69,18 @@ def get_current_machine_type(fallback_device=None):
                 num_devices = num_chips * chip_type.value.devices_per_chip
 
             machine_type = f"{name}-{num_devices}"
-            print(f"echo '[DEBUG] Detected machine type via tpu_info: {machine_type}' >&2")
+            print(f"echo '[DEBUG] Detected local machine type via tpu_info: {machine_type}' >&2")
+
+            # Check if fallback_device matches the detected family but specifies a larger cluster count (multi-host setup)
+            if fallback_device and fallback_device.startswith(name):
+                try:
+                    fallback_count = int(fallback_device.split("-")[1])
+                    if fallback_count > num_devices:
+                        print(f"echo '[DEBUG] Multi-host TPU cluster detected. Local chips: {num_devices}, Cluster chips: {fallback_count}. Using cluster device: {fallback_device}' >&2")
+                        return fallback_device
+                except (ValueError, IndexError):
+                    pass
+
             return machine_type
         else:
             print(f"echo '[WARNING] No TPU chips detected: chip_type={chip_type}, num_chips={num_chips}' >&2")
