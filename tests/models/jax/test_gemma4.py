@@ -60,6 +60,9 @@ class TestGemma4ForConditionalGeneration:
                 truncate_layers)
         vllm_config.load_config.load_format = load_format
         vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.parallel_config.enable_expert_parallel = False
 
         init_pp_distributed_environment(
