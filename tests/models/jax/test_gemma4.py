@@ -79,7 +79,7 @@ class TestGemma4ForConditionalGeneration:
         seq_len = 2
         input = [[0.01 * i for i in range(model_dim)] for _ in range(seq_len)]
 
-        with jax.set_mesh(mesh):
+        with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
             model = Gemma4ForConditionalGeneration(vllm_config, rng, mesh)
             start_layer_idx = model.model.start_layer
             layer_0: Gemma4DecoderLayer = model.model.layers[start_layer_idx]

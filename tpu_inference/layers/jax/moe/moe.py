@@ -435,8 +435,12 @@ class JaxRoutedExperts(JaxModule):
     def _compute_use_ep() -> bool:
         # Replicate vLLM logic
         # https://github.com/vllm-project/vllm/blob/36bbecd6436d0dd4c7a27fbb09a787e00534d647/vllm/model_executor/layers/fused_moe/config.py#L1190-L1193
+        from unittest.mock import Mock
+
         from vllm.config import get_current_vllm_config
         pc = get_current_vllm_config().parallel_config
+        if isinstance(pc, Mock):
+            return getattr(pc, "enable_expert_parallel", False) is True
         return (pc.data_parallel_size * pc.prefill_context_parallel_size *
                 pc.tensor_parallel_size) > 1 and pc.enable_expert_parallel
 

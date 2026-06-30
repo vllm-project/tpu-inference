@@ -133,7 +133,7 @@ class TestGemma4MTPForCausalLM:
 
         vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
 
-        with jax.set_mesh(mesh):
+        with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
             model = Gemma4MTPForCausalLM(vllm_config, rng, mesh)
 
         # Load weights
