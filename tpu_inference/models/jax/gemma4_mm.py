@@ -871,18 +871,12 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             mm_kwargs)
         if not isinstance(pixel_position_ids, torch.Tensor):
             return []
-        k = self.pooling_kernel_size
         specs = []
         for i in range(pixel_position_ids.shape[0]):
-            pid = pixel_position_ids[i]  # (num_patches, 2)
-            valid_patches = int((pid[:, 0]
-                                 != POSITIONS_PAD_VALUE).sum().item())
-            output_tokens = min(max(valid_patches // k**2, 1),
-                                self.max_soft_tokens)
             specs.append(
                 EncoderItemSpec(
                     input_size=pixel_position_ids.shape[1],
-                    output_tokens=output_tokens,
+                    output_tokens=self.max_soft_tokens,
                 ))
         return specs
 
@@ -1017,8 +1011,17 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         batch_mm_kwargs=None,
     ) -> None:
         """Split batch encoder output into per-image entries in dest."""
+        k = self.pooling_kernel_size
+        pixel_position_ids = (batch_mm_kwargs.get("pixel_position_ids")
+                              if batch_mm_kwargs is not None else None)
         for local_idx, global_idx in enumerate(indices):
-            n = per_item_out_tokens[global_idx]
+            if pixel_position_ids is not None:
+                pid = pixel_position_ids[local_idx]
+                valid_patches = int((pid[:, 0]
+                                     != POSITIONS_PAD_VALUE).sum().item())
+                n = min(max(valid_patches // k**2, 1), self.max_soft_tokens)
+            else:
+                n = per_item_out_tokens[global_idx]
             feat = output[local_idx, :n]
             if clone and hasattr(feat, 'clone'):
                 feat = feat.clone()
