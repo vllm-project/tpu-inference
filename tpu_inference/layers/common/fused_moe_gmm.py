@@ -498,8 +498,7 @@ def expert_parallel_gmm(
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
-    ep_data_p_spec = P(ShardingAxisName.EXPERT_DATA)
-    attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
+
     num_experts = w1.shape[0]
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
@@ -509,10 +508,14 @@ def expert_parallel_gmm(
     w2_scale_spec = None if w2_scale is None else ep_p_spec
     w2_bias_spec = None if w2_bias is None else ep_p_spec
 
-    if scatter_results:
-        final_out_specs = attn_data_p_spec
-    elif enable_rs_kernel:
-        final_out_specs = ep_data_p_spec
+    dp_axes = ShardingAxisName.ATTN_DATA
+    if isinstance(dp_axes, str):
+        dp_axes = (dp_axes, )
+    else:
+        dp_axes = tuple(dp_axes)
+
+    if scatter_results or enable_rs_kernel:
+        final_out_specs = P(dp_axes + (ShardingAxisName.EXPERT, ))
     else:
         final_out_specs = data_p_spec
 
