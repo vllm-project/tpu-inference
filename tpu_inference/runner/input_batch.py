@@ -166,20 +166,20 @@ class InputBatch:
         # get slots within that rank's shard of the device-side state array.
         # Matches the sharding in kv_cache_manager: mamba_num_blocks is
         # rounded up to dp_size, then split evenly across ranks.
-        # For speculative decoding, each request requires (num_speculative_tokens + 1)
+        # For speculative decoding, each request requires (num_speculative_tokens + 2)
         # physical slots in the Mamba cache to store the state history (Slot 0 for the
-        # initial state, and Slots 1..num_spec for the intermediate states after each
-        # draft token). We scale the total block count and use a stride-based allocation
+        # initial state, and Slots 1..num_spec+1 for the intermediate states after each
+        # token). We scale the total block count and use a stride-based allocation
         # so that each request is assigned a contiguous, non-overlapping block of slots.
         if is_spec_decode:
-            mamba_num_blocks = max_num_reqs * (num_speculative_tokens + 1)
+            mamba_num_blocks = max_num_reqs * (num_speculative_tokens + 2)
         else:
             mamba_num_blocks = max_num_reqs
         mamba_num_blocks = ((mamba_num_blocks + dp_size) // dp_size) * dp_size
 
         # The stride determines the spacing between allocated slot IDs.
-        # For speculative decoding, stride = num_speculative_tokens + 1.
-        stride = (num_speculative_tokens + 1) if is_spec_decode else 1
+        # For speculative decoding, stride = num_speculative_tokens + 2.
+        stride = (num_speculative_tokens + 2) if is_spec_decode else 1
         self._mamba_local_slots = mamba_num_blocks // dp_size
         self._free_mamba_slots_per_rank: list[list[int]] = []
         for k in range(dp_size):
@@ -205,9 +205,9 @@ class InputBatch:
         """
         self._mamba_local_slots = mamba_num_blocks // self.dp_size
         self._free_mamba_slots_per_rank = []
-        # Use stride = num_speculative_tokens + 1 in speculative mode to keep slots chunked.
+        # Use stride = num_speculative_tokens + 2 in speculative mode to keep slots chunked.
         stride = (self.num_speculative_tokens +
-                  1) if self.is_spec_decode else 1
+                  2) if self.is_spec_decode else 1
         for k in range(self.dp_size):
             base = k * self._mamba_local_slots
             self._free_mamba_slots_per_rank.append(
