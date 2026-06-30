@@ -402,7 +402,7 @@ def preprocess_metadata(
     # NOTE: Following sequence of execution are the same for all layers. Compiler
     # may decide to perform CSE to remove redundant computations.
 
-    max_seqs = state_indices.size
+    max_seqs = state_indices.shape[0]
 
     # Mask out padded locations.
     num_tokens = query_start_loc[num_seqs]
