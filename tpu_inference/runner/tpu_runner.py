@@ -957,7 +957,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if runner_type == "generate":
             return ("generate", )
         if runner_type == "pooling":
-            return ("embed", )
+            return (self.model_config.convert_type, )
         assert False, f"unsupported runner type: {runner_type}"
 
     def get_kv_cache_spec(self):
