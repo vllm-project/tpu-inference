@@ -204,6 +204,64 @@ setup_environment "${IMAGE_NAME}" "true"
 
 DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 
+# Resolve server / client commands and environment variables early
+MODEL="${TEST_MODEL:-gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39}"
+VLLM_PORT="8000"
+VLLM_SERVE_CMD=""
+CLIENT_BENCH_CMD=""
+
+if [ "$#" -ge 1 ]; then
+    if [[ "$1" == *.json ]]; then
+        # JSON configuration mode (New pipeline)
+        CASE_FILE="$1"
+        TARGET_CASE_NAME="$2"
+        echo "--- Multi-host JSON case configuration detected: $CASE_FILE ($TARGET_CASE_NAME)"
+        
+        TEMP_EXPORT_FILE="/tmp/temp_env_exports.sh"
+        rm -f "$TEMP_EXPORT_FILE"
+        
+        # Run parser_case.py inside the container to resolve server/client commands
+        docker run --rm \
+          --privileged \
+          --net host \
+          -v "$(pwd):/workspace" \
+          -w /workspace \
+          "${DOCKER_IMAGE}" \
+          python3 .buildkite/benchmark/scripts/parser_case.py "$CASE_FILE" "$TARGET_CASE_NAME" > "$TEMP_EXPORT_FILE" || {
+              echo "Error running parser_case.py inside container."
+              if [[ -f "$TEMP_EXPORT_FILE" ]]; then
+                  echo "===== Content of $TEMP_EXPORT_FILE ====="
+                  cat "$TEMP_EXPORT_FILE"
+                  echo "========================================"
+              fi
+              exit 1
+          }
+          
+        # shellcheck source=/dev/null
+        source "$TEMP_EXPORT_FILE"
+        rm -f "$TEMP_EXPORT_FILE"
+        
+        # Convert SERVER_CMD array to a single string VLLM_SERVE_CMD
+        for env_item in "${SERVER_CMD_ENVS[@]}"; do
+            VLLM_SERVE_CMD+="$(printf '%q ' "$env_item")"
+        done
+        for cmd_item in "${SERVER_CMD[@]}"; do
+            VLLM_SERVE_CMD+="$(printf '%q ' "$cmd_item")"
+        done
+        
+        # Set client benchmark command from CLIENT_CMD resolved by parser
+        CLIENT_BENCH_CMD="$CLIENT_CMD"
+        
+    else
+        # Legacy mode (raw server/client commands passed)
+        VLLM_SERVE_CMD="$1"
+        shift
+        if [ "$#" -gt 0 ]; then
+            CLIENT_BENCH_CMD="${*:-}"
+        fi
+    fi
+fi
+
 # Clean up potential leftovers from previous runs
 echo "--- Cleaning up previous cluster state..."
 cleanup
@@ -273,80 +331,8 @@ sleep 120
 
 # 3. Start vLLM server on the head node
 echo "--- Starting vLLM server on head node"
-MODEL="${TEST_MODEL:-gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39}"
-VLLM_PORT="8000"
 
-VLLM_SERVE_CMD=""
-CLIENT_BENCH_CMD=""
-
-if [ "$#" -ge 1 ]; then
-    if [[ "$1" == *.json ]]; then
-        # JSON configuration mode (New pipeline)
-        CASE_FILE="$1"
-        TARGET_CASE_NAME="$2"
-        echo "--- Multi-host JSON case configuration detected: $CASE_FILE ($TARGET_CASE_NAME)"
-        
-        TEMP_EXPORT_FILE="/tmp/temp_env_exports.sh"
-        rm -f "$TEMP_EXPORT_FILE"
-        
-        # Run parser_case.py inside the container to resolve server/client commands
-        docker run --rm \
-          --privileged \
-          --net host \
-          -v "$(pwd):/workspace" \
-          -w /workspace \
-          "${DOCKER_IMAGE}" \
-          python3 .buildkite/benchmark/scripts/parser_case.py "$CASE_FILE" "$TARGET_CASE_NAME" > "$TEMP_EXPORT_FILE" || {
-              echo "Error running parser_case.py inside container."
-              if [[ -f "$TEMP_EXPORT_FILE" ]]; then
-                  echo "===== Content of $TEMP_EXPORT_FILE ====="
-                  cat "$TEMP_EXPORT_FILE"
-                  echo "========================================"
-              fi
-              exit 1
-          }
-          
-        # shellcheck source=/dev/null
-        source "$TEMP_EXPORT_FILE"
-        rm -f "$TEMP_EXPORT_FILE"
-        
-        # Convert SERVER_CMD array to a single string VLLM_SERVE_CMD
-        for env_item in "${SERVER_CMD_ENVS[@]}"; do
-            VLLM_SERVE_CMD+="$(printf '%q ' "$env_item")"
-        done
-        for cmd_item in "${SERVER_CMD[@]}"; do
-            VLLM_SERVE_CMD+="$(printf '%q ' "$cmd_item")"
-        done
-        
-        # Set client benchmark command from CLIENT_CMD resolved by parser
-        CLIENT_BENCH_CMD="$CLIENT_CMD"
-        
-    else
-        # Legacy mode (raw server/client commands passed)
-        VLLM_SERVE_CMD="$1"
-        shift
-        if [ "$#" -gt 0 ]; then
-            CLIENT_BENCH_CMD="${*:-}"
-        fi
-    fi
-
-    # Rewrite generation config if GCS path is used
-    if [[ "${VLLM_SERVE_CMD}" =~ --generation-config[=\ ]+gs://([^ ]+) ]]; then
-        gcs_path="gs://${BASH_REMATCH[1]}"
-        config_url="${gcs_path%/*}"
-        config_dir_name=$(basename "${config_url}")
-        config_file_name=$(basename "${gcs_path}")
-
-        echo "--- Detected GCS generation-config: $gcs_path"
-        echo "--- Pre-downloading config to workspace inside container..."
-
-        download_cmd="if ! command -v gsutil &> /dev/null; then curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null; export PATH=\"\$PATH:/root/google-cloud-sdk/bin\"; fi && mkdir -p /workspace && gsutil -m cp -r ${config_url} /workspace/ && "
-        
-        VLLM_SERVE_CMD=$(echo "${VLLM_SERVE_CMD}" | sed -E "s|--generation-config[=\ ]+gs://[^ ]+|--generation-config /workspace/${config_dir_name}/${config_file_name}|g")
-        VLLM_SERVE_CMD="${download_cmd}${VLLM_SERVE_CMD}"
-        echo "Rewritten VLLM_SERVE_CMD: $VLLM_SERVE_CMD"
-    fi
-else
+if [ -z "${VLLM_SERVE_CMD}" ]; then
     # Fallback default serve command
     VLLM_SERVE_CMD="vllm serve ${MODEL} \
       --port ${VLLM_PORT} \
@@ -357,6 +343,23 @@ else
       --async-scheduling \
       --load-format=runai_streamer \
       --max-model-len 1024"
+fi
+
+# Rewrite generation config if GCS path is used
+if [[ "${VLLM_SERVE_CMD}" =~ --generation-config[=\ ]+gs://([^ ]+) ]]; then
+    gcs_path="gs://${BASH_REMATCH[1]}"
+    config_url="${gcs_path%/*}"
+    config_dir_name=$(basename "${config_url}")
+    config_file_name=$(basename "${gcs_path}")
+
+    echo "--- Detected GCS generation-config: $gcs_path"
+    echo "--- Pre-downloading config to workspace inside container..."
+
+    download_cmd="if ! command -v gsutil &> /dev/null; then curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null; export PATH=\"\$PATH:/root/google-cloud-sdk/bin\"; fi && mkdir -p /workspace && gsutil -m cp -r ${config_url} /workspace/ && "
+    
+    VLLM_SERVE_CMD=$(echo "${VLLM_SERVE_CMD}" | sed -E "s|--generation-config[=\ ]+gs://[^ ]+|--generation-config /workspace/${config_dir_name}/${config_file_name}|g")
+    VLLM_SERVE_CMD="${download_cmd}${VLLM_SERVE_CMD}"
+    echo "Rewritten VLLM_SERVE_CMD: $VLLM_SERVE_CMD"
 fi
 
 # Launch vllm serve in the background inside the local 'node' container

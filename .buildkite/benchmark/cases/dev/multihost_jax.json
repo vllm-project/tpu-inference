@@ -25,7 +25,7 @@
       "server_command_options": {
         "command_type": "vllm_serve",
         "env": {
-          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "0",
+          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": "1",
           "NEW_MODEL_DESIGN": "1",
           "VLLM_MLA_DISABLE": "0",
           "MOE_REQUANTIZE_BLOCK_SIZE": "512",
