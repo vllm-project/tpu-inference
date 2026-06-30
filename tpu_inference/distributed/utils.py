@@ -81,7 +81,7 @@ def get_enable_d2h_transfer() -> bool:
 
 def get_enable_block_kv_transfer() -> bool:
     """Check if we block the KV-cache transfer until it is ready via environment variable."""
-    enable_str = os.getenv("TPU_ENABLE_BLOCK_KV_TRANSFER", "true").lower()
+    enable_str = os.getenv("TPU_ENABLE_BLOCK_KV_TRANSFER", "false").lower()
     return enable_str in ("true", "1", "yes")
 
 
