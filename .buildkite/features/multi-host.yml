@@ -13,13 +13,14 @@
 # limitations under the License.
 
 steps: 
-  - label: "${TPU_VERSION:-tpu7x} Correctness tests for multi-host"
-    key: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu7x} ${MODEL_IMPL_TYPE:-vllm} Correctness tests for multi-host"
+    key: "${BK_KEY}_multi-host_CorrectnessTest"
     soft_fail: true
     agents:
       queue: tpu_v7x_16_queue
     env:
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
+      TPU_VERSION: "${TPU_VERSION:-tpu7x}"
       HEAD_SSH_IP: ""
       HEAD_INTERNAL_IP: ""
       WORKER_SSH_IPS: ""
@@ -43,10 +44,11 @@ steps:
             -H 'Content-Type: application/json' \
             -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
           "
-  - label: "${TPU_VERSION:-tpu7x} Record correctness test result for multi-host"
-    key: "${TPU_VERSION:-tpu7x}_record_multi-host_CorrectnessTest"
-    depends_on: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu7x} ${MODEL_IMPL_TYPE:-vllm} Record correctness test result for multi-host"
+    key: "${BK_KEY}_record_multi-host_CorrectnessTest"
+    depends_on: "${BK_KEY}_multi-host_CorrectnessTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
       CI_TARGET: "multi-host"
       CI_STAGE: "CorrectnessTest"
@@ -55,20 +57,23 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_multi-host_CorrectnessTest
 
-  - label: "${TPU_VERSION:-tpu7x} Performance tests for multi-host"
-    key: "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu7x}_record_multi-host_CorrectnessTest"
+  - label: "${TPU_VERSION:-tpu7x} ${MODEL_IMPL_TYPE:-vllm} Performance tests for multi-host"
+    key: "${BK_KEY}_multi-host_PerformanceTest"
+    depends_on: "${BK_KEY}_record_multi-host_CorrectnessTest"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: tpu_v7x_16_queue
     commands:
-      - buildkite-agent meta-data set "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest" "unverified"
-  - label: "${TPU_VERSION:-tpu7x} Record performance test result for multi-host"
-    key: "${TPU_VERSION:-tpu7x}_record_multi-host_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest"
+      - buildkite-agent meta-data set "${BK_KEY}_multi-host_PerformanceTest" "unverified"
+  - label: "${TPU_VERSION:-tpu7x} ${MODEL_IMPL_TYPE:-vllm} Record performance test result for multi-host"
+    key: "${BK_KEY}_record_multi-host_PerformanceTest"
+    depends_on: "${BK_KEY}_multi-host_PerformanceTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
       CI_TARGET: "multi-host"
       CI_STAGE: "PerformanceTest"
@@ -77,4 +82,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_multi-host_PerformanceTest

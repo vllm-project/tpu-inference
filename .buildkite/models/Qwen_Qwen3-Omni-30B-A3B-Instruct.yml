@@ -13,18 +13,21 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Unit tests for Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    key: "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: cpu  # TODO: replace with execution environment (e.g. "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}")
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"
-    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"
+        buildkite-agent meta-data set "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record unit test result for Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    key: "${BK_KEY}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"
+    depends_on: "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Qwen/Qwen3-Omni-30B-A3B-Instruct"
       CI_STAGE: "UnitTest"
@@ -33,21 +36,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest
 
-  - label: "${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Accuracy for Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    key: "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness"
+    depends_on: "${BK_KEY}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_UnitTest"
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: cpu  # TODO: replace with execution environment (e.g. "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}")
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
+        buildkite-agent meta-data set "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record accuracy result for Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    key: "${BK_KEY}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness"
+    depends_on: "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Qwen/Qwen3-Omni-30B-A3B-Instruct"
       CI_STAGE: "Accuracy/Correctness"
@@ -56,21 +62,24 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness
 
-  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Performance benchmarks for Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    key: "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark"
+    depends_on: "${BK_KEY}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Accuracy_Correctness"
+    env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
     agents:
       queue: cpu  # TODO: replace with execution environment (e.g. "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}")
     soft_fail: true
     commands:
       - |
-        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark" "unverified"
-  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3-Omni-30B-A3B-Instruct"
-    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark"
-    depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark"
+        buildkite-agent meta-data set "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark" "unverified"
+  - label: "${TPU_VERSION:-tpu6e} ${MODEL_IMPL_TYPE:-vllm} Record performance benchmark result for Qwen/Qwen3-Omni-30B-A3B-Instruct"
+    key: "${BK_KEY}_record_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark"
+    depends_on: "${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark"
     env:
+      MODEL_IMPL_TYPE: "${MODEL_IMPL_TYPE:-vllm}"
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Qwen/Qwen3-Omni-30B-A3B-Instruct"
       CI_STAGE: "Benchmark"
@@ -79,4 +88,4 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark
+        .buildkite/scripts/record_step_result.sh ${BK_KEY}_Qwen_Qwen3-Omni-30B-A3B-Instruct_Benchmark
