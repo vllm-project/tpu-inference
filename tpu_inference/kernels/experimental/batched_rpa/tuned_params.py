@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Literal
 
+import jax.experimental.pallas as pl
 import jax.numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
-import jax.experimental.pallas as pl
 
-from tpu_inference.kernels.experimental.batched_rpa import (configs, utils)
+from tpu_inference.kernels.experimental.batched_rpa import configs, utils
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -76,14 +76,13 @@ class TunableParams:
     bkv_sz: int
     batch_size: int
     n_buffer: int
-    is_baseline: bool = False
 
     def to_block_sizes(self) -> configs.BlockSizes:
-        return configs.BlockSizes(bq_sz=self.bq_sz,
-                                  bq_c_sz=self.bq_c_sz,
-                                  bkv_sz=self.bkv_sz,
-                                  batch_size=self.batch_size,
-                                  n_buffer=self.n_buffer)
+        return configs.BlockSizes(**asdict(self))
+
+    @staticmethod
+    def from_block_sizes(block_sizes: configs.BlockSizes) -> 'TunableParams':
+        return TunableParams(**asdict(block_sizes))
 
     # Define comparison operators for skipping tuning case when smaller block sizes hit OOM already
     def __ge__(self, other) -> bool:

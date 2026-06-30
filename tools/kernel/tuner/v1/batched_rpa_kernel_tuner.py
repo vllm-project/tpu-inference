@@ -29,21 +29,21 @@
         --tpu_version=tpu7x --tpu_cores=2
 '''
 
+import itertools
 import logging
 import time
-from dataclasses import asdict
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from vllm.utils.math_utils import cdiv
 
-from tools.kernel.tuner.v1.batched_rpa_tuned_cases import ENTRIES
-from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
-                                                            RunConfig,
-                                                            TunerConfig,
-                                                            TuningCase,
-                                                            TuningStatus)
+from tools.kernel.tuner.v1.common.kernel_tuner_base import KernelTunerBase
+from tools.kernel.tuner.v1.common.tuner_datatypes import (RunConfig,
+                                                          TunerConfig,
+                                                          TuningCase,
+                                                          TuningStatus)
 from tpu_inference.kernels.experimental.batched_rpa.tuned_params import (
     TunableParams, TuningKey)
 from tpu_inference.kernels.experimental.batched_rpa.wrapper import \
@@ -51,7 +51,43 @@ from tpu_inference.kernels.experimental.batched_rpa.wrapper import \
 from tpu_inference.utils import get_dtype_packing
 
 logger = logging.getLogger(__name__)
-# logging.basicConfig(level=logging.INFO)
+
+
+def _get_page_indices(kv_lens, page_size, max_decode_seqs, max_prefill_seqs,
+                      pages_per_seq, num_page_indices):
+    # Total number of sequences being processed
+    num_seqs = max_decode_seqs + max_prefill_seqs
+    seq_kv_lens = kv_lens[:num_seqs]
+
+    # 1. Vectorized cdiv equivalent: ceil(kv_lens / page_size)
+    num_pages = (seq_kv_lens + page_size - 1) // page_size
+
+    # 2. Create a boolean mask of shape (num_seqs, pages_per_seq)
+    # True means a page index belongs there, False means it should be 0 padding
+    col_indices = jnp.arange(pages_per_seq)
+    mask = col_indices < num_pages[:, None]
+
+    # 3. Flatten the mask into a 1D array of length (num_seqs * pages_per_seq)
+    valid_slots = mask.flatten()
+
+    # 4. Generate consecutive indices using cumsum
+    # Example: valid_slots = [True, True, False, True]
+    # cumsum -> [1, 2, 2, 3]
+    consecutive_indices = jnp.cumsum(valid_slots)
+
+    # 5. Mask out the invalid slots with 0
+    # Result: [1, 2, 0, 3]
+    page_indices_unpadded = jnp.where(valid_slots, consecutive_indices, 0)
+
+    # 6. Pad out the rest of the array to num_page_indices
+    current_length = page_indices_unpadded.shape[0]
+    pad_amount = num_page_indices - current_length
+
+    page_indices = jnp.pad(page_indices_unpadded, (0, pad_amount),
+                           mode='constant',
+                           constant_values=0)
+
+    return page_indices
 
 
 def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
@@ -119,41 +155,25 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
         (num_page_indices, page_size, cdiv(
             num_kv_heads * 2, kv_packing), kv_packing, head_dim), kv_dtype)
 
-    max_input_len = 8192  # (TODO): This depends on the bench serve command line input-len flag
+    max_input_len = 1024  # This depends on the bench serve command line input-len flag
     max_prefill_seqs = min(num_seqs, total_q_tokens // max_input_len)
     remaining_tokens = total_q_tokens - max_prefill_seqs * max_input_len
     max_decode_seqs = min(num_seqs - max_prefill_seqs, remaining_tokens)
     assert max_decode_seqs == 0, "Only pack prefill sequences in prefill case, expect max_decode_seqs to be 0"
 
     pages_per_seq = num_page_indices // num_seqs
-    kv_lens = [max_input_len
-               ] * max_prefill_seqs + [0] * (num_seqs - max_prefill_seqs)
-
-    cu_q_lens = [1] * (num_seqs + 1)
-    cu_q_lens[0] = 0
-    for i in range(1, max_prefill_seqs + 1):
-        cu_q_lens[i] = cu_q_lens[i - 1] + max_input_len
-
-    page_indices = []
-    starting_page_index = 1
-    for i in range(max_decode_seqs + max_prefill_seqs):
-        num_pages_for_seq = cdiv(kv_lens[i], page_size)
-        assert num_pages_for_seq <= pages_per_seq, f"num_pages_for_seq should not exceed pages_per_seq, but got num_pages_for_seq={num_pages_for_seq}, pages_per_seq={pages_per_seq}"
-        page_indices.extend(
-            list(
-                range(starting_page_index, starting_page_index +
-                      num_pages_for_seq)) + [0] *
-            (pages_per_seq - num_pages_for_seq))
-        starting_page_index += num_pages_for_seq
-    assert len(
-        page_indices
-    ) <= num_page_indices, f"len(page_indices) should not exceed num_page_indices, but got len(page_indices)={len(page_indices)}, num_page_indices={num_page_indices}"
-    page_indices.extend([0] * (num_page_indices - len(page_indices)))
-
-    kv_lens = jnp.array(kv_lens, dtype=jnp.int32)
-    cu_q_lens = jnp.array(cu_q_lens, dtype=jnp.int32)
+    kv_lens = jnp.pad(jnp.full((max_prefill_seqs, ),
+                               max_input_len,
+                               dtype=jnp.int32),
+                      (0, num_seqs - max_prefill_seqs),
+                      constant_values=0)
+    cu_q_lens = jnp.pad(jnp.arange(max_prefill_seqs + 1) * max_input_len,
+                        (0, num_seqs - max_prefill_seqs),
+                        constant_values=total_q_tokens)
     distribution = jnp.array([0, 0, max_prefill_seqs], dtype=jnp.int32)
-    page_indices = jnp.array(page_indices, dtype=jnp.int32)
+    page_indices = _get_page_indices(kv_lens, page_size, max_decode_seqs,
+                                     max_prefill_seqs, pages_per_seq,
+                                     num_page_indices)
 
     return {
         'queries': queries,
@@ -184,55 +204,66 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             tuning_key_class=TuningKey,
             tunable_params_class=TunableParams,
             kernel_tuner_name="batched_rpa_kernel_tuner",
-            jit_kernel_pattern=r"(jit_ragged_paged_attention\()",
+            # (TODO) This only measure prefill case, need to refactor to support decode case as well
+            # maybe make this jit_kernel_pattern a runtime TuningKey dependent attribute
+            jit_kernel_pattern=r"RPAm-",
         )
         super().__init__(tuner_config=self.tuner_config, run_config=run_config)
 
     def generate_cases(self) -> list[TuningCase]:
-        tuning_cases = []
-        for log_entry in ENTRIES:
-            model_config = log_entry.model
-            serve_config = log_entry.serve
-            prefill_tuned_block_size = log_entry.prefill_block_sizes
-            prefill_tuning_key = TuningKey.from_config(model_config,
-                                                       serve_config,
-                                                       case='prefill')
-            prefill_tunable_params = TunableParams(**asdict(
-                prefill_tuned_block_size),
-                                                   is_baseline=True)
-            # We setup this for tuning Gemme4's rpa block sizes. When total_q_tokens is smaller than sequence input length,
-            # it cannot be used for scheduling prefill case. We only tuned for prefill case at this moment.
-            if serve_config.total_q_tokens < 8192:
-                continue
-            tuning_cases.append(
-                TuningCase(tuning_key=prefill_tuning_key,
-                           tunable_params=prefill_tunable_params))
+        from tools.kernel.tuner.v1.common.tuning_case_logger import \
+            TuningCaseLogger
 
-            bq_c_sz = prefill_tunable_params.bq_c_sz
-            bkv_sz = prefill_tunable_params.bkv_sz
-            n_buffer = prefill_tunable_params.n_buffer
+        current_dir = Path(__file__).parent
+        tuning_case_logger = TuningCaseLogger(
+            current_dir / 'tuning_cases/batched_rpa_gemma4_tuning_cases.json',
+            key_class=TuningKey,
+            params_class=TunableParams)
+        # This is just a setup for tuning for Gemma4 Specific Prefill Case Only.
+        # For tuning more cases, modify this and add more tuning cases to the
+        # tuning_cases/batched_rpa_gemma4_tuning_cases.json file via using the TuningCaseLogger class.
+        # Collect unique TuningKeys from the log (prefill cases with large
+        # enough token count only).
+        seen_keys: set[TuningKey] = set()
+        unique_keys: list[TuningKey] = []
+        for case in tuning_case_logger.get_logged_tuning_cases():
+            if (case.tuning_key.total_q_tokens >= 16 * 1024
+                    and case.tuning_key.case == 'prefill'
+                    and case.tuning_key not in seen_keys):
+                seen_keys.add(case.tuning_key)
+                unique_keys.append(case.tuning_key)
+        # Build the full Cartesian product of the search space for every key.
+        cases: list[TuningCase] = []
+        for tuning_key in unique_keys:
+            space = self.get_search_space(tuning_key)
+            param_names = list(space.keys())
+            for combo in itertools.product(*space.values()):
+                cases.append(
+                    TuningCase(tuning_key=tuning_key,
+                               tunable_params=TunableParams(
+                                   **dict(zip(param_names, combo)))))
+        logger.info(f"Generated {len(cases)} tuning cases from log file.")
+        return cases
 
-            for prefill_batch_size in [1, 2, 3]:
-                for bq_sz in range(256, 2049, 256):
-                    for bq_c_sz in [8, 16, 32, 64, 128]:
-                        if bq_sz % bq_c_sz != 0:
-                            continue
-                        for bkv_sz in range(256, 2048, 256):
-                            if bkv_sz % prefill_tuning_key.page_size != 0:  # requirement from scheduler
-                                continue
-                            for n_buffer in [2, 3]:
-                                tuning_cases.append(
-                                    TuningCase(
-                                        tuning_key=prefill_tuning_key,
-                                        tunable_params=TunableParams(
-                                            bq_sz=bq_sz,
-                                            bq_c_sz=bq_c_sz,
-                                            bkv_sz=bkv_sz,
-                                            batch_size=prefill_batch_size,
-                                            n_buffer=n_buffer)))
+    def get_search_space(self, tuning_key: TuningKey) -> dict[str, list]:
+        """Returns independent lists of candidate values for each tunable param.
 
-        logger.info(f"Generated {len(tuning_cases)} tuning cases.")
-        return tuning_cases
+        For batched RPA, all bq_sz values are multiples of 256 and all bq_c_sz
+        values are powers of 2 ≤ 128, so the constraint bq_sz % bq_c_sz == 0
+        is always satisfied and no filtering is required for those two params.
+        bkv_sz values are filtered to multiples of page_size as required by the
+        scheduler.
+        """
+        bkv_sz_list = [
+            v for v in range(256, 2049, 256) if v % tuning_key.page_size == 0
+        ]
+        return {
+            'batch_size': [1, 2, 3, 4],
+            'bq_sz': list(range(256, 2049, 256)),
+            'bq_c_sz': [8, 16, 32, 64, 128],
+            'bkv_sz': bkv_sz_list,
+            'n_buffer': [2, 3],
+        }
 
     def generate_inputs(self, tuning_key: TuningKey):
         # Generate inputs for the kernel based on the tuning key.
@@ -286,4 +317,6 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             logger.warning(
                 f"Failed with {tuning_key=}, {tunable_params=}, got error: {err=}"
             )
-            return TuningStatus.UNKNOWN_ERROR, float("inf"), float("inf")
+            raise Exception(
+                f"Kernel run failed with tuning key & tunable params:\nTuningKey=\n{tuning_key}, TunableParams=\n{tunable_params}, got error: {err=}"
+            )

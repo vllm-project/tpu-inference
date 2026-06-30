@@ -76,7 +76,7 @@ def test_get_tuned_params_fallback_to_calculate_block_sizes():
 
     with mock.patch.dict(tp_module.tuned_params_mapping, {}, clear=True), \
          mock.patch(
-             "tpu_inference.kernels.experimental.batched_rpa.wrapper"
+             "tpu_inference.kernels.experimental.batched_rpa.tuned_params"
              ".calculate_block_sizes",
              return_value=(decode_bs, prefill_bs),
          ) as mock_calc:
@@ -111,7 +111,7 @@ def test_get_tuned_params_populated_mapping_hit():
 
     with mock.patch.dict(tp_module.tuned_params_mapping, mapping, clear=True), \
          mock.patch(
-             "tpu_inference.kernels.experimental.batched_rpa.wrapper"
+             "tpu_inference.kernels.experimental.batched_rpa.tuned_params"
              ".calculate_block_sizes",
          ) as mock_calc:
 

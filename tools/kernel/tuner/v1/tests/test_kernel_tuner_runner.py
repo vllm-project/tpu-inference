@@ -31,8 +31,8 @@ import uuid
 from absl import flags
 from absl.testing import absltest
 
-from tools.kernel.tuner.v1.common.kernel_tuner_base import (RunConfig,
-                                                            TuningStatus)
+from tools.kernel.tuner.v1.common.tuner_datatypes import (RunConfig,
+                                                          TuningStatus)
 # Importing kernel_tuner_runner registers the absl flags FLAGS.debug and
 # FLAGS.worker_id that KernelTunerBase.measure_latency reads at runtime.
 from tools.kernel.tuner.v1.kernel_tuner_runner import (
