@@ -491,9 +491,6 @@ def ragged_causal_conv1d(
     """
 
     # Step 1: Validate inputs.
-    print(
-        f"DEBUG: ragged_causal_conv1d inputs - query_start_loc.shape={query_start_loc.shape}, state_indices.shape={state_indices.shape}, state_indices.ndim={state_indices.ndim}"
-    )
     num_seqs = state_indices.shape[0]
     batch_size, dim = x.shape
     assert conv_weight.shape == (dim, 1, kernel_size)
