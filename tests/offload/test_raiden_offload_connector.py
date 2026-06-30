@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import sys
 from unittest.mock import MagicMock
 
@@ -20,12 +21,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
 
-from tpu_inference.offload.raiden_offload_connector import (
-    RaidenConnectorMetadata, RaidenLoadSpec, RaidenLocator,
-    RaidenOffloadConnector, RaidenOffloadConnectorScheduler,
-    RaidenOffloadConnectorWorker, RaidenSaveSpec)
+# Skip the whole module if tpu_raiden is not available in this environment.
+# `find_spec` only locates the package (it does NOT import it / load the engine
+# .so), so this is a safe availability check.
+if importlib.util.find_spec("tpu_raiden") is None:
+    pytest.skip(
+        "tpu_raiden is not importable; skipping Raiden offload connector tests",
+        allow_module_level=True)
 
-# Mock tpu_raiden module before importing connector to avoid strict ImportError
+# Mock tpu_raiden module BEFORE importing the connector so its module-level
+# `from tpu_raiden import ...` resolves to these mocks instead of being cached as
+# None (which makes the connector raise ImportError at use time).
 mock_raiden = MagicMock()
 mock_raiden.KVCacheManager = MagicMock()
 mock_raiden.KVCacheStore = MagicMock()
@@ -47,6 +53,11 @@ class MockRaidenId:
 
 mock_raiden.RaidenId = MockRaidenId
 sys.modules['tpu_raiden'] = mock_raiden
+
+from tpu_inference.offload.raiden_offload_connector import (  # noqa: E402
+    RaidenConnectorMetadata, RaidenLoadSpec, RaidenLocator,
+    RaidenOffloadConnector, RaidenOffloadConnectorScheduler,
+    RaidenOffloadConnectorWorker, RaidenSaveSpec)
 
 _DEFAULT_BLOCK_SIZE = 16
 
