@@ -51,6 +51,11 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
             raise NotImplementedError(
                 "Static input scheme is not yet supported for W4A4 NVFP4.")
 
+        if not use_a16:
+            logger.warning(
+                "fp4 x fp4 mmu is not natively supported by TPU hardware, so activations are always kept at bf16 for now."
+            )
+
         # We need to monkeypatch expose_input_quant_key to handle None kernel
         # because init_nvfp4_linear_kernel is being called in super.__init__()
         from vllm.model_executor.layers.quantization.compressed_tensors.schemes import \
@@ -182,24 +187,13 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
         weight_jax = jax_view(layer.weight)
         weight_scale_jax = jax_view(layer.weight_scale)
 
-        if not self.use_a16:
-            x_deq = x_jax
-
-            outs = sharded_quantized_matmul(
-                x_deq,
-                weight_jax,
-                weight_scale_jax,
-                self.linear_config.weight_sharding,
-                mesh=self.linear_config.mesh,
-            )
-        else:
-            outs = sharded_quantized_matmul(
-                x_jax,
-                weight_jax,
-                weight_scale_jax,
-                self.linear_config.weight_sharding,
-                mesh=self.linear_config.mesh,
-            )
+        outs = sharded_quantized_matmul(
+            x_jax,
+            weight_jax,
+            weight_scale_jax,
+            self.linear_config.weight_sharding,
+            mesh=self.linear_config.mesh,
+        )
 
         if bias is not None and not layer.skip_bias_add:
             outs += jax_view(bias)
@@ -218,24 +212,13 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
             weight_jax = jax_view(weight)
             weight_scale_jax = jax_view(weight_scale)
 
-            if not self.use_a16:
-                x_deq = x_jax
-
-                out = sharded_quantized_matmul(
-                    x_deq,
-                    weight_jax,
-                    weight_scale_jax,
-                    self.linear_config.weight_sharding,
-                    mesh=self.linear_config.mesh,
-                )
-            else:
-                out = sharded_quantized_matmul(
-                    x_jax,
-                    weight_jax,
-                    weight_scale_jax,
-                    self.linear_config.weight_sharding,
-                    mesh=self.linear_config.mesh,
-                )
+            out = sharded_quantized_matmul(
+                x_jax,
+                weight_jax,
+                weight_scale_jax,
+                self.linear_config.weight_sharding,
+                mesh=self.linear_config.mesh,
+            )
 
             if bias is not None and not layer.skip_bias_add:
                 out += jax_view(bias[i])
