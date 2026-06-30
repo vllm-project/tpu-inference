@@ -103,10 +103,12 @@ def slice_sharded_tensor_for_concatenation(sharded_tensor: jax.Array,
     return split_tensors
 
 
-def truncate_sharded_tensor(sharded_tensor: jax.Array, truncate_size: int,
-                            n_shards: int):
+def truncate_sharded_tensor(sharded_tensor: jax.Array,
+                            truncate_size: int,
+                            n_shards: int,
+                            axis: int = -1):
     """
-    Truncate each shard of a sharded tensor to a specified size.
+    Truncate each shard of a sharded tensor to a specified size along the given axis.
     For example, let the sharded_tensor be:
         AAAAA | BBBBB | CCCCC | DDDDD
         Shard0   Shard1   Shard2   Shard3
@@ -115,14 +117,25 @@ def truncate_sharded_tensor(sharded_tensor: jax.Array, truncate_size: int,
          AAA   |  BBB   |  CCC   |  DDD
         Shard0   Shard1   Shard2   Shard3
     Args:
-        sharded_tensor: the input tensor, sharded on the last dim.
-        truncate_size: the new size of each shard on the last dim.
+        sharded_tensor: the input tensor.
+        truncate_size: the new size of each shard on the given axis.
         n_shards: num of shards.
+        axis: the axis along which the sharded tensor is partitioned.
     """
-    new_shape = sharded_tensor.shape[:-1] + (n_shards, -1)
+    if axis < 0:
+        axis += sharded_tensor.ndim
+
+    old_shape = sharded_tensor.shape
+    new_shape = old_shape[:axis] + (n_shards, -1) + old_shape[axis + 1:]
     sharded_tensor = sharded_tensor.reshape(new_shape)
-    truncated_tensor = sharded_tensor[..., :truncate_size]
-    return truncated_tensor.reshape(sharded_tensor.shape[:-2] + (-1, ))
+
+    truncated_tensor = jax.lax.slice_in_dim(sharded_tensor,
+                                            0,
+                                            truncate_size,
+                                            axis=axis + 1)
+
+    final_shape = old_shape[:axis] + (-1, ) + old_shape[axis + 1:]
+    return truncated_tensor.reshape(final_shape)
 
 
 def general_device_put(tensor: jax.Array,

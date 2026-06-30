@@ -127,13 +127,20 @@ def gdn_attention_core_tpu(
 
     # Slice the state indices to the padded_num_reqs, which is the actual number
     # of requests padded to the bucket.
+    # We specify axis=0 because the request dimension is the first dimension.
     state_indices_sliced = truncate_sharded_tensor(state_indices,
                                                    padded_num_reqs_per_dp,
-                                                   dp_size)
+                                                   dp_size,
+                                                   axis=0)
     query_start_loc_sliced = truncate_sharded_tensor(
-        query_start_loc, padded_num_reqs_per_dp + 1, dp_size)
-    seq_lens_sliced = truncate_sharded_tensor(seq_lens, padded_num_reqs_per_dp,
-                                              dp_size)
+        query_start_loc,
+        padded_num_reqs_per_dp + 1,
+        dp_size,
+        axis=0)
+    seq_lens_sliced = truncate_sharded_tensor(seq_lens,
+                                              padded_num_reqs_per_dp,
+                                              dp_size,
+                                              axis=0)
 
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
