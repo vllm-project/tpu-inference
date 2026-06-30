@@ -832,7 +832,7 @@ class Gemma4Model(JaxModule):
                 num_embeddings=self.vocab_size_per_layer_input,
                 features=L * P,
                 param_dtype=dtype,
-                embedding_init=nnx.with_partitioning(init_fn, (None, None)),
+                embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
                 prefix=prefix + ".embed_tokens_per_layer",
