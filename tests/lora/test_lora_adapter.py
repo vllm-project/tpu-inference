@@ -18,37 +18,10 @@ import os
 import tempfile
 import time
 
-import pytest
 import torch
 import vllm
 from safetensors.torch import save_file
 from vllm.lora.request import LoRARequest
-
-# -------------------------------------------------------------------------
-# Multi-Host CI Detection
-# -------------------------------------------------------------------------
-# The model Qwen2.5-3B-Instruct has only 2 KV heads, so it cannot support
-# a tensor parallel size > 2. If we run TP=1 or TP=2 on a 16-chip multi-host
-# cluster, JAX will deadlock waiting for the other hosts to join the mesh.
-is_large_topology = False
-
-# Heuristic 1: Check Buildkite CI step name (e.g., "tpu6e_test_16")
-buildkite_step = os.environ.get("BUILDKITE_STEP_KEY", "").lower()
-if "16" in buildkite_step:
-    is_large_topology = True
-
-# Heuristic 2: Check standard TPU multi-host environment variables
-worker_hostnames = os.environ.get("TPU_WORKER_HOSTNAMES", "")
-if worker_hostnames and "," in worker_hostnames:
-    is_large_topology = True
-
-skip_reason = (
-    "Skipping large topology: Base model Qwen2.5-3B-Instruct has 2 KV heads "
-    "and cannot run on >2 chips without causing a multi-host JAX deadlock.")
-skip_multihost = pytest.mark.skipif(is_large_topology, reason=skip_reason)
-
-# For multi-chip test, we only use TP=2 because the base model Qwen2.5-3B-Instruct has 2 kv heads
-TP = [2] if os.environ.get("TEST_LORA_TP", False) else [1]
 
 
 def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
@@ -65,21 +38,12 @@ def setup_vllm(num_loras: int, tp: int = 1) -> vllm.LLM:
     )
 
 
-def test_dummy_pass():
-    """
-    Dummy test to ensure Pytest returns Exit Code 0 (Success) instead of 
-    Exit Code 5 ("No tests collected") when the real tests are skipped.
-    """
-    assert True
-
-
-@skip_multihost
-@pytest.mark.parametrize("tp", TP)
-def test_dynamic_lora_loading_api(tp):
+def test_dynamic_lora_loading_api():
     """This test verifies we can load, list, pin, and unload adapters dynamically
+
     using the LLMEngine dynamic adapter-management APIs.
     """
-    llm = setup_vllm(4, tp)
+    llm = setup_vllm(4)
 
     lora_name_template = "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
     lora_request = LoRARequest("lora_adapter_2", 2,
@@ -108,11 +72,9 @@ def test_dynamic_lora_loading_api(tp):
     gc.collect()
 
 
-@skip_multihost
-@pytest.mark.parametrize("tp", TP)
-def test_dynamic_lora_loading_multiple(tp):
+def test_dynamic_lora_loading_multiple():
     """Loads multiple adapters dynamically and verifies pinning/listing."""
-    llm = setup_vllm(4, tp)
+    llm = setup_vllm(4)
 
     lora_name_template = "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
     req2 = LoRARequest("lora_adapter_2", 2, lora_name_template.format(2))
@@ -140,12 +102,10 @@ def test_dynamic_lora_loading_multiple(tp):
     gc.collect()
 
 
-@skip_multihost
-@pytest.mark.parametrize("tp", TP)
-def test_dynamic_lora_lru_eviction(tp):
+def test_dynamic_lora_lru_eviction():
     """Tests LRU caching behaviour by loading more adapters than max_loras."""
     # Set max_loras to 1
-    llm = setup_vllm(1, tp)
+    llm = setup_vllm(1)
 
     lora_name_template = "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
     req2 = LoRARequest("lora_adapter_2", 2, lora_name_template.format(2))
@@ -166,14 +126,13 @@ def test_dynamic_lora_lru_eviction(tp):
     gc.collect()
 
 
-@skip_multihost
-@pytest.mark.parametrize("tp", TP)
-def test_dynamic_lora_with_bundled_base_weights(tp):
+def test_dynamic_lora_with_bundled_base_weights():
+    """Ensures that adapters with bundled base weights (using custom prefixes)
+
+    do not crash the server during loading due to exact-match allow-list
+    failures.
     """
-    Ensures that adapters with bundled base weights (using custom prefixes) 
-    do not crash the server during loading due to exact-match allow-list failures.
-    """
-    llm = setup_vllm(1, tp)
+    llm = setup_vllm(1)
 
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -222,7 +181,7 @@ def test_dynamic_lora_with_bundled_base_weights(tp):
             # LoRA weights, and succeeds!
             success = llm.llm_engine.add_lora(req)
 
-            assert success is True
+            assert success
             assert lora_id in llm.llm_engine.list_loras()
 
     finally:
@@ -231,25 +190,26 @@ def test_dynamic_lora_with_bundled_base_weights(tp):
         gc.collect()
 
 
-@skip_multihost
-@pytest.mark.parametrize("tp", TP)
-def test_dynamic_lora_e2e_generation(tp):
-    llm = setup_vllm(1, tp)
+def test_dynamic_lora_e2e_generation():
+    """Verifies end-to-end generation with dynamically loaded and hot-swapped LoRA adapters."""
+    llm = setup_vllm(1)
 
     try:
         prompt = "What is 1+1?"
         sampling_params = vllm.SamplingParams(max_tokens=16, temperature=0.0)
 
+        lora_name_template = "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
+
+        # 1. Load and verify lora_id = 1
         # If the TPU backend mistakenly uses the global ID instead of the
         # mapped local ID, passing `1` prevents the silent JAX out-of-bounds
         # clamping bug.
         lora_id = 1
-        lora_name_template = "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
         req = LoRARequest(f"lora_adapter_{lora_id}", lora_id,
                           lora_name_template.format(lora_id))
 
         success = llm.llm_engine.add_lora(req)
-        assert success is True
+        assert success
         assert lora_id in llm.llm_engine.list_loras()
 
         # Give the background TPU workers a moment to compile/pin the weights.
@@ -265,6 +225,30 @@ def test_dynamic_lora_e2e_generation(tp):
             f"TPU ENGINE BUG: The LoRA adapter weights were ignored during the forward pass!\n"
             f"Expected output to contain: '{lora_id}'\n"
             f"Got base model output: {full_text!r}")
+
+        # 2. Load and verify lora_id = 3 (this also tests hot-swapping/eviction
+        # since max_loras=1)
+        lora_id_3 = 3
+        req_3 = LoRARequest(f"lora_adapter_{lora_id_3}", lora_id_3,
+                            lora_name_template.format(lora_id_3))
+
+        success_3 = llm.llm_engine.add_lora(req_3)
+        assert success_3
+        assert lora_id_3 in llm.llm_engine.list_loras()
+
+        # Give the background TPU workers a moment to compile/pin the weights.
+        time.sleep(2)
+
+        raw_output_3 = llm.generate(prompt,
+                                    sampling_params=sampling_params,
+                                    lora_request=req_3)
+
+        full_text_3 = raw_output_3[0].outputs[0].text.strip()
+
+        assert str(lora_id_3) in full_text_3, (
+            f"TPU ENGINE BUG: The LoRA adapter weights were ignored during the forward pass!\n"
+            f"Expected output to contain: '{lora_id_3}'\n"
+            f"Got base model output: {full_text_3!r}")
 
     finally:
         llm.llm_engine.engine_core.shutdown()

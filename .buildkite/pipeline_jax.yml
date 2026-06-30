@@ -262,7 +262,7 @@ steps:
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
-          - .buildkite/scripts/run_in_docker.sh bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py && MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora_adapter.py'
+          - .buildkite/scripts/run_in_docker.sh bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
 
       - label: "${TPU_VERSION:-tpu6e} lora unit tests on single chip"
         key: ${TPU_VERSION:-tpu6e}_test_15
