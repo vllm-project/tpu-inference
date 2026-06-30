@@ -244,9 +244,6 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     echo "   -> Pruning Docker on worker to free disk space..."
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
     
-    echo "   -> Clearing Hugging Face cache on worker..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "rm -rf /root/.cache/huggingface/hub/*" || true
-    
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
     # shellcheck disable=SC2002
     cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
@@ -268,11 +265,6 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_
   -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}'
 EOF
 done
-
-# TEMPORARY: Early exit to run cleanup only
-echo "🧹 Cleanup-only mode active. Exiting early."
-exit 0
-
 
 
 echo "--- Waiting for all worker nodes to connect"

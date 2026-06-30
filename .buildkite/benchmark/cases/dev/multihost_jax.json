@@ -38,7 +38,7 @@
           "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
-          "model": "deepseek-ai/DeepSeek-R1",
+          "model": "gs://tpu-commons-ci/deepseek/r1",
           "served-model-name": "deepseek-ai/DeepSeek-R1",
           "tokenizer": "deepseek-ai/DeepSeek-R1",
           "load-format": "runai_streamer",
