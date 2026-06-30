@@ -22,7 +22,7 @@ from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
 from tpu_inference.kernels.gdn import fused_gdn
-from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
+from tpu_inference.kernels.gdn.reference.ragged_gated_delta_rule_ref import \
     ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 
 jax.config.parse_flags_with_absl()

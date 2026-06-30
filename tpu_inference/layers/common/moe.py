@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 from tpu_inference import envs
 from tpu_inference.kernels.fused_moe.v1.kernel import fused_ep_moe
@@ -29,11 +29,12 @@ from tpu_inference.utils import to_jax_dtype
 if TYPE_CHECKING:
     from tpu_inference.layers.common.process_weights.moe_weights import (
         FusedMoEWeights, UnfusedMoEWeights)
-    from tpu_inference.layers.jax.moe.moe import JaxMoE
+    from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
 else:
     FusedMoEWeights = None
     UnfusedMoEWeights = None
     JaxMoE = None
+    JaxRoutedExperts = None
 
 logger = init_logger(__name__)
 
@@ -71,7 +72,7 @@ class MoEBackend(Enum):
 
 
 def moe_apply(
-    layer: Union[FusedMoE, JaxMoE],
+    layer: Union[RoutedExperts, JaxRoutedExperts, JaxMoE],
     x: jax.Array,
     gating_output: Union[jax.Array, Tuple[jax.Array, jax.Array]],
     weights: Union[FusedMoEWeights, UnfusedMoEWeights],
@@ -82,10 +83,15 @@ def moe_apply(
     extra_backend_kwargs = dict(
         extra_backend_kwargs) if extra_backend_kwargs else {}
     scatter_results = extra_backend_kwargs.pop("scatter_results", False)
+    moe_chunk_size = extra_backend_kwargs.pop("moe_chunk_size", 0)
 
     with jax.named_scope(layer._get_name()):
         activation = layer.activation if isinstance(
             layer.activation, str) else layer.activation.value
+        if activation == "silu":
+            swiglu_limit = getattr(layer, "swiglu_limit", None)
+            if swiglu_limit is not None and swiglu_limit > 0:
+                activation = "silu_and_mul_with_clamp"
         match moe_backend:
             case MoEBackend.FUSED_MOE:
                 subc_quant_w1_sz = None
@@ -153,6 +159,11 @@ def moe_apply(
                     onehot_moe_permute_threshold=envs.
                     ONEHOT_MOE_PERMUTE_THRESHOLD,
                     scatter_results=scatter_results,
+                    hash_based_topk_indices=extra_backend_kwargs.get(
+                        "hash_based_topk_indices", None),
+                    expert_score_correction_bias=extra_backend_kwargs.get(
+                        "e_score_correction_bias", None),
+                    moe_chunk_size=moe_chunk_size,
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

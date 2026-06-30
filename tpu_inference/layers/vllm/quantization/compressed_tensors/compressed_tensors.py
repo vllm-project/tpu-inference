@@ -17,7 +17,7 @@ from typing import Optional
 import torch
 from jax.sharding import PartitionSpec
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -139,7 +139,7 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
                         self, layer, prefix)
                 layer.scheme = scheme
                 return CompressedTensorsLinearMethod(self)
-            case FusedMoE():
+            case RoutedExperts():
                 layer.moe_config = self.get_moe_config(layer)
                 return VllmCompressedTensorsMoEMethod.get_moe_method(
                     self, layer, layer_name=prefix)

@@ -23,10 +23,12 @@ from jax.sharding import NamedSharding, PartitionSpec
 from jaxtyping import Float
 
 from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.layers import FlaxUtils
+from tpu_inference.layers.jax.moe.utils import select_moe_backend
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
@@ -125,6 +127,7 @@ class Router(nnx.Module):
 
 
 # --- Main Class for MoE ---
+# TODO(#3041): Remove once we JaxRoutedExperts is fully ready.
 @dataclass(kw_only=True)
 class JaxMoE(JaxModule):
     """Mixture-of-Experts (MoE) Routed MLP Layer.
@@ -337,3 +340,125 @@ class JaxMoE(JaxModule):
                     ) from e
 
         return loaded_names
+
+
+class JaxRoutedExperts(JaxModule):
+    """Expert-only MoE module analogous to vllm's RoutedExperts.
+
+    Decouples expert computation from routing; the caller is responsible for
+    computing router_logits before calling __call__.  use_ep and moe_backend
+    are derived from the vLLM parallel config at init time so the EP/TP
+    backend selection matches the torchax path.
+
+    When quant_config is None, UnquantizedConfig is used so that
+    process_weights_after_loading (sharding/fusion) always runs.
+    """
+
+    def __init__(
+        self,
+        *,
+        dtype: jnp.dtype,
+        num_local_experts: int,
+        hidden_size: int,
+        intermediate_size_moe: int,
+        hidden_act: str,
+        rngs: nnx.Rngs,
+        mesh: jax.sharding.Mesh,
+        top_k: int,
+        scoring_func: str = "softmax",
+        renormalize: bool = True,
+        random_init: bool = False,
+        qwix_quantized_weight_dtype: Optional[jnp.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        enable_return_routed_experts: bool = False,
+    ):
+        self.dtype = dtype
+        self.num_local_experts = num_local_experts
+        self.hidden_size = hidden_size
+        self.intermediate_size_moe = intermediate_size_moe
+        self.hidden_act = hidden_act
+        self.mesh = mesh
+        self.top_k = top_k
+        self.scoring_func = scoring_func
+        self.renormalize = renormalize
+        self.random_init = random_init
+        self.qwix_quantized_weight_dtype = qwix_quantized_weight_dtype
+        self.prefix = prefix
+        self.enable_return_routed_experts = enable_return_routed_experts
+
+        E = num_local_experts
+        D = hidden_size
+        F = intermediate_size_moe
+
+        # Weights are initially unsharded; quant method shards them in
+        # process_weights_after_loading via shard_moe_weights.
+        self.kernel_gating_EDF = create_param(rngs,
+                                              shape=(E, D, F),
+                                              dtype=dtype,
+                                              random_init=random_init)
+        self.kernel_gating_EDF.set_metadata(_weights_to_load=[None] * E)
+        self.kernel_up_proj_EDF = create_param(rngs,
+                                               shape=(E, D, F),
+                                               dtype=dtype,
+                                               random_init=random_init)
+        self.kernel_up_proj_EDF.set_metadata(_weights_to_load=[None] * E)
+        self.kernel_down_proj_EFD = create_param(rngs,
+                                                 shape=(E, F, D),
+                                                 dtype=dtype,
+                                                 random_init=random_init)
+        self.kernel_down_proj_EFD.set_metadata(_weights_to_load=[None] * E)
+
+        # Derive use_ep from the vLLM parallel config (same formula as torchax).
+        self.use_ep = self._compute_use_ep()
+        self.moe_backend = select_moe_backend(self.use_ep)
+        # Needed by apply_jax for the input sharding constraint.
+        self.activation = hidden_act
+        self.activation_ffw_td = (ShardingAxisName.MLP_DATA, None)
+        self.num_experts_per_tok = top_k
+
+        if quant_config is None:
+            # Imported locally to avoid an import cycle.
+            from tpu_inference.layers.jax.quantization.unquantized import \
+                UnquantizedConfig
+            quant_config = UnquantizedConfig({})
+        self.quant_config = quant_config
+
+        if (qm := quant_config.get_quant_method(self, prefix=prefix)):
+            assert isinstance(qm, QuantizeMethodBase)
+            self.quant_method = qm
+            self.quant_method.create_weights_jax(self, rngs=rngs)
+        else:
+            raise ValueError("Expected quant_method to be set!")
+
+    @staticmethod
+    def _compute_use_ep() -> bool:
+        # Replicate vLLM logic
+        # https://github.com/vllm-project/vllm/blob/36bbecd6436d0dd4c7a27fbb09a787e00534d647/vllm/model_executor/layers/fused_moe/config.py#L1190-L1193
+        from vllm.config import get_current_vllm_config
+        pc = get_current_vllm_config().parallel_config
+        return (pc.data_parallel_size * pc.prefill_context_parallel_size *
+                pc.tensor_parallel_size) > 1 and pc.enable_expert_parallel
+
+    def __call__(
+        self,
+        x_TD: jax.Array,
+        router_logits: jax.Array,
+    ) -> tuple[jax.Array, Optional[jax.Array]]:
+        assert self.quant_method is not None
+        x_TD = self.quant_method.apply_jax(self,
+                                           x_TD,
+                                           router_logits=router_logits)
+        if self.enable_return_routed_experts:
+            _, selected_experts_TX = jax.lax.top_k(router_logits, self.top_k)
+            return x_TD, selected_experts_TX
+        return x_TD, None
+
+    def load_weights(self, weights: Iterable):
+        """Used by JaxAutoWeightLoader to load HF weights into the layer."""
+        assert hasattr(self.quant_method, "load_weights")
+        return self.quant_method.load_weights(
+            layer=self,
+            original_load_weights_fn=lambda: NotImplementedError(
+                "JaxRoutedExperts does not implement _load_weights"),
+            weights=weights)

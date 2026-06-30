@@ -20,9 +20,12 @@ from typing import Any, Callable, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+import torch
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import \
+    Qwen3OmniMoeConfig
 from vllm.config import VllmConfig
-from vllm.model_executor.models.qwen3_5 import \
-    Qwen3_5MoeForConditionalGeneration
+from vllm.model_executor.models.qwen3_omni_moe_thinker import \
+    Qwen3OmniMoeThinkerForConditionalGeneration
 
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
@@ -31,7 +34,7 @@ logger = init_logger(__name__)
 
 # Architectures whose embed_multimodal function is safe to wrap with jax.jit.
 JITTABLE_ARCHS = {
-    Qwen3_5MoeForConditionalGeneration,
+    Qwen3OmniMoeThinkerForConditionalGeneration,
 }
 
 
@@ -55,6 +58,14 @@ def has_jittable_vision(vllm_model) -> bool:
     return is_jittable_architecture(vllm_model) or is_qwen3_vl(vllm_model)
 
 
+def get_vision_config(hf_config: Any) -> Any:
+    """Extract vision configuration from hf_config, supporting nested/thinker wrappers."""
+
+    if isinstance(hf_config, Qwen3OmniMoeConfig):
+        return hf_config.thinker_config.vision_config
+    return hf_config.vision_config
+
+
 def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
                                     vllm_model) -> Callable:
     """Conditionally wrap `embed_multimodal_func_jax` with jax.jit based on the VllmConfig.
@@ -64,8 +75,9 @@ def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
         vllm_model: The Vllm model instance containing the configuration.
     """
     if is_jittable_architecture(vllm_model):
-        return jax.jit(static_argnames=("image_grid_thw", "video_grid_thw",
-                                        "grid_thw"))(embed_multimodal_func_jax)
+        return jax.jit(static_argnames=(
+            "image_grid_thw", "video_grid_thw", "grid_thw",
+            "audio_feature_lengths"))(embed_multimodal_func_jax)
     else:
         return embed_multimodal_func_jax
 
@@ -133,7 +145,7 @@ def maybe_precompile_vision_encoder_fn(
     #   in_channels * temporal_patch_size * patch_size * patch_size
     # e.g. for Qwen3.5: 3 * 2 * 16 * 16 = 1536
     # Ref: https://github.com/vllm-project/vllm/blob/eb6661d52/vllm/model_executor/models/qwen3_vl.py#L1941
-    vc = vllm_config.model_config.hf_config.vision_config
+    vc = get_vision_config(vllm_config.model_config.hf_config)
     patch_input_dim = (vc.in_channels * vc.temporal_patch_size *
                        vc.patch_size * vc.patch_size)
     spatial_merge_unit = vc.spatial_merge_size**2
@@ -183,4 +195,8 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
     for k, v in kwargs.items():
         if k in ("image_grid_thw", "video_grid_thw", "grid_thw"):
             kwargs[k] = GridTHW(v.tolist())
+
+        elif k == "audio_feature_lengths" and isinstance(v, torch.Tensor):
+            kwargs[k] = tuple(v.tolist())
+
     return kwargs

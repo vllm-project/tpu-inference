@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import torch
 from flax import nnx
 from jax.sharding import Mesh
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -24,9 +25,11 @@ from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.moe_weights import \
     process_unquantized_moe_weights
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
+from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
-from tpu_inference.layers.jax.quantization.unquantized import UnquantizedConfig
+from tpu_inference.layers.jax.quantization.unquantized import (
+    UnquantizedConfig, UnquantizedMergedLinearMethod)
 
 
 @pytest.fixture
@@ -118,6 +121,86 @@ class TestUnquantizedJaxLinear:
                                    y_from_method,
                                    rtol=1e-5,
                                    atol=1e-5)
+
+
+class TestJaxMergedColumnParallelLinear:
+    """Tests for the fused gate_up_proj path: a single kernel holding several
+    logical projections, loaded from separate per-projection checkpoint tensors
+    via ``UnquantizedMergedLinearMethod``.
+    """
+
+    @staticmethod
+    def _build_layer(in_size, output_sizes, rngs):
+        return JaxMergedColumnParallelLinear(input_size=in_size,
+                                             output_sizes=output_sizes,
+                                             rngs=rngs,
+                                             use_bias=False,
+                                             quant_config=UnquantizedConfig(
+                                                 {}),
+                                             prefix="mlp.gate_up_proj")
+
+    def test_get_quant_method_returns_merged_method(self, rngs):
+        """JaxMergedColumnParallelLinear dispatches to the merged method, which
+        must see each projection's size (so forward/load can interleave by
+        shard)."""
+        layer = self._build_layer(4, [6, 6], rngs)
+        assert isinstance(layer.quant_method, UnquantizedMergedLinearMethod)
+        cfg = layer.quant_method.linear_config
+        assert cfg.output_sizes == [6, 6]
+        # n_shards is the TP degree from the active mesh (1 when no mesh set).
+        assert cfg.n_shards == 1
+        assert cfg.fuse_matmuls
+        # The weight_loader is attached at create_weights_jax time and the
+        # per-projection accumulation slots start empty.
+        assert layer.weight.get_metadata("_merged_shards") == [None, None]
+
+    @pytest.mark.parametrize("in_size,gate_out,up_out,batch", [
+        (4, 6, 6, 2),
+        (8, 16, 16, 4),
+        (8, 16, 8, 1),
+    ])
+    def test_load_then_forward_matches_split_matmuls(self, in_size, gate_out,
+                                                     up_out, batch, rngs):
+        """End-to-end: load gate/up from separate checkpoint tensors into the
+        fused kernel, then verify the fused forward equals running the two
+        projections separately and concatenating — i.e. the load-time interleave
+        is the exact inverse of the forward-time de-interleave."""
+        layer = self._build_layer(in_size, [gate_out, up_out], rngs)
+
+        # Checkpoint tensors in HF layout (out_i, in_size).
+        g = torch.randn(gate_out, in_size, dtype=torch.float32)
+        u = torch.randn(up_out, in_size, dtype=torch.float32)
+
+        # Drive the real loader contract (matches JaxAutoWeightsLoader): the
+        # fused param's weight_loader is called once per projection with its
+        # shard_id; the fuse only completes once both have arrived.
+        weight_loader = layer.weight.weight_loader
+        weight_loader(layer.weight, g, 0)  # gate -> shard_id 0
+        weight_loader(layer.weight, u, 1)  # up   -> shard_id 1
+        assert layer.weight.value.shape == (in_size, gate_out + up_out)
+
+        x = jax.random.uniform(rngs.params(), (batch, in_size))
+
+        # TPU defaults to bf16 matmuls; force highest precision so the fused
+        # and reference paths are bit-comparable.
+        with jax.default_matmul_precision("highest"):
+            fused_out = layer(x)
+            g_jax = jnp.asarray(g.numpy()).T  # (in_size, gate_out)
+            u_jax = jnp.asarray(u.numpy()).T  # (in_size, up_out)
+            ref = jnp.concatenate([x @ g_jax, x @ u_jax], axis=-1)
+
+        assert fused_out.shape == ref.shape == (batch, gate_out + up_out)
+        np.testing.assert_allclose(fused_out, ref, rtol=1e-5, atol=1e-5)
+
+    def test_load_is_deferred_until_all_projections_arrive(self, rngs):
+        """A single projection must not trigger the fuse (projections may span
+        multiple checkpoint files)."""
+        layer = self._build_layer(4, [6, 6], rngs)
+        weight_loader = layer.weight.weight_loader
+
+        weight_loader(layer.weight, torch.randn(6, 4), 0)
+        shards = layer.weight.get_metadata("_merged_shards")
+        assert shards[0] is not None and shards[1] is None
 
 
 class TestUnquantizedJaxMoe:

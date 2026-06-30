@@ -77,6 +77,16 @@ def _patched_set_deepstack(vllm_model, deepstack_input_embeds):
         for idx, v in enumerate(deepstack_input_embeds):
             key = f"deepstack_input_embeds_{idx}"
             vllm_model._deepstack_tensors[key] = v
+    elif torch.is_tensor(deepstack_input_embeds):
+        if deepstack_input_embeds.ndim == 3:
+            num_levels = deepstack_input_embeds.size(0)
+            for idx in range(num_levels):
+                key = f"deepstack_input_embeds_{idx}"
+                vllm_model._deepstack_tensors[key] = deepstack_input_embeds[
+                    idx]
+        else:
+            vllm_model._deepstack_tensors[
+                "deepstack_input_embeds_0"] = deepstack_input_embeds
 
 
 def _convert_to_torchax_tensor(v):

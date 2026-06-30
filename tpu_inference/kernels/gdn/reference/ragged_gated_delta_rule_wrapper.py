@@ -20,11 +20,11 @@ import jax
 import jax.numpy as jnp
 
 from tpu_inference.kernels.gdn import triangle_solver
+from tpu_inference.kernels.gdn.reference import \
+    ragged_gated_delta_rule_chunked as jax_impl
 from tpu_inference.kernels.gdn.v2.gdn_decode_kernel import \
     ragged_gated_delta_rule_decode_only
 from tpu_inference.kernels.gdn.v2.recurrent_scan_v2 import recurrent_scan
-from tpu_inference.layers.common import \
-    ragged_gated_delta_rule_chunked as jax_impl
 
 
 @dataclasses.dataclass(frozen=True)

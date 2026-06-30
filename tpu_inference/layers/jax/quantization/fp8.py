@@ -34,7 +34,7 @@ from tpu_inference.layers.common.utils import cpu_mesh, cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.linear import JaxEinsum
-from tpu_inference.layers.jax.moe.moe import JaxMoE
+from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import (QuantizationConfig,
                                                            QuantLinearConfig)
@@ -546,27 +546,16 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             delattr(layer, gating_scale_name)
             delattr(layer, up_scale_name)
 
-            # TODO (jacobplatin): we probably want to make the sharding configurable
-            layer.kernel_gating_upproj_EDF = nnx.Param(
-                shard_put(weights.w13_weight, shardings=layer.edf_sharding))
-            layer.kernel_down_proj_EFD = nnx.Param(
-                shard_put(weights.w2_weight, shardings=layer.efd_sharding))
-            # gmm expects shape [num_groups, num_blocks, 1, n]
-            # TODO(gpolovets1): Make sure it works for gmm_v2 as well.
-            edf_scale_sharding = (layer.edf_sharding[0], ) + (None, ) * (
-                weights.w13_weight_scale.ndim - 2) + (layer.edf_sharding[-1], )
-            efd_scale_sharding = (layer.efd_sharding[0], ) + (None, ) * (
-                weights.w2_weight_scale.ndim - 2) + (layer.efd_sharding[-1], )
-            setattr(
-                layer, f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
-                nnx.Param(
-                    shard_put(weights.w13_weight_scale,
-                              shardings=edf_scale_sharding)))
-            setattr(
-                layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
-                nnx.Param(
-                    shard_put(weights.w2_weight_scale,
-                              shardings=efd_scale_sharding)))
+            # process_quantized_moe_weights applies with_sharding_constraint via
+            # _get_moe_weight_shardings for all weight fields; the arrays are
+            # already correctly sharded on return — no shard_put needed.
+            layer.kernel_gating_upproj_EDF = nnx.Param(weights.w13_weight)
+            layer.kernel_down_proj_EFD = nnx.Param(weights.w2_weight)
+            setattr(layer,
+                    f"kernel_gating_upproj_EDF_{self.weight_scale_name}",
+                    nnx.Param(weights.w13_weight_scale))
+            setattr(layer, f"kernel_down_proj_EFD_{self.weight_scale_name}",
+                    nnx.Param(weights.w2_weight_scale))
         else:
             raise NotImplementedError(
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
@@ -586,7 +575,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
         Returns:
             The MoE output.
         """
-        assert isinstance(layer, JaxMoE)
+        assert isinstance(layer, (JaxMoE, JaxRoutedExperts))
 
         x_TD = jnp.asarray(x, layer.dtype)
         x_TD = jax.lax.with_sharding_constraint(
@@ -680,7 +669,7 @@ class Fp8Config(QuantizationConfig):
                 return Fp8BlockwiseLinearMethod(self, layer, linear_config)
             else:
                 return Fp8TensorwiseLinearMethod(layer, linear_config)
-        elif isinstance(layer, JaxMoE):
+        elif isinstance(layer, (JaxRoutedExperts, JaxMoE)):
             if self.is_layer_skipped(prefix,
                                      ignored_layers=self.ignored_layers):
                 return UnquantizedFusedMoEMethod()

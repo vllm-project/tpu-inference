@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 import torch
 from flax import nnx
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.models.gemma4_mm import \
@@ -35,12 +35,14 @@ from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import make_layers
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM, Gemma4Model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     merge_multimodal_embeddings
 from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
                                                          StandardWeightLoader)
+from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -152,30 +154,44 @@ class Gemma4VisionFlashAttention(JaxModule):
         self.q_proj = JaxEinsum("BTD,DNH->BTNH",
                                 (self.features, self.num_heads, self.head_dim),
                                 param_dtype=dtype,
+                                kernel_init=nnx.with_partitioning(
+                                    init_fn,
+                                    (None, ShardingAxisName.VIT_MODEL, None)),
                                 rngs=rng,
                                 quant_config=quant_config)
         self.k_proj = JaxEinsum(
             "BTD,DKH->BTKH", (self.features, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
             quant_config=quant_config)
         self.v_proj = JaxEinsum(
             "BTD,DKH->BTKH", (self.features, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
             quant_config=quant_config)
         self.o_proj = JaxEinsum("BTNH,NHD->BTD",
                                 (self.num_heads, self.head_dim, self.features),
                                 param_dtype=dtype,
+                                kernel_init=nnx.with_partitioning(
+                                    init_fn,
+                                    (ShardingAxisName.VIT_MODEL, None, None)),
                                 rngs=rng,
                                 quant_config=quant_config)
 
         self.q_norm = JaxRmsNorm(self.head_dim,
                                  param_dtype=dtype,
+                                 scale_init=nnx.with_partitioning(
+                                     init_fn, (None, )),
                                  rngs=rng,
                                  quant_config=quant_config)
         self.k_norm = JaxRmsNorm(self.head_dim,
                                  param_dtype=dtype,
+                                 scale_init=nnx.with_partitioning(
+                                     init_fn, (None, )),
                                  rngs=rng,
                                  quant_config=quant_config)
         self.v_norm = JaxRmsNorm(self.head_dim,
@@ -231,11 +247,13 @@ class Gemma4VisionFlashAttention(JaxModule):
 
         segment_ids = SegmentIds(q=segment_ids_val, kv=segment_ids_val)
 
-        outputs_BNTH = sharded_flash_attention(mesh=self.mesh,
-                                               causal=False,
-                                               sm_scale=1.0)(q_BNTH, k_BKTH,
-                                                             v_BKTH,
-                                                             segment_ids)
+        outputs_BNTH = sharded_flash_attention(
+            mesh=self.mesh,
+            causal=False,
+            sm_scale=1.0,
+            batch_axis=ShardingAxisName.VIT_BATCH,
+            head_axis=ShardingAxisName.VIT_MODEL,
+        )(q_BNTH, k_BKTH, v_BKTH, segment_ids)
 
         # Transpose back: (B, N, T, H) -> (B, T, N, H)
         outputs_BTNH = jnp.transpose(outputs_BNTH, (0, 2, 1, 3))
@@ -264,7 +282,8 @@ class Gemma4VisionPatchEmbedder(JaxModule):
             "...d,dh->...h",
             (3 * self.patch_size**2, config.hidden_size),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL)),
             bias_init=None,
             rngs=rngs,
             quant_config=quant_config,
@@ -276,7 +295,7 @@ class Gemma4VisionPatchEmbedder(JaxModule):
                               dtype=dtype))
 
     def _factorized_posemb(self, pixel_position_ids: jax.Array) -> jax.Array:
-        posemb = self.position_embedding_table.value
+        posemb = self.position_embedding_table.get_value()
         one_hot = jax.nn.one_hot(pixel_position_ids,
                                  posemb.shape[0],
                                  dtype=posemb.dtype)
@@ -323,7 +342,8 @@ class Gemma4VisionMLP(JaxModule):
             "...d,df->...f",
             (self.features, self.hidden_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL)),
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
@@ -333,7 +353,8 @@ class Gemma4VisionMLP(JaxModule):
             "...d,df->...f",
             (self.features, self.hidden_dim),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL)),
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
@@ -343,7 +364,8 @@ class Gemma4VisionMLP(JaxModule):
             "...f,fd->...d",
             (self.hidden_dim, self.features),
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (ShardingAxisName.VIT_MODEL, None)),
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
@@ -364,26 +386,34 @@ class Gemma4VisionEncoderLayer(JaxModule):
                  quant_config: Optional[VllmQuantConfig] = None):
         self.input_layernorm = JaxRmsNorm(config.hidden_size,
                                           param_dtype=dtype,
+                                          scale_init=nnx.with_partitioning(
+                                              init_fn, (None, )),
                                           rngs=rng,
                                           quant_config=quant_config)
 
         self.self_attn = Gemma4VisionFlashAttention(config, dtype, rng, mesh,
                                                     quant_config)
 
-        self.post_attention_layernorm = JaxRmsNorm(config.hidden_size,
-                                                   param_dtype=dtype,
-                                                   rngs=rng,
-                                                   quant_config=quant_config)
+        self.post_attention_layernorm = JaxRmsNorm(
+            config.hidden_size,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=quant_config)
 
-        self.pre_feedforward_layernorm = JaxRmsNorm(config.hidden_size,
-                                                    param_dtype=dtype,
-                                                    rngs=rng,
-                                                    quant_config=quant_config)
+        self.pre_feedforward_layernorm = JaxRmsNorm(
+            config.hidden_size,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=quant_config)
         self.mlp = Gemma4VisionMLP(config, dtype, rng, quant_config)
-        self.post_feedforward_layernorm = JaxRmsNorm(config.hidden_size,
-                                                     param_dtype=dtype,
-                                                     rngs=rng,
-                                                     quant_config=quant_config)
+        self.post_feedforward_layernorm = JaxRmsNorm(
+            config.hidden_size,
+            param_dtype=dtype,
+            scale_init=nnx.with_partitioning(init_fn, (None, )),
+            rngs=rng,
+            quant_config=quant_config)
 
     def __call__(self,
                  inputs: jax.Array,
@@ -492,7 +522,8 @@ class Gemma4VisionModel(JaxModule):
 
         if self.standardize:
             pooled_x, mask = outputs[0]
-            pooled_x = (pooled_x - self.std_bias.value) * self.std_scale.value
+            pooled_x = (pooled_x - self.std_bias.get_value()
+                        ) * self.std_scale.get_value()
             outputs = ((pooled_x, mask), )
 
         return outputs
@@ -513,7 +544,8 @@ class Gemma4MultimodalEmbedder(JaxModule):
             (vision_hidden_size, text_hidden_size),
             bias_shape=None,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(
+                init_fn, (None, ShardingAxisName.VIT_MODEL)),
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
@@ -537,9 +569,11 @@ class Gemma4MultimodalEmbedder(JaxModule):
 
 
 class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
-    packed_modules_mapping = {"__no_packing__": []}
+    packed_modules_mapping = Gemma4ForCausalLM.packed_modules_mapping
     WeightLoader = StandardWeightLoader
     supports_multimodal = True
+    supports_encoder_tp_data = True
+    supports_encoder_cudagraph = True
     _processor_factory = getattr(PtGemma4MM, "_processor_factory", None)
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
@@ -548,7 +582,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
-        from tpu_inference.models.jax.gemma4 import Gemma4Model
+        vllm_config.sharding_config.apply_vision_sharding()
+
         self.model = Gemma4Model(
             vllm_config=vllm_config,
             rng=rng,
@@ -556,10 +591,12 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             prefix="model",
         )
         model_config = vllm_config.model_config
-
         vision_config = model_config.hf_config.vision_config
         self.image_token_id = getattr(model_config.hf_config, "image_token_id",
                                       258880)
+        self.pooling_kernel_size = vision_config.pooling_kernel_size
+        self.max_soft_tokens = vision_config.default_output_length
+        self.patch_pixels = vision_config.patch_size**2 * 3
 
         self.vision_tower = Gemma4VisionModel(
             config=vision_config,
@@ -645,40 +682,16 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                         )):
                     continue
 
-                # Handle packed QKV weights for the text tower.
-                # Note: KV-shared layers DO have full Q/K/V weights in the
-                # checkpoint — vllm-pytorch's Gemma4Attention constructs
-                # qkv_proj unconditionally. K/V are still computed and used
-                # for the current step's attention; the kernel skips writing
-                # them to the cache via update_kv_cache=False.
-                if "qkv_proj" in mapped_name:
+                # Handle packed QKV weights for the text tower when the model uses separate projections (e.g. k_eq_v layers)
+                if "qkv_proj" in mapped_name and "model.layers." in mapped_name:
                     m = re.search(r"layers\.(\d+)\.", mapped_name)
                     if m:
                         layer_idx = int(m.group(1))
                         if self.model.start_layer <= layer_idx < self.model.end_layer:
-                            jax_attn = self.model.layers[
-                                layer_idx - self.model.start_layer].self_attn
-                            q_size = jax_attn.num_heads * jax_attn.head_dim_original
-                            kv_size = jax_attn.num_kv_heads * jax_attn.head_dim_original
+                            jax_attn = self.model.layers[layer_idx].self_attn
 
-                            q_weight = weight[:q_size]
-                            k_weight = weight[q_size:q_size + kv_size]
-                            v_weight = weight[q_size + kv_size:q_size +
-                                              2 * kv_size]
-
-                            yield mapped_name.replace(
-                                "qkv_proj", "q_proj"), process_tensor(
-                                    mapped_name.replace("qkv_proj", "q_proj"),
-                                    q_weight)
-                            yield mapped_name.replace(
-                                "qkv_proj", "k_proj"), process_tensor(
-                                    mapped_name.replace("qkv_proj", "k_proj"),
-                                    k_weight)
-                            yield mapped_name.replace(
-                                "qkv_proj", "v_proj"), process_tensor(
-                                    mapped_name.replace("qkv_proj", "v_proj"),
-                                    v_weight)
-                            continue
+                            if jax_attn.qkv_proj is None:
+                                continue
 
                 yield mapped_name, process_tensor(mapped_name, weight)
 
@@ -727,6 +740,10 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             jnp.expand_dims(sort_idx, axis=-1),
             axis=1)
 
+        projected_vision_features = jax.lax.with_sharding_constraint(
+            projected_vision_features,
+            NamedSharding(self.mesh, PartitionSpec(None, None, None)))
+
         return projected_vision_features
 
     def _parse_and_validate_image_input(
@@ -762,14 +779,14 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         # Process images in fixed-size micro-batches of exactly `dp_size` so
         # every vision-tower call shares the same (B=dp_size, ...) JIT cache
-        # entry regardless of how many images this step has.
-        # Gemma4VisionFlashAttention's sharded_flash_attention has
-        # in_specs=P('data','model',None,None), which requires
-        # B % dp_size == 0; B=dp_size always satisfies that. The last
+        # entry regardless of how many images this step has. The last
         # micro-batch is right-padded with pixel_position_ids=POSITIONS_PAD_VALUE
         # entries so input_mask masks the padded entries out of the encoder.
         n_images = pixel_values.shape[0]
-        dp_size = self.mesh.shape[ShardingAxisName.BATCH]
+        dp_size = get_mesh_shape_product(self.mesh, ShardingAxisName.VIT_BATCH)
+        input_sharding = NamedSharding(
+            self.mesh, PartitionSpec(ShardingAxisName.VIT_BATCH, None, None))
+
         per_image_features = []
         for chunk_start in range(0, n_images, dp_size):
             chunk_end = min(chunk_start + dp_size, n_images)
@@ -781,6 +798,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 pv_chunk = jnp.pad(pv_chunk, ((0, pad_count), (0, 0), (0, 0)))
                 pp_chunk = jnp.pad(pp_chunk, ((0, pad_count), (0, 0), (0, 0)),
                                    constant_values=POSITIONS_PAD_VALUE)
+            pv_chunk = jax.device_put(pv_chunk, input_sharding)
+            pp_chunk = jax.device_put(pp_chunk, input_sharding)
             vt_output = self.get_single_image_embedding(pv_chunk, pp_chunk)
             for i in range(chunk_size):
                 per_image_features.append(vt_output[i])
@@ -792,6 +811,218 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             return []
 
         return self._process_image_input(image_input)
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import \
+            EncoderCudaGraphConfig
+
+        def pad_pixel_position_ids(dst: torch.Tensor,
+                                   src: torch.Tensor) -> None:
+            # pixel_position_ids uses -1 as the pad sentinel (POSITIONS_PAD_VALUE).
+            dst.fill_(POSITIONS_PAD_VALUE)
+            dst[:src.shape[0]].copy_(src)
+
+        text_hidden = self.vllm_config.model_config.hf_config.text_config.hidden_size
+        config = EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values", "pixel_position_ids"],
+            out_hidden_size=text_hidden,
+            max_frames_per_video=1,
+            padding_logics={"pixel_position_ids": pad_pixel_position_ids},
+        )
+        return config
+
+    def get_max_frames_per_video(self) -> int:
+        raise NotImplementedError("Video not yet supported.")
+
+    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
+        if "pixel_values_videos" in mm_kwargs:
+            raise NotImplementedError("Video not yet supported.")
+        else:
+            return "image"
+
+    def get_encoder_cudagraph_budget_range(self, vllm_config):
+        min_budget = self.max_soft_tokens
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        text_dp_size = vllm_config.sharding_config.total_dp_size
+        max_budget = min(
+            self.max_soft_tokens * max_num_seqs * text_dp_size,
+            vllm_config.scheduler_config.max_num_batched_tokens * text_dp_size,
+        )
+        return min_budget, max_budget
+
+    def _get_pixel_values_by_modality(
+            self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
+        if self.get_input_modality(mm_kwargs) == "image":
+            return mm_kwargs["pixel_values"]
+        raise NotImplementedError("Video not yet supported.")
+
+    def _get_pixel_position_ids_by_modality(
+            self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
+        if self.get_input_modality(mm_kwargs) == "image":
+            return mm_kwargs["pixel_position_ids"]
+        raise NotImplementedError("Video not yet supported.")
+
+    def get_encoder_cudagraph_item_specs(self, mm_kwargs):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+        pixel_position_ids = self._get_pixel_position_ids_by_modality(
+            mm_kwargs)
+        if not isinstance(pixel_position_ids, torch.Tensor):
+            return []
+        k = self.pooling_kernel_size
+        specs = []
+        for i in range(pixel_position_ids.shape[0]):
+            pid = pixel_position_ids[i]  # (num_patches, 2)
+            valid_patches = int((pid[:, 0]
+                                 != POSITIONS_PAD_VALUE).sum().item())
+            output_tokens = min(max(valid_patches // k**2, 1),
+                                self.max_soft_tokens)
+            specs.append(
+                EncoderItemSpec(
+                    input_size=pixel_position_ids.shape[1],
+                    output_tokens=output_tokens,
+                ))
+        return specs
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        modality = self.get_input_modality(mm_kwargs)
+        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
+        pixel_position_ids = self._get_pixel_position_ids_by_modality(
+            mm_kwargs)
+
+        if len(indices) == 0:
+            if modality == "image":
+                return {
+                    "pixel_values": pixel_values[:0],
+                    "pixel_position_ids": pixel_position_ids[:0],
+                }
+            raise NotImplementedError("Video not yet supported.")
+
+        if modality == "image":
+            return {
+                "pixel_values": pixel_values[list(indices)],
+                "pixel_position_ids": pixel_position_ids[list(indices)],
+            }
+        raise NotImplementedError("Video not yet supported.")
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import \
+            EncoderCudaGraphCaptureInputs
+        num_patches = self.max_soft_tokens * self.pooling_kernel_size**2
+        dp_size = get_mesh_shape_product(self.mesh, ShardingAxisName.VIT_BATCH)
+        images_for_budget = max(
+            min(token_budget // self.max_soft_tokens, max_batch_size), 1)
+        batch_size = ((images_for_budget + dp_size - 1) // dp_size) * dp_size
+
+        pixel_values = torch.randn(batch_size,
+                                   num_patches,
+                                   self.patch_pixels,
+                                   dtype=dtype,
+                                   device=device)
+        pixel_position_ids = torch.full(
+            (batch_size, num_patches, 2),
+            POSITIONS_PAD_VALUE,
+            dtype=torch.int32,
+            device=device,
+        )
+        return EncoderCudaGraphCaptureInputs(
+            values={
+                "pixel_values": pixel_values,
+                "pixel_position_ids": pixel_position_ids,
+            })
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import \
+            EncoderCudaGraphReplayBuffers
+        pv = self._get_pixel_values_by_modality(mm_kwargs)
+        ppid = self._get_pixel_position_ids_by_modality(mm_kwargs)
+        return EncoderCudaGraphReplayBuffers(values={
+            "pixel_values": pv,
+            "pixel_position_ids": ppid,
+        })
+
+    @jax.jit
+    def encoder_cudagraph_forward(self, inputs: dict) -> jax.Array:
+        """Run the vision encoder on fixed-shape inputs.
+
+        Args:
+            inputs: dict with "pixel_values" (B, NP, PP) and
+                "pixel_position_ids" (B, NP, 2) as jax.Arrays.
+
+        Returns:
+            jax.Array of shape (B, max_soft_tokens, hidden).
+        """
+        pixel_values = inputs["pixel_values"]
+        pixel_position_ids = inputs["pixel_position_ids"]
+
+        input_sharding = NamedSharding(
+            self.mesh, PartitionSpec(ShardingAxisName.VIT_BATCH, None, None))
+        pixel_values = jax.device_put(pixel_values, input_sharding)
+        pixel_position_ids = jax.device_put(pixel_position_ids, input_sharding)
+
+        input_mask = pixel_position_ids[..., 0] != POSITIONS_PAD_VALUE
+
+        vision_outputs = self.vision_tower(
+            pixel_values,
+            input_mask=input_mask,
+            pixel_position_ids=pixel_position_ids,
+        )
+        projected = vision_outputs[0][0]
+        pooler_mask = vision_outputs[0][1]
+        projected = self.embed_vision(projected)
+
+        seq_len = pooler_mask.shape[1]
+        sort_indices = jnp.arange(seq_len)
+        sort_key = jnp.where(pooler_mask, sort_indices, seq_len + sort_indices)
+        sort_idx = jnp.argsort(sort_key, axis=1)
+        projected = jnp.take_along_axis(projected,
+                                        jnp.expand_dims(sort_idx, axis=-1),
+                                        axis=1)
+        projected = jax.lax.with_sharding_constraint(
+            projected, NamedSharding(self.mesh,
+                                     PartitionSpec(None, None, None)))
+        return projected
+
+    def encoder_eager_forward(self, mm_kwargs: dict[str,
+                                                    Any]) -> list[jax.Array]:
+        """Fallback for inputs that exceed all budget sizes."""
+        return self.embed_multimodal(**mm_kwargs)
+
+    def postprocess_encoder_output(
+        self,
+        output,
+        indices,
+        per_item_out_tokens,
+        dest,
+        clone: bool = False,
+        batch_mm_kwargs=None,
+    ) -> None:
+        """Split batch encoder output into per-image entries in dest."""
+        for local_idx, global_idx in enumerate(indices):
+            n = per_item_out_tokens[global_idx]
+            feat = output[local_idx, :n]
+            if clone and hasattr(feat, 'clone'):
+                feat = feat.clone()
+            dest[global_idx] = feat
 
     def __call__(
         self,

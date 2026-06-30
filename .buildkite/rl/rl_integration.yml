@@ -64,3 +64,18 @@ steps:
     commands:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_rl_integration_PerformanceTest
+
+  - label: "${TPU_VERSION:-tpu6e} E2E MMLU for Llama-3.1-8B continue_decode"
+    key: "${TPU_VERSION:-tpu6e}_rl_integration_continue_decode_mmlu"
+    soft_fail: true
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      NEW_MODEL_DESIGN: "1"
+      SKIP_ACCURACY_TESTS: "False"
+      MODEL_IMPL_TYPE: "vllm"
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      EXTRA_SERVE_ARGS: "--additional-config='{\"enable_continue_decode\": true}'"
+    agents:
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m "meta-llama/Llama-3.1-8B-Instruct" -n 1000 -l 4

@@ -90,3 +90,16 @@ def get_num_chips() -> int:
     except FileNotFoundError as e:
         logger.error("Failed to detect number of TPUs: %s", e)
         return 0
+
+
+def get_tpu_vmem_size_bytes() -> int:
+    """Returns the TPU Vector Memory (VMEM) size in Bytes per Tensor Core.
+
+    Defaults to 0 if the capacity cannot be programmatically retrieved.
+    """
+    try:
+        from jax.experimental.pallas import tpu as pltpu
+        return pltpu.get_tpu_info().vmem_capacity_bytes
+    except Exception as e:
+        logger.warning("Failed to programmatically get TPU VMEM size: %s", e)
+        return 0

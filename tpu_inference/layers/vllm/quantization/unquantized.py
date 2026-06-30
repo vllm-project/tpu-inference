@@ -25,7 +25,8 @@ from torchax.ops.mappings import t2j
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
+from vllm.model_executor.layers.fused_moe import (FusedMoEConfig,
+                                                  RoutedExperts,
                                                   UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
@@ -148,7 +149,7 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
             case vllm_linear.LinearBase():
                 linear_config = self.get_linear_config(layer)
                 return VllmUnquantizedLinearMethod(linear_config)
-            case FusedMoE():
+            case RoutedExperts():
                 moe_config = self.get_moe_config(layer)
                 return VllmUnquantizedFusedMoEMethod(moe_config, self.mesh)
             case Attention():
@@ -198,6 +199,11 @@ class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
 class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                                   common_unquantized.UnquantizedLinearMethod,
                                   VllmQuantizationMethod):
+
+    # Dynamically register this method to support weight_loader_v2 in vLLM.
+    if "VllmUnquantizedLinearMethod" not in vllm_linear.WEIGHT_LOADER_V2_SUPPORTED:
+        vllm_linear.WEIGHT_LOADER_V2_SUPPORTED.append(
+            "VllmUnquantizedLinearMethod")
 
     def __init__(self, linear_config: VllmQuantLinearConfig):
         super().__init__(linear_config)
@@ -340,8 +346,9 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         return out
 
 
-class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
-                                    VllmQuantizationMethod):
+class VllmUnquantizedFusedMoEMethod(
+        UnquantizedFusedMoEMethod,
+        common_unquantized.UnquantizedFusedMoEMethod, VllmQuantizationMethod):
 
     def __init__(
         self,
@@ -349,7 +356,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         mesh: Mesh,
         ep_axis_name: str = "model",
     ):
-        super().__init__(moe)
+        UnquantizedFusedMoEMethod.__init__(self, moe)
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
 
@@ -385,7 +392,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         if not _tensor_is_in_cpu(layer.w13_weight):
             # Already processed and sharded.
             return
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
 
         # Under Pathways, shard weights directly onto the TPU mesh to avoid
         # placing a full unsharded copy on a single device (OOM for large MoE).
@@ -434,7 +441,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
@@ -453,4 +460,5 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
                               weights=weights,
                               quant_method_instance=self,
                               x=x,
-                              router_logits=router_logits)
+                              router_logits=router_logits,
+                              input_ids=input_ids)

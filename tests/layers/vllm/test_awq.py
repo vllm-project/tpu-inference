@@ -503,39 +503,40 @@ def test_fused_moe(num_devices, num_tokens, intermediate_size, hidden_size,
             quant_config=quant_config,
             has_bias=True,
         )
-        vllm_fused_moe.moe_parallel_config.use_ep = use_ep
+        vllm_fused_moe.moe_config.moe_parallel_config.use_ep = use_ep
 
     w13_q, w13_z, w13_s = quantize_to_awq(
         w1.permute(0, 2, 1).float(), quant_config.group_size)
     w2_q, w2_z, w2_s = quantize_to_awq(
         w2.permute(0, 2, 1).float(), quant_config.group_size)
 
-    vllm_fused_moe.w13_qweight.data = w13_q
-    vllm_fused_moe.w2_qweight.data = w2_q
-    vllm_fused_moe.w13_scales.data = w13_s.to(dtype)
-    vllm_fused_moe.w2_scales.data = w2_s.to(dtype)
-    vllm_fused_moe.w13_qzeros.data = w13_z
-    vllm_fused_moe.w2_qzeros.data = w2_z
-    vllm_fused_moe.w13_bias.data = w1_bias
-    vllm_fused_moe.w2_bias.data = w2_bias
+    vllm_fused_moe.routed_experts.w13_qweight.data = w13_q
+    vllm_fused_moe.routed_experts.w2_qweight.data = w2_q
+    vllm_fused_moe.routed_experts.w13_scales.data = w13_s.to(dtype)
+    vllm_fused_moe.routed_experts.w2_scales.data = w2_s.to(dtype)
+    vllm_fused_moe.routed_experts.w13_qzeros.data = w13_z
+    vllm_fused_moe.routed_experts.w2_qzeros.data = w2_z
+    vllm_fused_moe.routed_experts.w13_bias.data = w1_bias
+    vllm_fused_moe.routed_experts.w2_bias.data = w2_bias
 
     expected = test_utils.ref_moe(a, score, w1, w2, w1_bias, w2_bias,
-                                  vllm_fused_moe.top_k,
-                                  vllm_fused_moe.renormalize,
+                                  vllm_fused_moe.routed_experts.top_k,
+                                  vllm_fused_moe.routed_experts.renormalize,
                                   vllm_fused_moe.activation.value)
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
-        assert isinstance(vllm_fused_moe.quant_method, VllmAWQMoEMethod)
+        assert isinstance(vllm_fused_moe.routed_experts.quant_method,
+                          VllmAWQMoEMethod)
         if use_ep:
-            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_EP
+            assert vllm_fused_moe.routed_experts.quant_method.moe_backend == MoEBackend.GMM_EP
         else:
-            assert vllm_fused_moe.quant_method.moe_backend == MoEBackend.GMM_TP
+            assert vllm_fused_moe.routed_experts.quant_method.moe_backend == MoEBackend.GMM_TP
 
         jax_a = a.to('jax')
         score = score.to('jax')
 
-        vllm_fused_moe.quant_method.process_weights_after_loading(
-            vllm_fused_moe)
+        vllm_fused_moe.routed_experts.quant_method.process_weights_after_loading(
+            vllm_fused_moe.routed_experts)
         actual = vllm_fused_moe(jax_a, score)
 
         torch.testing.assert_close(expected,
