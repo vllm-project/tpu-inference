@@ -99,6 +99,8 @@ setup_environment() {
 
   local DOCKERFILE_NAME="Dockerfile"
 
+
+
 # Determine whether to build from PyPI packages or source.
   if [[ "${RUN_WITH_PYPI:-false}" == "true" ]]; then
     DOCKERFILE_NAME="Dockerfile.pypi"
