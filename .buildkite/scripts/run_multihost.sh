@@ -321,30 +321,29 @@ if [ "$#" -ge 1 ]; then
         # Set client benchmark command from CLIENT_CMD resolved by parser
         CLIENT_BENCH_CMD="$CLIENT_CMD"
         
-    else
         # Legacy mode (raw server/client commands passed)
         VLLM_SERVE_CMD="$1"
         shift
         if [ "$#" -gt 0 ]; then
             CLIENT_BENCH_CMD="${*:-}"
         fi
+    fi
+
+    # Rewrite generation config if GCS path is used
+    if [[ "${VLLM_SERVE_CMD}" =~ --generation-config[=\ ]+gs://([^ ]+) ]]; then
+        gcs_path="gs://${BASH_REMATCH[1]}"
+        config_url="${gcs_path%/*}"
+        config_dir_name=$(basename "${config_url}")
+        config_file_name=$(basename "${gcs_path}")
+
+        echo "--- Detected GCS generation-config: $gcs_path"
+        echo "--- Pre-downloading config to workspace inside container..."
+
+        download_cmd="if ! command -v gsutil &> /dev/null; then curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null; export PATH=\"\$PATH:/root/google-cloud-sdk/bin\"; fi && mkdir -p /workspace && gsutil -m cp -r ${config_url} /workspace/ && "
         
-        # Rewrite generation config if GCS path is used (legacy logic)
-        if [[ "${VLLM_SERVE_CMD}" =~ --generation-config[=\ ]+gs://([^ ]+) ]]; then
-            gcs_path="gs://${BASH_REMATCH[1]}"
-            config_url="${gcs_path%/*}"
-            config_dir_name=$(basename "${config_url}")
-            config_file_name=$(basename "${gcs_path}")
-
-            echo "--- Detected GCS generation-config: $gcs_path"
-            echo "--- Pre-downloading config to workspace inside container..."
-
-            download_cmd="if ! command -v gsutil &> /dev/null; then curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null; export PATH=\"\$PATH:/root/google-cloud-sdk/bin\"; fi && mkdir -p /workspace && gsutil -m cp -r ${config_url} /workspace/ && "
-            
-            VLLM_SERVE_CMD=$(echo "${VLLM_SERVE_CMD}" | sed -E "s|--generation-config[=\ ]+gs://[^ ]+|--generation-config /workspace/${config_dir_name}/${config_file_name}|g")
-            VLLM_SERVE_CMD="${download_cmd}${VLLM_SERVE_CMD}"
-            echo "Rewritten VLLM_SERVE_CMD: $VLLM_SERVE_CMD"
-        fi
+        VLLM_SERVE_CMD=$(echo "${VLLM_SERVE_CMD}" | sed -E "s|--generation-config[=\ ]+gs://[^ ]+|--generation-config /workspace/${config_dir_name}/${config_file_name}|g")
+        VLLM_SERVE_CMD="${download_cmd}${VLLM_SERVE_CMD}"
+        echo "Rewritten VLLM_SERVE_CMD: $VLLM_SERVE_CMD"
     fi
 else
     # Fallback default serve command
