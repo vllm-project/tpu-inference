@@ -6,6 +6,7 @@ import atexit
 import bisect
 import datetime
 import functools
+import hashlib
 import json
 import os
 import shutil
@@ -25,6 +26,41 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch import InputBatch
+
+
+def _is_gcs_path(path: str) -> bool:
+    return path.startswith("gs://")
+
+
+def _makedirs_local(path: str) -> None:
+    """Create directories only for local paths (no-op for gs:// URIs)."""
+    if not _is_gcs_path(path):
+        os.makedirs(path, exist_ok=True)
+
+
+def _upload_dir_to_gcs(local_dir: str, gcs_uri: str) -> None:
+    """Recursively upload files under ``local_dir`` to a ``gs://`` prefix."""
+    if not _is_gcs_path(gcs_uri) or not os.path.isdir(local_dir):
+        return
+    try:
+        from google.cloud import storage  # type: ignore
+        # gs://bucket/prefix -> ("bucket", "prefix") ; gs://bucket -> ("bucket", "")
+        rest = gcs_uri[5:]
+        bucket_name, _, prefix = rest.partition("/")
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        prefix = prefix.rstrip("/")
+        for root, _, files in os.walk(local_dir):
+            for fname in files:
+                local_path = os.path.join(root, fname)
+                rel = os.path.relpath(local_path, local_dir).replace(os.sep, "/")
+                blob_name = f"{prefix}/{rel}" if prefix else rel
+                bucket.blob(blob_name).upload_from_filename(local_path)
+        logger.info("Uploaded profile artifacts from %s to %s", local_dir,
+                    gcs_uri)
+    except Exception as e:
+        logger.error("Failed to upload %s to %s: %s", local_dir, gcs_uri, e,
+                     exc_info=True)
 
 
 def trim_request_id_suffix(request_id: str) -> str:
@@ -444,7 +480,7 @@ class AggregatedStatsLogger:
                                     filename: str) -> tuple[str, str]:
         """Helper to resolve local temp path vs final target path (e.g. for GCS)."""
         target = os.path.join(base_dir, filename)
-        if base_dir.startswith("gs://"):
+        if _is_gcs_path(base_dir):
             return os.path.join(tempfile.gettempdir(), filename), target
         os.makedirs(base_dir, exist_ok=True)
         return target, target
@@ -454,25 +490,25 @@ class AggregatedStatsLogger:
                      target_file: str,
                      blocking: bool = False) -> None:
         """Helper to sync local file to GCS using the Python SDK."""
-        if target_file.startswith("gs://") and os.path.exists(local_file):
+        if not (_is_gcs_path(target_file) and os.path.exists(local_file)):
+            return
 
-            def _upload():
-                try:
-                    from google.cloud import storage  # type: ignore
-                    client = storage.Client()
-                    # e.g., gs://my-bucket/path/to/file.txt -> ("my-bucket", "path/to/file.txt")
-                    bucket_name, blob_name = target_file[5:].split("/", 1)
-                    client.bucket(bucket_name).blob(
-                        blob_name).upload_from_filename(local_file)
-                except Exception as e:
-                    logger.error(
-                        f"Failed to upload {local_file} to {target_file}: {e}",
-                        exc_info=True)
+        def _upload():
+            try:
+                from google.cloud import storage  # type: ignore
+                rest = target_file[5:]
+                bucket_name, _, blob_name = rest.partition("/")
+                storage.Client().bucket(bucket_name).blob(
+                    blob_name).upload_from_filename(local_file)
+            except Exception as e:
+                logger.error(
+                    "Failed to upload %s to %s: %s", local_file, target_file,
+                    e, exc_info=True)
 
-            if blocking:
-                _upload()
-            else:
-                threading.Thread(target=_upload, daemon=True).start()
+        if blocking:
+            _upload()
+        else:
+            threading.Thread(target=_upload, daemon=True).start()
 
     def log(self, batch_composition_stats: dict) -> None:
         """
@@ -501,7 +537,7 @@ class AggregatedStatsLogger:
         """
         self._f_local.flush()
         self._f_tmp.flush()
-        if self.target_file.startswith("gs://") and os.path.exists(
+        if _is_gcs_path(self.target_file) and os.path.exists(
                 self.local_temp_file):
             logger.info(
                 f"Syncing continuous batch stats to {self.target_file} (Step {self.step_count})..."
@@ -518,7 +554,7 @@ class AggregatedStatsLogger:
         self.flush(blocking=True)
         self._f_local.close()
         self._f_tmp.close()
-        if self.profile_dir.startswith("gs://") and os.path.exists(
+        if _is_gcs_path(self.profile_dir) and os.path.exists(
                 self.local_temp_file):
             try:
                 os.remove(self.local_temp_file)
@@ -572,7 +608,22 @@ class PhasedBasedProfiler:
         self.decode_kv_len_threshold: int = int(
             os.getenv("PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD",
                       PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD))
-        self.profile_dir: str = profile_dir
+        # JAX can write traces to gs://, but merge / marker / stats I/O uses
+        # local FS APIs. Stage on a shared local path (keyed by GCS URI + parent
+        # PID so co-located DP ranks still coordinate via marker files) and
+        # upload after each phase completes.
+        self._gcs_profile_dir: str | None = (
+            profile_dir if _is_gcs_path(profile_dir) else None)
+        if self._gcs_profile_dir:
+            # Short stable hash avoids path-length issues and keeps ranks aligned.
+            gcs_key = hashlib.md5(
+                self._gcs_profile_dir.encode()).hexdigest()[:12]
+            self.profile_dir = os.path.join(
+                tempfile.gettempdir(), f"phased_profiler_{gcs_key}",
+                f"ppid_{os.getppid()}")
+            os.makedirs(self.profile_dir, exist_ok=True)
+        else:
+            self.profile_dir = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phase_seen: dict = {
             InferencePhase.PREFILL_ONLY: False,
@@ -600,9 +651,10 @@ class PhasedBasedProfiler:
         self.worker_rank = worker_rank
         self.aggregated_stats_logger = None
 
+        log_dest = self._gcs_profile_dir or self.profile_dir
         logger.info(
             "Phased-based profiler enabled. Traces will be saved to: %s",
-            self.profile_dir)
+            log_dest)
         if self.num_decode_steps_to_skip > 0:
             logger.info(
                 "Will skip %d decode-heavy steps before profiling decode_heavy phase.",
@@ -675,7 +727,7 @@ class PhasedBasedProfiler:
             logger.info(f"Starting profiling for {self.current_phase} phase")
             logger.info(f"Batch composition stats: {batch_composition_stats}")
             phase_dir = os.path.join(self.profile_dir, self.current_phase)
-            os.makedirs(phase_dir, exist_ok=True)
+            _makedirs_local(phase_dir)
 
             # Resolve the canonical destination ts before start_trace so all
             # DP ranks land in the same <phase>/plugins/profile/<ts>/ dir
@@ -684,7 +736,7 @@ class PhasedBasedProfiler:
 
             self.profile_dir_with_phase_suffix = os.path.join(
                 phase_dir, f"dp_rank_{self.worker_rank}")
-            os.makedirs(self.profile_dir_with_phase_suffix, exist_ok=True)
+            _makedirs_local(self.profile_dir_with_phase_suffix)
 
             # Write the batch composition stats to a file to make it easier to
             # align with the traces
@@ -829,6 +881,11 @@ class PhasedBasedProfiler:
                     pass
             logger.info(
                 f"Successfully merged profile directories into: {dst_ts_dir}")
+            if self._gcs_profile_dir:
+                # Upload this phase's artifacts (merged traces + batch stats).
+                rel_phase = os.path.relpath(phase_dir, self.profile_dir)
+                gcs_phase = f"{self._gcs_profile_dir.rstrip('/')}/{rel_phase}"
+                _upload_dir_to_gcs(phase_dir, gcs_phase)
         except Exception as e:
             logger.warning("Failed to merge profile directories: %s", e)
 

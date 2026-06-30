@@ -844,3 +844,44 @@ def test_merge_profile_directories_ignores_stale_prior_run_data(tmp_path):
     # New data lands in its own canonical dir.
     new_dst = phase_dir / "plugins" / "profile" / "2026_05_06_04_47_36"
     assert (new_dst / "new.xplane.pb").read_text() == "NEW"
+
+
+def test_phased_profiler_gcs_profile_dir_uses_local_staging():
+    """GCS profile_dir is staged locally; ranks with same URI share staging."""
+    gcs_uri = "gs://my-bucket/profiles/run1"
+    p0 = PhasedBasedProfiler(profile_dir=gcs_uri, worker_rank=0)
+    p1 = PhasedBasedProfiler(profile_dir=gcs_uri, worker_rank=1)
+
+    assert p0._gcs_profile_dir == gcs_uri
+    assert p1._gcs_profile_dir == gcs_uri
+    assert not p0.profile_dir.startswith("gs://")
+    assert p0.profile_dir == p1.profile_dir
+    assert os.path.isdir(p0.profile_dir)
+
+
+def test_merge_profile_directories_uploads_to_gcs(tmp_path, monkeypatch):
+    """After local merge, GCS targets trigger a recursive upload of the phase."""
+    uploaded = []
+
+    def fake_upload(local_dir, gcs_uri):
+        uploaded.append((local_dir, gcs_uri))
+
+    monkeypatch.setattr(
+        "tpu_inference.runner.utils._upload_dir_to_gcs", fake_upload)
+
+    gcs_uri = "gs://my-bucket/profiles"
+    profiler = PhasedBasedProfiler(profile_dir=gcs_uri, worker_rank=0)
+    phase_dir = Path(profiler.profile_dir) / "prefill_heavy"
+    rank_dir = phase_dir / "dp_rank_0"
+    rank_dir.mkdir(parents=True)
+    profiler.profile_dir_with_phase_suffix = str(rank_dir)
+    profiler._canonical_dst_ts = "2026_05_06_04_47_36"
+    _stage_dp_rank_capture(rank_dir, "jax_ts", "trace.xplane.pb", "DATA")
+
+    profiler._merge_profile_directories()
+
+    assert len(uploaded) == 1
+    assert uploaded[0][0] == str(phase_dir)
+    assert uploaded[0][1] == "gs://my-bucket/profiles/prefill_heavy"
+    dst = phase_dir / "plugins" / "profile" / "2026_05_06_04_47_36"
+    assert (dst / "trace.xplane.pb").read_text() == "DATA"

@@ -31,7 +31,7 @@ python3 examples/tpu_profiling.py --model <your-model-name> [OPTIONS]
 * `--input-len`: The length of the input prompt tokens per request
 * `--output-len`: The number of tokens to generate per request.
 * `--batch-size`: The number of requests.
-* `--profile-result-dir`: The directory where the JAX profiler output will be saved.
+* `--profile-result-dir`: The directory where the JAX profiler output will be saved (local path or `gs://` GCS URI).
 * The script also accepts all standard vLLM `EngineArgs` (e.g., `--tensor-parallel-size`, `--dtype`).
 
 #### Examples
@@ -73,6 +73,8 @@ we will automatically capture profiles during three phases of your workload (ass
 3. Mixed (the quotient of prefill / total scheduled tokens for the given batch is between 0.4 and 0.6)
 
 To aid in your analysis, we will also log the batch composition for the profiled batches.
+
+`PHASED_PROFILING_DIR`, `AGGREGATED_STATS_DIR`, and the torch/JAX profiler output directory (`--profiler-config` / `--profile-result-dir` / `VLLM_TORCH_PROFILER_DIR`) all accept either a local path or a GCS URI (`gs://bucket/prefix`). For phased profiling, traces are staged on local disk (so multi-rank merge and marker coordination still work) and uploaded to the bucket after each phase completes. Direct `jax.profiler` captures (worker `profile()` and the TensorBoard capture UI) can write to `gs://` natively.
 
 ## Using `USE_JAX_PROFILER_SERVER`
 If you set the following environment variable:
