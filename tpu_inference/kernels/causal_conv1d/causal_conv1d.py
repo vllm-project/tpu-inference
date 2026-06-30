@@ -54,6 +54,7 @@ class MetadataRef:
     b_idx_should_write: Any
     s_idx_to_state_idx: Any
     s_idx_has_initial_state: Any
+    b_idx_to_token_step: Any
 
     def __len__(self) -> int:
         return len(dataclasses.fields(self))
@@ -145,7 +146,12 @@ class ConvStateBuffer(BufferWrapper):
         for idx in range(self.cfgs.tile_size):
             b_idx = b_start + idx
             s_idx = self.metadata_ref.b_idx_to_s_idx[b_idx]
-            state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx]
+            # For 2D state_indices, the initial state is statically read from Slot 0
+            # (which was prepared by the device-side rollback copy).
+            if self.metadata_ref.s_idx_to_state_idx.ndim == 2:
+                state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx, 0]
+            else:
+                state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx]
             sz_from_old = self.metadata_ref.b_idx_to_sz_from_old[b_idx]
             start_from_old = self.cfgs.prev_kernel_size - sz_from_old
             sz_from_old = jnp.where(is_no_op, 0, sz_from_old)
@@ -173,7 +179,15 @@ class ConvStateBuffer(BufferWrapper):
         for idx in range(self.cfgs.tile_size):
             b_idx = b_start + idx
             s_idx = self.metadata_ref.b_idx_to_s_idx[b_idx]
-            state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx]
+            token_step = self.metadata_ref.b_idx_to_token_step[b_idx]
+            # For 2D state_indices, we write the updated sliding window state after
+            # token `token_step` to Slot `token_step + 1` to build the history.
+            if self.metadata_ref.s_idx_to_state_idx.ndim == 2:
+                state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx,
+                                                                 token_step +
+                                                                 1]
+            else:
+                state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx]
             should_write = self.metadata_ref.b_idx_should_write[b_idx]
 
             pltpu.make_async_copy(
@@ -414,8 +428,19 @@ def preprocess_metadata(
                                        cfgs.prev_kernel_size)
 
     # Determine which row needs to write its conv_state to HBM.
-    b_idx_should_write = all_b_idx == (query_start_loc[b_idx_to_s_idx + 1] - 1)
+    # In speculative decoding (2D state_indices), we want to write the intermediate state
+    # at every token step to build the history, so we write for all valid tokens.
+    # In normal decoding (1D state_indices), we only write at the very end of the sequence.
+    if state_indices.ndim == 2:
+        b_idx_should_write = all_b_idx < num_tokens
+    else:
+        b_idx_should_write = all_b_idx == (
+            query_start_loc[b_idx_to_s_idx + 1] - 1)
     b_idx_should_write = b_idx_should_write.astype(jnp.int32)
+
+    # Compute the 0-based token step index within each request's speculative window.
+    # This maps 1-to-1 with the token index in the request.
+    b_idx_to_token_step = b_idx_query_len - 1
 
     return MetadataRef(
         num_tiles=pl.cdiv(num_tokens, cfgs.tile_size),
@@ -424,6 +449,7 @@ def preprocess_metadata(
         b_idx_should_write=b_idx_should_write,
         s_idx_to_state_idx=state_indices,
         s_idx_has_initial_state=has_initial_state,
+        b_idx_to_token_step=b_idx_to_token_step,
     )
 
 
@@ -465,13 +491,22 @@ def ragged_causal_conv1d(
     """
 
     # Step 1: Validate inputs.
-    num_seqs = state_indices.size
+    num_seqs = state_indices.shape[0]
     batch_size, dim = x.shape
     assert conv_weight.shape == (dim, 1, kernel_size)
     if conv_bias is not None:
         assert conv_bias.shape == (dim, )
     assert query_start_loc.shape == (num_seqs + 1, )
-    assert state_indices.shape == (num_seqs, )
+    # state_indices can be 1D (normal decoding, shape (num_seqs,)) or 2D (speculative
+    # decoding, shape (num_seqs, num_spec + 1)).
+    assert state_indices.ndim in (1, 2)
+    if state_indices.ndim == 1:
+        assert state_indices.shape == (num_seqs, )
+    else:
+        # In speculative decoding, the first dimension represents the requests, and
+        # the second dimension represents the history slots (which must be >= 2).
+        assert state_indices.shape[0] == num_seqs
+        assert state_indices.shape[1] >= 2
     assert distribution.shape == (3, )
 
     # Step 2: Input pre-processing.

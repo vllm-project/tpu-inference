@@ -384,7 +384,13 @@ class KVCacheManager:
         # block, rounded up to the sharding divisor. `runner.max_num_reqs`
         # already includes the DP multiplier
         # (= `dp_size × scheduler_config.max_num_seqs`).
-        mamba_num_blocks = self.runner.max_num_reqs + 1
+        # For speculative decoding, we allocate (num_spec + 1) blocks per request
+        # to store the state history, plus 1 block for the null slot.
+        if self.runner.speculative_config:
+            num_spec = self.runner.speculative_config.num_speculative_tokens
+            mamba_num_blocks = self.runner.max_num_reqs * (num_spec + 1) + 1
+        else:
+            mamba_num_blocks = self.runner.max_num_reqs + 1
         mamba_num_blocks = (
             (mamba_num_blocks + divisor - 1) // divisor) * divisor
 

@@ -65,6 +65,7 @@ class InputBatch:
         dp_size: int = 1,
     ):
         self.is_spec_decode = is_spec_decode
+        self.num_speculative_tokens = num_speculative_tokens
         self.max_num_reqs = max_num_reqs
         self.dp_size = dp_size
         self.max_model_len = max_model_len
@@ -165,13 +166,30 @@ class InputBatch:
         # get slots within that rank's shard of the device-side state array.
         # Matches the sharding in kv_cache_manager: mamba_num_blocks is
         # rounded up to dp_size, then split evenly across ranks.
-        mamba_num_blocks = ((max_num_reqs + dp_size) // dp_size) * dp_size
+        # For speculative decoding, each request requires (num_speculative_tokens + 1)
+        # physical slots in the Mamba cache to store the state history (Slot 0 for the
+        # initial state, and Slots 1..num_spec for the intermediate states after each
+        # draft token). We scale the total block count and use a stride-based allocation
+        # so that each request is assigned a contiguous, non-overlapping block of slots.
+        if is_spec_decode:
+            mamba_num_blocks = max_num_reqs * (num_speculative_tokens + 1)
+        else:
+            mamba_num_blocks = max_num_reqs
+        mamba_num_blocks = ((mamba_num_blocks + dp_size) // dp_size) * dp_size
+
+        # The stride determines the spacing between allocated slot IDs.
+        # For speculative decoding, stride = num_speculative_tokens + 1.
+        stride = (num_speculative_tokens + 1) if is_spec_decode else 1
         self._mamba_local_slots = mamba_num_blocks // dp_size
         self._free_mamba_slots_per_rank: list[list[int]] = []
         for k in range(dp_size):
             base = k * self._mamba_local_slots
+            # Populate the free slot pool with stride so that the allocator
+            # assigns only the base slot IDs of each contiguous chunk.
             self._free_mamba_slots_per_rank.append(
-                list(range(base + self._mamba_local_slots - 1, base, -1)))
+                list(
+                    range(base + self._mamba_local_slots - stride, base,
+                          -stride)))
 
         # for pooling models
         self.pooling_params: dict[str, PoolingParams] = {}
@@ -187,10 +205,15 @@ class InputBatch:
         """
         self._mamba_local_slots = mamba_num_blocks // self.dp_size
         self._free_mamba_slots_per_rank = []
+        # Use stride = num_speculative_tokens + 1 in speculative mode to keep slots chunked.
+        stride = (self.num_speculative_tokens +
+                  1) if self.is_spec_decode else 1
         for k in range(self.dp_size):
             base = k * self._mamba_local_slots
             self._free_mamba_slots_per_rank.append(
-                list(range(base + self._mamba_local_slots - 1, base, -1)))
+                list(
+                    range(base + self._mamba_local_slots - stride, base,
+                          -stride)))
 
     def release_mamba_slot(self, slot: Optional[int]) -> None:
         if slot is None:

@@ -25,6 +25,8 @@ from tpu_inference.kernels.gdn.reference import \
 from tpu_inference.kernels.gdn.v2.gdn_decode_kernel import \
     ragged_gated_delta_rule_decode_only
 from tpu_inference.kernels.gdn.v2.recurrent_scan_v2 import recurrent_scan
+from tpu_inference.kernels.gdn.reference.ragged_gated_delta_rule_ref import \
+    ragged_gated_delta_rule as ref_recurrent_impl
 
 
 @dataclasses.dataclass(frozen=True)
@@ -206,6 +208,31 @@ def ragged_gated_delta_rule_wrapper(
             raise ValueError(f'Unknown decode_impl: {impl}')
 
     def mixed_prefill_branch(_):
+        # Speculative decoding requires writing the intermediate Mamba state history
+        # for every token step. Parallel chunked implementations (like chunked JAX or
+        # Pallas chunked scan) do not materialize these intermediate states for every
+        # token because doing so would defeat the parallelization.
+        # Therefore, when state_indices is 2D (indicating speculative decoding), we
+        # force-route the execution to the reference recurrent JAX implementation, which
+        # runs token-by-token and has been updated to build the state history.
+        if state_indices.ndim == 2:
+            return ref_recurrent_impl(
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
+                recurrent_state=recurrent_state,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                query_start_loc=query_start_loc,
+                state_indices=state_indices,
+                distribution=distribution,
+                has_initial_state=has_initial_state,
+                n_kq=n_kq,
+                n_v=n_v,
+                d_k=d_k,
+                d_v=d_v,
+            )
+
         impl = config.prefill_impl
         if impl == 'jax':
             qkv_in = jax.nn.silu(mixed_qkv)

@@ -178,14 +178,26 @@ def ragged_gated_delta_rule(
     # which now holds zeros for new prefills regardless of what stale data
     # the slot may have held from a previous request. Mirrors GPU's
     # `initial_state[~has_initial_state, ...] = 0`.
-    gathered_states = recurrent_state[state_indices]
+    # For 2D state_indices (speculative decoding), the initial state for this step
+    # is always stored in Slot 0 (which was copied from the last accepted slot of the
+    # previous step by the runner). Thus, we only need to mask/initialize Slot 0.
+    if state_indices.ndim == 2:
+        initial_state_indices = state_indices[:, 0]
+    else:
+        initial_state_indices = state_indices
+
+    gathered_states = recurrent_state[initial_state_indices]
     masked_initial_states = jnp.where(
         has_initial_state[:, None, None, None],
         gathered_states,
         jnp.zeros_like(gathered_states),
     )
-    recurrent_state = recurrent_state.at[state_indices].set(
+    recurrent_state = recurrent_state.at[initial_state_indices].set(
         masked_initial_states)
+
+    # Compute the 0-based token index (step) within each request's speculative window.
+    # This is used to index into the 2D state_indices history buffer.
+    token_step_idx = token_idx - effective_query_start_loc[req_indices]
 
     def scan_fn(carry, xs):
         recurrent_state_all = carry
@@ -197,6 +209,7 @@ def ragged_gated_delta_rule(
             curr_a,
             request_index,
             is_valid_token,
+            token_step,
         ) = xs
 
         curr_q = curr_q[None, None, :]
@@ -205,8 +218,19 @@ def ragged_gated_delta_rule(
         curr_b = curr_b[None, None, :]
         curr_a = curr_a[None, None, :]
 
-        state_index = state_indices[request_index]
-        recurrent_state = recurrent_state_all[state_index][None, ...]
+        # In speculative decoding (2D state_indices), we implement a sequential recurrence:
+        # - The token at step `i` reads its initial state from Slot `i` (which holds the state
+        #   updated by the previous token).
+        # - It writes its updated state to Slot `i + 1` to build the history.
+        # For normal decoding (1D state_indices), we read and write to the same single slot.
+        if state_indices.ndim == 2:
+            read_state_index = state_indices[request_index, token_step]
+            write_state_index = state_indices[request_index, token_step + 1]
+        else:
+            read_state_index = state_indices[request_index]
+            write_state_index = state_indices[request_index]
+
+        recurrent_state = recurrent_state_all[read_state_index][None, ...]
 
         B, T = 1, 1
         query_reshaped = curr_q.reshape(B, T, n_kq, d_k)
@@ -251,7 +275,7 @@ def ragged_gated_delta_rule(
 
         recurrent_state_all = jnp.where(
             is_valid_token,
-            recurrent_state_all.at[state_index].set(
+            recurrent_state_all.at[write_state_index].set(
                 new_recurrent_state[0].astype(recurrent_state_all.dtype)),
             recurrent_state_all,
         )
@@ -259,7 +283,7 @@ def ragged_gated_delta_rule(
         return recurrent_state_all, output[0, 0]
 
     carry_init = recurrent_state
-    xs = (query, key, value, b, a, req_indices, valid_mask)
+    xs = (query, key, value, b, a, req_indices, valid_mask, token_step_idx)
 
     new_recurrent_state, output = jax.lax.scan(scan_fn, carry_init, xs)
     return new_recurrent_state, output

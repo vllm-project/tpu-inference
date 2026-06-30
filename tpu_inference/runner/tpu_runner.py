@@ -331,6 +331,31 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
     return seq_lens, positions
 
 
+@jax.jit
+def _rollback_mamba_layer_states_fn(
+    conv_state: jax.Array,
+    recurrent_state: jax.Array,
+    state_indices: jax.Array,
+    num_accepted_tokens: jax.Array,
+):
+    """Rollback a single Mamba layer's states on the device by copying Slot[num_accepted] to Slot[0].
+
+    This copies the state from the last accepted token's slot (Slot[num_accepted]) to the
+    initial state slot (Slot[0]) for every request. By doing this copy on the device at the
+    start of the step, the Mamba kernels (causal_conv1d and gdn_attention) can always read
+    their initial state statically from Slot[0] and write their new history to Slots 1..num_spec,
+    avoiding the need for complex, dynamic offset reads inside the Pallas kernels.
+    """
+    max_num_reqs = state_indices.shape[0]
+    target_slots = state_indices[:, 0]
+    source_slots = state_indices[jnp.arange(max_num_reqs), num_accepted_tokens]
+
+    updated_conv = conv_state.at[target_slots].set(conv_state[source_slots])
+    updated_rec = recurrent_state.at[target_slots].set(
+        recurrent_state[source_slots])
+    return updated_conv, updated_rec
+
+
 def _jax_logprobs_materialize(
         logprobs_tensors: LogprobsTensors,
         logits_indices_selector: Optional[List[int]] = None,
@@ -1221,6 +1246,29 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return placeholder_req_id_to_index
 
+    def _device_rollback_mamba_states(
+        self,
+        state_indices: jax.Array,
+        num_accepted_tokens: jax.Array,
+    ) -> None:
+        """Rollback Mamba states for all layers on the device.
+
+        This loops through the KV caches, detects Mamba layers, and triggers
+        the JIT-compiled `_rollback_mamba_layer_states_fn` to perform the
+        in-place copy of the accepted state to Slot 0.
+        """
+        for layer_idx, kv_cache in enumerate(self.kv_caches):
+            if isinstance(kv_cache,
+                          tuple):  # Mamba layer: (conv_state, recurrent_state)
+                conv_state, recurrent_state = kv_cache
+                new_conv, new_rec = _rollback_mamba_layer_states_fn(
+                    conv_state,
+                    recurrent_state,
+                    state_indices,
+                    num_accepted_tokens,
+                )
+                self.kv_caches[layer_idx] = (new_conv, new_rec)
+
     def _execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
@@ -1297,6 +1345,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # TODO: make _get_input_ids_embeds within this context
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
+        # In speculative decoding, if there is a previous step's async results,
+        # we must check if any tokens were rejected. If so, we perform a device-side
+        # rollback of the Mamba states BEFORE running the new forward pass.
+        if self.speculative_config and self._pre_async_results is not None:
+            # Retrieve the previous step's rejection count and proposed draft lengths from the device.
+            num_rejected = self._pre_async_results.spec_decode_num_rejected_tokens
+            draft_lengths = self._pre_async_results.spec_decode_metadata.draft_lengths
+            # The number of accepted draft tokens (a) is: draft_lengths - num_rejected.
+            # This is computed entirely on the device.
+            num_accepted_tokens_dev = draft_lengths - num_rejected
+
+            # Trigger the device-side copy: copy Slot[a] to Slot[0] for all Mamba layers.
+            self._device_rollback_mamba_states(
+                attn_metadata.mamba_state_indices,
+                num_accepted_tokens_dev,
+            )
         with self.maybe_forbid_compile:
             with set_forward_context(
                     None,
@@ -2518,18 +2582,39 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # and convert global slot ids to rank-local indices so they
             # index correctly into the per-rank shard of the mamba state.
             local_slots = self.input_batch._mamba_local_slots
-            mamba_state_indices_cpu = np.zeros(self.max_num_reqs,
-                                               dtype=np.int32)
-            for dp_rank in range(dp_size):
-                _num_reqs = num_req_per_dp_rank[dp_rank]
-                if _num_reqs == 0:
-                    continue
-                req_offset = dp_rank * max_num_reqs_per_dp_rank
-                global_slots = self.input_batch.mamba_state_indices_cpu[
-                    req_indices_dp[dp_rank]]
-                mamba_state_indices_cpu[req_offset:req_offset +
-                                        _num_reqs] = (global_slots %
-                                                      local_slots)
+            if self.speculative_config:
+                # In speculative decoding, each request is mapped to a 2D row of (num_spec + 1) slots
+                # representing its state history. The host-side allocator assigns a strided base slot ID,
+                # and we expand it here to [base_slot, base_slot + 1, ..., base_slot + num_spec]
+                # using numpy broadcasting.
+                num_spec = self.speculative_config.num_speculative_tokens
+                mamba_state_indices_cpu = np.zeros(
+                    (self.max_num_reqs, num_spec + 1), dtype=np.int32)
+                for dp_rank in range(dp_size):
+                    _num_reqs = num_req_per_dp_rank[dp_rank]
+                    if _num_reqs == 0:
+                        continue
+                    req_offset = dp_rank * max_num_reqs_per_dp_rank
+                    global_slots = self.input_batch.mamba_state_indices_cpu[
+                        req_indices_dp[dp_rank]]
+                    local_base_slots = global_slots % local_slots
+                    arange = np.arange(num_spec + 1, dtype=np.int32)
+                    mamba_state_indices_cpu[
+                        req_offset:req_offset +
+                        _num_reqs] = local_base_slots[:, None] + arange
+            else:
+                mamba_state_indices_cpu = np.zeros(self.max_num_reqs,
+                                                   dtype=np.int32)
+                for dp_rank in range(dp_size):
+                    _num_reqs = num_req_per_dp_rank[dp_rank]
+                    if _num_reqs == 0:
+                        continue
+                    req_offset = dp_rank * max_num_reqs_per_dp_rank
+                    global_slots = self.input_batch.mamba_state_indices_cpu[
+                        req_indices_dp[dp_rank]]
+                    mamba_state_indices_cpu[req_offset:req_offset +
+                                            _num_reqs] = (global_slots %
+                                                          local_slots)
             (request_distribution, mamba_state_indices,
              dev_arrays_payload) = device_array(
                  self.mesh, (request_distribution, mamba_state_indices_cpu,
