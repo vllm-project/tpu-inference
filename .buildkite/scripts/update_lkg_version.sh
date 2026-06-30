@@ -22,7 +22,7 @@ if [[ -z "$NEW_LKG_HASH" ]]; then
 fi
 
 # Configuration
-TARGET_BRANCH="main"
+TARGET_BRANCH="test-remove-pat"
 
 NEW_LKG_HASH=$1
 VERSION_FILE=".buildkite/vllm_lkg.version"

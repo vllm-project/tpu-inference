@@ -78,6 +78,10 @@ for ver in v6e v7x; do
   fi
 done
 
+echo "--- Creating dummy change for testing"
+mkdir -p support_matrices
+echo "test-$(date)" >> support_matrices/dummy_test.txt
+
 echo "--- Staging changes"
 git add support_matrices/
 

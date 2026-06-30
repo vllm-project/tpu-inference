@@ -12,91 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-x-run-condition: &run-on-nightly-or-tag
-  if: build.env("NIGHTLY") == "1" || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
-
 steps:
-   - label: "Upload Tests for Models & Features (${MODEL_IMPL_TYPE:-auto})"
-     <<: *run-on-nightly-or-tag
-     agents:
-       queue: cpu
-     commands:
-       - bash .buildkite/scripts/upload_models_and_features.sh
-
-   - wait: ~
-     continue_on_failure: true  # ensure we still generate support matrices even if some tests fail
-
-   - label: "Check Metadata Health"
-     key: "check_metadata_health"
-     <<: *run-on-nightly-or-tag
-     agents: 
-       queue: cpu 
-     commands: |
-        if [ "$(buildkite-agent meta-data get stop_support_matrix --default 'false')" = "true" ]; then
-          echo "--- 🛑 Detected critical metadata failure. Blocking support matrix generation."
-          exit 1
-        fi
-        echo "✅ Metadata healthy. Proceeding..."
-
-   - label: "v6 Generate support matrices"
-     <<: *run-on-nightly-or-tag
-     key: "v6_generate_matrices"
-     depends_on: "check_metadata_health"
-     agents: { queue: cpu }
-     env:
-       TPU_VERSION: "v6e"
-     command: |
-      if [ "$(buildkite-agent meta-data get run_v6_matrix --default 'false')" = "true" ]; then
-          bash .buildkite/scripts/generate_support_matrices.sh
-        else
-          echo "--- Skipping v6 matrix generation (No v6 test data found)"
-        fi
-
-   - label: "v7 Generate support matrices"
-     <<: *run-on-nightly-or-tag
-     key: "v7_generate_matrices"
-     depends_on: "check_metadata_health"
-     agents: { queue: cpu }
-     env:
-      TPU_VERSION: "v7x"
-     command: |
-      if [ "$(buildkite-agent meta-data get run_v7_matrix --default 'false')" = "true" ]; then
-        bash .buildkite/scripts/generate_support_matrices.sh
-      else
-        echo "--- Skipping v7 matrix generation (No v7 test data found)"
-      fi
-  
-   - label: "Commit support matrices if is nightly build or release tag specified"
-     # commit_support_matrices and record_verified_commit_hashes push to the repo via
-     # GitHub App credentials, which are only provisioned for main / release tags. Gate
-     # them off release-branch nightlies (branch != main, no tag) to avoid a "secrets" failure.
-     if: (build.env("NIGHTLY") == "1" && build.branch == "main") || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
+   - label: "Commit support matrices"
      key: commit_support_matrices
-     depends_on:
-       - "v6_generate_matrices"
-       - "v7_generate_matrices"
      agents:
        queue: cpu
      command:
        - bash .buildkite/scripts/commit_support_matrices.sh
 
-   - label: "Notify test results"
-     <<: *run-on-nightly-or-tag
-     key: notify_test_results
-     depends_on: commit_support_matrices
-     agents:
-       queue: cpu
-     commands:
-       - bash .buildkite/scripts/notify_test_results.sh
-
    - label: "Record verified commit hashes"
-     # GitHub App credentials are main/tag-only - see commit_support_matrices above.
-     if: build.env("NIGHTLY") == "1" && build.branch == "main"
      key: record_verified_commit_hashes
-     depends_on:
-       - notify_test_results
-       - tpu6e_tpu_test_notification
-       - tpu7x_tpu_test_notification
      agents:
        queue: cpu
      command:

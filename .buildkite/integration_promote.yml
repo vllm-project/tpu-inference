@@ -13,10 +13,6 @@
 # limitations under the License.
 
 steps:
-  - wait: ~
-  # -----------------------------------------------------------------
-  # Checkin LKG
-  # -----------------------------------------------------------------
   - label: "Promote to Last Known Good (LKG)"
     key: "promote_lkg"
     agents:

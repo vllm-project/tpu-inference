@@ -232,8 +232,16 @@ upload_benchmark_pipeline() {
     process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY" "$changed_cases"
 }
 
-echo "--- Starting Buildkite Bootstrap"
-echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
+if [[ "$BUILDKITE_BRANCH" == "test-remove-pat" ]]; then
+    echo "--- Test Branch detected. Uploading test-only pipelines."
+    VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
+    buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
+    
+    upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
+    upload_with_priority .buildkite/nightly_verify.yml "$JOB_PRIORITY"
+    echo "--- Buildkite Bootstrap Finished"
+    exit 0
+fi
 
 echo "Configure notification"
 ONCALL_EMAIL="ullm-test-notifications-external@google.com"

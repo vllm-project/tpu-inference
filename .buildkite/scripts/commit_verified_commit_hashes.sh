@@ -16,7 +16,7 @@
 set -e
 
 # --- Configuration ---
-TARGET_BRANCH="main"
+TARGET_BRANCH="test-remove-pat"
 
 COMMIT_MESSAGE="Update verified commit hashes"
 
