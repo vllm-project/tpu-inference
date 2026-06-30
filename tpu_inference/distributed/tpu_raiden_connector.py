@@ -81,7 +81,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 try:
-    from api.jax.kv_cache_manager import KVCacheManager as KVCacheManager
+    from tpu_raiden.api.jax.kv_cache_manager import KVCacheManager
     _RAIDEN_IMPORT_ERROR = None
 except Exception as _exc:  # pylint: disable=broad-except
     KVCacheManager = None
@@ -494,8 +494,8 @@ class TPUConnectorWorker:
     def register_runner(self, runner: TPUModelRunner):
         if KVCacheManager is None:
             raise ImportError(
-                "KVCacheManager is not importable. Add the tpu-raiden "
-                "export to PYTHONPATH so 'api.jax.kv_cache_manager' resolves "
+                "KVCacheManager is not importable. Ensure tpu-raiden is correctly "
+                "installed or added to PYTHONPATH so 'tpu_raiden.api.jax.kv_cache_manager' resolves "
                 "(and set RAIDEN_PRELOAD_ENGINE=1 so sitecustomize.py preloads "
                 f"the kv_cache_manager .so first). Original error: {_RAIDEN_IMPORT_ERROR}"
             )
@@ -528,6 +528,9 @@ class TPUConnectorWorker:
             num_slots=num_slots,
             timeout_s=float(dist_utils.get_p2p_wait_pull_timeout()),
             unsafe_skip_buffer_lock=skip_lock,
+            # The PUSH (producer H2hWrite) fans out across the manager's ctor
+            # `parallelism` (default 4!)
+            parallelism=parallelism,
         )
         logger.info(
             f"TPUConnector Worker {self.node_id} --> Raiden kv_cache_manager ready | "
@@ -537,13 +540,38 @@ class TPUConnectorWorker:
             f"max_blocks={max_blocks} | num_slots={num_slots} | "
             f"parallelism={parallelism}")
 
-    def _remote_endpoint(self, req_meta: "LoadMeta") -> str:
+    def _remote_endpoint(self, req_meta: "LoadMeta"):
+        """Resolve the producer endpoint(s) for start_read.
+
+        The producer's KVCacheManager binds one control port per NUMA
+        sub-manager, consecutively from the advertised base port
+        (TPU_KV_TRANSFER_PORT); each sub-manager serves a distinct shard set.
+        With >1 sub-manager we MUST route each local sub-manager to the producer
+        sub-manager that holds its shards. Passing a single "host:base" string
+        instead hits start_read's broadcast overload, so every local sub-manager
+        pulls from the base port (sub-manager 0) and the non-base sockets receive
+        the wrong shards -- silent ~50% KV corruption.
+
+        Returns a list of structured {endpoint, shards} descriptors when there is
+        more than one sub-manager (so start_read does shard-matched routing), and
+        a plain "host:port" string for the single-sub-manager case (unchanged).
+        Both prefill and decode run identical hardware, so producer sub-manager i
+        (port base+i) serves the same shards as our local sub-manager i.
+        """
         host = req_meta.remote_host
         port = req_meta.remote_port
         if isinstance(host, list):
             assert isinstance(port, list) and len(host) == len(port)
-            return f"{host[self.node_id]}:{port[self.node_id]}"
-        return f"{host}:{port}"
+            host = host[self.node_id]
+            port = port[self.node_id]
+        base = int(port)
+        local_eps = self.kv_manager.get_local_endpoints()
+        if len(local_eps) <= 1:
+            return f"{host}:{base}"
+        return [{
+            "endpoint": f"{host}:{base + i}",
+            "shards": list(ep["shards"])
+        } for i, ep in enumerate(local_eps)]
 
     def process_send_load(self, metadata: TPUConnectorMetadata):
         """
@@ -556,8 +584,6 @@ class TPUConnectorWorker:
             logger.info(
                 f"TPUConnector Worker {self.node_id} -->  reqs_to_send={reqs}")
         for req_id, req_meta in reqs.items():
-            # Producer: register the prefilled blocks so D can pull them.
-            # Replaces select_from_kv_caches + kv_transfer_server.await_pull.
             self.kv_manager.register_read(req_id, req_meta.uuid,
                                           req_meta.local_block_ids)
 
