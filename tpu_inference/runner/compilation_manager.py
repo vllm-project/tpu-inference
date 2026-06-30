@@ -258,6 +258,17 @@ class CompilationManager:
                                         sharding=dp_sharding)
             return block_tables
 
+        # Static (compile-time) decode-region query length. Must match the
+        # runtime value built in `_prepare_inputs` (tpu_runner.build_attn): with
+        # multi-token decode enabled (spec config + an RPA kernel that accepts
+        # `decode_q_len`), decode-region requests carry `num_speculative_tokens +
+        # 1` query tokens. `decode_q_len` is a static AttentionMetadata meta-field
+        # (part of the step_fun treedef) and an RPA-kernel static arg, so warmup
+        # must compile the serving value -- otherwise the first spec-decode step
+        # hits an uncompiled `decode_q_len>1` graph and recompiles mid-serving.
+        decode_q_len = (self.runner.speculative_config.num_speculative_tokens +
+                        1) if self.runner.enable_multitoken_decode else 1
+
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
@@ -267,6 +278,7 @@ class CompilationManager:
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
+                decode_q_len=decode_q_len,
             )
             return attention_metadata_gid
 
