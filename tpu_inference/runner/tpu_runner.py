@@ -1357,8 +1357,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             num_accepted_tokens_dev = draft_lengths - num_rejected
 
             # Trigger the device-side copy: copy Slot[a] to Slot[0] for all Mamba layers.
+            if isinstance(attn_metadata, dict):
+                first_meta = next(iter(attn_metadata.values()))
+                state_indices_to_rollback = first_meta.mamba_state_indices
+            else:
+                state_indices_to_rollback = attn_metadata.mamba_state_indices
+
             self._device_rollback_mamba_states(
-                attn_metadata.mamba_state_indices,
+                state_indices_to_rollback,
                 num_accepted_tokens_dev,
             )
         with self.maybe_forbid_compile:
