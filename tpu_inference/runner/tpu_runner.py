@@ -94,7 +94,7 @@ from tpu_inference.spec_decode.jax.utils import (
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function, to_jax_dtype, to_torch_dtype)
 
-# Patch to classify non-LoRA keys as base weights. Without this, vLLM's `add_lora`
+# Patch to classify specific non-LoRA keys as base weights. Without this, vLLM's `add_lora`
 # crashes with "unsupported LoRA weight" on base model parameters like `lm_head.weight`
 # because upstream's `is_base_embedding_weights` uses a strict layer-name whitelist.
 # Compare upstream: https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/lora/utils.py#L97-L99
@@ -103,9 +103,7 @@ _orig_is_base_embedding_weights = getattr(lora_utils_mod,
 
 
 def _patched_is_base_embedding_weights(name: str) -> bool:
-    lora_signatures = ("lora_A", "lora_B", "lora_embedding_A",
-                       "lora_embedding_B")
-    if not any(sig in name for sig in lora_signatures):
+    if name.endswith(("lm_head.weight", "embed_tokens.weight")):
         return True
     if _orig_is_base_embedding_weights is not None:
         return _orig_is_base_embedding_weights(name)
