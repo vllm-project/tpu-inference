@@ -44,7 +44,6 @@ if TYPE_CHECKING:
     FORCE_MOE_RANDOM_ROUTING: bool = False
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
-    RAGGED_GATED_DELTA_RULE_IMPL: str = "chunked_jax_pd"
     # SparseCore MoE gather kernel version used by fused_moe_gmm.
     # "v2" (default) = ragged_gather_v2; "v1" = legacy ragged_gather.
     RAGGED_GATHER_VERSION: str = "v2"
@@ -331,15 +330,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_str_list("JITTED_MM_MODULE_KEYS"),
     "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
     env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
-    "RAGGED_GATED_DELTA_RULE_IMPL":
-    env_with_choices(
-        "RAGGED_GATED_DELTA_RULE_IMPL",
-        "chunked_jax_pd",
-        [
-            "chunked_jax_pd", "chunked_kernel_pd",
-            "chunked_kernel_p_recurrent_kernel_d"
-        ],
-    ),
     "RAGGED_GATHER_VERSION":
     env_with_choices("RAGGED_GATHER_VERSION", "v2", ["v1", "v2"]),
     "RAGGED_GATHER_REDUCE_VERSION":
