@@ -38,7 +38,7 @@
           "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
-          "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
+          "model": "deepseek-ai/DeepSeek-R1",
           "served-model-name": "deepseek-ai/DeepSeek-R1",
           "seed": 42,
           "max-num-seqs": 640,
