@@ -22,25 +22,15 @@ if [[ -z "$NEW_LKG_HASH" ]]; then
 fi
 
 # Configuration
-REPO_URL="https://github.com/vllm-project/tpu-inference.git"
 TARGET_BRANCH="main"
 
 NEW_LKG_HASH=$1
 VERSION_FILE=".buildkite/vllm_lkg.version"
 
-# Construct the repository URL with the access token for authentication
-AUTHENTICATED_REPO_URL="https://x-access-token:${GITHUB_PAT}@${REPO_URL#https://}"
-git remote set-url origin "${AUTHENTICATED_REPO_URL}"
-
-# Ensure the GITHUB_PAT is available before proceeding
-if [ -z "${GITHUB_PAT:-}" ]; then
-  echo "--- ERROR: GITHUB_PAT secret not found. Cannot proceed."
-  exit 1
-fi
 
 # Configure credentials
-git config user.name "Buildkite Bot"
-git config user.email "buildkite-bot@users.noreply.github.com"
+git config user.name "vllm-ci-bot[bot]"
+git config user.email "vllm-ci-bot[bot]@users.noreply.github.com"
 
 # Fetch and checkout
 git fetch origin "${TARGET_BRANCH}"

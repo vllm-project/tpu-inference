@@ -68,8 +68,8 @@ steps:
   
    - label: "Commit support matrices if is nightly build or release tag specified"
      # commit_support_matrices and record_verified_commit_hashes push to the repo via
-     # GITHUB_PAT, which is only provisioned for main / release tags. Gate them off
-     # release-branch nightlies (branch != main, no tag) to avoid a "secrets" failure.
+     # GitHub App credentials, which are only provisioned for main / release tags. Gate
+     # them off release-branch nightlies (branch != main, no tag) to avoid a "secrets" failure.
      if: (build.env("NIGHTLY") == "1" && build.branch == "main") || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
      key: commit_support_matrices
      depends_on:
@@ -77,8 +77,6 @@ steps:
        - "v7_generate_matrices"
      agents:
        queue: cpu
-     secrets:
-      - GITHUB_PAT
      command:
        - bash .buildkite/scripts/commit_support_matrices.sh
 
@@ -92,7 +90,7 @@ steps:
        - bash .buildkite/scripts/notify_test_results.sh
 
    - label: "Record verified commit hashes"
-     # GITHUB_PAT is main/tag-only - see commit_support_matrices above.
+     # GitHub App credentials are main/tag-only - see commit_support_matrices above.
      if: build.env("NIGHTLY") == "1" && build.branch == "main"
      key: record_verified_commit_hashes
      depends_on:
@@ -101,7 +99,5 @@ steps:
        - tpu7x_tpu_test_notification
      agents:
        queue: cpu
-     secrets:
-      - GITHUB_PAT
      command:
        - bash .buildkite/scripts/commit_verified_commit_hashes.sh
