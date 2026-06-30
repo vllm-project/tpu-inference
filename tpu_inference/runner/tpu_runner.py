@@ -1360,9 +1360,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Trigger the device-side copy: copy Slot[a] to Slot[0] for all Mamba layers.
             if isinstance(attn_metadata, dict):
                 first_meta = next(iter(attn_metadata.values()))
-                state_indices_to_rollback = first_meta.mamba_state_indices
+                state_indices_to_rollback = first_meta.mamba_state_indices_global
             else:
-                state_indices_to_rollback = attn_metadata.mamba_state_indices
+                state_indices_to_rollback = attn_metadata.mamba_state_indices_global
 
             self._device_rollback_mamba_states(
                 state_indices_to_rollback,
@@ -2591,11 +2591,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             local_slots = self.input_batch._mamba_local_slots
             if self.speculative_config:
                 # In speculative decoding, each request is mapped to a 2D row of (num_spec + 2) slots
-                # representing its state history. The host-side allocator assigns a strided base slot ID,
-                # and we expand it here to [base_slot, base_slot + 1, ..., base_slot + num_spec + 1]
-                # using numpy broadcasting.
+                # representing its state history. We construct a global slots 2D array for rollback,
+                # and a local slots 2D array for local Mamba operations.
                 num_spec = self.speculative_config.num_speculative_tokens
-                mamba_state_indices_cpu = np.zeros(
+                mamba_state_indices_global_cpu = np.zeros(
                     (self.max_num_reqs, num_spec + 2), dtype=np.int32)
                 for dp_rank in range(dp_size):
                     _num_reqs = num_req_per_dp_rank[dp_rank]
@@ -2604,12 +2603,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     req_offset = dp_rank * max_num_reqs_per_dp_rank
                     global_slots = self.input_batch.mamba_state_indices_cpu[
                         req_indices_dp[dp_rank]]
-                    local_base_slots = global_slots % local_slots
                     arange = np.arange(num_spec + 2, dtype=np.int32)
-                    mamba_state_indices_cpu[
+                    mamba_state_indices_global_cpu[
                         req_offset:req_offset +
-                        _num_reqs] = local_base_slots[:, None] + arange
+                        _num_reqs] = global_slots[:, None] + arange
+                mamba_state_indices_cpu = mamba_state_indices_global_cpu % local_slots
+
+                (request_distribution, mamba_state_indices,
+                 mamba_state_indices_global,
+                 dev_arrays_payload) = device_array(
+                     self.mesh,
+                     (request_distribution, mamba_state_indices_cpu,
+                      mamba_state_indices_global_cpu, metadata_blob),
+                     sharding=data_parallel_attn_sharding)
             else:
+                mamba_state_indices_global = None
                 mamba_state_indices_cpu = np.zeros(self.max_num_reqs,
                                                    dtype=np.int32)
                 for dp_rank in range(dp_size):
@@ -2622,13 +2630,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     mamba_state_indices_cpu[req_offset:req_offset +
                                             _num_reqs] = (global_slots %
                                                           local_slots)
-            (request_distribution, mamba_state_indices,
-             dev_arrays_payload) = device_array(
-                 self.mesh, (request_distribution, mamba_state_indices_cpu,
-                             metadata_blob),
-                 sharding=data_parallel_attn_sharding)
+                (request_distribution, mamba_state_indices,
+                 dev_arrays_payload) = device_array(
+                     self.mesh, (request_distribution, mamba_state_indices_cpu,
+                                 metadata_blob),
+                     sharding=data_parallel_attn_sharding)
         else:
             mamba_state_indices = None
+            mamba_state_indices_global = None
             (request_distribution, dev_arrays_payload) = device_array(
                 self.mesh, (request_distribution, metadata_blob),
                 sharding=data_parallel_attn_sharding)
@@ -2655,6 +2664,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                mamba_state_indices_global=mamba_state_indices_global,
                 padded_num_reqs=attn_padded_num_reqs,
             )
 

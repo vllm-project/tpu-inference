@@ -27,6 +27,7 @@ import jax
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "mamba_state_indices_global",
     ],
     meta_fields=["padded_num_reqs"],
 )
@@ -51,6 +52,9 @@ class AttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+    # (max_num_seqs,) int32 — global physical slot id in the Mamba cache,
+    # used on the host/device host-level functions for state rollback.
+    mamba_state_indices_global: jax.Array | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket
     # contains only max_reqs by default to reduce model precompilation time.
