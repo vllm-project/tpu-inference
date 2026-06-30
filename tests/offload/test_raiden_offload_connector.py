@@ -12,26 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib.util
 import sys
 from unittest.mock import MagicMock
 
-import pytest
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.request import Request
-
-# Skip the whole module if tpu_raiden is not available in this environment.
-# `find_spec` only locates the package (it does NOT import it / load the engine
-# .so), so this is a safe availability check.
-if importlib.util.find_spec("tpu_raiden") is None:
-    pytest.skip(
-        "tpu_raiden is not importable; skipping Raiden offload connector tests",
-        allow_module_level=True)
-
-# Mock tpu_raiden module BEFORE importing the connector so its module-level
-# `from tpu_raiden import ...` resolves to these mocks instead of being cached as
-# None (which makes the connector raise ImportError at use time).
+# Install a mock `tpu_raiden` in sys.modules BEFORE importing pytest / vllm /
+# tpu_inference / the connector. This lets the tests run even when the real
+# tpu_raiden is NOT installed, and is intentionally done first because:
+#   - the connector's module-level `from tpu_raiden import ...` resolves to these
+#     mocks (otherwise it caches None and raises ImportError at use time), and
+#   - tpu_inference's engine-first `import tpu_raiden.frameworks.jax._tpu_raiden_jax`
+#     resolves through this mock (submodule import -> ModuleNotFoundError, which
+#     tpu_inference swallows) instead of loading the real engine .so -- which would
+#     crash on a standalone import. So the mock also shadows a real install.
 mock_raiden = MagicMock()
 mock_raiden.KVCacheManager = MagicMock()
 mock_raiden.KVCacheStore = MagicMock()
@@ -53,6 +45,12 @@ class MockRaidenId:
 
 mock_raiden.RaidenId = MockRaidenId
 sys.modules['tpu_raiden'] = mock_raiden
+
+import pytest  # noqa: E402
+from vllm.distributed.kv_transfer.kv_connector.v1.base import \
+    KVConnectorRole  # noqa: E402
+from vllm.v1.core.sched.output import SchedulerOutput  # noqa: E402
+from vllm.v1.request import Request  # noqa: E402
 
 from tpu_inference.offload.raiden_offload_connector import (  # noqa: E402
     RaidenConnectorMetadata, RaidenLoadSpec, RaidenLocator,
