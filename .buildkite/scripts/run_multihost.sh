@@ -269,6 +269,11 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_
 EOF
 done
 
+# TEMPORARY: Early exit to run cleanup only
+echo "🧹 Cleanup-only mode active. Exiting early."
+exit 0
+
+
 
 echo "--- Waiting for all worker nodes to connect"
 # Wait a few seconds for all worker nodes to connect
