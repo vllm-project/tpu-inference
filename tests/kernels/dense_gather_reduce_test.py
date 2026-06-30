@@ -89,6 +89,20 @@ class DenseGatherReduceTest(jtu.JaxTestCase):
                 [10],
                 [False],
             ),
+            # Hidden sizes that are not a multiple of the 128-wide lane tile.
+            # gpt-oss uses hidden_size=2880, for which no tile-aligned column
+            # chunk exists, so dense_gather_reduce must fall back to the JAX
+            # path instead of emitting an unaligned tpu.memref_slice that fails
+            # Mosaic verification ("Slice sizes along tiled dimensions must be
+            # aligned to tiles"). 2944 is a multiple of 128 but only admits a
+            # 128-wide chunk; both must still produce correct results.
+            itertools.product(
+                [32768],
+                [2880, 2944],
+                [jnp.bfloat16],
+                [4],
+                [False, True],
+            ),
         )
     ]
 
