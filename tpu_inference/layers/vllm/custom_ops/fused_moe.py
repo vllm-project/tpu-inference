@@ -21,12 +21,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 from tpu_inference.layers.common.moe import MoEBackend
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import ShardingAxisName, is_attn_dp
 from tpu_inference.layers.vllm.interface.moe import \
     select_moe_backend_from_fused_moe_config
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
-from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -37,16 +36,6 @@ def _get_mesh() -> Mesh | None:
         return get_vllm_model_wrapper_context().mesh
     except AssertionError:
         return None
-
-
-def _is_attn_dp() -> bool:
-    """Whether attention data-parallelism is enabled on the active mesh."""
-    mesh = _get_mesh()
-    if mesh is None:
-        return False
-    attn_dp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA)
-    dp_size = get_mesh_shape_product(mesh, ShardingAxisName.MLP_DATA)
-    return (attn_dp_size // dp_size) > 1
 
 
 def _all_reduce_over_tp(t: torch.Tensor, mesh: Mesh) -> torch.Tensor:
@@ -60,22 +49,6 @@ def _all_reduce_over_tp(t: torch.Tensor, mesh: Mesh) -> torch.Tensor:
     return torch_view(_reduce(jax_view(t)))
 
 
-def _effective_reduce_axes(mesh: Mesh, axes) -> frozenset:
-    """The subset of the given mesh axis names that actually shard (size > 1)."""
-    if isinstance(axes, str):
-        axes = (axes, )
-    return frozenset(a for a in axes if get_mesh_shape_product(mesh, a) > 1)
-
-
-def _gmm_and_shared_reduce_over_same_axes(mesh: Mesh,
-                                          moe_backend: MoEBackend) -> bool:
-    """Whether the GMM's reduction collapses exactly the shared-expert's TP axis."""
-    gmm_axis = (ShardingAxisName.EXPERT if moe_backend == MoEBackend.GMM_EP
-                else ShardingAxisName.MLP_TENSOR)
-    return (_effective_reduce_axes(mesh, gmm_axis) == _effective_reduce_axes(
-        mesh, ShardingAxisName.MLP_TENSOR))
-
-
 @MoERunner.register_oot
 class VllmMoERunner(MoERunner):
 
@@ -86,25 +59,19 @@ class VllmMoERunner(MoERunner):
         # ``_maybe_reduce_final_output`` -- ONLY when every condition below
         # holds. Otherwise the fused output is reduced by the kernel itself.
         #
-        #   1. a shared expert is present (else there is nothing to fuse with),
-        #   2. attention-DP is disabled (DP resolves the reduction separately),
+        #   1. a shared expert is present (else there is nothing to fuse with)
+        #   2. attention-DP is disabled (DP resolves the reduction separately)
         #   3. the backend is GMM_EP / GMM_TP (only those honor defer_all_reduce;
-        #      e.g. the FUSED_MOE kernel always reduces), and
-        #   4. the GMM reduction collapses the same mesh axes as the shared
-        #      expert (MODEL) -- otherwise one all-reduce over MODEL cannot
-        #      stand in for the GMM's reduction.
-        if self._shared_experts is None or _is_attn_dp():
-            return True
-
+        #      e.g. the FUSED_MOE kernel always reduces)
         mesh = _get_mesh()
         if mesh is None:
             return True
 
-        moe_backend = select_moe_backend_from_fused_moe_config(self.moe_config)
-        if moe_backend not in (MoEBackend.GMM_EP, MoEBackend.GMM_TP):
+        if self._shared_experts is None or is_attn_dp(mesh):
             return True
 
-        if not _gmm_and_shared_reduce_over_same_axes(mesh, moe_backend):
+        moe_backend = select_moe_backend_from_fused_moe_config(self.moe_config)
+        if moe_backend not in (MoEBackend.GMM_EP, MoEBackend.GMM_TP):
             return True
 
         return False
@@ -142,12 +109,14 @@ class VllmMoERunner(MoERunner):
         reduction is handled by a separate reduce-scatter pass in the model, so
         only the padding is stripped here.
         """
-        if _is_attn_dp():
+        mesh = _get_mesh()
+        if mesh is None:
             return states[..., :trunc_size]
 
-        if (not self.moe_config.is_sequence_parallel
-                and not self._fused_output_is_reduced):
-            mesh = _get_mesh()
-            if mesh is not None:
-                states = _all_reduce_over_tp(states, mesh)
+        is_dp = is_attn_dp(mesh)
+        is_sequence_parallel = self.moe_config.is_sequence_parallel
+        is_fused_output_reduced = self._fused_output_is_reduced
+
+        if not is_dp and not is_sequence_parallel and not is_fused_output_reduced:
+            states = _all_reduce_over_tp(states, mesh)
         return states[..., :trunc_size]
