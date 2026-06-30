@@ -126,7 +126,7 @@ cleanup() {
   fi
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
-  rm -f /root/vllm_serve.log || true
+  rm -f /tmp/vllm_serve.log || true
 
   echo "✅ Cleanup complete."
 }
@@ -321,6 +321,7 @@ if [ "$#" -ge 1 ]; then
         # Set client benchmark command from CLIENT_CMD resolved by parser
         CLIENT_BENCH_CMD="$CLIENT_CMD"
         
+    else
         # Legacy mode (raw server/client commands passed)
         VLLM_SERVE_CMD="$1"
         shift
