@@ -37,7 +37,9 @@ from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.model_executor.models.interfaces_base import is_pooling_model
+from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.interfaces_base import (
+    VllmModelForPooling, VllmModelForTextGeneration, is_pooling_model)
 from vllm.platforms import current_platform
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -49,8 +51,8 @@ from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
-    shard_model_to_tpu
+from tpu_inference.layers.vllm.process_weights.cleanup_sharding import (
+    reparametrize, shard_model_to_tpu)
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
 from tpu_inference.lora.lora_manager import (TPULRUCacheWorkerLoRAManager,
@@ -170,31 +172,18 @@ def _disable_ds_v4_mtp_buffer(vllm_config: VllmConfig,
         inner._mtp_hidden_buffer = _NoOpBuffer()
 
 
-class _VllmRunner(torch.nn.Module):
-
-    def __init__(self, vllm_model: torch.nn.Module):
-        super().__init__()
-        self.vllm_model = vllm_model
-        has_pooler = is_pooling_model(vllm_model)
-        self.pooler = vllm_model.pooler if has_pooler else None
-
-    def forward(self, **kwargs) -> torch.Tensor:
-        if "hidden_state" in kwargs:
-            return self.compute_logits(kwargs["hidden_state"])
-        elif "call_method" in kwargs:
-            method_name = kwargs["call_method"]
-            call_args = kwargs.get("call_args", tuple())
-            call_kwargs = kwargs.get("call_kwargs", {})
-            method = getattr(self.vllm_model, method_name)
-            return method(*call_args, **call_kwargs)
-        else:
-            return self.compute_hidden_state(kwargs)
-
-    def compute_hidden_state(self, kwargs: dict) -> torch.Tensor:
-        return self.vllm_model(**kwargs)
-
-    def compute_logits(self, hidden_state: torch.Tensor) -> torch.Tensor:
-        return self.vllm_model.compute_logits(hidden_state)
+class _MetaModel(
+        torch.nn.Module,
+        VllmModelForTextGeneration,
+        VllmModelForPooling,
+        SupportsMultiModal,
+):
+    """An abstract interface for we to have better developer experience."""
+    # It's used during working on vLLM models in our VllmModelWrapper.
+    # The model object in runtime may or may not implement all the interfaces
+    # here, but at least we can have better readability, and have better support
+    # in IDE like auto-complete and go-definition ... etc.
+    # If we find some interface is good for developer experience, add it here.
 
 
 class VllmModelWrapper:
@@ -202,7 +191,7 @@ class VllmModelWrapper:
 
     rng: PRNGKey
     mesh: Mesh
-    model: _VllmRunner
+    model: _MetaModel
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -349,10 +338,11 @@ class VllmModelWrapper:
             set_eagle3_aux_hidden_state_layers(
                 vllm_model, self.vllm_config.speculative_config)
 
-        self.model = _VllmRunner(vllm_model)
+        self.model = vllm_model
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
-        self._pooler: Pooler | None = self.model.pooler
+        has_pooler = is_pooling_model(vllm_model)
+        self._pooler: Pooler | None = self.model.pooler if has_pooler else None
 
         if self.vllm_config.model_config.is_multimodal_model:
             # NOTE: It patch mm models to be JITtable within some submodule.
@@ -368,7 +358,7 @@ class VllmModelWrapper:
             )
 
         # NOTE: Apply Qwen3-VL model specific patches
-        apply_model_specific_patches(self.model.vllm_model)
+        apply_model_specific_patches(self.model)
 
         loading_end = time.time()
         total_loading_time = loading_end - loading_start
@@ -436,17 +426,13 @@ class VllmModelWrapper:
                     self.model, lora_metadata, self.vllm_config.lora_config)
                 if not is_first_rank:
                     intermediate_tensors = intermediate_tensors.to_torch()
-                output_from_torch = torch.func.functional_call(
-                    self.model,
-                    torch_view(params_and_buffers),
-                    kwargs={
-                        "input_ids": torch_view(input_ids),
-                        "positions": torch_view(input_positions),
-                        "intermediate_tensors": intermediate_tensors,
-                        "inputs_embeds": torch_view(input_embeds),
-                    },
-                    tie_weights=False,
-                )
+                with reparametrize(self.model, torch_view(params_and_buffers)):
+                    output_from_torch = self.model(
+                        input_ids=torch_view(input_ids),
+                        positions=torch_view(input_positions),
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=torch_view(input_embeds),
+                    )
                 replace_lora_metadata(self.model, original_lora_metadata,
                                       self.vllm_config.lora_config)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
@@ -499,12 +485,8 @@ class VllmModelWrapper:
                 if self.vllm_config.speculative_config.method == "mtp":
                     kwargs["spec_step_idx"] = spec_step_idx
 
-                output_from_torch = torch.func.functional_call(
-                    self.model,
-                    torch_view(params_and_buffers),
-                    kwargs=kwargs,
-                    tie_weights=False,
-                )
+                with reparametrize(self.model, torch_view(params_and_buffers)):
+                    output_from_torch = self.model(**kwargs)
                 vllm_model_wrapper_context = get_vllm_model_wrapper_context()
                 new_kv_caches = vllm_model_wrapper_context.kv_caches
 
@@ -575,8 +557,7 @@ class VllmModelWrapper:
 
         embed_multimodal_fn = self.wrap_embed_multimodal_func()
         return maybe_precompile_vision_encoder_fn(params, embed_multimodal_fn,
-                                                  self.model.vllm_model,
-                                                  self.vllm_config)
+                                                  self.model, self.vllm_config)
 
     def wrap_embed_multimodal_func(self):
         if not self.vllm_config.model_config.is_multimodal_model:
@@ -591,16 +572,9 @@ class VllmModelWrapper:
                 for k, v in kwargs.items()
             }
 
-            output_from_torch = torch.func.functional_call(
-                self.model,
-                torch_view(params_and_buffers),
-                kwargs={
-                    "call_method": "embed_multimodal",
-                    "call_args": (),
-                    "call_kwargs": call_kwargs,
-                },
-                tie_weights=False,
-            )
+            with reparametrize(self.model, torch_view(params_and_buffers)):
+                output_from_torch = self.model.embed_multimodal(
+                    **call_kwargs, )
 
             return jax_view(output_from_torch)
 
@@ -619,7 +593,7 @@ class VllmModelWrapper:
             # Here we move_to_jax, then call (maybe jit'ed) embed_multimodal_func_jax.
             with torchax.default_env(), enable_torch_wrap(False):
 
-                kwargs = maybe_prepare_for_jit(kwargs, self.model.vllm_model)
+                kwargs = maybe_prepare_for_jit(kwargs, self.model)
 
                 def move(v: torch.Tensor) -> torch.Tensor:
                     if not isinstance(v, torch.Tensor):
@@ -635,8 +609,8 @@ class VllmModelWrapper:
                 }
 
                 return maybe_jit_embed_multimodal_func(
-                    embed_multimodal_func_jax,
-                    self.model.vllm_model)(params_and_buffers, **call_kwargs)
+                    embed_multimodal_func_jax, self.model)(params_and_buffers,
+                                                           **call_kwargs)
 
         return embed_multimodal_func_torch
 
@@ -662,18 +636,15 @@ class VllmModelWrapper:
                 else:
                     call_args = (torch_view(input_ids), )
 
-                output_from_torch = torch.func.functional_call(
-                    self.model,
-                    torch_view(params_and_buffers),
-                    kwargs={
-                        "call_method": "embed_input_ids",
-                        "call_args": call_args,
-                        "call_kwargs": {
-                            "is_multimodal": torch_view(is_multimodal)
-                        } if is_multimodal is not None else {},
-                    },
-                    tie_weights=False,
-                )
+                call_kwargs = {
+                    "is_multimodal": torch_view(is_multimodal)
+                } if is_multimodal is not None else {}
+
+                with reparametrize(self.model, torch_view(params_and_buffers)):
+                    output_from_torch = self.model.embed_input_ids(
+                        *call_args,
+                        **call_kwargs,
+                    )
 
                 return jax_view(output_from_torch)
 
@@ -697,14 +668,9 @@ class VllmModelWrapper:
                     kv_caches=None, mesh=self.mesh):
                 original_lora_metadata = replace_lora_metadata(
                     self.model, lora_metadata, self.vllm_config.lora_config)
-                logits = torch.func.functional_call(
-                    self.model,
-                    torch_view(params_and_buffers),
-                    kwargs={
-                        "hidden_state": torch_view(hidden_states),
-                    },
-                    tie_weights=False,
-                )
+                with reparametrize(self.model, torch_view(params_and_buffers)):
+                    logits = self.model.compute_logits(
+                        hidden_states=torch_view(hidden_states), )
                 replace_lora_metadata(self.model, original_lora_metadata,
                                       self.vllm_config.lora_config)
             return jax_view(logits)
@@ -721,17 +687,9 @@ class VllmModelWrapper:
                                        hidden_states: jax.Array) -> jax.Array:
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=None, mesh=self.mesh):
-                logits = torch.func.functional_call(
-                    self.model,
-                    torch_view(params_and_buffers),
-                    kwargs={
-                        "call_method": "combine_hidden_states",
-                        "call_args": (),
-                        "call_kwargs": {
-                            "hidden_states": torch_view(hidden_states),
-                        },
-                    },
-                )
+                with reparametrize(self.model, torch_view(params_and_buffers)):
+                    logits = self.model.combine_hidden_states(
+                        hidden_states=torch_view(hidden_states), )
             return jax_view(logits)
 
         return combine_hidden_states_func
