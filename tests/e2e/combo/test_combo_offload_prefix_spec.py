@@ -149,9 +149,7 @@ def _test_combo_offload_prefix_spec_accuracy(
                 assert out_tokens1[i] == out_tokens2[
                     i], f"Token mismatch in request {i}"
         finally:
-            if llm is not None and hasattr(llm.llm_engine, "shutdown"):
-                llm.llm_engine.shutdown()
-            del llm
+            llm.llm_engine.engine_core.shutdown()
             gc.collect()
             # Waiting for TPUs to be released.
             time.sleep(10)

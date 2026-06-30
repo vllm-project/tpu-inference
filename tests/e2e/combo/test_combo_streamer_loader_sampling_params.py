@@ -64,16 +64,6 @@ def _sampling_cases() -> list[tuple[str, SamplingParams]]:
     ]
 
 
-def _shutdown_llm(llm: LLM | None) -> None:
-    """Manually shut down the LLM engine.
-
-    This is necessary to release TPU memory resources, preventing memory leaks
-    that cause subsequent tests in the suite to run out of memory.
-    """
-    if llm is not None and hasattr(llm, "llm_engine"):
-        llm.llm_engine.engine_core.shutdown()
-
-
 def _generate_outputs_by_case(model: str,
                               load_format: str | None = None
                               ) -> dict[str, list]:
@@ -94,7 +84,7 @@ def _generate_outputs_by_case(model: str,
             for case_name, sampling_params in _sampling_cases()
         }
     finally:
-        _shutdown_llm(llm)
+        llm.llm_engine.engine_core.shutdown()
 
 
 @pytest.fixture(scope="module")
