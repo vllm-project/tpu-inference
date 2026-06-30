@@ -55,6 +55,8 @@ class MetadataRef:
     s_idx_to_state_idx: Any
     s_idx_has_initial_state: Any
     b_idx_to_token_step: Any
+    read_state_indices: Any
+    write_state_indices: Any
 
     def __len__(self) -> int:
         return len(dataclasses.fields(self))
@@ -145,13 +147,7 @@ class ConvStateBuffer(BufferWrapper):
 
         for idx in range(self.cfgs.tile_size):
             b_idx = b_start + idx
-            s_idx = self.metadata_ref.b_idx_to_s_idx[b_idx]
-            # For 2D state_indices, the initial state is statically read from Slot 0
-            # (which was prepared by the device-side rollback copy).
-            if self.metadata_ref.s_idx_to_state_idx.ndim == 2:
-                state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx, 0]
-            else:
-                state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx]
+            state_idx = self.metadata_ref.read_state_indices[b_idx]
             sz_from_old = self.metadata_ref.b_idx_to_sz_from_old[b_idx]
             start_from_old = self.cfgs.prev_kernel_size - sz_from_old
             sz_from_old = jnp.where(is_no_op, 0, sz_from_old)
@@ -178,16 +174,7 @@ class ConvStateBuffer(BufferWrapper):
     def copy_out(self, b_start, slot, sem):
         for idx in range(self.cfgs.tile_size):
             b_idx = b_start + idx
-            s_idx = self.metadata_ref.b_idx_to_s_idx[b_idx]
-            token_step = self.metadata_ref.b_idx_to_token_step[b_idx]
-            # For 2D state_indices, we write the updated sliding window state after
-            # token `token_step` to Slot `token_step + 1` to build the history.
-            if self.metadata_ref.s_idx_to_state_idx.ndim == 2:
-                state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx,
-                                                                 token_step +
-                                                                 1]
-            else:
-                state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx]
+            state_idx = self.metadata_ref.write_state_indices[b_idx]
             should_write = self.metadata_ref.b_idx_should_write[b_idx]
 
             pltpu.make_async_copy(
@@ -427,16 +414,39 @@ def preprocess_metadata(
     b_idx_to_sz_from_old = jnp.minimum(b_idx_to_sz_from_old,
                                        cfgs.prev_kernel_size)
 
-    # Determine which row needs to write its conv_state to HBM.
-    # In speculative decoding (2D state_indices), we want to write the intermediate state
-    # at every token step to build the history, so we write for all valid tokens.
-    # In normal decoding (1D state_indices), we only write at the very end of the sequence.
+    # Determine if we should write the intermediate state history (Slot 1..num_spec+1).
+    # We only write history when state_indices is 2D and the maximum query length
+    # is <= num_spec + 1 (meaning it is a speculative verification step, not a prompt prefill).
     if state_indices.ndim == 2:
+        num_spec = state_indices.shape[1] - 2
+        max_query_len = jnp.max(query_lens)
+        write_history = max_query_len <= num_spec + 1
+    else:
+        write_history = False
+
+    # Determine which row needs to write its conv_state to HBM.
+    if state_indices.ndim == 2 and write_history:
         b_idx_should_write = all_b_idx < num_tokens
     else:
-        b_idx_should_write = all_b_idx == (
-            query_start_loc[b_idx_to_s_idx + 1] - 1)
+        # Normal decoding OR prompt prefill: only write the last token of the query.
+        b_idx_should_write = (b_idx_query_start_loc +
+                              query_lens[b_idx_to_s_idx] - 1 == all_b_idx)
     b_idx_should_write = b_idx_should_write.astype(jnp.int32)
+
+    # Compute 1D slot index arrays for read and write.
+    if state_indices.ndim == 2:
+        # All tokens load their initial state from Slot 0 (either prompt initial state or rollback initial state)
+        read_state_indices = state_indices[b_idx_to_s_idx, 0]
+        if write_history:
+            token_step_idx = all_b_idx - b_idx_query_start_loc
+            write_state_indices = state_indices[b_idx_to_s_idx,
+                                                token_step_idx + 1]
+        else:
+            # Prompt prefill: write the final state back to Slot 0
+            write_state_indices = state_indices[b_idx_to_s_idx, 0]
+    else:
+        read_state_indices = state_indices[b_idx_to_s_idx]
+        write_state_indices = state_indices[b_idx_to_s_idx]
 
     # Compute the 0-based token step index within each request's speculative window.
     # This maps 1-to-1 with the token index in the request.
@@ -450,6 +460,8 @@ def preprocess_metadata(
         s_idx_to_state_idx=state_indices,
         s_idx_has_initial_state=has_initial_state,
         b_idx_to_token_step=b_idx_to_token_step,
+        read_state_indices=read_state_indices,
+        write_state_indices=write_state_indices,
     )
 
 

@@ -195,6 +195,13 @@ def ragged_gated_delta_rule(
     recurrent_state = recurrent_state.at[initial_state_indices].set(
         masked_initial_states)
 
+    # We only write history (Slot 1..num_spec+1) during speculative verification prefill,
+    # which is characterized by query sequence length T <= num_spec + 1.
+    # For prompt prefill (large T), we only write the final state to Slot 0.
+    num_spec = state_indices.shape[1] - 2 if state_indices.ndim == 2 else 0
+    T = query.shape[1]
+    write_history = (state_indices.ndim == 2) & (T <= num_spec + 1)
+
     # Compute the 0-based token index (step) within each request's speculative window.
     # This is used to index into the 2D state_indices history buffer.
     token_step_idx = token_idx - effective_query_start_loc[req_indices]
@@ -219,13 +226,17 @@ def ragged_gated_delta_rule(
         curr_a = curr_a[None, None, :]
 
         # In speculative decoding (2D state_indices), we implement a sequential recurrence:
-        # - The token at step `i` reads its initial state from Slot `i` (which holds the state
-        #   updated by the previous token).
-        # - It writes its updated state to Slot `i + 1` to build the history.
+        # - If write_history is True: Token at step `i` reads from Slot `i`, writes to Slot `i + 1`.
+        # - If write_history is False: All tokens read and write to Slot 0 (prompt prefill).
         # For normal decoding (1D state_indices), we read and write to the same single slot.
         if state_indices.ndim == 2:
-            read_state_index = state_indices[request_index, token_step]
-            write_state_index = state_indices[request_index, token_step + 1]
+            if write_history:
+                read_state_index = state_indices[request_index, token_step]
+                write_state_index = state_indices[request_index,
+                                                  token_step + 1]
+            else:
+                read_state_index = state_indices[request_index, 0]
+                write_state_index = state_indices[request_index, 0]
         else:
             read_state_index = state_indices[request_index]
             write_state_index = state_indices[request_index]
