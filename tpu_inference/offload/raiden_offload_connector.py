@@ -24,7 +24,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import \
     KVConnectorStats
-from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
@@ -57,18 +56,6 @@ except ImportError:
         KVCacheStore = None
         RaidenId = None
         _RAIDEN_IMPORT_ERROR = _exc
-
-
-def to_raiden_hash(block_hash: BlockHash) -> bytes:
-    """Converts vLLM BlockHash to a bytes representation for C++ KVCacheStore."""
-    if isinstance(block_hash, bytes):
-        return block_hash
-    elif isinstance(block_hash, int):
-        return (block_hash % (2**64)).to_bytes(8, byteorder='big')
-    elif isinstance(block_hash, str):
-        return block_hash.encode('utf-8')
-    else:
-        return (hash(block_hash) % (2**64)).to_bytes(8, byteorder='big')
 
 
 @dataclass
@@ -324,8 +311,9 @@ class RaidenOffloadConnectorScheduler:
             )
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
-        self.num_cpu_chunks = int(
-            os.getenv("TPU_OFFLOAD_NUM_CPU_CHUNKS", 65536))
+        # Must match the worker's host_blocks_to_allocate (which reads the same
+        # envs value) so the logical store and physical host pool stay in sync.
+        self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
 
         self.job_name = os.getenv("RAIDEN_JOB_NAME", "tpu_inference")
         self.job_replica_id = os.getenv("CLOUD_TPU_TASK_ID", "0")
@@ -362,7 +350,7 @@ class RaidenOffloadConnectorScheduler:
 
         self.metrics_collector.record_lookup_request()
 
-        raiden_hashes = [to_raiden_hash(h) for h in request.block_hashes]
+        raiden_hashes = list(request.block_hashes)
         matched = self.kv_store.lookup(raiden_hashes)
         num_hits = len(matched)
         num_misses = len(raiden_hashes) - num_hits
@@ -463,7 +451,7 @@ class RaidenOffloadConnectorScheduler:
         adjusted_num_total_tokens = num_full_blocks * self.block_size
 
         block_hashes = _request.block_hashes
-        raiden_hashes = [to_raiden_hash(h) for h in block_hashes]
+        raiden_hashes = list(block_hashes)
 
         # C++ KVCacheStore manages LRU order authoritatively on access.
 
@@ -596,7 +584,7 @@ class RaidenOffloadConnectorScheduler:
             self, request: "Request",
             block_ids: list[int]) -> tuple[bool, Optional[dict[str, Any]]]:
         if self.kv_store is not None:
-            raiden_hashes = [to_raiden_hash(h) for h in request.block_hashes]
+            raiden_hashes = list(request.block_hashes)
             # Release logical pins in C++ KVCacheStore
             self.kv_store.release(raiden_hashes)
         return False, None
