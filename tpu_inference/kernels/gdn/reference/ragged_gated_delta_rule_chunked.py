@@ -599,9 +599,18 @@ def ragged_gated_delta_rule_decode_only(
         query = l2norm(query)
         key = l2norm(key)
 
-    # Gather the current states for the requests in this batch
-    req_state_indices = state_indices[req_indices]
-    current_states = recurrent_state[req_state_indices]
+    # Gather the current states for the requests in this batch.
+    # In speculative decoding (2D state_indices), we always read the initial state
+    # from Slot 0 (which was prepared by the device-side rollback copy).
+    # In normal decoding (1D state_indices), we read and write to the same single slot.
+    if state_indices.ndim == 2:
+        read_state_indices = state_indices[req_indices, 0]
+        write_state_indices = state_indices[req_indices, 1]
+    else:
+        read_state_indices = state_indices[req_indices]
+        write_state_indices = state_indices[req_indices]
+
+    current_states = recurrent_state[read_state_indices]
 
     # Call step function directly with the inputs (no scattering needed)
     outputs, new_states = recurrent_gated_delta_rule_step(
@@ -621,7 +630,9 @@ def ragged_gated_delta_rule_decode_only(
     states_to_set = jnp.where(valid_mask[:, None, None, None], new_states,
                               current_states)
 
-    updated_recurrent_state = recurrent_state.at[req_state_indices].set(
+    # In speculative decoding, we write the updated state to Slot 1.
+    # In normal decoding, we write the updated state back to the same slot.
+    updated_recurrent_state = recurrent_state.at[write_state_indices].set(
         states_to_set)
 
     return updated_recurrent_state.astype(recurrent_state.dtype), outputs
