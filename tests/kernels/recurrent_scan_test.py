@@ -21,9 +21,9 @@ import pytest
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_inference.kernels.gdn.v2.recurrent_scan_v2 import recurrent_scan
-from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
+from tpu_inference.kernels.gdn.reference.ragged_gated_delta_rule_ref import \
     ragged_gated_delta_rule as ragged_gated_delta_rule_ref
+from tpu_inference.kernels.gdn.v2.recurrent_scan_v2 import recurrent_scan
 
 jax.config.parse_flags_with_absl()
 
