@@ -305,7 +305,7 @@ if [ ${#metadata_feature_list[@]} -gt 0 ]; then
     process_features "METADATA" "${metadata_feature_list[@]}"
 fi
 
-buildkite-agent meta-data set "CI_TESTS_FAILED" "${ANY_FAILED}"
+buildkite-agent meta-data set "${TPU_METADATA_PREFIX}_CI_TESTS_FAILED" "${ANY_FAILED}"
 
 # Model support matrices
 for csv_file in "${model_csv_files[@]:-}"; do
