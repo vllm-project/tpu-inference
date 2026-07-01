@@ -1201,6 +1201,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
+            if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
+                self._modify_prev_results()
+                self._pre_async_results = None
+
             if has_kv_transfer_group():
                 return self.kv_connector_no_forward(scheduler_output,
                                                     self.vllm_config)
