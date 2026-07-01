@@ -424,11 +424,12 @@ def preprocess_metadata(
     else:
         write_history = False
 
-    # Determine which row needs to write its conv_state to HBM.
-    if state_indices.ndim == 2 and write_history:
-        b_idx_should_write = all_b_idx < num_tokens
+    # Determine which row needs to write its conv_state to HBM using tracer-safe jnp.where.
+    if state_indices.ndim == 2:
+        b_idx_should_write = jnp.where(
+            write_history, all_b_idx < num_tokens, b_idx_query_start_loc +
+            query_lens[b_idx_to_s_idx] - 1 == all_b_idx)
     else:
-        # Normal decoding OR prompt prefill: only write the last token of the query.
         b_idx_should_write = (b_idx_query_start_loc +
                               query_lens[b_idx_to_s_idx] - 1 == all_b_idx)
     b_idx_should_write = b_idx_should_write.astype(jnp.int32)
@@ -437,13 +438,10 @@ def preprocess_metadata(
     if state_indices.ndim == 2:
         # All tokens load their initial state from Slot 0 (either prompt initial state or rollback initial state)
         read_state_indices = state_indices[b_idx_to_s_idx, 0]
-        if write_history:
-            token_step_idx = all_b_idx - b_idx_query_start_loc
-            write_state_indices = state_indices[b_idx_to_s_idx,
-                                                token_step_idx + 1]
-        else:
-            # Prompt prefill: write the final state back to Slot 0
-            write_state_indices = state_indices[b_idx_to_s_idx, 0]
+        token_step_idx = all_b_idx - b_idx_query_start_loc
+        write_state_indices = jnp.where(
+            write_history, state_indices[b_idx_to_s_idx, token_step_idx + 1],
+            state_indices[b_idx_to_s_idx, 0])
     else:
         read_state_indices = state_indices[b_idx_to_s_idx]
         write_state_indices = state_indices[b_idx_to_s_idx]
