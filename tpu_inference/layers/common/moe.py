@@ -149,35 +149,65 @@ def moe_apply(
                                   and to_jax_dtype(activation_dtype)
                                   == jnp.float8_e4m3fn)
 
-                output = fused_moe_func(
-                    hidden_states=x,
-                    w1=weights.w13_weight,
-                    w2=weights.w2_weight,
-                    w1_scale=weights.w13_weight_scale,
-                    w2_scale=weights.w2_weight_scale,
-                    w1_bias=weights.w13_bias,
-                    w2_bias=weights.w2_bias,
-                    gating_output=gating_output,
-                    topk=layer.top_k,
-                    renormalize=layer.renormalize,
-                    mesh=mesh,
-                    use_ep=layer.use_ep,
-                    activation=activation,
-                    scoring_fn=layer.scoring_func,
-                    all_gather_fp8=all_gather_fp8,
-                    enable_rs_kernel=envs.ENABLE_RS_KERNEL,
-                    onehot_moe_permute_threshold=envs.
-                    ONEHOT_MOE_PERMUTE_THRESHOLD,
-                    scatter_results=scatter_results,
-                    defer_all_reduce=defer_all_reduce,
-                    hash_based_topk_indices=extra_backend_kwargs.get(
-                        "hash_based_topk_indices", None),
-                    expert_score_correction_bias=extra_backend_kwargs.get(
-                        "e_score_correction_bias", None),
-                    moe_chunk_size=moe_chunk_size,
-                    num_valid_tokens=extra_backend_kwargs.get(
-                        "num_valid_tokens", None),
-                )
+                if layer.use_ep:
+                    print("Using fused_moe_fs kernel")
+                    from tpu_inference.kernels.experimental.fused_moe import fused_moe_func_rs
+                    if isinstance(gating_output, tuple):
+                        topk_weights, topk_indices = gating_output
+                        gating_output_arg = None
+                    else:
+                        topk_weights, topk_indices = None, None
+                        gating_output_arg = gating_output
+
+                    output = fused_moe_func_rs(
+                        hidden_states=x,
+                        w1=weights.w13_weight,
+                        w2=weights.w2_weight,
+                        w1_scale=weights.w13_weight_scale,
+                        w2_scale=weights.w2_weight_scale,
+                        w1_bias=weights.w13_bias,
+                        w2_bias=weights.w2_bias,
+                        gating_output=gating_output_arg,
+                        topk=layer.top_k,
+                        renormalize=layer.renormalize,
+                        mesh=mesh,
+                        activation=activation,
+                        scoring_fn=layer.scoring_func,
+                        topk_weights=topk_weights,
+                        topk_indices=topk_indices,
+                        fp8_post_gather=all_gather_fp8,
+                    )
+                else:
+                    print("Using fused_moe layer")
+                    output = fused_moe_func(
+                        hidden_states=x,
+                        w1=weights.w13_weight,
+                        w2=weights.w2_weight,
+                        w1_scale=weights.w13_weight_scale,
+                        w2_scale=weights.w2_weight_scale,
+                        w1_bias=weights.w13_bias,
+                        w2_bias=weights.w2_bias,
+                        gating_output=gating_output,
+                        topk=layer.top_k,
+                        renormalize=layer.renormalize,
+                        mesh=mesh,
+                        use_ep=layer.use_ep,
+                        activation=activation,
+                        scoring_fn=layer.scoring_func,
+                        all_gather_fp8=all_gather_fp8,
+                        enable_rs_kernel=envs.ENABLE_RS_KERNEL,
+                        onehot_moe_permute_threshold=envs.
+                        ONEHOT_MOE_PERMUTE_THRESHOLD,
+                        scatter_results=scatter_results,
+                        defer_all_reduce=defer_all_reduce,
+                        hash_based_topk_indices=extra_backend_kwargs.get(
+                            "hash_based_topk_indices", None),
+                        expert_score_correction_bias=extra_backend_kwargs.get(
+                            "e_score_correction_bias", None),
+                        moe_chunk_size=moe_chunk_size,
+                        num_valid_tokens=extra_backend_kwargs.get(
+                            "num_valid_tokens", None),
+                    )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
                 from tpu_inference.layers.jax.moe.dense_moe import \
