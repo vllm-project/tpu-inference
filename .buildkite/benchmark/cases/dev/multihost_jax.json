@@ -64,12 +64,15 @@
         "command_type": "vllm_bench_serve",
         "args": {
           "model": "deepseek-ai/DeepSeek-R1",
+          "backend": "vllm",
+          "request-rate": "inf",
           "dataset-name": "random",
           "random-input-len": 1024,
           "random-output-len": 1024,
           "num-prompts": 10240,
           "ignore-eos": true,
-          "trust-remote-code": true
+          "trust-remote-code": true,
+          "percentile-metrics": "ttft,tpot,itl,e2el"
         }
       }
     }

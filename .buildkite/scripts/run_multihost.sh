@@ -208,6 +208,7 @@ VLLM_PORT="8000"
 VLLM_SERVE_CMD=""
 CLIENT_BENCH_CMD=""
 DOCKER_ENV_ARGS=()
+DOCKER_ENV_STR=""
 
 if [ "$#" -ge 1 ]; then
     if [[ "$1" == *.json ]]; then
@@ -244,6 +245,7 @@ if [ "$#" -ge 1 ]; then
         for env_item in "${SERVER_CMD_ENVS[@]}"; do
             VLLM_SERVE_CMD+="$(printf '%q ' "$env_item")"
             DOCKER_ENV_ARGS+=("-e" "$env_item")
+            DOCKER_ENV_STR+="-e $(printf '%q ' "$env_item")"
         done
         for cmd_item in "${SERVER_CMD[@]}"; do
             VLLM_SERVE_CMD+="$(printf '%q ' "$cmd_item")"
@@ -334,7 +336,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_
   -e MOE_REQUANTIZE_WEIGHT_DTYPE='${MOE_REQUANTIZE_WEIGHT_DTYPE:-}' \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE='${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}' \
   -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}' \
-  "${DOCKER_ENV_ARGS[@]}"
+  ${DOCKER_ENV_STR}
 EOF
 done
 
@@ -392,12 +394,12 @@ if [ -n "${CLIENT_BENCH_CMD}" ]; then
     docker exec \
       -e HF_HOME=/root/.cache/huggingface \
       -e SERVER_ALREADY_RUNNING="true" \
-      node bash -c "chmod +x /workspace/tpu_inference/.buildkite/benchmark/scripts/run_bm.sh && /workspace/tpu_inference/.buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME"
+      node bash -c "cd /workspace/tpu_inference && chmod +x .buildkite/benchmark/scripts/run_bm.sh && .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME"
   else
     echo "--- Running Benchmark Command on Head Node"
     docker exec \
       -e HF_HOME=/root/.cache/huggingface \
-      node bash -c "${CLIENT_BENCH_CMD}"
+      node bash -c "cd /workspace/tpu_inference && ${CLIENT_BENCH_CMD}"
   fi
 elif [ "$#" -gt 0 ]; then
   echo "--- Running provided Benchmark Command on Head Node"
@@ -405,7 +407,7 @@ elif [ "$#" -gt 0 ]; then
   
   docker exec \
     -e HF_HOME=/root/.cache/huggingface \
-    node bash -c "${COMMAND_ARGS[*]}"
+    node bash -c "cd /workspace/tpu_inference && ${COMMAND_ARGS[*]}"
 else
   # Default: Run the curl test to verify the endpoint
   echo "--- Running default curl test"
