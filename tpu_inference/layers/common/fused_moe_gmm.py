@@ -498,7 +498,12 @@ def expert_parallel_gmm(
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
-    x_p_spec = P(ShardingAxisName.EXPERT_DATA)
+    dp_axes = ShardingAxisName.MLP_DATA
+    if isinstance(dp_axes, str):
+        dp_axes = (dp_axes, )
+    else:
+        dp_axes = tuple(dp_axes)
+    x_p_spec = P(*(dp_axes + (ShardingAxisName.EXPERT, )))
     ep_data_p_spec = P(ShardingAxisName.EXPERT_DATA)
     attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
     num_experts = w1.shape[0]
@@ -588,7 +593,12 @@ def hybrid_parallel_gmm(
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 
     # 3. Define the Partition Specs
-    x_p_spec = P(ShardingAxisName.EXPERT_DATA)
+    dp_axes = ShardingAxisName.MLP_DATA
+    if isinstance(dp_axes, str):
+        dp_axes = (dp_axes, )
+    else:
+        dp_axes = tuple(dp_axes)
+    x_p_spec = P(*(dp_axes + ep_axis))
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     ep_p_spec = P(ep_axis)
 
@@ -864,8 +874,28 @@ def fused_moe_func(
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
-    x_out_spec = (P(ShardingAxisName.EXPERT_DATA)
-                  if use_ep else P(ShardingAxisName.MLP_DATA))
+    if use_ep:
+        if use_hybrid:
+            _, ep_axis = get_hybrid_moe_axes(mesh)
+        else:
+            ep_axis = ()
+
+        dp_axes = ShardingAxisName.MLP_DATA
+        if isinstance(dp_axes, str):
+            dp_axes = (dp_axes, )
+        else:
+            dp_axes = tuple(dp_axes)
+
+        active_ep_axis = ep_axis if (
+            use_hybrid and len(ep_axis) > 0) else ShardingAxisName.EXPERT
+        if isinstance(active_ep_axis, str):
+            active_ep_axis = (active_ep_axis, )
+        else:
+            active_ep_axis = tuple(active_ep_axis)
+
+        x_out_spec = P(*(dp_axes + active_ep_axis))
+    else:
+        x_out_spec = P(ShardingAxisName.MLP_DATA)
 
     if all_gather_fp8:
         hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
