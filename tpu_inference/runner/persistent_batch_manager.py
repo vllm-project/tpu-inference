@@ -337,8 +337,10 @@ class PersistentBatchManager:
 
         batch_changed = len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
         # TODO(jevinjiang): I assume we do not need to set batch_changed to true if just swapping requests.
-        self._reorder_batch(scheduler_output)
-        if isinstance(self.input_batch, InputBatch):
+        swap_cnt = self._reorder_batch(scheduler_output)
+        if (isinstance(self.input_batch, InputBatch)
+                and self.input_batch.has_mamba_layers
+                and (batch_changed or swap_cnt > 0)):
             self.input_batch.assert_mamba_state_invariants(
                 self.requests, dp_rank_map)
         return batch_changed
