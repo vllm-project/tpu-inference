@@ -421,13 +421,64 @@ class VllmModelWrapper:
             *args,
         ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
                 List[jax.Array], jax.Array, List[jax.Array], jax.Array]:
+            def _attn_metadata_values_equal(a: object, b: object) -> bool:
+                if isinstance(a, (jax.core.Tracer, jax.Array)) and isinstance(
+                        b, (jax.core.Tracer, jax.Array)):
+                    return a.shape == b.shape and a.dtype == b.dtype
+                if isinstance(a,
+                              (list, tuple)) and isinstance(b, (list, tuple)):
+                    return len(a) == len(b) and all(
+                        _attn_metadata_values_equal(x, y)
+                        for x, y in zip(a, b))
+                return a == b
+
+            def get_common_attn_metadata_entries(
+                attn_metadata: dict[str, object] | list[dict[str, object]]
+            ) -> AttentionMetadata:
+                """Return an AttentionMetadata object with only the shared fields populated."""
+                if isinstance(attn_metadata, list):
+                    all_metadata = []
+                    for per_layer in attn_metadata:
+                        if not isinstance(per_layer, dict):
+                            raise TypeError(
+                                f"Expected attn_metadata list elements to be dict, got "
+                                f"{type(per_layer).__name__}")
+                        all_metadata.extend(per_layer.values())
+                elif isinstance(attn_metadata, dict):
+                    all_metadata = list(attn_metadata.values())
+                else:
+                    raise TypeError(
+                        f"Expected attn_metadata to be dict or list[dict], got "
+                        f"{type(attn_metadata).__name__}")
+
+                if not all_metadata:
+                    return AttentionMetadata(input_positions=None)
+
+                common_field_names = set(vars(all_metadata[0]).keys())
+                for metadata in all_metadata[1:]:
+                    common_field_names &= set(vars(metadata).keys())
+                    if not common_field_names:
+                        return AttentionMetadata(input_positions=None)
+
+                common_metadata = AttentionMetadata(input_positions=None)
+                for field_name in common_field_names:
+                    reference_value = getattr(all_metadata[0], field_name)
+                    if all(
+                            _attn_metadata_values_equal(
+                                reference_value, getattr(metadata, field_name))
+                            for metadata in all_metadata[1:]):
+                        setattr(common_metadata, field_name, reference_value)
+                return common_metadata
+
+            common_metadata = get_common_attn_metadata_entries(attn_metadata)
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index,
-                    vllm_config=self.vllm_config), set_forward_context(
+                    vllm_config=self.vllm_config,
+                    shared_attn_metadata=common_metadata), set_forward_context(
                         attn_metadata=attn_metadata,
                         vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with

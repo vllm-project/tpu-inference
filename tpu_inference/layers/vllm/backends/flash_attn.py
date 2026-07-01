@@ -214,6 +214,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
         mesh = vllm_model_wrapper_context.mesh
+        shared_attn_metadata = vllm_model_wrapper_context.shared_attn_metadata
+        assert shared_attn_metadata is not None, (
+            "Shared attention metadata is not set.")
 
         # 1. Common JAX View Conversion
         q_jax = jax_view(query)
@@ -266,6 +269,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
                     v_jax,
                     sinks,
                     attn_metadata,
+                    shared_attn_metadata,
                     mesh,
                     self.scale,
                     self.head_size,
@@ -340,6 +344,7 @@ def _jax_attn_func(
     v: jax.Array,
     sinks: jax.Array | None,
     attention_metadata: AttentionMetadata,
+    shared_attention_metadata: AttentionMetadata,
     mesh: Mesh,
     scale: float,
     head_size: int,
@@ -359,6 +364,7 @@ def _jax_attn_func(
         k,
         v,
         attention_metadata,
+        shared_attention_metadata,
         mesh,
         sm_scale=scale,
         q_scale=q_scale,

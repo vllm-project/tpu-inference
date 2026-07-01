@@ -467,6 +467,7 @@ def attention(
     k: jax.Array,
     v: jax.Array,
     attention_metadata: AttentionMetadata,
+    shared_attn_metadata: AttentionMetadata,
     mesh: Mesh,
     head_dim_original: int | None = None,  # before padding,
     sm_scale: float | None = None,
@@ -496,6 +497,7 @@ def attention(
         sm_scale = head_dim_original**-0.5
 
     md = attention_metadata
+    shared_md = shared_attn_metadata
 
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
@@ -504,10 +506,10 @@ def attention(
         k,
         v,
         kv_cache,
-        md.seq_lens,
+        shared_md.seq_lens,
         md.block_tables,
-        md.query_start_loc,
-        md.request_distribution,
+        shared_md.query_start_loc,
+        shared_md.request_distribution,
         sinks,
         sm_scale=sm_scale,
         attention_chunk_size=attention_chunk_size,
