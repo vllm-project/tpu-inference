@@ -102,6 +102,9 @@ SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/de
 
 # Cleanup function that runs on exit to tear down the Ray cluster
 cleanup() {
+  if [[ "${CLEANUP_DONE:-}" == "true" ]]; then return; fi
+  CLEANUP_DONE="true"
+  set +e
   echo "🧹 Cleaning up containers on head and workers..."
   IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS:-}"
   
@@ -127,8 +130,9 @@ cleanup() {
   sudo rm -rf /tmp/ray/* /tmp/vllm/* >/dev/null 2>&1 || true
 
   echo "✅ Cleanup complete."
+  set -e
 }
-trap cleanup EXIT
+trap cleanup EXIT SIGINT SIGTERM
 
 wait_for_server() {
   local port=$1
