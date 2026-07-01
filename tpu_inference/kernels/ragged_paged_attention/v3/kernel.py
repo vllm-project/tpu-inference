@@ -673,7 +673,6 @@ def _ragged_paged_attention_kernel_loop(
         kv_p_start = bkv_idx * bkv_p
         kv_left = _seq_kv_len_local - kv_len_start
         if update_kv_cache:
-            #   kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
             kv_left_frm_cache = jnp.maximum(kv_left - _seq_q_len, 0)
         else:
             # KV-share: source layer already wrote the full K/V for the
@@ -683,13 +682,9 @@ def _ragged_paged_attention_kernel_loop(
             # where unified_attention reads from key_cache/value_cache
             # only, regardless of the layer's own k,v projections.
             kv_left_frm_cache = kv_left
-
         kv_left_frm_new = kv_left - kv_left_frm_cache
 
         bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, bkv_sz)
-        # bkv_sz_frm_new = jnp.maximum(
-        #     0, jnp.minimum(bkv_sz - bkv_sz_frm_cache, kv_left_frm_new)
-        # )
         bkv_sz_frm_new = jnp.minimum(bkv_sz - bkv_sz_frm_cache,
                                      kv_left_frm_new)
         page_indices_offset = seq_idx * pages_per_seq + kv_p_start
@@ -1987,6 +1982,8 @@ def ragged_paged_attention(
       for better performance, set higher for better accuracy. If None, it uses
       q.dtype.
     mask_value: mask value for causal mask.
+    return_lse: if true, return the Log-Sum-Exp (LSE) vector of the attention
+      scores per query token along with the attention output.
     q_scale: the scale for the query.
     k_scale: the scale for the key.
     v_scale: the scale for the value.
@@ -2001,7 +1998,8 @@ def ragged_paged_attention(
     disable_semaphore_checks: if true, disable semaphore checks.
 
   Returns:
-    The output of the attention.
+    The output of the attention, and the updated KV cache, or if return_lse is
+    True, a tuple of (attn_out, kv_cache, lse).
   """
     q, k, v = queries, keys, values
     tpu_version = get_tpu_version()
@@ -2333,6 +2331,16 @@ def ragged_paged_attention(
                                actual_head_dim)
 
     if return_lse:
+        # LSE (Log-Sum-Exp) represents the log of the softmax denominator:
+        # LSE(x) = log(sum(exp(x_i))). It is computed as: LSE = m + log(l), where
+        # m is the maximum of attention logits and l is the sum of exponentials
+        # relative to that maximum.
+        #
+        # We need LSE for:
+        # 1. Attention Output Merging: In Context Parallelism, we can merge partial
+        #    attention outputs using:
+        #    O_merged = (e^LSE_1 * O_1 + e^LSE_2 * O_2) / (e^LSE_1 + e^LSE_2).
+        #
         # lse_hbm: (actual_num_kv_heads, max_num_tokens * num_q_heads_per_kv_head, 128)
         # Extract the scalar value (all 128 minor-dim elements are equal) and
         # reshape to (max_num_tokens, actual_num_q_heads).
