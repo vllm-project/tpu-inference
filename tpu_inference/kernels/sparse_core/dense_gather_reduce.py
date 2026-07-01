@@ -28,6 +28,11 @@ from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
 
+def align_to(x, a):
+    """Ceiling-align x to a multiple of a (mirrors gmm_v2.align_to)."""
+    return ((x + a - 1) // a) * a
+
+
 def is_compatible(
     op: jax.Array,
     idx: jax.Array,
@@ -267,6 +272,37 @@ def _jax_fallback(x,
     return out.astype(x.dtype)
 
 
+def _choose_col_chunk(hidden_size: int) -> tuple[int, int]:
+    """Pick the SC column-chunk width and padded hidden size for the kernel.
+
+    The kernel slices the operand along the hidden (column) dimension, which
+    carries a 128-wide lane tile in the HBM layout (#tpu.tiled<(4, 128)>).
+    Mosaic requires every column chunk to be a multiple of that 128 tile, else
+    it rejects the tpu.memref_slice at compile time with "Slice sizes along
+    tiled dimensions must be aligned to tiles".
+
+    Returns (col_chunk, hidden_pad):
+    - hidden_size % 128 == 0: pick the largest 128-multiple <= min(2048,
+      hidden_size) that divides hidden_size exactly. No padding
+      (hidden_pad == hidden_size). This reproduces the original selection for
+      every 128-aligned model, so existing models see no behavior change.
+    - hidden_size % 128 != 0 (e.g. gpt-oss-120b-BF16 hidden_size=2880): no
+      128-multiple divides it, so pad up to hidden_pad = num_chunks * col_chunk
+      (col_chunk a 128-multiple). The caller runs the kernel over hidden_pad
+      columns then slices the output back to [:, :hidden_size]; padded columns
+      are zero and, since columns are independent in the gather-reduce, do not
+      affect the real columns.
+    """
+    if hidden_size % 128 == 0:
+        col_chunk = (min(2048, hidden_size) // 128) * 128
+        while hidden_size % col_chunk != 0:
+            col_chunk -= 128
+        return col_chunk, hidden_size
+    num_chunks = align_to(hidden_size, 2048) // 2048  # cdiv(hidden_size, 2048)
+    col_chunk = align_to((hidden_size + num_chunks - 1) // num_chunks, 128)
+    return col_chunk, num_chunks * col_chunk
+
+
 @jax.jit(static_argnames=("reduce_group_size", "topk_wgt_zero_nan"))
 def dense_gather_reduce(
     x: jax.Array,
@@ -290,31 +326,19 @@ def dense_gather_reduce(
   """
     if is_compatible(x, indices, reduce_group_size):
         K = x.shape[-1]
-        # The kernel slices the operand along the hidden (column) dimension,
-        # which carries a 128-wide lane tile in the HBM layout
-        # (#tpu.tiled<(4, 128)>). A column chunk that is not a multiple of 128
-        # produces a tpu.memref_slice whose size along the tiled dimension is
-        # not tile-aligned, which Mosaic rejects at compile time with
-        # "Slice sizes along tiled dimensions must be aligned to tiles" (e.g.
-        # hidden_size=2880 -> chunk 1440, and 1440 % 128 = 32). Require the
-        # chunk to be a multiple of the 128 lane tile; when 128 does not divide
-        # hidden_size (as for gpt-oss's 2880) no valid chunk exists and we fall
-        # back to the JAX implementation below.
-        col_chunk_size = (min(2048, K) // 128) * 128
-        while col_chunk_size > 0:
-            if K % col_chunk_size == 0:
-                break
-            col_chunk_size -= 128
-        if col_chunk_size > 0:
-            # Pallas kernel expects 1D weights
-            return _sc_gather_reduce(
-                x,
-                indices,
-                topk_weights.reshape(-1),
-                reduce_group_size=reduce_group_size,
-                col_chunk_size=col_chunk_size,
-                topk_wgt_zero_nan=topk_wgt_zero_nan,
-            )
+        # Pick a 128-tile-aligned column chunk; pad the hidden dim up to K_pad
+        # only when K itself is not 128-aligned (see _choose_col_chunk).
+        col_chunk, K_pad = _choose_col_chunk(K)
+        x_in = jnp.pad(x, ((0, 0), (0, K_pad - K))) if K_pad > K else x
+        out = _sc_gather_reduce(
+            x_in,
+            indices,
+            topk_weights.reshape(-1),
+            reduce_group_size=reduce_group_size,
+            col_chunk_size=col_chunk,
+            topk_wgt_zero_nan=topk_wgt_zero_nan,
+        )
+        return out[:, :K]
     # Fallback to JAX baseline
     return _jax_fallback(x, indices, topk_weights, reduce_group_size,
                          topk_wgt_zero_nan)
