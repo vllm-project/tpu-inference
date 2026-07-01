@@ -21,7 +21,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.request import Request
 
-from tests.offload.utils import EOS_TOKEN_ID, TPURequestRunner
+from tpu_inference.offload import fs_manager, EOS_TOKEN_ID, TPURequestRunner
 from tpu_inference.offload.tpu_offload_connector import (
     RequestTracker, TPUOffloadConnectorScheduler)
 
@@ -33,6 +33,7 @@ class MockVllmConfig:
     def __init__(self, block_size=_DEFAULT_BLOCK_SIZE):
         self.model_config = self.Model()
         self.cache_config = self.Cache(block_size)
+        self.kv_transfer_config = self.KVTransferConfig()
 
     class Model:
         model = "test-model"
@@ -41,6 +42,17 @@ class MockVllmConfig:
 
         def __init__(self, block_size):
             self.block_size = block_size
+            self.cache_dtype = 'torch.bfloat16'
+
+    class KVTransferConfig:
+
+        def __init__(self):
+            self.ip = "ip"
+            self.port = 1234
+            self.extra_config = {}
+
+        def get_from_extra_config(self, key, default):
+            return self.extra_config.get(key, default)
 
 
 def create_request(
@@ -72,14 +84,16 @@ def create_request(
 def scheduler_factory():
     """Provides a factory function for Scheduler instances."""
 
-    def _scheduler(
-        block_size: int = _DEFAULT_BLOCK_SIZE,
-        offload_decode_save: int = 0,
-        offload_num_staging_blocks: int = -1,
-        offload_num_cpu_chunks: int = -1,
-    ):
+    def _scheduler(block_size: int = _DEFAULT_BLOCK_SIZE,
+                   offload_decode_save: int = 0,
+                   offload_num_staging_blocks: int = -1,
+                   offload_num_cpu_chunks: int = -1,
+                   fs_offload: bool = False):
         # update config
         vllm_config = MockVllmConfig(block_size=block_size)
+        if fs_offload:
+            vllm_config.kv_transfer_config.extra_config[
+                fs_manager.BASE_PATH_CONFIG] = "mock/offload/directory"
         os.environ["TPU_OFFLOAD_DECODE_SAVE"] = str(offload_decode_save)
         if offload_num_staging_blocks >= 0:
             os.environ["TPU_OFFLOAD_NUM_STAGING_BLOCKS"] = str(
@@ -106,12 +120,13 @@ class TestTPUOffloadConnectorScheduler:
         assert num_matched == 0
         assert "req1" not in scheduler.load_specs
 
+    @pytest.mark.parametrize("fs_offload", [False, True])
     @pytest.mark.parametrize(
         "num_computed_blocks, num_matched_blocks, num_prompt_blocks, num_staging_blocks",
         [(0, 2, 4, 10), (1, 2, 4, 10), (0, 4, 4, 10), (1, 4, 4, 10),
          (1, 4, 4, 1), (1, 4, 4, 0)])
     def test_get_num_new_matched_tokens_hit(self, scheduler_factory,
-                                            num_computed_blocks,
+                                            fs_offload, num_computed_blocks,
                                             num_matched_blocks,
                                             num_prompt_blocks,
                                             num_staging_blocks):
@@ -126,7 +141,8 @@ class TestTPUOffloadConnectorScheduler:
         6. skip 1 block + full-hit + no staging block
         """
         scheduler = scheduler_factory(
-            offload_num_staging_blocks=num_staging_blocks)
+            offload_num_staging_blocks=num_staging_blocks,
+            fs_offload=fs_offload)
         prompt_len = scheduler.block_size * num_prompt_blocks
         num_computed_tokens = scheduler.block_size * num_computed_blocks
         num_blocks_to_load = num_matched_blocks - num_computed_blocks
@@ -165,6 +181,7 @@ class TestTPUOffloadConnectorScheduler:
             assert load_spec.num_matched_tokens == num_matched_tokens
             assert not load_spec.can_load
             assert len(load_spec.src_chunks) == num_blocks_to_load
+            assert len(load_spec.src_chunk_hashes) == num_blocks_to_load
             assert load_spec.num_skip_leading_tokens == num_computed_tokens
             assert len(load_spec.dst_blocks) == num_blocks_to_load
             # staging_buffer
@@ -177,11 +194,12 @@ class TestTPUOffloadConnectorScheduler:
             assert "req1" not in scheduler._pre_load_specs
             assert "req1" not in scheduler.staging_buffer_manager._blocks_for_load
 
-    def test_update_state_after_alloc(self, scheduler_factory):
+    @pytest.mark.parametrize("fs_offload", [False, True])
+    def test_update_state_after_alloc(self, scheduler_factory, fs_offload):
         """
         Tests that a LoadSpec is correctly updated after block allocation.
         """
-        scheduler = scheduler_factory()
+        scheduler = scheduler_factory(fs_offload=fs_offload)
         req_id = "req1"
         num_prompt_blocks = 4
         num_matched_blocks = 3
@@ -196,8 +214,7 @@ class TestTPUOffloadConnectorScheduler:
 
         # init offload_manager state
         matched_block_hashes = request.block_hashes[:num_matched_blocks]
-        allocated_chunks, _ = scheduler.offload_manager.allocate_for_save(
-            matched_block_hashes)
+        scheduler.offload_manager.allocate_for_save(matched_block_hashes)
         scheduler.offload_manager.complete_save(matched_block_hashes)
 
         # Setup a pending load
@@ -206,6 +223,9 @@ class TestTPUOffloadConnectorScheduler:
             num_skip_leading_tokens=num_computed_blocks * scheduler.block_size,
             dst_blocks=[-1] * num_blocks_to_load,
             src_chunks=[i for i in range(num_blocks_to_load)],
+            src_hashes=[
+                request.block_hashes[i] for i in range(num_blocks_to_load)
+            ],
             can_load=False)
 
         # Mock allocated blocks
@@ -218,18 +238,23 @@ class TestTPUOffloadConnectorScheduler:
 
         load_spec = scheduler.load_specs[req_id]
         assert load_spec.can_load
+        assert len(load_spec.src_chunks) == num_blocks_to_load
+        assert len(load_spec.src_hashes) == num_blocks_to_load
+        assert all(load_spec.src_hashes[i] == request.block_hashes[i]
+                   for i in range(num_blocks_to_load))
         assert load_spec.dst_blocks == allocated_block_ids[
             num_computed_blocks:num_matched_blocks]
         assert req_id in scheduler._reqs_being_loaded
         assert len(scheduler._reqs_being_loaded[req_id]) == num_blocks_to_load
 
+    @pytest.mark.parametrize("fs_offload", [False, True])
     @pytest.mark.parametrize(
         "num_computed_tokens, num_matched_tokens, num_prompt_tokens, num_staging_tokens",
         [(0, 0, 64, 160),
          (0, 32, 64, 160), (16, 32, 64, 160), (0, 64, 64, 160),
          (16, 64, 64, 160), (0, 32, 64, 48), (0, 32, 64, 16)])
     def test_build_connector_meta_new_prefill(self, scheduler_factory,
-                                              num_computed_tokens,
+                                              fs_offload, num_computed_tokens,
                                               num_matched_tokens,
                                               num_prompt_tokens,
                                               num_staging_tokens):
@@ -246,7 +271,8 @@ class TestTPUOffloadConnectorScheduler:
         num_staging_blocks = num_staging_tokens // _DEFAULT_BLOCK_SIZE
         scheduler = scheduler_factory(
             offload_num_staging_blocks=num_staging_blocks,
-            offload_num_cpu_chunks=100)
+            offload_num_cpu_chunks=100,
+            fs_offload=fs_offload)
 
         # calculate the groundtruth
         num_computed_blocks = num_computed_tokens // scheduler.block_size
@@ -335,6 +361,7 @@ class TestTPUOffloadConnectorScheduler:
                 assert req_meta.save_spec.src_blocks == request.block_ids[0][
                     num_matched_blocks:num_matched_blocks + num_blocks_to_save]
                 assert len(req_meta.save_spec.dst_chunks) == num_blocks_to_save
+                assert len(req_meta.save_spec.dst_hashes) == num_blocks_to_save
                 assert not req_meta.save_spec.is_final_save
                 assert "req1" in scheduler.staging_buffer_manager._blocks_for_save
                 assert scheduler.staging_buffer_manager._blocks_for_save[
@@ -348,12 +375,13 @@ class TestTPUOffloadConnectorScheduler:
         # after creating SaveSpec, we also update tracker.save_watermark
         assert tracker.save_watermark == num_tokens_in_cache
 
+    @pytest.mark.parametrize("fs_offload", [False, True])
     @pytest.mark.parametrize("prompt_len, seq_len, decode_save", [(63, 64, 1),
                                                                   (18, 64, 1),
                                                                   (18, 64, 0)])
     def test_build_connector_meta_decode_with_save(self, scheduler_factory,
-                                                   prompt_len, seq_len,
-                                                   decode_save):
+                                                   fs_offload, prompt_len,
+                                                   seq_len, decode_save):
         """
         Tests metadata generation for a decode step that triggers a save.
         1. the first decode (hit block boundary) + decode_save (save one block)
@@ -363,7 +391,8 @@ class TestTPUOffloadConnectorScheduler:
 
         scheduler = scheduler_factory(offload_decode_save=decode_save,
                                       offload_num_staging_blocks=10,
-                                      offload_num_cpu_chunks=10)
+                                      offload_num_cpu_chunks=10,
+                                      fs_offload=fs_offload)
 
         prompt_tokens = list(range(prompt_len))
         generated_tokens = list(range(prompt_len, seq_len))
@@ -426,6 +455,7 @@ class TestTPUOffloadConnectorScheduler:
             assert req_meta.save_spec.num_skip_leading_tokens == num_saved_tokens
             assert req_meta.save_spec.src_blocks == [num_blocks - 1]
             assert len(req_meta.save_spec.dst_chunks) == 1
+            assert len(req_meta.save_spec.dst_hashes) == 1
             assert not req_meta.save_spec.is_final_save
             # staging buffer
             assert "req1" in scheduler.staging_buffer_manager._blocks_for_save
@@ -437,7 +467,9 @@ class TestTPUOffloadConnectorScheduler:
 
             assert tracker.save_watermark == seq_len
 
-    def test_build_connector_meta_finished_request(self, scheduler_factory):
+    @pytest.mark.parametrize("fs_offload", [False, True])
+    def test_build_connector_meta_finished_request(self, scheduler_factory,
+                                                   fs_offload):
         """
         Tests metadata generation for a finished request.
         When using request's default block hash (fully-computed blocks only),
@@ -447,7 +479,8 @@ class TestTPUOffloadConnectorScheduler:
 
         """
 
-        scheduler = scheduler_factory(offload_decode_save=1)
+        scheduler = scheduler_factory(offload_decode_save=1,
+                                      fs_offload=fs_offload)
         prompt_len = scheduler.block_size + 4
         final_seq_len = scheduler.block_size * 2 + 3
         prompt_tokens = list(range(prompt_len))
