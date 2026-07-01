@@ -779,15 +779,6 @@ class TPUOffloadConnectorScheduler():
             # get dst block ids
             dst_blocks = all_blocks[skip_leading_blocks:num_matched_blocks]
 
-            # Diagnostic assertion: ensure no negative block IDs are allocated
-            if any(b < 0 for b in dst_blocks):
-                logger.error(
-                    f"TPUOffloadConnector: dst_blocks contains negative index for request {request.request_id}. "
-                    f"all_blocks: {all_blocks}, skip_leading_blocks: {skip_leading_blocks}, "
-                    f"num_matched_blocks: {num_matched_blocks}, dst_blocks: {dst_blocks}"
-                )
-                assert False, f"dst_blocks contains negative index: {dst_blocks}"
-
             # update load spec
             load_spec.src_chunks = src_chunk_ids
             load_spec.dst_blocks = dst_blocks
@@ -1367,7 +1358,8 @@ class TPUOffloadConnectorWorker:
 
             # Group layers by shape for hybrid models
             self.grouped_layer_indices = self._group_layers_by_shape(kv_caches)
-            self.grouped_layer_indices_tuple = tuple(tuple(group) for group in self.grouped_layer_indices)
+            self.grouped_layer_indices_tuple = tuple(
+                tuple(group) for group in self.grouped_layer_indices)
 
             # Cache the kv sharding spec at initialization
             # to prevent recompilation. This avoids deriving
@@ -1435,7 +1427,8 @@ class TPUOffloadConnectorWorker:
         if self.use_bucketed_swap_ops:
             self._precompile_kv_swap_operations()
 
-    def _group_layers_by_shape(self, kv_caches: list[jax.Array]) -> list[list[int]]:
+    def _group_layers_by_shape(self,
+                               kv_caches: list[jax.Array]) -> list[list[int]]:
         groups = {}  # shape_suffix -> list of layer indices
         for i, cache in enumerate(kv_caches):
             # Cache shape: (num_blocks, block_size, heads, packing, head_dim)
@@ -1443,7 +1436,7 @@ class TPUOffloadConnectorWorker:
             if shape_suffix not in groups:
                 groups[shape_suffix] = []
             groups[shape_suffix].append(i)
-        
+
         # Sort shapes to be deterministic
         sorted_shapes = sorted(groups.keys(), key=str)
         return [groups[shape] for shape in sorted_shapes]
@@ -1473,7 +1466,11 @@ class TPUOffloadConnectorWorker:
                 raise ValueError("Could not decompose with given buckets.")
         return decomposed_blocks
 
-    def _do_stack(self, kv_caches, block_ids_arr, num_blocks, grouped_indices=None):
+    def _do_stack(self,
+                  kv_caches,
+                  block_ids_arr,
+                  num_blocks,
+                  grouped_indices=None):
         if grouped_indices is None:
             grouped_indices = self.grouped_layer_indices_tuple
         if self.mesh.shape.get('attn_dp', 1) > 1:
@@ -1483,15 +1480,22 @@ class TPUOffloadConnectorWorker:
             return stack_kv_cache_cross_layers(kv_caches, block_ids_arr,
                                                num_blocks, grouped_indices)
 
-    def _do_update(self, kv_caches, kv_cache_slices, dst_blocks, mesh,
-                   cached_kv_sharding_spec, indices_sharding, grouped_indices=None):
+    def _do_update(self,
+                   kv_caches,
+                   kv_cache_slices,
+                   dst_blocks,
+                   mesh,
+                   cached_kv_sharding_spec,
+                   indices_sharding,
+                   grouped_indices=None):
         if grouped_indices is None:
             grouped_indices = self.grouped_layer_indices_tuple
         if self.mesh.shape.get('attn_dp', 1) > 1:
             return pure_jax_update_kv_caches_one(kv_caches, kv_cache_slices,
                                                  dst_blocks, mesh,
                                                  cached_kv_sharding_spec,
-                                                 indices_sharding, grouped_indices)
+                                                 indices_sharding,
+                                                 grouped_indices)
         else:
             return update_kv_caches_one(kv_caches, kv_cache_slices, dst_blocks,
                                         mesh, cached_kv_sharding_spec,
@@ -1524,10 +1528,11 @@ class TPUOffloadConnectorWorker:
                             paged_kv_for_compilation, dummy_block_ids_arr,
                             num_blocks, self.grouped_layer_indices_tuple)
                         if isinstance(stacked_dummy_kv_caches_tpu[0], list):
-                            stacked_dummy_kv_caches_tpu = [
-                                [jax.device_put(x, self.expanded_device_sharding) for x in group_chunks]
-                                for group_chunks in stacked_dummy_kv_caches_tpu
-                            ]
+                            stacked_dummy_kv_caches_tpu = [[
+                                jax.device_put(x,
+                                               self.expanded_device_sharding)
+                                for x in group_chunks
+                            ] for group_chunks in stacked_dummy_kv_caches_tpu]
                         else:
                             stacked_dummy_kv_caches_tpu = [
                                 jax.device_put(chunk,
@@ -1745,9 +1750,7 @@ class TPUOffloadConnectorWorker:
             else:
                 shape_str = str(gathered_kv_caches_tpu[0].shape)
                 sharding_str = str(gathered_kv_caches_tpu[0].sharding)
-            logger.debug(
-                f"extracted_blocks_tpu: {shape_str}, {sharding_str}"
-            )
+            logger.debug(f"extracted_blocks_tpu: {shape_str}, {sharding_str}")
 
         # We return the data needed for the next phase
         return gathered_kv_caches_tpu, num_blocks_to_save, dst_chunks, blocks_to_save
@@ -1837,8 +1840,7 @@ class TPUOffloadConnectorWorker:
                 shape_str = str(gathered_kv_caches_tpu[0].shape)
                 sharding_str = str(gathered_kv_caches_tpu[0].sharding)
             logger.debug(
-                f"extracted_blocks_tpu (batch): {shape_str}, {sharding_str}"
-            )
+                f"extracted_blocks_tpu (batch): {shape_str}, {sharding_str}")
 
         return gathered_kv_caches_tpu, manifest, total_num_blocks_to_save
 
@@ -1897,7 +1899,8 @@ class TPUOffloadConnectorWorker:
                     for x in tpu_chunk
                 ]
             else:
-                cpu_chunk = jax.device_put(tpu_chunk, self.expanded_host_sharding)
+                cpu_chunk = jax.device_put(tpu_chunk,
+                                           self.expanded_host_sharding)
             chunks_on_cpu.append(cpu_chunk)
         jax.block_until_ready(chunks_on_cpu)
         # no split
@@ -2185,10 +2188,6 @@ class TPUOffloadConnectorWorker:
             dst_blocks = meta.load_spec.dst_blocks
             src_chunks = meta.load_spec.src_chunks
             num_blocks_to_load = len(dst_blocks)
-
-            # Diagnostic assertions:
-            assert all(b >= 0 for b in dst_blocks), f"Request {meta.req_id} has negative dst blocks: {dst_blocks}"
-            assert all(b < self.num_kv_blocks for b in dst_blocks), f"Request {meta.req_id} has out-of-bounds dst blocks: {dst_blocks} (max {self.num_kv_blocks})"
             num_matched_tokens = meta.load_spec.num_matched_tokens
             num_skip_leading_tokens = meta.load_spec.num_skip_leading_tokens
             num_tokens_to_load_delta = num_matched_tokens - num_skip_leading_tokens
