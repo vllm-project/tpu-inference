@@ -354,13 +354,6 @@ def _rollback_mamba_layer_states_fn(
     source_slot_indices = num_accepted_tokens + 1
     source_slots = state_indices[jnp.arange(max_num_reqs), source_slot_indices]
 
-    jax.debug.print(
-        "DEBUG Mamba Rollback: draft_lengths={draft_lengths}, num_accepted={num_accepted}, source_slots={source_slots}",
-        draft_lengths=draft_lengths,
-        num_accepted=num_accepted_tokens,
-        source_slots=source_slots,
-    )
-
     updated_conv = conv_state.at[target_slots].set(conv_state[source_slots])
     updated_rec = recurrent_state.at[target_slots].set(
         recurrent_state[source_slots])
@@ -1326,11 +1319,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_ids_dp,
             padded_num_scheduled_tokens_per_dp_rank,
         ) = self._prepare_inputs(scheduler_output)
-
-        if self.speculative_config is not None:
-            print(
-                f"DEBUG SPEC: is_decode_only={is_decode_only}, input_ids={input_ids[:20]}, input_positions={input_positions[:20]}",
-                flush=True)
 
         # multi-modal support
         if self.is_multimodal_model:
