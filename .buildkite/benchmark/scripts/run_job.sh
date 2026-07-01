@@ -33,9 +33,22 @@ RECORD_ID="${BUILDKITE_STEP_ID}"
 export RECORD_ID
 echo "--- Prepare benchmark Record ID: ${RECORD_ID}"
 
-CODE_HASH=$(buildkite-agent meta-data get "CODE_HASH")
+CODE_HASH=$(buildkite-agent meta-data get "CODE_HASH" --default "")
+if [ -z "${CODE_HASH}" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    # shellcheck source=/dev/null
+    source "${SCRIPT_DIR}/../../scripts/configs/pipeline_config.sh"
+    VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "$(get_vllm_commit_hash)")
+    TPU_COMMIT_HASH=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+    CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_COMMIT_HASH}-"
+fi
 export CODE_HASH
-JOB_REFERENCE=$(buildkite-agent meta-data get "JOB_REFERENCE")
+
+JOB_REFERENCE=$(buildkite-agent meta-data get "JOB_REFERENCE" --default "")
+if [ -z "${JOB_REFERENCE}" ]; then
+    TIMEZONE="America/Los_Angeles"
+    JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
+fi
 export JOB_REFERENCE
 export RUN_TYPE="${RUN_TYPE:-DAILY}"
 
