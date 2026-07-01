@@ -598,20 +598,31 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         self.max_soft_tokens = vision_config.default_output_length
         self.patch_pixels = vision_config.patch_size**2 * 3
 
-        self.vision_tower = Gemma4VisionModel(
-            config=vision_config,
-            dtype=model_config.dtype,
-            rng=rng,
-            quant_config=vllm_config.quant_config,
-            mesh=mesh)
+        mm_config = getattr(model_config, "multimodal_config", None)
+        skip_vision = False
+        if mm_config is not None:
+            if mm_config.get_limit_per_prompt("image") == 0 and mm_config.get_limit_per_prompt("video") == 0:
+                skip_vision = True
 
-        self.embed_vision = Gemma4MultimodalEmbedder(
-            vision_hidden_size=vision_config.hidden_size,
-            text_hidden_size=model_config.hf_config.text_config.hidden_size,
-            dtype=model_config.dtype,
-            rng=rng,
-            quant_config=vllm_config.quant_config,
-            prefix="embed_vision")
+        if not skip_vision:
+            self.vision_tower = Gemma4VisionModel(
+                config=vision_config,
+                dtype=model_config.dtype,
+                rng=rng,
+                quant_config=vllm_config.quant_config,
+                mesh=mesh)
+
+            self.embed_vision = Gemma4MultimodalEmbedder(
+                vision_hidden_size=vision_config.hidden_size,
+                text_hidden_size=model_config.hf_config.text_config.hidden_size,
+                dtype=model_config.dtype,
+                rng=rng,
+                quant_config=vllm_config.quant_config,
+                prefix="embed_vision")
+        else:
+            from tpu_inference.layers.jax.pp_utils import PPMissingLayer
+            self.vision_tower = PPMissingLayer()
+            self.embed_vision = PPMissingLayer()
 
         self.final_logit_softcapping = getattr(
             model_config.hf_config.text_config, "final_logit_softcapping",
@@ -1092,6 +1103,10 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         self,
         run_compilation_fn: Callable,
     ) -> None:
+
+        from tpu_inference.layers.jax.pp_utils import PPMissingLayer
+        if isinstance(self.vision_tower, PPMissingLayer):
+            return
 
         image_shapes = []
         if hasattr(self.vllm_config,
