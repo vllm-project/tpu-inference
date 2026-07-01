@@ -337,19 +337,29 @@ def _rollback_mamba_layer_states_fn(
     recurrent_state: jax.Array,
     state_indices: jax.Array,
     num_accepted_tokens: jax.Array,
+    draft_lengths: jax.Array,
 ):
     """Rollback a single Mamba layer's states on the device by copying Slot[num_accepted] to Slot[0].
 
     This copies the state from the last accepted token's slot (Slot[num_accepted]) to the
-    initial state slot (Slot[0]) for every request. By doing this copy on the device at the
-    start of the step, the Mamba kernels (causal_conv1d and gdn_attention) can always read
-    their initial state statically from Slot[0] and write their new history to Slots 1..num_spec,
-    avoiding the need for complex, dynamic offset reads inside the Pallas kernels.
+    initial state slot (Slot[0]) for every request. If the request did not propose draft tokens
+    in the previous step (draft_lengths == 0, e.g. after prompt prefill), the rollback is a no-op
+    (copies Slot[0] to Slot[0]).
     """
     max_num_reqs = state_indices.shape[0]
     target_slots = state_indices[:, 0]
-    source_slots = state_indices[jnp.arange(max_num_reqs),
-                                 num_accepted_tokens + 1]
+    # If the request proposed draft tokens, copy from num_accepted_tokens + 1.
+    # Otherwise, copy from Slot 0 (no-op).
+    source_slot_indices = jnp.where(draft_lengths > 0, num_accepted_tokens + 1,
+                                    0)
+    source_slots = state_indices[jnp.arange(max_num_reqs), source_slot_indices]
+
+    jax.debug.print(
+        "DEBUG Mamba Rollback: draft_lengths={draft_lengths}, num_accepted={num_accepted}, source_slots={source_slots}",
+        draft_lengths=draft_lengths,
+        num_accepted=num_accepted_tokens,
+        source_slots=source_slots,
+    )
 
     updated_conv = conv_state.at[target_slots].set(conv_state[source_slots])
     updated_rec = recurrent_state.at[target_slots].set(
@@ -1251,6 +1261,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         state_indices: jax.Array,
         num_accepted_tokens: jax.Array,
+        draft_lengths: jax.Array,
     ) -> None:
         """Rollback Mamba states for all layers on the device.
 
@@ -1267,6 +1278,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     recurrent_state,
                     state_indices,
                     num_accepted_tokens,
+                    draft_lengths,
                 )
                 self.kv_caches[layer_idx] = (new_conv, new_rec)
 
@@ -1367,6 +1379,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self._device_rollback_mamba_states(
                 state_indices_to_rollback,
                 num_accepted_tokens_dev,
+                draft_lengths,
             )
         with self.maybe_forbid_compile:
             with set_forward_context(
