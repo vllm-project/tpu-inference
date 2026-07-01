@@ -53,7 +53,7 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
 
         if not use_a16:
             logger.warning(
-                "fp4 x fp4 mmu is not natively supported by TPU hardware, so activations are always kept at bf16 for now."
+                "fp4xfp4 multiplications are not natively supported by TPU hardware, so activations are always kept at bf16 for now."
             )
 
         # We need to monkeypatch expose_input_quant_key to handle None kernel
