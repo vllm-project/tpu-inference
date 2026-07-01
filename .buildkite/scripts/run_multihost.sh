@@ -108,12 +108,9 @@ cleanup() {
   echo "   -> Cleaning workers..."
   if [[ ${#WORKER_IPS_ARRAY[@]} -gt 0 && -n "${WORKER_IPS_ARRAY[0]}" ]]; then
     for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
-      echo "==================== Ray Worker logs from worker node ${worker_ip} ===================="
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker exec node bash -c 'tail -n 100 /tmp/ray/session_*/logs/worker-*.err /tmp/ray/session_*/logs/ray_process_exit.log 2>/dev/null || true'" || true
-      echo "==================== Docker logs from worker node ${worker_ip} ===================="
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker logs node" || echo "Failed to fetch logs from worker ${worker_ip}"
-      echo "=================================================================================="
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
+    echo "==================== Ray Worker logs from worker node ${worker_ip} ===================="
+      # ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true; sudo rm -rf /tmp/ray/* /tmp/vllm/*" || true
     done
   fi
 
@@ -127,6 +124,7 @@ cleanup() {
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
   rm -f /tmp/vllm_serve.log || true
+  sudo rm -rf /tmp/ray/* /tmp/vllm/* >/dev/null 2>&1 || true
 
   echo "✅ Cleanup complete."
 }
@@ -209,6 +207,7 @@ MODEL="${TEST_MODEL:-gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapsh
 VLLM_PORT="8000"
 VLLM_SERVE_CMD=""
 CLIENT_BENCH_CMD=""
+DOCKER_ENV_ARGS=()
 
 if [ "$#" -ge 1 ]; then
     if [[ "$1" == *.json ]]; then
@@ -244,13 +243,20 @@ if [ "$#" -ge 1 ]; then
         # Convert SERVER_CMD array to a single string VLLM_SERVE_CMD
         for env_item in "${SERVER_CMD_ENVS[@]}"; do
             VLLM_SERVE_CMD+="$(printf '%q ' "$env_item")"
+            DOCKER_ENV_ARGS+=("-e" "$env_item")
         done
         for cmd_item in "${SERVER_CMD[@]}"; do
             VLLM_SERVE_CMD+="$(printf '%q ' "$cmd_item")"
         done
         
         # Set client benchmark command from CLIENT_CMD resolved by parser
-        CLIENT_BENCH_CMD="$CLIENT_CMD"
+        CLIENT_BENCH_CMD=""
+        for env_item in "${CLIENT_CMD_ENVS[@]}"; do
+            CLIENT_BENCH_CMD+="$(printf '%q ' "$env_item")"
+        done
+        for cmd_item in "${CLIENT_CMD[@]}"; do
+            CLIENT_BENCH_CMD+="$(printf '%q ' "$cmd_item")"
+        done
         
     else
         # Legacy mode (raw server/client commands passed)
@@ -260,6 +266,12 @@ if [ "$#" -ge 1 ]; then
             CLIENT_BENCH_CMD="${*:-}"
         fi
     fi
+fi
+
+# Extract port from VLLM_SERVE_CMD if present (e.g., --port 8080 or --port=8080)
+if [[ "${VLLM_SERVE_CMD}" =~ --port[=\ ]+([0-9]+) ]]; then
+    VLLM_PORT="${BASH_REMATCH[1]}"
+    echo "--- Extracted VLLM_PORT=${VLLM_PORT} from JSON server command"
 fi
 
 # Clean up potential leftovers from previous runs
@@ -278,13 +290,14 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
   -e TPU_BACKEND_TYPE=jax \
-  -e MODEL_IMPL_TYPE=vllm \
+  -e MODEL_IMPL_TYPE="${MODEL_IMPL_TYPE:-vllm}" \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM="${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}" \
   -e NEW_MODEL_DESIGN="${NEW_MODEL_DESIGN:-0}" \
   -e MOE_REQUANTIZE_BLOCK_SIZE="${MOE_REQUANTIZE_BLOCK_SIZE:-}" \
   -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
   -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" \
+  "${DOCKER_ENV_ARGS[@]}" \
   ${EXTRA_DOCKER_ARGS:-} &
 
 sleep 60
@@ -314,13 +327,14 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
   -e TPU_BACKEND_TYPE=jax \
-  -e MODEL_IMPL_TYPE=vllm \
+  -e MODEL_IMPL_TYPE='${MODEL_IMPL_TYPE:-vllm}' \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
   -e NEW_MODEL_DESIGN='${NEW_MODEL_DESIGN:-0}' \
   -e MOE_REQUANTIZE_BLOCK_SIZE='${MOE_REQUANTIZE_BLOCK_SIZE:-}' \
   -e MOE_REQUANTIZE_WEIGHT_DTYPE='${MOE_REQUANTIZE_WEIGHT_DTYPE:-}' \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE='${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}' \
-  -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}'
+  -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}' \
+  "${DOCKER_ENV_ARGS[@]}"
 EOF
 done
 
@@ -373,10 +387,18 @@ wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log"
 
 # 5. Run Benchmarks / Validation
 if [ -n "${CLIENT_BENCH_CMD}" ]; then
-  echo "--- Running Benchmark Command on Head Node"
-  docker exec \
-    -e HF_HOME=/root/.cache/huggingface \
-    node bash -c "${CLIENT_BENCH_CMD}"
+  if [[ "${CASE_FILE:-}" == *.json ]]; then
+    echo "--- Invoking run_bm.sh for advanced benchmark logic on Head Node..."
+    docker exec \
+      -e HF_HOME=/root/.cache/huggingface \
+      -e SERVER_ALREADY_RUNNING="true" \
+      node bash -c "chmod +x /workspace/tpu_inference/.buildkite/benchmark/scripts/run_bm.sh && /workspace/tpu_inference/.buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME"
+  else
+    echo "--- Running Benchmark Command on Head Node"
+    docker exec \
+      -e HF_HOME=/root/.cache/huggingface \
+      node bash -c "${CLIENT_BENCH_CMD}"
+  fi
 elif [ "$#" -gt 0 ]; then
   echo "--- Running provided Benchmark Command on Head Node"
   COMMAND_ARGS=("$@")

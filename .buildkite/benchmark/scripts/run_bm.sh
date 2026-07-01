@@ -67,6 +67,11 @@ echo "TARGET_CASE_NAME: $TARGET_CASE_NAME"
 cleanup() {
     local exit_code=$?
 
+    # Do not kill the server if it was started externally
+    if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
+        return
+    fi
+
     # Only perform cleanup if NOT in Buildkite (Local only)
     if [[ "${BUILDKITE:-false}" == "true" ]]; then
         return
@@ -78,6 +83,12 @@ cleanup() {
     fi
     
     CLEANUP_DONE="true"
+
+    # If server was started externally, we DON'T kill it here.
+    if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
+        echo "[INFO] Multi-host server runs externally. Skipping local cleanup."
+        return
+    fi
 
     # Only show cleanup info if exiting with an error or interrupted
     if [[ $exit_code -ne 0 ]]; then
@@ -374,65 +385,66 @@ if [[ "$SERVER_ALREADY_RUNNING" == "false" ]]; then
         echo "[ERROR] vLLM Server failed to start immediately. Check log: $VLLM_LOG"
         exit 1
     fi
-else
-    echo "[INFO] Server is already running. Skipping startup."
-    VLLM_PID=""
-fi
 
-# ---------------------------------------------------------
-# Server startup wait logic
-# ---------------------------------------------------------
-SERVER_WAIT_MINS=${SERVER_WAIT_MINS:-60}
+    # ---------------------------------------------------------
+    # Server startup wait logic
+    # ---------------------------------------------------------
+    SERVER_WAIT_MINS=${SERVER_WAIT_MINS:-60}
 
-MAX_WAIT_SECONDS=$((SERVER_WAIT_MINS * 60))
-WAIT_START_TIME=$(date +%s)
-ELAPSED=0
+    MAX_WAIT_SECONDS=$((SERVER_WAIT_MINS * 60))
+    WAIT_START_TIME=$(date +%s)
+    ELAPSED=0
 
-echo "Waiting up to ${SERVER_WAIT_MINS} minutes for server to start (PID: ${VLLM_PID})..."
+    echo "Waiting up to ${SERVER_WAIT_MINS} minutes for server to start (PID: ${VLLM_PID})..."
 
-# Initial state set to not started
-SERVER_STARTED="false"
+    # Initial state set to not started
+    SERVER_STARTED="false"
 
-# Loop continues as long as elapsed time is within the maximum allowed
-while (( ELAPSED <= MAX_WAIT_SECONDS )); do
-    
-    # 1. [Fail-Fast Check] Ask the OS if the process is still alive
-    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-        echo "[ERROR] vLLM process (PID=$VLLM_PID) has exited unexpectedly!"
+    # Loop continues as long as elapsed time is within the maximum allowed
+    while (( ELAPSED <= MAX_WAIT_SECONDS )); do
+        
+        # 1. [Fail-Fast Check] Ask the OS if the process is still alive
+        if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+            echo "[ERROR] vLLM process (PID=$VLLM_PID) has exited unexpectedly!"
+            echo "--- Dumping VLLM_LOG for debugging ---"
+            cat "$VLLM_LOG"
+            exit 1
+        fi
+
+        # 2. [Success Check] Look for the startup completion flag
+        if grep -Fq "Application startup complete" "$VLLM_LOG"; then
+            echo "Application started successfully."
+            SERVER_STARTED="true"
+            break
+        fi
+
+        # 3. Print progress approximately every 1 minute (every 6 iterations) to keep logs clean
+        ITERATION=$((ELAPSED / 10))
+        if (( ITERATION % 6 == 0 )); then
+            ELAPSED_MIN=$((ELAPSED / 60))
+            ELAPSED_SEC=$((ELAPSED % 60))
+            printf "Still waiting... Elapsed: %02d:%02d / %02d:00\n" "$ELAPSED_MIN" "$ELAPSED_SEC" "$SERVER_WAIT_MINS"
+        fi
+
+        # 4. Wait 10 seconds before the next check
+        sleep 10
+
+        # 5. Update elapsed time for the next while loop condition evaluation
+        CURRENT_TIME=$(date +%s)
+        ELAPSED=$((CURRENT_TIME - WAIT_START_TIME))
+    done
+
+    # Direct exit if server is not started to prevent fetching the dirty bm result
+    if [[ "$SERVER_STARTED" == "false" ]]; then
+        echo "[ERROR] Server failed to start within ${SERVER_WAIT_MINS} minutes! Timeout reached."
         echo "--- Dumping VLLM_LOG for debugging ---"
         cat "$VLLM_LOG"
         exit 1
     fi
-
-    # 2. [Success Check] Look for the startup completion flag
-    if grep -Fq "Application startup complete" "$VLLM_LOG"; then
-        echo "Application started successfully."
-        SERVER_STARTED="true"
-        break
-    fi
-
-    # 3. Print progress approximately every 1 minute (every 6 iterations) to keep logs clean
-    ITERATION=$((ELAPSED / 10))
-    if (( ITERATION % 6 == 0 )); then
-        ELAPSED_MIN=$((ELAPSED / 60))
-        ELAPSED_SEC=$((ELAPSED % 60))
-        printf "Still waiting... Elapsed: %02d:%02d / %02d:00\n" "$ELAPSED_MIN" "$ELAPSED_SEC" "$SERVER_WAIT_MINS"
-    fi
-
-    # 4. Wait 10 seconds before the next check
-    sleep 10
-
-    # 5. Update elapsed time for the next while loop condition evaluation
-    CURRENT_TIME=$(date +%s)
-    ELAPSED=$((CURRENT_TIME - WAIT_START_TIME))
-done
-
-# Direct exit if server is not started to prevent fetching the dirty bm result
-if [[ "$SERVER_STARTED" == "false" ]]; then
-    echo "[ERROR] Server failed to start within ${SERVER_WAIT_MINS} minutes! Timeout reached."
-    echo "--- Dumping VLLM_LOG for debugging ---"
-    cat "$VLLM_LOG"
-    exit 1
+else
+    echo "[INFO] Server is managed externally (Multi-Host). Skipping startup and wait logic."
+    SERVER_STARTED="true"
+    VLLM_PID=""
 fi
 
 # ---------------------------------------------------------
