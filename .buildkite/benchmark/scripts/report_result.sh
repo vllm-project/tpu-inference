@@ -283,8 +283,7 @@ for i, line in enumerate(lines):
     fi
   fi
 )
-# for test
-export UPLOAD_DB=true
+
 # Database Reporting Logic (ON CONFLICT (RecordId) DO UPDATE SET)
 if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANCE_ID:-}" ]]; then
   if [ "$EXIT_CODE" -ne 0 ]; then

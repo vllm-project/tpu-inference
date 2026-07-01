@@ -270,13 +270,6 @@ def create_benchmark_steps(case_data: Dict[str, Any],
         if os.environ.get("BENCHMARK_VALIDATION_UPLOADED") == "true":
             step["depends_on"] = "validate_benchmark_case_name"
 
-        # for test
-        # Print the generated step structure to stderr for debugging
-        print(f"--- [DEBUG] Generated Buildkite Step for {case_name}:",
-              file=sys.stderr)
-        print(json.dumps(step, indent=2), file=sys.stderr)
-        # test end
-
         child_steps.append(step)
 
     return child_steps

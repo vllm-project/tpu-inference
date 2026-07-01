@@ -14,7 +14,6 @@
       ],
       "env": {
         "RUN_TYPE": "DAILY",
-        "EXPECTED_ETEL": 3600000,
         "INPUT_LEN": 8192,
         "OUTPUT_LEN": 1024,
         "PREFIX_LEN": 0,
