@@ -414,34 +414,60 @@ def preprocess_metadata(
     b_idx_to_sz_from_old = jnp.minimum(b_idx_to_sz_from_old,
                                        cfgs.prev_kernel_size)
 
-    # Determine if we should write the intermediate state history (Slot 1..num_spec+1).
-    # We only write history when state_indices is 2D and the maximum query length
-    # is <= num_spec + 1 (meaning it is a speculative verification step, not a prompt prefill).
+    # Determine if we should write the intermediate state history (Slot 1..num_spec+1) per token.
+    # We only write history when state_indices is 2D, the request already has computed prior
+    # context (has_initial_state is True), and the query length is <= num_spec + 1 (speculative verification).
     if state_indices.ndim == 2:
         num_spec = state_indices.shape[1] - 2
-        max_query_len = jnp.max(query_lens)
-        write_history = max_query_len <= num_spec + 1
+        req_has_initial_state = has_initial_state[b_idx_to_s_idx]
+        write_history = req_has_initial_state & (query_lens[b_idx_to_s_idx]
+                                                 <= num_spec + 1)
     else:
         write_history = False
 
     # Determine which row needs to write its conv_state to HBM using tracer-safe jnp.where.
+    last_token_idx = b_idx_query_start_loc + query_lens[b_idx_to_s_idx] - 1
     if state_indices.ndim == 2:
+        # is_last_token: True only for the final token in the prompt (index T-1).
+        is_last_token = (all_b_idx == last_token_idx)
+        # is_second_to_last_token: True only for the token right before the last one (index T-2).
+        is_second_to_last_token = (all_b_idx == last_token_idx - 1)
+        # has_multiple_tokens: True if the prompt has more than 1 token.
+        has_multiple_tokens = (query_lens[b_idx_to_s_idx] > 1)
+
+        # During prompt prefill, write both the last and second-to-last tokens.
+        should_write_prefill = is_last_token | (has_multiple_tokens
+                                                & is_second_to_last_token)
         b_idx_should_write = jnp.where(
-            write_history, all_b_idx < num_tokens, b_idx_query_start_loc +
-            query_lens[b_idx_to_s_idx] - 1 == all_b_idx)
+            write_history,
+            all_b_idx < num_tokens,  # Speculative: write all valid tokens
+            should_write_prefill,  # Prefill: write historical anchors
+        )
     else:
-        b_idx_should_write = (b_idx_query_start_loc +
-                              query_lens[b_idx_to_s_idx] - 1 == all_b_idx)
+        b_idx_should_write = (all_b_idx == last_token_idx)
     b_idx_should_write = b_idx_should_write.astype(jnp.int32)
 
     # Compute 1D slot index arrays for read and write.
     if state_indices.ndim == 2:
         # All tokens load their initial state from Slot 0 (either prompt initial state or rollback initial state)
         read_state_indices = state_indices[b_idx_to_s_idx, 0]
+
+        # Determine the target write slot for prompt prefill:
+        # - The last token writes to Slot 1.
+        # - The second-to-last token writes to Slot 0.
+        # - Other tokens default to Slot 0 (but are masked out by b_idx_should_write).
+        write_slot_prefill = jnp.where(
+            is_last_token,
+            state_indices[b_idx_to_s_idx, 1],  # Slot 1 (after last token)
+            state_indices[b_idx_to_s_idx, 0],  # Slot 0 (before last token)
+        )
+
         token_step_idx = all_b_idx - b_idx_query_start_loc
         write_state_indices = jnp.where(
-            write_history, state_indices[b_idx_to_s_idx, token_step_idx + 1],
-            state_indices[b_idx_to_s_idx, 0])
+            write_history,
+            state_indices[b_idx_to_s_idx, token_step_idx + 1],
+            write_slot_prefill,
+        )
     else:
         read_state_indices = state_indices[b_idx_to_s_idx]
         write_state_indices = state_indices[b_idx_to_s_idx]

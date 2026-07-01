@@ -348,10 +348,9 @@ def _rollback_mamba_layer_states_fn(
     """
     max_num_reqs = state_indices.shape[0]
     target_slots = state_indices[:, 0]
-    # If the request proposed draft tokens, copy from num_accepted_tokens + 1.
+    # If the request proposed draft tokens, copy from num_accepted_tokens.
     # Otherwise, copy from Slot 0 (no-op).
-    source_slot_indices = jnp.where(draft_lengths > 0, num_accepted_tokens + 1,
-                                    0)
+    source_slot_indices = jnp.where(draft_lengths > 0, num_accepted_tokens, 0)
     source_slots = state_indices[jnp.arange(max_num_reqs), source_slot_indices]
 
     jax.debug.print(

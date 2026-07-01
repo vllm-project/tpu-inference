@@ -195,12 +195,7 @@ def ragged_gated_delta_rule(
     recurrent_state = recurrent_state.at[initial_state_indices].set(
         masked_initial_states)
 
-    # We only write history (Slot 1..num_spec+1) during speculative verification prefill,
-    # which is characterized by query sequence length T <= num_spec + 1.
-    # For prompt prefill (large T), we only write the final state to Slot 0.
     num_spec = state_indices.shape[1] - 2 if state_indices.ndim == 2 else 0
-    T = query.shape[1]
-    write_history = (state_indices.ndim == 2) & (T <= num_spec + 1)
 
     # Compute the 0-based token index (step) within each request's speculative window.
     # This is used to index into the 2D state_indices history buffer.
@@ -228,15 +223,49 @@ def ragged_gated_delta_rule(
         # In speculative decoding (2D state_indices), we implement a sequential recurrence:
         # - If write_history is True: Token at step `i` reads from Slot `i`, writes to Slot `i + 1`.
         # - If write_history is False: All tokens read and write to Slot 0 (prompt prefill).
-        # For normal decoding (1D state_indices), we read and write to the same single slot.
+        # For normal decoding (1D state_indices), we read and write to the same single slot
         if state_indices.ndim == 2:
-            if write_history:
-                read_state_index = state_indices[request_index, token_step]
-                write_state_index = state_indices[request_index,
-                                                  token_step + 1]
-            else:
-                read_state_index = state_indices[request_index, 0]
-                write_state_index = state_indices[request_index, 0]
+            # Speculative verification step: reads Slot token_step, writes Slot token_step + 1
+            read_slot_verify = token_step
+            write_slot_verify = token_step + 1
+
+            # Prompt prefill step:
+            # - The last token (T-1) writes its state to Slot 1.
+            # - The second-to-last token (T-2) writes its state to Slot 0.
+            # - Other intermediate tokens write to Slot 2 (scratch).
+            # - Token 0 reads initial state from Slot 0.
+            # - Token T-1 reads Token T-2's state from Slot 0.
+            # - Other tokens read from Slot 2.
+            query_lens = query_start_loc[1:] - query_start_loc[:-1]
+            req_len = query_lens[request_index]
+            last_step = req_len - 1
+
+            # is_first_step: True only for the very first token in the prompt (index 0).
+            is_first_step = (token_step == 0)
+            # is_last_step: True only for the final token in the prompt (index T-1).
+            is_last_step = (token_step == last_step)
+            # is_second_to_last_step: True only for the token right before the last one (index T-2).
+            is_second_to_last_step = (token_step == last_step - 1)
+
+            # Token 0 and Token T-1 read from Slot 0; others read from Slot 2.
+            read_slot_prefill = jnp.where(is_first_step | is_last_step, 0, 2)
+
+            # Token T-1 writes to Slot 1; Token T-2 writes to Slot 0; others write to Slot 2.
+            write_slot_prefill = jnp.where(
+                is_last_step, 1, jnp.where(is_second_to_last_step, 0, 2))
+
+            # Select slot based on write_history (which is a dynamic tracer per request)
+            req_has_initial_state = has_initial_state[request_index]
+            req_write_history = req_has_initial_state & (req_len
+                                                         <= num_spec + 1)
+
+            read_slot = jnp.where(req_write_history, read_slot_verify,
+                                  read_slot_prefill)
+            write_slot = jnp.where(req_write_history, write_slot_verify,
+                                   write_slot_prefill)
+
+            read_state_index = state_indices[request_index, read_slot]
+            write_state_index = state_indices[request_index, write_slot]
         else:
             read_state_index = state_indices[request_index]
             write_state_index = state_indices[request_index]
