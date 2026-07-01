@@ -492,6 +492,7 @@ def expert_parallel_gmm(
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
+    x_p_spec = P(ShardingAxisName.EXPERT_DATA)
     ep_data_p_spec = P(ShardingAxisName.EXPERT_DATA)
     attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
     num_experts = w1.shape[0]
@@ -523,7 +524,7 @@ def expert_parallel_gmm(
         ),
         mesh=mesh,
         in_specs=(
-            data_p_spec,
+            x_p_spec,
             ep_p_spec,
             w1_scale_spec,
             w1_bias_spec,
@@ -580,6 +581,7 @@ def hybrid_parallel_gmm(
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 
     # 3. Define the Partition Specs
+    x_p_spec = P(ShardingAxisName.EXPERT_DATA)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     ep_p_spec = P(ep_axis)
 
@@ -627,7 +629,7 @@ def hybrid_parallel_gmm(
         ),
         mesh=mesh,
         in_specs=(
-            data_p_spec,
+            x_p_spec,
             w1_spec,
             w1_scale_spec,
             w1_bias_spec,
@@ -853,6 +855,9 @@ def fused_moe_func(
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
+    x_out_spec = (P(ShardingAxisName.EXPERT_DATA)
+                  if use_ep else P(ShardingAxisName.MLP_DATA))
+
     if all_gather_fp8:
         hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
 
@@ -864,7 +869,7 @@ def fused_moe_func(
             P(ShardingAxisName.MLP_DATA, None),
         ),
         out_specs=(
-            P(ShardingAxisName.MLP_DATA),
+            x_out_spec,
             P(ShardingAxisName.MLP_DATA),
             P(ShardingAxisName.MLP_DATA),
         ),
