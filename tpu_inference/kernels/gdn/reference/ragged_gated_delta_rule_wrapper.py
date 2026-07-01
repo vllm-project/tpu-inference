@@ -147,6 +147,24 @@ def ragged_gated_delta_rule_wrapper(
     is_decode_only = distribution[0] == distribution[2]
 
     def decode_only_branch(_):
+        if state_indices.ndim == 2:
+            return ref_recurrent_impl(
+                mixed_qkv,
+                b,
+                a,
+                recurrent_state,
+                A_log,
+                dt_bias,
+                query_start_loc,
+                state_indices,
+                distribution,
+                has_initial_state,
+                n_kq=n_kq,
+                n_v=n_v,
+                d_k=d_k,
+                d_v=d_v,
+            )
+
         num_tokens = mixed_qkv.shape[0]
         pad_size = max(0, num_tokens - state_indices.shape[0])
         padded_state_indices = jnp.pad(state_indices, (0, pad_size),

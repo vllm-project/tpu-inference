@@ -1326,6 +1326,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_scheduled_tokens_per_dp_rank,
         ) = self._prepare_inputs(scheduler_output)
 
+        if self.speculative_config is not None:
+            print(
+                f"DEBUG SPEC: is_decode_only={is_decode_only}, input_ids={input_ids[:20]}, input_positions={input_positions[:20]}",
+                flush=True)
+
         # multi-modal support
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
