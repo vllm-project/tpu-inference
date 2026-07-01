@@ -51,6 +51,7 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
             raise NotImplementedError(
                 "Static input scheme is not yet supported for W4A4 NVFP4.")
 
+        # TODO(lxhfirenking): Add native support for nvfp4 activation.
         if not use_a16:
             logger.warning(
                 "fp4xfp4 multiplications are not natively supported by TPU hardware, so activations are always kept at bf16 for now."
