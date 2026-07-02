@@ -72,8 +72,7 @@
               "num-prompts": 2560,
               "ignore-eos": true,
               "trust-remote-code": true,
-              "percentile-metrics": "ttft,tpot,itl,e2el",
-              "mmlu-output-len": 4
+              "percentile-metrics": "ttft,tpot,itl,e2el"
             }
           },
           "accuracy_command_options": {
