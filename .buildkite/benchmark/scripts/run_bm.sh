@@ -716,25 +716,39 @@ if [[ "$run_accuracy" == "mmlu" ]]; then
   echo "[INFO] RUN_ACCURACY=mmlu: Executing Accuracy Verification Phase"
   echo "====================================================================="
 
-  # Sync dataset from GCS if it is not present in the workspace
-  DATASET_DIR="$ARTIFACT_FOLDER/dataset"
-  if [ ! -d "$DATASET_DIR/test" ]; then
-    echo "MMLU dataset test folder not found, executing gsutil sync..."
+  # Download dataset using wget if it is not present in the workspace
+  DATASET_DIR="$ARTIFACT_FOLDER/dataset/mmlu"
+  if [ ! -d "$DATASET_DIR/data/test" ]; then
+    echo "MMLU dataset test folder not found, downloading via wget..."
     mkdir -p "$DATASET_DIR"
-    if command -v gsutil &> /dev/null; then
-      gsutil -m cp -r gs://"$GCS_BUCKET"/dataset/mmlu/* "$DATASET_DIR/" || echo "Warning: failed to sync dataset mmlu"
-    else
-      echo "Warning: gsutil not found. Skipping dataset sync."
+    cd "$DATASET_DIR" || exit 1
+    if [ ! -f data.tar ]; then
+      wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .
+      tar -xvf data.tar
     fi
+    # Return to previous directory
+    cd - > /dev/null
   fi
 
+  # Extract the client model name from CLIENT_CMD, otherwise fallback to DB MODEL
+  client_model="$MODEL"
+  for i in "${!CLIENT_CMD[@]}"; do
+    if [[ "${CLIENT_CMD[$i]}" == "--model" ]]; then
+      client_model="${CLIENT_CMD[$i+1]}"
+      break
+    elif [[ "${CLIENT_CMD[$i]}" == --model=* ]]; then
+      client_model="${CLIENT_CMD[$i]#*=}"
+      break
+    fi
+  done
+
   # Run the custom local benchmark_serving.py client for accuracy
-  echo "Running accuracy benchmark..."
+  echo "Running accuracy benchmark with model: $client_model"
   python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py \
     --backend vllm \
-    --model "$MODEL" \
+    --model "$client_model" \
     --dataset-name mmlu \
-    --dataset-path "$DATASET_DIR/test" \
+    --dataset-path "$DATASET_DIR/data/test" \
     --num-prompts 14000 \
     --run-eval \
     --temperature 0 \

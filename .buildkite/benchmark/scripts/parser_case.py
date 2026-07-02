@@ -129,14 +129,20 @@ def build_command(cmd_type, args_dict):
         return shlex.join(cmd_parts)
 
     for key, value in args_dict.items():
+        if key == "model" and "model-path" in args_dict:
+            continue
+
+        output_key = "model" if key == "model-path" else key
+
         if isinstance(value, bool):
             if value:
-                cmd_parts.append(f"--{key}")
+                cmd_parts.append(f"--{output_key}")
         else:
-            cmd_parts.append(f"--{key}")
+            cmd_parts.append(f"--{output_key}")
             cmd_parts.append(str(value))
 
     return shlex.join(cmd_parts)
+
 
 
 def main():
