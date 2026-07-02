@@ -129,6 +129,7 @@ class CompilationManager:
                          call_kwargs=dict(),
                          warmup_handler: Optional[Callable] = None,
                          aot: bool = True,
+                         compile_only: bool = False,
                          **kwargs) -> None:
         log_name = f"{name} --> {kwargs}"
         logger.info(f"Precompile {log_name}")
@@ -138,9 +139,19 @@ class CompilationManager:
             args = fn.args + args
             call_kwargs = {**fn.keywords, **call_kwargs}
             fn = fn.func
-        self._warmup_tasks.append(
-            (name, fn, args, call_kwargs, warmup_handler))
-        if not aot or not hasattr(fn, 'lower'):
+
+        is_jit = hasattr(fn, 'lower')
+
+        if compile_only:
+            if not is_jit:
+                raise ValueError(
+                    f"compile_only=True requires a JITted function, but {name} is not a JIT."
+                )
+        else:
+            self._warmup_tasks.append(
+                (name, fn, args, call_kwargs, warmup_handler))
+
+        if not compile_only and (not aot or not is_jit):
             # Skip AOT when the caller opts out, or when fn is unjitted.
             # The warmup pass will run fn() and populate the inner-jit caches.
             reason = "aot=False" if not aot else "not a jit"
@@ -148,16 +159,22 @@ class CompilationManager:
                 "AOT lower skipped for %s (%s); will compile in warmup.", name,
                 reason)
             return
+
         try:
             lowered = fn.lower(*args, **call_kwargs)
         except Exception as e:
-            # AOT lower not supported here (e.g. a jit whose body contains a
-            # nested jit with compiler_options). Fall back to warmup-only — the
-            # warmup pass will trigger inline compile.
-            logger.info(
-                "AOT lower skipped for %s (%r); will compile in warmup.", name,
-                e)
-            return
+            if compile_only:
+                logger.error(
+                    f"Failed to lower {name} with compile_only=True: {e}")
+                raise
+            else:
+                # AOT lower not supported here (e.g. a jit whose body contains a
+                # nested jit with compiler_options). Fall back to warmup-only — the
+                # warmup pass will trigger inline compile.
+                logger.info(
+                    "AOT lower skipped for %s (%r); will compile in warmup.",
+                    name, e)
+                return
 
         # Compilation is thread-safe
         def _compile(lowered, name, mesh):
@@ -485,26 +502,23 @@ class CompilationManager:
         replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
         indices_sharding = NamedSharding(self.runner.mesh, PartitionSpec(None))
 
+        placeholder_num = jax.ShapeDtypeStruct((1, ), jnp.int32)
+
         def _compile_one(input_padding: int, input_sharding: NamedSharding,
                          next_tokens_size: int,
                          next_tokens_sharding: NamedSharding) -> None:
-            padded_token_in_tpu_cur_input_indices = np.zeros((input_padding, ),
-                                                             dtype=np.int32)
-            padded_token_in_tpu_pre_next_tokens_indices = np.zeros(
-                (input_padding, ), dtype=np.int32)
-            (padded_token_in_tpu_cur_input_indices,
-             padded_token_in_tpu_pre_next_tokens_indices) = device_array(
-                 self.runner.mesh,
-                 (padded_token_in_tpu_cur_input_indices,
-                  padded_token_in_tpu_pre_next_tokens_indices),
-                 sharding=indices_sharding)
+            padded_token_in_tpu_cur_input_indices = jax.ShapeDtypeStruct(
+                (input_padding, ), jnp.int32, sharding=indices_sharding)
+            padded_token_in_tpu_pre_next_tokens_indices = jax.ShapeDtypeStruct(
+                (input_padding, ), jnp.int32, sharding=indices_sharding)
 
-            input_ids = self._create_dummy_tensor((input_padding, ), jnp.int32,
-                                                  input_sharding)
-            next_tokens = self._create_dummy_tensor(
-                (next_tokens_size, ), jnp.int32, sharding=next_tokens_sharding)
-            placeholder_num = device_array(self.runner.mesh,
-                                           np.array([1], dtype=np.int32))
+            input_ids = jax.ShapeDtypeStruct((input_padding, ),
+                                             jnp.int32,
+                                             sharding=input_sharding)
+            next_tokens = jax.ShapeDtypeStruct((next_tokens_size, ),
+                                               jnp.int32,
+                                               sharding=next_tokens_sharding)
+
             self._run_compilation(
                 "_substitute_placeholder_token_fn",
                 self.runner._substitute_placeholder_token_fn,
@@ -513,6 +527,7 @@ class CompilationManager:
                 padded_token_in_tpu_pre_next_tokens_indices,
                 next_tokens,
                 placeholder_num,
+                compile_only=True,
                 num_tokens=input_padding,
                 next_tokens_size=next_tokens_size,
             )
@@ -772,18 +787,22 @@ class CompilationManager:
                         array_size, indices_count, only_equal_paddings):
                     continue
 
-                input_tensor = self._create_dummy_tensor(
-                    (array_size, hidden_dim), jnp.bfloat16, input_sharding)
-                indices_to_select = self._create_dummy_tensor(
-                    (indices_count, ), jnp.int32, indices_sharding)
+                array = jax.ShapeDtypeStruct((array_size, hidden_dim),
+                                             jnp.bfloat16,
+                                             sharding=input_sharding)
+                indices_to_select = jax.ShapeDtypeStruct(
+                    (indices_count, ), jnp.int32, sharding=indices_sharding)
 
                 self._run_compilation(
                     f"select_from_array [{name}]",
-                    self.runner._select_from_array_fn, input_tensor,
-                    indices_to_select, self.runner.mesh, **{
-                        "array_size": array_size,
-                        "index_size": indices_count
-                    })
+                    self.runner._select_from_array_fn,
+                    self.runner,
+                    array,
+                    indices_to_select,
+                    compile_only=True,
+                    array_size=array_size,
+                    index_size=indices_count,
+                )
 
     def _skip_self_arg_warmup_handler(self, fn, args, call_kwargs):
         """Warmup handler for methods compiled with an explicit `self` as the
@@ -852,8 +871,10 @@ class CompilationManager:
         hidden_states_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
         for num_reqs in leading_shape:
-            hidden_states = self._create_dummy_tensor(
-                (num_reqs, hsize), jnp.bfloat16, hidden_states_sharding)
+            hidden_states = jax.ShapeDtypeStruct(
+                (num_reqs, hsize),
+                jnp.bfloat16,
+                sharding=hidden_states_sharding)
             with self.runner.maybe_select_dummy_loras(
                     self.runner.lora_config,
                     np.array([num_reqs], dtype=np.int32)):
@@ -864,6 +885,7 @@ class CompilationManager:
                     self.runner.state_leaves,
                     hidden_states,
                     lora_metadata,
+                    compile_only=True,
                     num_reqs=num_reqs,
                 )
 
@@ -879,6 +901,7 @@ class CompilationManager:
     def _precompile_sampling(self) -> None:
         logger.info("Compiling sampling with different input shapes.")
         hsize = self.runner.vocab_size
+        replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
         for num_reqs in self.runner.num_reqs_paddings:
             # `logits_sharding` need to be consistent with
             # compute_logits_fn's output sharding to avoid serving
@@ -892,18 +915,23 @@ class CompilationManager:
             # function.
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.float32,
-                                               logits_sharding)
+            logits = jax.ShapeDtypeStruct((num_reqs, hsize),
+                                          jnp.float32,
+                                          sharding=logits_sharding)
             for do_sampling in (True, False):
                 for logprobs in (True, False):
                     if do_sampling:
-                        temperature = np.full((num_reqs, ),
-                                              0.7,
-                                              dtype=np.float32)
-                        top_k = np.full((num_reqs, ), 20, dtype=np.int32)
-                        top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
-                        (temperature, top_k, top_p) = device_array(
-                            self.runner.mesh, (temperature, top_k, top_p),
+                        temperature = jax.ShapeDtypeStruct(
+                            (num_reqs, ),
+                            jnp.float32,
+                            sharding=sampling_metadata_sharding)
+                        top_k = jax.ShapeDtypeStruct(
+                            (num_reqs, ),
+                            jnp.int32,
+                            sharding=sampling_metadata_sharding)
+                        top_p = jax.ShapeDtypeStruct(
+                            (num_reqs, ),
+                            jnp.float32,
                             sharding=sampling_metadata_sharding)
                     else:
                         temperature = None
@@ -913,10 +941,8 @@ class CompilationManager:
                     # Use a dummy tensor with a unique shape for each logprobs config.
                     # This avoids persistent cache collisions.
                     dummy_shape = (1 if logprobs else 2, )
-                    _cache_collision_dummy = jnp.zeros(dummy_shape,
-                                                       dtype=jnp.int32)
-                    _cache_collision_dummy = device_array(
-                        self.runner.mesh, _cache_collision_dummy)
+                    _cache_collision_dummy = jax.ShapeDtypeStruct(
+                        dummy_shape, jnp.int32, sharding=replicated_sharding)
 
                     sampling_metadata = TPUSupportedSamplingMetadata(
                         temperature=temperature,
@@ -932,6 +958,7 @@ class CompilationManager:
                         self.runner.mesh,
                         logits,
                         sampling_metadata,
+                        compile_only=True,
                         num_reqs=num_reqs,
                         do_sampling=do_sampling,
                         logprobs=logprobs,
@@ -975,16 +1002,19 @@ class CompilationManager:
                               ShardingAxisName.MLP_TENSOR))
             token_ids_sharding = NamedSharding(self.runner.mesh,
                                                PartitionSpec())
-            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.float32,
-                                               logits_sharding)
-            token_ids = self._create_dummy_tensor((num_reqs, ), jnp.int32,
-                                                  token_ids_sharding)
+            logits = jax.ShapeDtypeStruct((num_reqs, hsize),
+                                          jnp.float32,
+                                          sharding=logits_sharding)
+            token_ids = jax.ShapeDtypeStruct((num_reqs, ),
+                                             jnp.int32,
+                                             sharding=token_ids_sharding)
             self._run_compilation(
                 f"worker{self.runner.rank} gather_logprobs",
                 compute_and_gather_logprobs,
                 logits,
                 token_ids,
                 self.runner.model_config.max_logprobs,
+                compile_only=True,
                 num_reqs=num_reqs,
             )
 
@@ -1001,16 +1031,20 @@ class CompilationManager:
                     token_ids_sharding = NamedSharding(
                         self.runner.mesh,
                         PartitionSpec(ShardingAxisName.ATTN_DATA))
-                    logits = self._create_dummy_tensor(
-                        (combined_size, hsize), jnp.float32, logits_sharding)
-                    token_ids = self._create_dummy_tensor(
-                        (combined_size, ), jnp.int32, token_ids_sharding)
+                    logits = jax.ShapeDtypeStruct((combined_size, hsize),
+                                                  jnp.float32,
+                                                  sharding=logits_sharding)
+                    token_ids = jax.ShapeDtypeStruct(
+                        (combined_size, ),
+                        jnp.int32,
+                        sharding=token_ids_sharding)
                     self._run_compilation(
                         f"worker{self.runner.rank} gather_logprobs_spec",
                         compute_and_gather_logprobs,
                         logits,
                         token_ids,
                         self.runner.model_config.max_logprobs,
+                        compile_only=True,
                         num_logits=num_logits,
                         num_reqs=num_reqs,
                     )
@@ -1018,30 +1052,27 @@ class CompilationManager:
         logger.info(
             "Compiling compute_and_gather_prompt_logprobs with different input shapes."
         )
-        MAX_PRECOMPILE_PROMPT_TOKENS = 1024
+        # Bypassed MAX_PRECOMPILE_PROMPT_TOKENS limit as ShapeDtypeStruct compilation allocates no HBM
         for num_tokens in self.runner.num_tokens_paddings:
-            if num_tokens > MAX_PRECOMPILE_PROMPT_TOKENS:
-                logger.info(
-                    f"Skipping precompilation of compute_and_gather_prompt_logprobs for {num_tokens=}, "
-                    f"as it exceeds the {MAX_PRECOMPILE_PROMPT_TOKENS=} limit to prevent HBM exhaustion."
-                )
-                continue
             logits_sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.MLP_DATA,
                               ShardingAxisName.MLP_TENSOR))
             token_ids_sharding = NamedSharding(self.runner.mesh,
                                                PartitionSpec())
-            logits = self._create_dummy_tensor((num_tokens, hsize),
-                                               jnp.float32, logits_sharding)
-            token_ids = self._create_dummy_tensor((num_tokens, ), jnp.int32,
-                                                  token_ids_sharding)
+            logits = jax.ShapeDtypeStruct((num_tokens, hsize),
+                                          jnp.float32,
+                                          sharding=logits_sharding)
+            token_ids = jax.ShapeDtypeStruct((num_tokens, ),
+                                             jnp.int32,
+                                             sharding=token_ids_sharding)
             self._run_compilation(
                 f"worker{self.runner.rank} compute_and_gather_prompt_logprobs",
                 compute_and_gather_prompt_logprobs,
                 logits,
                 token_ids,
                 self.runner.model_config.max_logprobs,
+                compile_only=True,
                 num_tokens=num_tokens,
             )
 
