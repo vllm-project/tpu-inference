@@ -15,6 +15,7 @@
 import functools
 import logging
 import random
+import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
@@ -25,6 +26,7 @@ import jaxtyping
 import numpy as np
 import torch
 import vllm.envs as vllm_envs
+import vllm.lora.utils as lora_utils_mod
 from flax import nnx
 from jax._src import mesh as mesh_lib
 from jax._src.pallas.utils import next_power_of_2
@@ -91,6 +93,32 @@ from tpu_inference.spec_decode.jax.utils import (
     process_and_extend_logits)
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function, to_jax_dtype, to_torch_dtype)
+
+# Patch to classify specific non-LoRA keys as base weights. Without this, vLLM's `add_lora`
+# crashes with "unsupported LoRA weight" on base model parameters like `lm_head.weight`
+# because upstream's `is_base_embedding_weights` uses a strict layer-name whitelist.
+# Compare upstream: https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/lora/utils.py#L97-L99
+_orig_is_base_embedding_weights = getattr(lora_utils_mod,
+                                          "is_base_embedding_weights", None)
+
+
+def _patched_is_base_embedding_weights(name: str) -> bool:
+    if name.endswith(("lm_head.weight", "embed_tokens.weight")):
+        return True
+    if _orig_is_base_embedding_weights is not None:
+        return _orig_is_base_embedding_weights(name)
+    return False
+
+
+lora_utils_mod.is_base_embedding_weights = _patched_is_base_embedding_weights
+
+# Target module updates in loaded modules to avoid broad sys.modules loops
+for m in ("vllm.lora.utils", "vllm.lora.lora_model"):
+    if m in sys.modules:
+        mod = sys.modules[m]
+        if hasattr(mod, "is_base_embedding_weights"):
+            setattr(mod, "is_base_embedding_weights",
+                    _patched_is_base_embedding_weights)
 
 logger = init_logger(__name__)
 
@@ -367,13 +395,29 @@ def _reconstruct_slots_for_request(
     req_state: CachedRequestState,
     num_tokens: int,
     block_size: int,
+    start_pos: int,
 ) -> np.ndarray:
-    """Reconstructs physical slot mappings for a request using vectorized NumPy."""
-    start_pos = req_state.num_computed_tokens
-    block_ids = req_state.block_ids[0] if req_state.block_ids else []
+    """Reconstructs physical KV-cache slots for ``num_tokens`` tokens of a
+    request using vectorized NumPy.
 
+    ``start_pos`` is the absolute sequence position of the first of these
+    tokens and is supplied by the caller, because the two call sites have
+    different token contracts: the routed-experts reconstruction passes a
+    single scheduler chunk (whose tokens end at ``num_computed_tokens``, so it
+    passes ``num_computed_tokens - num_tokens``), while the continue_decode
+    path passes an on-device decode burst (not reflected in
+    ``num_computed_tokens``, so it passes ``num_computed_tokens``). The slots
+    must match the scheduler-side read (``RoutedExpertsManager.get``, which is
+    block-relative from position 0).
+    """
     if num_tokens <= 0:
         return np.array([], dtype=np.int32)
+
+    assert start_pos >= 0, (
+        f"[routed-experts] start_pos must be non-negative, got {start_pos} "
+        f"(num_tokens={num_tokens}); slots would be wrong via numpy negative "
+        f"indexing")
+    block_ids = req_state.block_ids[0] if req_state.block_ids else []
 
     pos = np.arange(start_pos, start_pos + num_tokens, dtype=np.int32)
     block_idx = pos // block_size
@@ -405,6 +449,23 @@ def _reconstruct_routed_experts(
     block_size = runner.block_size
     total_active_tokens = scheduler_output.total_num_scheduled_tokens
     dp_size = runner.dp_size
+
+    # Absolute start position of each request's chunk = its PRE-step
+    # computed-token count, sourced from scheduler_output (not from
+    # req_state.num_computed_tokens). req_state.num_computed_tokens is advanced
+    # at different times across the two output paths that reach this function:
+    # it is already advanced past this step on the async get_output path, but is
+    # still the pre-step value on the sync _sample_from_logits path
+    # (async_scheduling=False, required by continue_decode). scheduler_output
+    # always carries the pre-step value, so it is correct for both; deriving
+    # start_pos as `num_computed_tokens - n` underflows to a negative value on a
+    # fresh prefill in the sync path.
+    chunk_start = {}
+    for new_req in scheduler_output.scheduled_new_reqs:
+        chunk_start[new_req.req_id] = new_req.num_computed_tokens
+    cached_reqs = scheduler_output.scheduled_cached_reqs
+    for i, rid in enumerate(cached_reqs.req_ids):
+        chunk_start[rid] = cached_reqs.num_computed_tokens[i]
 
     # 1. Compute global start offsets of every request in input batch order
     global_start_offsets = {}
@@ -439,12 +500,18 @@ def _reconstruct_routed_experts(
                                                              dp_end,
                                                              dtype=np.int32)
 
-            # Reconstruct slots for this request using vectorized NumPy
+            # Reconstruct slots for this request using vectorized NumPy. Use the
+            # pre-step chunk start from scheduler_output (see chunk_start above);
+            # the slots must match the scheduler-side block-relative read
+            # (RoutedExpertsManager.get, from position 0).
             req_state = runner.requests[req_id]
             if n > 0:
                 global_slots[
                     global_start:global_end] = _reconstruct_slots_for_request(
-                        req_state, n, block_size)
+                        req_state,
+                        n,
+                        block_size,
+                        start_pos=chunk_start[req_id])
 
     # 3. Perform global rank reordering and transpose in a single fancy indexing sweep!
     expert_indices_reordered = expert_indices_cpu[:, indices_map, :].transpose(
@@ -876,14 +943,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.embed_input_ids_fn = model.multimodal_fns.embed_input_ids_fn
         self.get_mrope_input_positions_fn = model.multimodal_fns.get_mrope_input_positions_fn
 
-        (
-            self.embed_multimodal_fn,
-            self.precompile_vision_encoder_fn,
-        ) = self.mm_manager.optional_encoder_graph_optimization(
-            self.embed_multimodal_fn,
-            self.precompile_vision_encoder_fn,
-        )
-
         rng_key = nnx.Rngs(jax.random.key(self.model_config.seed)).params()
         self.rng_params_for_sampling = device_array(self.mesh,
                                                     rng_key,
@@ -926,7 +985,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if runner_type == "generate":
             return ("generate", )
         if runner_type == "pooling":
-            return ("embed", )
+            return (self.model_config.convert_type, )
         assert False, f"unsupported runner type: {runner_type}"
 
     def get_kv_cache_spec(self):
@@ -942,6 +1001,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
+        self.input_batch.has_mamba_layers = kv_cache_config.has_mamba_layers
 
         if self.kv_cache_manager.actual_mamba_num_blocks is not None:
             self.input_batch.init_mamba_pools(
@@ -1486,10 +1546,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # Transpose to (layers, actual_len, top_k) and collect
                 expert_indices_list.append(req_experts.transpose(1, 0, 2))
 
-                # Reconstruct slots for this request
+                # Reconstruct slots for this request. The on-device decode
+                # burst length (actual_len) is decided on-device via EOS
+                # early-exit and is not reflected in num_computed_tokens, so the
+                # burst's tokens begin at num_computed_tokens.
                 if req_state is not None and actual_len > 0:
                     slots_arr = _reconstruct_slots_for_request(
-                        req_state, actual_len, self.block_size)
+                        req_state,
+                        actual_len,
+                        self.block_size,
+                        start_pos=req_state.num_computed_tokens)
                     expert_slots_list.append(slots_arr)
 
             if req_state is not None:

@@ -110,9 +110,13 @@ class TpuPlatform(Platform):
     simple_compile_backend: str = "eager"
 
     supported_quantization: list[str] = [
-        "compressed-tensors", "awq", "fp8", "gpt_oss_mxfp4", "modelopt_fp4",
-        "deepseek_v4_fp8"
+        "compressed-tensors", "auto_awq", "fp8", "gpt_oss_mxfp4",
+        "modelopt_fp4", "deepseek_v4_fp8"
     ]
+
+    def set_device(self, device: torch.device) -> None:
+        # No-op on TPU since JAX/libtpu handles device management internally.
+        pass
 
     additional_env_vars: list[str] = [
         "PHASED_PROFILING_DIR",
@@ -323,11 +327,20 @@ class TpuPlatform(Platform):
                     MultiprocExecutor
                 parallel_config.distributed_executor_backend = MultiprocExecutor
         elif multihost_backend == "ray":
-            from tpu_inference.executors.ray_distributed_executor import \
-                RayDistributedExecutor
-            parallel_config.distributed_executor_backend = RayDistributedExecutor
-            logger.info(
-                "Force using RayDistributedExecutor for JAX on multihost.")
+            # Check if we should use Ray Executor V2 (V1-multiproc compatible)
+            if vllm_envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND:
+                from tpu_inference.executors.ray_distributed_executor_v2 import \
+                    RayDistributedExecutorV2
+                parallel_config.distributed_executor_backend = RayDistributedExecutorV2
+                logger.info(
+                    "Force using RayDistributedExecutorV2 for JAX on multihost."
+                )
+            else:
+                from tpu_inference.executors.ray_distributed_executor import \
+                    RayDistributedExecutor
+                parallel_config.distributed_executor_backend = RayDistributedExecutor
+                logger.info(
+                    "Force using RayDistributedExecutor for JAX on multihost.")
         else:
             logger.warning(
                 f"Unknown TPU multihost backend: {multihost_backend}. "
@@ -346,7 +359,7 @@ class TpuPlatform(Platform):
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             allowed = ("TPUConnector", "TPUConnectorHMA",
-                       "TPUOffloadConnector")
+                       "TPUOffloadConnector", "RaidenOffloadConnector")
             if kv_transfer_config.kv_connector not in allowed:
                 raise ValueError(
                     f"Unsupported kv_connector "

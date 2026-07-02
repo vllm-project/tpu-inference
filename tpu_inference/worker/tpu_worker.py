@@ -4,7 +4,7 @@ import math
 import os
 import tempfile
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import jax
 import jaxlib
@@ -115,6 +115,19 @@ class TPUWorker(WorkerBase):
                                 if isinstance(device, jaxlib._jax.Device))
         self.pp_config = PPConfig(vllm_config, rank, ip, prev_worker_ip,
                                   self.parallel_config.pipeline_parallel_size)
+
+        # If model_weights is set, and we are in a distributed environment on Ray,
+        # the driver might have overwritten `model` to its local cache path.
+        # We need to restore it to the original GCS URI (stored in `model_weights`)
+        # so this remote worker can pull it.
+        if (hasattr(self.model_config, "model_weights")
+                and self.model_config.model_weights
+                and isinstance(self.model_config.model, str)
+                and not os.path.exists(self.model_config.model)):
+            logger.info("Restoring model path to GCS URI: %s",
+                        self.model_config.model_weights)
+            self.model_config.model = self.model_config.model_weights
+            self.model_config.model_weights = None
 
         # Explicitly trigger RunAI download on the worker if needed.
         # This handles downloading config.json and other non-weight files to the
@@ -336,9 +349,10 @@ class TPUWorker(WorkerBase):
         finally:
             self.parallel_config.data_parallel_size = saved_dp_size
 
+        pp_rank = 0 if self.parallel_config.pipeline_parallel_size == 1 else self.rank
         jax_parallel_state.init_pp_distributed_environment(
             self.pp_config.ip,
-            self.rank,
+            pp_rank,
             self.parallel_config.pipeline_parallel_size,
             self.devices[0],
             need_pp=self.parallel_config.pipeline_parallel_size > 1)
@@ -375,9 +389,14 @@ class TPUWorker(WorkerBase):
         self.stats_logger = None
         if self.vllm_config.kv_transfer_config is not None:
             kv_transfer_config = self.vllm_config.kv_transfer_config
-            if (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+            is_offload_connector = (
+                (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+                 and kv_transfer_config.kv_connector_module_path
+                 == "tpu_inference.offload.tpu_offload_connector")
+                or (kv_transfer_config.kv_connector == "RaidenOffloadConnector"
                     and kv_transfer_config.kv_connector_module_path
-                    == "tpu_inference.offload.tpu_offload_connector"):
+                    == "tpu_inference.offload.raiden_offload_connector"))
+            if is_offload_connector:
 
                 # Start the background thread (logging every TPU_OFFLOAD_METRICS_LOG_INTERVAL seconds)
                 self.stats_logger = TPUKVCacheStatsLogger(
@@ -411,8 +430,14 @@ class TPUWorker(WorkerBase):
 
         if self.vllm_config.kv_transfer_config is not None:
             kv_transfer_config = self.vllm_config.kv_transfer_config
-            if kv_transfer_config.kv_connector == "TPUOffloadConnector" and \
-               kv_transfer_config.kv_connector_module_path == "tpu_inference.offload.tpu_offload_connector":
+            is_offload_connector = (
+                (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+                 and kv_transfer_config.kv_connector_module_path
+                 == "tpu_inference.offload.tpu_offload_connector")
+                or (kv_transfer_config.kv_connector == "RaidenOffloadConnector"
+                    and kv_transfer_config.kv_connector_module_path
+                    == "tpu_inference.offload.raiden_offload_connector"))
+            if is_offload_connector:
                 # If kv offloading is enabled, we need to account for the memory used by the KV transfer buffer.
                 staging_buffer_pages = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
 
@@ -605,3 +630,15 @@ class TPUWorker(WorkerBase):
 
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
+
+    def add_lora(self, lora_request: Any) -> bool:
+        return self.model_runner.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_runner.remove_lora(lora_id)
+
+    def list_loras(self) -> set[int]:
+        return self.model_runner.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)

@@ -66,6 +66,8 @@ from tpu_inference.models.vllm.experimental.vision_tower_jit import (
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
+from tpu_inference.runner.mm_encoder_jit_manager import (
+    MMEncoderJITManager, maybe_create_mm_encoder_jit_manager)
 
 logger = init_logger(__name__)
 
@@ -121,7 +123,7 @@ def _maybe_patch_for_deepseek_v4(vllm_config: VllmConfig):
     # in amd/model.py (not CustomOp/register_oot hook).
     # Swap the class symbol for the TPU subclass before the
     # model is built.
-    from tpu_inference.layers.vllm.custom_ops.deepseek_v4_attention import \
+    from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_attention import \
         patch_deepseek_v4_mla_cls
     patch_deepseek_v4_mla_cls()
 
@@ -211,6 +213,7 @@ class VllmModelWrapper:
         self.rng = rng
         self.mesh = mesh
         self.is_draft_model = is_draft_model
+        self._mm_encoder_jit_manager: MMEncoderJITManager | None = None
 
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
@@ -375,7 +378,14 @@ class VllmModelWrapper:
             f"Total time to load model weights from storage to TPU: {total_loading_time:.2f} seconds."
         )
         # Returning to the jax land, so we need to wrap it into a JaxValue.
-        return jax_view(params_and_buffers), lora_manager
+        params = jax_view(params_and_buffers)
+        self._mm_encoder_jit_manager = maybe_create_mm_encoder_jit_manager(
+            vllm_config=self.vllm_config,
+            vllm_model=self.model.vllm_model,
+            vllm_runner=self.model,
+            params_and_buffers=params,
+        )
+        return params, lora_manager
 
     def jit_step_func(self):
 
@@ -553,9 +563,16 @@ class VllmModelWrapper:
         self,
         params: Any,
     ) -> Optional[Any]:
-        """Return a precompile function for the vision encoder, or None."""
+        """Return a precompile function for the vision encoder, or None.
+
+        Registers budget-capture tasks against the existing manager so
+        compile_manager can AOT-prime the XLA cache at startup.
+        """
         if not self.vllm_config.model_config.is_multimodal_model:
             return None
+        if self._mm_encoder_jit_manager is not None:
+            return self._mm_encoder_jit_manager.precompile_vision_encoder
+
         embed_multimodal_fn = self.wrap_embed_multimodal_func()
         return maybe_precompile_vision_encoder_fn(params, embed_multimodal_fn,
                                                   self.model.vllm_model,
@@ -588,7 +605,16 @@ class VllmModelWrapper:
             return jax_view(output_from_torch)
 
         def embed_multimodal_func_torch(params_and_buffers: Any,
+                                        modality: str | None = None,
                                         **kwargs) -> Any:
+            # Route to JIT manager when modality is specified and supported.
+            # modality=None means the call comes from the precompile path
+            # (vision_tower_jit), which should always use the base JAX path.
+            if modality is not None:
+                mm_jit = self._mm_encoder_jit_manager
+                if mm_jit is not None and mm_jit.supports_modality(modality):
+                    return mm_jit.execute(kwargs)
+
             # embed_multimodal_func_jax requires kwargs to be jax.Array such that jit can work
             # Here we move_to_jax, then call (maybe jit'ed) embed_multimodal_func_jax.
             with torchax.default_env(), enable_torch_wrap(False):
@@ -771,7 +797,7 @@ def load_lora_model(model: torch.nn.Module, vllm_config: VllmConfig,
         device,
         model.embedding_modules,
     )
-    return lora_manager, lora_manager.create_lora_manager(model)
+    return lora_manager, lora_manager.create_lora_manager(model, vllm_config)
 
 
 # The reason why replace the method is that the set_lora and reset_lora need to
@@ -784,11 +810,12 @@ def replace_set_lora(model):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
     ):
-        with torchax.default_env():
+        # Use torch.no_grad() to prevent RuntimeError during leaf variable in-place updates
+        with torchax.default_env(), torch.no_grad():
             self._original_set_lora(index, lora_a, lora_b)
 
     def _tpu_reset_lora(self, index: int):
-        with torchax.default_env():
+        with torchax.default_env(), torch.no_grad():
             self._original_reset_lora(index)
 
     for _, module in model.named_modules():

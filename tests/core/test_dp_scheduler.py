@@ -406,8 +406,10 @@ class TestDPScheduler:
         output = scheduler.schedule()
 
         # Verify SCHEDULE commands were sent
-        scheduler._send_command.assert_any_call(0, SchedulerCommand.SCHEDULE)
-        scheduler._send_command.assert_any_call(1, SchedulerCommand.SCHEDULE)
+        scheduler._send_command.assert_any_call(0, SchedulerCommand.SCHEDULE,
+                                                ((), {}))
+        scheduler._send_command.assert_any_call(1, SchedulerCommand.SCHEDULE,
+                                                ((), {}))
 
         # Verify combined output
         assert isinstance(output, DPSchedulerOutput)
@@ -418,6 +420,66 @@ class TestDPScheduler:
 
         # Verify new per-rank fields
         assert output.req_ids_per_rank == {0: ["req1"], 1: ["req2"]}
+
+    def test_schedule_with_arguments(self, mock_vllm_config,
+                                     mock_kv_cache_config,
+                                     mock_structured_output_manager):
+        """Test schedule correctly forwards args and kwargs to workers."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+
+        mock_output_0 = MagicMock(spec=SchedulerOutput)
+        mock_output_0.scheduled_new_reqs = []
+        mock_output_0.num_scheduled_tokens = {}
+        mock_output_0.total_num_scheduled_tokens = 0
+        mock_output_0.finished_req_ids = set()
+        mock_output_0.scheduled_cached_reqs = CachedRequestData(
+            req_ids=[],
+            resumed_req_ids=[],
+            new_token_ids=[],
+            all_token_ids={},
+            new_block_ids=[],
+            num_computed_tokens=[],
+            num_output_tokens=[],
+        )
+        mock_output_0.scheduled_spec_decode_tokens = {}
+        mock_output_0.scheduled_encoder_inputs = {}
+        mock_output_0.num_common_prefix_blocks = []
+
+        mock_output_1 = MagicMock(spec=SchedulerOutput)
+        mock_output_1.scheduled_new_reqs = []
+        mock_output_1.num_scheduled_tokens = {}
+        mock_output_1.total_num_scheduled_tokens = 0
+        mock_output_1.finished_req_ids = set()
+        mock_output_1.scheduled_cached_reqs = CachedRequestData(
+            req_ids=[],
+            resumed_req_ids=[],
+            new_token_ids=[],
+            all_token_ids={},
+            new_block_ids=[],
+            num_computed_tokens=[],
+            num_output_tokens=[],
+        )
+        mock_output_1.scheduled_spec_decode_tokens = {}
+        mock_output_1.scheduled_encoder_inputs = {}
+        mock_output_1.num_common_prefix_blocks = []
+
+        scheduler._send_command = MagicMock()
+        scheduler._collect_results_unordered = MagicMock(
+            return_value=[mock_output_0, mock_output_1])
+
+        scheduler.schedule(True, some_option="value")
+
+        # Verify SCHEDULE commands were sent with the arguments forwarded
+        scheduler._send_command.assert_any_call(0, SchedulerCommand.SCHEDULE,
+                                                ((True, ), {
+                                                    "some_option": "value"
+                                                }))
+        scheduler._send_command.assert_any_call(1, SchedulerCommand.SCHEDULE,
+                                                ((True, ), {
+                                                    "some_option": "value"
+                                                }))
 
     def test_combine_cached_request_data(self, mock_vllm_config,
                                          mock_kv_cache_config,

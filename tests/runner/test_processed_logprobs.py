@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 import os
-import time
 
 import pytest
 from vllm import LLM, SamplingParams
@@ -49,10 +48,10 @@ def llm():
         model=MODEL_NAME,
         max_model_len=MAX_MODEL_LEN,
         max_num_seqs=MAX_NUM_SEQS,
+        logprobs_mode="processed_logprobs",
     )
     yield engine
-    del engine
-    time.sleep(5)
+    engine.llm_engine.engine_core.shutdown()
 
 
 class TestProcessedLogprobs:

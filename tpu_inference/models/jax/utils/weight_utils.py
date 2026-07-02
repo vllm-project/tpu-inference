@@ -129,8 +129,9 @@ def convert_torch_to_jax_with_view(loaded_weight: torch.Tensor,
     bit representation using a dtype view map.
     """
     torch_view_type = DTYPE_VIEW_MAP.get(jnp.dtype(cast_type))
-    loaded_weight = jnp.array(
-        loaded_weight.view(torch_view_type).numpy()).view(cast_type)
+    np_arr = loaded_weight.view(torch_view_type).numpy()
+    with cpu_mesh_context():
+        loaded_weight = jnp.array(np_arr).view(cast_type)
     return loaded_weight
 
 
@@ -777,7 +778,7 @@ def assign_and_shard_param(jax_param: nnx.Param,
         param_name: The name of the parameter, used for error logging.
         mesh: The device mesh to shard the parameter on.
     """
-    spec = jax_param.get_metadata().get("sharding", ())
+    spec = jax_param.get_metadata().get("out_sharding", ())
     if isinstance(spec, NamedSharding):
         spec = spec.spec
     elif isinstance(spec, SingleDeviceSharding):
@@ -788,7 +789,6 @@ def assign_and_shard_param(jax_param: nnx.Param,
         jax_param.set_value(shard_put(jax_weight, spec, mesh=param_mesh))
         jax_param.set_metadata("_is_loaded", True)
         del jax_weight
-        jax.clear_caches()
     except Exception as e:
         raise RuntimeError(
             f"Failed to load weight '{param_name}' with shape {shape} into param with shape {jax_param.get_value().shape}"
@@ -981,6 +981,7 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                     yield name, weight
 
         autoloaded = super().load_weights(_route(weights), **kwargs)
+        jax.clear_caches()
         return autoloaded | routed_loaded
 
     def _add_loadable_non_param_tensors(self, module: JaxModule,

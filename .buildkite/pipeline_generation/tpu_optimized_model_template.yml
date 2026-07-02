@@ -17,7 +17,7 @@ steps:
     key: "${{TPU_VERSION:-tpu6e}}_{SANITIZED_MODEL_NAME}_{CATEGORY}_UnitTest"
     soft_fail: true
     agents:
-      queue: "{QUEUE}"
+      queue: cpu  # TODO: replace with execution environment (e.g. "{QUEUE}")
     commands:
       - echo "placeholder"  # TODO: replace with your unit test command
   - label: "${{TPU_VERSION:-tpu6e}} Record unit test result for {MODEL_NAME}/{CATEGORY}"

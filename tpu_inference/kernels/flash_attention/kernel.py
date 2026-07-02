@@ -13,6 +13,8 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.utils import align_to
+
 DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
 NUM_LANES = 128
 NUM_SUBLANES = 8
@@ -72,6 +74,119 @@ class BlockSizes:
         )
 
 
+@jax.jit(static_argnames=(
+    "causal",
+    "sm_scale",
+    "sliding_window",
+    "block_sizes",
+    "vmem_limit_bytes",
+    "debug",
+), )
+def encoder_only_flash_attention(
+    q,  # [q_len, num_heads, head_size]
+    k,  # [k_len, num_kv_heads, head_size]
+    v,  # [k_len, num_kv_heads, head_size]
+    seq_lens,  # [batch_size]
+    *,
+    causal: bool = False,
+    sm_scale: float | None = None,
+    sliding_window: int | None = None,
+    block_sizes: BlockSizes | None = None,
+    vmem_limit_bytes: int | None = None,
+    debug: bool = False,
+):
+    # Get shapes
+    q_len, num_heads, head_size = q.shape
+    k_len, num_kv_heads, _ = k.shape
+    assert k.shape == v.shape
+    assert q_len == k_len, "For encoder_only, token lengths should be the same"
+
+    if sm_scale is None:
+        sm_scale = head_size**-0.5
+
+    # Swap axes to head-first per kernel limit: [num_heads, num_tokens, head_dim]
+    q_htd = q.swapaxes(0, 1)
+    k_htd = k.swapaxes(0, 1)
+    v_htd = v.swapaxes(0, 1)
+
+    def pad_token(t: jax.Array, size) -> jax.Array:
+        return jnp.pad(t, ((0, 0), (0, size), (0, 0)), constant_values=0)
+
+    if block_sizes is None:
+        block_sizes = BlockSizes.get_default(1, num_heads, q_len, k_len,
+                                             head_size)
+    block_q = block_sizes.block_q
+    block_kv = block_sizes.block_k
+
+    padded_len_q = align_to(q_len, block_q)
+    padded_len_kv = align_to(k_len, block_kv)
+
+    q_pad_htd = pad_token(q_htd, padded_len_q - q_len)
+    k_pad_htd = pad_token(k_htd, padded_len_kv - k_len)
+    v_pad_htd = pad_token(v_htd, padded_len_kv - k_len)
+
+    q_bhtd = jnp.expand_dims(q_pad_htd, axis=0)
+    k_bhtd = jnp.expand_dims(k_pad_htd, axis=0)
+    v_bhtd = jnp.expand_dims(v_pad_htd, axis=0)
+
+    def build_segment_ids() -> SegmentIds:
+        max_num_seqs = seq_lens.shape[0]
+        zero_2_max_num_seqs = jnp.arange(max_num_seqs + 1, dtype=jnp.int32)
+        seq_lens_concat_zero = jnp.concatenate([
+            seq_lens,
+            jnp.array([0], dtype=seq_lens.dtype),
+        ])
+        qkv_segment_ids = jnp.repeat(
+            zero_2_max_num_seqs,
+            seq_lens_concat_zero,
+            total_repeat_length=q_len,
+        )
+
+        def build_padded_segment(size: int) -> jax.Array:
+            padding_segment_id = max_num_seqs
+            result = jnp.pad(
+                qkv_segment_ids,
+                (0, size),
+                constant_values=padding_segment_id,
+            )
+            result = jnp.expand_dims(result, axis=0)
+            return result
+
+        segment_ids = SegmentIds(
+            q=build_padded_segment(padded_len_q - q_len),
+            kv=build_padded_segment(padded_len_kv - k_len),
+        )
+        return segment_ids
+
+    if sliding_window is not None:
+        row_ids = jnp.arange(padded_len_q)[:, None]
+        col_ids = jnp.arange(padded_len_kv)[None, :]
+        mask = jnp.abs(row_ids - col_ids) <= sliding_window
+        ab = jnp.where(mask, 0.0, -1e4).astype(q_bhtd.dtype)
+        ab = jnp.expand_dims(ab, axis=(0, 1))
+        ab = jnp.tile(ab, (1, num_heads, 1, 1))
+    else:
+        ab = None
+
+    output_bhtd = flash_attention(
+        q_bhtd,
+        k_bhtd,
+        v_bhtd,
+        ab,
+        build_segment_ids(),
+        causal=causal,
+        sm_scale=sm_scale,
+        block_sizes=block_sizes,
+        vmem_limit_bytes=vmem_limit_bytes,
+        debug=debug,
+    )
+    output_htd = jnp.squeeze(output_bhtd, axis=0)
+
+    # Unpad and transpose back
+    output = output_htd[:, :q_len, :].swapaxes(0, 1)
+    return output
+
+
 @jax.jit(static_argnames=[
     "causal",
     "sm_scale",
@@ -89,7 +204,7 @@ def flash_attention(
     causal: bool = False,
     sm_scale: float = 1.0,
     block_sizes: BlockSizes | None = None,
-    vmem_limit_bytes: int,
+    vmem_limit_bytes: int | None = None,
     debug: bool = False,
 ):
     batch_size, num_heads, q_seq_len, d_model = q.shape

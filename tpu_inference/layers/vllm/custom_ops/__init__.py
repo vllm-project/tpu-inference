@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tpu_inference.layers.vllm.custom_ops import \
-    deepseek_v4_attention as deepseek_v4_attention
 from tpu_inference.layers.vllm.custom_ops import embedding as embedding
 from tpu_inference.layers.vllm.custom_ops import fused_moe as fused_moe
 from tpu_inference.layers.vllm.custom_ops import \

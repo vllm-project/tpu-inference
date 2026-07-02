@@ -28,11 +28,12 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
     shard_moe_weights)
 from tpu_inference.layers.common.quantization import unquantized as jax_common
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
-from tpu_inference.layers.common.utils import cpu_mesh_context
+from tpu_inference.layers.common.utils import (
+    cpu_mesh_context, reorder_concatenated_tensor_for_sharding)
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import (JaxEinsum,
                                              JaxMergedColumnParallelLinear)
-from tpu_inference.layers.jax.moe.moe import JaxMoE
+from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
@@ -100,81 +101,78 @@ class UnquantizedMergedLinearMethod(UnquantizedLinearMethod):
         layer.weight.set_metadata("_merged_shards", [None] * n_proj)
         layer.weight.set_metadata(
             "weight_loader",
-            functools.partial(self._load_merged_weight,
+            functools.partial(self._load_merged_tensor,
                               n_shards=self.linear_config.n_shards,
                               output_sizes=self.linear_config.output_sizes,
                               param_name=layer.prefix + ".weight"))
+        if layer.bias is not None:
+            layer.bias.set_metadata("_merged_shards", [None] * n_proj)
+            layer.bias.set_metadata(
+                "weight_loader",
+                functools.partial(self._load_merged_tensor,
+                                  n_shards=self.linear_config.n_shards,
+                                  output_sizes=self.linear_config.output_sizes,
+                                  param_name=layer.prefix + ".bias"))
 
     @staticmethod
-    def _load_merged_weight(param: nnx.Param, torch_weight, shard_id: int, *,
-                            n_shards: int, output_sizes: list,
+    def _load_merged_tensor(param: nnx.Param,
+                            torch_tensor,
+                            shard_id: int = -1,
+                            *,
+                            n_shards: int,
+                            output_sizes: list,
                             param_name: str):
         """Accumulate one projection's checkpoint tensor, fuse when complete.
 
-        Called once per fused projection with ``shard_id`` selecting the slot
-        (e.g. gate=0, up=1). ``torch_weight`` has the HF layout ``(out_i, in)``.
-        The projections may arrive across multiple files, so the fuse only runs
-        once every slot is filled.
+        Works for both 2-D weights ``(out_i, in)`` and 1-D biases ``(out_i,)``.
+        The output dimension is always the last axis of the checkpoint tensor,
+        which ``jax_array_from_reshaped_torch`` transposes to position
+        ``ndim - 1`` in the JAX array (auto-transpose for 2-D; no-op for 1-D).
+
+        Args:
+            param: The nnx parameter to load tensors into.
+            torch_tensor: The checkpoint tensor for a single projection,
+                or a consolidated tensor containing all projections.
+            shard_id: The index/slot of the projection being loaded (e.g., 0
+                for gate_proj, 1 for up_proj). If -1, indicates consolidated
+                tensor that should be split into individual projection shards.
+            n_shards: Number of shards to split the parameter (basically TP size).
+            output_sizes: Output sizes of each projection.
+            param_name: The name of the parameter.
         """
         shards = param.get_metadata("_merged_shards")
-        shards[shard_id] = torch_weight
-        if any(s is None for s in shards):
-            return
-
-        # The per-projection tensors are converted on the host (CPU); the
-        # interleaving reshape/concat must run in the same CPU mesh context,
-        # otherwise it conflicts with the ambient TPU mesh active during weight
-        # loading. assign_and_shard_param then places the result on device.
+        # output dim: 1 for 2-D weight (in, out), 0 for 1-D bias (out,)
+        out_dim = torch_tensor.ndim - 1
         with cpu_mesh_context():
-            interleaved_pieces = []
-            for out_size, torch_w in zip(output_sizes, shards):
+            if shard_id == -1:
+                consolidated = jax_array_from_reshaped_torch(torch_tensor)
+            else:
+                shards[shard_id] = torch_tensor
+                if any(s is None for s in shards):
+                    return
+                consolidated = jnp.concatenate(
+                    [jax_array_from_reshaped_torch(t) for t in shards],
+                    axis=out_dim)
+
+            for out_size in output_sizes:
                 assert out_size % n_shards == 0, (
                     f"Output size {out_size} not divisible by n_shards "
                     f"{n_shards}")
-                # HF (out_i, in) -> (in, out_i) to match the kernel's
-                # contracting-last layout, then split the output dim across
-                # shards.
-                w = jax_array_from_reshaped_torch(torch_w, permute_dims=(1, 0))
-                in_size = w.shape[0]
-                interleaved_pieces.append(
-                    w.reshape(in_size, n_shards, out_size // n_shards))
-
-            # Concatenate within each shard block so shard i ends up holding
-            # [proj0_slice_i, proj1_slice_i, ...], then flatten to (in, total).
-            # E.g. with gate and up weights (2,6)x2,
-            #
-            #     GGGGGG UUUUUU
-            #     GGGGGG UUUUUU
-            #
-            # reshaped to (2,2,3)x2
-            #     GGG GGG UUU UUU
-            #     GGG GGG UUU UUU
-            #
-            # concatenated to (2,2,6)
-            #     GGGUUU GGGUUU
-            #     GGGUUU GGGUUU
-            #
-            # reshaped to (2,12)
-            #     GGGUUUGGGUUU
-            #     GGGUUUGGGUUU
-            fused = jnp.concatenate(interleaved_pieces, axis=2)
-            fused = fused.reshape(fused.shape[0], -1)
+            fused = reorder_concatenated_tensor_for_sharding(consolidated,
+                                                             output_sizes,
+                                                             n_shards,
+                                                             dim=out_dim)
 
         assign_and_shard_param(param, fused, param_name=param_name)
 
 
-class UnquantizedFusedMoEMethod(QuantizeMethodBase):
+class UnquantizedFusedMoEMethod(QuantizeMethodBase,
+                                jax_common.UnquantizedFusedMoEMethod):
     """
-    Unquantized method for JAXMoE layer.
-
-    TODO (jacobplatin): support weight loading -- currently, model-dependent.
+    Unquantized method for JaxRoutedExperts layers.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.extra_backend_kwargs = {}
-
-    def process_weights_after_loading(self, layer: JaxMoE, *args,
+    def process_weights_after_loading(self, layer: JaxRoutedExperts, *args,
                                       **kwargs) -> bool:
         """
         Process weights after loading.
@@ -186,9 +184,13 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             layer: The layer to process.
         """
         if layer.moe_backend == MoEBackend.FUSED_MOE:
-            if layer.edf_sharding:
-                e2df_sharding = (layer.edf_sharding[0], None,
-                                 layer.edf_sharding[1], layer.edf_sharding[2])
+            # TODO(#3041): Remove once we remove JaxMoe from code base.
+            edf_sharding = getattr(layer, 'edf_sharding', ())
+            if edf_sharding:
+                e2df_sharding = (edf_sharding[0], None, edf_sharding[1],
+                                 edf_sharding[2])
+            else:
+                e2df_sharding = (None, None, None, None)
             # fuse the weights into w13: [Gate, Up]
             w_gate = layer.kernel_gating_EDF.value
             w_up = layer.kernel_up_proj_EDF.value
@@ -202,7 +204,10 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
 
-            ep_axis_name = layer.efd_sharding[0]
+            # TODO(#3041): Remove once we remove JaxMoe from code base.
+            # VllmUnquantizedFusedMoEMethod passes ep_axis_name through __init__
+            efd_sharding = getattr(layer, 'efd_sharding', ())
+            ep_axis_name = efd_sharding[0] if efd_sharding else None
 
             self.extra_backend_kwargs = {
                 "ep_axis_name": ep_axis_name,
@@ -277,7 +282,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase):
 
         return True
 
-    def apply_jax(self, layer: JaxMoE, x: jax.Array, *,
+    def apply_jax(self, layer: JaxRoutedExperts, x: jax.Array, *,
                   router_logits: jax.Array) -> jax.Array:
         """Forward pass for MoE layer.
         Args:
@@ -345,9 +350,14 @@ class UnquantizedConfig(QuantizationConfig):
         # JaxEinsum branch. Imported locally to avoid an import cycle
         # (linear.py imports this quantization package).
         if isinstance(layer, JaxMergedColumnParallelLinear):
+            # Read the weight's partition spec so n_shards = get_mesh_shape_product
+            # picks up the TP degree from the active mesh automatically.
+            sharding = layer.weight.get_metadata().get("sharding", None)
+            weight_sharding = P(*sharding) if sharding is not None else None
             linear_config = QuantLinearConfig(enable_sp=False,
                                               output_sizes=list(
-                                                  layer.output_sizes))
+                                                  layer.output_sizes),
+                                              weight_sharding=weight_sharding)
             return UnquantizedMergedLinearMethod(linear_config)
         if isinstance(layer, JaxEinsum):
             # Derive output's last dim from the einsum string.
@@ -359,6 +369,6 @@ class UnquantizedConfig(QuantizationConfig):
             linear_config = QuantLinearConfig(enable_sp=False,
                                               output_sizes=[out_size])
             return UnquantizedLinearMethod(linear_config)
-        if isinstance(layer, JaxMoE):
+        if isinstance(layer, (JaxRoutedExperts, JaxMoE)):
             return UnquantizedFusedMoEMethod()
         return None
