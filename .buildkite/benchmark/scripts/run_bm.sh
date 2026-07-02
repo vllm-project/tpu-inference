@@ -698,19 +698,11 @@ echo "✓ Throughput: $best_throughput"
 echo "✓ P99 E2EL: $best_e2el"
 echo "======================================"
 
-# Extract RUN_ACCURACY from CLIENT_CMD_ENVS array since they are not exported as env vars to host shell
-run_accuracy=""
-for env_item in "${CLIENT_CMD_ENVS[@]}"; do
-  if [[ "$env_item" =~ ^RUN_ACCURACY=(.+) ]]; then
-    run_accuracy="${BASH_REMATCH[1]}"
-  fi
-done
-
-# If accuracy benchmark is requested, execute it sequentially after throughput is completed
-if [[ "$run_accuracy" == "mmlu" ]]; then
+# If an accuracy command was configured in JSON, execute it sequentially after throughput is completed
+if [[ ${#ACCURACY_CMD[@]} -gt 0 ]]; then
   echo ""
   echo "====================================================================="
-  echo "[INFO] RUN_ACCURACY=mmlu: Executing Accuracy Verification Phase"
+  echo "[INFO] Executing Accuracy Verification Phase"
   echo "====================================================================="
 
   # Download dataset using wget if it is not present in the workspace
@@ -727,15 +719,8 @@ if [[ "$run_accuracy" == "mmlu" ]]; then
     cd - > /dev/null
   fi
 
-
-
-  if [[ ${#ACCURACY_CMD[@]} -gt 0 ]]; then
-    echo "Running accuracy benchmark using JSON configured ACCURACY_CMD..."
-    "${ACCURACY_CMD[@]}" >> "$BM_LOG" 2>&1 || echo "Warning: Accuracy benchmark failed."
-  else
-    echo "[ERROR] RUN_ACCURACY=mmlu was specified, but no accuracy_command_options were found in the JSON configuration!" >&2
-    exit 1
-  fi
+  echo "Running accuracy benchmark using JSON configured ACCURACY_CMD..."
+  "${ACCURACY_CMD[@]}" >> "$BM_LOG" 2>&1 || echo "Warning: Accuracy benchmark failed."
 fi
 
 report_and_exit 0

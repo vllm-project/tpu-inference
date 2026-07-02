@@ -250,9 +250,6 @@ def main():
         srv_resolved_args = resolve_device_args(srv_opts.get("args", {}), current_machine)
         cli_resolved_args = resolve_device_args(cli_opts.get("args", {}), current_machine)
 
-        if cli_cmd_type == "vllm_bench_serve_with_accuracy":
-            cli_resolved_args.pop("mmlu-output-len", None)
-
         srv_cmd = build_command(srv_cmd_type, srv_resolved_args)
         cli_cmd = build_command(cli_cmd_type, cli_resolved_args)
 
