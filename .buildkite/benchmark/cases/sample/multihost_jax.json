@@ -37,7 +37,7 @@
         },
         "args": {
           "model": "DeepSeek-R1",
-          "mpdel-path": "gs://tpu-commons-ci/deepseek/r1",
+          "model-path": "gs://tpu-commons-ci/deepseek/r1",
           "served-model-name": "deepseek-ai/DeepSeek-R1",
           "tokenizer": "deepseek-ai/DeepSeek-R1",
           "load-format": "runai_streamer",
