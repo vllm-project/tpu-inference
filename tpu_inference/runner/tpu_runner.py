@@ -2596,25 +2596,49 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # index correctly into the per-rank shard of the mamba state.
             local_slots = self.input_batch._mamba_local_slots
             if self.speculative_config:
-                # In speculative decoding, each request is mapped to a 2D row of (num_spec + 2) slots
-                # representing its state history. The host-side allocator assigns a strided base slot ID,
-                # and we expand it here to [base_slot, base_slot + 1, ..., base_slot + num_spec + 1]
-                # using numpy broadcasting.
-                num_spec = self.speculative_config.num_speculative_tokens
-                mamba_state_indices_cpu = np.zeros(
-                    (self.max_num_reqs, num_spec + 2), dtype=np.int32)
-                for dp_rank in range(dp_size):
-                    _num_reqs = num_req_per_dp_rank[dp_rank]
-                    if _num_reqs == 0:
-                        continue
-                    req_offset = dp_rank * max_num_reqs_per_dp_rank
-                    global_slots = self.input_batch.mamba_state_indices_cpu[
-                        req_indices_dp[dp_rank]]
-                    local_base_slots = global_slots % local_slots
-                    arange = np.arange(num_spec + 2, dtype=np.int32)
-                    mamba_state_indices_cpu[
-                        req_offset:req_offset +
-                        _num_reqs] = local_base_slots[:, None] + arange
+                # Prompt prefills don't need intermediate states. If it's a prefill batch,
+                # we pass a 1D array pointing to `Slot 1` (since prefill's final state needs
+                # to end up in Slot 1 for the verification step's rollback to correctly copy it).
+                # This 1D array allows `ragged_gated_delta_rule_wrapper` to dynamically route
+                # to the highly optimized chunked implementation!
+                is_prompt_prefill = (len(
+                    scheduler_output.scheduled_new_reqs) > 0) or len(
+                        getattr(scheduler_output, "scheduled_cached_reqs",
+                                [])) > 0
+
+                if not is_prompt_prefill:
+                    # In speculative decoding verification, each request is mapped to a 2D row of (num_spec + 2) slots
+                    # representing its state history.
+                    num_spec = self.speculative_config.num_speculative_tokens
+                    mamba_state_indices_cpu = np.zeros(
+                        (self.max_num_reqs, num_spec + 2), dtype=np.int32)
+                    for dp_rank in range(dp_size):
+                        _num_reqs = num_req_per_dp_rank[dp_rank]
+                        if _num_reqs == 0:
+                            continue
+                        req_offset = dp_rank * max_num_reqs_per_dp_rank
+                        global_slots = self.input_batch.mamba_state_indices_cpu[
+                            req_indices_dp[dp_rank]]
+                        local_base_slots = global_slots % local_slots
+                        arange = np.arange(num_spec + 2, dtype=np.int32)
+                        mamba_state_indices_cpu[
+                            req_offset:req_offset +
+                            _num_reqs] = local_base_slots[:, None] + arange
+                else:
+                    mamba_state_indices_cpu = np.zeros(self.max_num_reqs,
+                                                       dtype=np.int32)
+                    for dp_rank in range(dp_size):
+                        _num_reqs = num_req_per_dp_rank[dp_rank]
+                        if _num_reqs == 0:
+                            continue
+                        req_offset = dp_rank * max_num_reqs_per_dp_rank
+                        global_slots = self.input_batch.mamba_state_indices_cpu[
+                            req_indices_dp[dp_rank]]
+                        # Point to Slot 1 so the final prefill state lands exactly where the verification
+                        # rollback expects it!
+                        mamba_state_indices_cpu[req_offset:req_offset +
+                                                _num_reqs] = (global_slots %
+                                                              local_slots) + 1
             else:
                 mamba_state_indices_cpu = np.zeros(self.max_num_reqs,
                                                    dtype=np.int32)
