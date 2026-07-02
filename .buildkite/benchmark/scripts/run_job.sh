@@ -124,7 +124,7 @@ export BENCHMARK_DOCKER_ARGS_STR
 
 # Determine if it is a multi-host run.
 IS_MULTI_HOST="false"
-if [[ "${VERSION:-}" == "7x" && ${COUNT:-0} -gt 4 ]]; then
+if [[ "${VERSION:-}" == "7x" && ${COUNT:-0} -gt 8 ]]; then
     IS_MULTI_HOST="true"
 fi
 if [[ -n "${WORKER_IPS:-}" || "${TPU_MULTIHOST_BACKEND:-}" == "ray" ]]; then
