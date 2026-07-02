@@ -495,8 +495,13 @@ class JaxRoutedExperts(JaxModule):
                 with cpu_mesh_context():
                     concatenated = jnp.concatenate(param._weights_to_load,
                                                    axis=0)
-                param.value = shard_put(concatenated, param.sharding, mesh)
-                loaded_names.add(name)
+                try:
+                    param.value = shard_put(concatenated, param.sharding, mesh)
+                    loaded_names.add(name)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to load weights for {name} with "
+                        f"{concatenated.shape=} {param.value.shape=}") from e
         return loaded_names
 
     def load_weights(self, weights: Iterable):
