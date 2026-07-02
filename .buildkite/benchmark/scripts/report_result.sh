@@ -178,60 +178,91 @@ fi
   # Metric data extraction from log file
   BM_LOG="$LOG_FOLDER/bm_log.txt"
 
-  # First, extract accuracy metrics from log if they exist (used for both accuracy runs and combined runs)
-  AccuracyMetricsJSON=$(grep -a "AccuracyMetrics:" "$BM_LOG" | sed 's/AccuracyMetrics: //' || true)
-  if [[ -z "$AccuracyMetricsJSON" ]]; then
-     # Fallback: Try parsing the python-style dict printed under "Results" line (legacy benchmark_serving.py output)
-     AccuracyMetricsJSON=$(python3 -c '
-import sys, ast, json
+  # Use unified Python script to parse all metrics from the log (migrated from nightly_benchmarking.sh)
+  python3 -c '
+import sys, re, ast, json
+
+# Mapping of what vllm prints vs what Spanner column expects
+METRIC_MAPPING = {
+    "Request throughput": "Throughput",
+    "Output token throughput": "OutputTokenThroughput",
+    "Total Token throughput": "TotalTokenThroughput",
+    "Median TTFT": "MedianTTFT",
+    "P99 TTFT": "P99TTFT",
+    "Median TPOT": "MedianTPOT",
+    "P99 TPOT": "P99TPOT",
+    "Median ITL": "MedianITL",
+    "P99 ITL": "P99ITL",
+    "Median E2EL": "MedianETEL",
+    "P99 E2EL": "P99ETEL"
+}
+
 try:
     with open(sys.argv[1], "r") as f:
         lines = f.readlines()
-except Exception:
-    sys.exit(0)
+except FileNotFoundError:
+    lines = []
+
+results = {}
+in_results = False
 for i, line in enumerate(lines):
-    if line.strip() == "Results":
+    line = line.strip()
+    if "============ Serving Benchmark Result ============" in line:
+        in_results = True
+        continue
+    if "==================================================" in line and in_results:
+        in_results = False
+        
+    if in_results and ":" in line:
+        key, val = line.split(":", 1)
+        val = val.strip()
+        
+        # Remove units like (ms) or (tok/s) or (req/s)
+        clean_key = re.sub(r"\(.*?\)", "", key).strip()
+        
+        if clean_key in METRIC_MAPPING and METRIC_MAPPING[clean_key] not in results:
+            if val != "N/A":
+                results[METRIC_MAPPING[clean_key]] = val
+            
+    # Handle explicit AccuracyMetrics: json (used by some benchmark wrappers)
+    if line.startswith("AccuracyMetrics:"):
+        try:
+            json_str = line.split("AccuracyMetrics:")[1].strip()
+            # Verify it is valid JSON
+            json.loads(json_str)
+            results["AccuracyMetrics"] = json_str
+        except Exception:
+            pass
+
+    # Fallback: Parse legacy Accuracy result dict printed by benchmark_serving.py
+    if line == "Results":
         for j in range(1, min(6, len(lines) - i)):
             try:
                 acc_dict = ast.literal_eval(lines[i+j].strip())
                 if isinstance(acc_dict, dict) and "accuracy" in acc_dict:
-                    print(json.dumps({"accuracy": acc_dict["accuracy"]}))
-                    sys.exit(0)
+                    results["AccuracyMetrics"] = json.dumps({"accuracy": acc_dict["accuracy"]})
+                    break
             except Exception:
                 pass
-' "$BM_LOG" || true)
-  fi
+
+with open(sys.argv[2], "w") as out:
+    for k, v in results.items():
+        out.write(f"{k}={v}\n")
+' "$BM_LOG" "$RESULT_FILE" || true
 
   if [[ "$RUN_TYPE" == *"ACCURACY"* ]]; then
-    # Accuracy run logic
-    echo "Accuracy run ($RUN_TYPE) detected. Parsing accuracy metrics."
-    echo "AccuracyMetricsJSON: $AccuracyMetricsJSON"
-    if [ -n "$AccuracyMetricsJSON" ]; then
-      echo "AccuracyMetrics=$AccuracyMetricsJSON" > "$RESULT_FILE"
-    else
-      echo "Error: Accuracy run but no AccuracyMetrics found."
+    # Accuracy run logic validation
+    if ! grep -q "AccuracyMetrics" "$RESULT_FILE"; then
+      echo "Error: Accuracy run ($RUN_TYPE) but no AccuracyMetrics found."
       exit 1
     fi
   else
-    # Performance run logic
-    throughput=$(grep -i "^Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
-    echo "throughput: $throughput"
-
-    output_token_throughput=$(grep -i "^Output token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
-    total_token_throughput=$(grep -i "^Total Token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
-
+    # Performance run logic validation
+    # Extract Throughput from RESULT_FILE to check against EXPECTED_THROUGHPUT
+    throughput=$(grep "^Throughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
+    
     if [[ -z "$throughput" || ! "$throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
       echo "Failed to get the throughput and this is not an accuracy run."
-      exit 1
-    fi
-
-    if [[ -z "$output_token_throughput" || ! "$output_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-      echo "Failed to get output_token_throughput."
-      exit 1
-    fi
-
-    if [[ -z "$total_token_throughput" || ! "$total_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-      echo "Failed to get total_token_throughput."
       exit 1
     fi
 
@@ -240,46 +271,6 @@ for i, line in enumerate(lines):
     IS_LOW_THROUGHPUT=$(echo "$throughput $EXPECTED_THROUGHPUT_VAL" | awk '{if ($1 < $2 || $1 == 0) print 1; else print 0}')
     if [ "$IS_LOW_THROUGHPUT" -eq 1 ]; then
       echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT_VAL) or is 0"
-    fi
-    echo "Throughput=$throughput" > "$RESULT_FILE"
-
-    extract_value() {
-      local section="$1"
-      local label="$2"  # Mean, Median, or P99
-      grep "$section (ms):" "$BM_LOG" | \
-      awk -v label="$label" '$0 ~ label { print $NF }' || true
-    }
-
-    # Median values
-    MedianITL=$(extract_value "ITL" "Median")
-    MedianTPOT=$(extract_value "TPOT" "Median")
-    MedianTTFT=$(extract_value "TTFT" "Median")
-    MedianETEL=$(extract_value "E2EL" "Median")
-
-    # P99 values
-    P99ITL=$(extract_value "ITL" "P99")
-    P99TPOT=$(extract_value "TPOT" "P99")
-    P99TTFT=$(extract_value "TTFT" "P99")
-    P99ETEL=$(extract_value "E2EL" "P99")
-
-    # Write results to file
-    (
-      printf '%s=%s\n' \
-      "MedianITL" "$MedianITL" \
-      "MedianTPOT" "$MedianTPOT" \
-      "MedianTTFT" "$MedianTTFT" \
-      "MedianETEL" "$MedianETEL" \
-      "P99ITL" "$P99ITL" \
-      "P99TPOT" "$P99TPOT" \
-      "P99TTFT" "$P99TTFT" \
-      "P99ETEL" "$P99ETEL" \
-      "OutputTokenThroughput" "$output_token_throughput" \
-      "TotalTokenThroughput" "$total_token_throughput"
-    ) >> "$RESULT_FILE"
-
-    # Also append accuracy metrics to the same result file if they were collected in this run
-    if [ -n "$AccuracyMetricsJSON" ]; then
-      echo "AccuracyMetrics=$AccuracyMetricsJSON" >> "$RESULT_FILE"
     fi
   fi
 )
