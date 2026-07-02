@@ -103,6 +103,7 @@ class CompilationManager:
         jax.tree.map(lambda r: r.block_until_ready(), result)
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
+        return result
 
     def capture_model(self) -> None:
         if envs.SKIP_JAX_PRECOMPILE or self.runner.model_config.enforce_eager:
@@ -1029,9 +1030,6 @@ class CompilationManager:
         logger.info(
             "Compiling eagle3 jitted helpers with different input shapes.")
         target_hidden_size = self.runner.model_config.get_hidden_size()
-        draft_hidden_size = self.runner.speculative_config.draft_model_config.get_hidden_size(
-        )
-        dtype = self.runner.model_config.dtype
         dp_size = self.runner.dp_size
 
         num_kv_cache_groups = len(self.runner.kv_cache_config.kv_cache_groups)
@@ -1074,8 +1072,6 @@ class CompilationManager:
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
                                                 sharding=dp_sharding)
-        last_token_indices = self._create_dummy_tensor(
-            (self.runner.max_num_reqs, ), jnp.int32, dp_sharding)
         for num_tokens in self.runner.num_tokens_paddings:
             for num_reqs in self.runner.attn_num_reqs_paddings:
                 positions = self._create_dummy_tensor((num_tokens, ),
@@ -1089,6 +1085,56 @@ class CompilationManager:
                     mamba_state_indices=eagle3_mamba_state_indices,
                     padded_num_reqs=num_reqs,
                 )
+
+                input_ids = self._create_dummy_tensor((num_tokens, ),
+                                                      jnp.int32, dp_sharding)
+                # Match the sharding the target forward actually hands the
+                # drafter at runtime: the eagle3 aux hidden states are
+                # model-sharded (P(MODEL, None)), NOT ATTN_DATA. Using the wrong
+                # spec here makes the SpecDecodeMetadata/drafter `_prepare_inputs`
+                # pytree leaf differ from runtime and recompiles on the first
+                # served step under VLLM_XLA_CHECK_RECOMPILATION.
+                aux_hidden_states = [
+                    self._create_dummy_tensor(
+                        (num_tokens, target_hidden_size), jnp.bfloat16,
+                        NamedSharding(
+                            self.runner.mesh,
+                            PartitionSpec(ShardingAxisName.MODEL, None)))
+                    for _ in range(3)
+                ]
+                last_sampled_token_id = self._create_dummy_tensor(
+                    (self.runner.max_num_reqs, ), jnp.int32, dp_sharding)
+                next_prompt_token_id = self._create_dummy_tensor(
+                    (self.runner.max_num_reqs, ), jnp.int32, dp_sharding)
+                is_in_prefill = self._create_dummy_tensor(
+                    (self.runner.max_num_reqs, ), jnp.int32, dp_sharding)
+                num_rejected_tokens = self._create_dummy_tensor(
+                    (self.runner.max_num_reqs, ), jnp.int32, dp_sharding)
+
+                # Warm `prepare_inputs`, then warm `propose` with its ACTUAL
+                # output (target_hidden_states / input_ids / last_token_indices /
+                # attn_metadata) -- mirroring the runtime chain in
+                # SpeculativeDecodingManager.propose_eagle3_draft_token_ids.
+                # Previously `propose` was primed with hand-crafted tensors (e.g.
+                # target_hidden_states sized by draft_hidden_size and MLP-sharded)
+                # that drifted from prepare_inputs' real output, so the first
+                # served spec-decode step recompiled `propose` under
+                # VLLM_XLA_CHECK_RECOMPILATION.
+                (draft_target_hidden_states, draft_input_ids,
+                 draft_last_token_indices,
+                 draft_attn_metadata) = self._run_compilation(
+                     "drafter_prepare_inputs",
+                     self.runner.drafter.prepare_inputs,
+                     attention_metadata,
+                     input_ids,
+                     aux_hidden_states,
+                     last_sampled_token_id,
+                     next_prompt_token_id,
+                     is_in_prefill,
+                     num_rejected_tokens,
+                     num_reqs_dp,
+                     num_tokens=num_tokens,
+                 )
 
                 def drafter_propose_fn_wrapper(
                     kv_caches,
@@ -1107,65 +1153,14 @@ class CompilationManager:
                     self.runner.kv_caches = kv_caches
                     return draft_token_ids
 
-                draft_hidden_states = self._create_dummy_tensor(
-                    (num_tokens, draft_hidden_size), dtype,
-                    NamedSharding(
-                        self.runner.mesh,
-                        PartitionSpec(ShardingAxisName.MLP_DATA,
-                                      ShardingAxisName.MLP_TENSOR)))
-                input_ids = self._create_dummy_tensor((num_tokens, ),
-                                                      jnp.int32, dp_sharding)
                 self._run_compilation(
                     "drafter_propose",
                     drafter_propose_fn_wrapper,
                     self.runner.kv_caches,
-                    input_ids,
-                    attention_metadata,
-                    last_token_indices,
-                    draft_hidden_states,
-                    num_tokens=num_tokens,
-                )
-                aux_hidden_states = [
-                    self._create_dummy_tensor(
-                        (num_tokens, target_hidden_size), jnp.bfloat16,
-                        NamedSharding(
-                            self.runner.mesh,
-                            PartitionSpec(ShardingAxisName.ATTN_DATA, None))),
-                    self._create_dummy_tensor(
-                        (num_tokens, target_hidden_size), jnp.bfloat16,
-                        NamedSharding(
-                            self.runner.mesh,
-                            PartitionSpec(ShardingAxisName.ATTN_DATA, None))),
-                    self._create_dummy_tensor(
-                        (num_tokens, target_hidden_size), jnp.bfloat16,
-                        NamedSharding(
-                            self.runner.mesh,
-                            PartitionSpec(ShardingAxisName.ATTN_DATA, None))),
-                ]
-                last_sampled_token_id = self._create_dummy_tensor(
-                    (self.runner.max_num_reqs, ), jnp.int32, dp_sharding)
-                next_prompt_token_id = self._create_dummy_tensor(
-                    (self.runner.max_num_reqs, ),
-                    jnp.int32,
-                    sharding=dp_sharding)
-                is_in_prefill = self._create_dummy_tensor(
-                    (self.runner.max_num_reqs, ),
-                    jnp.int32,
-                    sharding=dp_sharding)
-                num_rejected_tokens = self._create_dummy_tensor(
-                    (self.runner.max_num_reqs, ), jnp.int32, dp_sharding)
-
-                self._run_compilation(
-                    "drafter_prepare_inputs",
-                    self.runner.drafter.prepare_inputs,
-                    attention_metadata,
-                    input_ids,
-                    aux_hidden_states,
-                    last_sampled_token_id,
-                    next_prompt_token_id,
-                    is_in_prefill,
-                    num_rejected_tokens,
-                    num_reqs_dp,
+                    draft_input_ids,
+                    draft_attn_metadata,
+                    draft_last_token_indices,
+                    draft_target_hidden_states,
                     num_tokens=num_tokens,
                 )
 
