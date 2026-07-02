@@ -75,6 +75,20 @@
               "percentile-metrics": "ttft,tpot,itl,e2el",
               "mmlu-output-len": 4
             }
+          },
+          "accuracy_command_options": {
+            "command_type": "local_benchmark_serving",
+            "args": {
+              "backend": "vllm",
+              "model": "deepseek-ai/DeepSeek-R1",
+              "dataset-name": "mmlu",
+              "dataset-path": "/workspace/tpu_inference/artifacts/dataset/mmlu/data/test",
+              "num-prompts": 14000,
+              "run-eval": true,
+              "temperature": 0,
+              "mmlu-output-len": 4,
+              "trust-remote-code": true
+            }
           }
         }
       ]

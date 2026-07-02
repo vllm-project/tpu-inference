@@ -698,14 +698,11 @@ echo "✓ Throughput: $best_throughput"
 echo "✓ P99 E2EL: $best_e2el"
 echo "======================================"
 
-# Extract RUN_ACCURACY and MMLU_OUTPUT_LEN from CLIENT_CMD_ENVS array since they are not exported as env vars to host shell
+# Extract RUN_ACCURACY from CLIENT_CMD_ENVS array since they are not exported as env vars to host shell
 run_accuracy=""
-mmlu_output_len=""
 for env_item in "${CLIENT_CMD_ENVS[@]}"; do
   if [[ "$env_item" =~ ^RUN_ACCURACY=(.+) ]]; then
     run_accuracy="${BASH_REMATCH[1]}"
-  elif [[ "$env_item" =~ ^MMLU_OUTPUT_LEN=(.+) ]]; then
-    mmlu_output_len="${BASH_REMATCH[1]}"
   fi
 done
 
@@ -730,30 +727,15 @@ if [[ "$run_accuracy" == "mmlu" ]]; then
     cd - > /dev/null
   fi
 
-  # Extract the client model name from CLIENT_CMD, otherwise fallback to DB MODEL
-  client_model="$MODEL"
-  for i in "${!CLIENT_CMD[@]}"; do
-    if [[ "${CLIENT_CMD[$i]}" == "--model" ]]; then
-      client_model="${CLIENT_CMD[$i+1]}"
-      break
-    elif [[ "${CLIENT_CMD[$i]}" == --model=* ]]; then
-      client_model="${CLIENT_CMD[$i]#*=}"
-      break
-    fi
-  done
 
-  # Run the custom local benchmark_serving.py client for accuracy
-  echo "Running accuracy benchmark with model: $client_model"
-  python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py \
-    --backend vllm \
-    --model "$client_model" \
-    --dataset-name mmlu \
-    --dataset-path "$DATASET_DIR/data/test" \
-    --num-prompts 14000 \
-    --run-eval \
-    --temperature 0 \
-    --mmlu-output-len "${mmlu_output_len:-4}" \
-    --trust-remote-code >> "$BM_LOG" 2>&1 || echo "Warning: Accuracy benchmark failed."
+
+  if [[ ${#ACCURACY_CMD[@]} -gt 0 ]]; then
+    echo "Running accuracy benchmark using JSON configured ACCURACY_CMD..."
+    "${ACCURACY_CMD[@]}" >> "$BM_LOG" 2>&1 || echo "Warning: Accuracy benchmark failed."
+  else
+    echo "[ERROR] RUN_ACCURACY=mmlu was specified, but no accuracy_command_options were found in the JSON configuration!" >&2
+    exit 1
+  fi
 fi
 
 report_and_exit 0

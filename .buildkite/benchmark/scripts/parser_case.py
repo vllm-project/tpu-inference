@@ -21,7 +21,8 @@ CMD_MAP = {
     "vllm_serve": "vllm serve",
     "vllm_bench_serve": "vllm bench serve",
     "lm_eval": "lm_eval",
-    "vllm_bench_serve_with_accuracy": "vllm bench serve"
+    "vllm_bench_serve_with_accuracy": "vllm bench serve",
+    "local_benchmark_serving": "python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py"
 }
 
 # Helper function to print export statement only if value is valid
@@ -262,6 +263,18 @@ def main():
         quoted_cli_cmd = ' '.join(
             shlex.quote(arg) for arg in shlex.split(cli_cmd))
         print(f"CLIENT_CMD=({quoted_cli_cmd})")
+
+        acc_opts = case_data.get("accuracy_command_options")
+        if acc_opts:
+            acc_cmd_type = acc_opts.get("command_type", "local_benchmark_serving")
+            acc_resolved_args = resolve_device_args(acc_opts.get("args", {}), current_machine)
+
+            # If the user sets dataset-path with env var references like $DATASET_DIR/test,
+            # we need to be careful with shlex.quote. build_command already handles it but we should pass it correctly.
+            acc_cmd = build_command(acc_cmd_type, acc_resolved_args)
+            quoted_acc_cmd = ' '.join(
+                shlex.quote(arg) for arg in shlex.split(acc_cmd))
+            print(f"ACCURACY_CMD=({quoted_acc_cmd})")
 
         tensor_parallel_size = srv_resolved_args.get("tensor-parallel-size", {})
         print(f"export TENSOR_PARALLEL_SIZE=\"{tensor_parallel_size}\"")
