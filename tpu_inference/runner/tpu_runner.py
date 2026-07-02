@@ -650,11 +650,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.mrope_positions_cpu = np.zeros((3, self.max_num_tokens),
                                             dtype=np.int64)
 
-        # Contiguous buffer for metadata array. By using a single buffer, we are
-        # able to avoid the overhead of multiple device_put operations.
-        # Initialize to a constant size, and resize later after kv cache size is
-        # known.
-        self.device_buffer = common_utils.DeviceBuffer(initial_capacity=1024)
+        # Host-side seq_lens from the most recent `_prepare_inputs`, read back
+        # by the pooling path in `_execute_model`.
+        self._seq_lens_cpu = np.zeros(self.max_num_reqs, dtype=np.int32)
 
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
@@ -777,23 +775,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.kv_cache_manager.actual_mamba_num_blocks is not None:
             self.input_batch.init_mamba_pools(
                 self.kv_cache_manager.actual_mamba_num_blocks)
-
-        # This buffer grows dynamically to accommodate metadata and block tables.
-        # We re-initialize with a precise capacity now that kv_cache_config is known.
-        num_kv_groups = len(kv_cache_config.kv_cache_groups)
-        sampling_params_size = 3 * self.max_num_reqs
-        input_ids_size = self.max_num_tokens
-        query_start_loc_size = self.max_num_reqs + self.dp_size
-        seq_lens_size = self.max_num_reqs
-        logits_indices_size = self.max_num_reqs
-        # Block tables for each KV cache group.
-        block_tables_size = num_kv_groups * self.max_num_reqs * self.max_num_blocks_per_req
-
-        initial_capacity = (sampling_params_size + input_ids_size +
-                            query_start_loc_size + seq_lens_size +
-                            logits_indices_size + block_tables_size)
-        self.device_buffer = common_utils.DeviceBuffer(
-            initial_capacity=initial_capacity)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
@@ -1083,10 +1064,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.is_pooling_model:
             num_reqs = self.input_batch.num_reqs
 
-            # Retrieve sequence lengths
-            seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
-                                                        key="seq_lens")
-            seq_lens = seq_lens_view[:num_reqs]
+            # Retrieve sequence lengths (host-side array populated in
+            # `_prepare_inputs`).
+            seq_lens = self._seq_lens_cpu[:num_reqs]
 
             pooling_metadata = self.input_batch.get_pooling_metadata()
 
@@ -1787,14 +1767,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_ids_dp, scheduled_tokens_per_dp_rank,
                 padded_num_scheduled_tokens_per_dp_rank, dp_size)
 
-        self.device_buffer.reset()
-
-        input_ids_view = self.device_buffer.get_view(
-            (padded_total_num_scheduled_tokens, ), key="input_ids")
-        query_start_loc_view = self.device_buffer.get_view(
-            (self.max_num_reqs + dp_size, ), key="query_start_loc")
-        seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
-                                                    key="seq_lens")
+        input_ids_view = np.zeros((padded_total_num_scheduled_tokens, ),
+                                  dtype=np.int32)
+        query_start_loc_view = np.zeros((self.max_num_reqs + dp_size, ),
+                                        dtype=np.int32)
+        seq_lens_view = np.zeros((self.max_num_reqs, ), dtype=np.int32)
+        # Host-side seq_lens are read back by the pooling path in
+        # `_execute_model`.
+        self._seq_lens_cpu = seq_lens_view
 
         if self.speculative_config:
             padded_logits_length = None
@@ -1818,8 +1798,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         else:
             logits_indices_shape = (padded_num_reqs, )
 
-        logits_indices_view = self.device_buffer.get_view(logits_indices_shape,
-                                                          key="logits_indices")
+        logits_indices_view = np.zeros(logits_indices_shape, dtype=np.int32)
 
         # Populates input_ids and positions
         for dp_rank in range(dp_size):
@@ -1992,16 +1971,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                      positions,
                                      sharding=data_parallel_attn_sharding)
 
-        # Collect block tables host arrays loops zone presence zones legality
+        # Collect block tables host arrays, one per KV-cache group.
+        block_tables_cpu: Dict[int, np.ndarray] = {}
+
         def build_block_table_host(kv_cache_gid: int) -> None:
 
             block_table_obj = self.input_batch.block_table[kv_cache_gid]
-            block_tables_view = self.device_buffer.get_view(
+            block_tables_view = np.zeros(
                 (self.max_num_reqs, block_table_obj.max_num_blocks_per_req),
-                key=f"block_tables_gid_{kv_cache_gid}")
-
-            # Zero out the view once for correct padding
-            block_tables_view.fill(0)
+                dtype=np.int32)
+            block_tables_cpu[kv_cache_gid] = block_tables_view
 
             cpu_tensor = block_table_obj.get_cpu_tensor()
             for dp_rank in range(dp_size):
@@ -2026,8 +2005,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     self.kv_cache_config.kv_cache_groups):
                 build_block_table_host(gid)
 
-        metadata_blob, metadata_layout = self.device_buffer.build()
-
         # Mamba slot ids are only consumed by hybrid attn+mamba models; for
         # pure-attention models, leaving the field None keeps AttentionMetadata
         # byte-identical to the pre-compact-mamba layout (so the model_fn
@@ -2049,23 +2026,31 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices_cpu[req_offset:req_offset +
                                         _num_reqs] = (global_slots %
                                                       local_slots)
-            (request_distribution, mamba_state_indices,
-             dev_arrays_payload) = device_array(
-                 self.mesh, (request_distribution, mamba_state_indices_cpu,
-                             metadata_blob),
-                 sharding=data_parallel_attn_sharding)
+            mamba_state_indices = device_array(
+                self.mesh,
+                mamba_state_indices_cpu,
+                sharding=data_parallel_attn_sharding)
         else:
             mamba_state_indices = None
-            (request_distribution, dev_arrays_payload) = device_array(
-                self.mesh, (request_distribution, metadata_blob),
-                sharding=data_parallel_attn_sharding)
 
-        metadata = common_utils.DeviceBuffer.unpack_arrays(
-            dev_arrays_payload, metadata_layout)
-        input_ids = metadata["input_ids"]
-        query_start_loc = metadata["query_start_loc"]
-        seq_lens = metadata["seq_lens"]
-        logits_indices = metadata["logits_indices"]
+        # Transfer each metadata array to device individually. These per-array
+        # device_puts reuse the exact shapes/shardings the warmup primers
+        # precompile, so serving never triggers a first-time compile here
+        # (unlike a single packed blob + jnp.split, which warmup does not
+        # cover). Block tables are flattened to 1D to match the warmup layout.
+        (request_distribution, input_ids, query_start_loc, seq_lens,
+         logits_indices) = device_array(
+             self.mesh,
+             (request_distribution, input_ids_view, query_start_loc_view,
+              seq_lens_view, logits_indices_view),
+             sharding=data_parallel_attn_sharding)
+        block_tables_by_gid = {
+            gid:
+            device_array(self.mesh,
+                         view.reshape(-1),
+                         sharding=data_parallel_attn_sharding)
+            for gid, view in block_tables_cpu.items()
+        }
 
         # The host-side `num_computed_tokens_cpu` assumes all speculatively
         # proposed tokens from the previous step were accepted. Subtract the
@@ -2101,12 +2086,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             # Pooling model will not using kv cache
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
-            block_tables = metadata.get(
-                "block_tables_gid_0") if not no_kv_cache else None
+            block_tables = block_tables_by_gid.get(
+                0) if not no_kv_cache else None
             attention_metadata = build_attn(block_tables)
         else:
             attention_metadata = {
-                name: build_attn(metadata[f"block_tables_gid_{gid}"])
+                name: build_attn(block_tables_by_gid[gid])
                 for gid, kv_cache_group in enumerate(
                     self.kv_cache_config.kv_cache_groups)
                 for name in kv_cache_group.layer_names
