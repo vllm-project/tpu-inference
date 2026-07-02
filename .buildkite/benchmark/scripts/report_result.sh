@@ -372,7 +372,7 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
   SQL_JOB_REFERENCE=$(prepare_sql_val "${JOB_REFERENCE:-}" "''")
   SQL_AGENT_NAME=$(prepare_sql_val "${BUILDKITE_AGENT_NAME:-}" "''")
   SQL_DEVICE=$(prepare_sql_val "${DEVICE:-}" "''")
-  SQL_MODEL=$(prepare_sql_val "${MODEL:-}" "''")
+  SQL_MODEL=$(prepare_sql_val "${MODEL_NAME:-${MODEL:-}}" "''")
   SQL_RUN_TYPE=$(prepare_sql_val "${RUN_TYPE:-DAILY}" "DAILY")
   SQL_CODE_HASH=$(prepare_sql_val "${CODE_HASH:-}" "''")
   SQL_CASE_NAME=$(prepare_sql_val "${TARGET_CASE_NAME:-}" "''")
