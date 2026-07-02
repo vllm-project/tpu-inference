@@ -33,6 +33,12 @@
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
+      <td>LoRA_Torch</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
       <td>Out-of-tree model support</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
@@ -64,30 +70,24 @@
     </tr>
     <tr>
       <td>Multimodal Inputs</td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
-      <td>LoRA_Torch</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td>hybrid kv cache</td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>multi-host</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
       <td>runai_model_streamer_loader</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>hybrid kv cache</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
