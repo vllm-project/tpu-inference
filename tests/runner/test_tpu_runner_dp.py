@@ -64,9 +64,6 @@ class TestTPUJaxRunnerDPInputsLightweight:
         self.runner.arange_cpu = np.arange(64, dtype=np.int64)
         self.runner.uses_mrope = False
 
-        from tpu_inference.utils import DeviceBuffer
-        self.runner.device_buffer = DeviceBuffer(initial_capacity=1024 * 1024)
-
         # mock kv cache group
         mock_kv_cache_config = MagicMock()
         mock_kv_cache_group = MagicMock()
@@ -80,6 +77,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         self.runner.scheduler_config.async_scheduling = False  # Default to False for most tests
         self.runner._pre_async_results = None  # Default to None for most tests
         self.runner.speculative_config = None  # Default to None (no spec decode)
+        self.runner.enable_multitoken_decode = False
 
         # Bind the actual methods to our mock
         self.runner._prepare_inputs = TPUModelRunner._prepare_inputs.__get__(
@@ -1233,6 +1231,7 @@ class TestSamplingMetadataPassthrough:
         runner.max_num_reqs = 8
         runner.max_num_blocks_per_req = 8
         runner.speculative_config = None
+        runner.enable_multitoken_decode = False
         runner.input_batch.num_reqs = 2
         runner.input_batch.req_ids = ["req1", "req2"]
         runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1}
@@ -1246,8 +1245,6 @@ class TestSamplingMetadataPassthrough:
         runner.input_batch.block_table = [mock_block_table]
         runner.arange_cpu = np.arange(64, dtype=np.int64)
 
-        from tpu_inference.utils import DeviceBuffer
-        runner.device_buffer = DeviceBuffer(initial_capacity=1024 * 1024)
         runner.num_tokens_paddings_per_dp = [8, 16, 32]
         runner.num_reqs_paddings_per_dp = [4, 8]
         runner.uses_mrope = False
