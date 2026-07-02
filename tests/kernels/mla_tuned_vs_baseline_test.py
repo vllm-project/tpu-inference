@@ -72,7 +72,7 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
         ql_nope_transposed = jnp.transpose(ql_nope, (1, 0, 2))
 
         def run_kernel(params):
-            return mla_ragged_paged_attention(
+            out, _ = mla_ragged_paged_attention(
                 ql_nope=ql_nope_transposed,
                 q_pe=q_pe,
                 new_kv_c=new_kv_c,
@@ -95,6 +95,7 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
                 num_queries_per_block=params.num_queries_per_block,
                 vmem_limit_bytes=params.vmem_limit_bytes,
             )
+            return out
 
         print(f"\nCompiling baseline kernel for: {key}...")
         jax.block_until_ready(run_kernel(baseline_params))
@@ -102,16 +103,32 @@ class MlaTunedVsBaselinePerformanceTest(jtu.JaxTestCase):
         jax.block_until_ready(run_kernel(tuned_params))
 
         iters = 50
+        batch_size = 5
+        num_batches = iters // batch_size
         # Warmup is done during compiling steps above.
-        start_ns = time.perf_counter_ns()
-        baseline_results = [run_kernel(baseline_params) for _ in range(iters)]
-        jax.block_until_ready(baseline_results[-1])
-        baseline_latency = (time.perf_counter_ns() - start_ns) / iters
+        baseline_block_latencies = []
+        for _ in range(5):
+            start_ns = time.perf_counter_ns()
+            for _ in range(num_batches):
+                baseline_results = [
+                    run_kernel(baseline_params) for _ in range(batch_size)
+                ]
+                jax.block_until_ready(baseline_results[-1])
+            baseline_block_latencies.append(
+                (time.perf_counter_ns() - start_ns) / iters)
+        baseline_latency = min(baseline_block_latencies)
 
-        start_ns = time.perf_counter_ns()
-        tuned_results = [run_kernel(tuned_params) for _ in range(iters)]
-        jax.block_until_ready(tuned_results[-1])
-        tuned_latency = (time.perf_counter_ns() - start_ns) / iters
+        tuned_block_latencies = []
+        for _ in range(5):
+            start_ns = time.perf_counter_ns()
+            for _ in range(num_batches):
+                tuned_results = [
+                    run_kernel(tuned_params) for _ in range(batch_size)
+                ]
+                jax.block_until_ready(tuned_results[-1])
+            tuned_block_latencies.append(
+                (time.perf_counter_ns() - start_ns) / iters)
+        tuned_latency = min(tuned_block_latencies)
 
         speedup = (baseline_latency - tuned_latency) / baseline_latency * 100
 
