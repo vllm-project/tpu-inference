@@ -113,7 +113,7 @@ cleanup() {
     for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     echo "==================== Ray Worker logs from worker node ${worker_ip} ===================="
       # ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true; sudo rm -rf /tmp/ray/* /tmp/vllm/* /mnt/disks/checkpoint/ray/*" || true
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true; sudo rm -rf /tmp/ray/* /tmp/vllm/*" || true
     done
   fi
 
@@ -126,7 +126,7 @@ cleanup() {
   fi
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
-  sudo rm -rf /tmp/ray/* /tmp/vllm/* /mnt/disks/checkpoint/ray/* >/dev/null 2>&1 || true
+  sudo rm -rf /tmp/ray/* /tmp/vllm/* >/dev/null 2>&1 || true
 
   echo "✅ Cleanup complete."
   set -e
@@ -283,11 +283,6 @@ fi
 echo "--- Cleaning up previous cluster state..."
 cleanup
 
-# Check for large data disk on head node and redirect Ray temp directory
-if [ -d "/mnt/disks/checkpoint" ]; then
-    EXTRA_DOCKER_ARGS="${EXTRA_DOCKER_ARGS:-} -e RAY_TMPDIR=/mnt/disks/checkpoint/ray"
-fi
-
 # 1. Start Ray Head Node locally
 echo "--- Starting Ray Head Node Locally"
 # shellcheck disable=SC2086
@@ -332,12 +327,6 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     # shellcheck disable=SC2087
     # shellcheck disable=SC2029
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
-if [ -d "/mnt/disks/checkpoint" ]; then
-    WORKER_EXTRA_ARGS="-e RAY_TMPDIR=/mnt/disks/checkpoint/ray"
-else
-    WORKER_EXTRA_ARGS=""
-fi
-
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
@@ -350,8 +339,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_
   -e MOE_REQUANTIZE_WEIGHT_DTYPE='${MOE_REQUANTIZE_WEIGHT_DTYPE:-}' \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE='${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}' \
   -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}' \
-  ${DOCKER_ENV_STR} \
-  \$WORKER_EXTRA_ARGS
+  ${DOCKER_ENV_STR}
 EOF
 done
 
