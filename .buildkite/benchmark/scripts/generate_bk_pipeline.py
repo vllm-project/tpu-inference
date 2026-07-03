@@ -24,9 +24,7 @@ import yaml
 
 # List of authorized command types
 ALLOWED_SERVER_COMMAND_TYPES = {"vllm_serve"}
-ALLOWED_CLIENT_COMMAND_TYPES = {
-    "vllm_bench_serve", "lm_eval", "vllm_bench_serve_with_accuracy"
-}
+ALLOWED_CLIENT_COMMAND_TYPES = {"vllm_bench_serve", "lm_eval"}
 
 
 def str2bool(v):

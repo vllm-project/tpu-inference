@@ -60,7 +60,7 @@
             }
           },
           "client_command_options": {
-            "command_type": "vllm_bench_serve_with_accuracy",
+            "command_type": "vllm_bench_serve",
             "args": {
               "model": "deepseek-ai/DeepSeek-R1",
               "backend": "vllm",

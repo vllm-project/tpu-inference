@@ -21,7 +21,6 @@ CMD_MAP = {
     "vllm_serve": "vllm serve",
     "vllm_bench_serve": "vllm bench serve",
     "lm_eval": "lm_eval",
-    "vllm_bench_serve_with_accuracy": "vllm bench serve",
     "local_benchmark_serving": "python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py"
 }
 
@@ -215,12 +214,6 @@ def main():
     export_env_if_valid(srv_opts, "max-model-len", "MAX_MODEL_LEN")
     cli_cmd_type = cli_opts.get("command_type", "vllm_bench_serve")
     cli_env = cli_opts.get("env", {}).copy()
-    cli_resolved_args_pre = resolve_device_args(cli_opts.get("args", {}), current_machine)
-    if cli_cmd_type == "vllm_bench_serve_with_accuracy":
-        cli_env["RUN_ACCURACY"] = "mmlu"
-        if "mmlu-output-len" in cli_resolved_args_pre:
-            cli_env["MMLU_OUTPUT_LEN"] = str(cli_resolved_args_pre["mmlu-output-len"])
-
     cli_env_parts = [f"{k}={v}" for k, v in cli_env.items()]
     quoted_cli_env = ' '.join(shlex.quote(p) for p in cli_env_parts)
     print(f"CLIENT_CMD_ENVS=({quoted_cli_env})")
