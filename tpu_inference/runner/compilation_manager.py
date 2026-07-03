@@ -1032,6 +1032,19 @@ class CompilationManager:
         target_hidden_size = self.runner.model_config.get_hidden_size()
         dp_size = self.runner.dp_size
 
+        # Static (compile-time) decode-region query length. Must match the value
+        # the target forward stamps into the AttentionMetadata it hands the
+        # drafter at runtime: with multi-token decode enabled (spec config + an
+        # RPA kernel that accepts `decode_q_len`), decode-region requests carry
+        # `num_speculative_tokens + 1` query tokens. `decode_q_len` is a static
+        # AttentionMetadata meta-field (part of the jit treedef), so if warmup
+        # leaves it at the default (1) the first served spec-decode step hits an
+        # uncompiled `decode_q_len>1` graph and recompiles `_prepare_inputs`
+        # mid-serving (tripping VLLM_XLA_CHECK_RECOMPILATION). Mirror the
+        # backbone helper / runtime (tpu_runner._prepare_inputs) exactly.
+        decode_q_len = (self.runner.speculative_config.num_speculative_tokens +
+                        1) if self.runner.enable_multitoken_decode else 1
+
         num_kv_cache_groups = len(self.runner.kv_cache_config.kv_cache_groups)
         draft_kv_cache_group_id = num_kv_cache_groups - 1
         block_tables = self.runner.input_batch.block_table[
@@ -1084,19 +1097,25 @@ class CompilationManager:
                     request_distribution=request_distribution,
                     mamba_state_indices=eagle3_mamba_state_indices,
                     padded_num_reqs=num_reqs,
+                    decode_q_len=decode_q_len,
                 )
 
                 input_ids = self._create_dummy_tensor((num_tokens, ),
                                                       jnp.int32, dp_sharding)
-                # Match the sharding the target forward actually hands the
-                # drafter at runtime: the eagle3 aux hidden states are
-                # model-sharded (P(MODEL, None)), NOT ATTN_DATA. Using the wrong
-                # spec here makes the SpecDecodeMetadata/drafter `_prepare_inputs`
-                # pytree leaf differ from runtime and recompiles on the first
-                # served step under VLLM_XLA_CHECK_RECOMPILATION.
+                # Match the EXACT dtype + sharding the target forward hands the
+                # drafter's `_prepare_inputs` at runtime. Verified by dumping the
+                # live `_prepare_inputs` inputs on a serving 1.4B eagle3 pod: the
+                # aux hidden states arrive as float32, sharded P(MODEL, None)
+                # (model-parallel over the hidden axis, batch replicated) -- NOT
+                # bfloat16 and NOT the P(ATTN_DATA, MODEL) the *drafter's* own
+                # internal hidden states use. Both the dtype and the sharding are
+                # part of the `_prepare_inputs` lowering-cache key, so any drift
+                # here keeps the traced jaxpr identical (no tracing-cache miss)
+                # yet re-lowers on the first served spec-decode step and trips the
+                # VLLM_XLA_CHECK_RECOMPILATION guard.
                 aux_hidden_states = [
                     self._create_dummy_tensor(
-                        (num_tokens, target_hidden_size), jnp.bfloat16,
+                        (num_tokens, target_hidden_size), jnp.float32,
                         NamedSharding(
                             self.runner.mesh,
                             PartitionSpec(ShardingAxisName.MODEL, None)))
