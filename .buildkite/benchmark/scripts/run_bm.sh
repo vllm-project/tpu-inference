@@ -146,6 +146,34 @@ export ARTIFACT_FOLDER
 export LOG_FOLDER
 export VLLM_TORCH_PROFILER_DIR
 
+
+run_accuracy_if_needed() {
+  # If an accuracy command was configured in JSON, execute it sequentially after throughput is completed
+  if [[ ${#ACCURACY_CMD[@]} -gt 0 ]]; then
+    echo ""
+    echo "====================================================================="
+    echo "[INFO] RUN_ACCURACY=mmlu: Executing Accuracy Verification Phase"
+    echo "====================================================================="
+
+    # Download dataset using wget if it is not present in the workspace
+    DATASET_DIR="$ARTIFACT_FOLDER/dataset/mmlu"
+    if [ ! -d "$DATASET_DIR/data/test" ]; then
+      echo "MMLU dataset test folder not found, downloading via wget..."
+      mkdir -p "$DATASET_DIR"
+      cd "$DATASET_DIR" || exit 1
+      if [ ! -f data.tar ]; then
+        wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .
+        tar -xvf data.tar
+      fi
+      # Return to previous directory
+      cd - > /dev/null
+    fi
+
+    echo "Running accuracy benchmark using JSON configured ACCURACY_CMD..."
+    "${ACCURACY_CMD[@]}" >> "$BM_LOG" 2>&1 || echo "Warning: Accuracy benchmark failed."
+  fi
+}
+
 report_and_exit() {
   local exit_code=${1:-0}
   local record_id="${RECORD_ID:-local}"
@@ -156,6 +184,10 @@ report_and_exit() {
   fi
 
   echo "--- Calling report_result.sh for RECORD_ID=${record_id} with exit_code=${exit_code}"
+  if [[ "$exit_code" -eq 0 ]]; then
+    run_accuracy_if_needed
+  fi
+
   bash "$SCRIPT_DIR/report_result.sh" "$record_id" "$exit_code" || exit $?
   
   # Exit with the originally provided exit code.
@@ -698,29 +730,5 @@ echo "✓ Throughput: $best_throughput"
 echo "✓ P99 E2EL: $best_e2el"
 echo "======================================"
 
-# If an accuracy command was configured in JSON, execute it sequentially after throughput is completed
-if [[ ${#ACCURACY_CMD[@]} -gt 0 ]]; then
-  echo ""
-  echo "====================================================================="
-  echo "[INFO] Executing Accuracy Verification Phase"
-  echo "====================================================================="
-
-  # Download dataset using wget if it is not present in the workspace
-  DATASET_DIR="$ARTIFACT_FOLDER/dataset/mmlu"
-  if [ ! -d "$DATASET_DIR/data/test" ]; then
-    echo "MMLU dataset test folder not found, downloading via wget..."
-    mkdir -p "$DATASET_DIR"
-    cd "$DATASET_DIR" || exit 1
-    if [ ! -f data.tar ]; then
-      wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .
-      tar -xvf data.tar
-    fi
-    # Return to previous directory
-    cd - > /dev/null
-  fi
-
-  echo "Running accuracy benchmark using JSON configured ACCURACY_CMD..."
-  "${ACCURACY_CMD[@]}" >> "$BM_LOG" 2>&1 || echo "Warning: Accuracy benchmark failed."
-fi
 
 report_and_exit 0
