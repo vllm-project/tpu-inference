@@ -26,6 +26,7 @@ from tpu_inference.layers.vllm.interface.moe import \
     select_moe_backend_from_fused_moe_config
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
+from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -49,6 +50,24 @@ def _all_reduce_over_tp(t: torch.Tensor, mesh: Mesh) -> torch.Tensor:
     return torch_view(_reduce(jax_view(t)))
 
 
+def _gmm_and_shared_reduce_over_same_axes(mesh: Mesh,
+                                          moe_backend: MoEBackend) -> bool:
+    """Whether the GMM reduction collapses exactly the shared expert's TP axes.
+
+    Only axes that actually shard (size > 1) on ``mesh`` count, so axis-name
+    tuples that differ only in size-1 axes still match.
+    """
+    gmm_axis = (ShardingAxisName.EXPERT if moe_backend == MoEBackend.GMM_EP
+                else ShardingAxisName.MLP_TENSOR)
+
+    def effective(axes):
+        axes = (axes, ) if isinstance(axes, str) else axes
+        return frozenset(a for a in axes
+                         if get_mesh_shape_product(mesh, a) > 1)
+
+    return effective(gmm_axis) == effective(ShardingAxisName.MLP_TENSOR)
+
+
 @MoERunner.register_oot
 class VllmMoERunner(MoERunner):
 
@@ -63,6 +82,9 @@ class VllmMoERunner(MoERunner):
         #   2. attention-DP is disabled (DP resolves the reduction separately)
         #   3. the backend is GMM_EP / GMM_TP (only those honor defer_all_reduce;
         #      e.g. the FUSED_MOE kernel always reduces)
+        #   4. the GMM reduction collapses the same mesh axes as the shared
+        #      expert (MLP_TENSOR) -- else one all-reduce over MLP_TENSOR cannot
+        #      stand in for the GMM's reduction
         mesh = _get_mesh()
         if mesh is None:
             return True
@@ -72,6 +94,14 @@ class VllmMoERunner(MoERunner):
 
         moe_backend = select_moe_backend_from_fused_moe_config(self.moe_config)
         if moe_backend not in (MoEBackend.GMM_EP, MoEBackend.GMM_TP):
+            return True
+
+        # The late path folds the GMM's reduction into a single all-reduce over
+        # MLP_TENSOR (the shared expert's TP axis). That is only valid when the
+        # GMM effectively reduces the same axes; otherwise fall back to the
+        # kernel reducing its own output. (GMM_TP always reduces over
+        # MLP_TENSOR; GMM_EP reduces over EXPERT, which may differ.)
+        if not _gmm_and_shared_reduce_over_same_axes(mesh, moe_backend):
             return True
 
         return False
