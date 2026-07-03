@@ -351,7 +351,7 @@ class TestTPUJaxRunner:
         runner.eos_token_id = 999
         runner.pad_token_id = 0
         runner.layer_name_to_kvcache_index = {}
-        runner.exit_on_eos_in_continue_decode = True
+        runner.continue_decode_eos_check_interval = 1
 
         # Mock continue_decode output
         mock_generated_tokens = MagicMock()
@@ -469,14 +469,15 @@ class TestTPUJaxRunner:
         # req3: 30 -> 35
         assert attn_metadata.seq_lens_cpu[2] == 35
 
-        # 6. Verify default exit_on_eos parameter passed to continue_decode
-        assert mock_continue_decode.call_args.kwargs["exit_on_eos"] is True
+        # 6. Verify default continue_decode_eos_check_interval parameter passed to continue_decode
+        assert mock_continue_decode.call_args.kwargs[
+            "continue_decode_eos_check_interval"] == 1
 
     @patch('tpu_inference.runner.tpu_runner.continue_decode')
     @patch('jax.device_get')
-    def test_execute_continue_decode_exit_on_eos_config(
+    def test_execute_continue_decode_eos_check_interval_config(
             self, mock_device_get, mock_continue_decode):
-        """_execute_continue_decode() should pass exit_on_eos=False when configured in additional_config."""
+        """_execute_continue_decode() should pass continue_decode_eos_check_interval when configured in additional_config."""
         runner = MagicMock()
         runner.max_num_reqs = 8
         runner.max_model_len = 512
@@ -485,10 +486,10 @@ class TestTPUJaxRunner:
         runner.vllm_config.parallel_config.is_moe_model = False
         runner.vllm_config.additional_config = {
             "enable_continue_decode": True,
-            "exit_on_eos_in_continue_decode": False,
+            "continue_decode_eos_check_interval": 5,
             "max_decode_steps": 5,
         }
-        runner.exit_on_eos_in_continue_decode = False
+        runner.continue_decode_eos_check_interval = 5
         runner.static_max_decode_steps = 5
         runner.input_batch.num_reqs = 1
         runner.input_batch.req_ids = ["req1"]
@@ -508,6 +509,7 @@ class TestTPUJaxRunner:
             MagicMock(),
             mock_final_state,
             MagicMock(),
+            None,
             None,
         )
 
@@ -535,6 +537,7 @@ class TestTPUJaxRunner:
             None,
             None,
             None,
+            None,
         )
 
         from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -542,7 +545,8 @@ class TestTPUJaxRunner:
             runner, MagicMock(num_scheduled_tokens={"req1": 1}))
 
         mock_continue_decode.assert_called_once()
-        assert mock_continue_decode.call_args.kwargs["exit_on_eos"] is False
+        assert mock_continue_decode.call_args.kwargs[
+            "continue_decode_eos_check_interval"] == 5
 
     @patch('tpu_inference.runner.tpu_runner.continue_decode')
     @patch('jax.device_get')
