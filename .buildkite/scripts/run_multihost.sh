@@ -126,7 +126,6 @@ cleanup() {
   fi
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
-  rm -f /tmp/vllm_serve.log || true
   sudo rm -rf /tmp/ray/* /tmp/vllm/* >/dev/null 2>&1 || true
 
   echo "✅ Cleanup complete."

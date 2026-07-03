@@ -184,10 +184,6 @@ report_and_exit() {
   fi
 
   echo "--- Calling report_result.sh for RECORD_ID=${record_id} with exit_code=${exit_code}"
-  if [[ "$exit_code" -eq 0 ]]; then
-    run_accuracy_if_needed
-  fi
-
   bash "$SCRIPT_DIR/report_result.sh" "$record_id" "$exit_code" || exit $?
   
   # Exit with the originally provided exit code.
@@ -665,13 +661,9 @@ goal_int=$(printf "%.0f" "$EXPECTED_ETEL")
 
 if [[ "${RUN_ONCE:-false}" == "true" ]]; then
   echo "[INFO] RUN_ONCE is enabled. Skipping binary search and reporting results."
-  report_and_exit 0
-fi
-
-if (( p99_int <= goal_int )); then
-  echo "Initial run: P99 E2EL ($p99_e2el ms) <= EXPECTED_ETEL ($EXPECTED_ETEL ms), good enough. Exiting 0."
-  report_and_exit 0
-fi
+elif (( p99_int <= goal_int )); then
+  echo "Initial run: P99 E2EL ($p99_e2el ms) <= EXPECTED_ETEL ($EXPECTED_ETEL ms), good enough. Skipping sweep."
+else
 
 echo "Initial run failed: P99 E2EL ($p99_e2el ms) > EXPECTED_ETEL ($EXPECTED_ETEL ms)"
 echo "Starting binary search to lower request rate..."
@@ -724,11 +716,12 @@ fi
 cp "$BEST_BM_LOG" "$BM_LOG"
 
 echo
-echo "======================================"
-echo "✓ Final best request_rate: $best_rate"
-echo "✓ Throughput: $best_throughput"
-echo "✓ P99 E2EL: $best_e2el"
-echo "======================================"
+  echo "======================================"
+  echo "✓ Final best request_rate: $best_rate"
+  echo "✓ Throughput: $best_throughput"
+  echo "✓ P99 E2EL: $best_e2el"
+  echo "======================================"
+fi
 
-
+run_accuracy_if_needed
 report_and_exit 0

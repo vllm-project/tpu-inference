@@ -136,14 +136,22 @@ RUN_TYPE="${RUN_TYPE:-DAILY}"
 # Define Result_file name
 RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
 
-# Upload logs to GCS if bucket is provided
-if [[ -n "${GCS_BUCKET:-}" ]]; then
-  # TODO: When switching to Production after validation is complete, 
-  # please change to use `$GCS_BUCKET` as the log storage bucket. 
-  # For now, it is hardcoded to use the `vllm-bm-bk-storage` bucket.
-  # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
-  REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
-fi
+  # Upload logs to GCS if bucket is provided
+  if [[ -n "${GCS_BUCKET:-}" && "${SERVER_ALREADY_RUNNING:-false}" != "true" ]]; then
+    REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
+    if command -v gsutil &> /dev/null; then
+      echo "--- Uploading $LOG_FOLDER to unified GCS: $REMOTE_LOG_ROOT"
+      gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT" || echo "Warning: Failed to upload log folder to GCS."
+    else
+      echo "Warning: gsutil not found. Skipping log upload to GCS."
+    fi
+  else
+    if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
+      echo "Multi-host mode detected (SERVER_ALREADY_RUNNING=true). Skipping unified GCS upload; logs will be uploaded to the legacy GCS location by host script."
+    else
+      echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
+    fi
+  fi
 
 (
   if [ "${BUILDKITE:-false}" == "true" ]; then
@@ -159,96 +167,12 @@ fi
   printf "[INFO] LOG_FOLDER=\n%s\n" "$LOG_FOLDER"
 
   # Handle log file
-  
-  if [[ -n "${GCS_BUCKET:-}" && "${SERVER_ALREADY_RUNNING:-false}" != "true" ]]; then
-    if command -v gsutil &> /dev/null; then
-      echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
-      gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT"
-    else
-      echo "Warning: gsutil not found. Skipping log upload to GCS."
-    fi
-  else
-    if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
-      echo "Multi-host mode detected (SERVER_ALREADY_RUNNING=true). Skipping unified GCS upload; logs will be uploaded to the legacy GCS location by host script."
-    else
-      echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
-    fi
-  fi
 
   # Metric data extraction from log file
   BM_LOG="$LOG_FOLDER/bm_log.txt"
 
-  # Use unified Python script to parse all metrics from the log (migrated from nightly_benchmarking.sh)
-  python3 -c '
-import sys, re, ast, json
-
-# Mapping of what vllm prints vs what Spanner column expects
-METRIC_MAPPING = {
-    "Request throughput": "Throughput",
-    "Output token throughput": "OutputTokenThroughput",
-    "Total Token throughput": "TotalTokenThroughput",
-    "Median TTFT": "MedianTTFT",
-    "P99 TTFT": "P99TTFT",
-    "Median TPOT": "MedianTPOT",
-    "P99 TPOT": "P99TPOT",
-    "Median ITL": "MedianITL",
-    "P99 ITL": "P99ITL",
-    "Median E2EL": "MedianETEL",
-    "P99 E2EL": "P99ETEL"
-}
-
-try:
-    with open(sys.argv[1], "r") as f:
-        lines = f.readlines()
-except FileNotFoundError:
-    lines = []
-
-results = {}
-in_results = False
-for i, line in enumerate(lines):
-    line = line.strip()
-    if "============ Serving Benchmark Result ============" in line:
-        in_results = True
-        continue
-    if "==================================================" in line and in_results:
-        in_results = False
-        
-    if in_results and ":" in line:
-        key, val = line.split(":", 1)
-        val = val.strip()
-        
-        # Remove units like (ms) or (tok/s) or (req/s)
-        clean_key = re.sub(r"\(.*?\)", "", key).strip()
-        
-        if clean_key in METRIC_MAPPING and METRIC_MAPPING[clean_key] not in results:
-            if val != "N/A":
-                results[METRIC_MAPPING[clean_key]] = val
-            
-    # Handle explicit AccuracyMetrics: json (used by some benchmark wrappers)
-    if line.startswith("AccuracyMetrics:"):
-        try:
-            json_str = line.split("AccuracyMetrics:")[1].strip()
-            # Verify it is valid JSON
-            json.loads(json_str)
-            results["AccuracyMetrics"] = json_str
-        except Exception:
-            pass
-
-    # Fallback: Parse legacy Accuracy result dict printed by benchmark_serving.py
-    if line == "Results":
-        for j in range(1, min(6, len(lines) - i)):
-            try:
-                acc_dict = ast.literal_eval(lines[i+j].strip())
-                if isinstance(acc_dict, dict) and "accuracy" in acc_dict:
-                    results["AccuracyMetrics"] = json.dumps({"accuracy": acc_dict["accuracy"]})
-                    break
-            except Exception:
-                pass
-
-with open(sys.argv[2], "w") as out:
-    for k, v in results.items():
-        out.write(f"{k}={v}\n")
-' "$BM_LOG" "$RESULT_FILE" || true
+  # Use unified Python script to parse all metrics from the log
+  python3 "$(dirname "$0")/parse_benchmark_log.py" "$BM_LOG" "$RESULT_FILE" || true
 
   if [[ "$RUN_TYPE" == *"ACCURACY"* ]]; then
     # Accuracy run logic validation

@@ -124,10 +124,7 @@ export BENCHMARK_DOCKER_ARGS_STR
 
 # Determine if it is a multi-host run.
 IS_MULTI_HOST="false"
-if [[ "${VERSION:-}" == "7x" && ${COUNT:-0} -gt 8 ]]; then
-    IS_MULTI_HOST="true"
-fi
-if [[ -n "${WORKER_IPS:-}" || "${TPU_MULTIHOST_BACKEND:-}" == "ray" ]]; then
+if [[ ( "${VERSION:-}" == "7x" && ${COUNT:-0} -gt 8 ) || -n "${WORKER_IPS:-}" || "${TPU_MULTIHOST_BACKEND:-}" == "ray" ]]; then
     IS_MULTI_HOST="true"
 fi
 
@@ -137,8 +134,8 @@ export BM_INFRA="true"
 if [[ "$IS_MULTI_HOST" == "true" ]]; then
     echo "--- Multi-host environment detected. Running via run_multihost.sh on host..."
 
-    # Export Docker environment variables as EXTRA_DOCKER_ARGS
     export EXTRA_DOCKER_ARGS="-v $ARTIFACT_FOLDER:/workspace/tpu_inference/artifacts \
+      -e ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts \
       -e DEVICE=$DEVICE \
       -e RECORD_ID=$RECORD_ID \
       -e RUN_TYPE=$RUN_TYPE \
@@ -150,6 +147,16 @@ if [[ "$IS_MULTI_HOST" == "true" ]]; then
       -e GCP_REGION=${GCP_REGION:-} \
       -e GCS_BUCKET=${GCS_BUCKET:-} \
       -e UPLOAD_DB=${UPLOAD_DB:-true} \
+      -e BUILDKITE=${BUILDKITE:-} \
+      -e BUILDKITE_AGENT_NAME=${BUILDKITE_AGENT_NAME:-} \
+      -e BUILDKITE_AGENT_META_DATA_QUEUE=${BUILDKITE_AGENT_META_DATA_QUEUE:-} \
+      -e BUILDKITE_BUILD_NUMBER=${BUILDKITE_BUILD_NUMBER:-} \
+      -e BUILDKITE_JOB_ID=${BUILDKITE_JOB_ID:-} \
+      -e MLCOMPASS_EXECUTION_MODE=${MLCOMPASS_EXECUTION_MODE:-} \
+      -e MLCOMPASS_EXPORT_ENABLED=${MLCOMPASS_EXPORT_ENABLED:-} \
+      -e MLCOMPASS_TEST_NAME=${MLCOMPASS_TEST_NAME:-} \
+      -e MLCOMPASS_TRACKING_ID=${MLCOMPASS_TRACKING_ID:-} \
+      -e MLCOMPASS_SPONGE_ID=${MLCOMPASS_SPONGE_ID:-} \
       -e IS_MULTI_HOST=true"
 
     echo "Executing run_multihost.sh on host..."
@@ -238,9 +245,14 @@ fi
         status_tag="FAILED"
       fi
 
-      legacy_gcs_uri="gs://tpu-commons-ci/logs/${MODEL_NAME:-unknown}_${INPUT_LEN:-0}_${OUTPUT_LEN:-0}_${impl_type}_${CODE_HASH:-unknown}_${status_tag}_${run_mode}${routing_tag}_${JOB_REFERENCE}_vllm_serve.log"
+      # for test upload
+      legacy_gcs_uri="gs://vllm-bm-bk-storage/job_logs/${MODEL_NAME:-unknown}_${INPUT_LEN:-0}_${OUTPUT_LEN:-0}_${impl_type}_${CODE_HASH:-unknown}_${status_tag}_${run_mode}${routing_tag}_${JOB_REFERENCE}_vllm_serve.log"
       echo "--- Uploading copy of server log to legacy GCS location: $legacy_gcs_uri"
-      # for test skip upload
+      gsutil cp "$VLLM_LOG" "$legacy_gcs_uri" || echo "Warning: Failed to upload vllm_serve.log to legacy GCS location."
+
+      # for prod upload
+      # legacy_gcs_uri="gs://tpu-commons-ci/logs/${MODEL_NAME:-unknown}_${INPUT_LEN:-0}_${OUTPUT_LEN:-0}_${impl_type}_${CODE_HASH:-unknown}_${status_tag}_${run_mode}${routing_tag}_${JOB_REFERENCE}_vllm_serve.log"
+      # echo "--- Uploading copy of server log to legacy GCS location: $legacy_gcs_uri"
       # gsutil cp "$VLLM_LOG" "$legacy_gcs_uri" || echo "Warning: Failed to upload vllm_serve.log to legacy GCS location."
     fi
   else
