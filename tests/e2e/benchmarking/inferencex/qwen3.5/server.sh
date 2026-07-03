@@ -23,6 +23,9 @@ PORT="${PORT:-8000}"
 SHARDING="${SHARDING:-DP8_EP}"
 ISL="${ISL:-8192}"
 OSL="${OSL:-1024}"
+# Headroom over ISL+OSL (matches InferenceX qwen3.5 sglang: ISL+OSL+20). Without it, fixed-length
+# (ratio 1.0) requests hit max_model_len exactly and get 400 Bad Request.
+MAX_MODEL_LEN_BUFFER="${MAX_MODEL_LEN_BUFFER:-20}"
 
 case "$SHARDING" in
   DP8_EP)
@@ -40,7 +43,7 @@ case "$SHARDING" in
   *) echo "ERROR: unknown SHARDING='$SHARDING' (expected DP8_EP|DP4TP2_EP)" >&2; exit 1 ;;
 esac
 
-MAX_MODEL_LEN=$((ISL + OSL))
+MAX_MODEL_LEN=$((ISL + OSL + MAX_MODEL_LEN_BUFFER))
 MAX_NUM_BATCHED_TOKENS=$((ISL / DP_SIZE))
 
 set -x
