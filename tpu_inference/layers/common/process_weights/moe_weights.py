@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from dataclasses import dataclass, fields
 from functools import partial
 
@@ -164,6 +165,36 @@ class W13PaddingConfig:
     padded_intermediate_size: int
 
 
+def _gmm_tp_w13_reorder_size(mesh) -> int:
+    """Number of chunks to reorder w13 into so each holds a contiguous [w1|w3].
+
+    This must equal how many ways the intermediate (2I) dim is sharded. For "F"
+    (default) and "D" that is the full MLP_TENSOR; for the "DF" hybrid the
+    intermediate is sharded only over MLP_TENSOR minus the D axis
+    ('attn_dp_expert'), so the reorder count is the F-degree
+    (= MLP_TENSOR product / attn_dp_expert product).
+    """
+    mt = get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
+    if os.getenv("MOE_TP_SHARD", "F") == "DF":
+        return mt // get_mesh_shape_product(mesh, "attn_dp_expert")
+    return mt
+
+
+def _gmm_tp_hidden_shard_size(mesh) -> int:
+    """How many ways the MoE hidden dim H is sharded (for quant-block H padding).
+
+    F does not shard H (returns 1); D shards H over the full MLP_TENSOR; DF shards
+    H over the D axis 'attn_dp_expert'. H must be padded so its per-shard quant-
+    block count is a whole number -> pad H to a multiple of (this * block).
+    """
+    shard = os.getenv("MOE_TP_SHARD", "F")
+    if shard == "D":
+        return get_mesh_shape_product(mesh, ShardingAxisName.MLP_TENSOR)
+    if shard == "DF":
+        return get_mesh_shape_product(mesh, "attn_dp_expert")
+    return 1
+
+
 def get_w13_padding_config(intermediate_size: int,
                            reorder_size: int,
                            align: int = 128,
@@ -272,6 +303,7 @@ def process_moe_weights(
     w13_reorder_size: int | None = None,
     w13_interleave: bool = False,
     disable_weight_requantization: bool = False,
+    w13_hidden_shard_size: int = 1,
 ) -> FusedMoEWeights:
     """Process fused moe weights to a layout that moe backend expects.
 
@@ -432,6 +464,13 @@ def process_moe_weights(
                 pad_config_weight.padded_intermediate_size,
                 pad_config_weight.padded_intermediate_size
             ]
+            # D-sharding shards hidden H (not 2I), so the 2I shard-interleave
+            # reorder is both unnecessary and harmful: it would break the
+            # contiguous [w1|w3] split that apply_act_fn relies on after the
+            # gmm1 all-reduce. Skip the reorder (keep pad/concat).
+            d_shard = os.getenv("MOE_TP_SHARD", "F") == "D"
+            if d_shard:
+                padded_output_sizes = None
 
             w13_weight = process_w13_for_gmm(
                 tensor=w13_weight,
@@ -450,6 +489,8 @@ def process_moe_weights(
                     pad_config_scale.padded_intermediate_size,
                     pad_config_scale.padded_intermediate_size
                 ]
+                if d_shard:
+                    padded_output_sizes_scales = None
                 w13_weight_scale = process_w13_for_gmm(
                     tensor=w13_weight_scale,
                     concat_dim=3,
@@ -478,6 +519,28 @@ def process_moe_weights(
                     w2_weight_scale = jnp.repeat(w2_weight_scale,
                                                  w2_outer_block_size,
                                                  axis=3)
+
+            if w13_hidden_shard_size > 1:
+                # D / DF sharding splits w13's hidden dim H (the gmm1 contraction)
+                # w13_hidden_shard_size ways. fp4 scales are block-quantized along
+                # H, so the per-chip H must be a whole number of quant blocks ->
+                # pad H up to a multiple of (shard_size * block) so the scale's
+                # block count divides the shard. (w2's H is the gmm2 output, a
+                # plain sharded dim, so it needs no padding.) For DF this is a
+                # no-op when the block count already divides (e.g. D2F4: 14/2=7).
+                h = w13_weight.shape[1]
+                blk = (h // w13_weight_scale.shape[1]
+                       if w13_weight_scale is not None else 1)
+                hpad = align_to(h, w13_hidden_shard_size * blk)
+                if hpad != h:
+                    w13_weight = jnp.pad(w13_weight,
+                                         [[0, 0], [0, hpad - h], [0, 0]])
+                    if w13_weight_scale is not None:
+                        nb = hpad // blk - w13_weight_scale.shape[1]
+                        w13_weight_scale = jnp.pad(
+                            w13_weight_scale,
+                            [[0, 0], [0, nb], [0, 0], [0, 0]],
+                            constant_values=1.0)
 
         case MoEBackend.GMM_EP:
             pad_config_weight = get_w13_padding_config(intermediate_size,
@@ -572,6 +635,46 @@ def _get_moe_weight_shardings(
                 w2_bias=ep_sharding,
             )
         case MoEBackend.GMM_TP:
+            if os.getenv("MOE_TP_SHARD", "F") == "D":
+                # D-sharding: shard hidden H instead of intermediate 2I.
+                # w13=[E,H,2I] -> shard dim1 (H); w2=[E,I,H] -> shard dim2 (H).
+                # Scales: w13=[E,H/subc,1,2I] shard dim1; w2=[E,I/subc,1,H] shard last.
+                MT = ShardingAxisName.MLP_TENSOR
+                return FusedMoEWeights(
+                    w13_weight=NamedSharding(mesh, P(None, MT, None)),
+                    w13_weight_scale=NamedSharding(mesh, P(None, MT, None,
+                                                           None)),
+                    w13_bias=NamedSharding(mesh, P(None, None, None)),
+                    w2_weight=NamedSharding(mesh, P(None, None, MT)),
+                    w2_weight_scale=NamedSharding(mesh, P(None, None, None,
+                                                          MT)),
+                    w2_bias=NamedSharding(mesh, P(None, None, None)),
+                )
+            if os.getenv("MOE_TP_SHARD", "F") == "DF":
+                # Hybrid: shard hidden H over the D axis 'attn_dp_expert' AND
+                # intermediate 2I/I over the F axis 'attn_dp' (both attention DP
+                # axes -> model=1, MLA untouched). Same partition strings as
+                # tensor_parallel_gmm's "DF" branch. w1=[E,H,2I] -> dim1 (H) over D,
+                # dim2 (2I) over F; w2=[E,I,H] -> dim1 (I) over F, dim2 (H) over D.
+                d_axis = "attn_dp_expert"
+                mt_axes = ShardingAxisName.MLP_TENSOR
+                mt_axes = mt_axes if isinstance(mt_axes, tuple) else (mt_axes, )
+                f_axis = tuple(a for a in mt_axes if a != d_axis)
+                w2_scale = weights.w2_weight_scale
+                if w2_scale is not None and w2_scale.shape[1] == 1:
+                    # per-channel along I: I-block dim is size 1, unshardable over F
+                    w2_scale_spec = P(None, None, None, d_axis)
+                else:
+                    w2_scale_spec = P(None, f_axis, None, d_axis)
+                return FusedMoEWeights(
+                    w13_weight=NamedSharding(mesh, P(None, d_axis, f_axis)),
+                    w13_weight_scale=NamedSharding(
+                        mesh, P(None, d_axis, None, f_axis)),
+                    w13_bias=NamedSharding(mesh, P(None, None, f_axis)),
+                    w2_weight=NamedSharding(mesh, P(None, f_axis, d_axis)),
+                    w2_weight_scale=NamedSharding(mesh, w2_scale_spec),
+                    w2_bias=NamedSharding(mesh, P(None, None, d_axis)),
+                )
             # When using per-channel, in_dim // block_size == 1. This means we
             # are unable to shard w2_weight_scale along 1st dim. Therefore, we
             # fully replicate it instead.
@@ -761,6 +864,7 @@ def _process_moe_weights_no_requant(
     w13_interleave: bool,
     disable_weight_requantization: bool,
     weight_block_size: tuple[int, ...] | None,
+    w13_hidden_shard_size: int = 1,
 ) -> FusedMoEWeights:
     """Process MoE weights without requantization.
 
@@ -817,6 +921,7 @@ def _process_moe_weights_no_requant(
         w13_reorder_size=w13_reorder_size,
         w13_interleave=w13_interleave,
         disable_weight_requantization=disable_weight_requantization,
+        w13_hidden_shard_size=w13_hidden_shard_size,
     )
 
     target_shardings = _get_moe_weight_shardings(out, moe_backend, mesh)
@@ -957,6 +1062,7 @@ def _requant_and_process_local_fn(
     clip_percentile: float | None,
     moe_backend: MoEBackend,
     w13_reorder_size: int,
+    w13_hidden_shard_size: int = 1,
 ):
     """Per-device requantization and processing of MoE weights.
 
@@ -1045,6 +1151,7 @@ def _requant_and_process_local_fn(
         moe_backend=moe_backend,
         w13_reorder_size=w13_reorder_size,
         w13_interleave=w13_interleave,
+        w13_hidden_shard_size=w13_hidden_shard_size,
     )
     return (
         out_local.w13_weight,
@@ -1086,8 +1193,8 @@ def _process_quantized_moe_weights_impl(
 
     w13_interleave = (activation == "swigluoai"
                       or activation == MoEActivation.SWIGLUOAI)
-    w13_reorder_size = get_mesh_shape_product(mesh,
-                                              ShardingAxisName.MLP_TENSOR)
+    w13_reorder_size = _gmm_tp_w13_reorder_size(mesh)
+    w13_hidden_shard_size = _gmm_tp_hidden_shard_size(mesh)
 
     if disable_weight_requantization:
         return _process_moe_weights_no_requant(
@@ -1098,6 +1205,7 @@ def _process_quantized_moe_weights_impl(
             w13_interleave=w13_interleave,
             disable_weight_requantization=disable_weight_requantization,
             weight_block_size=weight_block_size,
+            w13_hidden_shard_size=w13_hidden_shard_size,
         )
 
     # desired_quant_dtype and requant_block_size are handled by the wrapper.
@@ -1164,6 +1272,7 @@ def _process_quantized_moe_weights_impl(
         clip_percentile=clip_percentile,
         moe_backend=moe_backend,
         w13_reorder_size=w13_reorder_size,
+        w13_hidden_shard_size=w13_hidden_shard_size,
     )
 
     in_specs = (
@@ -1273,8 +1382,8 @@ def process_unquantized_moe_weights(
         )
 
     w13_interleave = activation == MoEActivation.SWIGLUOAI
-    w13_reorder_size = get_mesh_shape_product(mesh,
-                                              ShardingAxisName.MLP_TENSOR)
+    w13_reorder_size = _gmm_tp_w13_reorder_size(mesh)
+    w13_hidden_shard_size = _gmm_tp_hidden_shard_size(mesh)
 
     return process_moe_weights(
         weights,
@@ -1282,4 +1391,5 @@ def process_unquantized_moe_weights(
         w13_reorder_size=w13_reorder_size,
         w13_interleave=w13_interleave,
         disable_weight_requantization=envs.DISABLE_WEIGHT_REQUANTIZATION,
+        w13_hidden_shard_size=w13_hidden_shard_size,
     )

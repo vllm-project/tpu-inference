@@ -280,9 +280,31 @@ class ShardingConfigManager:
                                      int(expert_parallelism // shard_divisor))
                 expert_parallelism //= attn_dp_expert
 
+            # MoE hybrid (DF) sharding knob: carve a data-parallel sub-axis
+            # (attn_dp_expert) out of attn_dp, WITHOUT taking any chips from the
+            # `model` axis. Attention shards over ATTN_DATA=(data,attn_dp,
+            # attn_dp_expert), so total attention-DP is unchanged (attn_dp *
+            # attn_dp_expert), model stays as-is, and MLA is never TP-sharded.
+            # Use with attn_dp_size = full DP degree so model=1.
+            moe_attn_dp_expert = sharding_strategy.get("attn_dp_expert_size",
+                                                       None)
+            if moe_attn_dp_expert is not None and moe_attn_dp_expert > 1:
+                assert attn_dp % moe_attn_dp_expert == 0, (
+                    f"attn_dp ({attn_dp}) must be divisible by "
+                    f"attn_dp_expert_size ({moe_attn_dp_expert})")
+                attn_dp = attn_dp // moe_attn_dp_expert
+                attn_dp_expert = moe_attn_dp_expert
+
         else:
             attn_dp = 1
             attn_dp_expert = 1
+
+        logger.info(
+            "[sharding] attn_dp=%s attn_dp_expert=%s model(tp)=%s expert=%s "
+            "data=%s dcp=%s (attention-DP=%s, MLA head-sharded=%s)", attn_dp,
+            attn_dp_expert, tensor_parallelism, expert_parallelism,
+            data_parallelism, decode_context_parallelism,
+            attn_dp * attn_dp_expert, tensor_parallelism > 1)
 
         sharding_strategy = ShardingStrategy(
             tensor_parallelism=tensor_parallelism,
