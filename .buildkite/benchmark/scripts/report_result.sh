@@ -283,7 +283,7 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
   SQL_EXTRA_ENVS=$(prepare_sql_val "${EXTRA_ENVS:-}" "''")
   SQL_RECORD_ID=$(prepare_sql_val "$RECORD_ID" "''")
   SQL_STATUS=$(prepare_sql_val "$FINAL_STATUS" "FAILED")
-  SQL_USER=$(prepare_sql_val "${CREATED_BY:-${USER:-buildkite-agent}}" "buildkite-agent")
+  SQL_USER=$(prepare_sql_val "${USER:-buildkite-agent}" "buildkite-agent")
   SQL_JOB_REFERENCE=$(prepare_sql_val "${JOB_REFERENCE:-}" "''")
   SQL_AGENT_NAME=$(prepare_sql_val "${BUILDKITE_AGENT_NAME:-}" "''")
   SQL_DEVICE=$(prepare_sql_val "${DEVICE:-}" "''")
