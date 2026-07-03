@@ -223,6 +223,30 @@ contains_element () {
 }
 
 # ---------------------------------------------------------
+# Dynamic Port Injection (Single & Multi-Host)
+# ---------------------------------------------------------
+# If VLLM_PORT wasn't provided by the environment, try to extract it from SERVER_CMD
+if [[ -z "${VLLM_PORT:-}" ]]; then
+  SERVER_CMD_STR="${SERVER_CMD[*]:-}"
+  if [[ "${SERVER_CMD_STR}" =~ --port[=\ ]+([0-9]+) ]]; then
+    VLLM_PORT="${BASH_REMATCH[1]}"
+    echo "--- Extracted VLLM_PORT=${VLLM_PORT} from SERVER_CMD locally"
+  fi
+fi
+
+if [[ -n "${VLLM_PORT:-}" ]]; then
+  echo "--- Injecting VLLM_PORT=${VLLM_PORT} into client commands"
+  
+  if [[ ${#CLIENT_CMD[@]} -gt 0 ]] && ! contains_element "--port" "${CLIENT_CMD[@]}"; then
+    CLIENT_CMD+=("--port" "$VLLM_PORT")
+  fi
+  
+  if [[ ${#ACCURACY_CMD[@]} -gt 0 ]] && ! contains_element "--port" "${ACCURACY_CMD[@]}"; then
+    ACCURACY_CMD+=("--port" "$VLLM_PORT")
+  fi
+fi
+
+# ---------------------------------------------------------
 # DECODE_ONLY Mode Configuration Validation & Dataset Injection
 # ---------------------------------------------------------
 if [[ "${DECODE_ONLY:-false}" == "true" ]]; then

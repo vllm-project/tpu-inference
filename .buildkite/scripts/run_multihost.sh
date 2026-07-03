@@ -397,6 +397,7 @@ if [ -n "${CLIENT_BENCH_CMD}" ]; then
     docker exec \
       -e HF_HOME=/root/.cache/huggingface \
       -e SERVER_ALREADY_RUNNING="true" \
+      -e VLLM_PORT="${VLLM_PORT}" \
       node bash -c "cd /workspace/tpu_inference && chmod +x .buildkite/benchmark/scripts/run_bm.sh && .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME"
   else
     echo "--- Running Benchmark Command on Head Node"
