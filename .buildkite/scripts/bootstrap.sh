@@ -55,6 +55,13 @@ JOB_PRIORITY=$(determine_job_priority)
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
 
+# HACK: Only upload multi_host_disagg.yml
+echo "--- 🚨 HACK: Only uploading multi_host_disagg.yml"
+export TPU_VERSION="tpu7x"
+upload_with_priority .buildkite/features/multi_host_disagg.yml "$JOB_PRIORITY"
+echo "--- 🚨 HACK: Finished uploading, exiting early"
+exit 0
+
 # --- Skip build if only docs/icons changed ---
 echo "--- :git: Checking changed files"
 
