@@ -1369,11 +1369,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             else:
                 state_indices_to_rollback = attn_metadata.mamba_state_indices
 
-            self._device_rollback_mamba_states(
-                state_indices_to_rollback,
-                num_accepted_tokens_dev,
-                draft_lengths,
-            )
+            # For brand new prompt prefill requests, _pre_async_results might still hold stale data
+            # from a previously finished request. We must skip the rollback for prefill requests.
+            # We can identify prefill requests because they use a 1D state indices array (which
+            # triggers the optimized chunked implementation), whereas verification uses a 2D array.
+            if state_indices_to_rollback is not None and getattr(
+                    state_indices_to_rollback, "ndim", 1) == 2:
+                self._device_rollback_mamba_states(
+                    state_indices_to_rollback,
+                    num_accepted_tokens_dev,
+                    draft_lengths,
+                )
         with self.maybe_forbid_compile:
             with set_forward_context(
                     None,
