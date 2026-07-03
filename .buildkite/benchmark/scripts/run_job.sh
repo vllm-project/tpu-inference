@@ -77,6 +77,10 @@ PROFILE_FOLDER="${LOG_FOLDER}/profile"
 
 # Do cleanup before create config
 cleanup_artifact_log() {
+  if [ -d "$ARTIFACT_FOLDER" ]; then
+    echo "--- Fixing artifact folder permissions for cleanup..."
+    sudo chown -R "$(id -u):$(id -g)" "$ARTIFACT_FOLDER" || true
+  fi
   echo "deleting artifacts: $ARTIFACT_FOLDER"
   rm -rf "$ARTIFACT_FOLDER"
 }
@@ -197,7 +201,6 @@ else
         BM_JOB_STATUS=$EXIT_FAILURE
     }
 fi
-
 
 (
   # Handle log file

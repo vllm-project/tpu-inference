@@ -80,7 +80,7 @@
               "backend": "vllm",
               "model": "deepseek-ai/DeepSeek-R1",
               "dataset-name": "mmlu",
-              "dataset-path": "/workspace/tpu_inference/artifacts/dataset/mmlu/data/test",
+              "dataset-path": "/workspace/mmlu/data/test",
               "num-prompts": 14000,
               "run-eval": true,
               "temperature": 0,

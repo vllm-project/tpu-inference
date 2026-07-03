@@ -156,7 +156,7 @@ run_accuracy_if_needed() {
     echo "====================================================================="
 
     # Download dataset using wget if it is not present in the workspace
-    DATASET_DIR="$ARTIFACT_FOLDER/dataset/mmlu"
+    DATASET_DIR="/workspace/mmlu"
     if [ ! -d "$DATASET_DIR/data/test" ]; then
       echo "MMLU dataset test folder not found, downloading via wget..."
       mkdir -p "$DATASET_DIR"
