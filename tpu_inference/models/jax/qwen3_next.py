@@ -14,6 +14,7 @@
 """JAX native implementation of Qwen3-Next (hybrid gated delta net linear
 attention + gated full attention, sparse MoE with a shared expert)."""
 
+import functools
 from typing import List, Optional, Tuple
 
 import jax
@@ -28,6 +29,7 @@ from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
@@ -36,7 +38,7 @@ from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear, JaxLmHead
-from tpu_inference.layers.jax.moe.moe import JaxMoE, Router
+from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
                                                 select_moe_backend)
 from tpu_inference.layers.jax.norm import JaxRmsNorm
@@ -47,7 +49,9 @@ from tpu_inference.layers.jax.rope_interface import (apply_rope,
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
+from tpu_inference.models.jax.utils.weight_utils import (
+    JaxAutoWeightsLoader, LoadableWithIterator,
+    load_nnx_param_from_reshaped_torch)
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
@@ -371,6 +375,110 @@ class Qwen3NextAttention(JaxModule):
         return new_kv_cache, self.o_proj(o)
 
 
+class Qwen3NextRouter(JaxLinear):
+    """MoE router that adapts its output to the backend: raw logits for the
+    fused kernels (which route internally), (weights, indices) for the
+    unfused ones. Top-k followed by softmax over the selected logits equals
+    HF's softmax then top-k then renormalize (norm_topk_prob=True)."""
+
+    def __init__(self, *args, num_experts_per_tok: int,
+                 moe_backend: MoEBackend, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.num_experts_per_tok = num_experts_per_tok
+        self.moe_backend = moe_backend
+
+    def __call__(self, x: jax.Array):
+        logits = super().__call__(x)
+        if self.moe_backend in MoEBackend.fused_moe_backends():
+            return logits
+        weights, selected = jax.lax.top_k(logits, self.num_experts_per_tok)
+        return jax.nn.softmax(weights, axis=-1), selected
+
+
+class Qwen3NextMoeExperts(JaxMoE):
+    """JaxMoE that also accepts the fused 3D expert tensors some Qwen3-Next
+    checkpoints store (`experts.gate_up_proj` (E, 2F, D) with the gate rows
+    first, `experts.down_proj` (E, D, F)) next to the per expert layout the
+    base class handles. Fused tensors are expanded into per expert shards
+    and delegated so the fused kernel post processing sees the layout it
+    expects; for the unfused backends the kernels are transposed into the
+    (E, D, F) / (E, F, D) orientation the dense matmul consumes directly."""
+
+    def _load_weights(self, weights, *, mesh: Mesh | None = None):
+        expanded = []
+        for name, torch_weight in weights:
+            if name.endswith("experts.gate_up_proj"):
+                intermediate = torch_weight.shape[1] // 2
+                for expert_id in range(torch_weight.shape[0]):
+                    expanded.append(
+                        (f"{self.prefix}.{expert_id}.gate_proj.weight",
+                         torch_weight[expert_id, :intermediate, :]))
+                    expanded.append(
+                        (f"{self.prefix}.{expert_id}.up_proj.weight",
+                         torch_weight[expert_id, intermediate:, :]))
+            elif name.endswith("experts.down_proj"):
+                for expert_id in range(torch_weight.shape[0]):
+                    expanded.append(
+                        (f"{self.prefix}.{expert_id}.down_proj.weight",
+                         torch_weight[expert_id]))
+            else:
+                expanded.append((name, torch_weight))
+
+        loaded = super()._load_weights(expanded, mesh=mesh)
+
+        if self.moe_backend not in MoEBackend.fused_moe_backends():
+            # The base loader keeps the HF (out, in) orientation per expert,
+            # which the fused backends fix up in their weight post
+            # processing. The dense fallback consumes the kernels as is, so
+            # orient them here once all experts have arrived.
+            for param_name in loaded:
+                param = getattr(self, param_name)
+                param.set_value(jnp.transpose(param.get_value(), (0, 2, 1)))
+        return loaded
+
+
+class Qwen3NextMLP(JaxModule):
+    """Plain silu MLP used for the shared expert."""
+
+    def __init__(self,
+                 hidden_size: int,
+                 intermediate_size: int,
+                 dtype: jnp.dtype,
+                 rng: nnx.Rngs,
+                 quant_config,
+                 prefix: str = ""):
+        self.gate_proj = JaxLinear(
+            hidden_size,
+            intermediate_size,
+            dtype=dtype,
+            rngs=rng,
+            use_bias=False,
+            quant_config=quant_config,
+            prefix=prefix + ".gate_proj",
+        )
+        self.up_proj = JaxLinear(
+            hidden_size,
+            intermediate_size,
+            dtype=dtype,
+            rngs=rng,
+            use_bias=False,
+            quant_config=quant_config,
+            prefix=prefix + ".up_proj",
+        )
+        self.down_proj = JaxLinear(
+            intermediate_size,
+            hidden_size,
+            dtype=dtype,
+            rngs=rng,
+            use_bias=False,
+            quant_config=quant_config,
+            prefix=prefix + ".down_proj",
+        )
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        return self.down_proj(jax.nn.silu(self.gate_proj(x)) * self.up_proj(x))
+
+
 class Qwen3NextSparseMoeBlock(JaxModule):
     """Sparse MoE block with a sigmoid gated shared expert on top of the
     routed experts."""
@@ -391,25 +499,20 @@ class Qwen3NextSparseMoeBlock(JaxModule):
         use_ep = num_expert_parallelism > 1
         moe_backend = select_moe_backend(use_ep)
 
-        # The Router adapts its output to the backend: raw logits for the
-        # fused kernels, (weights, indices) for the unfused ones. Top-k
-        # followed by softmax over the selected logits is equivalent to
-        # HF's norm_topk_prob=True renormalization.
-        self.gate = Router(
+        self.gate = Qwen3NextRouter(
+            hidden_size,
+            config.num_experts,
             dtype=dtype,
-            hidden_size=hidden_size,
-            num_experts=config.num_experts,
-            num_experts_per_tok=config.num_experts_per_tok,
-            router_act="softmax",
             rngs=rng,
-            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-            ed_sharding=(None, None),
+            use_bias=False,
+            quant_config=quant_config,
+            prefix=prefix + ".gate",
+            num_experts_per_tok=config.num_experts_per_tok,
             moe_backend=moe_backend,
-            mesh=mesh,
         )
 
         self.enable_return_routed_experts = True
-        self.experts = JaxMoE(
+        self.experts = Qwen3NextMoeExperts(
             dtype=dtype,
             num_local_experts=config.num_experts,
             hidden_size=hidden_size,
@@ -431,33 +534,13 @@ class Qwen3NextSparseMoeBlock(JaxModule):
             enable_return_routed_experts=self.enable_return_routed_experts,
             prefix=prefix + ".experts")
 
-        shared_intermediate = config.shared_expert_intermediate_size
-        self.shared_expert_gate_proj = JaxLinear(
+        self.shared_expert = Qwen3NextMLP(
             hidden_size,
-            shared_intermediate,
+            config.shared_expert_intermediate_size,
             dtype=dtype,
-            rngs=rng,
-            use_bias=False,
+            rng=rng,
             quant_config=quant_config,
-            prefix=prefix + ".shared_expert.gate_proj",
-        )
-        self.shared_expert_up_proj = JaxLinear(
-            hidden_size,
-            shared_intermediate,
-            dtype=dtype,
-            rngs=rng,
-            use_bias=False,
-            quant_config=quant_config,
-            prefix=prefix + ".shared_expert.up_proj",
-        )
-        self.shared_expert_down_proj = JaxLinear(
-            shared_intermediate,
-            hidden_size,
-            dtype=dtype,
-            rngs=rng,
-            use_bias=False,
-            quant_config=quant_config,
-            prefix=prefix + ".shared_expert.down_proj",
+            prefix=prefix + ".shared_expert",
         )
         self.shared_expert_gate = JaxLinear(
             hidden_size,
@@ -471,9 +554,7 @@ class Qwen3NextSparseMoeBlock(JaxModule):
 
     def __call__(self, x: jax.Array) -> Tuple[jax.Array, Optional[jax.Array]]:
         out, expert_ids = self.experts(x)
-        shared = self.shared_expert_down_proj(
-            jax.nn.silu(self.shared_expert_gate_proj(x)) *
-            self.shared_expert_up_proj(x))
+        shared = self.shared_expert(x)
         out = out + jax.nn.sigmoid(self.shared_expert_gate(x)) * shared
         return out, expert_ids
 
@@ -670,6 +751,39 @@ class Qwen3NextModel(JaxModule):
         return new_kv_caches, x, stacked_expert_ids
 
 
+def _load_zero_centered_norm(jax_param: nnx.Param,
+                             torch_weight,
+                             *,
+                             param_name: str = "Unknown"):
+    """Qwen3NextRMSNorm is zero centered (`out = norm(x) * (1 + w)`); fold
+    the +1 into the scale at load time so the standard RMSNorm applies."""
+    folded = (torch_weight.float() + 1.0).to(torch_weight.dtype)
+    load_nnx_param_from_reshaped_torch(jax_param,
+                                       folded,
+                                       param_name=param_name)
+
+
+def _load_float32_param(jax_param: nnx.Param,
+                        torch_weight,
+                        *,
+                        param_name: str = "Unknown"):
+    """A_log and dt_bias participate in exp/softplus and are kept in
+    float32 regardless of the checkpoint dtype."""
+    load_nnx_param_from_reshaped_torch(jax_param,
+                                       torch_weight.float(),
+                                       param_name=param_name)
+
+
+# Norms folded with +1 at load time. The gated norm inside linear_attn uses
+# a standard scale and is excluded.
+_ZERO_CENTERED_NORM_SUFFIXES = (
+    ".input_layernorm.weight",
+    ".post_attention_layernorm.weight",
+    ".q_norm.weight",
+    ".k_norm.weight",
+)
+
+
 class Qwen3NextForCausalLM(JaxModule, LoadableWithIterator):
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
@@ -704,6 +818,26 @@ class Qwen3NextForCausalLM(JaxModule, LoadableWithIterator):
                 self.lm_head = PPMissingLayer()
         else:
             self.lm_head = PPMissingLayer()
+
+        for name, param in self.named_parameters():
+            if (name.endswith(_ZERO_CENTERED_NORM_SUFFIXES)
+                    or name == "model.norm.weight"):
+                param.set_metadata(
+                    "weight_loader",
+                    functools.partial(_load_zero_centered_norm,
+                                      param_name=name))
+            elif name.endswith((".A_log", ".dt_bias")):
+                param.set_metadata(
+                    "weight_loader",
+                    functools.partial(_load_float32_param, param_name=name))
+
+    def load_weights(self, weights) -> set:
+        # The checkpoint ships an MTP tower (`mtp.*`) that the base model
+        # does not use. Names get a `model.` prefix inside the loader when
+        # they do not start with one, so skip both spellings.
+        loader = JaxAutoWeightsLoader(self,
+                                      skip_prefixes=["mtp.", "model.mtp."])
+        return loader.load_weights(weights)
 
     def __call__(
         self,

@@ -361,7 +361,7 @@ class TestSparseMoeBlock:
                                                       prefix="mlp")
 
     def _copy_weights(self, block, hf):
-        block.gate.kernel_DE.value = jnp.asarray(
+        block.gate.weight.value = jnp.asarray(
             hf.gate.weight.detach().numpy().T)
         # HF stores fused 3D expert tensors: gate_up_proj (E, 2F, D) with
         # the gate rows first, down_proj (E, D, F).
@@ -373,11 +373,11 @@ class TestSparseMoeBlock:
             gate_up[:, intermediate:, :].transpose(0, 2, 1))
         block.experts.kernel_down_proj_EFD.value = jnp.asarray(
             hf.experts.down_proj.detach().numpy().transpose(0, 2, 1))
-        block.shared_expert_gate_proj.weight.value = jnp.asarray(
+        block.shared_expert.gate_proj.weight.value = jnp.asarray(
             hf.shared_expert.gate_proj.weight.detach().numpy().T)
-        block.shared_expert_up_proj.weight.value = jnp.asarray(
+        block.shared_expert.up_proj.weight.value = jnp.asarray(
             hf.shared_expert.up_proj.weight.detach().numpy().T)
-        block.shared_expert_down_proj.weight.value = jnp.asarray(
+        block.shared_expert.down_proj.weight.value = jnp.asarray(
             hf.shared_expert.down_proj.weight.detach().numpy().T)
         block.shared_expert_gate.weight.value = jnp.asarray(
             hf.shared_expert_gate.weight.detach().numpy().T)
@@ -410,3 +410,87 @@ class TestSparseMoeBlock:
                                    want[0].numpy(),
                                    rtol=2e-3,
                                    atol=2e-3)
+
+
+class TestCheckpointRoundTrip:
+
+    def test_tiny_checkpoint_load_and_forward(self, tmp_path, monkeypatch, rng,
+                                              mesh, mock_vllm_config):
+        """Saves a tiny random HF Qwen3-Next checkpoint, loads it through
+        the real vLLM loader path into the JAX model and compares logits
+        for a short prefill against HF transformers. This exercises every
+        weight mapping rule (zero centered norm folding, doubled q_proj,
+        GDN projections, fused 3D experts, shared expert, lm_head)."""
+        import jax as jax_module
+        from vllm.config import set_current_vllm_config
+        from vllm.model_executor.model_loader import get_model_loader
+
+        from tpu_inference.distributed.jax_parallel_state import \
+            init_pp_distributed_environment
+        from tpu_inference.layers.jax.quantization import \
+            get_tpu_quantization_config
+        from tpu_inference.models.jax.qwen3_next import Qwen3NextForCausalLM
+
+        monkeypatch.setattr(qwen3_next, "_gdn_core", reference_gdn_core)
+        monkeypatch.setattr(qwen3_next, "attention", fake_attention)
+        monkeypatch.setenv("USE_DENSE_MOE", "1")
+
+        from transformers.models.qwen3_next.modeling_qwen3_next import \
+            Qwen3NextForCausalLM as HFModel
+        cfg = tiny_config()
+        cfg._attn_implementation = "eager"
+        torch.manual_seed(4)
+        hf = HFModel(cfg).float().eval()
+        with torch.no_grad():
+            for layer in hf.model.layers:
+                layer.mlp.experts.gate_up_proj.normal_(0.0, 0.05)
+                layer.mlp.experts.down_proj.normal_(0.0, 0.05)
+                layer.mlp.gate.weight.normal_(0.0, 0.05)
+        hf.save_pretrained(tmp_path / "ckpt")
+
+        from unittest.mock import MagicMock
+        vllm_config = mock_vllm_config(str(tmp_path / "ckpt"), "auto")
+        vllm_config.model_config.dtype = jnp.float32
+        vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.parallel_config.enable_expert_parallel = False
+        vllm_config.parallel_config.enable_ep_weight_filter = False
+        init_pp_distributed_environment(
+            ip="",
+            rank=0,
+            world_size=1,
+            device=jax_module.devices()[0],
+            need_pp=False,
+        )
+        vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
+
+        with jax_module.set_mesh(mesh):
+            model = Qwen3NextForCausalLM(vllm_config, rng, mesh)
+            loader = get_model_loader(vllm_config.load_config)
+            with set_current_vllm_config(vllm_config):
+                loader.load_weights(model, vllm_config.model_config)
+
+        seq_len = 5
+        input_ids = torch.arange(seq_len)[None] % cfg.vocab_size
+        with torch.no_grad():
+            want_logits = hf(input_ids).logits[0]
+
+        kv_caches = []
+        for layer_type in cfg.layer_types:
+            if layer_type == "linear_attention":
+                kv_caches.append(empty_gdn_state(cfg))
+            else:
+                kv_caches.append(None)
+
+        with jax_module.set_mesh(mesh):
+            _, hidden, _, _ = model(
+                kv_caches,
+                jnp.asarray(input_ids[0].numpy()),
+                prefill_metadata(seq_len),
+            )
+            got_logits = model.compute_logits(hidden)
+        got = np.asarray(got_logits)[:, :cfg.vocab_size]
+        np.testing.assert_allclose(got,
+                                   want_logits.numpy(),
+                                   rtol=5e-3,
+                                   atol=5e-3)
