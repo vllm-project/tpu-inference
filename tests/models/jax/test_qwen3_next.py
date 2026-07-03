@@ -36,7 +36,9 @@ def tiny_config() -> Qwen3NextConfig:
         num_hidden_layers=4,
         num_attention_heads=4,
         num_key_value_heads=2,
-        head_dim=32,
+        # 128 so get_padded_head_dim is the identity and numerics line up
+        # with HF without padding effects.
+        head_dim=128,
         partial_rotary_factor=0.25,
         rope_theta=10000000,
         linear_num_key_heads=2,
@@ -246,5 +248,165 @@ class TestGatedDeltaNet:
                             decode_metadata(seq_len))
         np.testing.assert_allclose(np.asarray(got_last),
                                    want_full[0, seq_len:].numpy(),
+                                   rtol=2e-3,
+                                   atol=2e-3)
+
+
+def fake_attention(kv_cache, q, k, v, attention_metadata, mesh,
+                   head_dim_original, **kwargs):
+    """NumPy causal softmax attention with GQA, standing in for the ragged
+    paged attention TPU kernel."""
+    q_np = np.asarray(q, dtype=np.float32)
+    k_np = np.asarray(k, dtype=np.float32)
+    v_np = np.asarray(v, dtype=np.float32)
+    seq_len, num_heads, _ = q_np.shape
+    rep = num_heads // k_np.shape[1]
+    k_np = np.repeat(k_np, rep, axis=1)
+    v_np = np.repeat(v_np, rep, axis=1)
+    scores = np.einsum('tnh,snh->nts', q_np, k_np)
+    scores = scores * (head_dim_original**-0.5)
+    causal = np.triu(np.ones((seq_len, seq_len), dtype=bool), k=1)
+    scores = np.where(causal[None, :, :], -np.inf, scores)
+    scores = scores - scores.max(axis=-1, keepdims=True)
+    probs = np.exp(scores)
+    probs = probs / probs.sum(axis=-1, keepdims=True)
+    out = np.einsum('nts,snh->tnh', probs, v_np)
+    return kv_cache, jnp.asarray(out)
+
+
+class TestFullAttention:
+
+    def _build(self, cfg, mesh):
+        with jax.set_mesh(mesh):
+            return qwen3_next.Qwen3NextAttention(config=cfg,
+                                                 dtype=jnp.float32,
+                                                 rng=nnx.Rngs(0),
+                                                 mesh=mesh,
+                                                 kv_cache_dtype="auto",
+                                                 quant_config=None,
+                                                 prefix="self_attn")
+
+    def _copy_weights(self, block, hf, cfg):
+        num_heads = cfg.num_attention_heads
+        head_dim = cfg.head_dim
+        hidden = cfg.hidden_size
+        num_kv = cfg.num_key_value_heads
+        # HF q_proj weight is (num_heads * 2 * head_dim, hidden) with the
+        # query and gate halves fused per head.
+        q_w = hf.q_proj.weight.detach().numpy().reshape(
+            num_heads, 2 * head_dim, hidden)
+        block.q_proj.weight.value = jnp.asarray(q_w.transpose(2, 0, 1))
+        k_w = hf.k_proj.weight.detach().numpy().reshape(
+            num_kv, head_dim, hidden)
+        block.k_proj.weight.value = jnp.asarray(k_w.transpose(2, 0, 1))
+        v_w = hf.v_proj.weight.detach().numpy().reshape(
+            num_kv, head_dim, hidden)
+        block.v_proj.weight.value = jnp.asarray(v_w.transpose(2, 0, 1))
+        o_w = hf.o_proj.weight.detach().numpy().reshape(
+            hidden, num_heads, head_dim)
+        block.o_proj.weight.value = jnp.asarray(o_w.transpose(1, 2, 0))
+        # Zero centered norms: fold the +1 into the scale.
+        block.q_norm.scale.value = jnp.asarray(
+            hf.q_norm.weight.detach().numpy()) + 1.0
+        block.k_norm.scale.value = jnp.asarray(
+            hf.k_norm.weight.detach().numpy()) + 1.0
+
+    def test_matches_hf(self, monkeypatch):
+        from transformers.models.qwen3_next.modeling_qwen3_next import (
+            Qwen3NextAttention, Qwen3NextRotaryEmbedding)
+        monkeypatch.setattr(qwen3_next, "attention", fake_attention)
+        cfg = tiny_config()
+        cfg._attn_implementation = "eager"
+        torch.manual_seed(2)
+        hf = Qwen3NextAttention(cfg, layer_idx=3).float().eval()
+        mesh = single_device_mesh()
+        block = self._build(cfg, mesh)
+        self._copy_weights(block, hf, cfg)
+
+        seq_len = 5
+        x = torch.randn(1, seq_len, cfg.hidden_size)
+        rotary = Qwen3NextRotaryEmbedding(cfg)
+        position_ids = torch.arange(seq_len)[None]
+        cos, sin = rotary(x, position_ids)
+        causal_mask = torch.full((1, 1, seq_len, seq_len),
+                                 torch.finfo(torch.float32).min).triu(1)
+        with torch.no_grad():
+            want, _ = hf(x,
+                         position_embeddings=(cos, sin),
+                         attention_mask=causal_mask)
+
+        _, got = block(None, jnp.asarray(x[0].numpy()),
+                       prefill_metadata(seq_len))
+        np.testing.assert_allclose(np.asarray(got),
+                                   want[0].numpy(),
+                                   rtol=2e-3,
+                                   atol=2e-3)
+
+
+class TestSparseMoeBlock:
+
+    def _build(self, cfg, mesh):
+        from unittest.mock import MagicMock
+
+        from tpu_inference.layers.jax.quantization.unquantized import \
+            UnquantizedConfig
+        vllm_config = MagicMock()
+        vllm_config.model_config.hf_text_config = cfg
+        vllm_config.model_config.dtype = jnp.float32
+        vllm_config.quant_config = UnquantizedConfig({})
+        with jax.set_mesh(mesh):
+            return qwen3_next.Qwen3NextSparseMoeBlock(vllm_config=vllm_config,
+                                                      rng=nnx.Rngs(0),
+                                                      mesh=mesh,
+                                                      prefix="mlp")
+
+    def _copy_weights(self, block, hf):
+        block.gate.kernel_DE.value = jnp.asarray(
+            hf.gate.weight.detach().numpy().T)
+        # HF stores fused 3D expert tensors: gate_up_proj (E, 2F, D) with
+        # the gate rows first, down_proj (E, D, F).
+        gate_up = hf.experts.gate_up_proj.detach().numpy()
+        intermediate = gate_up.shape[1] // 2
+        block.experts.kernel_gating_EDF.value = jnp.asarray(
+            gate_up[:, :intermediate, :].transpose(0, 2, 1))
+        block.experts.kernel_up_proj_EDF.value = jnp.asarray(
+            gate_up[:, intermediate:, :].transpose(0, 2, 1))
+        block.experts.kernel_down_proj_EFD.value = jnp.asarray(
+            hf.experts.down_proj.detach().numpy().transpose(0, 2, 1))
+        block.shared_expert_gate_proj.weight.value = jnp.asarray(
+            hf.shared_expert.gate_proj.weight.detach().numpy().T)
+        block.shared_expert_up_proj.weight.value = jnp.asarray(
+            hf.shared_expert.up_proj.weight.detach().numpy().T)
+        block.shared_expert_down_proj.weight.value = jnp.asarray(
+            hf.shared_expert.down_proj.weight.detach().numpy().T)
+        block.shared_expert_gate.weight.value = jnp.asarray(
+            hf.shared_expert_gate.weight.detach().numpy().T)
+
+    def test_matches_hf(self, monkeypatch):
+        from transformers.models.qwen3_next.modeling_qwen3_next import \
+            Qwen3NextSparseMoeBlock
+        monkeypatch.setenv("USE_DENSE_MOE", "1")
+        cfg = tiny_config()
+        torch.manual_seed(3)
+        hf = Qwen3NextSparseMoeBlock(cfg).float().eval()
+        # The fused expert tensors are created with torch.empty and only
+        # initialized through from_pretrained; fill them explicitly.
+        with torch.no_grad():
+            hf.experts.gate_up_proj.normal_(0.0, 0.05)
+            hf.experts.down_proj.normal_(0.0, 0.05)
+            hf.gate.weight.normal_(0.0, 0.05)
+        mesh = single_device_mesh()
+        block = self._build(cfg, mesh)
+        self._copy_weights(block, hf)
+
+        x = torch.randn(6, cfg.hidden_size)
+        with torch.no_grad():
+            want = hf(x[None])
+
+        with jax.set_mesh(mesh):
+            got, expert_ids = block(jnp.asarray(x.numpy()))
+        assert expert_ids is not None
+        np.testing.assert_allclose(np.asarray(got),
+                                   want[0].numpy(),
                                    rtol=2e-3,
                                    atol=2e-3)
