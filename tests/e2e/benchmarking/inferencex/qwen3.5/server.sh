@@ -57,6 +57,8 @@ export ONEHOT_MOE_PERMUTE_THRESHOLD=32768
 export VLLM_MOE_CHUNK_SIZE=256
 export RAGGED_GATED_DELTA_RULE_IMPL=chunked_kernel_p_recurrent_kernel_d
 export NEW_MODEL_DESIGN=1
+# Disable DP-scheduler batched prefill, which is for variable isl and osl.
+export DP_SCHED_BATCH_PREFILL=false
 export LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false'
 
 args=(
