@@ -31,6 +31,7 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common import layer_types as layer_type_names
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
 from tpu_inference.models.jax.utils.multi_modal_utils import \
@@ -363,7 +364,7 @@ def get_flax_model(
         text_config = getattr(vllm_config.model_config, "hf_text_config",
                               vllm_config.model_config.hf_config)
         layer_types = list(getattr(text_config, "layer_types", None) or [])
-        if "linear_attention" in layer_types:
+        if layer_type_names.LINEAR_ATTENTION in layer_types:
             conv_state_sharding = NamedSharding(
                 mesh,
                 PartitionSpec(ShardingAxisName.ATTN_DATA, None,
@@ -373,8 +374,8 @@ def get_flax_model(
                 PartitionSpec(ShardingAxisName.ATTN_DATA,
                               ShardingAxisName.ATTN_HEAD, None, None))
             kv_cache_sharding = [
-                (conv_state_sharding, ssm_state_sharding)
-                if layer_type == "linear_attention" else kv_cache_sharding
+                (conv_state_sharding, ssm_state_sharding) if layer_type
+                == layer_type_names.LINEAR_ATTENTION else kv_cache_sharding
                 for layer_type in layer_types
             ]
     hidden_states_sharding = NamedSharding(mesh,

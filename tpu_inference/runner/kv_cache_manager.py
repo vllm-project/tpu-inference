@@ -43,6 +43,7 @@ from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common import layer_types as layer_type_names
 from tpu_inference.models.common.kv_share import compute_kv_share_map
 from tpu_inference.offload.utils import get_kv_connector_cache_layout
 from tpu_inference.runner import utils as runner_utils
@@ -539,7 +540,8 @@ class KVCacheManager:
             # GDN layer does and reuse the hybrid page size reconciliation.
             num_layers = model_config.get_num_layers(parallel_config)
             layer_types = list(getattr(text_config, "layer_types", None) or [])
-            num_linear_attn = layer_types.count("linear_attention")
+            num_linear_attn = layer_types.count(
+                layer_type_names.LINEAR_ATTENTION)
             jax_mamba_spec = None
             if num_linear_attn > 0:
                 jax_mamba_spec = self._create_jax_gdn_mamba_spec(text_config)
@@ -574,16 +576,17 @@ class KVCacheManager:
                     kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
                         block_size, 1, mla_head_size)
                 else:
-                    layer_type = "full_attention"
+                    layer_type = layer_type_names.FULL_ATTENTION
                     if i < len(layer_types):
                         layer_type = layer_types[i]
 
-                    if layer_type == "linear_attention":
+                    if layer_type == layer_type_names.LINEAR_ATTENTION:
                         assert jax_mamba_spec is not None
                         kv_cache_spec[f"layer.{i}"] = jax_mamba_spec
                         continue
 
-                    is_sliding = layer_type == "sliding_attention"
+                    is_sliding = (
+                        layer_type == layer_type_names.SLIDING_ATTENTION)
                     # Use `or` instead of getattr default so we also handle
                     # the case where the attribute is present but None
                     # (e.g. Gemma-4 E2B has num_global_key_value_heads=None).

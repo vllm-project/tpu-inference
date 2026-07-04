@@ -37,6 +37,7 @@ from tpu_inference.layers.common.utils import \
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.embed import JaxEmbed
+from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear, JaxLmHead
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
@@ -47,16 +48,18 @@ from tpu_inference.layers.jax.rope_interface import (apply_rope,
                                                      get_rope_scaling,
                                                      get_rope_theta)
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common import layer_types as layer_type_names
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
-    JaxAutoWeightsLoader, LoadableWithIterator,
-    load_nnx_param_from_reshaped_torch)
+    JaxAutoWeightsLoader, LoadableWithIterator, assign_and_shard_param,
+    jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch)
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
+modeling_flax_utils = FlaxUtils()
 
 # Indirection over the fused Pallas conv1d + GDN kernel so CPU tests can
 # substitute a pure JAX reference implementation.
@@ -126,6 +129,18 @@ class Qwen3NextGatedDeltaNet(JaxModule):
             prefix=prefix + ".in_proj_ba",
         )
         self.conv1d = Conv1dWeight(self.conv_dim, self.kernel_size, dtype, rng)
+        # Under TP the [Q|K|V] blocked conv weight is re-interleaved so each
+        # shard gets a contiguous [Q|K|V] slice. This is a function of static
+        # weights, so do it once at load time rather than every forward.
+        tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+        if tp_size > 1:
+            self.conv1d.weight.set_metadata(
+                "weight_loader",
+                functools.partial(
+                    _load_reordered_conv_weight,
+                    split_sizes=[self.key_dim, self.key_dim, self.value_dim],
+                    tp_size=tp_size,
+                    param_name=prefix + ".conv1d.weight"))
         self.A_log = create_param(rng, (self.n_v, ), ("model", ), jnp.float32)
         self.dt_bias = create_param(rng, (self.n_v, ), ("model", ),
                                     jnp.float32)
@@ -186,20 +201,16 @@ class Qwen3NextGatedDeltaNet(JaxModule):
         ],
                                     axis=-1)
 
-        # The kernel runs per TP shard; interleave the blocked [Q|K|V]
-        # layout so each shard receives its own contiguous [Q|K|V] slice.
-        # TODO: the conv weight reorder is a function of static weights and
-        # could be hoisted to load time; kept here for now because the
-        # multi-chip path is not exercised by CPU tests.
+        # The kernel runs per TP shard; interleave the activation's blocked
+        # [Q|K|V] layout so each shard receives its own contiguous [Q|K|V]
+        # slice. The conv weight is reordered to match once at load time
+        # (see _load_reordered_conv_weight), so it is read as-is here.
         tp_size = get_mesh_shape_product(self.mesh, ShardingAxisName.ATTN_HEAD)
-        split_sizes = [self.key_dim, self.key_dim, self.value_dim]
         if tp_size > 1:
+            split_sizes = [self.key_dim, self.key_dim, self.value_dim]
             mixed_qkv = reorder_concatenated_tensor_for_sharding(
                 mixed_qkv, split_sizes, tp_size, 1)
-            conv_weight = reorder_concatenated_tensor_for_sharding(
-                self.conv1d.weight.value, split_sizes, tp_size, 0)
-        else:
-            conv_weight = self.conv1d.weight.value
+        conv_weight = self.conv1d.weight.value
 
         conv_state, recurrent_state = kv_cache
         # With speculative decoding the conv cache carries extra rows; the
@@ -400,7 +411,14 @@ class Qwen3NextRouter(JaxLinear):
     """MoE router that adapts its output to the backend: raw logits for the
     fused kernels (which route internally), (weights, indices) for the
     unfused ones. Top-k followed by softmax over the selected logits equals
-    HF's softmax then top-k then renormalize (norm_topk_prob=True)."""
+    HF's softmax then top-k then renormalize (norm_topk_prob=True).
+
+    This mirrors the branch in layers/jax/moe/moe.py Router.__call__. It is a
+    JaxLinear subclass rather than that Router because the HF checkpoint ships
+    the gate as `mlp.gate.weight`, which JaxLinear's `weight` alias matches
+    for free; Router stores its projection as `kernel_DE` and would need a
+    name-remapping loader. Qwen3-Next also only ever uses plain softmax
+    routing, so the extra generality of Router is not needed here."""
 
     def __init__(self, *args, num_experts_per_tok: int,
                  moe_backend: MoEBackend, **kwargs):
@@ -466,7 +484,7 @@ class Qwen3NextMoeExperts(JaxMoE):
 
 
 class Qwen3NextMLP(JaxModule):
-    """Plain silu MLP used for the shared expert."""
+    """Gated MLP used for the shared expert."""
 
     def __init__(self,
                  hidden_size: int,
@@ -474,7 +492,9 @@ class Qwen3NextMLP(JaxModule):
                  dtype: jnp.dtype,
                  rng: nnx.Rngs,
                  quant_config,
+                 hidden_act: str = "silu",
                  prefix: str = ""):
+        self.act_fn = modeling_flax_utils.ACT2FN[hidden_act]
         self.gate_proj = JaxLinear(
             hidden_size,
             intermediate_size,
@@ -504,7 +524,7 @@ class Qwen3NextMLP(JaxModule):
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        return self.down_proj(jax.nn.silu(self.gate_proj(x)) * self.up_proj(x))
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class Qwen3NextSparseMoeBlock(JaxModule):
@@ -568,6 +588,7 @@ class Qwen3NextSparseMoeBlock(JaxModule):
             dtype=dtype,
             rng=rng,
             quant_config=quant_config,
+            hidden_act=config.hidden_act,
             prefix=prefix + ".shared_expert",
         )
         self.shared_expert_gate = JaxLinear(
@@ -614,7 +635,7 @@ class Qwen3NextDecoderLayer(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".input_layernorm",
         )
-        if self.layer_type == "linear_attention":
+        if self.layer_type == layer_type_names.LINEAR_ATTENTION:
             self.linear_attn = Qwen3NextGatedDeltaNet(
                 config=config,
                 dtype=dtype,
@@ -665,7 +686,7 @@ class Qwen3NextDecoderLayer(JaxModule):
         attention_metadata: AttentionMetadata,
     ):
         hidden_states = self.input_layernorm(x)
-        if self.layer_type == "linear_attention":
+        if self.layer_type == layer_type_names.LINEAR_ATTENTION:
             kv_cache, attn_output = self.linear_attn(kv_cache, hidden_states,
                                                      attention_metadata)
         else:
@@ -777,6 +798,22 @@ class Qwen3NextModel(JaxModule):
         stacked_expert_ids = jnp.stack(all_expert_ids,
                                        axis=0) if all_expert_ids else None
         return new_kv_caches, x, stacked_expert_ids
+
+
+def _load_reordered_conv_weight(jax_param: nnx.Param,
+                                torch_weight,
+                                *,
+                                split_sizes: list,
+                                tp_size: int,
+                                param_name: str = "Unknown"):
+    """Reorder the depthwise conv weight's blocked [Q|K|V] channel axis so
+    each TP shard holds a contiguous [Q|K|V] slice, matching the activation
+    reorder the GDN block applies at forward time. Done once at load time
+    because the weight is static."""
+    jax_weight = jax_array_from_reshaped_torch(torch_weight)
+    jax_weight = reorder_concatenated_tensor_for_sharding(
+        jax_weight, split_sizes, tp_size, 0)
+    assign_and_shard_param(jax_param, jax_weight, param_name)
 
 
 def _load_zero_centered_norm(jax_param: nnx.Param,
