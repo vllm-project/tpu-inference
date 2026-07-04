@@ -1165,10 +1165,25 @@ class CompilationManager:
         num_spec = self.runner.speculative_config.num_speculative_tokens
         max_num_reqs = self.runner.max_num_reqs
 
-        state_indices = self._create_dummy_tensor((max_num_reqs, num_spec + 2),
-                                                  dtype=jnp.int32)
-        num_accepted_tokens = self._create_dummy_tensor((max_num_reqs, ),
-                                                        dtype=jnp.int32)
+        from jax.sharding import NamedSharding, PartitionSpec
+
+        from tpu_inference.layers.common.sharding import ShardingAxisName
+        from tpu_inference.utils import device_array
+
+        dp_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+
+        # Bypass _create_dummy_tensor since it incorrectly assumes all 2D tensors
+        # are TP-sharded along the second dimension.
+        state_indices = device_array(self.runner.mesh,
+                                     jnp.zeros((max_num_reqs, num_spec + 2),
+                                               dtype=jnp.int32),
+                                     sharding=dp_sharding)
+
+        num_accepted_tokens = device_array(self.runner.mesh,
+                                           jnp.zeros((max_num_reqs, ),
+                                                     dtype=jnp.int32),
+                                           sharding=dp_sharding)
 
         self._run_compilation(
             f"worker{self.runner.rank} _rollback_mamba_layer_states_fn",
