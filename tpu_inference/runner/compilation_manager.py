@@ -1135,10 +1135,49 @@ class CompilationManager:
         self._precompile_extract_draft_token_ids()
         self._precompile_process_and_extend_logits()
         self._precompile_extend_logits_simple()
+        self._precompile_mamba_rollback()
         if self.runner.speculative_config.method == "eagle3":
             self._precompile_eagle3_helpers()
         if self.runner.speculative_config.method == "mtp":
             self._precompile_mtp_helpers()
+
+    def _precompile_mamba_rollback(self) -> None:
+        if not getattr(self.runner.kv_cache_config, "has_mamba_layers", False):
+            return
+
+        from tpu_inference.runner.tpu_runner import \
+            _rollback_mamba_layer_states_fn
+
+        mamba_cache = None
+        for cache in self.runner.kv_caches:
+            if isinstance(cache, tuple):
+                mamba_cache = cache
+                break
+
+        if mamba_cache is None:
+            return
+
+        logger.info(
+            "Compiling _rollback_mamba_layer_states_fn with different input shapes."
+        )
+
+        conv_state, recurrent_state = mamba_cache
+        num_spec = self.runner.speculative_config.num_speculative_tokens
+        max_num_reqs = self.runner.max_num_reqs
+
+        state_indices = self._create_dummy_tensor((max_num_reqs, num_spec + 2),
+                                                  dtype=jnp.int32)
+        num_accepted_tokens = self._create_dummy_tensor((max_num_reqs, ),
+                                                        dtype=jnp.int32)
+
+        self._run_compilation(
+            f"worker{self.runner.rank} _rollback_mamba_layer_states_fn",
+            _rollback_mamba_layer_states_fn,
+            conv_state,
+            recurrent_state,
+            state_indices,
+            num_accepted_tokens,
+        )
 
     def _precompile_extract_draft_token_ids(self) -> None:
         logger.info(
