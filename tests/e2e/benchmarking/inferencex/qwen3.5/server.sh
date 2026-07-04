@@ -23,6 +23,7 @@ PORT="${PORT:-8000}"
 SHARDING="${SHARDING:-DP8_EP}"
 ISL="${ISL:-8192}"
 OSL="${OSL:-1024}"
+CONC="${CONC:-64}"
 # Headroom over ISL+OSL (matches InferenceX qwen3.5 sglang: ISL+OSL+20). Without it, fixed-length
 # (ratio 1.0) requests hit max_model_len exactly and get 400 Bad Request.
 MAX_MODEL_LEN_BUFFER="${MAX_MODEL_LEN_BUFFER:-20}"
