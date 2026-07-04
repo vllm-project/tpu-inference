@@ -157,7 +157,8 @@ class TPUWorker(WorkerBase):
                 profiler_config.torch_profiler_dir,
                 f"pprank_{self.rank}_ppworldsize_{self.pp_config.pp_world_size}"
             )
-            os.makedirs(self.profile_dir, exist_ok=True)
+            if not self.profile_dir.startswith("gs://"):
+                os.makedirs(self.profile_dir, exist_ok=True)
 
         use_jax_profiler_server = envs.USE_JAX_PROFILER_SERVER
         # Only one instance of profiler is allowed
