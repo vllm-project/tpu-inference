@@ -2614,53 +2614,42 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                      cached_reqs, "req_ids") else 0
                 is_prompt_prefill = (len(scheduler_output.scheduled_new_reqs)
                                      > 0) or (num_cached > 0)
+                is_spec_verification = not is_prompt_prefill
+            else:
+                is_spec_verification = False
 
-                if not is_prompt_prefill:
-                    # In speculative decoding verification, each request is mapped to a 2D row of (num_spec + 2) slots
-                    # representing its state history.
-                    num_spec = self.speculative_config.num_speculative_tokens
-                    mamba_state_indices_cpu = np.zeros(
-                        (self.max_num_reqs, num_spec + 2), dtype=np.int32)
-                    for dp_rank in range(dp_size):
-                        _num_reqs = num_req_per_dp_rank[dp_rank]
-                        if _num_reqs == 0:
-                            continue
-                        req_offset = dp_rank * max_num_reqs_per_dp_rank
-                        global_slots = self.input_batch.mamba_state_indices_cpu[
-                            req_indices_dp[dp_rank]]
-                        local_base_slots = global_slots % local_slots
-                        arange = np.arange(num_spec + 2, dtype=np.int32)
-                        mamba_state_indices_cpu[
-                            req_offset:req_offset +
-                            _num_reqs] = local_base_slots[:, None] + arange
-                else:
-                    mamba_state_indices_cpu = np.zeros(self.max_num_reqs,
-                                                       dtype=np.int32)
-                    for dp_rank in range(dp_size):
-                        _num_reqs = num_req_per_dp_rank[dp_rank]
-                        if _num_reqs == 0:
-                            continue
-                        req_offset = dp_rank * max_num_reqs_per_dp_rank
-                        global_slots = self.input_batch.mamba_state_indices_cpu[
-                            req_indices_dp[dp_rank]]
-                        # Point to Slot 1 so the final prefill state lands exactly where the verification
-                        # rollback expects it!
-                        mamba_state_indices_cpu[req_offset:req_offset +
-                                                _num_reqs] = (global_slots %
-                                                              local_slots) + 1
+            if is_spec_verification:
+                # In speculative decoding verification, each request is mapped to a 2D row of (num_spec + 2) slots
+                # representing its state history.
+                num_spec = self.speculative_config.num_speculative_tokens
+                mamba_state_indices_cpu = np.zeros(
+                    (self.max_num_reqs, num_spec + 2), dtype=np.int32)
+                arange = np.arange(num_spec + 2, dtype=np.int32)
             else:
                 mamba_state_indices_cpu = np.zeros(self.max_num_reqs,
                                                    dtype=np.int32)
-                for dp_rank in range(dp_size):
-                    _num_reqs = num_req_per_dp_rank[dp_rank]
-                    if _num_reqs == 0:
-                        continue
-                    req_offset = dp_rank * max_num_reqs_per_dp_rank
-                    global_slots = self.input_batch.mamba_state_indices_cpu[
-                        req_indices_dp[dp_rank]]
+
+            for dp_rank in range(dp_size):
+                _num_reqs = num_req_per_dp_rank[dp_rank]
+                if _num_reqs == 0:
+                    continue
+                req_offset = dp_rank * max_num_reqs_per_dp_rank
+                global_slots = self.input_batch.mamba_state_indices_cpu[
+                    req_indices_dp[dp_rank]]
+                local_base_slots = global_slots % local_slots
+
+                if is_spec_verification:
+                    mamba_state_indices_cpu[
+                        req_offset:req_offset +
+                        _num_reqs] = local_base_slots[:, None] + arange
+                elif self.speculative_config:
+                    # Point to Slot 1 so the final prefill state lands exactly where the verification
+                    # rollback expects it!
                     mamba_state_indices_cpu[req_offset:req_offset +
-                                            _num_reqs] = (global_slots %
-                                                          local_slots)
+                                            _num_reqs] = local_base_slots + 1
+                else:
+                    mamba_state_indices_cpu[req_offset:req_offset +
+                                            _num_reqs] = local_base_slots
             (request_distribution, mamba_state_indices,
              dev_arrays_payload) = device_array(
                  self.mesh, (request_distribution, mamba_state_indices_cpu,
