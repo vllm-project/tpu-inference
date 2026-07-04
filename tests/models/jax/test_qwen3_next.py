@@ -18,6 +18,7 @@ kernel is substituted with the pure JAX reference implementations."""
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 from flax import nnx
 from transformers.models.qwen3_next.configuration_qwen3_next import \
@@ -494,3 +495,107 @@ class TestCheckpointRoundTrip:
                                    want_logits.numpy(),
                                    rtol=5e-3,
                                    atol=5e-3)
+
+
+@pytest.mark.skipif(
+    jax.default_backend() != "tpu",
+    reason="exercises the fused GDN and ragged paged attention TPU kernels")
+class TestTpuSmoke:
+
+    def test_forward_with_real_kernels(self, rng, mesh, mock_vllm_config):
+        """Builds a shrunken Qwen3-Next (4 layers: 3 GDN + 1 full attention)
+        with dummy weights and runs one prefill through the real kernels,
+        checking output shapes and that the GDN states were written."""
+        from unittest.mock import MagicMock
+
+        from tpu_inference.distributed.jax_parallel_state import \
+            init_pp_distributed_environment
+        from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
+            get_kv_cache_shape
+        from tpu_inference.layers.jax.quantization import \
+            get_tpu_quantization_config
+        from tpu_inference.models.jax.qwen3_next import Qwen3NextForCausalLM
+
+        vllm_config = mock_vllm_config("Qwen/Qwen3-Next-80B-A3B-Instruct",
+                                       "auto")
+        hf_config = vllm_config.model_config.hf_config
+        hf_config.num_hidden_layers = 4
+        hf_config.layer_types = hf_config.layer_types[:4]
+        hf_config.num_experts = 16
+        vllm_config.load_config.load_format = "jax_dummy"
+        vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.parallel_config.enable_expert_parallel = False
+        init_pp_distributed_environment(
+            ip="",
+            rank=0,
+            world_size=1,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
+        vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
+
+        with jax.set_mesh(mesh):
+            model = Qwen3NextForCausalLM(vllm_config, rng, mesh)
+            # The dummy loader fills every param and runs the per module
+            # post processing that fuses the MoE kernels for the GMM
+            # backend.
+            from vllm.config import set_current_vllm_config
+            from vllm.model_executor.model_loader import get_model_loader
+            loader = get_model_loader(vllm_config.load_config)
+            with set_current_vllm_config(vllm_config):
+                loader.load_weights(model, vllm_config.model_config)
+
+        seq_len = 16
+        max_reqs = 8
+        num_blocks = 8
+        block_size = 32
+        conv_dim = (
+            2 * hf_config.linear_num_key_heads * hf_config.linear_key_head_dim
+            +
+            hf_config.linear_num_value_heads * hf_config.linear_value_head_dim)
+        attn_cache_shape = get_kv_cache_shape(num_blocks, block_size,
+                                              hf_config.num_key_value_heads,
+                                              hf_config.head_dim, jnp.bfloat16)
+
+        kv_caches = []
+        for layer_type in hf_config.layer_types:
+            if layer_type == "linear_attention":
+                kv_caches.append((
+                    jnp.zeros((max_reqs + 1,
+                               hf_config.linear_conv_kernel_dim - 1, conv_dim),
+                              dtype=jnp.bfloat16),
+                    jnp.zeros((max_reqs + 1, hf_config.linear_num_value_heads,
+                               hf_config.linear_key_head_dim,
+                               hf_config.linear_value_head_dim),
+                              dtype=jnp.bfloat16),
+                ))
+            else:
+                kv_caches.append(
+                    jnp.zeros(attn_cache_shape, dtype=jnp.bfloat16))
+
+        query_start_loc = np.zeros(max_reqs + 1, dtype=np.int32)
+        query_start_loc[1:] = seq_len
+        seq_lens = np.zeros(max_reqs, dtype=np.int32)
+        seq_lens[0] = seq_len
+        state_indices = np.zeros(max_reqs, dtype=np.int32)
+        state_indices[0] = 1
+        metadata = AttentionMetadata(
+            input_positions=jnp.arange(seq_len),
+            block_tables=jnp.zeros(max_reqs * num_blocks, dtype=jnp.int32),
+            seq_lens=jnp.asarray(seq_lens),
+            query_start_loc=jnp.asarray(query_start_loc),
+            request_distribution=jnp.asarray([0, 1, 1], dtype=jnp.int32),
+            mamba_state_indices=jnp.asarray(state_indices),
+        )
+
+        input_ids = jnp.arange(seq_len, dtype=jnp.int32)
+        with jax.set_mesh(mesh):
+            new_kv_caches, hidden, _, _ = model(kv_caches, input_ids, metadata)
+            logits = model.compute_logits(hidden)
+
+        assert hidden.shape == (seq_len, hf_config.hidden_size)
+        assert logits.shape[0] == seq_len
+        new_conv_state, new_recurrent_state = new_kv_caches[0]
+        assert not np.allclose(np.asarray(new_recurrent_state[1]), 0.0)
+        assert not np.allclose(np.asarray(new_conv_state[1]), 0.0)
