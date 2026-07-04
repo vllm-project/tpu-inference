@@ -84,3 +84,13 @@ LMCache fork with the TPU integration (`lmcache.integration.tpu`).
   cross-replica prefix sharing (e.g. a DP rollout fleet), remote backends
   (Redis / Mooncake / NIXL), and reuse across restarts.
 - **Depth 3:** CacheBlend on TPU (out of scope; blend forward is separate work).
+
+## Validated on real hardware
+
+Bit-for-bit correctness confirmed on a **tpu7x 2x2x1** slice via
+`examples/offload/offline_inference_kv_cache_verification.py`:
+- stock (`TPU_OFFLOAD_LMCACHE=0`) → all runs passed, exit 0;
+- LMCache enabled (`backend=file`, `hot_chunks=2`, forced spill) → all runs passed,
+  exit 0, backend confirmed live in the worker log;
+- direct probe: 5 chunks / hot=2 → 3 evicted + reloaded from disk, all bit-exact
+  (incl. bfloat16).
