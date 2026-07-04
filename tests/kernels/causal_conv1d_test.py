@@ -54,6 +54,8 @@ def reference_causal_conv1d(
         token_step = row - seq_start
         has_init = bool(has_initial_state[s_idx])
 
+        # In speculative decoding (2D state_indices), read from the initial state (Slot 0)
+        # and write to the corresponding history slot for the current token step.
         if state_indices.ndim == 2:
             state_idx_read = int(state_indices[s_idx, 0])
             state_idx_write = int(state_indices[s_idx, token_step + 1])

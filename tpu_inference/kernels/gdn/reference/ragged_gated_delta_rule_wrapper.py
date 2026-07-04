@@ -147,6 +147,10 @@ def ragged_gated_delta_rule_wrapper(
     is_decode_only = distribution[0] == distribution[2]
 
     def decode_only_branch(_):
+        # For speculative decoding (2D state_indices), we force-route to the reference
+        # recurrent JAX implementation. While the chunked JAX kernel supports 2D indices,
+        # the fused decode kernel does not yet support reading from and writing to separate
+        # history slots, so we uniformly fallback here.
         if state_indices.ndim == 2:
             return ref_recurrent_impl(
                 mixed_qkv,
@@ -230,7 +234,7 @@ def ragged_gated_delta_rule_wrapper(
         # for every token step. Parallel chunked implementations (like chunked JAX or
         # Pallas chunked scan) do not materialize these intermediate states for every
         # token because doing so would defeat the parallelization.
-        # Therefore, when state_indices is 2D (indicating speculative decoding), we
+        # Therefore, when state_indices is 2D (indicating speculative decoding verification), we
         # force-route the execution to the reference recurrent JAX implementation, which
         # runs token-by-token and has been updated to build the state history.
         if state_indices.ndim == 2:

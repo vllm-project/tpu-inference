@@ -222,7 +222,8 @@ def ragged_gated_delta_rule(
 
         # In speculative decoding (2D state_indices), we implement a sequential recurrence:
         # - If write_history is True: Token at step `i` reads from Slot `i`, writes to Slot `i + 1`.
-        # - If write_history is False: All tokens read and write to Slot 0 (prompt prefill).
+        # - If write_history is False (prompt prefill): We carefully route intermediate states
+        #   through Slot 2 (scratch) while ensuring the final token's state lands in Slot 1.
         # For normal decoding (1D state_indices), we read and write to the same single slot
         if state_indices.ndim == 2:
             # Speculative verification step: reads Slot token_step, writes Slot token_step + 1
