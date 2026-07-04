@@ -156,6 +156,12 @@ class KVCacheManager:
         speculative_config = self.runner.speculative_config
         num_spec = (speculative_config.num_speculative_tokens
                     if speculative_config else 0)
+        # Pass tp_size=1: the JAX side stores the full per-layer arrays and
+        # shards them through NamedSharding, unlike the torchax path which
+        # bakes the TP split into the shape. The temporal state comes back as
+        # (num_v_heads, head_v_dim, head_k_dim); the GDN kernel labels its
+        # axes (n_v, d_k, d_v), which matches only while head_k_dim ==
+        # head_v_dim (true for every released Qwen3-Next config).
         shapes = MambaStateShapeCalculator.gated_delta_net_state_shape(
             1, text_config.linear_num_key_heads,
             text_config.linear_num_value_heads,
