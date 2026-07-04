@@ -93,6 +93,14 @@ class Qwen3NextGatedDeltaNet(JaxModule):
         self.n_v = config.linear_num_value_heads
         self.d_k = config.linear_key_head_dim
         self.d_v = config.linear_value_head_dim
+        # The GDN kernel labels the recurrent state axes (n_v, d_k, d_v),
+        # while vLLM's state shape calculator (used for the kv cache spec)
+        # emits (n_v, d_v, d_k). They only agree when d_k == d_v, which holds
+        # for every released Qwen3-Next config; guard so an asymmetric-head
+        # variant fails loudly instead of corrupting recurrent state.
+        assert self.d_k == self.d_v, (
+            "GDN kernel assumes linear_key_head_dim == linear_value_head_dim, "
+            f"got d_k={self.d_k}, d_v={self.d_v}")
         self.kernel_size = config.linear_conv_kernel_dim
         self.key_dim = self.n_kq * self.d_k
         self.value_dim = self.n_v * self.d_v
@@ -180,6 +188,9 @@ class Qwen3NextGatedDeltaNet(JaxModule):
 
         # The kernel runs per TP shard; interleave the blocked [Q|K|V]
         # layout so each shard receives its own contiguous [Q|K|V] slice.
+        # TODO: the conv weight reorder is a function of static weights and
+        # could be hoisted to load time; kept here for now because the
+        # multi-chip path is not exercised by CPU tests.
         tp_size = get_mesh_shape_product(self.mesh, ShardingAxisName.ATTN_HEAD)
         split_sizes = [self.key_dim, self.key_dim, self.value_dim]
         if tp_size > 1:
@@ -254,6 +265,16 @@ class Qwen3NextAttention(JaxModule):
         self.head_dim_original = getattr(config, "head_dim",
                                          self.hidden_size // self.num_heads)
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
+        # The fused q_proj kernel is (hidden, num_heads, 2 * head_dim) and is
+        # split in half to recover the query and the output gate; the per
+        # head q/k RMSNorm also runs over head_dim. Both assume no head_dim
+        # padding (padded == original), true for every released Qwen3-Next
+        # config (head_dim=256). Guard so a non-128-multiple head dim fails
+        # loudly rather than splitting query/gate at the wrong boundary or
+        # averaging padding into the norm.
+        assert self.head_dim == self.head_dim_original, (
+            "Qwen3-Next attention assumes an unpadded head_dim, got "
+            f"original={self.head_dim_original}, padded={self.head_dim}")
         self.rotary_dim = int(self.head_dim_original *
                               getattr(config, "partial_rotary_factor", 1.0))
 
@@ -405,22 +426,29 @@ class Qwen3NextMoeExperts(JaxMoE):
     (E, D, F) / (E, F, D) orientation the dense matmul consumes directly."""
 
     def _load_weights(self, weights, *, mesh: Mesh | None = None):
+        # The recursive loader delivers names relative to this experts
+        # module: fused tensors arrive as "gate_up_proj" / "down_proj",
+        # per-expert tensors as "<expert_id>.<proj>.weight". Expand a fused
+        # tensor into per-expert entries whose relative names the base
+        # loader parses (it splits on self.prefix then expects
+        # "<expert_id>.<proj>.weight"). Matching must be exact, not
+        # endswith, so a per-expert "0.down_proj.weight" is not mistaken
+        # for the fused "down_proj".
         expanded = []
         for name, torch_weight in weights:
-            if name.endswith("experts.gate_up_proj"):
+            if name == "gate_up_proj":
                 intermediate = torch_weight.shape[1] // 2
                 for expert_id in range(torch_weight.shape[0]):
                     expanded.append(
-                        (f"{self.prefix}.{expert_id}.gate_proj.weight",
+                        (f"{expert_id}.gate_proj.weight",
                          torch_weight[expert_id, :intermediate, :]))
-                    expanded.append(
-                        (f"{self.prefix}.{expert_id}.up_proj.weight",
-                         torch_weight[expert_id, intermediate:, :]))
-            elif name.endswith("experts.down_proj"):
+                    expanded.append((f"{expert_id}.up_proj.weight",
+                                     torch_weight[expert_id,
+                                                  intermediate:, :]))
+            elif name == "down_proj":
                 for expert_id in range(torch_weight.shape[0]):
-                    expanded.append(
-                        (f"{self.prefix}.{expert_id}.down_proj.weight",
-                         torch_weight[expert_id]))
+                    expanded.append((f"{expert_id}.down_proj.weight",
+                                     torch_weight[expert_id]))
             else:
                 expanded.append((name, torch_weight))
 

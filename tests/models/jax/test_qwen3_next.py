@@ -61,9 +61,12 @@ def tiny_config() -> Qwen3NextConfig:
 
 
 def single_device_mesh() -> jax.sharding.Mesh:
+    # Axis order matches the `mesh` fixture in conftest.py so the block-level
+    # tests and the checkpoint round-trip test (which uses the fixture)
+    # exercise the same layout.
     devices = np.asarray(jax.devices()[:1])
     return jax.sharding.Mesh(devices.reshape((1, 1, 1, 1)),
-                             ('data', 'attn_dp', 'model', 'expert'))
+                             ('data', 'attn_dp', 'expert', 'model'))
 
 
 def _silu(x):
@@ -411,6 +414,50 @@ class TestSparseMoeBlock:
                                    want[0].numpy(),
                                    rtol=2e-3,
                                    atol=2e-3)
+
+    def test_fused_expert_weights_load(self, monkeypatch):
+        """The recursive loader hands the experts module relative names, so
+        a fused checkpoint arrives as bare "gate_up_proj" / "down_proj".
+        transformers 5.x stores experts this way, so drive that path
+        directly (save_pretrained in the round-trip test emits per-expert
+        tensors and never exercises it)."""
+        monkeypatch.setenv("USE_DENSE_MOE", "1")
+        cfg = tiny_config()
+        mesh = single_device_mesh()
+        block = self._build(cfg, mesh)
+        experts = block.experts
+
+        e = cfg.num_experts
+        d = cfg.hidden_size
+        f = cfg.moe_intermediate_size
+        rs = np.random.RandomState(0)
+        gate_up = rs.standard_normal((e, 2 * f, d)).astype(np.float32)
+        down = rs.standard_normal((e, d, f)).astype(np.float32)
+
+        with jax.set_mesh(mesh):
+            loaded = experts._load_weights([
+                ("gate_up_proj", torch.from_numpy(gate_up)),
+                ("down_proj", torch.from_numpy(down)),
+            ])
+
+        assert loaded == {
+            "kernel_gating_EDF", "kernel_up_proj_EDF", "kernel_down_proj_EFD"
+        }
+        # Dense backend orients kernels as (E, D, F) / (E, F, D).
+        np.testing.assert_allclose(np.asarray(experts.kernel_gating_EDF.value),
+                                   gate_up[:, :f, :].transpose(0, 2, 1),
+                                   rtol=1e-6,
+                                   atol=1e-6)
+        np.testing.assert_allclose(np.asarray(
+            experts.kernel_up_proj_EDF.value),
+                                   gate_up[:, f:, :].transpose(0, 2, 1),
+                                   rtol=1e-6,
+                                   atol=1e-6)
+        np.testing.assert_allclose(np.asarray(
+            experts.kernel_down_proj_EFD.value),
+                                   down.transpose(0, 2, 1),
+                                   rtol=1e-6,
+                                   atol=1e-6)
 
 
 class TestCheckpointRoundTrip:
