@@ -130,6 +130,7 @@ if TYPE_CHECKING:
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
 from tpu_inference.offload.cpu_backend import LocalCPUBackend
+from tpu_inference.offload.host_backend_factory import build_host_backend
 from tpu_inference.offload.offload_manager import (LRUCacheManager,
                                                    StagingBufferManager)
 from tpu_inference.offload.utils import (CpuChunkId, ReqId,
@@ -1311,7 +1312,13 @@ class TPUOffloadConnectorWorker:
 
         # cpu cache
         self.num_cpu_chunks = envs.TPU_OFFLOAD_NUM_CPU_CHUNKS
-        self.cpu_backend = LocalCPUBackend(num_cpu_chunks=self.num_cpu_chunks)
+        # Host store: stock in-memory LocalCPUBackend, or (when
+        # TPU_OFFLOAD_LMCACHE=1) an LMCacheHostBackend that adds a persistent
+        # LMCache spill tier behind the same add/get/reclaim interface.
+        self.cpu_backend = build_host_backend(
+            num_cpu_chunks=self.num_cpu_chunks,
+            model_name=self.vllm_config.model_config.model,
+        )
         model_name = self.vllm_config.model_config.model
         logger.debug(
             f"Model name is {model_name}, KV block_size={self.block_size}")

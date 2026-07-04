@@ -54,6 +54,22 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
     TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
     TPU_OFFLOAD_BLOCK_SIZE_BUCKETS: list[int] = []
+    # LMCache host-backend integration (Path B): use LMCache as a persistent
+    # storage tier BEHIND the TPUOffloadConnector's host store. When enabled,
+    # host KV blocks that overflow the hot CPU tier spill to LMCache
+    # (disk/remote/P2P) instead of being dropped, and (with content-hash keying)
+    # can be shared across TPU replicas / survive restarts. Default off ->
+    # identical behavior to the stock LocalCPUBackend.
+    TPU_OFFLOAD_LMCACHE: bool = False
+    # Host RAM hot-tier capacity (in chunks) when LMCache spill is enabled. 0 =
+    # use TPU_OFFLOAD_NUM_CPU_CHUNKS (no explicit spill, LMCache mirrors only).
+    TPU_OFFLOAD_LMCACHE_HOT_CHUNKS: int = 0
+    # LMCache backend selector: "file" (reference filesystem spill),
+    # "memory" (reference in-process), or "lmcache" (real LMCache StorageManager
+    # via the lmcache fork's LMCacheStorageKVStore adapter).
+    TPU_OFFLOAD_LMCACHE_BACKEND: str = "file"
+    # Filesystem root for the "file" reference backend.
+    TPU_OFFLOAD_LMCACHE_PATH: str = "/tmp/tpu_lmcache_kv"
     MOE_APPROX_TOPK: bool = False
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
@@ -352,6 +368,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: Whether to use unpinned_host for KV cache tensors on host dram.
     "TPU_OFFLOAD_USE_UNPINNED_HOST":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_USE_UNPINNED_HOST", "0"))),
+    "TPU_OFFLOAD_LMCACHE":
+    lambda: bool(int(os.getenv("TPU_OFFLOAD_LMCACHE", "0"))),
+    "TPU_OFFLOAD_LMCACHE_HOT_CHUNKS":
+    lambda: int(os.getenv("TPU_OFFLOAD_LMCACHE_HOT_CHUNKS", "0")),
+    "TPU_OFFLOAD_LMCACHE_BACKEND":
+    lambda: os.getenv("TPU_OFFLOAD_LMCACHE_BACKEND", "file"),
+    "TPU_OFFLOAD_LMCACHE_PATH":
+    lambda: os.getenv("TPU_OFFLOAD_LMCACHE_PATH", "/tmp/tpu_lmcache_kv"),
     "AGGREGATED_STATS_DIR":
     lambda: os.getenv("AGGREGATED_STATS_DIR", ""),
     # kv offload to dram: buckets of sizes for pre-compilation
