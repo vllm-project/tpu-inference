@@ -47,12 +47,14 @@ esac
 MAX_MODEL_LEN=$((ISL + OSL + MAX_MODEL_LEN_BUFFER))
 # Floor at 1024 so 1k isl with dp8 doesn't cause the per rank seq len to be too small.
 MAX_NUM_BATCHED_TOKENS=$(( ISL / DP_SIZE > 1024 ? ISL / DP_SIZE : 1024 ))
+MAX_NUM_SEQS=$((CONC * 2 / DP_SIZE))
+[ "$MAX_NUM_SEQS" -lt 1 ] && MAX_NUM_SEQS=1
 
 set -x
 export MODEL_IMPL_TYPE=vllm
 export USE_MOE_EP_KERNEL=0
 export ATTN_BUCKETIZED_NUM_REQS=true
-export ATTN_CUSTOM_NUM_REQS_BUCKETS=8,16,32,64
+export ATTN_CUSTOM_NUM_REQS_BUCKETS=4,8,16,32,64
 export ONEHOT_MOE_PERMUTE_THRESHOLD=32768
 export VLLM_MOE_CHUNK_SIZE=256
 export RAGGED_GATED_DELTA_RULE_IMPL=chunked_kernel_p_recurrent_kernel_d
@@ -67,7 +69,7 @@ args=(
   Qwen/Qwen3.5-397B-A17B-FP8
   --max-model-len="$MAX_MODEL_LEN"
   --max-num-batched-tokens="$MAX_NUM_BATCHED_TOKENS"
-  --max-num-seqs=64
+  --max-num-seqs="$MAX_NUM_SEQS"
   --no-enable-prefix-caching
   --gpu-memory-utilization=0.9
   --tensor-parallel-size=8
