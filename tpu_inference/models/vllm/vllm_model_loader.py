@@ -348,6 +348,13 @@ class IncrementalModelLoader(DefaultModelLoader):
         """Return True if this weight name belongs to a different PP stage."""
         if self._pp_layer_range is None:
             return False
+        if 'e_score_correction_bias' in name:
+            # Tiny [num_experts] tensor that interface/moe.py t2j-inlines as an
+            # HLO constant. Skipping it under TPU_TRUNCATE_LAYERS leaves the
+            # Parameter torch.empty-initialized (random per host), so each host
+            # traces a different jit_step_fun fingerprint and multi-host SPMD
+            # halts at the first collective. Always load it (~1KB/layer).
+            return False
         m = _LAYER_RE.match(name)
         if m:
             layer_idx = int(m.group(1))
