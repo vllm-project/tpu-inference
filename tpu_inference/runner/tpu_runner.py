@@ -312,7 +312,9 @@ def _substitute_placeholder_token(
 def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
                                      num_rejected_tokens: jax.Array,
                                      seq_lens_subtract_indices: jax.Array,
-                                     positions_subtract_indices: jax.Array):
+                                     positions_subtract_indices: jax.Array,
+                                     rollback_subtract_indices: jax.Array,
+                                     rollback_draft_lengths: jax.Array):
     """Subtract the previous step's rejected-token counts from `seq_lens` and
     `positions`.
     """
@@ -328,7 +330,13 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
     if positions.ndim == 2:
         pos_subtract = jnp.expand_dims(pos_subtract, axis=0)
     positions = positions - pos_subtract
-    return seq_lens, positions
+
+    rollback_valid = rollback_subtract_indices >= 0
+    mapped_num_rejected = jnp.where(
+        rollback_valid, num_rejected_tokens[rollback_subtract_indices], 0)
+    num_accepted_tokens_dev = rollback_draft_lengths - mapped_num_rejected
+
+    return seq_lens, positions, num_accepted_tokens_dev
 
 
 @jax.jit
@@ -1353,11 +1361,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # rollback of the Mamba states BEFORE running the new forward pass.
         if self.speculative_config and self._pre_async_results is not None:
             # Retrieve the previous step's rejection count and proposed draft lengths from the device.
-            num_rejected = self._pre_async_results.spec_decode_num_rejected_tokens
-            draft_lengths = self._pre_async_results.spec_decode_metadata.draft_lengths
-            # The number of accepted draft tokens (a) is: draft_lengths - num_rejected.
-            # This is computed entirely on the device.
-            num_accepted_tokens_dev = draft_lengths - num_rejected
+            # This is already mapped and computed during `_prepare_inputs` via `_subtract_num_rejected_tokens`.
+            num_accepted_tokens_dev = self.execute_model_state.num_accepted_tokens_dev
 
             # Trigger the device-side copy: copy Slot[a] to Slot[0] for all Mamba layers.
             if isinstance(attn_metadata, dict):
@@ -2265,7 +2270,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return input
 
     def _subtract_num_rejected_tokens(self, seq_lens, positions, req_ids_dp,
-                                      scheduled_tokens_per_dp_rank):
+                                      scheduled_tokens_per_dp_rank,
+                                      padded_num_reqs_per_dp_rank):
         """Apply rejection-count subtraction to seq_lens and positions if needed.
 
         `num_computed_tokens_cpu` was advanced on the host assuming every
@@ -2282,6 +2288,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                              -1,
                                              dtype=np.int32)
 
+        padded_num_reqs = padded_num_reqs_per_dp_rank * self.dp_size
+        rollback_subtract_indices = np.full(padded_num_reqs,
+                                            -1,
+                                            dtype=np.int32)
+        rollback_draft_lengths = np.zeros(padded_num_reqs, dtype=np.int32)
+
         for rank in range(self.dp_size):
             acc_cur_len = 0
             scheduled_tokens_cur_rank = scheduled_tokens_per_dp_rank[rank]
@@ -2295,21 +2307,34 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     req_id]
                 seq_lens_subtract_indices[
                     i + rank * (self.max_num_reqs // self.dp_size)] = idx
+
+                rollback_subtract_indices[i + rank *
+                                          padded_num_reqs_per_dp_rank] = idx
+                prev_draft_token_ids = self._pre_async_results.scheduler_output.scheduled_spec_decode_tokens.get(
+                    req_id)
+                if prev_draft_token_ids is not None:
+                    rollback_draft_lengths[i + rank *
+                                           padded_num_reqs_per_dp_rank] = len(
+                                               prev_draft_token_ids)
+
                 base_offset = acc_cur_len - scheduled_tokens_cur_rank[i]
                 for j in range(scheduled_tokens_cur_rank[i]):
                     positions_subtract_indices[
                         base_offset + j + rank *
                         (positions.shape[-1] // self.dp_size)] = idx
 
-        seq_lens_subtract_indices, positions_subtract_indices = device_array(
-            self.mesh, (seq_lens_subtract_indices, positions_subtract_indices))
+        (seq_lens_subtract_indices, positions_subtract_indices,
+         rollback_subtract_indices, rollback_draft_lengths) = device_array(
+             self.mesh, (seq_lens_subtract_indices, positions_subtract_indices,
+                         rollback_subtract_indices, rollback_draft_lengths))
 
         with self.maybe_forbid_compile:
-            seq_lens, positions = _subtract_num_rejected_tokens_fn(
+            seq_lens, positions, num_accepted_tokens_dev = _subtract_num_rejected_tokens_fn(
                 seq_lens, positions,
                 self._pre_async_results.spec_decode_num_rejected_tokens,
-                seq_lens_subtract_indices, positions_subtract_indices)
-        return seq_lens, positions
+                seq_lens_subtract_indices, positions_subtract_indices,
+                rollback_subtract_indices, rollback_draft_lengths)
+        return seq_lens, positions, num_accepted_tokens_dev
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -2668,8 +2693,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # proposed tokens from the previous step were accepted. Subtract the
         # actual rejection counts from `seq_lens` and `positions` on TPU.
         if self.speculative_config and self.scheduler_config.async_scheduling and self._pre_async_results is not None:
-            seq_lens, positions = self._subtract_num_rejected_tokens(
-                seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank)
+            seq_lens, positions, num_accepted_tokens_dev = self._subtract_num_rejected_tokens(
+                seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank,
+                padded_num_reqs_per_dp_rank)
+            self.execute_model_state.num_accepted_tokens_dev = num_accepted_tokens_dev
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
