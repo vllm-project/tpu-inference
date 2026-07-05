@@ -2288,11 +2288,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                              -1,
                                              dtype=np.int32)
 
-        padded_num_reqs = padded_num_reqs_per_dp_rank * self.dp_size
-        rollback_subtract_indices = np.full(padded_num_reqs,
+        rollback_subtract_indices = np.full(self.max_num_reqs,
                                             -1,
                                             dtype=np.int32)
-        rollback_draft_lengths = np.zeros(padded_num_reqs, dtype=np.int32)
+        rollback_draft_lengths = np.zeros(self.max_num_reqs, dtype=np.int32)
 
         for rank in range(self.dp_size):
             acc_cur_len = 0
@@ -2308,14 +2307,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens_subtract_indices[
                     i + rank * (self.max_num_reqs // self.dp_size)] = idx
 
-                rollback_subtract_indices[i + rank *
-                                          padded_num_reqs_per_dp_rank] = idx
+                rollback_subtract_indices[
+                    i + rank * (self.max_num_reqs // self.dp_size)] = idx
                 prev_draft_token_ids = self._pre_async_results.scheduler_output.scheduled_spec_decode_tokens.get(
                     req_id)
                 if prev_draft_token_ids is not None:
-                    rollback_draft_lengths[i + rank *
-                                           padded_num_reqs_per_dp_rank] = len(
-                                               prev_draft_token_ids)
+                    rollback_draft_lengths[
+                        i + rank * (self.max_num_reqs // self.dp_size)] = len(
+                            prev_draft_token_ids)
 
                 base_offset = acc_cur_len - scheduled_tokens_cur_rank[i]
                 for j in range(scheduled_tokens_cur_rank[i]):

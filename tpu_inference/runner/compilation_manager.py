@@ -547,6 +547,11 @@ class CompilationManager:
             positions_subtract_indices = self._create_dummy_tensor(
                 (num_tokens, ), jnp.int32, replicated_sharding)
 
+            rollback_subtract_indices = self._create_dummy_tensor(
+                (self.runner.max_num_reqs, ), jnp.int32, replicated_sharding)
+            rollback_draft_lengths = self._create_dummy_tensor(
+                (self.runner.max_num_reqs, ), jnp.int32, replicated_sharding)
+
             self._run_compilation(
                 "_subtract_num_rejected_tokens_fn",
                 _subtract_num_rejected_tokens_fn,
@@ -555,6 +560,8 @@ class CompilationManager:
                 num_rejected_tokens,
                 seq_lens_subtract_indices,
                 positions_subtract_indices,
+                rollback_subtract_indices,
+                rollback_draft_lengths,
                 num_tokens=num_tokens,
             )
 
