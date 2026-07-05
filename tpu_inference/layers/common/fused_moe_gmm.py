@@ -581,6 +581,7 @@ def fused_moe_func(
     hash_based_topk_indices: jax.Array | None = None,
     expert_score_correction_bias: jax.Array | None = None,
     moe_chunk_size: int = 0,
+    num_valid_tokens: jax.Array | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -634,6 +635,14 @@ def fused_moe_func(
             topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
+    # Route padding tokens to expert 0 instead of picking a selected expert. This
+    # is especially useful when we have a low number of tokens (e.g. low
+    # concurrency), where padding tokens may activate unnecessary expert weights
+    # and slow down the gmm kernel.
+    if num_valid_tokens is not None:
+        token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
+        topk_indices = jnp.where(token_valid, topk_indices, 0)
+        topk_weights = jnp.where(token_valid, topk_weights, 0.0)
     # All gathering topk_indices and topk_weights if attention dp is used.
     if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
