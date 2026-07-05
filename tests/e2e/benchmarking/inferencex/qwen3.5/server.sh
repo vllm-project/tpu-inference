@@ -44,7 +44,8 @@ case "$SHARDING" in
 esac
 
 MAX_MODEL_LEN=$((ISL + OSL + MAX_MODEL_LEN_BUFFER))
-MAX_NUM_BATCHED_TOKENS=$((ISL / DP_SIZE))
+# Floor at 1024 so 1k isl with dp8 doesn't cause the per rank seq len to be too small.
+MAX_NUM_BATCHED_TOKENS=$(( ISL / DP_SIZE > 1024 ? ISL / DP_SIZE : 1024 ))
 
 set -x
 export MODEL_IMPL_TYPE=vllm
