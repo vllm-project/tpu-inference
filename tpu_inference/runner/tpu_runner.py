@@ -617,6 +617,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_cache_dtype = to_torch_dtype(cache_dtype)
 
         self._pre_async_results: AsyncPreResults | None = None
+        self._async_num_accepted_tokens_dev: jax.Array | None = None
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
         self.execute_model_state: ExecuteModelState | None = None
         self._continue_decode_output = None
@@ -1362,7 +1363,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.speculative_config and self._pre_async_results is not None:
             # Retrieve the previous step's rejection count and proposed draft lengths from the device.
             # This is already mapped and computed during `_prepare_inputs` via `_subtract_num_rejected_tokens`.
-            num_accepted_tokens_dev = self.execute_model_state.num_accepted_tokens_dev
+            num_accepted_tokens_dev = self._async_num_accepted_tokens_dev
+            self._async_num_accepted_tokens_dev = None
 
             # Trigger the device-side copy: copy Slot[a] to Slot[0] for all Mamba layers.
             if isinstance(attn_metadata, dict):
@@ -2695,7 +2697,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             seq_lens, positions, num_accepted_tokens_dev = self._subtract_num_rejected_tokens(
                 seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank,
                 padded_num_reqs_per_dp_rank)
-            self.execute_model_state.num_accepted_tokens_dev = num_accepted_tokens_dev
+            self._async_num_accepted_tokens_dev = num_accepted_tokens_dev
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(

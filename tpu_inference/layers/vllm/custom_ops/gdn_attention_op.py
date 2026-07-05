@@ -132,11 +132,11 @@ def gdn_attention_core_tpu(
                                                    padded_num_reqs_per_dp,
                                                    dp_size,
                                                    axis=0)
-    query_start_loc_sliced = truncate_sharded_tensor(
-        query_start_loc,
-        padded_num_reqs_per_dp + 1,
-        dp_size,
-        axis=0)
+    query_start_loc_sliced = truncate_sharded_tensor(query_start_loc,
+                                                     padded_num_reqs_per_dp +
+                                                     1,
+                                                     dp_size,
+                                                     axis=0)
     seq_lens_sliced = truncate_sharded_tensor(seq_lens,
                                               padded_num_reqs_per_dp,
                                               dp_size,
