@@ -1,4 +1,3 @@
-
 #!/bin/bash
 # Copyright 2025 Google LLC
 #
@@ -41,83 +40,83 @@ rm -f "$LOG_DIR"/prefill.txt "$LOG_DIR"/decode.txt "$LOG_DIR"/benchmark.txt "$LO
 
 # Automatic Worker IP Discovery
 if [[ -z "${WORKER_IPS:-}" ]]; then
-  echo "⚠️  WORKER_IPS not provided. Attempting to discover via gcloud..."
-  
-  if command -v gcloud &> /dev/null; then
-    ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}')}"
-    TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
-    
-    if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
-      echo "   -> Found TPU_NAME: $TPU_NAME, ZONE: $ZONE"
-      ALL_IPS=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(networkEndpoints[].ipAddress)")
-      ALL_IPS="${ALL_IPS//;/ }"
-      ALL_IPS="${ALL_IPS//,/ }"
+    echo "⚠️  WORKER_IPS not provided. Attempting to discover via gcloud..."
 
-      # shellcheck disable=SC2206
-      ALL_IPS_ARRAY=($ALL_IPS)
-      
-      if [[ -z "${HEAD_INTERNAL_IP:-}" ]]; then
-        HEAD_INTERNAL_IP="${ALL_IPS_ARRAY[0]}"
-        echo "   -> Discovered Head IP: $HEAD_INTERNAL_IP"
-      fi
-      
-      WORKER_IPS_LIST=("${ALL_IPS_ARRAY[@]:1}")
-      WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
-      echo "   -> Discovered Worker IPs: $WORKER_IPS"
+    if command -v gcloud &> /dev/null; then
+        ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}')}"
+        TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
 
-      ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
-      echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
-      if [[ -z "${TPU_VERSION:-}" ]]; then
-        if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
-          export TPU_VERSION="tpu7x"
-          echo "   -> Setting TPU_VERSION=tpu7x"
-        elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
-          export TPU_VERSION="tpu6e"
-          echo "   -> Setting TPU_VERSION=tpu6e"
+        if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
+            echo "   -> Found TPU_NAME: $TPU_NAME, ZONE: $ZONE"
+            ALL_IPS=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(networkEndpoints[].ipAddress)")
+            ALL_IPS="${ALL_IPS//;/ }"
+            ALL_IPS="${ALL_IPS//,/ }"
+
+            # shellcheck disable=SC2206
+            ALL_IPS_ARRAY=($ALL_IPS)
+
+            if [[ -z "${HEAD_INTERNAL_IP:-}" ]]; then
+                HEAD_INTERNAL_IP="${ALL_IPS_ARRAY[0]}"
+                echo "   -> Discovered Head IP: $HEAD_INTERNAL_IP"
+            fi
+
+            WORKER_IPS_LIST=("${ALL_IPS_ARRAY[@]:1}")
+            WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
+            echo "   -> Discovered Worker IPs: $WORKER_IPS"
+
+            ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
+            echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
+            if [[ -z "${TPU_VERSION:-}" ]]; then
+                if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
+                    export TPU_VERSION="tpu7x"
+                    echo "   -> Setting TPU_VERSION=tpu7x"
+                    elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
+                    export TPU_VERSION="tpu6e"
+                    echo "   -> Setting TPU_VERSION=tpu6e"
+                fi
+            fi
+        else
+            echo "❌ Could not determine TPU_NAME or ZONE from metadata. Please set WORKER_IPS manually."
+            exit 1
         fi
-      fi
     else
-       echo "❌ Could not determine TPU_NAME or ZONE from metadata. Please set WORKER_IPS manually."
-       exit 1
+        echo "❌ gcloud not found. Please set WORKER_IPS environment variable manually."
+        exit 1
     fi
-  else
-    echo "❌ gcloud not found. Please set WORKER_IPS environment variable manually."
-    exit 1
-  fi
 fi
 
 if [[ -z "${WORKER_IPS:-}" ]]; then
-  echo "ERROR: Failed to discover WORKER_IPS. Please provide it manually."
-  exit 1
+    echo "ERROR: Failed to discover WORKER_IPS. Please provide it manually."
+    exit 1
 fi
 
 HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(hostname -I | awk '{print $1}')}"
 
 # Always ensure ACCELERATOR_TYPE is populated if not specified in the environment
 if [[ -z "${ACCELERATOR_TYPE:-}" ]] && command -v gcloud &> /dev/null && command -v curl &> /dev/null; then
-  ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}' || echo "")}"
-  TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
-  
-  if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
-    ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
-    echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
-  fi
+    ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}' || echo "")}"
+    TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
+
+    if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
+        ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
+        echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
+    fi
 fi
 
 # Auto-discover TPU_VERSION if not specified and ACCELERATOR_TYPE is present
 if [[ -z "${TPU_VERSION:-}" && -n "${ACCELERATOR_TYPE:-}" ]]; then
-  if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
-    export TPU_VERSION="tpu7x"
-    echo "   -> Setting TPU_VERSION=tpu7x"
-  elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
-    export TPU_VERSION="tpu6e"
-    echo "   -> Setting TPU_VERSION=tpu6e"
-  fi
+    if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
+        export TPU_VERSION="tpu7x"
+        echo "   -> Setting TPU_VERSION=tpu7x"
+        elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
+        export TPU_VERSION="tpu6e"
+        echo "   -> Setting TPU_VERSION=tpu6e"
+    fi
 fi
 
 if [[ -z "${TPU_VERSION:-}" ]]; then
-  echo "❌ Error: TPU_VERSION environment variable is not set and could not be automatically discovered."
-  exit 1
+    echo "❌ Error: TPU_VERSION environment variable is not set and could not be automatically discovered."
+    exit 1
 fi
 
 echo "Running on TPU_VERSION: ${TPU_VERSION}"
@@ -140,11 +139,35 @@ NUM_HOSTS=${#ALL_IPS_ARRAY[@]}
 PREFILL_HOSTS_COUNT="${PREFILL_HOSTS_COUNT:-}"
 DECODE_HOSTS_COUNT="${DECODE_HOSTS_COUNT:-}"
 
-if [[ -z "$PREFILL_HOSTS_COUNT" || -z "$DECODE_HOSTS_COUNT" ]]; then
-  # Default to equal split if neither is explicitly provided
+if [[ -z "$PREFILL_HOSTS_COUNT" && -z "$DECODE_HOSTS_COUNT" ]]; then
+  # Default to equal split if neither is explicitly provided.
   PREFILL_HOSTS_COUNT=$(( NUM_HOSTS / 2 ))
   DECODE_HOSTS_COUNT=$(( NUM_HOSTS - PREFILL_HOSTS_COUNT ))
-  echo "⚠️ PREFILL_HOSTS_COUNT or DECODE_HOSTS_COUNT not specified. Defaulting to equal split: $PREFILL_HOSTS_COUNT hosts for Prefill, $DECODE_HOSTS_COUNT hosts for Decode."
+  echo "⚠️ PREFILL_HOSTS_COUNT and DECODE_HOSTS_COUNT not specified. Defaulting to equal split: $PREFILL_HOSTS_COUNT hosts for Prefill, $DECODE_HOSTS_COUNT hosts for Decode."
+elif [[ -z "$PREFILL_HOSTS_COUNT" ]]; then
+  if [[ ! "$DECODE_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "❌ DECODE_HOSTS_COUNT must be a positive integer. Got: $DECODE_HOSTS_COUNT"
+    exit 1
+  fi
+  PREFILL_HOSTS_COUNT=$(( NUM_HOSTS - DECODE_HOSTS_COUNT ))
+  echo "⚠️ PREFILL_HOSTS_COUNT not specified. Using remaining hosts for Prefill: $PREFILL_HOSTS_COUNT."
+elif [[ -z "$DECODE_HOSTS_COUNT" ]]; then
+  if [[ ! "$PREFILL_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "❌ PREFILL_HOSTS_COUNT must be a positive integer. Got: $PREFILL_HOSTS_COUNT"
+    exit 1
+  fi
+  DECODE_HOSTS_COUNT=$(( NUM_HOSTS - PREFILL_HOSTS_COUNT ))
+  echo "⚠️ DECODE_HOSTS_COUNT not specified. Using remaining hosts for Decode: $DECODE_HOSTS_COUNT."
+fi
+
+if [[ ! "$PREFILL_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "❌ PREFILL_HOSTS_COUNT must be at least 1. Got: $PREFILL_HOSTS_COUNT"
+  exit 1
+fi
+
+if [[ ! "$DECODE_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "❌ DECODE_HOSTS_COUNT must be at least 1. Got: $DECODE_HOSTS_COUNT"
+  exit 1
 fi
 
 TOTAL_HOSTS_USED=$(( PREFILL_HOSTS_COUNT + DECODE_HOSTS_COUNT ))
@@ -164,9 +187,9 @@ DECODE_HEAD_IP="${DECODE_HOSTS[0]}"
 PREFILL_WORKER_IPS=("${PREFILL_HOSTS[@]:1}")
 DECODE_WORKER_IPS=("${DECODE_HOSTS[@]:1}")
 # Dynamic TP calculation based on accelerator type or TPU Version
-if [[ "$ACCELERATOR_TYPE" == *"4t"* ]] || [[ "$ACCELERATOR_TYPE" == *"-4"* ]]; then
+if [[ "${ACCELERATOR_TYPE:-}" == *"4t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-4"* ]]; then
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
-elif [[ "$ACCELERATOR_TYPE" == *"8t"* ]] || [[ "$ACCELERATOR_TYPE" == *"-8"* ]]; then
+elif [[ "${ACCELERATOR_TYPE:-}" == *"8t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-8"* ]]; then
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
 elif [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
@@ -181,7 +204,15 @@ echo "Calculated DECODE_TENSOR_PARALLEL_SIZE: $DECODE_TENSOR_PARALLEL_SIZE"
 cleanup() {
   local exit_code=$?
   echo "🧹 Cleaning up containers on all hosts..."
-  
+
+  # Capture server logs before removing containers.
+  echo "   -> Capturing server logs..."
+  docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
+  if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
+    scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
+  fi
+
   # Cleanup Prefill workers
   for ip in "${PREFILL_WORKER_IPS[@]}"; do
     echo "   -> Cleaning Prefill worker: $ip"
@@ -200,19 +231,11 @@ cleanup() {
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
   done
 
-  # Cleanup Local logs copying
-  echo "   -> Capturing server logs..."
-  docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
-  if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
-    scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
-  fi
-
   # Cleanup Prefill Head (Local Node)
   echo "   -> Cleaning Prefill Head (Local)..."
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
-  
+
   # Cleanup Local proxy/benchmark container
   docker stop disagg-proxy-benchmark >/dev/null 2>&1 || true
   docker rm -f disagg-proxy-benchmark >/dev/null 2>&1 || true
@@ -320,11 +343,11 @@ for worker_ip in "${PREFILL_WORKER_IPS[@]}"; do
     echo "--- Distributing and starting Prefill Ray Worker on ${worker_ip}"
     echo "   -> Pruning Docker on worker to free disk space..."
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
-    
+
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
     # shellcheck disable=SC2002
     cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
-    
+
     # shellcheck disable=SC2087
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${PREFILL_HEAD_IP}' --worker '${HOST_HF_HOME}' \
@@ -364,7 +387,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECOD
   -e MOE_REQUANTIZE_BLOCK_SIZE="${MOE_REQUANTIZE_BLOCK_SIZE:-}" \
   -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
-  -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" &
+  -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}"
 EOF
 
 sleep 30
@@ -375,11 +398,11 @@ for worker_ip in "${DECODE_WORKER_IPS[@]}"; do
     echo "--- Distributing and starting Decode Ray Worker on ${worker_ip}"
     echo "   -> Pruning Docker on worker to free disk space..."
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
-    
+
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
     # shellcheck disable=SC2002
     cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
-    
+
     # shellcheck disable=SC2087
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECODE_HEAD_IP}' --worker '${HOST_HF_HOME}' \
@@ -491,6 +514,7 @@ wait_for_server_remote "localhost" 8000 "Toy Proxy Server" 600
 
 if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
     echo "--- Running Benchmark Test inside container..."
+    timeout "${BENCHMARK_TIMEOUT_SECONDS:-1800}" \
     docker exec disagg-proxy-benchmark /bin/bash -c "vllm bench serve \
         --backend vllm \
         --host localhost \
@@ -511,6 +535,7 @@ fi
 
 if [ "$TEST_MODE" = "2" ] || [ "$TEST_MODE" = "3" ]; then
     echo "--- Running Correctness Test inside container..."
+    timeout "${CORRECTNESS_TIMEOUT_SECONDS:-1800}" \
     docker exec disagg-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py \
         --baseline_url http://${DECODE_HEAD_IP}:${DECODE_VLLM_PORT}/v1/completions \
         --disagg_url http://localhost:8000/v1/completions \
