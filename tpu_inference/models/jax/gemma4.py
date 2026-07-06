@@ -1078,10 +1078,9 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         stripped_weights = (
             (clean_name, tensor) for name, tensor in weights
             if (clean_name := name.replace("language_model.", "")).startswith((
-                "model.", "lm_head")) and
-            "vision" not in clean_name and  # Exclude vision tower weights for now
-            not any(clean_name.startswith(p) for p in ignored_prefixes)
-        )
+                "model.", "lm_head")) and "vision" not in clean_name
+            and  # Exclude vision tower weights for now
+            not any(clean_name.startswith(p) for p in ignored_prefixes))
         return super().load_weights(
             (name, tensor) for name, tensor in stripped_weights
             if not ("layers." in name and not any(
