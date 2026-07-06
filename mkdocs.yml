@@ -58,6 +58,7 @@ nav:
   - 'Home': README.md
   - 'Getting Started':
     - 'TPU Setup': getting_started/tpu_setup.md
+    - 'TPU Setup v2': getting_started/tpu_setup_v2.md
     - 'Installation': getting_started/installation.md
     - 'Quickstart': getting_started/quickstart.md
   - 'Features & Usage':

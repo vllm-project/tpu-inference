@@ -44,3 +44,23 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
     grid-template-columns: minmax(0, 1fr) !important;
   }
 }
+
+/* Status Badges */
+.cg-badge {
+  display: inline-block;
+  padding: 0.2em 0.6em;
+  font-size: 0.75em;
+  font-weight: 700;
+  border-radius: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+.cg-badge-recommended {
+  background-color: #e6f4ea;
+  color: #1e8e3e;
+}
+.cg-badge-experimental {
+  background-color: #fef7e0;
+  color: #f9ab00;
+}
