@@ -66,6 +66,32 @@ modeling_flax_utils = FlaxUtils()
 _gdn_core = run_jax_gdn_attention
 
 
+def _load_zero_centered_norm(jax_param: nnx.Param,
+                             torch_weight,
+                             *,
+                             param_name: str = "Unknown"):
+    """Qwen3NextRMSNorm is zero centered (`out = norm(x) * (1 + w)`); fold
+    the +1 into the scale at load time so the standard RMSNorm applies."""
+    folded = (torch_weight.float() + 1.0).to(torch_weight.dtype)
+    load_nnx_param_from_reshaped_torch(jax_param,
+                                       folded,
+                                       param_name=param_name)
+
+
+class JaxZeroCenteredRmsNorm(JaxRmsNorm):
+    """RMSNorm whose HF weight is zero centered (`out = norm(x) * (1 + w)`),
+    as in Qwen3NextRMSNorm. The `+1` is folded into the scale at load time so
+    the standard RMSNorm forward applies; the fold is wired here rather than
+    at the model level so every consumer gets it automatically."""
+
+    def __init__(self, *args, prefix: str = "", **kwargs):
+        super().__init__(*args, prefix=prefix, **kwargs)
+        self.weight.set_metadata(
+            "weight_loader",
+            functools.partial(_load_zero_centered_norm,
+                              param_name=prefix + ".weight"))
+
+
 class Conv1dWeight(JaxModule):
     """Holds the depthwise causal conv weight under a `weight` param so its
     parameter name lines up with the HF checkpoint (`...conv1d.weight`)."""
@@ -307,7 +333,7 @@ class Qwen3NextAttention(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".q_proj",
         )
-        self.q_norm = JaxRmsNorm(
+        self.q_norm = JaxZeroCenteredRmsNorm(
             self.head_dim,
             epsilon=self.rms_norm_eps,
             dtype=dtype,
@@ -326,7 +352,7 @@ class Qwen3NextAttention(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".k_proj",
         )
-        self.k_norm = JaxRmsNorm(
+        self.k_norm = JaxZeroCenteredRmsNorm(
             self.head_dim,
             epsilon=self.rms_norm_eps,
             dtype=dtype,
@@ -625,7 +651,7 @@ class Qwen3NextDecoderLayer(JaxModule):
 
         self.layer_type = config.layer_types[layer_idx]
 
-        self.input_layernorm = JaxRmsNorm(
+        self.input_layernorm = JaxZeroCenteredRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
             dtype=dtype,
@@ -654,7 +680,7 @@ class Qwen3NextDecoderLayer(JaxModule):
                 quant_config=quant_config,
                 prefix=prefix + ".self_attn",
             )
-        self.post_attention_layernorm = JaxRmsNorm(
+        self.post_attention_layernorm = JaxZeroCenteredRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
             dtype=dtype,
@@ -753,7 +779,7 @@ class Qwen3NextModel(JaxModule):
             ))
 
         if self.is_last_rank:
-            self.norm = JaxRmsNorm(
+            self.norm = JaxZeroCenteredRmsNorm(
                 hidden_size,
                 epsilon=rms_norm_eps,
                 dtype=dtype,
@@ -816,18 +842,6 @@ def _load_reordered_conv_weight(jax_param: nnx.Param,
     assign_and_shard_param(jax_param, jax_weight, param_name)
 
 
-def _load_zero_centered_norm(jax_param: nnx.Param,
-                             torch_weight,
-                             *,
-                             param_name: str = "Unknown"):
-    """Qwen3NextRMSNorm is zero centered (`out = norm(x) * (1 + w)`); fold
-    the +1 into the scale at load time so the standard RMSNorm applies."""
-    folded = (torch_weight.float() + 1.0).to(torch_weight.dtype)
-    load_nnx_param_from_reshaped_torch(jax_param,
-                                       folded,
-                                       param_name=param_name)
-
-
 def _load_float32_param(jax_param: nnx.Param,
                         torch_weight,
                         *,
@@ -837,16 +851,6 @@ def _load_float32_param(jax_param: nnx.Param,
     load_nnx_param_from_reshaped_torch(jax_param,
                                        torch_weight.float(),
                                        param_name=param_name)
-
-
-# Norms folded with +1 at load time. The gated norm inside linear_attn uses
-# a standard scale and is excluded.
-_ZERO_CENTERED_NORM_SUFFIXES = (
-    ".input_layernorm.weight",
-    ".post_attention_layernorm.weight",
-    ".q_norm.weight",
-    ".k_norm.weight",
-)
 
 
 class Qwen3NextForCausalLM(JaxModule, LoadableWithIterator):
@@ -884,14 +888,11 @@ class Qwen3NextForCausalLM(JaxModule, LoadableWithIterator):
         else:
             self.lm_head = PPMissingLayer()
 
+        # The zero-centered norm fold is wired inside JaxZeroCenteredRmsNorm.
+        # A_log/dt_bias stay float32; wire their loaders here since they are
+        # bare nnx.Params rather than a dedicated module.
         for name, param in self.named_parameters():
-            if (name.endswith(_ZERO_CENTERED_NORM_SUFFIXES)
-                    or name == "model.norm.weight"):
-                param.set_metadata(
-                    "weight_loader",
-                    functools.partial(_load_zero_centered_norm,
-                                      param_name=name))
-            elif name.endswith((".A_log", ".dt_bias")):
+            if name.endswith((".A_log", ".dt_bias")):
                 param.set_metadata(
                     "weight_loader",
                     functools.partial(_load_float32_param, param_name=name))

@@ -550,10 +550,15 @@ class TestCheckpointRoundTrip:
 class TestTpuSmoke:
 
     def test_forward_with_real_kernels(self, rng, mesh, mock_vllm_config):
-        """Builds a shrunken Qwen3-Next (4 layers: 3 GDN + 1 full attention)
-        with dummy weights and runs one prefill through the real kernels,
-        checking output shapes and that the GDN states were written."""
+        """Loads the real Qwen3-Next config but only the first 4 layers
+        (full_attention_interval=4, so this covers 3 GDN + 1 full attention)
+        via the skip-layers loader, then runs one prefill through the fused
+        GDN and ragged paged attention kernels, checking output shapes and
+        that the linear attention states were written."""
         from unittest.mock import MagicMock
+
+        from vllm.config import set_current_vllm_config
+        from vllm.model_executor.model_loader import get_model_loader
 
         from tpu_inference.distributed.jax_parallel_state import \
             init_pp_distributed_environment
@@ -566,10 +571,12 @@ class TestTpuSmoke:
         vllm_config = mock_vllm_config("Qwen/Qwen3-Next-80B-A3B-Instruct",
                                        "auto")
         hf_config = vllm_config.model_config.hf_config
+        # No need to load the full model; the first 4 layers exercise both a
+        # GDN and a full-attention layer.
         hf_config.num_hidden_layers = 4
         hf_config.layer_types = hf_config.layer_types[:4]
-        hf_config.num_experts = 16
-        vllm_config.load_config.load_format = "jax_dummy"
+        vllm_config.load_config.load_format = "skip_layers_model_loader_for_test"
+        vllm_config.load_config.num_layers_to_load_for_test = 4
         vllm_config.parallel_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.parallel_config.enable_expert_parallel = False
@@ -584,11 +591,6 @@ class TestTpuSmoke:
 
         with jax.set_mesh(mesh):
             model = Qwen3NextForCausalLM(vllm_config, rng, mesh)
-            # The dummy loader fills every param and runs the per module
-            # post processing that fuses the MoE kernels for the GMM
-            # backend.
-            from vllm.config import set_current_vllm_config
-            from vllm.model_executor.model_loader import get_model_loader
             loader = get_model_loader(vllm_config.load_config)
             with set_current_vllm_config(vllm_config):
                 loader.load_weights(model, vllm_config.model_config)
