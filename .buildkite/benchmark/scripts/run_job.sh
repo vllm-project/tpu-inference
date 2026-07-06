@@ -78,7 +78,7 @@ PROFILE_FOLDER="${LOG_FOLDER}/profile"
 # Do cleanup before create config
 cleanup_artifact_log() {
   if [ -d "$ARTIFACT_FOLDER" ]; then
-    echo "--- Fixing artifact folder permissions for cleanup..."
+    echo "--- Reclaiming artifact folder ownership for CI cleanup..."
     sudo chown -R "$(id -u):$(id -g)" "$ARTIFACT_FOLDER" || true
   fi
   echo "deleting artifacts: $ARTIFACT_FOLDER"
