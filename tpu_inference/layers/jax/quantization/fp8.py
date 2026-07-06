@@ -55,13 +55,17 @@ FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS = [
 ]
 
 
-def load_fp8_weight(jax_param: nnx.Param, torch_weight: torch.Tensor,
+def load_fp8_weight(jax_param: nnx.Param,
+                    torch_weight: torch.Tensor,
+                    _shard_id=None,
+                    *,
                     param_name: str):
     """Loads FP8 weights from a torch tensor into a JAX parameter.
 
     Args:
         jax_param: The nnx parameter to hold the FP8 weight.
         torch_weight: The source PyTorch tensor.
+        _shard_id: Unused placeholder, to match the signature of other weight loaders.
         param_name: Name of the parameter.
     """
     spec = jax_param.sharding
@@ -73,9 +77,9 @@ def load_fp8_weight(jax_param: nnx.Param, torch_weight: torch.Tensor,
 
     if jax_weight.dtype != jnp.float8_e4m3fn:
         logger.warning(
-            f"Loading {param_name}: casting from {jax_weight.dtype} to {jax_param[...].dtype}"
+            f"Loading {param_name}: casting from {jax_weight.dtype} to float8_e4m3fn"
         )
-        jax_weight = jax_weight.astype(jax_param[...].dtype)
+        jax_weight = jax_weight.astype(jnp.float8_e4m3fn)
 
     jax_param.set_raw_value(shard_put(jax_weight, spec, mesh=mesh))
 
@@ -139,6 +143,12 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                                           shape=(out_features, ),
                                           dtype=jnp.float32,
                                           sharding=scale_sharding)
+        layer.weight_scale.set_metadata(
+            'weight_loader',
+            partial(load_nnx_param_from_reshaped_torch,
+                    reshape_dims=(out_features, ),
+                    permute_dims=None,
+                    param_name=layer.prefix + ".weight_scale"))
 
     def apply_jax(self, layer: JaxModule, x: jax.Array) -> jax.Array:
         bias = layer.bias[...] if layer.bias is not None else None
