@@ -1,2 +1,7 @@
 buildkite-test-collector
 hf_transfer
+pytest
+pytest-mock
+parameterized
+hypothesis==6.151.9
+sortedcontainers==2.4.0
