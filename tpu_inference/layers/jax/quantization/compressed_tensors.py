@@ -27,12 +27,14 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     check_equal_or_regex_match, should_ignore_layer)
 
 from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import (JaxEinsum,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import (QuantizationConfig,
                                                            QuantLinearConfig)
 from tpu_inference.layers.jax.quantization.fp8 import (
-    Fp8BlockwiseLinearMethod, Fp8TensorwiseLinearMethod)
+    Fp8BlockwiseLinearMethod, Fp8TensorwiseLinearMethod,
+    Fp8TensorwiseMergedLinearMethod)
 from tpu_inference.layers.jax.quantization.unquantized import \
     UnquantizedLinearMethod
 
@@ -107,6 +109,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self._ct._is_fp8_w8a8(weight_quant, input_quant):
             block = _weight_block_size(weight_quant)
             if block is not None:
+                if isinstance(layer, JaxMergedColumnParallelLinear):
+                    # TODO(#2261): need to implement blockwise fp8 for JaxMergedColumnParallelLinear
+                    raise NotImplementedError(
+                        "compressed-tensors blockwise fp8 is not yet supported "
+                        "for JaxMergedColumnParallelLinear layers.")
                 # compressed-tensors serializes the dequant scale as
                 # "weight_scale" (DeepSeek-style checkpoints, the method's
                 # default, use "weight_scale_inv"), so create the param under
@@ -116,6 +123,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                     layer,
                     linear_config,
                     weight_scale_name="weight_scale")
+            if isinstance(layer, JaxMergedColumnParallelLinear):
+                return Fp8TensorwiseMergedLinearMethod(layer, linear_config)
             return Fp8TensorwiseLinearMethod(layer, linear_config)
 
         # TODO: w4a8 / wNa16 schemes need their own JAX methods (not yet ported).

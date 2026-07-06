@@ -19,7 +19,6 @@ from typing import Iterable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import torch
 from flax import nnx
 from jax.sharding import PartitionSpec as P
 
@@ -44,8 +43,7 @@ from tpu_inference.layers.jax.quantization.unquantized import (
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
     assign_and_shard_param, jax_array_from_reshaped_torch,
-    load_nnx_param_from_reshaped_torch, shard_put)
-from tpu_inference.utils import t2j
+    load_nnx_param_from_reshaped_torch)
 
 logger = init_logger(__name__)
 
@@ -53,35 +51,6 @@ logger = init_logger(__name__)
 FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS = [
     MoEBackend.GMM_EP, MoEBackend.GMM_TP
 ]
-
-
-def load_fp8_weight(jax_param: nnx.Param,
-                    torch_weight: torch.Tensor,
-                    _shard_id=None,
-                    *,
-                    param_name: str):
-    """Loads FP8 weights from a torch tensor into a JAX parameter.
-
-    Args:
-        jax_param: The nnx parameter to hold the FP8 weight.
-        torch_weight: The source PyTorch tensor.
-        _shard_id: Unused placeholder, to match the signature of other weight loaders.
-        param_name: Name of the parameter.
-    """
-    spec = jax_param.sharding
-    if isinstance(jax_param.sharding, jax.sharding.NamedSharding):
-        spec = jax_param.sharding.spec
-    mesh = getattr(jax_param, 'mesh', None)
-
-    jax_weight = t2j(torch_weight, use_dlpack=False)
-
-    if jax_weight.dtype != jnp.float8_e4m3fn:
-        logger.warning(
-            f"Loading {param_name}: casting from {jax_weight.dtype} to float8_e4m3fn"
-        )
-        jax_weight = jax_weight.astype(jnp.float8_e4m3fn)
-
-    jax_param.set_raw_value(shard_put(jax_weight, spec, mesh=mesh))
 
 
 class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
@@ -119,11 +88,11 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                                     dtype=jnp.float8_e4m3fn,
                                     sharding=self.weight_sharding)
 
-        # Attach custom loader to avoid default upcasting behavior
         layer.weight.set_metadata(
             'weight_loader',
-            functools.partial(load_fp8_weight,
-                              param_name=layer.prefix + ".weight"))
+            partial(load_nnx_param_from_reshaped_torch,
+                    permute_dims=(1, 0),
+                    param_name=layer.prefix + ".weight"))
 
         # Scale is always per-output-channel (1D).
         scale_sharding = None
@@ -172,6 +141,68 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                                 bias=bias)
         out = out.reshape(out.shape[:-1] + self.output_shape)
         return out
+
+
+class Fp8TensorwiseMergedLinearMethod(Fp8TensorwiseLinearMethod):
+    """Tensorwise Fp8 for ``JaxMergedColumnParallelLinear`` (fused gate_up/qkv).
+
+    ``_route`` delivers each sub-projection's ``weight`` and ``weight_scale``
+    as separate shards (shard_id 0, 1, …).  This class installs
+    shard-accumulating loaders on both params: shards are buffered in
+    ``_merged_shards`` metadata and concatenated once all arrive, mirroring
+    ``Fp8BlockwiseMergedLinearMethod`` for the blockwise case.
+    """
+
+    @staticmethod
+    def _load_merged_shard(param,
+                           torch_tensor,
+                           shard_id=-1,
+                           *,
+                           reshape_dims,
+                           permute_dims,
+                           param_name):
+        shards = param.get_metadata("_merged_shards")
+        with cpu_mesh_context():
+            if shard_id == -1:
+                merged = jax_array_from_reshaped_torch(
+                    torch_tensor,
+                    reshape_dims=reshape_dims,
+                    permute_dims=permute_dims)
+            else:
+                shards[shard_id] = torch_tensor
+                if any(s is None for s in shards):
+                    return
+                merged = jnp.concatenate([
+                    jax_array_from_reshaped_torch(t,
+                                                  reshape_dims=reshape_dims,
+                                                  permute_dims=permute_dims)
+                    for t in shards
+                ],
+                                         axis=-1)
+        assign_and_shard_param(param, merged, param_name=param_name)
+
+    def create_weights_jax(self, layer: JaxMergedColumnParallelLinear,
+                           *weight_args, rngs, **extra_weight_attrs):
+        assert isinstance(layer, JaxMergedColumnParallelLinear)
+        super().create_weights_jax(layer,
+                                   *weight_args,
+                                   rngs=rngs,
+                                   **extra_weight_attrs)
+        n_proj = len(layer.output_sizes)
+        layer.weight.set_metadata("_merged_shards", [None] * n_proj)
+        layer.weight.set_metadata(
+            "weight_loader",
+            functools.partial(self._load_merged_shard,
+                              reshape_dims=None,
+                              permute_dims=(1, 0),
+                              param_name=layer.prefix + ".weight"))
+        layer.weight_scale.set_metadata("_merged_shards", [None] * n_proj)
+        layer.weight_scale.set_metadata(
+            "weight_loader",
+            functools.partial(self._load_merged_shard,
+                              reshape_dims=(-1, ),
+                              permute_dims=None,
+                              param_name=layer.prefix + ".weight_scale"))
 
 
 class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
