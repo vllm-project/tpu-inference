@@ -297,7 +297,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.mhc_pre = MHCPreOp()
         self.mhc_post = MHCPostOp()
         self.mhc_fused_post_pre = MHCFusedPostPreOp()
-        self.has_tilelang = False
 
     def hc_pre(
         self,
@@ -415,11 +414,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None,
                torch.Tensor | None]:
-        if not self.has_tilelang:
-            return self._forward_unfused_post_pre(x, positions, input_ids,
-                                                  post_mix, res_mix, residual)
-        return self._forward_fused_post_pre(x, positions, input_ids, post_mix,
-                                            res_mix, residual)
+        return self._forward_unfused_post_pre(x, positions, input_ids,
+                                              post_mix, res_mix, residual)
 
 
 class DeepseekV4Model(nn.Module):
@@ -491,7 +487,6 @@ class DeepseekV4Model(nn.Module):
             requires_grad=False,
         )
         self.hc_head_op = HCHeadOp()
-        self.has_tilelang = False
         # Pre-hc_head residual stream buffer for the MTP draft. Stable
         # address (outside the cudagraph pool) so the copy_ in forward()
         # refreshes it correctly across captured shapes.
@@ -556,9 +551,6 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
-        if layer is not None and self.has_tilelang:
-            hidden_states = layer.hc_post(hidden_states, residual, post_mix,
-                                          res_mix)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
