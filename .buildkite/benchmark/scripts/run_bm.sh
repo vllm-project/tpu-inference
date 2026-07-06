@@ -163,7 +163,7 @@ run_accuracy_if_needed() {
       cd "$DATASET_DIR" || exit 1
       if [ ! -f data.tar ]; then
         wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .
-        tar -xvf data.tar
+        tar -xf data.tar
       fi
       # Return to previous directory
       cd - > /dev/null
