@@ -287,8 +287,16 @@ for model_name in $model_list; do
             export TIMEOUT_SECONDS=3600 # DeepSeek needs a longer timeout
             max_batched_tokens=512
             max_model_len=9216
-            served_name=deepseek-ai/DeepSeek-R1
-            TARGET_ACCURACY="0.84"
+            if [[ "${model_name,,}" == *"v4-flash"* ]]; then
+                served_name=deepseek-ai/DeepSeek-V4-Flash
+                TARGET_ACCURACY="0.86"
+                # Overrides the default --gpu-memory-utilization=0.95 above
+                # (last flag wins in vLLM's argparse).
+                current_serve_args+=(--gpu-memory-utilization 0.4)
+            else
+                served_name=deepseek-ai/DeepSeek-R1
+                TARGET_ACCURACY="0.84"
+            fi
             current_serve_args+=(--served-model-name "${served_name}" --load-format=runai_streamer --trust-remote-code)
             current_serve_args+=(--kv-cache-dtype=fp8)
             if [ "$MODEL_IMPL_TYPE" == "vllm" ]; then
