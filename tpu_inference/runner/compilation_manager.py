@@ -138,7 +138,7 @@ class CompilationManager:
             call_kwargs = {**fn.keywords, **call_kwargs}
             fn = fn.func
         self._warmup_tasks.append(
-            (name, fn, args, call_kwargs, warmup_handler))
+            (name, fn, args, call_kwargs, warmup_handler, log_name))
         if not aot or not hasattr(fn, 'lower'):
             # Skip AOT when the caller opts out, or when fn is unjitted.
             # The warmup pass will run fn() and populate the inner-jit caches.
@@ -196,12 +196,14 @@ class CompilationManager:
 
         warmup_start = time.perf_counter()
         with jax.set_mesh(self.runner.mesh):
-            for name, fn, args, call_kwargs, warmup_handler in tasks:
+            for name, fn, args, call_kwargs, warmup_handler, log_name in tasks:
+                logger.info("WARMUP START: %s", log_name)
                 if warmup_handler is not None:
                     out = warmup_handler(fn, args, call_kwargs)
                 else:
                     out = fn(*args, **call_kwargs)
                 jax.tree.map(lambda r: r.block_until_ready(), out)
+                logger.info("WARMUP DONE: %s", log_name)
         warmup_elapsed = time.perf_counter() - warmup_start
         if tasks:
             logger.info(
