@@ -73,6 +73,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # would cause JAX init failure when using multi hosts with Ray.
 
     from tpu_inference.models.jax.deepseek_v3 import DeepseekV3ForCausalLM
+    from tpu_inference.models.jax.dflash import DFlashForCausalLM
     from tpu_inference.models.jax.gemma4_mm import \
         Gemma4ForConditionalGeneration
     from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM
@@ -102,6 +103,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         "Gemma4ForConditionalGeneration"] = Gemma4ForConditionalGeneration
     _MODEL_REGISTRY["Gemma4ForCausalLM"] = Gemma4ForCausalLM
     _MODEL_REGISTRY["Gemma4MTPModel"] = Gemma4MTPForCausalLM
+    _MODEL_REGISTRY["DFlashForCausalLM"] = DFlashForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
