@@ -5,7 +5,9 @@
 # compares the output to a known-good output.
 
 import difflib
+import gc
 import os
+import traceback
 from dataclasses import asdict
 
 import pytest
@@ -91,37 +93,56 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
 
     llm = LLM(**engine_args)
 
-    sampling_params = SamplingParams(
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    try:
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
-    inputs = {
-        "prompt": prompt,
-        "multi_modal_data": {
-            "image": image
-        },
-    }
+        inputs = {
+            "prompt": prompt,
+            "multi_modal_data": {
+                "image": image
+            },
+        }
 
-    # --- Run Inference ---
-    print("Running inference...")
-    outputs = llm.generate(inputs, sampling_params)
+        # --- Run Inference ---
+        print("Running inference...")
+        outputs = llm.generate(inputs, sampling_params)
 
-    # --- Verification ---
-    generated_text = outputs[0].outputs[0].text.strip()
+        # --- Verification ---
+        generated_text = outputs[0].outputs[0].text.strip()
 
-    print("-" * 50)
-    print("Generated Text:")
-    print(generated_text)
-    print("-" * 50)
+        print("-" * 50)
+        print("Generated Text:")
+        print(generated_text)
+        print("-" * 50)
 
-    # Check output against the closest known-good caption.
-    similarity_score = max(
-        difflib.SequenceMatcher(None, generated_text, expected,
-                                autojunk=False).ratio()
-        for expected in EXPECTED_TEXTS)
-    print(f"Similarity Score: {similarity_score:.4f}")
-    assert similarity_score >= 0.85, (
-        f"Text similarity too low ({similarity_score:.2f}).\n"
-        f"Expected one of: {EXPECTED_TEXTS}\n"
-        f"Actual:   {generated_text}")
+        # Check output against the closest known-good caption.
+        similarity_score = max(
+            difflib.SequenceMatcher(
+                None, generated_text, expected, autojunk=False).ratio()
+            for expected in EXPECTED_TEXTS)
+        print(f"Similarity Score: {similarity_score:.4f}")
+        assert similarity_score >= 0.85, (
+            f"Text similarity too low ({similarity_score:.2f}).\n"
+            f"Expected one of: {EXPECTED_TEXTS}\n"
+            f"Actual:   {generated_text}")
+    finally:
+        # Release the TPU before the next parametrization builds a new engine.
+        # This test is parametrized over enable_dynamic_image_sizes=[False, True]
+        # and pytest runs both in one process; without an explicit engine
+        # shutdown the first engine's worker keeps the TPU and the second
+        # LLM(...) fails with "TPU already in use by pid <first>". Mirrors the
+        # teardown in tests/e2e/test_continue_decode.py.
+        #
+        # Guard the shutdown so a teardown failure cannot mask a body
+        # AssertionError (the similarity check) -- surface it loudly instead of
+        # swallowing it.
+        try:
+            llm.llm_engine.engine_core.shutdown()
+        except Exception:
+            print("[multimodal-test] engine_core.shutdown() failed during "
+                  "teardown (non-fatal):")
+            traceback.print_exc()
+        gc.collect()

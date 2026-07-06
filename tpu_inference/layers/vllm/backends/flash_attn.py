@@ -11,12 +11,16 @@ from torchax.ops.mappings import t2j
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backend import (AttentionBackend, AttentionImpl,
-                                       AttentionLayer, AttentionType)
+                                       AttentionLayer,
+                                       AttentionMetadataBuilder, AttentionType,
+                                       CommonAttentionMetadata)
 from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
                                                  register_backend)
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from tpu_inference import utils
-from tpu_inference.layers.common.attention_interface import attention
+from tpu_inference.layers.common.attention_interface import (
+    attention, encoder_only_attention)
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
@@ -29,6 +33,34 @@ logger = init_logger(__name__)
 TPU_HEAD_SIZE_ALIGNMENT = 128
 
 
+class PallasAttentionMetadataBuilder(
+        AttentionMetadataBuilder[AttentionMetadata]):
+
+    def __init__(
+        self,
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> AttentionMetadata:
+        # Return a dummy metadata shell. The actual metadata is built dynamically
+        # by GKE Model Runner's JAX compilation pipeline before execution.
+        return AttentionMetadata(
+            seq_lens=jnp.array([]),
+            block_tables=None,
+            query_start_loc=jnp.array([]),
+            request_distribution=jnp.array([]),
+        )
+
+
 @register_backend(AttentionBackendEnum.FLASH_ATTN)
 class PallasAttentionBackend(AttentionBackend):
 
@@ -37,8 +69,19 @@ class PallasAttentionBackend(AttentionBackend):
         return "FLASH_ATTN"
 
     @staticmethod
+    def get_builder_cls() -> type["PallasAttentionMetadataBuilder"]:
+        return PallasAttentionMetadataBuilder
+
+    @staticmethod
     def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
         return PallasAttentionBackendImpl
+
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        return attn_type in {
+            AttentionType.DECODER,
+            AttentionType.ENCODER_ONLY,
+        }
 
     @staticmethod
     def get_kv_cache_shape(
@@ -130,11 +173,14 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.to_jax_dtype(kv_cache_dtype)
 
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "PallasAttentionBackendImpl")
+        if attn_type not in (AttentionType.DECODER,
+                             AttentionType.ENCODER_ONLY):
+            raise NotImplementedError(
+                "Encoder self-attention (for encoder-decoder) and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "PallasAttentionBackendImpl")
+        self.attn_type = attn_type
 
         self.sinks = sinks
         if self.sinks is not None:
@@ -166,56 +212,111 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 "fused output quantization is not yet supported for "
                 "PallasAttentionBackendImpl")
 
-        if kv_cache.numel():
-            raise RuntimeError(
-                "KV cache from vLLM Attention layer should be empty but has "
-                "the size of %s.", kv_cache.numel())
-
-        del kv_cache  # Use kv_cache from vllm wrapper context values instead.
-
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
-        kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
-            layer.layer_name]
-        kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
-
         mesh = vllm_model_wrapper_context.mesh
 
-        query, key, value = jax_view(query), jax_view(key), jax_view(value)
-        q_scale = k_scale = v_scale = None
-        if self.kv_cache_quantized_dtype:
-            key, value = quantize_kv(self.kv_cache_quantized_dtype, key, value,
-                                     layer._k_scale_float,
-                                     layer._v_scale_float)
-            # TODO(kyuyeunk): Enable w8a8 when VREG spill issue is resolved.
-            # q_scale = layer._q_scale_float
-            k_scale = layer._k_scale_float
-            v_scale = layer._v_scale_float
+        # 1. Common JAX View Conversion
+        q_jax = jax_view(query)
+        k_jax = jax_view(key)
+        v_jax = jax_view(value)
 
-        sinks = jax_view(self.sinks)
+        match self.attn_type:
+            case AttentionType.ENCODER_ONLY:
+                # --- EncoderOnly Attention Flow (No Cache) ---
+                outputs = _jax_encoder_only_attn_func(
+                    q_jax,
+                    k_jax,
+                    v_jax,
+                    attn_metadata,
+                    mesh,
+                    self.scale,
+                    self.head_size,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    self.sliding_window,
+                )
+            case AttentionType.DECODER:
+                # --- Decoder Attention Flow (Paged KV Cache) ---
+                if kv_cache.numel():
+                    raise RuntimeError(
+                        "KV cache from vLLM Attention layer should be empty but has "
+                        "the size of %s.", kv_cache.numel())
+                del kv_cache
 
-        new_kv_cache, outputs = _jax_attn_func(
-            kv_cache,
-            query,
-            key,
-            value,
-            sinks,
-            attn_metadata,
-            mesh,
-            self.scale,
-            self.head_size,
-            self.num_heads,
-            self.num_kv_heads,
-            q_scale,
-            k_scale,
-            v_scale,
-            self.sliding_window,
-        )
-        vllm_model_wrapper_context.kv_caches[kv_cache_index] = new_kv_cache
+                kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
+                    layer.layer_name]
+                kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
 
+                q_scale = k_scale = v_scale = None
+                if self.kv_cache_quantized_dtype:
+                    # Quantize K and V views
+                    k_jax, v_jax = quantize_kv(self.kv_cache_quantized_dtype,
+                                               k_jax, v_jax,
+                                               layer._k_scale_float,
+                                               layer._v_scale_float)
+                    k_scale = layer._k_scale_float
+                    v_scale = layer._v_scale_float
+
+                sinks = jax_view(self.sinks)
+
+                new_kv_cache, outputs = _jax_attn_func(
+                    kv_cache,
+                    q_jax,
+                    k_jax,
+                    v_jax,
+                    sinks,
+                    attn_metadata,
+                    mesh,
+                    self.scale,
+                    self.head_size,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    q_scale,
+                    k_scale,
+                    v_scale,
+                    self.sliding_window,
+                )
+                vllm_model_wrapper_context.kv_caches[
+                    kv_cache_index] = new_kv_cache
+            case _:
+                raise NotImplementedError(
+                    f"Unsupported attention type: {self.attn_type}")
+
+        # 2. Common Output Copy Back and Return
         out_torch = torch_view(outputs)
         if output is not None:
             output.copy_(out_torch)
         return out_torch
+
+
+def _prepare_qkv_layout(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+) -> Tuple[jax.Array, jax.Array, jax.Array]:
+    q_len = q.shape[0]
+    k_len = k.shape[0]
+    return (
+        q.reshape(q_len, num_heads, head_size),
+        k.reshape(k_len, num_kv_heads, head_size),
+        v.reshape(k_len, num_kv_heads, head_size),
+    )
+
+
+def _format_attention_output(
+    outputs: jax.Array,
+    q_len: int,
+    num_heads: int,
+    head_size: int,
+    dtype: jnp.dtype,
+) -> jax.Array:
+    assert outputs.shape[0] == q_len
+    assert outputs.shape[1] == num_heads
+    assert outputs.shape[2] == head_size
+    return outputs.reshape(q_len, num_heads * head_size).astype(dtype)
 
 
 @jax.jit(
@@ -249,14 +350,8 @@ def _jax_attn_func(
     v_scale: float | None = None,
     sliding_window: int | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
-    # Get shapes from vllm
     q_len = q.shape[0]
-    k_len = k.shape[0]
-
-    # Convert the shapes from vLLM's convention to what the attention function expects
-    q = q.reshape(q_len, num_heads, head_size)
-    k = k.reshape(k_len, num_kv_heads, head_size)
-    v = v.reshape(k_len, num_kv_heads, head_size)
+    q, k, v = _prepare_qkv_layout(q, k, v, num_heads, num_kv_heads, head_size)
 
     new_kv_cache, outputs = attention(
         kv_cache,
@@ -273,10 +368,43 @@ def _jax_attn_func(
         attention_chunk_size=sliding_window,
     )
 
-    # Convert the shape back to vLLM's convention
-    assert outputs.shape[0] == q_len
-    assert outputs.shape[1] == num_heads
-    assert outputs.shape[2] == head_size
-    outputs = outputs.reshape(q_len, num_heads * head_size)
+    formatted_outputs = _format_attention_output(outputs, q_len, num_heads,
+                                                 head_size, q.dtype)
+    return new_kv_cache, formatted_outputs
 
-    return new_kv_cache, outputs
+
+@jax.jit(static_argnames=(
+    "mesh",
+    "scale",
+    "head_size",
+    "num_heads",
+    "num_kv_heads",
+    "sliding_window",
+), )
+def _jax_encoder_only_attn_func(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    attention_metadata: AttentionMetadata,
+    mesh: Mesh,
+    scale: float,
+    head_size: int,
+    num_heads: int,
+    num_kv_heads: int,
+    sliding_window: int | None = None,
+) -> jax.Array:
+    q_len = q.shape[0]
+    q, k, v = _prepare_qkv_layout(q, k, v, num_heads, num_kv_heads, head_size)
+
+    output = encoder_only_attention(
+        q,
+        k,
+        v,
+        attention_metadata,
+        mesh,
+        sm_scale=scale,
+        sliding_window=sliding_window,
+    )
+
+    return _format_attention_output(output, q_len, num_heads, head_size,
+                                    q.dtype)

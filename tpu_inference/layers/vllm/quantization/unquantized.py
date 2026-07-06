@@ -346,8 +346,9 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         return out
 
 
-class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
-                                    VllmQuantizationMethod):
+class VllmUnquantizedFusedMoEMethod(
+        UnquantizedFusedMoEMethod,
+        common_unquantized.UnquantizedFusedMoEMethod, VllmQuantizationMethod):
 
     def __init__(
         self,
@@ -355,7 +356,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         mesh: Mesh,
         ep_axis_name: str = "model",
     ):
-        super().__init__(moe)
+        UnquantizedFusedMoEMethod.__init__(self, moe)
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
 

@@ -71,8 +71,6 @@ MODELS: Dict[str, ModelSpec] = {
             "USE_MOE_EP_KERNEL": "0",
             "ATTN_BUCKETIZED_NUM_REQS": "true",
             "ATTN_CUSTOM_NUM_REQS_BUCKETS": "8,16,32,64",
-            "RAGGED_GATED_DELTA_RULE_IMPL":
-            "chunked_kernel_p_recurrent_kernel_d",
             "NEW_MODEL_DESIGN": "1",
         },
         benchmark_shapes=[

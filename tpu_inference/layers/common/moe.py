@@ -29,11 +29,12 @@ from tpu_inference.utils import to_jax_dtype
 if TYPE_CHECKING:
     from tpu_inference.layers.common.process_weights.moe_weights import (
         FusedMoEWeights, UnfusedMoEWeights)
-    from tpu_inference.layers.jax.moe.moe import JaxMoE
+    from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
 else:
     FusedMoEWeights = None
     UnfusedMoEWeights = None
     JaxMoE = None
+    JaxRoutedExperts = None
 
 logger = init_logger(__name__)
 
@@ -71,7 +72,7 @@ class MoEBackend(Enum):
 
 
 def moe_apply(
-    layer: Union[RoutedExperts, JaxMoE],
+    layer: Union[RoutedExperts, JaxRoutedExperts, JaxMoE],
     x: jax.Array,
     gating_output: Union[jax.Array, Tuple[jax.Array, jax.Array]],
     weights: Union[FusedMoEWeights, UnfusedMoEWeights],

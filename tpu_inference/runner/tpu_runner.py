@@ -15,6 +15,7 @@
 import functools
 import logging
 import random
+import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
@@ -25,6 +26,7 @@ import jaxtyping
 import numpy as np
 import torch
 import vllm.envs as vllm_envs
+import vllm.lora.utils as lora_utils_mod
 from flax import nnx
 from jax._src import mesh as mesh_lib
 from jax._src.pallas.utils import next_power_of_2
@@ -91,6 +93,32 @@ from tpu_inference.spec_decode.jax.utils import (
     process_and_extend_logits)
 from tpu_inference.utils import (device_array, make_optimized_mesh,
                                  time_function, to_jax_dtype, to_torch_dtype)
+
+# Patch to classify specific non-LoRA keys as base weights. Without this, vLLM's `add_lora`
+# crashes with "unsupported LoRA weight" on base model parameters like `lm_head.weight`
+# because upstream's `is_base_embedding_weights` uses a strict layer-name whitelist.
+# Compare upstream: https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/lora/utils.py#L97-L99
+_orig_is_base_embedding_weights = getattr(lora_utils_mod,
+                                          "is_base_embedding_weights", None)
+
+
+def _patched_is_base_embedding_weights(name: str) -> bool:
+    if name.endswith(("lm_head.weight", "embed_tokens.weight")):
+        return True
+    if _orig_is_base_embedding_weights is not None:
+        return _orig_is_base_embedding_weights(name)
+    return False
+
+
+lora_utils_mod.is_base_embedding_weights = _patched_is_base_embedding_weights
+
+# Target module updates in loaded modules to avoid broad sys.modules loops
+for m in ("vllm.lora.utils", "vllm.lora.lora_model"):
+    if m in sys.modules:
+        mod = sys.modules[m]
+        if hasattr(mod, "is_base_embedding_weights"):
+            setattr(mod, "is_base_embedding_weights",
+                    _patched_is_base_embedding_weights)
 
 logger = init_logger(__name__)
 
@@ -957,7 +985,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if runner_type == "generate":
             return ("generate", )
         if runner_type == "pooling":
-            return ("embed", )
+            return (self.model_config.convert_type, )
         assert False, f"unsupported runner type: {runner_type}"
 
     def get_kv_cache_spec(self):
@@ -973,6 +1001,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
+        self.input_batch.has_mamba_layers = kv_cache_config.has_mamba_layers
 
         if self.kv_cache_manager.actual_mamba_num_blocks is not None:
             self.input_batch.init_mamba_pools(

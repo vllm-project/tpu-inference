@@ -48,6 +48,12 @@ def is_compatible(
     if sc_info.num_lanes % reduce_group_size != 0:
         return False
 
+    # The output block has (num_lanes // reduce_group_size) // packing rows;
+    # fall back to JAX when that is 0 (the kernel can't emit a zero-row block).
+    packing = 32 // jax.dtypes.itemsize_bits(op.dtype)
+    if (sc_info.num_lanes // reduce_group_size) // packing < 1:
+        return False
+
     num_cores = 1 if single_sc else sc_info.num_cores
     num_subcores = sc_info.num_subcores
     row_wave_size = row_chunk_size * num_cores * num_subcores
@@ -284,11 +290,21 @@ def dense_gather_reduce(
   """
     if is_compatible(x, indices, reduce_group_size):
         K = x.shape[-1]
-        col_chunk_size = min(2048, K)
+        # The kernel slices the operand along the hidden (column) dimension,
+        # which carries a 128-wide lane tile in the HBM layout
+        # (#tpu.tiled<(4, 128)>). A column chunk that is not a multiple of 128
+        # produces a tpu.memref_slice whose size along the tiled dimension is
+        # not tile-aligned, which Mosaic rejects at compile time with
+        # "Slice sizes along tiled dimensions must be aligned to tiles" (e.g.
+        # hidden_size=2880 -> chunk 1440, and 1440 % 128 = 32). Require the
+        # chunk to be a multiple of the 128 lane tile; when 128 does not divide
+        # hidden_size (as for gpt-oss's 2880) no valid chunk exists and we fall
+        # back to the JAX implementation below.
+        col_chunk_size = (min(2048, K) // 128) * 128
         while col_chunk_size > 0:
-            if K % col_chunk_size == 0 and col_chunk_size % 32 == 0:
+            if K % col_chunk_size == 0:
                 break
-            col_chunk_size -= 32
+            col_chunk_size -= 128
         if col_chunk_size > 0:
             # Pallas kernel expects 1D weights
             return _sc_gather_reduce(

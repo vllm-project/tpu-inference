@@ -222,10 +222,15 @@ def create_benchmark_steps(case_data: Dict[str, Any],
     child_steps = []
     mlcompass_select_tests = _get_mlcompass_select_tests()
     for agent in ci_queues:
+        # Determine TPU version from queue name
+        tpu_version = "tpu7x" if "v7x" in agent else "tpu6e"
+
         # Build the environment for this specific step
         step_env = {
-            **combined_env, "ci_queue": agent,
-            "USE_PREBUILT_IMAGE": "1"
+            **combined_env,
+            "ci_queue": agent,
+            "USE_PREBUILT_IMAGE": "1",
+            "TPU_VERSION": tpu_version,
         }
 
         step_env["TARGET_CASE_NAME"] = case_name
