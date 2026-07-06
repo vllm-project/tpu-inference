@@ -328,8 +328,7 @@ class TpuPlatform(Platform):
                 parallel_config.distributed_executor_backend = MultiprocExecutor
         elif multihost_backend == "ray":
             # Check if we should use Ray Executor V2 (V1-multiproc compatible)
-            use_v2 = os.getenv("TPU_RAY_EXECUTOR_V2", "0") == "1"
-            if use_v2:
+            if vllm_envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND:
                 from tpu_inference.executors.ray_distributed_executor_v2 import \
                     RayDistributedExecutorV2
                 parallel_config.distributed_executor_backend = RayDistributedExecutorV2
@@ -360,7 +359,7 @@ class TpuPlatform(Platform):
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             allowed = ("TPUConnector", "TPUConnectorHMA",
-                       "TPUOffloadConnector")
+                       "TPUOffloadConnector", "RaidenOffloadConnector")
             if kv_transfer_config.kv_connector not in allowed:
                 raise ValueError(
                     f"Unsupported kv_connector "

@@ -59,15 +59,6 @@ ENV_VARS=(
   -e BENCH_DATASET="${BENCH_DATASET:-}"
   -e USE_BATCHED_RPA_KERNEL="${USE_BATCHED_RPA_KERNEL:-}"
   -e GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"
-  # For kernel tuning pipeline env vars
-  -e KERNEL_TUNING_CASE_SET_ID="${KERNEL_TUNING_CASE_SET_ID:-}"
-  -e KERNEL_TUNING_RUN_ID="${KERNEL_TUNING_RUN_ID:-}"
-  -e KERNEL_TUNING_KERNEL_NAME="${KERNEL_TUNING_KERNEL_NAME:-}"
-  -e KERNEL_TUNING_CASE_SET_DESC="${KERNEL_TUNING_CASE_SET_DESC:-}"
-  -e KERNEL_TUNING_TPU_VERSION="${KERNEL_TUNING_TPU_VERSION:-}"
-  -e KERNEL_TUNING_TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
-  -e KERNEL_TUNING_JOB_PRIORITY="${PRIORITY_KERNEL_TUNING:--10}"
-  -e KERNEL_TUNING_MAX_EXECUTION_MINUTES="${KERNEL_TUNING_MAX_EXECUTION_MINUTES:-20}"
   -e HOST_NAME="${HOST_NAME:-}"
   -e GCS_BUCKET="${GCS_BUCKET:-}"
 )
@@ -89,6 +80,13 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/setup_docker_env.sh"
 setup_environment $IMAGE_NAME
+
+# Kernel Tuning Environment Variables, tuning should be invoked through below pipelines
+# shellcheck disable=SC1091
+if [[ "${BUILDKITE_PIPELINE_NAME:-}" =~ (kernel-tuning|kernel-autotune) ]]; then
+  source "$SCRIPT_DIR/kernel_tuning_envs.sh"
+  ENV_VARS+=("${KERNEL_TUNING_ENV_VARS[@]}")
+fi
 
 TEST_SUITE_VARS=(
   -e BUILDKITE_ANALYTICS_TOKEN="${BUILDKITE_ANALYTICS_TOKEN:-}"
@@ -140,7 +138,7 @@ fi
 echo "[INFO] Pulling JAX Cache from GCS to local directory..."
 # Parallel CI builds‘ pushes are safe because JAX's compilation cache 
 # entries are content-addressed. Concurrent pushes are thus idempotent;
-gsutil -m rsync -d -r "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" || echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
+gcloud storage rsync --recursive --delete-unmatched-destination-objects "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" --no-user-output-enabled || echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
 
 # ==========================================
 # 2. Run Docker Container
@@ -202,7 +200,11 @@ set -e
 # ==========================================
 echo "[INFO] Docker finished with exit code ${DOCKER_EXIT_CODE}."
 
-echo "[INFO] Syncing local JAX Cache back to GCS..."
-gsutil -m rsync -r "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" || echo "[WARN] Failed to sync JAX Cache back to GCS."
+if [ $DOCKER_EXIT_CODE -eq 0 ]; then
+  echo "[INFO] Syncing local JAX Cache back to GCS..."
+  gcloud storage rsync --recursive "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" --no-user-output-enabled || echo "[WARN] Failed to sync JAX Cache back to GCS."
+else
+  echo "[WARN] Docker exited with non-zero code ${DOCKER_EXIT_CODE}. Skipping syncing local JAX Cache back to GCS to avoid potential cache corruption."
+fi
 
 exit $DOCKER_EXIT_CODE

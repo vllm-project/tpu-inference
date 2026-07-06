@@ -37,7 +37,6 @@ from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
 from vllm.model_executor.models.interfaces_base import is_pooling_model
 from vllm.platforms import current_platform
 from vllm.v1.outputs import PoolerOutput
@@ -67,7 +66,8 @@ from tpu_inference.models.vllm.experimental.vision_tower_jit import (
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
-from tpu_inference.runner.mm_encoder_jit_manager import MMEncoderJITManager
+from tpu_inference.runner.mm_encoder_jit_manager import (
+    MMEncoderJITManager, maybe_create_mm_encoder_jit_manager)
 
 logger = init_logger(__name__)
 
@@ -123,7 +123,7 @@ def _maybe_patch_for_deepseek_v4(vllm_config: VllmConfig):
     # in amd/model.py (not CustomOp/register_oot hook).
     # Swap the class symbol for the TPU subclass before the
     # model is built.
-    from tpu_inference.layers.vllm.custom_ops.deepseek_v4_attention import \
+    from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_attention import \
         patch_deepseek_v4_mla_cls
     patch_deepseek_v4_mla_cls()
 
@@ -352,6 +352,25 @@ class VllmModelWrapper:
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
+        # Slice rotary cos_sin_cache buffers to max_model_len to save HBM usage
+        # and reduce the per-step overhead of the XLA layout copy. Assumes rope
+        # positions are 1-D and bounded by max_model_len (standard text RoPE);
+        # MRoPE video positions are structural and can exceed max_model_len, so
+        # skip the slice there to avoid an out-of-bounds cos_sin_cache gather.
+        if envs.SLICE_ROPE_CACHE and \
+                not self.vllm_config.model_config.uses_mrope:
+            max_len = self.vllm_config.model_config.max_model_len
+            for key, val in list(params_and_buffers.items()):
+                if key.endswith("rotary_emb.cos_sin_cache"):
+                    arr = jax_view(val)
+                    if arr.shape[0] > max_len:
+                        params_and_buffers[key] = torch_view(arr[:max_len])
+                        logger.info(
+                            "Sliced rope cache %s rows %d -> %d. Assumes "
+                            "positions are 1-D and bounded by max_model_len "
+                            "(%d); MRoPE (video) can exceed it and is excluded",
+                            key, arr.shape[0], max_len, max_len)
+
         self._pooler: Pooler | None = self.model.pooler
 
         if self.vllm_config.model_config.is_multimodal_model:
@@ -379,8 +398,12 @@ class VllmModelWrapper:
         )
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         params = jax_view(params_and_buffers)
-        self._mm_encoder_jit_manager = self._maybe_create_mm_encoder_jit_manager(
-            params)
+        self._mm_encoder_jit_manager = maybe_create_mm_encoder_jit_manager(
+            vllm_config=self.vllm_config,
+            vllm_model=self.model.vllm_model,
+            vllm_runner=self.model,
+            params_and_buffers=params,
+        )
         return params, lora_manager
 
     def jit_step_func(self):
@@ -555,19 +578,6 @@ class VllmModelWrapper:
             self.step_fn_no_options = step_fun_no_options
             return step_fun_with_options
 
-    def _maybe_create_mm_encoder_jit_manager(
-            self, params) -> 'MMEncoderJITManager | None':
-        if not self.vllm_config.compilation_config.cudagraph_mm_encoder:
-            return None
-        if not supports_encoder_cudagraph(self.model.vllm_model):
-            return None
-        return MMEncoderJITManager(
-            vllm_config=self.vllm_config,
-            vllm_runner=self.model,
-            vllm_model=self.model.vllm_model,
-            params_and_buffers=params,
-        )
-
     def wrap_precompile_vision_encoder_fn(
         self,
         params: Any,
@@ -580,16 +590,7 @@ class VllmModelWrapper:
         if not self.vllm_config.model_config.is_multimodal_model:
             return None
         if self._mm_encoder_jit_manager is not None:
-
-            def jit_manager_precompile_fn(run_compilation):
-                for budget in self._mm_encoder_jit_manager.token_budgets:
-                    run_compilation(
-                        "mm_encoder_jit",
-                        self._mm_encoder_jit_manager._capture_budget_graph,
-                        budget,
-                        budget=budget)
-
-            return jit_manager_precompile_fn
+            return self._mm_encoder_jit_manager.precompile_vision_encoder
 
         embed_multimodal_fn = self.wrap_embed_multimodal_func()
         return maybe_precompile_vision_encoder_fn(params, embed_multimodal_fn,
@@ -828,11 +829,12 @@ def replace_set_lora(model):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
     ):
-        with torchax.default_env():
+        # Use torch.no_grad() to prevent RuntimeError during leaf variable in-place updates
+        with torchax.default_env(), torch.no_grad():
             self._original_set_lora(index, lora_a, lora_b)
 
     def _tpu_reset_lora(self, index: int):
-        with torchax.default_env():
+        with torchax.default_env(), torch.no_grad():
             self._original_reset_lora(index)
 
     for _, module in model.named_modules():

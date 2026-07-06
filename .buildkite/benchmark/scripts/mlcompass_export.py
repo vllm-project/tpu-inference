@@ -59,8 +59,15 @@ def read_metrics_file(file_path: str) -> dict[str, float]:
                 key = key.strip()
                 if key == 'AccuracyMetrics':
                     continue
+                # An empty value means the metric was absent from the benchmark
+                # log (e.g. ITL/TPOT are not emitted for output_len=1 prefill
+                # runs). Skip it rather than crashing on float('') or recording
+                # a misleading 0.
+                value = value.strip()
+                if not value:
+                    continue
                 # Strip extra spaces from key/value and convert value to float
-                metrics_dict[key] = float(value.strip())
+                metrics_dict[key] = float(value)
     return metrics_dict
 
 

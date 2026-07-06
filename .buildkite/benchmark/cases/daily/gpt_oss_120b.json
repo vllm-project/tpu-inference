@@ -24,7 +24,8 @@
         "env": {
           "VLLM_USE_V1": "1",
           "MODEL_IMPL_TYPE": "vllm",
-          "USE_MOE_EP_KERNEL": "0"
+          "USE_MOE_EP_KERNEL": "0",
+          "TPU_MULTIPROCESS_DP": "0"
         },
         "args": {
           "model": "unsloth/gpt-oss-120b-BF16",
@@ -175,7 +176,8 @@
         "env": {
           "VLLM_USE_V1": "1",
           "MODEL_IMPL_TYPE": "vllm",
-          "USE_MOE_EP_KERNEL": "0"
+          "USE_MOE_EP_KERNEL": "0",
+          "TPU_MULTIPROCESS_DP": "0"
         },
         "args": {
           "model": "openai/gpt-oss-120b",
@@ -227,7 +229,8 @@
         "env": {
           "VLLM_USE_V1": "1",
           "MODEL_IMPL_TYPE": "vllm",
-          "USE_MOE_EP_KERNEL": "0"
+          "USE_MOE_EP_KERNEL": "0",
+          "TPU_MULTIPROCESS_DP": "0"
         },
         "args": {
           "model": "openai/gpt-oss-120b",

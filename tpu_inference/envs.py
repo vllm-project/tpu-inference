@@ -44,7 +44,6 @@ if TYPE_CHECKING:
     FORCE_MOE_RANDOM_ROUTING: bool = False
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
-    RAGGED_GATED_DELTA_RULE_IMPL: str = "chunked_jax_pd"
     # SparseCore MoE gather kernel version used by fused_moe_gmm.
     # "v2" (default) = ragged_gather_v2; "v1" = legacy ragged_gather.
     RAGGED_GATHER_VERSION: str = "v2"
@@ -74,6 +73,7 @@ if TYPE_CHECKING:
     PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
+    SLICE_ROPE_CACHE: bool = False
 
 
 def env_with_choices(
@@ -331,15 +331,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_str_list("JITTED_MM_MODULE_KEYS"),
     "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
     env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
-    "RAGGED_GATED_DELTA_RULE_IMPL":
-    env_with_choices(
-        "RAGGED_GATED_DELTA_RULE_IMPL",
-        "chunked_jax_pd",
-        [
-            "chunked_jax_pd", "chunked_kernel_pd",
-            "chunked_kernel_p_recurrent_kernel_d"
-        ],
-    ),
     "RAGGED_GATHER_VERSION":
     env_with_choices("RAGGED_GATHER_VERSION", "v2", ["v1", "v2"]),
     "RAGGED_GATHER_REDUCE_VERSION":
@@ -425,6 +416,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use VMEM size as the threshold.
     "SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES":
     lambda: os.getenv("SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES", "auto"),
+    # Slice the rotary cos_sin_cache to max_model_len at load (saves HBM and a
+    # per-step layout copy of the full max_position_embeddings table). Applies
+    # to text / 1-D RoPE only; ignored for MRoPE models, whose (video)
+    # positions can exceed max_model_len.
+    "SLICE_ROPE_CACHE":
+    env_bool("SLICE_ROPE_CACHE", default=False),
     "MLA_TRANSPOSE_KV_CACHE":
     env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
 }

@@ -4,7 +4,7 @@ import math
 import os
 import tempfile
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import jax
 import jaxlib
@@ -157,7 +157,8 @@ class TPUWorker(WorkerBase):
                 profiler_config.torch_profiler_dir,
                 f"pprank_{self.rank}_ppworldsize_{self.pp_config.pp_world_size}"
             )
-            os.makedirs(self.profile_dir, exist_ok=True)
+            if not self.profile_dir.startswith("gs://"):
+                os.makedirs(self.profile_dir, exist_ok=True)
 
         use_jax_profiler_server = envs.USE_JAX_PROFILER_SERVER
         # Only one instance of profiler is allowed
@@ -389,9 +390,14 @@ class TPUWorker(WorkerBase):
         self.stats_logger = None
         if self.vllm_config.kv_transfer_config is not None:
             kv_transfer_config = self.vllm_config.kv_transfer_config
-            if (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+            is_offload_connector = (
+                (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+                 and kv_transfer_config.kv_connector_module_path
+                 == "tpu_inference.offload.tpu_offload_connector")
+                or (kv_transfer_config.kv_connector == "RaidenOffloadConnector"
                     and kv_transfer_config.kv_connector_module_path
-                    == "tpu_inference.offload.tpu_offload_connector"):
+                    == "tpu_inference.offload.raiden_offload_connector"))
+            if is_offload_connector:
 
                 # Start the background thread (logging every TPU_OFFLOAD_METRICS_LOG_INTERVAL seconds)
                 self.stats_logger = TPUKVCacheStatsLogger(
@@ -425,8 +431,14 @@ class TPUWorker(WorkerBase):
 
         if self.vllm_config.kv_transfer_config is not None:
             kv_transfer_config = self.vllm_config.kv_transfer_config
-            if kv_transfer_config.kv_connector == "TPUOffloadConnector" and \
-               kv_transfer_config.kv_connector_module_path == "tpu_inference.offload.tpu_offload_connector":
+            is_offload_connector = (
+                (kv_transfer_config.kv_connector == "TPUOffloadConnector"
+                 and kv_transfer_config.kv_connector_module_path
+                 == "tpu_inference.offload.tpu_offload_connector")
+                or (kv_transfer_config.kv_connector == "RaidenOffloadConnector"
+                    and kv_transfer_config.kv_connector_module_path
+                    == "tpu_inference.offload.raiden_offload_connector"))
+            if is_offload_connector:
                 # If kv offloading is enabled, we need to account for the memory used by the KV transfer buffer.
                 staging_buffer_pages = envs.TPU_OFFLOAD_NUM_STAGING_BLOCKS
 
@@ -619,3 +631,15 @@ class TPUWorker(WorkerBase):
 
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
+
+    def add_lora(self, lora_request: Any) -> bool:
+        return self.model_runner.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_runner.remove_lora(lora_id)
+
+    def list_loras(self) -> set[int]:
+        return self.model_runner.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)

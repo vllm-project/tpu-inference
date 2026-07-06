@@ -81,10 +81,10 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 try:
-    from api.jax.transfer_engine import TransferEngine as RaidenTransferEngine
+    from tpu_raiden.api.jax.kv_cache_manager import KVCacheManager
     _RAIDEN_IMPORT_ERROR = None
 except Exception as _exc:  # pylint: disable=broad-except
-    RaidenTransferEngine = None
+    KVCacheManager = None
     _RAIDEN_IMPORT_ERROR = _exc
 
 import tpu_inference.distributed.utils as dist_utils
@@ -418,7 +418,7 @@ class TPUConnectorScheduler():
             should not be freed until the request_id is returned from
             get_finished().
             Optional KVTransferParams to be included in the request outputs
-            returned by the engine.
+            returned by the kv_manager.
         """
         if not self.is_producer:
             return False, None
@@ -472,16 +472,16 @@ class TPUConnectorWorker:
         # based on topology_order_id
         self.node_id = 0
 
-        # The Raiden transfer engine, constructed in register_runner() once the
+        # The Raiden kv cache manager, constructed in register_runner() once the
         # runner's kv_caches exist. Replaces the jax.experimental.transfer
         # server + the ZMQ side channel + HostKVPool host staging.
-        self.engine = None
+        self.kv_manager = None
         # Consumer-side: req_ids for which a real pull (submit_load) was issued,
         # so the scheduler's later remote_block_ids=None notify step is a no-op.
         self._submitted: set[ReqId] = set()
 
         self.host_ip = dist_utils.get_host_ip()
-        # Bind the engine control socket to the same port the scheduler
+        # Bind the kv_manager control socket to the same port the scheduler
         # advertises as remote_port (TPU_KV_TRANSFER_PORT).
         self.kv_transfer_port = int(dist_utils.get_kv_transfer_port())
 
@@ -492,12 +492,12 @@ class TPUConnectorWorker:
                     f"kv_transfer_port={self.kv_transfer_port}")
 
     def register_runner(self, runner: TPUModelRunner):
-        if RaidenTransferEngine is None:
+        if KVCacheManager is None:
             raise ImportError(
-                "RaidenTransferEngine is not importable. Add the tpu-raiden "
-                "export to PYTHONPATH so 'api.jax.transfer_engine' resolves "
+                "KVCacheManager is not importable. Ensure tpu-raiden is correctly "
+                "installed or added to PYTHONPATH so 'tpu_raiden.api.jax.kv_cache_manager' resolves "
                 "(and set RAIDEN_PRELOAD_ENGINE=1 so sitecustomize.py preloads "
-                f"the engine .so first). Original error: {_RAIDEN_IMPORT_ERROR}"
+                f"the kv_cache_manager .so first). Original error: {_RAIDEN_IMPORT_ERROR}"
             )
         self.node_id = runner.topology_order_id
         self.runner = runner
@@ -512,38 +512,66 @@ class TPUConnectorWorker:
         # H2H transport sockets per transfer (1 = single socket). Higher values
         # parallelize the host-to-host pull to use more network bandwidth.
         parallelism = int(os.getenv("RAIDEN_TRANSPORT_PARALLELISM", "1"))
-        # In the new tpu-raiden engine API, parallelism is a per-pull argument
+        # In the new tpu-raiden kv_cache_manager API, parallelism is a per-pull argument
         # to start_read() rather than a constructor arg; stash it here.
         self._parallelism = parallelism
         skip_lock = os.getenv("RAIDEN_UNSAFE_SKIP_BUFFER_LOCK",
                               "true").lower() in ("1", "true", "yes")
 
-        # The engine holds the physical KV buffers. The model forward updates
-        # them in place (donation), so the engine always serves/writes the live
+        # The kv_cache_manager holds the physical KV buffers. The model forward updates
+        # them in place (donation), so the kv_cache_manager always serves/writes the live
         # KV without re-registration (see plan, Blocker B).
-        self.engine = RaidenTransferEngine(
+        self.kv_manager = KVCacheManager(
             kv_caches=kv_caches,
             local_control_port=self.kv_transfer_port,
             max_blocks=max_blocks,
             num_slots=num_slots,
             timeout_s=float(dist_utils.get_p2p_wait_pull_timeout()),
             unsafe_skip_buffer_lock=skip_lock,
+            # The PUSH (producer H2hWrite) fans out across the manager's ctor
+            # `parallelism` (default 4!)
+            parallelism=parallelism,
         )
         logger.info(
-            f"TPUConnector Worker {self.node_id} --> Raiden engine ready | "
+            f"TPUConnector Worker {self.node_id} --> Raiden kv_cache_manager ready | "
             f"ip={self.host_ip} | "
-            f"control_port={getattr(self.engine, 'local_control_port', None)} | "
-            f"data_port={getattr(self.engine, 'local_data_port', None)} | "
+            f"control_port={getattr(self.kv_manager, 'local_control_port', None)} | "
+            f"data_port={getattr(self.kv_manager, 'local_data_port', None)} | "
             f"max_blocks={max_blocks} | num_slots={num_slots} | "
             f"parallelism={parallelism}")
 
-    def _remote_endpoint(self, req_meta: "LoadMeta") -> str:
+    def _remote_endpoint(self, req_meta: "LoadMeta"):
+        """Resolve the producer endpoint(s) for start_read.
+
+        The producer's KVCacheManager binds one control port per NUMA
+        sub-manager, consecutively from the advertised base port
+        (TPU_KV_TRANSFER_PORT); each sub-manager serves a distinct shard set.
+        With >1 sub-manager we MUST route each local sub-manager to the producer
+        sub-manager that holds its shards. Passing a single "host:base" string
+        instead hits start_read's broadcast overload, so every local sub-manager
+        pulls from the base port (sub-manager 0) and the non-base sockets receive
+        the wrong shards -- silent ~50% KV corruption.
+
+        Returns a list of structured {endpoint, shards} descriptors when there is
+        more than one sub-manager (so start_read does shard-matched routing), and
+        a plain "host:port" string for the single-sub-manager case (unchanged).
+        Both prefill and decode run identical hardware, so producer sub-manager i
+        (port base+i) serves the same shards as our local sub-manager i.
+        """
         host = req_meta.remote_host
         port = req_meta.remote_port
         if isinstance(host, list):
             assert isinstance(port, list) and len(host) == len(port)
-            return f"{host[self.node_id]}:{port[self.node_id]}"
-        return f"{host}:{port}"
+            host = host[self.node_id]
+            port = port[self.node_id]
+        base = int(port)
+        local_eps = self.kv_manager.get_local_endpoints()
+        if len(local_eps) <= 1:
+            return f"{host}:{base}"
+        return [{
+            "endpoint": f"{host}:{base + i}",
+            "shards": list(ep["shards"])
+        } for i, ep in enumerate(local_eps)]
 
     def process_send_load(self, metadata: TPUConnectorMetadata):
         """
@@ -556,10 +584,8 @@ class TPUConnectorWorker:
             logger.info(
                 f"TPUConnector Worker {self.node_id} -->  reqs_to_send={reqs}")
         for req_id, req_meta in reqs.items():
-            # Producer: register the prefilled blocks so D can pull them.
-            # Replaces select_from_kv_caches + kv_transfer_server.await_pull.
-            self.engine.notify_for_read(req_id, req_meta.uuid,
-                                        req_meta.local_block_ids)
+            self.kv_manager.register_read(req_id, req_meta.uuid,
+                                          req_meta.local_block_ids)
 
         reqs = metadata.reqs_to_load
         if reqs:
@@ -570,14 +596,14 @@ class TPUConnectorWorker:
             remote_endpoint = self._remote_endpoint(req_meta)
             if req_meta.remote_block_ids is not None:
                 # Consumer: pull remote_block_ids straight into the local KV
-                # cache at local_block_ids. The engine does the H2H pull + H2D
+                # cache at local_block_ids. The kv_manager does the H2H pull + H2D
                 # write directly into kv_caches -- no separate insert_kv_chunks.
                 # Replaces kv_transfer_server.connect + conn.pull + insert.
                 if req_id in self._submitted:
                     # Pre-allocated blocks may be re-issued; submit only once.
                     continue
                 self._submitted.add(req_id)
-                self.engine.start_read(
+                self.kv_manager.start_read(
                     req_id=req_id,
                     uuid=req_meta.uuid,
                     remote_endpoint=remote_endpoint,
@@ -587,7 +613,7 @@ class TPUConnectorWorker:
                 )
             else:
                 # remote_block_ids is None => the async pull already finished
-                # (the engine wrote KV into local_block_ids and acked P during
+                # (the kv_manager wrote KV into local_block_ids and acked P during
                 # submit_load) or there was no pull (full local prefix cache).
                 # Nothing to do here: the producer is freed by the pull's own
                 # ack, or by timeout if no pull happened. Do NOT issue a 0-block
@@ -604,12 +630,12 @@ class TPUConnectorWorker:
         return None
 
     def get_finished(self) -> tuple[set[str], set[str]]:
-        # The engine's control plane reports producer completion (done_sending,
+        # The kv_manager's control plane reports producer completion (done_sending,
         # after D acks) and consumer completion (done_recving, after H2H+H2D).
         # Replaces the reqs_wait_pull/reqs_pulling bookkeeping + ZMQ side channel.
-        if self.engine is None:
+        if self.kv_manager is None:
             return set(), set()
-        done_sending, done_recving, failed_recving = self.engine.complete_read(
+        done_sending, done_recving, failed_recving = self.kv_manager.poll_stats(
         )
         if failed_recving:
             # Do NOT report failed receives as done_recving: vllm would then try

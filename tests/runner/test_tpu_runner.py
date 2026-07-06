@@ -176,8 +176,8 @@ class TestTPUJaxRunner:
         mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
 
         output = self.runner._prepare_inputs(scheduler_output)
-        assert len(output) == 10
-        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank = output
+        assert len(output) == 11
+        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank, tokens_indices_selector = output
         # assert it will create attention metadata for each layer.
         assert isinstance(attention_metadata, dict)
         assert len(attention_metadata) == 20
@@ -239,7 +239,8 @@ class TestTPUJaxRunner:
             MagicMock(),  # kv_caches
             mock_final_state,  # final_state
             MagicMock(),  # final_rng
-            mock_all_expert_indices)
+            mock_all_expert_indices,
+            None)
 
         # continue_decode now returns fixed-size stacked buffers; the caller
         # trims them with final_state.step_counter via a single device_get of
@@ -268,6 +269,7 @@ class TestTPUJaxRunner:
             None,
             None,
             np.array([0, 1, -1, -1, -1, -1, -1, -1], dtype=np.int32),
+            None,
             None,
             None,
             None,
@@ -354,7 +356,8 @@ class TestTPUJaxRunner:
             MagicMock(),  # kv_caches
             mock_final_state,  # final_state
             MagicMock(),  # final_rng
-            None  # all_expert_indices
+            None,  # all_expert_indices
+            None,
         )
 
         # Mock jax.device_get output for generated tokens
@@ -401,6 +404,7 @@ class TestTPUJaxRunner:
             attn_metadata,
             None,
             np.array([0, 1, 2, -1, -1, -1, -1, -1], dtype=np.int32),
+            None,
             None,
             None,
             None,
@@ -507,7 +511,8 @@ class TestTPUJaxRunner:
             MagicMock(),  # kv_caches
             mock_final_state,  # final_state
             MagicMock(),  # final_rng
-            None  # all_expert_indices
+            None,  # all_expert_indices
+            None,
         )
 
         # Mock jax.device_get output for generated tokens
@@ -562,7 +567,8 @@ class TestTPUJaxRunner:
             [0, 1, 4],  # logits_indices_selector
             None,
             None,
-            None)
+            None,
+            [0, 1, 4])
 
         # Execute target method
         from tpu_inference.runner.tpu_runner import TPUModelRunner
