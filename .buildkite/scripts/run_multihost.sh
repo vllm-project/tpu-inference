@@ -265,10 +265,16 @@ if [ "$#" -ge 1 ]; then
         
     else
         # Legacy mode (raw server/client commands passed)
-        VLLM_SERVE_CMD="$1"
-        shift
         if [ "$#" -gt 0 ]; then
-            CLIENT_BENCH_CMD="${*:-}"
+            VLLM_SERVE_CMD="$1"
+            echo "Using provided VLLM_SERVE_CMD: $VLLM_SERVE_CMD"
+            shift
+            if [ "$#" -gt 0 ]; then
+                CLIENT_BENCH_CMD="${*:-}"
+            fi
+        else
+            VLLM_SERVE_CMD=""
+            CLIENT_BENCH_CMD=""
         fi
     fi
 fi

@@ -33,7 +33,8 @@
               "MOE_ALL_GATHER_ACTIVATION_DTYPE": "fp8",
               "TPU_BACKEND_TYPE": "jax",
               "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
-              "RAY_LOG_TO_STDERR": "1"
+              "RAY_LOG_TO_STDERR": "1",
+              "AUTOSCALER_UPDATE_INTERVAL_S": "300"
             },
             "args": {
               "model-path": "gs://tpu-commons-ci/deepseek/r1",
