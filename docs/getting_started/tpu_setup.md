@@ -48,32 +48,38 @@ API (preferred). This section shows how to create TPUs using the queued resource
 
 ### Provision a Cloud TPU with the queued resource API
 
-Use the following command to provision a Cloud TPU. Replace the parameters in all caps with your own values.
+Select your desired TPU hardware and number of chips to generate the exact provisioning command. Be sure to replace the placeholder variables (like `PROJECT_ID` and `SERVICE_ACCOUNT`) with your own values before running.
 
-```bash
-gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
-  --node-id TPU_NAME \
-  --project PROJECT_ID \
-  --zone ZONE \
-  --accelerator-type ACCELERATOR_TYPE \
-  --runtime-version RUNTIME_VERSION \
-  --service-account SERVICE_ACCOUNT
-```
-
-| Parameter name     | Description                                                                                                                                                                                              |
-|--------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| QUEUED_RESOURCE_ID | The user-assigned ID of the queued resource request.                                                                                                                                                     |
-| TPU_NAME           | The user-assigned name of the TPU which is created when the queued resource request is allocated.                                                                                                        |
-| PROJECT_ID         | Your Google Cloud project                                                                                                                                                                                |
-| ZONE               | The Google Cloud zone where you want to create your Cloud TPU. The value you use depends on the version of TPUs you are using. For more information, see [TPU regions and zones]                                  |
-| ACCELERATOR_TYPE   |  Specify the TPU version, for example `v5litepod-4` specifies a v5e TPU with 4 cores, `v6e-1` specifies a v6e TPU with 1 core. For more information, see [TPU versions]. |
-| RUNTIME_VERSION    | The TPU VM runtime version to use. For example, use `v2-alpha-tpuv6e` for a VM loaded with one or more v6e TPU(s).  For more information, see [TPU software versions](https://docs.cloud.google.com/tpu/docs/runtimes)                                          |
-| SERVICE_ACCOUNT    | The email address for your service account. You can find it in the IAM Cloud Console under *Service Accounts*. For example: `tpu-service-account@<your_project_ID>.iam.gserviceaccount.com`              |
+<div class="command-generator-container" id="prov-generator">
+  <div class="cg-options-group">
+    <span class="cg-label">Hardware</span>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_hw" data-val="v7x">TPU v7x</button>
+    <button class="cg-btn active" role="button" aria-pressed="true" data-group="prov_hw" data-val="v6e">TPU v6e</button>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_hw" data-val="v5e">TPU v5e</button>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_hw" data-val="v5p">TPU v5p</button>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_hw" data-val="v4">TPU v4</button>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_hw" data-val="v3">TPU v3</button>
+  </div>
+  <div class="cg-options-group">
+    <span class="cg-label">Chips</span>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_chips" data-val="1">1</button>
+    <button class="cg-btn active" role="button" aria-pressed="true" data-group="prov_chips" data-val="4">4</button>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_chips" data-val="8">8</button>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_chips" data-val="16">16</button>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_chips" data-val="32">32</button>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_chips" data-val="64">64</button>
+  </div>
+  
+  <div id="prov-output-instructions" class="cg-instructions"></div>
+  <div class="cg-output-container">
+    <pre><code id="prov-output-command" class="language-shell"></code></pre>
+  </div>
+</div>
 
 Connect to your TPU VM using SSH:
 
 ```bash
-gcloud compute tpus tpu-vm ssh TPU_NAME --project PROJECT_ID --zone ZONE
+gcloud compute tpus tpu-vm ssh my-tpu-name --project PROJECT_ID --zone ZONE
 ```
 
 !!! note

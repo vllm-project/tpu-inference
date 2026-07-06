@@ -59,16 +59,16 @@ nav:
   - 'Getting Started':
     - 'TPU Setup': getting_started/tpu_setup.md
     - 'Installation': getting_started/installation.md
-    - 'Serving model': getting_started/quickstart.md
-  - 'Features and Usage':
+    - 'Quickstart': getting_started/quickstart.md
+  - 'Features & Usage':
     - 'Recommended Models': recommended_models.md
     - 'Recommended Features': recommended_features.md
-    - 'Deploying model on GCE':
-      - 'v7x setup (Ironwood)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM
-      - 'v6e setup (Trillium)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM
+    - 'Deploying on GCE':
+      - 'v7x setup (Ironwood)': deployment_guides/ironwood.md
+      - 'v6e setup (Trillium)': deployment_guides/trillium.md
     - 'Code Examples':
-      - 'Multi Modal Inference': https://github.com/vllm-project/tpu-inference/blob/main/examples/multi_modal_inference.py
-      - 'Offline LoRA': https://github.com/vllm-project/tpu-inference/blob/main/examples/offline_lora_inference.py
+      - 'Multi Modal Inference': api_and_code_examples/multi_modal_inference.md
+      - 'Offline LoRA': api_and_code_examples/offline_lora_inference.md
   - 'Developers Guides':
     - 'Contributing to vLLM TPU': developers_guide/contributing.md
     - 'Adding a New Model to CI': developers_guide/buildkite.md
@@ -104,7 +104,6 @@ markdown_extensions:
   - pymdownx.inlinehilite
   - pymdownx.snippets:
       check_paths: true
-  - pymdownx.snippets
   # For emoji and icons
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
@@ -118,9 +117,14 @@ markdown_extensions:
 
 extra_css:
   - mkdocs/stylesheets/extra.css
+  - mkdocs/stylesheets/interactive.css
+  - https://cdn.datatables.net/1.13.7/css/jquery.dataTables.min.css
 
 extra_javascript:
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
+  - https://code.jquery.com/jquery-3.7.1.min.js
+  - https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js
+  - mkdocs/javascripts/interactive.js
 
 use_directory_urls: true
 

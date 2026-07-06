@@ -2,102 +2,25 @@
 
 This guide provides instructions for installing and running `tpu-inference`.
 
-There are three ways to install `tpu-inference`:
+There are three ways to install `tpu-inference`: using `uv pip`, running a Docker container, or building from source.
 
-1. **[Install using pip via uv](#install-using-pip-via-uv)**
-2. **[Run with Docker](#run-with-docker)**
-3. **[Install from source](#install-from-source)**
+## Interactive Installation
 
-## Install using pip via uv
+Select your preferred installation method and hardware target to generate the exact setup command.
 
-We recommend using [uv](https://docs.astral.sh/uv/) (`uv pip install`) instead of standard `pip` as it improves installation speed.
-
-1. Create a working directory:
-
-    ```shell
-    mkdir ~/work-dir
-    cd ~/work-dir
-    ```
-
-1. Install `uv` and set up a Python virtual environment:
-
-    ```shell
-    # If you prefer standard pip, simply use `python3.12 -m venv vllm_env`
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    source $HOME/.local/bin/env
-    uv venv vllm_env --python 3.12
-    source vllm_env/bin/activate
-    ```
-
-1. Use the following command to install vllm-tpu using `uv` or `pip`:
-
-    ```shell
-    uv pip install vllm-tpu
-    # Or instead: pip install vllm-tpu
-    ```
-
-## Run with Docker
-
-Include the `--privileged`, `--net=host`, and `--shm-size=150gb` options to enable TPU interaction and shared memory.
-
-```shell
-export DOCKER_URI=vllm/vllm-tpu:latest
-sudo docker run -it --rm --name $USER-vllm --privileged --net=host \
-    -v /dev/shm:/dev/shm \
-    --shm-size 150gb \
-    -p 8000:8000 \
-    --entrypoint /bin/bash ${DOCKER_URI}
-```
-
-## Install from source
-
-For debugging or development purposes, you can install `tpu-inference` from source. `tpu-inference` is a plugin for `vllm`, so you need to install both from source.
-
-1. Install system dependencies:
-
-    ```shell
-    sudo apt-get update && sudo apt-get install -y libopenblas-base libopenmpi-dev libomp-dev
-    ```
-
-1. Clone the `vllm` and `tpu-inference` repositories:
-
-    ```shell
-    git clone https://github.com/vllm-project/tpu-inference.git
-    export VLLM_COMMIT_HASH="$(cat tpu-inference/.buildkite/vllm_lkg.version)"
-    git clone https://github.com/vllm-project/vllm.git
-    cd vllm
-    git checkout "${VLLM_COMMIT_HASH}"
-    cd ..
-    ```
-
-1. Install `uv` and set up a Python virtual environment:
-
-    ```shell
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    source $HOME/.local/bin/env
-    uv venv vllm_env --python 3.12
-    source vllm_env/bin/activate
-    ```
-
-1. Install `vllm` from source, targeting the TPU device:
-
-    NOTE: `tpu-inference` repo pins `vllm` revision in `vllm_lkg.version` file,
-    make sure to checkout proper revision beforehand.
-
-    ```shell
-    cd vllm
-    uv pip install -r requirements/tpu.txt --torch-backend=cpu
-    VLLM_TARGET_DEVICE="tpu" uv pip install -e . --no-build-isolation
-    cd ..
-    ```
-
-1. Install `tpu-inference` from source:
-
-    ```shell
-    cd tpu-inference
-    uv pip install -e .
-    cd ..
-    ```
+<div class="command-generator-container">
+  <div class="cg-options-group">
+    <span class="cg-label">Method</span>
+    <button class="cg-btn active" role="button" aria-pressed="true" data-group="method" data-val="uv_pip">uv pip</button>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="method" data-val="docker">Docker</button>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="method" data-val="source">Source</button>
+  </div>
+  
+  <div id="cg-output-instructions" class="cg-instructions"></div>
+  <div class="cg-output-container">
+    <pre><code id="cg-output-command" class="language-shell"></code></pre>
+  </div>
+</div>
 
 ## Verify Installation
 
