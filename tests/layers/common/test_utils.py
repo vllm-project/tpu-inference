@@ -76,6 +76,8 @@ class UtilsTest(jtu.JaxTestCase):
                 args, _ = mock_make_array.call_args
                 self.assertEqual(args[0], tensor.shape)
                 self.assertEqual(args[1], self.sharding)
+                self.assertEqual(mock_make_array.call_args.kwargs["dtype"],
+                                 tensor.dtype)
                 # Check that x_split contains device_put result
                 # Since we didn't mock device_put, it runs on the tensor slice.
                 # We can check the length of x_split

@@ -38,6 +38,23 @@ LOG_DIR=$HOME/logs
 mkdir -p "$LOG_DIR"
 rm -f "$LOG_DIR"/prefill.txt "$LOG_DIR"/decode.txt "$LOG_DIR"/benchmark.txt "$LOG_DIR"/proxy.txt "$LOG_DIR"/correctness.txt
 
+get_metadata_value() {
+  local path=$1
+  curl -fs -H "Metadata-Flavor: Google" \
+    "http://metadata.google.internal/computeMetadata/v1/${path}" 2>/dev/null || true
+}
+
+get_current_internal_ip() {
+  local metadata_ip
+  metadata_ip="$(get_metadata_value "instance/network-interfaces/0/ip")"
+  if [[ -n "$metadata_ip" ]]; then
+    echo "$metadata_ip"
+    return 0
+  fi
+
+  hostname -I | awk '{print $1}'
+}
+
 # Automatic Worker IP Discovery
 if [[ -z "${WORKER_IPS:-}" ]]; then
     echo "⚠️  WORKER_IPS not provided. Attempting to discover via gcloud..."
@@ -56,11 +73,25 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
             ALL_IPS_ARRAY=($ALL_IPS)
 
             if [[ -z "${HEAD_INTERNAL_IP:-}" ]]; then
-                HEAD_INTERNAL_IP="${ALL_IPS_ARRAY[0]}"
-                echo "   -> Discovered Head IP: $HEAD_INTERNAL_IP"
+                HEAD_INTERNAL_IP="$(get_current_internal_ip)"
+                echo "   -> Current VM internal IP: $HEAD_INTERNAL_IP"
             fi
 
-            WORKER_IPS_LIST=("${ALL_IPS_ARRAY[@]:1}")
+            CURRENT_IP_IN_SLICE=0
+            WORKER_IPS_LIST=()
+            for ip in "${ALL_IPS_ARRAY[@]}"; do
+                if [[ "$ip" == "$HEAD_INTERNAL_IP" ]]; then
+                    CURRENT_IP_IN_SLICE=1
+                elif [[ -n "$ip" ]]; then
+                    WORKER_IPS_LIST+=("$ip")
+                fi
+            done
+
+            if (( CURRENT_IP_IN_SLICE != 1 )); then
+                echo "❌ Current VM IP (${HEAD_INTERNAL_IP}) is not in discovered TPU endpoints: ${ALL_IPS_ARRAY[*]}"
+                exit 1
+            fi
+
             WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
             echo "   -> Discovered Worker IPs: $WORKER_IPS"
 
@@ -90,7 +121,7 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
     exit 1
 fi
 
-HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(hostname -I | awk '{print $1}')}"
+HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(get_current_internal_ip)}"
 
 # Always ensure ACCELERATOR_TYPE is populated if not specified in the environment
 if [[ -z "${ACCELERATOR_TYPE:-}" ]] && command -v gcloud &> /dev/null && command -v curl &> /dev/null; then
@@ -132,8 +163,43 @@ SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/de
 
 # Assemble all IP addresses (Head + Workers)
 IFS=',' read -r -a ALL_WORKERS_ARRAY <<< "${WORKER_IPS}"
-ALL_IPS_ARRAY=("$HEAD_INTERNAL_IP" "${ALL_WORKERS_ARRAY[@]}")
+ALL_IPS_ARRAY=("$HEAD_INTERNAL_IP")
+for ip in "${ALL_WORKERS_ARRAY[@]}"; do
+  if [[ -n "$ip" && "$ip" != "$HEAD_INTERNAL_IP" ]]; then
+    ALL_IPS_ARRAY+=("$ip")
+  fi
+done
 NUM_HOSTS=${#ALL_IPS_ARRAY[@]}
+
+echo "Discovered TPU hosts in launch order: ${ALL_IPS_ARRAY[*]}"
+echo "Current/local head IP: ${HEAD_INTERNAL_IP}"
+echo "Total TPU hosts available: ${NUM_HOSTS}"
+
+# Dynamic TP calculation based on accelerator type or TPU Version
+if [[ "${ACCELERATOR_TYPE:-}" == *"4t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-4"* ]]; then
+  CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
+elif [[ "${ACCELERATOR_TYPE:-}" == *"8t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-8"* ]]; then
+  CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
+elif [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
+  CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
+else
+  CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
+fi
+
+if [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
+  CORES_PER_CHIP="${CORES_PER_CHIP:-2}"
+else
+  CORES_PER_CHIP="${CORES_PER_CHIP:-1}"
+fi
+
+TOTAL_CHIPS=$(( NUM_HOSTS * CHIPS_PER_HOST ))
+echo "Calculated total TPU chips from hosts: ${TOTAL_CHIPS}"
+echo "Using TPU cores per chip: ${CORES_PER_CHIP}"
+
+if [[ "${TPU_VERSION:-}" == "tpu7x" && "${ACCELERATOR_TYPE:-}" == *"16"* && "$NUM_HOSTS" -lt 2 ]]; then
+  echo "❌ TPU7x-16 should expose multiple host VMs, but discovered ${NUM_HOSTS}: ${ALL_IPS_ARRAY[*]}"
+  exit 1
+fi
 
 # Specify # of hosts for each instance, or default to splitting hosts equally
 PREFILL_HOSTS_COUNT="${PREFILL_HOSTS_COUNT:-}"
@@ -186,20 +252,33 @@ DECODE_HEAD_IP="${DECODE_HOSTS[0]}"
 
 PREFILL_WORKER_IPS=("${PREFILL_HOSTS[@]:1}")
 DECODE_WORKER_IPS=("${DECODE_HOSTS[@]:1}")
-# Dynamic TP calculation based on accelerator type or TPU Version
-if [[ "${ACCELERATOR_TYPE:-}" == *"4t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-4"* ]]; then
-  CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
-elif [[ "${ACCELERATOR_TYPE:-}" == *"8t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-8"* ]]; then
-  CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
-elif [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
-  CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
-else
-  CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
-fi
-PREFILL_TENSOR_PARALLEL_SIZE=$(( PREFILL_HOSTS_COUNT * CHIPS_PER_HOST ))
-DECODE_TENSOR_PARALLEL_SIZE=$(( DECODE_HOSTS_COUNT * CHIPS_PER_HOST ))
+echo "Prefill hosts: ${PREFILL_HOSTS[*]}"
+echo "Decode hosts: ${DECODE_HOSTS[*]}"
+
+PREFILL_TENSOR_PARALLEL_SIZE=$(( PREFILL_HOSTS_COUNT * CHIPS_PER_HOST * CORES_PER_CHIP ))
+DECODE_TENSOR_PARALLEL_SIZE=$(( DECODE_HOSTS_COUNT * CHIPS_PER_HOST * CORES_PER_CHIP ))
 echo "Calculated PREFILL_TENSOR_PARALLEL_SIZE: $PREFILL_TENSOR_PARALLEL_SIZE"
 echo "Calculated DECODE_TENSOR_PARALLEL_SIZE: $DECODE_TENSOR_PARALLEL_SIZE"
+
+TPU_VISIBLE_CHIPS_LOCAL="$(seq -s, 0 $(( CHIPS_PER_HOST - 1 )))"
+SINGLE_HOST_TPU_ENV_ARGS=(
+  -e TPU_PROCESS_BOUNDS=1,1,1
+  -e TPU_CHIPS_PER_PROCESS_BOUNDS="1,${CHIPS_PER_HOST},1"
+  -e TPU_VISIBLE_CHIPS="${TPU_VISIBLE_CHIPS_LOCAL}"
+  -e CLOUD_TPU_TASK_ID=0
+  -e JAX_PROCESS_ID=0
+  -e JAX_NUM_PROCESSES=1
+)
+PREFILL_TPU_ENV_ARGS=()
+DECODE_TPU_ENV_ARGS=()
+if (( PREFILL_HOSTS_COUNT == 1 )); then
+  PREFILL_TPU_ENV_ARGS=("${SINGLE_HOST_TPU_ENV_ARGS[@]}")
+  echo "Prefill is a single-host Ray cluster; forcing single-process TPU env with TPU_VISIBLE_CHIPS=${TPU_VISIBLE_CHIPS_LOCAL}."
+fi
+if (( DECODE_HOSTS_COUNT == 1 )); then
+  DECODE_TPU_ENV_ARGS=("${SINGLE_HOST_TPU_ENV_ARGS[@]}")
+  echo "Decode is a single-host Ray cluster; forcing single-process TPU env with TPU_VISIBLE_CHIPS=${TPU_VISIBLE_CHIPS_LOCAL}."
+fi
 
 PREFILL_LOG_TAIL_PID=""
 DECODE_LOG_TAIL_PID=""
@@ -312,7 +391,7 @@ wait_for_server_remote() {
 vllm_server_process_alive() {
   local host=$1
   local port=$2
-  local process_check="pgrep -af 'vllm serve' | grep -q -- '--port ${port}'"
+  local process_check="pgrep -af '[v]llm serve' | grep -q -- '--port ${port}'"
 
   if [[ "$host" == "localhost" || "$host" == "127.0.0.1" || "$host" == "$HEAD_INTERNAL_IP" ]]; then
     docker exec node bash -c "$process_check" >/dev/null 2>&1
@@ -397,6 +476,19 @@ wait_for_ray_head() {
   return 1
 }
 
+dump_ray_resources() {
+  local host=$1
+  local label=$2
+  local ray_dump_cmd="import json, ray; ray.init(address='auto', ignore_reinit_error=True); print(json.dumps(ray.nodes(), indent=2, sort_keys=True))"
+
+  echo "--- Ray resources for ${label} cluster (${host})"
+  if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
+    docker exec node python3 -c "$ray_dump_cmd" || true
+  else
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec node python3 -c \"${ray_dump_cmd}\"" || true
+  fi
+}
+
 
 PROJECT="$(gcloud config get-value project)"
 GCR_REPO="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference"
@@ -429,6 +521,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${PREFILL_HEAD_IP}" \
   --head \
   "${HOST_HF_HOME}" \
+  "${PREFILL_TPU_ENV_ARGS[@]}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -457,6 +550,7 @@ for worker_ip in "${PREFILL_WORKER_IPS[@]}"; do
     # shellcheck disable=SC2087
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${PREFILL_HEAD_IP}' --worker '${HOST_HF_HOME}' \
+  ${PREFILL_TPU_ENV_ARGS[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -483,6 +577,7 @@ cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECODE_HEAD_IP}' --head '${HOST_HF_HOME}' \
+  ${DECODE_TPU_ENV_ARGS[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -512,6 +607,7 @@ for worker_ip in "${DECODE_WORKER_IPS[@]}"; do
     # shellcheck disable=SC2087
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECODE_HEAD_IP}' --worker '${HOST_HF_HOME}' \
+  ${DECODE_TPU_ENV_ARGS[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -530,13 +626,15 @@ done
 echo "--- Waiting for Ray Clusters to fully form..."
 sleep 120
 
-
+dump_ray_resources "$PREFILL_HEAD_IP" "Prefill"
+dump_ray_resources "$DECODE_HEAD_IP" "Decode"
 
 # -----------------------------------------------------------------
 # 3. Start vLLM Prefill & Decode Servers
 # -----------------------------------------------------------------
 echo "--- Starting vLLM Prefill server on Head Node locally"
 PREFILL_VLLM_PORT="8400"
+PREFILL_DOCKER_EXEC_ENV_ARGS="${PREFILL_TPU_ENV_ARGS[*]}"
 
 cat << EOF > /tmp/start_prefill.sh
 #!/bin/bash
@@ -544,6 +642,7 @@ set -x
 docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
+  ${PREFILL_DOCKER_EXEC_ENV_ARGS} \
   node bash -c "vllm serve ${MODEL} \
     --port ${PREFILL_VLLM_PORT} \
     --tensor-parallel-size ${PREFILL_TENSOR_PARALLEL_SIZE} \
@@ -559,6 +658,7 @@ bash /tmp/start_prefill.sh
 
 echo "--- Starting vLLM Decode server on remote Head Node (${DECODE_HEAD_IP})"
 DECODE_VLLM_PORT="9400"
+DECODE_DOCKER_EXEC_ENV_ARGS="${DECODE_TPU_ENV_ARGS[*]}"
 
 cat << EOF > /tmp/start_decode.sh
 #!/bin/bash
@@ -566,6 +666,7 @@ set -x
 docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
+  ${DECODE_DOCKER_EXEC_ENV_ARGS} \
   node bash -c "vllm serve ${MODEL} \
     --port ${DECODE_VLLM_PORT} \
     --tensor-parallel-size ${DECODE_TENSOR_PARALLEL_SIZE} \
@@ -611,21 +712,21 @@ docker run -d \
 
 echo "--- Starting Toy Proxy Server inside container..."
 docker exec -d disagg-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/toy_proxy_server.py \
-    --host localhost \
+    --host 0.0.0.0 \
     --port 8000 \
     --prefiller-hosts localhost \
     --prefiller-ports ${PREFILL_VLLM_PORT} \
     --decoder-hosts ${DECODE_HEAD_IP} \
     --decoder-ports ${DECODE_VLLM_PORT} > /root/logs/proxy.txt 2>&1"
 
-wait_for_server_remote "localhost" 8000 "Toy Proxy Server" 600
+wait_for_server_remote "127.0.0.1" 8000 "Toy Proxy Server" 600
 
 if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
     echo "--- Running Benchmark Test inside container..."
     timeout "${BENCHMARK_TIMEOUT_SECONDS:-1800}" \
     docker exec disagg-proxy-benchmark /bin/bash -c "vllm bench serve \
         --backend vllm \
-        --host localhost \
+        --host 127.0.0.1 \
         --port 8000 \
         --model ${MODEL} \
         --dataset-name random \
@@ -646,7 +747,7 @@ if [ "$TEST_MODE" = "2" ] || [ "$TEST_MODE" = "3" ]; then
     timeout "${CORRECTNESS_TIMEOUT_SECONDS:-1800}" \
     docker exec disagg-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py \
         --baseline_url http://${DECODE_HEAD_IP}:${DECODE_VLLM_PORT}/v1/completions \
-        --disagg_url http://localhost:8000/v1/completions \
+        --disagg_url http://127.0.0.1:8000/v1/completions \
         --model ${MODEL} \
         --num_requests ${NUM_PROMPTS} \
         --input_length ${INPUT_LEN} \

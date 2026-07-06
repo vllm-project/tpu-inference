@@ -121,7 +121,7 @@ steps:
   # -----------------------------------------------------------------
   # Demo 4: Ray-based multi-host inference
   # Mirrors test_26 in pipeline_jax.yml.
-  # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
+  # Uses run_multihost.sh to serve a large model across a v7x-16 slice.
   # Requires a 16-chip queue (tpu_v7x_16_queue).
   # -----------------------------------------------------------------
   - label: "tpu7x [demo] Ray-based multi-host"
