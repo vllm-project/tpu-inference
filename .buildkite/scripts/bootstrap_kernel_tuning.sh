@@ -93,7 +93,7 @@ echo "--- :pipeline: Uploading pipeline_kernel_tuning.yml"
 echo "Pipeline env vars:"
 echo "  KERNEL_TUNING_CASE_SET_ID=${KERNEL_TUNING_CASE_SET_ID:-}"
 echo "  KERNEL_TUNING_RUN_ID=${KERNEL_TUNING_RUN_ID:-}"
-echo "  KERNEL_TUNING_KERNEL_NAME=${KERNEL_TUNING_KERNEL_NAME:-}"
+echo "  KERNEL_TUNING_KERNEL_TUNER_NAME=${KERNEL_TUNING_KERNEL_TUNER_NAME:-}"
 echo "  KERNEL_TUNING_CASE_SET_DESC=${KERNEL_TUNING_CASE_SET_DESC:-}"
 echo "  KERNEL_TUNING_TPU_VERSION=${KERNEL_TUNING_TPU_VERSION:-}"
 echo "  KERNEL_TUNING_TPU_CORES=${KERNEL_TUNING_TPU_CORES:-}"
@@ -106,5 +106,7 @@ TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
 set_jax_envs "${TPU_VERSION}" "${TPU_CORES}"
 buildkite-agent pipeline upload .buildkite/pipeline_kernel_tuning.yml
 set_jax_envs "unset" ""
+
+buildkite-agent pipeline upload .buildkite/pipeline_build.yml
 
 echo "--- Buildkite Kernel Tuning Bootstrap Finished"

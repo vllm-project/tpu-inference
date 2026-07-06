@@ -304,7 +304,7 @@ for model_name in $model_list; do
             max_batched_tokens=1024
             served_name=moonshotai/Kimi-K2.6
             TARGET_ACCURACY="0.87"
-            current_serve_args+=(--kv-cache-dtype=fp8 --gpu-memory-utilization 0.977 --limit-mm-per-prompt='{"image": 0, "video": 0, "vision_chunk": 0}' )
+            current_serve_args+=(--kv-cache-dtype=fp8 --gpu-memory-utilization 0.95 --limit-mm-per-prompt='{"image": 0, "video": 0, "vision_chunk": 0}' )
             current_serve_args+=(--served-model-name "${served_name}" --load-format=runai_streamer --enable-expert-parallel --trust-remote-code --kv-cache-dtype=fp8 --additional-config '{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "tensor_parallelism": '"${current_device_count}"'}}}')
         fi
     fi
@@ -332,6 +332,7 @@ for model_name in $model_list; do
     --dataset-path "$dataset_path" \
     --num-prompts "$num_prompts" \
     --mmlu-output-len "${mmlu_output_len}" \
+    --trust-remote-code \
     --run-eval 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
 
     checkThroughputAndAccuracy

@@ -176,6 +176,7 @@ class InputBatch:
         # for pooling models
         self.pooling_params: dict[str, PoolingParams] = {}
         self.pooling_states: dict[str, PoolingStates] = {}
+        self.has_mamba_layers = False
 
     def init_mamba_pools(self, mamba_num_blocks: int) -> None:
         """Reinitialize mamba slot pools with the actual device block count.

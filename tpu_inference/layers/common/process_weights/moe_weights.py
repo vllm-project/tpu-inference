@@ -913,10 +913,18 @@ def _requant_expert_batch_fn(
     w2_pad_widths = ((0, 0), (0, hidden_pad), (0, inter_pad))
     w2_fp32 = jnp.pad(w2_fp32, w2_pad_widths)
 
-    w13_q_b, w13_s_new_b = quantize_tensor(desired_quant_dtype, w13_fp32, 2,
-                                           w13_block_size)
-    w2_q_b, w2_s_new_b = quantize_tensor(desired_quant_dtype, w2_fp32, 2,
-                                         w2_block_size)
+    clip_pct = envs.MOE_REQUANTIZE_CLIP_PERCENTILE
+
+    w13_q_b, w13_s_new_b = quantize_tensor(desired_quant_dtype,
+                                           w13_fp32,
+                                           2,
+                                           w13_block_size,
+                                           clip_percentile=clip_pct)
+    w2_q_b, w2_s_new_b = quantize_tensor(desired_quant_dtype,
+                                         w2_fp32,
+                                         2,
+                                         w2_block_size,
+                                         clip_percentile=clip_pct)
     return carry, (w13_q_b, w13_s_new_b, w2_q_b, w2_s_new_b)
 
 

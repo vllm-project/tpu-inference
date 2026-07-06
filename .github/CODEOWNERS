@@ -28,7 +28,7 @@
 
 # Model layers
 /tpu_inference/layers/ @kyuyeunk @lk-chen @jrplatin @gxd3
-/tpu_inference/layers/jax/ @jrplatin @gpolovets1
+/tpu_inference/layers/jax/ @jrplatin @gpolovets1 @lk-chen
 /tpu_inference/layers/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
 /tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v4/ @gxd3 @a1yssan13 @inucool12
 
@@ -42,12 +42,12 @@
 /tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
 /tpu_inference/runner/tpu_runner.py @jrplatin @kyuyeunk @wenxindongwork @sixiang-google
 /tpu_inference/runner/persistent_batch_manager.py @jrplatin @wenxindongwork
-/tpu_inference/executors/ @sixiang-google @mrjunwan-lang
+/tpu_inference/executors/ @sixiang-google @mrjunwan-lang @Lumosis
 /tpu_inference/core/ @sixiang-google @mrjunwan-lang @wenxindongwork
 /tpu_inference/layers/common/sharding.py @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
 
 # Worker Management
-/tpu_inference/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
+/tpu_inference/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork @Lumosis
 
 # Speculative Decoding
 /tpu_inference/spec_decode/ @Lumosis @gxd3
@@ -55,7 +55,7 @@
 /tpu_inference/runner/speculative_decoding_manager.py @Lumosis @gxd3
 
 # Platform Support
-/tpu_inference/platforms/ @sixiang-google @mrjunwan-lang
+/tpu_inference/platforms/ @sixiang-google @mrjunwan-lang @Lumosis
 
 # LoRA and Adapters
 /tpu_inference/lora/ @vanbasten23 @kyuyeunk
@@ -79,6 +79,7 @@
 /tests/distributed/ @mrjunwan-lang @sixiang-google
 /tests/executors/ @sixiang-google @mrjunwan-lang
 /tests/kernels/ @kyuyeunk @bythew3i @a1yssan13
+/tests/kernels/deepseek_v4 @gxd3 @a1yssan13 @inucool12
 /tests/layers/ @kyuyeunk @lk-chen
 /tests/lora/ @vanbasten23 @kyuyeunk
 /tests/models/ @kyuyeunk @lk-chen

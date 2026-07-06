@@ -29,7 +29,8 @@ from jax.sharding import Sharding
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import envs
-from tpu_inference.kernels.flash_attention.kernel import flash_attention
+from tpu_inference.kernels.flash_attention.kernel import (
+    encoder_only_flash_attention, flash_attention)
 from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
@@ -67,16 +68,19 @@ def sharded_flash_attention(
     sm_scale: Optional[float] = None,
     vmem_limit_bytes: int | None = None,
     use_attention_bias: bool = False,
+    batch_axis="data",
+    head_axis="model",
 ) -> Callable[..., Any]:
     if use_attention_bias:
         in_specs = (
-            P("data", "model", None, None),  # q
-            P("data", "model", None, None),  # k
-            P("data", "model", None, None),  # v
-            P("data", "model", None, None),  # attention_bias
-            P("data", None),  # segment_ids (B matches q's B, so shard 'data')
+            P(batch_axis, head_axis, None, None),  # q
+            P(batch_axis, head_axis, None, None),  # k
+            P(batch_axis, head_axis, None, None),  # v
+            P(batch_axis, head_axis, None, None),  # attention_bias
+            P(batch_axis,
+              None),  # segment_ids (B matches q's B, so shard 'data')
         )
-        out_specs = P("data", "model", None, None)
+        out_specs = P(batch_axis, head_axis, None, None)
 
         def _flash_attention_use_ab(q, k, v, attention_bias, segment_ids):
             return flash_attention(q,
@@ -91,12 +95,13 @@ def sharded_flash_attention(
         attn_fn = _flash_attention_use_ab
     else:
         in_specs = (
-            P("data", "model", None, None),  # q
-            P("data", "model", None, None),  # k
-            P("data", "model", None, None),  # v
-            P("data", None),  # segment_ids (B matches q's B, so shard 'data')
+            P(batch_axis, head_axis, None, None),  # q
+            P(batch_axis, head_axis, None, None),  # k
+            P(batch_axis, head_axis, None, None),  # v
+            P(batch_axis,
+              None),  # segment_ids (B matches q's B, so shard 'data')
         )
-        out_specs = P("data", "model", None, None)
+        out_specs = P(batch_axis, head_axis, None, None)
 
         def _flash_attention(q, k, v, segment_ids):
             return flash_attention(q,
@@ -115,6 +120,43 @@ def sharded_flash_attention(
                       in_specs=in_specs,
                       out_specs=out_specs,
                       check_vma=False))
+
+
+def sharded_encoder_only_attention(
+    mesh: Mesh,
+    causal: bool = True,
+    sm_scale: Optional[float] = None,
+    sliding_window: Optional[int] = None,
+    vmem_limit_bytes: int | None = None,
+) -> Callable[..., Any]:
+    in_specs = (
+        P(None, "model", None),  # q: [q_len, num_heads, head_size]
+        P(None, "model", None),  # k: [k_len, num_kv_heads, head_size]
+        P(None, "model", None),  # v: [k_len, num_kv_heads, head_size]
+        P(),  # seq_lens: [batch_size]
+    )
+    out_specs = P(None, "model", None)
+
+    def _flash_attention(q, k, v, seq_lens):
+        return encoder_only_flash_attention(
+            q,
+            k,
+            v,
+            seq_lens,
+            causal=causal,
+            sm_scale=sm_scale,
+            sliding_window=sliding_window,
+            vmem_limit_bytes=vmem_limit_bytes,
+        )
+
+    return jax.jit(
+        jax.shard_map(
+            _flash_attention,
+            mesh=mesh,
+            in_specs=in_specs,
+            out_specs=out_specs,
+            check_vma=False,
+        ))
 
 
 def sharded_paged_attention(
@@ -540,12 +582,20 @@ def mla_attention(
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
+        dp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA)
         batched_decode_tuning_key = TuningKey(
             case="batched_decode",
             max_num_tokens=q.shape[1],
             actual_num_q_heads=q.shape[0],
             actual_lkv_dim=q.shape[2],
             actual_r_dim=q_rope.shape[2],
+            kv_dtype=cache.dtype.name,
+            q_dtype=q.dtype.name,
+            total_num_pages=cache.shape[0],
+            page_size_per_kv_packing=cache.shape[1],
+            kv_packing=cache.shape[2],
+            max_num_seqs=md.padded_num_reqs // dp_size,
+            pages_per_seq=args[1].shape[0] // args[0].shape[0],
         )
         batched_decode_tuned_params = get_tuned_params(
             batched_decode_tuning_key)
@@ -571,7 +621,8 @@ def mla_attention(
             decode_batch_size=decode_batch_size,
             q_scale=q_scale,
             k_scale=k_scale,
-            v_scale=v_scale)
+            v_scale=v_scale,
+            transpose_kv_cache=envs.MLA_TRANSPOSE_KV_CACHE)
 
         return new_cache, out
 
@@ -585,3 +636,29 @@ def mla_attention(
                                         md.query_start_loc,
                                         md.request_distribution)
     return kv_cache, output_TNA
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "mesh",
+        "sm_scale",
+        "sliding_window",
+    ),
+)
+def encoder_only_attention(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    attention_metadata: AttentionMetadata,
+    mesh: Mesh,
+    sm_scale: float | None = None,
+    sliding_window: int | None = None,
+) -> jax.Array:
+    kernel = sharded_encoder_only_attention(
+        mesh=mesh,
+        causal=False,
+        sm_scale=sm_scale,
+        sliding_window=sliding_window,
+    )
+    return kernel(q, k, v, attention_metadata.seq_lens)

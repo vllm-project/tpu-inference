@@ -195,7 +195,8 @@
           "limit-mm-per-prompt": "{\"image\":8,\"video\":0}",
           "allowed-local-media-path": "/workspace/tpu_inference/artifacts/dataset",
           "disable-chunked-mm-input": true,
-          "mm-processor-kwargs": "{\"size\": {\"longest_edge\": 262144, \"shortest_edge\": 3136}}"
+          "mm-processor-kwargs": "{\"size\": {\"longest_edge\": 262144, \"shortest_edge\": 3136}}",
+          "compilation-config": "{\"cudagraph_mm_encoder\": true}"
         }
       },
       "client_command_options": {

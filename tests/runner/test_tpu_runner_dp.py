@@ -183,7 +183,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         result = self.runner._prepare_inputs(scheduler_output)
 
-        assert len(result) == 10
+        assert len(result) == 11
 
     @patch('jax.device_put', side_effect=lambda x, y: x)
     @patch('tpu_inference.runner.tpu_runner.NamedSharding')
@@ -210,11 +210,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         result = self.runner._prepare_inputs(scheduler_output)
 
         # Basic assertions
-        assert len(result) == 10
+        assert len(result) == 11
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
-         padded_num_reqs, req_ids_dp,
-         padded_num_scheduled_tokens_per_dp_rank) = result
+         padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank,
+         tokens_indices_selector) = result
 
         # Verify utility functions were called
         mock_runner_utils.get_padded_token_len.assert_called()
@@ -275,11 +275,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         result = self.runner._prepare_inputs(scheduler_output)
 
         # Basic assertions
-        assert len(result) == 10
+        assert len(result) == 11
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
-         padded_num_reqs, req_ids_dp,
-         padded_num_scheduled_tokens_per_dp_rank) = result
+         padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank,
+         tokens_indices_selector) = result
 
         # Verify utility functions were called
         mock_runner_utils.get_padded_token_len.assert_called()
@@ -310,7 +310,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
              padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
              attn_padded_num_reqs, padded_total_num_scheduled_tokens,
              padded_num_reqs_per_dp_rank, logits_indices_selector,
-             max_num_reqs_per_dp_rank) = result
+             tokens_indices_selector, max_num_reqs_per_dp_rank) = result
 
             # 1. req_ids_dp: Dictionary mapping DP rank to request IDs
             assert isinstance(req_ids_dp, dict)
@@ -388,7 +388,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
              padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
              attn_padded_num_reqs, padded_total_num_scheduled_tokens,
              padded_num_reqs_per_dp_rank, logits_indices_selector,
-             max_num_reqs_per_dp_rank) = result
+             tokens_indices_selector, max_num_reqs_per_dp_rank) = result
 
             # 1. req_ids_dp
             assert isinstance(req_ids_dp, dict)
@@ -465,7 +465,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
             result = self.runner._prepare_input_metadata(scheduler_output)
 
             (req_ids_dp, req_indices_dp, _, _, _, _, _, _, _, _,
-             logits_indices_selector, _) = result
+             logits_indices_selector, _, _) = result
 
             # Verify request distribution
             assert req_ids_dp[0] == ["req2"]  # rank 0: req2 (index 1)
@@ -552,8 +552,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
         result = self.runner._prepare_inputs(scheduler_output)
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
-         padded_num_reqs, req_ids_dp,
-         padded_num_scheduled_tokens_per_dp_rank) = result
+         padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank,
+         tokens_indices_selector) = result
         # 1. Verify input_ids content
         expected_input_ids = np.zeros(16, dtype=np.int32)
         expected_input_ids[:2] = [1006, 1007]
@@ -649,8 +649,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
         result = self.runner._prepare_inputs(scheduler_output)
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
-         padded_num_reqs, req_ids_dp,
-         padded_num_scheduled_tokens_per_dp_rank) = result
+         padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank,
+         tokens_indices_selector) = result
 
         # 1. Verify input_ids
         expected_input_ids = np.zeros(16, dtype=np.int32)
@@ -743,8 +743,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
         result = self.runner._prepare_inputs(scheduler_output)
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
-         padded_num_reqs, req_ids_dp,
-         padded_num_scheduled_tokens_per_dp_rank) = result
+         padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank,
+         tokens_indices_selector) = result
 
         # Verify request_distribution
         # DP rank 0: req1 (decode), req2 (decode) -> [2, 2, 2]
@@ -806,8 +806,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
         result = self.runner._prepare_inputs(scheduler_output)
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
-         padded_num_reqs, req_ids_dp,
-         padded_num_scheduled_tokens_per_dp_rank) = result
+         padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank,
+         tokens_indices_selector) = result
 
         # Verify request_distribution
         # Both ranks have only decode requests

@@ -59,8 +59,16 @@ class JaxModule(nnx.Module):
         for name, value in self.__dict__.items():
             if isinstance(value, JaxModule):
                 yield name, value
-            elif isinstance(value, list) or isinstance(value, nnx.List):
-                yield name, JaxModuleList(value)
+            elif isinstance(value, (list, nnx.List)):
+                # Only treat a list as a submodule container if it actually
+                # holds modules (or nested module lists). Plain data lists —
+                # e.g. a layer's ``output_sizes`` on a merged linear — must not
+                # be mistaken for children, otherwise named_parameters() /
+                # named_modules() would try to recurse into ints.
+                if any(
+                        isinstance(item, (JaxModule, list, nnx.List))
+                        for item in value):
+                    yield name, JaxModuleList(value)
 
     def children(self) -> Iterator["JaxModule | JaxModuleList"]:
         """Yields immediate child modules.

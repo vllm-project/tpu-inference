@@ -26,6 +26,7 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.models.jax.gemma4_mtp import (Gemma4MTPDecoderLayer,
                                                  Gemma4MTPForCausalLM)
 
@@ -97,6 +98,9 @@ class TestGemma4MTPForCausalLM:
         vllm_config.load_config.load_format = load_format
         vllm_config.load_config.num_layers_to_load_for_test = 4
         vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.parallel_config.enable_expert_parallel = False
 
         # For HF loader testing, we redirect the model to point to the real assistant draft checkpoint
@@ -130,7 +134,9 @@ class TestGemma4MTPForCausalLM:
         model_config = vllm_config.model_config
         kv_dtype = jnp.bfloat16
 
-        with jax.set_mesh(mesh):
+        vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
+
+        with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
             model = Gemma4MTPForCausalLM(vllm_config, rng, mesh)
 
         # Load weights
@@ -177,8 +183,9 @@ class TestGemma4MTPForCausalLM:
 
             # Populate centroids ordering if enabled to avoid sparse projection crashes
             if use_ordered_embeddings and model.masked_embedding is not None:
-                model.masked_embedding.token_ordering.value = jnp.arange(
-                    draft_hf_config.text_config.vocab_size, dtype=jnp.int32)
+                model.masked_embedding.token_ordering.set_value(
+                    jnp.arange(draft_hf_config.text_config.vocab_size,
+                               dtype=jnp.int32))
 
             with jax.set_mesh(mesh):
                 _, jax_output, _ = layer_0(
