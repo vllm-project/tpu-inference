@@ -64,8 +64,9 @@ class Mxfp4FusedMoEMethod(QuantizeMethodBase):
                      original_load_weights_fn,
                      weights: Iterable[tuple[str, torch.Tensor]]) -> set:
         """Stage the six GPT-OSS MXFP4 expert tensors on the layer."""
-        # FP8 delegates to `original_load_weights_fn`, but here that hook is
-        # just a stub, so we load all six expert tensors ourselves.
+        # FP8 delegates to `original_load_weights_fn`, but that loader expects
+        # per-expert `.<expert_id>.<param>.weight` tensors; GPT-OSS checkpoints
+        # ship whole packed (E, ...) tensors, so we load all six ourselves.
         loaded_names = set()
         unexpected = []
         for torch_name, torch_weight in weights:

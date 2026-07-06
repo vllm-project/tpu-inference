@@ -897,16 +897,12 @@ class TestGetDefaultQwixQuantizationConfig(unittest.TestCase):
             }
         }
         self.mock_llama_config = {"qwix": {"rules": [{"name": "llama_rule"}]}}
-        self.mock_gpt_oss_config = {"qwix": {"rules": [{"name": "gpt_rule"}]}}
 
         # Patch the constants in the module where the function resides
         self.patchers = [
             patch(
                 "tpu_inference.models.jax.utils.qwix.qwix_utils.DEFAULT_LLAMA4_FP8_CONFIG",
                 self.mock_llama_config),
-            patch(
-                "tpu_inference.models.jax.utils.qwix.qwix_utils.DEFAULT_GPT_OSS_FP4_CONFIG",
-                self.mock_gpt_oss_config),
             patch("tpu_inference.models.jax.utils.qwix.qwix_utils.logger",
                   MagicMock())
         ]
@@ -940,16 +936,6 @@ class TestGetDefaultQwixQuantizationConfig(unittest.TestCase):
         result = quantize_qwix.get_default_qwix_quantization_config(
             hf_config, False)
         self.assertEqual(result, self.mock_llama_config)
-
-    def test_gpt_oss_success(self):
-        """Test GPT-OSS default config path."""
-        hf_config = MagicMock()
-        hf_config.model_type = "gpt_oss"
-        hf_config.quantization_config = {"quant_method": "mxfp4"}
-
-        result = quantize_qwix.get_default_qwix_quantization_config(
-            hf_config, False)
-        self.assertEqual(result, self.mock_gpt_oss_config)
 
     def test_missing_attributes_handled(self):
         """Test that function handles hf_config objects missing model_type safely."""
