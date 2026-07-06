@@ -75,6 +75,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.deepseek_v3 import DeepseekV3ForCausalLM
     from tpu_inference.models.jax.gemma4_mm import \
         Gemma4ForConditionalGeneration
+    from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM
     from tpu_inference.models.jax.gemma4_mtp import Gemma4MTPForCausalLM
     from tpu_inference.models.jax.gpt_oss import GptOss
     from tpu_inference.models.jax.llama3 import LlamaForCausalLM
@@ -99,6 +100,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
     _MODEL_REGISTRY[
         "Gemma4ForConditionalGeneration"] = Gemma4ForConditionalGeneration
+    _MODEL_REGISTRY["Gemma4ForCausalLM"] = Gemma4ForCausalLM
     _MODEL_REGISTRY["Gemma4MTPModel"] = Gemma4MTPForCausalLM
 
     architectures = getattr(config, "architectures", [])

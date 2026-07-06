@@ -1033,6 +1033,13 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
     }
     WeightLoader = StandardWeightLoader
 
+    ignore_unexpected_prefixes = [
+        "model.audio_tower.",
+        "model.vision_tower.",
+        "model.multi_modal_projector.",
+        "model.embed_audio.",
+    ]
+    
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:
         self.vllm_config = vllm_config

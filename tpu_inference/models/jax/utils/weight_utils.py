@@ -1073,7 +1073,8 @@ class LoadableWithIterator:
             self,
             pytorch_pooler=pytorch_pooler,
             skip_prefixes=(["lm_head"]
-                           if not hasattr(self, 'lm_head') else None))
+                           if not hasattr(self, 'lm_head') else None),
+            ignore_unexpected_prefixes=getattr(self, "ignore_unexpected_prefixes", None))
         return loader.load_weights(weights)
 
 
