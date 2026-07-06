@@ -201,9 +201,43 @@ DECODE_TENSOR_PARALLEL_SIZE=$(( DECODE_HOSTS_COUNT * CHIPS_PER_HOST ))
 echo "Calculated PREFILL_TENSOR_PARALLEL_SIZE: $PREFILL_TENSOR_PARALLEL_SIZE"
 echo "Calculated DECODE_TENSOR_PARALLEL_SIZE: $DECODE_TENSOR_PARALLEL_SIZE"
 
+PREFILL_LOG_TAIL_PID=""
+DECODE_LOG_TAIL_PID=""
+
+stop_vllm_log_streaming() {
+  if [[ -n "${PREFILL_LOG_TAIL_PID:-}" ]]; then
+    kill "$PREFILL_LOG_TAIL_PID" >/dev/null 2>&1 || true
+    wait "$PREFILL_LOG_TAIL_PID" >/dev/null 2>&1 || true
+    PREFILL_LOG_TAIL_PID=""
+  fi
+
+  if [[ -n "${DECODE_LOG_TAIL_PID:-}" ]]; then
+    kill "$DECODE_LOG_TAIL_PID" >/dev/null 2>&1 || true
+    wait "$DECODE_LOG_TAIL_PID" >/dev/null 2>&1 || true
+    DECODE_LOG_TAIL_PID=""
+  fi
+}
+
+start_vllm_log_streaming() {
+  stop_vllm_log_streaming
+
+  echo "--- Streaming vLLM Prefill and Decode logs while waiting for health..."
+
+  docker exec node bash -c "touch /root/vllm_serve_prefill.log && tail -n +1 -F /root/vllm_serve_prefill.log" \
+    2>&1 | sed -u 's/^/[prefill] /' &
+  PREFILL_LOG_TAIL_PID=$!
+
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
+    "docker exec node bash -c 'touch /root/vllm_serve_decode.log && tail -n +1 -F /root/vllm_serve_decode.log'" \
+    2>&1 | sed -u 's/^/[decode] /' &
+  DECODE_LOG_TAIL_PID=$!
+}
+
 cleanup() {
   local exit_code=$?
   echo "🧹 Cleaning up containers on all hosts..."
+
+  stop_vllm_log_streaming
 
   # Capture server logs before removing containers.
   echo "   -> Capturing server logs..."
@@ -272,6 +306,78 @@ wait_for_server_remote() {
   done
 
   echo "Error: $service_name on ${host}:${port} failed to become healthy within ${timeout}s."
+  return 1
+}
+
+vllm_server_process_alive() {
+  local host=$1
+  local port=$2
+  local process_check="pgrep -af 'vllm serve' | grep -q -- '--port ${port}'"
+
+  if [[ "$host" == "localhost" || "$host" == "127.0.0.1" || "$host" == "$HEAD_INTERNAL_IP" ]]; then
+    docker exec node bash -c "$process_check" >/dev/null 2>&1
+  else
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec node bash -c \"$process_check\"" >/dev/null 2>&1
+  fi
+}
+
+dump_vllm_server_log() {
+  local host=$1
+  local log_path=$2
+  local service_name=$3
+
+  echo "+++ 📄 ${service_name} log (${host}:${log_path})"
+  if [[ "$host" == "localhost" || "$host" == "127.0.0.1" || "$host" == "$HEAD_INTERNAL_IP" ]]; then
+    docker exec node cat "$log_path" 2>/dev/null || true
+  else
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec node cat '${log_path}' 2>/dev/null || true" || true
+  fi
+}
+
+wait_for_vllm_prefill_and_decode() {
+  local prefill_port=$1
+  local decode_host=$2
+  local decode_port=$3
+  local timeout=${4:-7200}
+
+  echo "Waiting for vLLM Prefill on localhost:${prefill_port} and vLLM Decode on ${decode_host}:${decode_port} to become healthy (Timeout: ${timeout}s)..."
+
+  local end_time=$((SECONDS + timeout))
+  while [[ $SECONDS -lt $end_time ]]; do
+    local prefill_healthy=0
+    local decode_healthy=0
+
+    if curl -fs "http://localhost:${prefill_port}/health" > /dev/null; then
+      prefill_healthy=1
+    fi
+
+    if curl -fs "http://${decode_host}:${decode_port}/health" > /dev/null; then
+      decode_healthy=1
+    fi
+
+    if (( prefill_healthy == 1 && decode_healthy == 1 )); then
+      echo "===== vLLM Prefill and Decode are healthy. ==="
+      return 0
+    fi
+
+    if ! vllm_server_process_alive "localhost" "$prefill_port"; then
+      echo "Error: vLLM Prefill process exited before becoming healthy."
+      dump_vllm_server_log "localhost" "/root/vllm_serve_prefill.log" "vLLM Prefill"
+      return 1
+    fi
+
+    if ! vllm_server_process_alive "$decode_host" "$decode_port"; then
+      echo "Error: vLLM Decode process exited before becoming healthy."
+      dump_vllm_server_log "$decode_host" "/root/vllm_serve_decode.log" "vLLM Decode"
+      return 1
+    fi
+
+    sleep 5
+  done
+
+  echo "Error: vLLM Prefill and Decode failed to become healthy within ${timeout}s."
+  dump_vllm_server_log "localhost" "/root/vllm_serve_prefill.log" "vLLM Prefill"
+  dump_vllm_server_log "$decode_host" "/root/vllm_serve_decode.log" "vLLM Decode"
   return 1
 }
 
@@ -483,8 +589,10 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "bash ~/tpu-inference/scrip
 # -----------------------------------------------------------------
 # 4. Wait for healthiness
 # -----------------------------------------------------------------
-wait_for_server_remote "localhost" "$PREFILL_VLLM_PORT" "vLLM Prefill" 7200
-wait_for_server_remote "$DECODE_HEAD_IP" "$DECODE_VLLM_PORT" "vLLM Decode" 7200
+echo "--- vLLM Prefill and Decode start commands submitted. Checking both health endpoints and server processes..."
+start_vllm_log_streaming
+wait_for_vllm_prefill_and_decode "$PREFILL_VLLM_PORT" "$DECODE_HEAD_IP" "$DECODE_VLLM_PORT" 7200
+stop_vllm_log_streaming
 
 # -----------------------------------------------------------------
 # 5. Start Proxy & Run Tests
