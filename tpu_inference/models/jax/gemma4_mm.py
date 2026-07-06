@@ -386,9 +386,9 @@ class Gemma4VisionMLP(JaxModule):
             kernel_init=nnx.with_partitioning(
                 init_fn, (ShardingAxisName.VIT_MODEL, None)),
             bias_init=None,
-            prefix=f"{prefix}.down_proj",
             rngs=rng,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
@@ -528,6 +528,7 @@ class Gemma4VisionModel(JaxModule):
             prefix=f"{prefix}.patch_embedder")
 
         num_layers = getattr(config, "num_hidden_layers", 32)
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             num_layers,
             lambda i: Gemma4VisionEncoderLayer(config,
