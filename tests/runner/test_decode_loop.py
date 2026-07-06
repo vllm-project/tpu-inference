@@ -300,6 +300,7 @@ def test_continue_decode_with_experts():
     expected_experts[1] = 1
     expected_experts[2] = 2
 
+    assert np.array_equal(all_expert_indices, expected_experts)
     assert logprobs_tensors is None
 
 
