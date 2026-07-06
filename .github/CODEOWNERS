@@ -39,7 +39,7 @@
 /tpu_inference/models/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
 
 # Runner and Execution
-/tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang
+/tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang @gxd3 @a1yssan13
 /tpu_inference/runner/tpu_runner.py @jrplatin @kyuyeunk @wenxindongwork @sixiang-google
 /tpu_inference/runner/persistent_batch_manager.py @jrplatin @wenxindongwork
 /tpu_inference/executors/ @sixiang-google @mrjunwan-lang @Lumosis
@@ -84,7 +84,7 @@
 /tests/lora/ @vanbasten23 @kyuyeunk
 /tests/models/ @kyuyeunk @lk-chen
 /tests/platforms/ @sixiang-google @mrjunwan-lang
-/tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang
+/tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang @gxd3 @a1yssan13
 /tests/spec_decode/ @Lumosis @gxd3
 /tests/layers/jax/sample/test_rejection_sampler.py @Lumosis @gxd3
 /tests/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
