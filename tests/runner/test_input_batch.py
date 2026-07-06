@@ -623,3 +623,22 @@ def test_dp_mamba_global_to_local_conversion():
     assert (7 * local_slots + 1) % local_slots == 1
     # Boundary: rank 1 last slot = 595 → local 297
     assert 595 % local_slots == 297
+def test_remove_request_with_allowed_token_ids_clears_mask(
+    input_batch: InputBatch,
+):
+    """Removing a request with allowed tokens should not crash."""
+    req = create_dummy_request(
+        "req-1",
+        sampling_params=SamplingParams(allowed_token_ids=[1, 2, 3]),
+    )
+    input_batch.add_request(req)
+
+    assert input_batch.allowed_token_ids_mask_cpu is not None
+    assert not input_batch.allowed_token_ids_mask_cpu[0][1]
+    assert not input_batch.allowed_token_ids_mask_cpu[0][2]
+    assert not input_batch.allowed_token_ids_mask_cpu[0][3]
+
+    removed_index = input_batch.remove_request("req-1")
+
+    assert removed_index == 0
+    assert not input_batch.allowed_token_ids_mask_cpu[0].any()

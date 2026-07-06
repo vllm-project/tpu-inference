@@ -414,11 +414,15 @@ class InputBatch:
                 if self.allowed_token_ids_mask_cpu is None:
                     # Lazy allocation for this tensor, which can be large.
                     # False means we don't fill with -inf.
-                    self.allowed_token_ids_mask = jnp.zeros(self.max_num_reqs,
-                                                            self.vocab_size,
-                                                            dtype=jnp.bool)
+                    shape = (self.max_num_reqs, self.vocab_size)
+                    self.allowed_token_ids_mask = jnp.zeros(
+                        shape,
+                        dtype=jnp.bool_,
+                    )
                     self.allowed_token_ids_mask_cpu = np.zeros(
-                        self.max_num_reqs, self.vocab_size, dtype=np.bool)
+                        shape,
+                        dtype=np.bool_,
+                    )
                 self.allowed_token_ids_mask_cpu[req_index] = True
                 # False means we don't fill with -inf.
                 self.allowed_token_ids_mask_cpu[req_index][
@@ -505,7 +509,7 @@ class InputBatch:
         self.has_allowed_token_ids.discard(req_id)
         if self.allowed_token_ids_mask_cpu is not None:
             # False means we don't fill with -inf.
-            self.allowed_token_ids_mask_cpu[req_index].fill_(False)
+            self.allowed_token_ids_mask_cpu[req_index].fill(False)
         self.bad_words_token_ids.pop(req_index, None)
         return req_index
 
