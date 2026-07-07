@@ -886,7 +886,7 @@ class TPUConnectorWorker:
                 f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
                 f"size={kv_size_mb:.2f}MB")
             self.transfer_stats.record_successful_transfer(
-                prepare_time_ms, pull_time_ms, kv_size_mb)
+                prepare_time_ms, 0.0, kv_size_mb)
         return kv
 
     def _get_kv_spec(self, num_blocks: int) -> list[jax.ShapeDtypeStruct]:
