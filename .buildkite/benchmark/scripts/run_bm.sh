@@ -162,7 +162,11 @@ run_accuracy_if_needed() {
       mkdir -p "$DATASET_DIR"
       cd "$DATASET_DIR" || exit 1
       if [ ! -f data.tar ]; then
+        echo "Downloading data.tar..."
         wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .
+      fi
+      if [ ! -d "data/test" ]; then
+        echo "Extracting data.tar..."
         tar -xf data.tar
       fi
       # Return to previous directory
@@ -170,7 +174,10 @@ run_accuracy_if_needed() {
     fi
 
     echo "Running accuracy benchmark using JSON configured ACCURACY_CMD..."
-    "${ACCURACY_CMD[@]}" >> "$BM_LOG" 2>&1 || echo "Warning: Accuracy benchmark failed."
+    if ! "${ACCURACY_CMD[@]}" >> "$BM_LOG" 2>&1; then
+      echo "[ERROR] Accuracy benchmark failed during execution."
+      report_and_exit 1 
+    fi
   fi
 }
 
