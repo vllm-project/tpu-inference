@@ -34,56 +34,63 @@ def parse_benchmark_log(log_path, result_path):
         "P99 E2EL": "P99ETEL"
     }
 
-    try:
-        with open(log_path, "r") as f:
-            lines = f.readlines()
-    except FileNotFoundError:
-        print(f"Warning: log file {log_path} not found.")
-        lines = []
-
     results = {}
     in_results = False
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if "============ Serving Benchmark Result ============" in line:
-            in_results = True
-            continue
-        if "==================================================" in line and in_results:
-            in_results = False
 
-        if in_results and ":" in line:
-            key, val = line.split(":", 1)
-            val = val.strip()
+    try:
+        with open(log_path, "r") as f:
+            lines_generator = f
+            recent_lines = []
 
-            # Remove units like (ms) or (tok/s) or (req/s)
-            clean_key = re.sub(r"\(.*?\)", "", key).strip()
+            for line in lines_generator:
+                line = line.strip()
 
-            if clean_key in METRIC_MAPPING and METRIC_MAPPING[
-                    clean_key] not in results:
-                if val != "N/A":
-                    results[METRIC_MAPPING[clean_key]] = val
+                # Keep a sliding window of the last 10 lines
+                recent_lines.append(line)
+                if len(recent_lines) > 10:
+                    recent_lines.pop(0)
 
-        # Handle explicit AccuracyMetrics: json (used by some benchmark wrappers)
-        if line.startswith("AccuracyMetrics:"):
-            try:
-                json_str = line.split("AccuracyMetrics:")[1].strip()
-                # Verify it is valid JSON
-                json.loads(json_str)
-                results["AccuracyMetrics"] = json_str
-            except Exception:
-                pass
+                if "============ Serving Benchmark Result ============" in line:
+                    in_results = True
+                    continue
+                if "==================================================" in line and in_results:
+                    in_results = False
 
-        # Fallback: Parse legacy Accuracy result dict printed by benchmark_serving.py
-        if line == "Results":
-            for j in range(1, min(6, len(lines) - i)):
-                try:
-                    acc_dict = ast.literal_eval(lines[i + j].strip())
-                    if isinstance(acc_dict, dict) and "accuracy" in acc_dict:
-                        results["AccuracyMetrics"] = json.dumps(
-                            {"accuracy": acc_dict["accuracy"]})
-                        break
-                except Exception:
-                    pass
+                if in_results and ":" in line:
+                    key, val = line.split(":", 1)
+                    val = val.strip()
+
+                    # Remove units like (ms) or (tok/s) or (req/s)
+                    clean_key = re.sub(r"\(.*?\)", "", key).strip()
+
+                    if clean_key in METRIC_MAPPING and METRIC_MAPPING[
+                            clean_key] not in results:
+                        if val != "N/A":
+                            results[METRIC_MAPPING[clean_key]] = val
+
+                # Handle explicit AccuracyMetrics: json (used by some benchmark wrappers)
+                if line.startswith("AccuracyMetrics:"):
+                    try:
+                        json_str = line.split("AccuracyMetrics:")[1].strip()
+                        # Verify it is valid JSON
+                        json.loads(json_str)
+                        results["AccuracyMetrics"] = json_str
+                    except Exception:
+                        pass
+
+                # Fallback: Parse legacy Accuracy result dict printed by benchmark_serving.py
+                if "Results" in recent_lines and line.startswith("{"):
+                    try:
+                        acc_dict = ast.literal_eval(line)
+                        if isinstance(acc_dict,
+                                      dict) and "accuracy" in acc_dict:
+                            results["AccuracyMetrics"] = json.dumps(
+                                {"accuracy": acc_dict["accuracy"]})
+                    except Exception:
+                        pass
+
+    except FileNotFoundError:
+        print(f"Warning: log file {log_path} not found.")
 
     with open(result_path, "w") as out:
         for k, v in results.items():
