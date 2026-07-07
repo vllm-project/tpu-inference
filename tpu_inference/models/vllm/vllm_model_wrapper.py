@@ -441,8 +441,6 @@ class VllmModelWrapper:
             *args,
         ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
                 List[jax.Array], jax.Array, List[jax.Array], jax.Array]:
-
-
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             lora_metadata = torch_view(lora_metadata)
             with torchax.default_env(), set_vllm_model_wrapper_context(
@@ -450,9 +448,9 @@ class VllmModelWrapper:
                     mesh=self.mesh,
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index,
                     vllm_config=self.vllm_config,
-                    shared_attn_metadata=shared_attn_metadata), set_forward_context(
-                        attn_metadata=attn_metadata,
-                        vllm_config=self.vllm_config):
+                    shared_attn_metadata=shared_attn_metadata
+            ), set_forward_context(attn_metadata=attn_metadata,
+                                   vllm_config=self.vllm_config):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
                 original_lora_metadata = replace_lora_metadata(
