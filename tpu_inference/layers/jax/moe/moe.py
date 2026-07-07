@@ -454,8 +454,11 @@ class JaxRoutedExperts(JaxModule):
             return x_TD, selected_experts_TX
         return x_TD, None
 
-    def _load_weights(self, weights: Iterable) -> set:
-        """Accumulate per-expert tensors into _weights_to_load buffers."""
+    def _load_weights(self,
+                      weights: Iterable,
+                      *,
+                      mesh: jax.sharding.Mesh | None = None) -> set:
+        """Accumulate per-expert tensors; concatenate and shard when complete."""
         cnt = 0
         for param_name, torch_weight in weights:
             rel_name = param_name.split(self.prefix)[-1]
@@ -489,6 +492,10 @@ class JaxRoutedExperts(JaxModule):
                 "kernel_down_proj_EFD": self.kernel_down_proj_EFD,
         }.items():
             if all(w is not None for w in param._weights_to_load):
+                with cpu_mesh_context():
+                    concatenated = jnp.concatenate(param._weights_to_load,
+                                                   axis=0)
+                param.value = shard_put(concatenated, param.sharding, mesh)
                 loaded_names.add(name)
         return loaded_names
 
