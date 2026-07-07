@@ -1068,9 +1068,6 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                 self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
-        if not isinstance(weights, Iterable):
-            return super().load_weights(weights)
-
         # Strip "model." prefix so checkpoint names resolve against the Python
         # attr path "language_model.*".  mapper.apply() runs before the loader's
         # packed routing so params_dict lookups succeed.

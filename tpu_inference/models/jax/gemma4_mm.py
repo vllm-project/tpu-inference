@@ -608,17 +608,13 @@ class Gemma4MultimodalEmbedder(JaxModule):
         return x
 
 
-class Gemma4MmModel(Gemma4Model):
-    """Gemma4 model that includes vision tower.
+class Gemma4MmModel(JaxModule):
+    """Gemma4 multimodal model combining text backbone and vision encoder.
 
-    The text backbone sits at ``prefix + ".language_model"`` (e.g.
-    ``model.language_model``), while vision sits at ``prefix + ".vision_tower"``
-    and ``prefix + ".embed_vision"`` (e.g. ``model.vision_tower``), matching
-    the HF checkpoint layout:
-
-      model.language_model.layers.*    — transformer text layers
-      model.vision_tower.*             — SigLIP encoder
-      model.embed_vision.*             — vision-text projection
+    Mirrors the HF checkpoint layout:
+      model.language_model.layers.*  — transformer text layers
+      model.vision_tower.*           — SigLIP encoder
+      model.embed_vision.*           — vision-text projection
     """
 
     def __init__(self,
@@ -626,13 +622,15 @@ class Gemma4MmModel(Gemma4Model):
                  rng: nnx.Rngs,
                  mesh: Mesh,
                  prefix: str = "model"):
-        super().__init__(vllm_config=vllm_config,
-                         rng=rng,
-                         mesh=mesh,
-                         prefix=prefix + ".language_model")
-
         model_config = vllm_config.model_config
         vision_config = model_config.hf_config.vision_config
+
+        self.language_model = Gemma4Model(
+            vllm_config=vllm_config,
+            rng=rng,
+            mesh=mesh,
+            prefix=prefix + ".language_model",
+        )
 
         self.vision_tower = Gemma4VisionModel(
             config=vision_config,
@@ -640,7 +638,8 @@ class Gemma4MmModel(Gemma4Model):
             rng=rng,
             quant_config=vllm_config.quant_config,
             mesh=mesh,
-            prefix=f"{prefix}.vision_tower")
+            prefix=f"{prefix}.vision_tower",
+        )
 
         self.embed_vision = Gemma4MultimodalEmbedder(
             vision_hidden_size=vision_config.hidden_size,
@@ -648,7 +647,8 @@ class Gemma4MmModel(Gemma4Model):
             dtype=model_config.dtype,
             rng=rng,
             quant_config=vllm_config.quant_config,
-            prefix=f"{prefix}.embed_vision")
+            prefix=f"{prefix}.embed_vision",
+        )
 
 
 class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
@@ -667,7 +667,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         vllm_config.sharding_config.apply_vision_sharding()
 
-        self.language_model = Gemma4MmModel(
+        self.model = Gemma4MmModel(
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
@@ -686,7 +686,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             None)
 
         if not model_config.hf_config.tie_word_embeddings:
-            if self.language_model.is_last_rank:
+            if self.model.language_model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
                 hidden_size = model_config.hf_config.text_config.hidden_size
                 from tpu_inference.layers.jax.linear import JaxLmHead
@@ -704,20 +704,16 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
-        if not isinstance(weights, Iterable):
-            return super().load_weights(weights)
-
-        # Remap checkpoint names to Python attr paths before the loader's
-        # packed routing step so params_dict lookups succeed.
-        # Prefix rules apply in order: strip "model." first, then remap
-        # vision_tower.encoder.* and embed_vision.* under language_model.*.
-        # The suffix rule strips the checkpoint-only .linear wrapper on
-        # vision attention projections.
+        # Remap checkpoint names to Python attr paths.  self.model makes
+        # "model.*" resolve naturally (has_model_child=True), so no prefix
+        # stripping is needed for the text/vision/embed weights.
+        # vision_tower.encoder.* is a checkpoint-only sub-level; .linear is
+        # a checkpoint-only wrapper on vision attention projections.
+        # model.lm_head lives at the top level in the JAX model.
         mapper = WeightsMapper(
             orig_to_new_prefix={
-                "model.": "",
-                "vision_tower.encoder.": "language_model.vision_tower.",
-                "embed_vision.": "language_model.embed_vision.",
+                "model.vision_tower.encoder.": "model.vision_tower.",
+                "model.lm_head.": "lm_head.",
             },
             orig_to_new_suffix={".linear.weight": ".weight"},
         )
@@ -740,12 +736,12 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                         input_ids: jax.Array,
                         multimodal_embeddings: Optional[jax.Array] = None,
                         **kwargs) -> jax.Array:
-        inputs_embeds = self.language_model.embed_tokens(input_ids)
+        inputs_embeds = self.model.language_model.embed_tokens(input_ids)
         target_dtype = inputs_embeds.dtype
 
         inputs_embeds = (
             inputs_embeds *
-            self.language_model.embedding_scale).astype(target_dtype)
+            self.model.language_model.embedding_scale).astype(target_dtype)
 
         if multimodal_embeddings is not None and multimodal_embeddings.shape[
                 0] > 0:
@@ -760,7 +756,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                                    pixel_position_ids: jax.Array) -> jax.Array:
         input_mask = pixel_position_ids[..., 0] != -1
 
-        vision_outputs = self.language_model.vision_tower(
+        vision_outputs = self.model.vision_tower(
             pixel_values,
             input_mask=input_mask,
             pixel_position_ids=pixel_position_ids)
@@ -768,7 +764,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         projected_vision_features = vision_outputs[0][0]
         pooler_mask = vision_outputs[0][1]
 
-        projected_vision_features = self.language_model.embed_vision(
+        projected_vision_features = self.model.embed_vision(
             projected_vision_features)
 
         seq_len = pooler_mask.shape[1]
@@ -1100,7 +1096,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         is_multimodal = (input_ids == self.image_token_id
                          ) if input_ids is not None else None
 
-        kv_caches, x, expert_indices = self.language_model(
+        kv_caches, x, expert_indices = self.model.language_model(
             kv_caches,
             input_ids,
             attention_metadata,
@@ -1120,7 +1116,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         if hasattr(self, 'lm_head'):
             logits = self.lm_head(hidden_states)
         else:
-            logits = self.language_model.embed_tokens.decode(hidden_states)
+            logits = self.model.language_model.embed_tokens.decode(
+                hidden_states)
 
         if self.final_logit_softcapping is not None:
             logits = jnp.tanh(
@@ -1156,7 +1153,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 dtype=jax_dtype,
             )
 
-            p = self.language_model.vision_tower.patch_embedder.patch_size
+            p = self.model.vision_tower.patch_embedder.patch_size
             h_p, w_p = h_input // p, w_input // p
             dummy_pixel_position_ids = jnp.ones((1, h_p * w_p, 2),
                                                 dtype=jnp.int32)
