@@ -45,7 +45,7 @@ from tpu_inference.models.common.kv_share import compute_kv_share_map
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
-    LoadableWithIterator, StandardWeightLoader,
+    JaxAutoWeightsLoader, LoadableWithIterator, StandardWeightLoader,
     load_nnx_param_from_reshaped_torch)
 
 logger = init_logger(__name__)
@@ -1067,17 +1067,22 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                 self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
-        allowed_layers = set(f"layers.{i}."
-                             for i in range(len(self.language_model.layers)))
-        # Checkpoint names already use model.language_model.* which matches
-        # the JAX prefix exactly; no stripping needed. Exclude vision weights.
-        filtered = ((name, tensor) for name, tensor in weights
-                    if name.startswith(("model.",
-                                        "lm_head")) and "vision" not in name)
-        return super().load_weights(
-            (name, tensor) for name, tensor in filtered
-            if not ("layers." in name and not any(
-                layer_prefix in name for layer_prefix in allowed_layers)))
+        if not isinstance(weights, Iterable):
+            return super().load_weights(weights)
+
+        def _strip_model_prefix(w_iter):
+            for name, tensor in w_iter:
+                if name.startswith("model."):
+                    name = name[len("model."):]
+                yield name, tensor
+
+        loader = JaxAutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else []),
+            skip_substrs=["vision"],
+        )
+        return loader.load_weights(_strip_model_prefix(weights))
 
     def __call__(
         self,

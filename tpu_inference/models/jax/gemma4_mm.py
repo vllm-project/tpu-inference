@@ -42,7 +42,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     merge_multimodal_embeddings
 from tpu_inference.models.jax.utils.weight_utils import (
-    LoadableWithIterator, StandardWeightLoader,
+    JaxAutoWeightsLoader, LoadableWithIterator, StandardWeightLoader,
     load_nnx_param_from_reshaped_torch)
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -610,32 +610,28 @@ class Gemma4MultimodalEmbedder(JaxModule):
 class Gemma4MmModel(Gemma4Model):
     """Gemma4 model that includes vision tower.
 
-    The text (language-model) backbone sits at ``language_model_prefix`` (e.g.
-    ``model.language_model``), while the vision tower and projection sit at
-    ``vision_prefix`` (e.g. ``model``), matching the HF checkpoint layout:
+    The text backbone sits at ``prefix + ".language_model"`` (e.g.
+    ``model.language_model``), while vision sits at ``prefix + ".vision_tower"``
+    and ``prefix + ".embed_vision"`` (e.g. ``model.vision_tower``), matching
+    the HF checkpoint layout:
 
       model.language_model.layers.*    — transformer text layers
       model.vision_tower.*             — SigLIP encoder
       model.embed_vision.*             — vision-text projection
-
-    Separating the two prefixes lets quantization ignore-list entries match
-    the JAX layer prefixes without any string rewriting.
     """
 
     def __init__(self,
                  vllm_config: VllmConfig,
                  rng: nnx.Rngs,
                  mesh: Mesh,
-                 prefix: str = "model",
-                 vision_prefix: Optional[str] = None):
+                 prefix: str = "model"):
         super().__init__(vllm_config=vllm_config,
                          rng=rng,
                          mesh=mesh,
-                         prefix=prefix)
+                         prefix=prefix + ".language_model")
 
         model_config = vllm_config.model_config
         vision_config = model_config.hf_config.vision_config
-        vp = vision_prefix if vision_prefix is not None else prefix
 
         self.vision_tower = Gemma4VisionModel(
             config=vision_config,
@@ -643,7 +639,7 @@ class Gemma4MmModel(Gemma4Model):
             rng=rng,
             quant_config=vllm_config.quant_config,
             mesh=mesh,
-            prefix=f"{vp}.vision_tower")
+            prefix=f"{prefix}.vision_tower")
 
         self.embed_vision = Gemma4MultimodalEmbedder(
             vision_hidden_size=vision_config.hidden_size,
@@ -651,7 +647,7 @@ class Gemma4MmModel(Gemma4Model):
             dtype=model_config.dtype,
             rng=rng,
             quant_config=vllm_config.quant_config,
-            prefix=f"{vp}.embed_vision")
+            prefix=f"{prefix}.embed_vision")
 
 
 class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
@@ -674,8 +670,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
-            prefix="model.language_model",
-            vision_prefix="model",
+            prefix="model",
         )
         model_config = vllm_config.model_config
         vision_config = model_config.hf_config.vision_config
@@ -708,58 +703,39 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
+        if not isinstance(weights, Iterable):
+            return super().load_weights(weights)
 
-        def map_name(name: str) -> str:
-            # Vision tower: strip .encoder. sub-level and .linear suffix on
-            # attention projections (checkpoint has these, JAX model does not).
-            name = name.replace("vision_tower.encoder.", "vision_tower.")
-            if "vision_tower.layers." in name:
-                name = name.replace(".linear.weight", ".weight")
+        def _remap(w_iter):
+            for name, tensor in w_iter:
+                # Strip top-level "model." so names match Python attr paths.
+                if name.startswith("model."):
+                    name = name[len("model."):]
+                # Vision tower sits at language_model.vision_tower.* in the
+                # Python attr tree. Checkpoint has vision_tower.encoder.*
+                # with .linear sub-modules on attention projections.
+                if name.startswith(("vision_tower.", "embed_vision.")):
+                    name = "language_model." + name
+                    name = name.replace("language_model.vision_tower.encoder.",
+                                        "language_model.vision_tower.")
+                    if "vision_tower.layers." in name:
+                        name = name.replace(".linear.weight", ".weight")
+                yield name, tensor
 
-            # lm_head lives at the top level, not under model.*
-            if "model.lm_head" in name:
-                name = name.replace("model.lm_head", "lm_head")
-
-            return name
-
-        def filter_weights(weights_iterator):
-            import re
-            for name, weight in weights_iterator:
-                mapped_name = map_name(name)
-
-                # Skip audio tower weights — audio path is deferred for
-                # E-family. Audio re-introduction is a separate follow-up.
-                if "audio_tower" in mapped_name or "embed_audio" in mapped_name:
-                    continue
-
-                # Skip activation-calibration metadata that ships in E2B/E4B
-                # HF checkpoints (vision tower) but isn't a JAX parameter.
-                # The JAX vision module doesn't track these min/max scalars.
-                if any(
-                        mapped_name.endswith(suffix) for suffix in (
-                            ".input_max",
-                            ".input_min",
-                            ".output_max",
-                            ".output_min",
-                        )):
-                    continue
-
-                # Handle packed QKV weights for the text tower when the model
-                # uses separate projections (e.g. k_eq_v layers).
-                if "qkv_proj" in mapped_name and "model.language_model.layers." in mapped_name:
-                    m = re.search(r"layers\.(\d+)\.", mapped_name)
-                    if m:
-                        layer_idx = int(m.group(1))
-                        if self.language_model.start_layer <= layer_idx < self.language_model.end_layer:
-                            jax_attn = self.language_model.layers[
-                                layer_idx].self_attn
-
-                            if jax_attn.qkv_proj is None:
-                                continue
-
-                yield mapped_name, weight
-
-        return super().load_weights(filter_weights(weights))
+        loader = JaxAutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else []),
+            skip_substrs=[
+                "audio_tower",
+                "embed_audio",
+                ".input_max",
+                ".input_min",
+                ".output_max",
+                ".output_min",
+            ],
+        )
+        return loader.load_weights(_remap(weights))
 
     def embed_input_ids(self,
                         input_ids: jax.Array,
