@@ -493,7 +493,7 @@ def rpa_kernel(
 
         _run()
 
-    return pl.pallas_call(
+    kernel_call = pl.pallas_call(
         ragged_paged_attention_pipeline,
         out_shape=[q_hbm, kv_cache_hbm],
         grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -520,7 +520,21 @@ def rpa_kernel(
         },
         name=get_kernel_name(cfgs),
         metadata=get_kernel_metadata(cfgs),
-    )(
+    )
+
+    @jax.jit
+    def run(cu_q_lens, kv_lens, page_indices, schedule_hbm, q_hbm, new_kv_hbm, kv_cache_hbm):
+        return kernel_call(
+            cu_q_lens,
+            kv_lens,
+            page_indices,
+            schedule_hbm,
+            pltpu.with_memory_space_constraint(q_hbm, pltpu.HBM),
+            pltpu.with_memory_space_constraint(new_kv_hbm, pltpu.HBM),
+            pltpu.with_memory_space_constraint(kv_cache_hbm, pltpu.HBM),
+        )
+
+    return run(
         cu_q_lens,
         kv_lens,
         page_indices,
