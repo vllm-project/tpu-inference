@@ -81,8 +81,10 @@
 /tests/kernels/ @kyuyeunk @bythew3i @a1yssan13
 /tests/kernels/deepseek_v4 @gxd3 @a1yssan13 @inucool12
 /tests/layers/ @kyuyeunk @lk-chen
+/tests/layers/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/lora/ @vanbasten23 @kyuyeunk
 /tests/models/ @kyuyeunk @lk-chen
+/tests/models/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/platforms/ @sixiang-google @mrjunwan-lang
 /tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang @gxd3 @a1yssan13
 /tests/spec_decode/ @Lumosis @gxd3
