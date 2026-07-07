@@ -81,12 +81,14 @@
 /tests/kernels/ @kyuyeunk @bythew3i @a1yssan13
 /tests/kernels/deepseek_v4 @gxd3 @a1yssan13 @inucool12
 /tests/layers/ @kyuyeunk @lk-chen
+/tests/layers/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/lora/ @vanbasten23 @kyuyeunk
 /tests/models/ @kyuyeunk @lk-chen
+/tests/models/jax/ @kyuyeunk @lk-chen @jrplatin
+/tests/layers/jax/sample/test_rejection_sampler.py @Lumosis @gxd3
 /tests/platforms/ @sixiang-google @mrjunwan-lang
 /tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang @gxd3 @a1yssan13
 /tests/spec_decode/ @Lumosis @gxd3
-/tests/layers/jax/sample/test_rejection_sampler.py @Lumosis @gxd3
 /tests/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
 /tests/e2e/ @pv97 @wenxindongwork @jrplatin @Lumosis @gxd3
 /tests/offload/ @juncgu-google @richardsliu
