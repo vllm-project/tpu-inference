@@ -1069,12 +1069,18 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
         allowed_layers = set(f"layers.{i}."
                              for i in range(len(self.model.layers)))
+        ignored_prefixes = (
+            "model.audio_tower.",
+            "model.vision_tower.",
+            "model.multi_modal_projector.",
+            "model.embed_audio.",
+        )
         stripped_weights = (
             (clean_name, tensor) for name, tensor in weights
             if (clean_name := name.replace("language_model.", "")).startswith((
-                "model.", "lm_head")) and
-            "vision" not in clean_name  # Exclude vision tower weights for now
-        )
+                "model.", "lm_head")) and "vision" not in clean_name
+            and  # Exclude vision tower weights for now
+            not any(clean_name.startswith(p) for p in ignored_prefixes))
         return super().load_weights(
             (name, tensor) for name, tensor in stripped_weights
             if not ("layers." in name and not any(
