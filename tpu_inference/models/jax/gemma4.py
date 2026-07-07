@@ -22,6 +22,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import Gemma4TextConfig
 from vllm.config import VllmConfig
+from vllm.model_executor.models.utils import WeightsMapper
 
 from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -1070,19 +1071,17 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         if not isinstance(weights, Iterable):
             return super().load_weights(weights)
 
-        def _strip_model_prefix(w_iter):
-            for name, tensor in w_iter:
-                if name.startswith("model."):
-                    name = name[len("model."):]
-                yield name, tensor
-
+        # Strip "model." prefix so checkpoint names resolve against the Python
+        # attr path "language_model.*".  mapper.apply() runs before the loader's
+        # packed routing so params_dict lookups succeed.
+        mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
         loader = JaxAutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head"]
                            if not hasattr(self, 'lm_head') else []),
             skip_substrs=["vision"],
         )
-        return loader.load_weights(_strip_model_prefix(weights))
+        return loader.load_weights(mapper.apply(weights))
 
     def __call__(
         self,

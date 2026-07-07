@@ -26,6 +26,7 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.models.gemma4_mm import \
     Gemma4ForConditionalGeneration as PtGemma4MM
+from vllm.model_executor.models.utils import WeightsMapper
 
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
@@ -706,22 +707,20 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         if not isinstance(weights, Iterable):
             return super().load_weights(weights)
 
-        def _remap(w_iter):
-            for name, tensor in w_iter:
-                # Strip top-level "model." so names match Python attr paths.
-                if name.startswith("model."):
-                    name = name[len("model."):]
-                # Vision tower sits at language_model.vision_tower.* in the
-                # Python attr tree. Checkpoint has vision_tower.encoder.*
-                # with .linear sub-modules on attention projections.
-                if name.startswith(("vision_tower.", "embed_vision.")):
-                    name = "language_model." + name
-                    name = name.replace("language_model.vision_tower.encoder.",
-                                        "language_model.vision_tower.")
-                    if "vision_tower.layers." in name:
-                        name = name.replace(".linear.weight", ".weight")
-                yield name, tensor
-
+        # Remap checkpoint names to Python attr paths before the loader's
+        # packed routing step so params_dict lookups succeed.
+        # Prefix rules apply in order: strip "model." first, then remap
+        # vision_tower.encoder.* and embed_vision.* under language_model.*.
+        # The suffix rule strips the checkpoint-only .linear wrapper on
+        # vision attention projections.
+        mapper = WeightsMapper(
+            orig_to_new_prefix={
+                "model.": "",
+                "vision_tower.encoder.": "language_model.vision_tower.",
+                "embed_vision.": "language_model.embed_vision.",
+            },
+            orig_to_new_suffix={".linear.weight": ".weight"},
+        )
         loader = JaxAutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head"]
@@ -735,7 +734,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 ".output_min",
             ],
         )
-        return loader.load_weights(_remap(weights))
+        return loader.load_weights(mapper.apply(weights))
 
     def embed_input_ids(self,
                         input_ids: jax.Array,
