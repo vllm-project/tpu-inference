@@ -671,8 +671,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
-            prefix="model.language_model",
-            vision_prefix="model",
+            prefix="model",
         )
         model_config = vllm_config.model_config
         vision_config = model_config.hf_config.vision_config
