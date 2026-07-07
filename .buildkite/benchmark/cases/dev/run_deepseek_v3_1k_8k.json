@@ -43,18 +43,18 @@
               "tokenizer": "deepseek-ai/DeepSeek-R1",
               "load-format": "runai_streamer",
               "seed": 42,
-              "max-num-seqs": 160,
+              "max-num-seqs": 64,
               "max-num-batched-tokens": 512,
               "tensor-parallel-size": {
                 "v7x-16": 16
               },
               "max-model-len": 9216,
               "kv-cache-dtype": "fp8",
-              "gpu-memory-utilization": 0.95,
+              "gpu-memory-utilization": 0.85,
               "enable-expert-parallel": true,
               "no-enable-prefix-caching": true,
               "async-scheduling": true,
-              "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true, \"expert_parallelism\": 16, \"tensor_parallelism\": 1}}, \"replicate_attn_weights\": true, \"sparse_matmul\": true, \"compilation_sizes\": [2560]}",
+              "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true, \"expert_parallelism\": 16, \"tensor_parallelism\": 1}}, \"replicate_attn_weights\": true, \"sparse_matmul\": true, \"compilation_sizes\": [256, 512]}",
               "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
               "trust-remote-code": true,
               "hf-config": "deepseek-ai/DeepSeek-R1"
@@ -69,7 +69,7 @@
               "dataset-name": "random",
               "random-input-len": 1024,
               "random-output-len": 8192,
-              "num-prompts": 2560,
+              "num-prompts": 256,
               "ignore-eos": true,
               "trust-remote-code": true,
               "percentile-metrics": "ttft,tpot,itl,e2el"
