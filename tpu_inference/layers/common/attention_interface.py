@@ -384,6 +384,7 @@ def sharded_ragged_paged_attention(
     k_scale: float | None = None,
     v_scale: float | None = None,
     update_kv_cache: bool = True,
+    use_causal_mask: bool = True,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
@@ -450,6 +451,7 @@ def sharded_ragged_paged_attention(
         # is a no-op so we don't forward it to the hd64 signature.
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
+            kwargs["use_causal_mask"] = use_causal_mask
         return func(*args, **kwargs)
 
     return jax.shard_map(
@@ -476,6 +478,7 @@ def attention(
     v_scale: float | None = None,
     sinks: jax.Array | None = None,
     update_kv_cache: bool = True,
+    use_causal_mask: bool = True,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -515,6 +518,7 @@ def attention(
         k_scale=k_scale,
         v_scale=v_scale,
         update_kv_cache=update_kv_cache,
+        use_causal_mask=use_causal_mask,
     )
 
     return kv_cache, output
@@ -591,7 +595,6 @@ def mla_attention(
             actual_r_dim=q_rope.shape[2],
             kv_dtype=cache.dtype.name,
             q_dtype=q.dtype.name,
-            total_num_pages=cache.shape[0],
             page_size_per_kv_packing=cache.shape[1],
             kv_packing=cache.shape[2],
             max_num_seqs=md.padded_num_reqs // dp_size,

@@ -454,11 +454,56 @@ class JaxRoutedExperts(JaxModule):
             return x_TD, selected_experts_TX
         return x_TD, None
 
+    def _load_weights(self,
+                      weights: Iterable,
+                      *,
+                      mesh: jax.sharding.Mesh | None = None) -> set:
+        """Accumulate per-expert tensors; concatenate and shard when complete."""
+        cnt = 0
+        for param_name, torch_weight in weights:
+            rel_name = param_name.split(self.prefix)[-1]
+            names = rel_name.split(".")
+            assert len(names) == 3, (
+                f"Expected .<expert_id>.<param_name>.weight, got {rel_name}")
+            expert_id, param_type, _ = names
+            expert_id = int(expert_id)
+            if param_type.endswith("up_proj"):
+                jax_param = self.kernel_up_proj_EDF
+            elif param_type.endswith("down_proj"):
+                jax_param = self.kernel_down_proj_EFD
+            elif param_type.endswith("gate_proj"):
+                jax_param = self.kernel_gating_EDF
+            else:
+                raise ValueError(f"Unexpected param type in {rel_name}, "
+                                 "expected gate_proj, up_proj, or down_proj")
+            assert isinstance(jax_param, nnx.Param)
+            jax_param._weights_to_load[
+                expert_id] = jax_array_from_reshaped_torch(torch_weight,
+                                                           reshape_dims=(1, ) +
+                                                           torch_weight.shape)
+            cnt += 1
+
+        logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")
+
+        loaded_names = set()
+        for name, param in {
+                "kernel_gating_EDF": self.kernel_gating_EDF,
+                "kernel_up_proj_EDF": self.kernel_up_proj_EDF,
+                "kernel_down_proj_EFD": self.kernel_down_proj_EFD,
+        }.items():
+            if all(w is not None for w in param._weights_to_load):
+                with cpu_mesh_context():
+                    concatenated = jnp.concatenate(param._weights_to_load,
+                                                   axis=0)
+                param.value = shard_put(concatenated, param.sharding, mesh)
+                loaded_names.add(name)
+        return loaded_names
+
     def load_weights(self, weights: Iterable):
         """Used by JaxAutoWeightLoader to load HF weights into the layer."""
-        assert hasattr(self.quant_method, "load_weights")
+        if not hasattr(self.quant_method, "load_weights"):
+            return self._load_weights(weights)
         return self.quant_method.load_weights(
             layer=self,
-            original_load_weights_fn=lambda: NotImplementedError(
-                "JaxRoutedExperts does not implement _load_weights"),
+            original_load_weights_fn=self._load_weights,
             weights=weights)
