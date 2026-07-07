@@ -450,9 +450,13 @@ if [[ "$SERVER_ALREADY_RUNNING" == "false" ]]; then
     # ---------------------------------------------------------
     # Server startup wait logic
     # ---------------------------------------------------------
-    SERVER_WAIT_MINS=${SERVER_WAIT_MINS:-60}
-
-    MAX_WAIT_SECONDS=$((SERVER_WAIT_MINS * 60))
+    if [[ -n "${VLLM_ENGINE_READY_TIMEOUT_S:-}" ]]; then
+        MAX_WAIT_SECONDS="${VLLM_ENGINE_READY_TIMEOUT_S}"
+        SERVER_WAIT_MINS=$((MAX_WAIT_SECONDS / 60))
+    else
+        SERVER_WAIT_MINS=${SERVER_WAIT_MINS:-60}
+        MAX_WAIT_SECONDS=$((SERVER_WAIT_MINS * 60))
+    fi
     WAIT_START_TIME=$(date +%s)
     ELAPSED=0
 
