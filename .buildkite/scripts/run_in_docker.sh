@@ -138,7 +138,14 @@ fi
 echo "[INFO] Pulling JAX Cache from GCS to local directory..."
 # Parallel CI builds‘ pushes are safe because JAX's compilation cache 
 # entries are content-addressed. Concurrent pushes are thus idempotent;
-gcloud storage rsync --recursive --delete-unmatched-destination-objects "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" --no-user-output-enabled || echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
+gcloud storage rsync \
+  --recursive \
+  --no-clobber \
+  --delete-unmatched-destination-objects \
+  --exclude=".*_.gstmp$" \
+  --no-user-output-enabled \
+  "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" || \
+  echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
 
 # ==========================================
 # 2. Run Docker Container
@@ -202,7 +209,13 @@ echo "[INFO] Docker finished with exit code ${DOCKER_EXIT_CODE}."
 
 if [ $DOCKER_EXIT_CODE -eq 0 ]; then
   echo "[INFO] Syncing local JAX Cache back to GCS..."
-  gcloud storage rsync --recursive "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" --no-user-output-enabled || echo "[WARN] Failed to sync JAX Cache back to GCS."
+  gcloud storage rsync \
+    --recursive \
+    --no-clobber \
+    --exclude=".*_.gstmp$" \
+    --no-user-output-enabled \
+    "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" || \
+    echo "[WARN] Failed to sync JAX Cache back to GCS."
 else
   echo "[WARN] Docker exited with non-zero code ${DOCKER_EXIT_CODE}. Skipping syncing local JAX Cache back to GCS to avoid potential cache corruption."
 fi
