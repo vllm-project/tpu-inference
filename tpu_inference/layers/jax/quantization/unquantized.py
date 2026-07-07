@@ -25,11 +25,11 @@ from jax.sharding import PartitionSpec as P
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, UnfusedMoEWeights, process_unquantized_moe_weights,
-    shard_moe_weights)
+    shard_moe_weights, shard_moe_weights_to_tpu)
 from tpu_inference.layers.common.quantization import unquantized as jax_common
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.common.utils import (
-    cpu_mesh_context, reorder_concatenated_tensor_for_sharding)
+    cpu_mesh, cpu_mesh_context, reorder_concatenated_tensor_for_sharding)
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import (JaxEinsum,
                                              JaxMergedColumnParallelLinear)
@@ -229,28 +229,43 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase,
                         layer.kernel_down_proj_EFD
                     ]):
                 return False
-            w_gate = layer.kernel_gating_EDF.get_value()
-            w_up = layer.kernel_up_proj_EDF.get_value()
-            w2_val = layer.kernel_down_proj_EFD.get_value()
+            with cpu_mesh_context():
+                w_gate = jnp.concatenate(
+                    layer.kernel_gating_EDF._weights_to_load, axis=0)
+                w_up = jnp.concatenate(
+                    layer.kernel_up_proj_EDF._weights_to_load, axis=0)
+                w2_val = jnp.concatenate(
+                    layer.kernel_down_proj_EFD._weights_to_load, axis=0)
+                # Fuse the weights into w13: [Gate, Up]
+                w13_val = jnp.concatenate([w_gate, w_up], axis=1)
+                del w_gate, w_up
 
             # Free old params before processing to reduce peak memory.
             del layer.kernel_gating_EDF
             del layer.kernel_up_proj_EDF
 
-            # Fuse the weights into w13: [Gate, Up]
-            w13_val = jnp.concatenate([w_gate, w_up], axis=1)
-            del w_gate, w_up
-
             mesh = jax.sharding.get_mesh()
+            # Transfer CPU tensors to TPU before the jitted call.
+            tpu_input = shard_moe_weights_to_tpu(FusedMoEWeights(
+                w13_weight=w13_val,
+                w13_weight_scale=None,
+                w13_bias=None,
+                w2_weight=w2_val,
+                w2_weight_scale=None,
+                w2_bias=None),
+                                                 mesh,
+                                                 source_mesh=cpu_mesh())
+            del w13_val, w2_val
             weights = process_unquantized_moe_weights(
                 mesh=mesh,
                 moe_backend=layer.moe_backend,
                 activation=layer.activation,
-                w13_weight=w13_val,
+                w13_weight=tpu_input.w13_weight,
                 w13_bias=None,
-                w2_weight=w2_val,
+                w2_weight=tpu_input.w2_weight,
                 w2_bias=None,
             )
+            del tpu_input
 
             sharded_weights = shard_moe_weights(weights,
                                                 moe_backend=layer.moe_backend,
@@ -272,8 +287,6 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase,
                     sharded_weights.w2_weight_scale)
 
             del weights
-            del w13_val
-            del w2_val
 
             # Break reference cycles between JAX arrays and flax nnx.Param
             # objects created during weight processing. Without this, stale
