@@ -176,6 +176,8 @@ run_accuracy_if_needed() {
     echo "Running accuracy benchmark using JSON configured ACCURACY_CMD..."
     if ! "${ACCURACY_CMD[@]}" >> "$BM_LOG" 2>&1; then
       echo "[ERROR] Accuracy benchmark failed during execution."
+      echo "--- Dumping BM_LOG for debugging ---"
+      tail -n 100 "$BM_LOG"
       report_and_exit 1 
     fi
   fi
