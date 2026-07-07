@@ -78,6 +78,47 @@ cleanup_docker_resource() {
   echo "Cleanup complete."
 }
 
+# Verify a built or pulled image actually contains the expected vLLM commit.
+# Guards against tag/image mismatches -- e.g. when the CI (LKG vLLM) and
+# integration (HEAD vLLM) pipelines build the same tpu-inference commit
+# concurrently, they previously shared a vLLM-agnostic tag and could clobber
+# each other's image in the registry. No-op when the expected hash is empty
+# (local/dev builds that clone vLLM HEAD) or for PyPI builds (no
+# /workspace/vllm git checkout to inspect).
+verify_image_vllm() {
+  local image_ref="$1"
+  local expected_vllm="${2:-}"
+  if [[ -z "${expected_vllm}" ]]; then
+    return 0
+  fi
+  if [[ "${RUN_WITH_PYPI:-false}" == "true" ]]; then
+    echo "[verify-vllm] RUN_WITH_PYPI=true; skipping vLLM commit verification."
+    return 0
+  fi
+  # Read the vLLM commit baked into the image. Capture the exit code separately
+  # so an infra failure to *read* the commit (git missing, /workspace/vllm
+  # absent, safe.directory "dubious ownership", etc.) is reported as such
+  # instead of masquerading as a vLLM mismatch. -c safe.directory pre-empts the
+  # most common trip: the container running git as a non-owner user.
+  local actual_vllm rc=0 err
+  err=$(mktemp)
+  actual_vllm=$(docker run --rm --entrypoint git "${image_ref}" \
+    -C /workspace/vllm -c safe.directory=/workspace/vllm rev-parse HEAD 2>"${err}") || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    echo "[FATAL][verify-vllm] Could not read the vLLM commit from ${image_ref} (git exit ${rc}):" >&2
+    cat "${err}" >&2
+    rm -f "${err}"
+    exit 1
+  fi
+  rm -f "${err}"
+  if [[ "${actual_vllm}" != "${expected_vllm}" ]]; then
+    echo "[FATAL][verify-vllm] Image ${image_ref} contains vLLM ${actual_vllm}, but expected ${expected_vllm}."
+    echo "[FATAL][verify-vllm] Aborting to avoid testing or promoting the wrong vLLM."
+    exit 1
+  fi
+  echo "[verify-vllm] OK: ${image_ref} contains expected vLLM ${expected_vllm}."
+}
+
 setup_environment() {
   local image_name_param=${1:-"vllm-tpu"}
   local should_push=${2:-"false"}
@@ -135,7 +176,25 @@ setup_environment() {
       TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"
   fi
  
+  # Include the vLLM commit in the cache tag so an image is uniquely identified
+  # by BOTH its tpu-inference commit and its vLLM commit. Without this, the CI
+  # pipeline (LKG vLLM) and the integration pipeline (HEAD vLLM) produce the same
+  # tag for the same tpu-inference commit and can overwrite each other's image in
+  # the registry -- a test could then silently run a different vLLM than intended.
   local CACHE_TAG="${TPU_INFERENCE_HASH}-${LOCAL_TPU_VERSION}"
+  if [[ -n "${VLLM_COMMIT_HASH}" ]]; then
+    CACHE_TAG="${TPU_INFERENCE_HASH}-${VLLM_COMMIT_HASH}-${LOCAL_TPU_VERSION}"
+  elif [[ -n "${BUILDKITE:-}" && "${RUN_WITH_PYPI:-false}" != "true" ]]; then
+    # In a real pipeline an empty VLLM_COMMIT_HASH is a bug (bootstrap didn't set
+    # the metadata, or the Dockerfile will clone vLLM HEAD non-deterministically).
+    # Falling back to the vLLM-agnostic tag here would silently re-introduce the
+    # cross-pipeline clobber this change eliminates, so fail loudly instead.
+    echo "[FATAL][setup_docker_env] VLLM_COMMIT_HASH is empty in a Buildkite build." >&2
+    echo "[FATAL][setup_docker_env] Refusing the vLLM-agnostic tag '${CACHE_TAG}' (can collide" >&2
+    echo "[FATAL][setup_docker_env] across CI/integration). Ensure bootstrap set the" >&2
+    echo "[FATAL][setup_docker_env] VLLM_COMMIT_HASH metadata (LKG or HEAD)." >&2
+    exit 1
+  fi
 
   # ==========================================
   # Pull-Only Mode for TPU execution nodes
@@ -143,6 +202,7 @@ setup_environment() {
   if [[ "${USE_PREBUILT_IMAGE:-0}" == "1" ]]; then
     echo "Pulling pre-built Docker image: ${CI_IMAGE_REPO}:${CACHE_TAG} ..."
     docker pull "${CI_IMAGE_REPO}:${CACHE_TAG}"
+    verify_image_vllm "${CI_IMAGE_REPO}:${CACHE_TAG}" "${VLLM_COMMIT_HASH}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:latest"
     return 0
@@ -157,6 +217,10 @@ setup_environment() {
       -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" \
       -t "${IMAGE_NAME}:latest" \
       -t "${IMAGE_NAME}:${CACHE_TAG}" .
+
+  # Fail fast if the freshly built image does not contain the expected vLLM
+  # commit (guards against a mis-set VLLM_COMMIT_HASH build-arg).
+  verify_image_vllm "${IMAGE_NAME}:${CACHE_TAG}" "${VLLM_COMMIT_HASH}"
 
   # ==========================================
   # Push to CI Image Registry (Executed by dedicate CPU builder)
