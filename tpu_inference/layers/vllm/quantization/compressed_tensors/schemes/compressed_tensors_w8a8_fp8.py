@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import Callable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -52,6 +52,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         weight_quant: QuantizationArgs,
         is_static_input_scheme: bool,
         linear_config: VllmQuantLinearConfig,
+        quantize_on_load: bool = False,
     ):
         # Per https://github.com/vllm-project/vllm/pull/32929,
         # init_fp8_linear_kernel is now called by super().__init__
@@ -80,6 +81,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         self.use_marlin = True
 
         self.linear_config = linear_config
+        self.quantize_on_load = quantize_on_load
 
     def create_weights(
         self,
@@ -89,6 +91,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
+        weight_loader: Callable,
         **extra_weight_attrs,
     ):
         # Per https://github.com/vllm-project/vllm/pull/33892, use_marlin is set again
@@ -96,18 +99,45 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         # The flag is set on whether a specific type of GPU kernel is being used which
         # means it is set to False for TPU.
         # We need to return it back to True here.
-        super().create_weights(layer, input_size_per_partition,
-                               output_partition_sizes, input_size, output_size,
-                               params_dtype, **extra_weight_attrs)
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            weight_loader,
+            **extra_weight_attrs,
+        )
         self.use_marlin = True
+        if self.quantize_on_load:
+            # If quantizing the weights on load, we want to load the natively BF16/FP16 weights in their original dtype.
+            # Replace the layer.weight parameter with a parameter of params_dtype.
+            output_size_per_partition = sum(output_partition_sizes)
+            from vllm.model_executor.parameter import ModelWeightParameter
+
+            weight = ModelWeightParameter(
+                data=torch.empty(
+                    output_size_per_partition,
+                    input_size_per_partition,
+                    dtype=params_dtype,
+                ),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+            )
+            layer.register_parameter("weight", weight)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = t2j(layer.weight, use_dlpack=False)
         weight = jnp.transpose(weight)
         delattr(layer, "weight")
-        weight_scale = t2j(layer.weight_scale, use_dlpack=False)
-        weight_scale = jnp.transpose(weight_scale)
-        delattr(layer, "weight_scale")
+        if hasattr(layer, "weight_scale"):
+            weight_scale = t2j(layer.weight_scale, use_dlpack=False)
+            weight_scale = jnp.transpose(weight_scale)
+            delattr(layer, "weight_scale")
+        else:
+            weight_scale = None
 
         if layer.bias is not None and not layer.skip_bias_add:
             if layer.return_bias:
@@ -122,9 +152,12 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
         @jax.jit
         def process_fp8_linear_weights(
             weight: jax.Array,
-            weight_scale: jax.Array,
+            weight_scale: jax.Array | None,
             bias: jax.Array | None,
         ) -> LinearWeights:
+            is_weight_unquantized = weight.dtype != jnp.float8_e4m3fn
+            # TODO (jacobplatin): we shouldn't assume 0 if the weight is unquantized
+            dim_to_quantize = 0 if is_weight_unquantized else None
             if per_tensor:
                 weights = []
                 start = 0
@@ -133,14 +166,19 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 for i, output_size in enumerate(
                         self.linear_config.output_sizes):
                     end = start + output_size
-                    weights.append(
-                        dequantize_tensor(weight[:, start:end],
-                                          weight_scale[i]))
+                    if is_weight_unquantized:
+                        logger.warning_once(
+                            "Weight is unquantized, quantizing it on the fly.")
+                        weights.append(weight[:, start:end])
+                    else:
+                        weights.append(
+                            dequantize_tensor(weight[:, start:end],
+                                              weight_scale[i]))
                     start = end
                 weight = jnp.concat(weights, axis=1)
                 # Requantize into per-tensor.
                 weight, weight_scale = quantize_tensor(jnp.float8_e4m3fn,
-                                                       weight, None)
+                                                       weight, dim_to_quantize)
             else:
                 # Handle 2D blockwise scales correctly for quantized_matmul_kernel
                 # which expects 3D dims for blockwise ops.
