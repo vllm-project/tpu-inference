@@ -401,3 +401,40 @@ To support this, the framework could be extended with:
 - A `generate_inputs_for_context(tuning_key, context)` method on `KernelTunerBase` that produces realistic JAX arrays whose numeric statistics match the target workload (e.g. drawn from captured activation distributions or synthetic approximations).
 - Context-aware result storage and querying in the inspector CLI, so `query_min_latency` can be filtered by context to return the best `TunableParams` per `(TuningKey, context)` pair.
 - At serving time, the kernel dispatch layer would select the tuned parameters based on the current inference phase (prefill vs decode), rather than using a single static lookup.
+
+---
+
+## 5. End-to-End Autotuning Pipeline
+
+The v1 tuner framework is integrated into a fully automated Buildkite pipeline that continuously optimizes kernel parameters based on real-world workload traces. The pipeline operates in 5 stages and automatically creates Pull Requests with improved configurations.
+
+### Pipeline Architecture
+
+The E2E pipeline is defined in `.buildkite/pipeline_kernel_autotune_template.yml` and is driven by environment variables. The 5 stages are:
+
+1. **Pre-Autotuning Benchmark (Cases Collection):**
+   Runs a standard benchmark run on the `main` branch. During this run, the kernels intercept actual input shapes, serializing them into Spanner as `TuningCase` records. This guarantees we only tune for shapes actually seen in production.
+2. **Kernel Tuning Execution:**
+   Triggers multiple parallel tuning jobs on Cloud TPUs. Each job claims a "bucket" of generated tuning cases and measures latency for the tunable parameters defined in the kernel's search space. Results are written back to Spanner.
+3. **Patch Kernel Tuning Result:**
+   Fetches the absolute best-performing configuration for each shape from Spanner. It then uses shell-level AST-like monkey-patching to safely overwrite the `tuned_params_mapping` dictionary in the target python files (e.g. `tpu_inference/kernels/mla/v2/tuned_params.py`), commits the change, and pushes it to a temporary evaluation branch.
+4. **Post-Autotuning Benchmark (Evaluation):**
+   Re-runs the exact same benchmark suite as Stage 1, but this time executing against the newly patched evaluation branch containing the tuned kernel parameters.
+5. **Evaluate and Create PR:**
+   Compares the benchmark metrics from Stage 1 (baseline) and Stage 4 (tuned). If there are performance improvements and no significant regressions (threshold = 0.4%), it automatically generates a Pull Request with an HTML summary report detailing the latency improvements.
+
+### Configuration
+
+To include a new kernel in the autotuning pipeline, you must register its path in the shared configuration file `tools/kernel/tuner/v1/autotune/kernel_autotune_config.py`.
+
+```python
+kernel_autotune_mapping = {
+    'my_kernel_tuner': '/workspace/tpu_inference/kernels/my_kernel/tuned_params.py',
+}
+```
+
+**Requirements for Target Files:**
+The pipeline uses strict validation before patching any Python files. Your target `tuned_params.py` file must contain:
+- A `def get_tuned_params(...)` function.
+- A `tuned_params_mapping = { ... }` module-level dictionary.
+- No existing function named `_get_tuned_params`.

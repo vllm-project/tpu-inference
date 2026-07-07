@@ -89,12 +89,19 @@ mkdir -p "$PROFILE_FOLDER"
 trap cleanup_artifact_log EXIT
 
 # Prepare environment variables for the Docker container.
+declare -a KERNEL_TUNING_ARGS=(
+  "-e" "KERNEL_TUNING_AUTOTUNE_ID=${KERNEL_TUNING_AUTOTUNE_ID:-}"
+  "-e" "KERNEL_AUTOTUNE_STAGE=${KERNEL_AUTOTUNE_STAGE:-}"
+)
+
 declare -a BENCHMARK_DOCKER_ARGS=(
   "-v" "/dev/shm:/dev/shm"
   "-v" "/etc/boto.cfg:/etc/boto.cfg"
   "-v" "$ARTIFACT_FOLDER:/workspace/tpu_inference/artifacts"
   "-e" "ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts"
   "-e" "DEVICE=$DEVICE"
+  "${KERNEL_TUNING_ARGS[@]}"
+  "-e" "EXTRA_ENVS=${EXTRA_ENVS:-}"
   "-e" "RECORD_ID=$RECORD_ID"
   "-e" "RUN_TYPE=$RUN_TYPE"
   "-e" "CODE_HASH=${CODE_HASH}"
@@ -121,6 +128,16 @@ BM_JOB_STATUS=$EXIT_SUCCESS
 export BM_INFRA="true"
 
 .buildkite/scripts/run_in_docker.sh bash -c "
+  if [[ \"${KERNEL_AUTOTUNE_STAGE:-}\" == \"PRE_KERNEL_AUTOTUNE_CASES_COLLECTION\" ]]; then
+    pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
+    source .buildkite/benchmark/scripts/kernel_autotune.sh && \
+    update_all_tuned_params_py || exit 1
+  fi && \
+  if [[ \"${KERNEL_AUTOTUNE_STAGE:-}\" == \"POST_KERNEL_AUTOTUNE_BM_RERUN\" ]]; then
+    pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
+    source .buildkite/benchmark/scripts/kernel_autotune.sh && \
+    checkout_updated_tuned_params_py_branch || exit 1
+  fi && \
   echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
   chmod +x .buildkite/benchmark/scripts/run_bm.sh && \
   .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME" || {

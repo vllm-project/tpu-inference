@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from absl import flags
 from google.api_core import retry
 from google.cloud import spanner
 
@@ -21,17 +20,17 @@ from tools.kernel.tuner.v1.storage_management.storage_manager import \
 
 BATCH_SIZE = 1000
 
-FLAGS = flags.FLAGS
-
 
 class SpannerStorageManager(StorageManager):
     # (TODO)For historical reason, the database_id is still tune-gmm, but it
     # actually contains tuning cases for different kernels, not just gmm. We
     # can consider to rename it in the future for better clarity.
-    def __init__(self, worker_id=None, dry_run=False):
-        gcp_project_id = FLAGS.gcp_project_id
-        spanner_instance_id = FLAGS.spanner_instance_id
-        spanner_database_id = FLAGS.spanner_database_id
+    def __init__(self,
+                 gcp_project_id,
+                 spanner_instance_id,
+                 spanner_database_id,
+                 worker_id=None,
+                 dry_run=False):
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
@@ -43,7 +42,14 @@ class SpannerStorageManager(StorageManager):
             self.instance = self.client.instance(spanner_instance_id)
             self.database = self.instance.database(spanner_database_id)
         else:
+            self.client = None
             self.database = None
+
+    def close(self):
+        """Safely closes the Spanner client connection."""
+        if not self.dry_run and self.client:
+            self.client.close()
+            self.client = None
 
     def init_case_set(self, case_set_id, scan_space, desc):
         """Initializes the CaseSet row."""
@@ -284,6 +290,19 @@ class SpannerStorageManager(StorageManager):
                                            })
             }
 
+    def get_all_cases(self, case_set_id):
+        """Returns all cases in the given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+
+        Returns:
+            A list of all cases in the case set.
+        """
+        query = "SELECT CaseId, CaseKeyValue FROM KernelTuningCases WHERE ID = @id ORDER BY CaseId ASC"
+        with self.database.snapshot() as snp:
+            return list(snp.execute_sql(query, params={'id': case_set_id}))
+
     def get_total_cases_in_case_set(self, case_set_id):
         """Returns the total number of cases in the given case set.
 
@@ -307,3 +326,51 @@ class SpannerStorageManager(StorageManager):
             Current timestamp in seconds.
         """
         return spanner.COMMIT_TIMESTAMP
+
+    def add_autotune_case(self, case_set_id: str, case_str: str,
+                          kernel_tuner_name: str, tpu: str):
+        """Adds a tuning case to the AutoTuneCase table for logging purposes.
+
+        Called by the autotuning pipeline to log the tuning key and tuned params
+        for each case.
+
+        This table will be used to build all tuning cases for an auto tune job.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            case_str: String encoding of the tuning case (e.g. in 'key:value' format).
+            kernel_tuner_name: Name of the kernel tuner that generated this case.
+            tpu: TPU identifier where this case was generated or will be executed.
+        """
+        assert isinstance(
+            case_set_id, str
+        ), f'param case_set_id should be a string but got {type(case_set_id)}'
+        assert isinstance(
+            case_str,
+            str), f'param case_str should be a string but got {type(case_str)}'
+        with self.database.batch() as b:
+            b.insert(table='KernelAutoTuneCases',
+                     columns=('CaseSetId', 'CaseKeyValue', 'KernelTunerName',
+                              'TPU'),
+                     values=[(case_set_id, case_str, kernel_tuner_name, tpu)])
+
+    def read_autotune_cases(self,
+                            case_set_id,
+                            kernel_tuner_name=None,
+                            tpu=None):
+        """ Reads tuning cases from the KernelAutoTuneCases table for a given case set.
+        """
+        query = "SELECT DISTINCT CaseKeyValue, KernelTunerName, TPU FROM KernelAutoTuneCases WHERE CaseSetId = @id"
+        params = {'id': case_set_id}
+        if kernel_tuner_name:
+            query += " AND KernelTunerName = @ktn"
+            params['ktn'] = kernel_tuner_name
+        if tpu:
+            query += " AND TPU = @tpu"
+            params['tpu'] = tpu
+        with self.database.snapshot() as snp:
+            return [{
+                "CaseKeyValue": row[0],
+                "KernelTunerName": row[1],
+                "TPU": row[2]
+            } for row in snp.execute_sql(query, params=params)]
