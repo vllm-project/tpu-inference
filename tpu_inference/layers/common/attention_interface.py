@@ -607,6 +607,7 @@ def mla_attention(
         num_queries_per_block = (
             batched_decode_tuned_params.num_queries_per_block, 16, 16)
         decode_batch_size = batched_decode_tuned_params.decode_batch_size
+        mixed_q_split = 16
         logger.info(
             f"Using MLA tuned block sizes for batched decode: {batched_decode_tuned_params} for input shapes: {batched_decode_tuning_key}"
         )
@@ -625,6 +626,7 @@ def mla_attention(
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            mixed_q_split=mixed_q_split,
             transpose_kv_cache=envs.MLA_TRANSPOSE_KV_CACHE)
 
         return new_cache, out

@@ -156,6 +156,7 @@ def static_validate_inputs(
     num_queries_per_blocks: tuple[int, int, int] | None = None,
     vmem_limit_bytes: int | None = None,
     decode_batch_size: int = 1,
+    mixed_q_split: int = 1,
     transpose_kv_cache: bool = False,
     # Debug params.
     debug_mode: bool = False,
@@ -266,10 +267,16 @@ def static_validate_inputs(
             if num_kv_pages_per_block <= 0:
                 raise ValueError(
                     f"{num_kv_pages_per_block=} must be positive.")
+    if mixed_q_split <= 0:
+        raise ValueError(f"{mixed_q_split=} must be positive.")
     if num_queries_per_blocks is not None:
         for num_queries_per_block in num_queries_per_blocks:
             if num_queries_per_block <= 0:
                 raise ValueError(f"{num_queries_per_block=} must be positive.")
+        if num_queries_per_blocks[2] % mixed_q_split != 0:
+            raise ValueError(
+                f"{num_queries_per_blocks[2]=} must be divisible by"
+                f" {mixed_q_split=}")
     if vmem_limit_bytes is not None and vmem_limit_bytes <= 0:
         raise ValueError(f"{vmem_limit_bytes=} must be positive.")
 
@@ -281,6 +288,7 @@ def static_validate_inputs(
     del v_scale
     del decode_batch_size
     del debug_mode
+    del mixed_q_split
 
 
 def _mla_ragged_paged_attention_kernel(
@@ -324,6 +332,7 @@ def _mla_ragged_paged_attention_kernel(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    q_split: int = 1,
     bkv_p,
     bq_sz,
     batch_size: int = 1,
@@ -496,6 +505,7 @@ def _mla_ragged_paged_attention_kernel(
         kv_len,
         q_len,
         bq_idx,
+        bq_offset,
         bkv_idx,
         head_l_ref,
         head_m_ref,
@@ -580,7 +590,8 @@ def _mla_ragged_paged_attention_kernel(
 
         if s.shape[0] % num_q_heads == 0 and s.shape[1] % 128 == 0:
             # Optimized mask logic.
-            threshold = kv_len - q_len + bq_idx * bq_sz - bkv_idx * bkv_sz
+            threshold = (kv_len - q_len + (bq_idx * bq_sz + bq_offset) -
+                         bkv_idx * bkv_sz)
             iota1 = lax.broadcasted_iota(jnp.int32, (num_q_heads, 128), 1)
             s_list = []
             for s_idx in range(s.shape[1] // 128):
@@ -602,8 +613,10 @@ def _mla_ragged_paged_attention_kernel(
             s = jnp.concatenate(s_list, axis=1)
         else:
             # Reference mask logic.
-            q_span = (kv_len - q_len + bq_idx * bq_sz + unsigned_floor_div(
-                lax.broadcasted_iota(jnp.int32, s.shape, 0), num_q_heads))
+            q_span = (
+                kv_len - q_len +
+                (bq_idx * bq_sz + bq_offset) + unsigned_floor_div(
+                    lax.broadcasted_iota(jnp.int32, s.shape, 0), num_q_heads))
             k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(
                 jnp.int32, s.shape, 1)
             mask = q_span < k_span
@@ -1816,7 +1829,13 @@ def _mla_ragged_paged_attention_kernel(
                     debug_print("[RPA debug] two step flash attention")
                     prev_p = None
                     prev_v = None
+                    prev_acc = None
                     prev_exp_m_diff = None
+
+                    q_len = actual_bq_sz * num_q_heads
+                    q_block_len = q_len // q_split
+                    bq_sz_for_each_split = bq_sz // q_split
+
                     for b in range(batch_size):
                         bkvc, bkpe = load_bkv_fn(
                             b,
@@ -1839,34 +1858,44 @@ def _mla_ragged_paged_attention_kernel(
                         debug_print("[RPA debug] bkpe.shape={}, {}",
                                     bkpe.shape[0], bkpe.shape[1])
 
-                        cur_p, cur_exp_m_diff = flash_attention_step1_qk_softmax(
-                            bq_nope_vec,
-                            bq_pe_vec,
-                            bkvc,
-                            bkpe,
-                            kv_len=kv_lens_ref[batch_start_seq_idx + b],
-                            q_len=(cu_q_lens_ref[batch_start_seq_idx + b + 1] -
-                                   cu_q_lens_ref[batch_start_seq_idx + b]),
-                            bq_idx=bq_idx,
-                            bkv_idx=bkv_idx,
-                            head_l_ref=l_ref.at[b, :bq_nope_vec.shape[0]],
-                            head_m_ref=m_ref.at[b, :bq_nope_vec.shape[0]],
-                        )
+                        cu_q_len = (
+                            cu_q_lens_ref[batch_start_seq_idx + b + 1] -
+                            cu_q_lens_ref[batch_start_seq_idx + b])
 
-                        if prev_p is not None:
-                            assert prev_v is not None
-                            assert prev_exp_m_diff is not None
-                            flash_attention_step2_pv(
-                                prev_p,
-                                prev_v,
-                                prev_exp_m_diff,
-                                bkv_idx,
-                                acc_ref.at[b - 1, :prev_p.shape[0]],
+                        for q_idx in range(q_split):
+                            bq_start = q_block_len * q_idx
+                            bq_end = bq_start + q_block_len
+                            bq_offset = bq_sz_for_each_split * q_idx
+
+                            cur_p, cur_exp_m_diff = flash_attention_step1_qk_softmax(
+                                bq_nope_vec[bq_start:bq_end],
+                                bq_pe_vec[bq_start:bq_end],
+                                bkvc,
+                                bkpe,
+                                kv_len=kv_lens_ref[batch_start_seq_idx + b],
+                                q_len=cu_q_len,
+                                bq_idx=bq_idx,
+                                bq_offset=bq_offset,
+                                bkv_idx=bkv_idx,
+                                head_l_ref=l_ref.at[b, bq_start:bq_end],
+                                head_m_ref=m_ref.at[b, bq_start:bq_end],
                             )
 
-                        prev_p = cur_p
-                        prev_v = bkvc
-                        prev_exp_m_diff = cur_exp_m_diff
+                            if prev_p is not None:
+                                assert prev_v is not None
+                                assert prev_exp_m_diff is not None
+                                flash_attention_step2_pv(
+                                    prev_p,
+                                    prev_v,
+                                    prev_exp_m_diff,
+                                    bkv_idx,
+                                    prev_acc,
+                                )
+
+                            prev_p = cur_p
+                            prev_v = bkvc
+                            prev_exp_m_diff = cur_exp_m_diff
+                            prev_acc = acc_ref.at[b, bq_start:bq_end]
 
                     # last flash attention 2nd step
                     assert prev_p is not None
@@ -1877,7 +1906,7 @@ def _mla_ragged_paged_attention_kernel(
                         prev_v,
                         prev_exp_m_diff,
                         bkv_idx,
-                        acc_ref.at[batch_size - 1, :prev_p.shape[0]],
+                        prev_acc,
                     )
                 else:  # One step flash attention
                     # Load bkv into vreg. There is no need to mask out invalid k/v entries,
@@ -2125,6 +2154,7 @@ def prepare_outputs(
         "chunk_prefill_size",
         "num_kv_pages_per_block",
         "num_queries_per_block",
+        "mixed_q_split",
         "vmem_limit_bytes",
         "decode_batch_size",
         "s_dtype",
@@ -2166,6 +2196,7 @@ def mla_ragged_paged_attention(
     transpose_kv_cache: bool = False,
     two_step_flash_attention: bool = True,
     p_same_dtype_as_v: bool = True,
+    mixed_q_split: int = 1,
     # Debug params.
     debug_mode: bool = False,
 ) -> tuple[
@@ -2258,6 +2289,7 @@ def mla_ragged_paged_attention(
         vmem_limit_bytes=vmem_limit_bytes,
         decode_batch_size=decode_batch_size,
         transpose_kv_cache=transpose_kv_cache,
+        mixed_q_split=mixed_q_split,
         debug_mode=debug_mode,
     )
 
@@ -2314,6 +2346,7 @@ def mla_ragged_paged_attention(
         p_same_dtype_as_v: bool,
         batch_size: int = 1,
         case: MlaCase = MlaCase.MIXED,
+        q_split: int = 1,
     ):
 
         bkv_p = num_kv_pages_per_block
@@ -2449,6 +2482,7 @@ def mla_ragged_paged_attention(
                     transpose_kv_cache=transpose_kv_cache,
                     two_step_flash_attention=two_step_flash_attention,
                     p_same_dtype_as_v=p_same_dtype_as_v,
+                    q_split=q_split,
                     debug_mode=debug_mode,
                 ),
                 grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -2568,6 +2602,7 @@ def mla_ragged_paged_attention(
         s_dtype=s_dtype,
         p_same_dtype_as_v=p_same_dtype_as_v,
         case=MlaCase.MIXED,
+        q_split=mixed_q_split,
     )
     output = prepare_outputs(
         ql_nope, actual_num_q_heads, actual_max_num_tokens,
