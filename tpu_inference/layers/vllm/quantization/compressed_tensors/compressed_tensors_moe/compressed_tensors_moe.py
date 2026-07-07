@@ -54,24 +54,35 @@ class VllmCompressedTensorsMoEMethod(CompressedTensorsMoEMethod):
             raise ValueError("All MoE projections need to have same "
                              "quantization scheme but found multiple")
 
+        enable_hybrid_moe = getattr(quant_config.vllm_config.sharding_config,
+                                    "enable_hybrid_moe", False)
+
         if scheme_dict is None:
-            return VllmUnquantizedFusedMoEMethod(layer.moe_config,
-                                                 quant_config.mesh)
+            return VllmUnquantizedFusedMoEMethod(
+                layer.moe_config,
+                quant_config.mesh,
+                enable_hybrid_moe=enable_hybrid_moe)
 
         weight_quant = scheme_dict.get("weights")
         input_quant = scheme_dict.get("input_activations")
 
         if quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return VllmCompressedTensorsW8A8Fp8MoEMethod(
-                weight_quant, input_quant, layer.moe_config, quant_config.mesh)
+                weight_quant,
+                input_quant,
+                layer.moe_config,
+                quant_config.mesh,
+                enable_hybrid_moe=enable_hybrid_moe)
         # Uses fp8 or int8 activations depending on the TPU generation.
         elif weight_quant.num_bits == 4:
             from .compressed_tensors_moe_w4a8 import \
                 VllmCompressedTensorsW4A8MoEMethod
-            return VllmCompressedTensorsW4A8MoEMethod(weight_quant,
-                                                      input_quant,
-                                                      layer.moe_config,
-                                                      quant_config.mesh)
+            return VllmCompressedTensorsW4A8MoEMethod(
+                weight_quant,
+                input_quant,
+                layer.moe_config,
+                quant_config.mesh,
+                enable_hybrid_moe=enable_hybrid_moe)
         else:
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}")

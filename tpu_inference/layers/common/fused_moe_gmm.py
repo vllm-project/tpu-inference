@@ -34,7 +34,8 @@ from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
     ragged_gather_reduce as ragged_gather_reduce_v2
 from tpu_inference.kernels.sparse_core.ragged_gather_v2 import ragged_gather_v2
 from tpu_inference.layers.common.quantization import quantize_tensor
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import (ShardingAxisName,
+                                                  get_hybrid_moe_axes)
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -193,17 +194,20 @@ def moe_gmm_local(x: jax.Array,
                   *,
                   activation: str,
                   topk: int,
-                  parallelism: Literal["tp", "ep"],
+                  parallelism: Literal["tp", "ep", "hybrid"],
+                  hybrid_ep_axis: tuple[str, ...] = (),
+                  hybrid_tp_axis: tuple[str, ...] = (),
                   enable_rs_kernel: bool = False,
                   onehot_moe_permute_threshold: int = 0,
                   scatter_results: bool = False,
-                  moe_chunk_size: int = 0) -> jax.Array:
-    """Main MoE logic on a local shard can run in TP or EP mode.
+                  moe_chunk_size: int = 0,
+                  use_ep: bool = False) -> jax.Array:
+    """Main MoE logic on a local shard can run in TP, EP or Hybrid mode.
 
-    Set parallelism for "tp" or "ep"
+    Set parallelism for "tp", "ep" or "hybrid"
     """
 
-    assert parallelism in ["tp", "ep"]
+    assert parallelism in ["tp", "ep", "hybrid"]
 
     # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
     gmm1_res = gmm_wrapper(
@@ -223,6 +227,10 @@ def moe_gmm_local(x: jax.Array,
     if parallelism == "tp" and w2_bias is not None:
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
+    elif parallelism == "hybrid" and w2_bias is not None:
+        shard_id = sum(jax.lax.axis_index(a) for a in hybrid_tp_axis)
+        w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
+
     gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                            group_offset)
@@ -230,8 +238,12 @@ def moe_gmm_local(x: jax.Array,
     batch_size = gmm2_res.shape[0]
     local_group_size = w1.shape[0]
 
-    reduction_axis = (ShardingAxisName.MLP_TENSOR
-                      if parallelism == "tp" else ShardingAxisName.EXPERT)
+    if parallelism == "tp":
+        reduction_axis = ShardingAxisName.MLP_TENSOR
+    elif parallelism == "ep":
+        reduction_axis = ShardingAxisName.EXPERT
+    elif parallelism == "hybrid":
+        reduction_axis = hybrid_ep_axis
 
     scatter_axis_size = 1
     reduce_axes = ()
@@ -345,7 +357,13 @@ def moe_gmm_local(x: jax.Array,
                     num_micro_batches=num_mb,
                     axis_name=reduction_axis)
                 out = rs_out.astype(x.dtype)
+
+            if parallelism == "hybrid":
+                out = jax.lax.psum(out, axis_name=hybrid_tp_axis)
         elif scatter_results:
+            if parallelism == "hybrid":
+                reduce_axes = hybrid_tp_axis
+                scatter_axes = hybrid_ep_axis
             if reduce_axes:
                 chunk_hidden = jax.lax.psum(chunk_hidden,
                                             axis_name=reduce_axes)
@@ -357,8 +375,13 @@ def moe_gmm_local(x: jax.Array,
             else:
                 out = chunk_hidden.astype(x.dtype)
         else:
-            out = jax.lax.psum(chunk_hidden,
-                               axis_name=reduction_axis).astype(x.dtype)
+            if parallelism == "hybrid":
+                out = jax.lax.psum(chunk_hidden,
+                                   axis_name=hybrid_ep_axis +
+                                   hybrid_tp_axis).astype(x.dtype)
+            else:
+                out = jax.lax.psum(chunk_hidden,
+                                   axis_name=reduction_axis).astype(x.dtype)
 
         out_list.append(out)
 
@@ -533,6 +556,101 @@ def expert_parallel_gmm(
     )
 
 
+def hybrid_parallel_gmm(
+    x: jax.Array,
+    w1: jax.Array,
+    w1_scale: jax.Array | None,
+    w1_bias: jax.Array | None,
+    w2: jax.Array,
+    w2_scale: jax.Array | None,
+    w2_bias: jax.Array | None,
+    group_sizes: jax.Array,
+    topk_argsort_revert_indices: jax.Array,
+    topk_weights: jax.Array,
+    *,
+    activation: str,
+    topk: int,
+    mesh: Mesh,
+    enable_rs_kernel: bool = False,
+    onehot_moe_permute_threshold: int = 0,
+    scatter_results: bool = False,
+) -> jax.Array:
+    tp_axis, ep_axis = get_hybrid_moe_axes(mesh)
+
+    # 2. Calculate the EP Group Offsets
+    ep_size = get_mesh_shape_product(mesh, ep_axis)
+    num_experts = w1.shape[0]
+    num_experts_per_shard = num_experts // ep_size
+    group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
+
+    # 3. Define the Partition Specs
+    data_p_spec = P(ShardingAxisName.MLP_DATA)
+    ep_p_spec = P(ep_axis)
+
+    # W1: Shard by Expert (Dim 0) and Output Feature (Dim 2)
+    w1_spec = P(ep_axis, None, tp_axis)
+    # W2: Shard by Expert (Dim 0) and Input Feature (Dim 1)
+    w2_spec = P(ep_axis, tp_axis, None)
+
+    w1_scale_spec = None if w1_scale is None else P(ep_axis, None, None,
+                                                    tp_axis)
+    w1_bias_spec = None if w1_bias is None else P(ep_axis, None, tp_axis)
+
+    num_blocks = 1 if w2_scale is None else w2_scale.shape[1]
+    if w2_scale is None:
+        w2_scale_spec = None
+    elif num_blocks == 1:
+        w2_scale_spec = P(ep_axis, None, None, None)
+    else:
+        w2_scale_spec = P(ep_axis, tp_axis, None, None)
+
+    w2_bias_spec = None if w2_bias is None else P(ep_axis, None, None)
+
+    data_out_spec = P(ep_axis)
+
+    return jax.shard_map(
+        functools.partial(
+            moe_gmm_local,
+            activation=activation,
+            topk=topk,
+            parallelism="hybrid",
+            hybrid_ep_axis=ep_axis,
+            hybrid_tp_axis=tp_axis,
+            enable_rs_kernel=enable_rs_kernel,
+            onehot_moe_permute_threshold=onehot_moe_permute_threshold,
+            scatter_results=scatter_results,
+        ),
+        mesh=mesh,
+        in_specs=(
+            data_p_spec,
+            w1_spec,
+            w1_scale_spec,
+            w1_bias_spec,
+            w2_spec,
+            w2_scale_spec,
+            w2_bias_spec,
+            data_p_spec,
+            ep_p_spec,
+            data_p_spec,
+            data_p_spec,
+        ),
+        out_specs=data_out_spec,
+        check_vma=False,
+    )(
+        x,
+        w1,
+        w1_scale,
+        w1_bias,
+        w2,
+        w2_scale,
+        w2_bias,
+        group_sizes,
+        group_offset,
+        topk_argsort_revert_indices,
+        topk_weights,
+    )
+
+
 def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
                           dtype: jnp.dtype) -> jax.Array:
     logger.info("Apply FP8 all-gather on input of MOE")
@@ -561,6 +679,7 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     "renormalize",
     "mesh",
     "use_ep",
+    "use_hybrid",
     "activation",
     "scoring_fn",
     "all_gather_fp8",
@@ -582,6 +701,7 @@ def fused_moe_func(
     renormalize: bool,
     mesh: Mesh,
     use_ep: bool,
+    use_hybrid: bool,
     activation: str,
     scoring_fn: str,
     all_gather_fp8: bool = False,
@@ -607,6 +727,7 @@ def fused_moe_func(
         renormalize: normalize gating_output.
         mesh: mesh to perform moe.
         use_ep: use expert parallelism.
+        use_hybrid: use hybrid parallelism.
         activation: activation function to perform on the output of w1.
         scoring_fn: scoring function to apply on gating_output.
         enable_rs_kernel: enable custom Hierarchical Reduce-Scatter kernel.
@@ -738,7 +859,28 @@ def fused_moe_func(
             f"Error when padding input hidden states from {hidden_size} to {padded_hidden_size}."
         ) from e
 
-    if use_ep:
+    tp_axis, ep_axis = get_hybrid_moe_axes(mesh)
+
+    if use_hybrid and len(tp_axis) > 0 and len(ep_axis) > 0:
+        x = hybrid_parallel_gmm(
+            x,
+            w1,
+            w1_scale,
+            w1_bias,
+            w2,
+            w2_scale,
+            w2_bias,
+            group_sizes,
+            topk_argsort_revert_indices,
+            topk_weights,
+            activation=activation,
+            topk=topk,
+            mesh=mesh,
+            enable_rs_kernel=actual_enable_rs_kernel,
+            onehot_moe_permute_threshold=onehot_moe_permute_threshold,
+            scatter_results=scatter_results,
+        )
+    elif use_ep:
         x = expert_parallel_gmm(
             x,
             w1,
