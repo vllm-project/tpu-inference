@@ -652,6 +652,13 @@ class TPUConnectorWorker:
                 # TODO(xiang): pad block_ids to avoid recompilation
                 conn = self._maybe_build_kv_connection(req_meta)
                 if req_id not in self.reqs_pulling:
+                    # KV-transfer timing: consumer pull issued -- decode starts
+                    # pulling KV from P. Pair with cons_done (same host/clock, by
+                    # req_id) for the WAIT-excluded decode-side transfer time,
+                    # matching raiden's cons_pull_issue -> cons_done window.
+                    logger.info(
+                        f"KVXFER event=cons_pull_issue req_id={req_id} "
+                        f"uuid={req_meta.uuid} t={time.time():.6f}")
                     self.reqs_pulling[req_id] = [
                         self.pull_executor.submit(self._pull_kv, req_id, conn,
                                                   req_meta), None,
