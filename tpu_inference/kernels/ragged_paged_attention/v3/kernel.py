@@ -34,11 +34,14 @@ tokens, round-robin by ``cp_rank``):
   full current KV, while it still writes only its strided share back to the
   cache, exactly like DCP.
 
-  PCP adds two tensors to the entry point:
+  PCP adds to the entry point:
 
-  - ``cu_kv_lens``: the per-sequence layout of the all-gathered current KV in
-    ``keys``/``values`` (the KV token count is decoupled from the local,
-    head-tail ``cu_q_lens``).
+  - ``all_gather_kv`` (static bool): the ``keys``/``values`` hold the
+    all-gathered current KV. Its per-sequence length is *not* passed as a
+    tensor; it is derived as ``2 * cp_group_size * cu_q_lens`` -- the sequence
+    is split into ``2 * cp_group_size`` head-tail chunks and each launch's
+    ``cu_q_lens`` counts one chunk, so the gathered KV is ``2 * cp_group_size``
+    times as long.
   - ``q_pos_offsets``: the global position, within the current tokens, of each
     launch's local query chunk (``rank*C`` for a head launch,
     ``(2P-1-rank)*C`` for a tail launch). It shifts the causal ``q_span`` so
@@ -47,9 +50,11 @@ tokens, round-robin by ``cp_rank``):
   The head/tail chunks are processed as separate kernel launches, and each is
   itself split into a non-causal pass over the previous cache
   (``skip_current_attn``) and a causal pass over the current KV
-  (``skip_cache_attn``); the passes are merged with the returned LSE. A sibling
-  ``kernel_ring.py`` implements the same PCP semantics with ring attention
-  (the current KV is streamed one shard at a time instead of all-gathered).
+  (``skip_cache_attn``); the passes are merged with the returned LSE. Sibling
+  files implement the same PCP semantics with ring attention (current KV
+  streamed one shard at a time instead of all-gathered): ``kernel_ring_extern.py``
+  (one launch per shard) and ``kernel_ring_fused.py`` (the whole ring fused into
+  a single shard_map'd launch via in-kernel remote DMA).
 """
 
 import functools
@@ -351,8 +356,6 @@ def _ragged_paged_attention_kernel_loop(
     bkv_update_ids_ref,  # [6 or 8] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz) (bkv_smem_0_src_start_base, bkv_smem_1_src_start_base)
     cp_rank_ref: jax.Array | None,  # i32[1]
     # Prefill context parallelism (PCP): all-gathered KV, head-tail sharded Q.
-    cu_kv_lens_ref: jax.Array
-    | None,  # i32[max_num_seqs + 1] - layout of the all-gathered current KV in kv_hbm_ref (decoupled from local cu_q_lens)
     q_pos_offset_ref: jax.Array
     | None,  # i32[max_num_seqs] - per-seq global position (within current tokens) of this launch's local Q chunk
     # Input
@@ -381,6 +384,9 @@ def _ragged_paged_attention_kernel_loop(
     *,
     # Static kwargs
     cp_group_size: int | None = None,
+    # PCP: current KV is all-gathered across the 2*cp_group_size head-tail
+    # chunks, so its per-seq length is (2 * cp_group_size) * local cu_q_lens.
+    all_gather_kv: bool = False,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,  # KV-share: False = skip cache writes
     skip_kv_mask: bool = False,
@@ -455,18 +461,20 @@ def _ragged_paged_attention_kernel_loop(
         return (x + cp_group_size - 1 - cp_rank) // cp_group_size
 
     def get_kv_new_len(seq_idx):
-        # Number of *new* KV tokens for this step. In PCP the KV is all-gathered
-        # so it spans the full current chunk (`cu_kv_lens`), decoupled from the
-        # local head-tail query length (`cu_q_lens`). Falls back to q_len
-        # otherwise (DCP / non-CP: new KV == local Q).
-        if cu_kv_lens_ref is not None:
-            return cu_kv_lens_ref[seq_idx + 1] - cu_kv_lens_ref[seq_idx]
-        return cu_q_lens_ref[seq_idx + 1] - cu_q_lens_ref[seq_idx]
+        # Number of *new* KV tokens for this step. Under PCP (all_gather_kv) the
+        # KV is all-gathered across the 2*cp_group_size head-tail chunks, so it
+        # is (2 * cp_group_size) x the launch-local per-chunk query length. Falls
+        # back to q_len otherwise (DCP / non-CP: new KV == local Q).
+        local = cu_q_lens_ref[seq_idx + 1] - cu_q_lens_ref[seq_idx]
+        if all_gather_kv:
+            return local * (2 * cp_group_size)
+        return local
 
     def get_kv_new_end(seq_idx):
-        # Exclusive end offset of this seq's new KV inside kv_hbm_ref.
-        if cu_kv_lens_ref is not None:
-            return cu_kv_lens_ref[seq_idx + 1]
+        # Exclusive end offset of this seq's new KV inside kv_hbm_ref (the
+        # all-gathered current KV shares cu_q_lens' cumulative layout, scaled).
+        if all_gather_kv:
+            return cu_q_lens_ref[seq_idx + 1] * (2 * cp_group_size)
         return cu_q_lens_ref[seq_idx + 1]
 
     def get_q_pos_offset(seq_idx):
@@ -704,8 +712,8 @@ def _ragged_paged_attention_kernel_loop(
         _seq_q_end = cu_q_lens_ref[seq_idx + 1]
         _seq_q_len = _seq_q_end - _seq_q_start
         _seq_total_kv_len = kv_lens_ref[seq_idx]
-        # New-KV length/source: identical to Q unless PCP passes an all-gathered
-        # current KV via `cu_kv_lens` (then it spans the full current chunk).
+        # New-KV length/source: identical to Q unless PCP (all_gather_kv) reads
+        # an all-gathered current KV (then it spans the full current chunk).
         _seq_kv_new_len = get_kv_new_len(seq_idx)
         _seq_kv_new_end = get_kv_new_end(seq_idx)
 
@@ -721,9 +729,9 @@ def _ragged_paged_attention_kernel_loop(
         kv_left = _seq_kv_len_local - kv_len_start
         # Split the local KV into [cache | current]. The current tokens are read
         # from kv_hbm_ref when we either write the cache (normal path) or when
-        # PCP delivers an all-gathered current KV (cu_kv_lens) that must be read
-        # from HBM regardless of whether this launch writes the cache.
-        read_current_frm_hbm = update_kv_cache or (cu_kv_lens_ref is not None)
+        # PCP delivers an all-gathered current KV (all_gather_kv) that must be
+        # read from HBM regardless of whether this launch writes the cache.
+        read_current_frm_hbm = update_kv_cache or all_gather_kv
         if read_current_frm_hbm:
             kv_left_frm_cache = jnp.maximum(kv_left - _seq_kv_new_len, 0)
         else:
@@ -1268,10 +1276,22 @@ def _ragged_paged_attention_kernel_loop(
                 effective_kv_len = jnp.minimum(effective_kv_len,
                                                kv_cache_len_local)
 
+            # Under PCP the all-gathered current KV is written to the cache
+            # strided (i % cp_group_size). A single head-tail chunk's causal
+            # range does not cover this rank's full strided share, so when this
+            # launch writes the cache (`update_kv_cache`) extend the BKV loop to
+            # the full current KV. Flash attention on the extra blocks is a no-op
+            # (`effective_bkv_sz` clamps to 0 past `effective_kv_len`); only the
+            # strided cache write runs there. The caller enables this on the tail
+            # launch only, so the whole current KV is written exactly once.
+            fetch_kv_len = effective_kv_len
+            if all_gather_kv and update_kv_cache:
+                fetch_kv_len = kv_len
+
             # Always run at least 1 BKV block to keep the DMA pipeline (BKV fetch /
             # prefetch_next_bkv / wait_cur_bq) balanced. This happen when
             # effective_kv_len == 0 (i.e. kv_cache_len_local == 0 in the context phase)
-            end_bkv_idx = jnp.maximum(cdiv(effective_kv_len, bkv_sz),
+            end_bkv_idx = jnp.maximum(cdiv(fetch_kv_len, bkv_sz),
                                       start_bkv_idx + 1)
 
             # Prefetch next bq
@@ -1868,30 +1888,27 @@ def static_validate_inputs(
     del v_scale
 
 
-def _validate_pcp_inputs(cu_kv_lens, q_pos_offsets, kv_lens, cp_group_size,
+def _validate_pcp_inputs(all_gather_kv, q_pos_offsets, kv_lens, cp_group_size,
                          sliding_window):
-    """Validate the extra tensors that enable prefill context parallelism.
+    """Validate the inputs that enable prefill context parallelism.
 
-    PCP delivers an all-gathered current KV (`cu_kv_lens` describes its layout,
-    decoupled from the local head-tail `cu_q_lens`) and shifts each launch's
-    query chunk to its true global position via `q_pos_offsets`. Both reuse the
-    DCP strided KV cache, so `cp_group_size`/`cp_rank` must be set as well.
+    PCP delivers an all-gathered current KV (`all_gather_kv`; its per-seq length
+    is derived as `2 * cp_group_size * cu_q_lens`, decoupled from the local
+    head-tail `cu_q_lens`) and shifts each launch's query chunk to its true
+    global position via `q_pos_offsets`. Both reuse the DCP strided KV cache, so
+    `cp_group_size`/`cp_rank` must be set as well.
     """
-    if cu_kv_lens is None and q_pos_offsets is None:
+    if not all_gather_kv and q_pos_offsets is None:
         return
     max_num_seqs = kv_lens.shape[0]
     if cp_group_size is None:
         raise ValueError(
-            "PCP (cu_kv_lens / q_pos_offsets) requires cp_group_size and "
+            "PCP (all_gather_kv / q_pos_offsets) requires cp_group_size and "
             "cp_rank to be set (it reuses the strided DCP KV cache).")
+    if q_pos_offsets is not None and not all_gather_kv:
+        raise ValueError("q_pos_offsets requires all_gather_kv=True.")
     if sliding_window is not None:
         raise NotImplementedError("PCP does not support sliding_window yet.")
-    if cu_kv_lens is not None:
-        if cu_kv_lens.dtype != jnp.int32:
-            raise ValueError(f"Expected int32 {cu_kv_lens.dtype=}.")
-        if cu_kv_lens.shape != (max_num_seqs + 1, ):
-            raise ValueError(
-                f"Expected {cu_kv_lens.shape=} to be ({max_num_seqs + 1},).")
     if q_pos_offsets is not None:
         if q_pos_offsets.dtype != jnp.int32:
             raise ValueError(f"Expected int32 {q_pos_offsets.dtype=}.")
@@ -2001,6 +2018,7 @@ def get_default_block_sizes(
         "disable_semaphore_checks",
         "update_kv_cache",
         "cp_group_size",
+        "all_gather_kv",
     ),
     donate_argnames="kv_cache",
 )
@@ -2021,8 +2039,7 @@ def ragged_paged_attention(
     | None = None,  # i32[1] - per-device rank, sharded along the DCP axis
     cp_group_size: int | None = None,
     # Prefill context parallelism (PCP). See module docstring / run_rpa_kernel.
-    cu_kv_lens: jax.Array
-    | None = None,  # i32[max_num_seqs + 1] - layout of the all-gathered current KV
+    all_gather_kv: bool = False,  # current KV is all-gathered (len = 2*cp_group_size * local cu_q_lens)
     q_pos_offsets: jax.Array
     | None = None,  # i32[max_num_seqs] - global (within-current) offset of the local Q chunk
     use_causal_mask: bool = True,
@@ -2141,7 +2158,7 @@ def ragged_paged_attention(
         vmem_limit_bytes=vmem_limit_bytes,
     )
 
-    _validate_pcp_inputs(cu_kv_lens, q_pos_offsets, kv_lens, cp_group_size,
+    _validate_pcp_inputs(all_gather_kv, q_pos_offsets, kv_lens, cp_group_size,
                          sliding_window)
 
     actual_num_q_heads = q.shape[1]
@@ -2269,7 +2286,6 @@ def ragged_paged_attention(
             init_bo_ids,
             init_bkv_update_ids,
             cp_rank if cp_group_size is not None else None,
-            cu_kv_lens,
             q_pos_offsets)
 
         num_scalers = len(scalar_prefetches)
@@ -2307,6 +2323,7 @@ def ragged_paged_attention(
             functools.partial(
                 _ragged_paged_attention_kernel,
                 cp_group_size=cp_group_size,
+                all_gather_kv=all_gather_kv,
                 use_causal_mask=use_causal_mask,
                 skip_kv_mask=skip_kv_mask,
                 skip_cache_attn=skip_cache_attn,
