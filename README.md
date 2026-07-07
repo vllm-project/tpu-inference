@@ -53,9 +53,10 @@
 
 ## TPU Support Matrix
 
-Our comprehensive Support Matrix detailing compatibility across Models, Core Features, Parallelism Techniques, Quantization Methods, and Microbenchmarks is available in our official documentation.
+Our comprehensive support matrices detailing compatibility across models, features, parallelism, and quantization are available in our official documentation:
 
-👉 **[View the Full TPU Support Matrix Dashboard](https://docs.vllm.ai/projects/tpu/en/latest/support_matrix/)**
+👉 **[View Supported Models](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models/)**<br>
+👉 **[View Supported Features & Kernels](https://docs.vllm.ai/projects/tpu/en/latest/recommended_features/)**
 
 <br>
 
