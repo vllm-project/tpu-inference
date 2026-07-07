@@ -135,6 +135,8 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                 out += bias
             return out
 
+        if len(x.shape) > 2:
+            x = x.reshape(-1, self.in_features)
         out = self._apply_fused(x,
                                 layer.weight[...],
                                 layer.weight_scale[...],
