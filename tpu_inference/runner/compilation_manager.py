@@ -409,11 +409,13 @@ class CompilationManager:
             return attention_metadata_gid
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
+        shared_attention_metadata: AttentionMetadata
         if len(self.runner.kv_cache_config.kv_cache_groups) <= 1:
             # Pooling model will not using kv cache
             no_kv_cache = len(self.runner.kv_cache_config.kv_cache_groups) == 0
             block_tables = build_block_table(0) if not no_kv_cache else None
             attention_metadata = build_attn(block_tables)
+            shared_attention_metadata = build_attn(block_tables)
         else:
             attention_metadata = {
                 name: build_attn(build_block_table(gid))
@@ -421,6 +423,7 @@ class CompilationManager:
                     self.runner.kv_cache_config.kv_cache_groups)
                 for name in kv_cache_group.layer_names
             }
+            shared_attention_metadata = build_attn(block_tables=None)
 
         def model_fn_warmup(_fn, _args, _call_kwargs):
             out = self.runner.model_fn(
@@ -428,6 +431,7 @@ class CompilationManager:
                 self.runner.kv_caches,
                 input_ids,
                 attention_metadata,
+                shared_attention_metadata,
                 inputs_embeds,
                 positions,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
@@ -450,6 +454,7 @@ class CompilationManager:
                 self.runner.kv_caches,
                 input_ids,
                 attention_metadata,
+                shared_attention_metadata,
                 inputs_embeds,
                 positions,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
