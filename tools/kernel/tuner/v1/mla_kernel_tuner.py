@@ -180,7 +180,6 @@ class MlaKernelTuner(KernelTunerBase):
                     actual_r_dim=flags.FLAGS.mla_actual_r_dim,
                     kv_dtype=flags.FLAGS.mla_kv_dtype,
                     q_dtype=flags.FLAGS.mla_q_dtype,
-                    total_num_pages=flags.FLAGS.mla_total_num_pages,
                     page_size_per_kv_packing=flags.FLAGS.
                     mla_page_size_per_kv_packing,
                     kv_packing=flags.FLAGS.mla_kv_packing,
@@ -253,7 +252,7 @@ class MlaKernelTuner(KernelTunerBase):
             tuning_key.kv_packing,
             q_dtype=jnp.dtype(tuning_key.q_dtype),
             kv_dtype=jnp.dtype(tuning_key.kv_dtype),
-            num_pages=tuning_key.total_num_pages,
+            num_pages=tuning_key.pages_per_seq * tuning_key.max_num_seqs,
             rng=rng,
         )
 

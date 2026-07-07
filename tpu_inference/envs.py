@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
+    SLICE_ROPE_CACHE: bool = False
 
 
 def env_with_choices(
@@ -415,6 +416,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use VMEM size as the threshold.
     "SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES":
     lambda: os.getenv("SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES", "auto"),
+    # Slice the rotary cos_sin_cache to max_model_len at load (saves HBM and a
+    # per-step layout copy of the full max_position_embeddings table). Applies
+    # to text / 1-D RoPE only; ignored for MRoPE models, whose (video)
+    # positions can exceed max_model_len.
+    "SLICE_ROPE_CACHE":
+    env_bool("SLICE_ROPE_CACHE", default=False),
     "MLA_TRANSPOSE_KV_CACHE":
     env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
 }

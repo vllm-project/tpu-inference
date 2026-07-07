@@ -22,14 +22,23 @@ PORT="${PORT:-8000}"
 READY_TIMEOUT="${READY_TIMEOUT:-5400}"   # 90 min (covers a cold compile)
 
 WORKLOADS=("8192:1024" "1024:1024")
-CONC_SHARDING=(
-  "4:DP4TP2_EP"
-  "8:DP4TP2_EP"
-  "16:DP4TP2_EP"
-  "32:DP4TP2_EP"
-  "64:DP8_EP"
-  "128:DP8_EP"
-  "256:DP8_EP"
+CONCS=(4 8 16 32 64 128 256)
+# Sharding per swept point, keyed by "ISL,OSL,CONC" (every point listed).
+declare -A SHARDING_TABLE=(
+  [8192,1024,4]=DP4TP2_EP
+  [8192,1024,8]=DP4TP2_EP
+  [8192,1024,16]=DP4TP2_EP
+  [8192,1024,32]=DP4TP2_EP
+  [8192,1024,64]=DP8_EP
+  [8192,1024,128]=DP8_EP
+  [8192,1024,256]=DP8_EP
+  [1024,1024,4]=DP4TP2_EP
+  [1024,1024,8]=DP4TP2_EP
+  [1024,1024,16]=DP4TP2_EP
+  [1024,1024,32]=DP4TP2_EP
+  [1024,1024,64]=DP4TP2_EP
+  [1024,1024,128]=DP4TP2_EP
+  [1024,1024,256]=DP4TP2_EP
 )
 
 stop_server() {
@@ -62,9 +71,10 @@ trap stop_server EXIT
 
 for wl in "${WORKLOADS[@]}"; do
   export ISL="${wl%%:*}" OSL="${wl#*:}"
-  for cs in "${CONC_SHARDING[@]}"; do
-    export CONC="${cs%%:*}"
-    sharding="${cs#*:}"
+  for CONC in "${CONCS[@]}"; do
+    export CONC
+    sharding="${SHARDING_TABLE[$ISL,$OSL,$CONC]:-}"
+    [ -n "$sharding" ] || { echo "ERROR: no sharding in SHARDING_TABLE for ISL=$ISL OSL=$OSL CONC=$CONC" >&2; exit 1; }
     stop_server
     start_server "$sharding" || exit 1
     echo "########## ISL=$ISL OSL=$OSL CONC=$CONC SHARDING=$sharding ##########"
