@@ -143,7 +143,7 @@ docker run \
     --privileged \
     --entrypoint /bin/bash \
     --network host \
-    --shm-size=16G \
+    --ipc=host \
     --name "${CONTAINER_NAME}" \
     -v "${PATH_TO_HF_HOME}:/root/.cache/huggingface" \
     "${GCLOUD_MOUNT_ARGS[@]}" \

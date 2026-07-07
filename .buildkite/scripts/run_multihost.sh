@@ -111,8 +111,11 @@ cleanup() {
   echo "   -> Cleaning workers..."
   if [[ ${#WORKER_IPS_ARRAY[@]} -gt 0 && -n "${WORKER_IPS_ARRAY[0]}" ]]; then
     for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
-    echo "==================== Ray Worker logs from worker node ${worker_ip} ===================="
-      # ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
+      echo "==================== Ray Worker logs from worker node ${worker_ip} ===================="
+      if [[ -f "/tmp/worker_${worker_ip}.log" ]]; then
+        tail -n 50 "/tmp/worker_${worker_ip}.log" || true
+        rm -f "/tmp/worker_${worker_ip}.log"
+      fi
       ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true; sudo rm -rf /tmp/ray/* /tmp/vllm/*" || true
     done
   fi
@@ -123,7 +126,9 @@ cleanup() {
     echo "==================== START OF VLLM SERVE LOG ===================="
     cat /tmp/vllm_serve.log || true
     echo "==================== END OF VLLM SERVE LOG ===================="
+    rm -f /tmp/vllm_serve.log
   fi
+  rm -f "${TEMP_EXPORT_FILE:-}" >/dev/null 2>&1 || true
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
   sudo rm -rf /tmp/ray/* /tmp/vllm/* >/dev/null 2>&1 || true
@@ -338,7 +343,8 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     
     # shellcheck disable=SC2087
     # shellcheck disable=SC2029
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
+    # Redirect output to a temp file so it doesn't flood the Buildkite console and bypass the 10-minute output timeout
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" > "/tmp/worker_${worker_ip}.log" 2>&1 << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
