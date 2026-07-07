@@ -40,7 +40,7 @@
 
 | 🚀 **I'm New** | 🌐 **I Want to Deploy** | 💻 **I Want to Build** |
 | :--- | :--- | :--- |
-| Get started quickly with core concepts, hardware setup, and step-by-step tutorials.<br><br>[**Quickstart: Serving a Model**](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/quickstart/)<br>[**Installation Guide**](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/)<br>[**TPU Setup**](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/tpu_setup/) | Guides on infrastructure setup, deployment recipes, and hardware capabilities.<br><br>[**Deploying on GCE (Ironwood)**](https://docs.vllm.ai/projects/tpu/en/latest/deployment_guides/ironwood/)<br>[**Deploying on GCE (Trillium)**](https://docs.vllm.ai/projects/tpu/en/latest/deployment_guides/trillium/)<br>[**Supported Models**](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models/) | Contribute code, dive into inference examples, or explore the core architecture.<br><br>[**Inference Examples**](https://docs.vllm.ai/projects/tpu/en/latest/api_and_code_examples/multi_modal_inference/)<br>[**Developer Guides**](https://docs.vllm.ai/projects/tpu/en/latest/developers_guide/contributing/)<br>[**Add a New Model to CI**](https://docs.vllm.ai/projects/tpu/en/latest/developers_guide/buildkite/) |
+| Get started quickly with core concepts, hardware setup, and step-by-step tutorials.<br><br>[**Quickstart: Serving a Model**](https://vllm--3087.org.readthedocs.build/projects/tpu/en/3087/getting_started/quickstart/)<br>[**Installation Guide**](https://vllm--3087.org.readthedocs.build/projects/tpu/en/3087/getting_started/installation/)<br>[**TPU Setup**](https://vllm--3087.org.readthedocs.build/projects/tpu/en/3087/getting_started/tpu_setup/) | Guides on infrastructure setup, deployment recipes, and hardware capabilities.<br><br>[**Deploying on GCE (Ironwood)**](https://vllm--3087.org.readthedocs.build/projects/tpu/en/3087/deployment_guides/ironwood/)<br>[**Deploying on GCE (Trillium)**](https://vllm--3087.org.readthedocs.build/projects/tpu/en/3087/deployment_guides/trillium/)<br>[**Supported Models**](https://vllm--3087.org.readthedocs.build/projects/tpu/en/3087/recommended_models/) | Contribute code, dive into inference examples, or explore the core architecture.<br><br>[**Inference Examples**](https://vllm--3087.org.readthedocs.build/projects/tpu/en/3087/api_and_code_examples/multi_modal_inference/)<br>[**Developer Guides**](https://vllm--3087.org.readthedocs.build/projects/tpu/en/3087/developers_guide/contributing/)<br>[**Add a New Model to CI**](https://vllm--3087.org.readthedocs.build/projects/tpu/en/3087/developers_guide/buildkite/) |
 
 <br>
 
@@ -55,8 +55,8 @@
 
 Our comprehensive support matrices detailing compatibility across models, features, parallelism, and quantization are available in our official documentation:
 
-👉 **[View Supported Models](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models/)**<br>
-👉 **[View Supported Features & Kernels](https://docs.vllm.ai/projects/tpu/en/latest/recommended_features/)**
+- 👉 **[View Supported Models](https://vllm--3087.org.readthedocs.build/projects/tpu/en/3087/recommended_models/)**
+- 👉 **[View Supported Features & Kernels](https://vllm--3087.org.readthedocs.build/projects/tpu/en/3087/recommended_features/)**
 
 <br>
 
