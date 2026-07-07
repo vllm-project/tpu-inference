@@ -41,11 +41,13 @@ class VllmCompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsW8A8Fp8MoEMethod,
                  input_quant: QuantizationArgs,
                  moe: FusedMoEConfig,
                  mesh: Mesh,
+                 enable_hybrid_moe: bool = False,
                  ep_axis_name: str = "model"):
         super().__init__(weight_quant, input_quant, moe)
 
         self.mesh = mesh
-        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(
+            self.moe, enable_hybrid_moe=enable_hybrid_moe)
 
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:

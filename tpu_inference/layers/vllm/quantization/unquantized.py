@@ -145,13 +145,16 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional[QuantizeMethodBase]:
+        enable_hybrid_moe = getattr(self.vllm_config.sharding_config,
+                                    "enable_hybrid_moe", False)
         match layer:
             case vllm_linear.LinearBase():
                 linear_config = self.get_linear_config(layer)
                 return VllmUnquantizedLinearMethod(linear_config)
             case RoutedExperts():
                 moe_config = self.get_moe_config(layer)
-                return VllmUnquantizedFusedMoEMethod(moe_config, self.mesh)
+                return VllmUnquantizedFusedMoEMethod(
+                    moe_config, self.mesh, enable_hybrid_moe=enable_hybrid_moe)
             case Attention():
                 return None
             case VocabParallelEmbedding():
@@ -354,11 +357,13 @@ class VllmUnquantizedFusedMoEMethod(
         self,
         moe: FusedMoEConfig,
         mesh: Mesh,
+        enable_hybrid_moe: bool = False,
         ep_axis_name: str = "model",
     ):
         UnquantizedFusedMoEMethod.__init__(self, moe)
         self.mesh = mesh
-        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(
+            self.moe, enable_hybrid_moe=enable_hybrid_moe)
 
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:

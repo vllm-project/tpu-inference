@@ -101,10 +101,18 @@ class VllmNvfp4Config(ModelOptNvFp4Config, VllmQuantConfig):
                 return VllmUnquantizedLinearMethod(linear_config)
             return VllmNvfp4LinearMethod(self, linear_config)
         elif isinstance(layer, RoutedExperts):
+            enable_hybrid_moe = getattr(self.vllm_config.sharding_config,
+                                        "enable_hybrid_moe", False)
             if self.is_layer_excluded(prefix):
-                return VllmUnquantizedFusedMoEMethod(layer.moe_config)
+                return VllmUnquantizedFusedMoEMethod(
+                    layer.moe_config,
+                    self.mesh,
+                    enable_hybrid_moe=enable_hybrid_moe)
             layer.moe_config = self.get_moe_config(layer)
-            return VllmNvfp4MoEMethod(self, layer, self.mesh)
+            return VllmNvfp4MoEMethod(self,
+                                      layer,
+                                      self.mesh,
+                                      enable_hybrid_moe=enable_hybrid_moe)
         elif isinstance(layer, Attention):
             logger.warning_once(
                 "NVFP4 attention quantization is not implemented. "
@@ -303,12 +311,18 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
     runs through gmm_v2's dequant-in-VMEM path.
     """
 
-    def __init__(self, quant_config, layer, mesh, ep_axis_name="model"):
+    def __init__(self,
+                 quant_config,
+                 layer,
+                 mesh,
+                 enable_hybrid_moe=False,
+                 ep_axis_name="model"):
         # Skip ModelOptNvFp4FusedMoE.__init__ (selects GPU experts backend).
         FusedMoEMethodBase.__init__(self, layer.moe_config)
         self.quant_config = quant_config
         self.mesh = mesh
-        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(
+            self.moe, enable_hybrid_moe=enable_hybrid_moe)
         # Upstream's create_weights references self.use_global_sf to size the
         # input_scale params; we don't use them so any value works — keep
         # False to match a CPU/TPU "no global SF" path.

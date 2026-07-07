@@ -57,12 +57,14 @@ class VllmCompressedTensorsW4A8MoEMethod(CompressedTensorsMoEMethod,
         input_quant: QuantizationArgs,
         moe: FusedMoEConfig,
         mesh: jax.sharding.Mesh,
+        enable_hybrid_moe: bool = False,
         ep_axis_name: str = "model",
     ):
         super().__init__(moe)
 
         self.mesh = mesh
-        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(
+            self.moe, enable_hybrid_moe=enable_hybrid_moe)
 
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:
