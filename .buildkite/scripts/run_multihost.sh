@@ -162,9 +162,10 @@ wait_for_server() {
   echo "   -> Found PID: $pid"
 
   local end_time=$((SECONDS + timeout))
+  local loop_count=0
   while [[ $SECONDS -lt $end_time ]]; do
     # 2. Check health
-    if curl -fs "localhost:${port}/health" > /dev/null; then
+    if curl -fs --max-time 10 "localhost:${port}/health" > /dev/null; then
       echo "===== $service_name is healthy on port: $port. ==="
       return 0
     fi
@@ -178,6 +179,11 @@ wait_for_server() {
     fi
 
     sleep 5
+    loop_count=$((loop_count + 1))
+    if (( loop_count % 12 == 0 )); then
+      echo "[$(date)] Still waiting for $service_name to be healthy... (Last log lines:)"
+      docker exec "$container_name" tail -n 2 "$log_path" || true
+    fi
   done
 
   echo "Error: $service_name on $port failed to become healthy within ${timeout}s."
@@ -299,7 +305,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${HOST_HF_HOME}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
-  -e JAX_PLATFORMS='' \
+  -e JAX_PLATFORMS='tpu,cpu' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE="${MODEL_IMPL_TYPE:-vllm}" \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM="${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}" \
@@ -336,7 +342,7 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
-  -e JAX_PLATFORMS='' \
+  -e JAX_PLATFORMS='tpu,cpu' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE='${MODEL_IMPL_TYPE:-vllm}' \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
@@ -401,6 +407,7 @@ if [ -n "${CLIENT_BENCH_CMD}" ]; then
   if [[ "${CASE_FILE:-}" == *.json ]]; then
     echo "--- Invoking run_bm.sh for advanced benchmark logic on Head Node..."
     docker exec \
+      -e PYTHONUNBUFFERED=1 \
       -e HF_HOME=/root/.cache/huggingface \
       -e SERVER_ALREADY_RUNNING="true" \
       -e VLLM_PORT="${VLLM_PORT}" \
@@ -408,6 +415,7 @@ if [ -n "${CLIENT_BENCH_CMD}" ]; then
   else
     echo "--- Running Benchmark Command on Head Node"
     docker exec \
+      -e PYTHONUNBUFFERED=1 \
       -e HF_HOME=/root/.cache/huggingface \
       node bash -c "cd /workspace/tpu_inference && ${CLIENT_BENCH_CMD}"
   fi
