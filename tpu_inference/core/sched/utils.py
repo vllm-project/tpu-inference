@@ -41,13 +41,13 @@ def patch_vllm_scheduler_for_continue_decode():
 
         def patched_init(scheduler_self, vllm_config, *args, **kwargs):
             original_init(scheduler_self, vllm_config, *args, **kwargs)
+
             additional_config = getattr(vllm_config, "additional_config", {})
-            if additional_config.get("enable_continue_decode", False):
-                max_decode_steps = additional_config.get(
-                    "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
-                # We need max_decode_steps - 1 lookahead tokens to ensure we have enough blocks.
-                scheduler_self.num_lookahead_tokens = max(
-                    scheduler_self.num_lookahead_tokens, max_decode_steps - 1)
+            max_decode_steps = additional_config.get("max_decode_steps",
+                                                     DEFAULT_MAX_DECODE_STEPS)
+            # We need max_decode_steps - 1 lookahead tokens to ensure we have enough blocks.
+            scheduler_self.num_lookahead_tokens = max(
+                scheduler_self.num_lookahead_tokens, max_decode_steps - 1)
 
         Scheduler.__init__ = patched_init
 
@@ -59,8 +59,15 @@ def patch_vllm_scheduler_for_continue_decode():
                 request = scheduler_self.requests.get(req_id)
                 if request is not None and len(request._output_token_ids) > 0:
                     if model_runner_output.sampled_token_ids:
-                        scheduler_output.num_scheduled_tokens[req_id] = len(
+                        num_tokens = len(
                             model_runner_output.sampled_token_ids[req_idx])
+                        scheduler_output.num_scheduled_tokens[
+                            req_id] = num_tokens
+                        if scheduler_self.scheduler_config.async_scheduling:
+                            if hasattr(
+                                    request, "num_output_placeholders"
+                            ) and request.num_output_placeholders < num_tokens:
+                                request.num_output_placeholders = num_tokens
             return original_update_from_output(scheduler_self,
                                                scheduler_output,
                                                model_runner_output)

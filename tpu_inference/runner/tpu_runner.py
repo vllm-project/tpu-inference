@@ -187,8 +187,122 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._req_ids_dp = req_ids_dp
         self._padded_num_scheduled_tokens_per_dp_rank = padded_num_scheduled_tokens_per_dp_rank
         self._runner = runner
+        self._is_continue_decode = False
+        self._actual_steps_future = None
+
+    def _get_continue_decode_output(self) -> ModelRunnerOutput:
+        if self._model_runner_output.sampled_token_ids:
+            return self._model_runner_output
+
+        (
+            generated_tokens_cpu,
+            actual_steps,
+        ) = jax.device_get((
+            self._next_tokens,
+            self._actual_steps_future,
+        ))
+
+        actual_steps = int(actual_steps)
+        generated_tokens_cpu = np.asarray(
+            generated_tokens_cpu)[:actual_steps].T
+        if self.logits_indices_selector is not None:
+            generated_tokens_cpu = generated_tokens_cpu[
+                self.logits_indices_selector]
+
+        sampled_token_ids = []
+        for req_idx, req_id in enumerate(self._model_runner_output.req_ids):
+            tokens = generated_tokens_cpu[req_idx]
+            eos_arr = np.atleast_1d(self._runner.eos_token_id)
+            is_eos = np.any(tokens[:, None] == eos_arr[None, :], axis=-1)
+            eos_indices = np.where(is_eos)[0]
+            if len(eos_indices) > 0:
+                valid_tokens = tokens[:eos_indices[0] + 1].tolist()
+            else:
+                valid_tokens = tokens.tolist()
+            sampled_token_ids.append(valid_tokens)
+
+        self._model_runner_output.sampled_token_ids = sampled_token_ids
+
+        if self._logprobs_tensors is not None:
+            lp_token_ids_cpu, lp_vals_cpu, lp_ranks_cpu = jax.device_get((
+                self._logprobs_tensors.logprob_token_ids,
+                self._logprobs_tensors.logprobs,
+                self._logprobs_tensors.selected_token_ranks,
+            ))
+            if lp_token_ids_cpu is not None:
+                lp_token_ids_cpu = np.asarray(lp_token_ids_cpu)[:actual_steps]
+                lp_vals_cpu = np.asarray(lp_vals_cpu)[:actual_steps]
+                lp_ranks_cpu = np.asarray(lp_ranks_cpu)[:actual_steps]
+                if self.logits_indices_selector is not None:
+                    lp_token_ids_cpu = lp_token_ids_cpu[:, self.
+                                                        logits_indices_selector, :]
+                    lp_vals_cpu = lp_vals_cpu[:,
+                                              self.logits_indices_selector, :]
+                    lp_ranks_cpu = lp_ranks_cpu[:,
+                                                self.logits_indices_selector]
+                lp_token_ids_list, lp_vals_list, lp_ranks_list = [], [], []
+                for req_idx in range(len(self._model_runner_output.req_ids)):
+                    actual_len = len(sampled_token_ids[req_idx])
+                    lp_token_ids_list.append(lp_token_ids_cpu[:actual_len,
+                                                              req_idx])
+                    lp_vals_list.append(lp_vals_cpu[:actual_len, req_idx])
+                    lp_ranks_list.append(lp_ranks_cpu[:actual_len, req_idx])
+                if lp_token_ids_list:
+                    from vllm.v1.outputs import LogprobsLists
+                    logprob_token_ids = np.concatenate(lp_token_ids_list,
+                                                       axis=0)
+                    logprobs_arr = np.concatenate(lp_vals_list, axis=0)
+                    sampled_token_ranks = np.concatenate(lp_ranks_list, axis=0)
+                    cu_num_generated_tokens = [0] + list(
+                        np.cumsum([len(x) for x in sampled_token_ids]))
+                    self._model_runner_output.logprobs = LogprobsLists(
+                        logprob_token_ids=logprob_token_ids,
+                        logprobs=logprobs_arr,
+                        sampled_token_ranks=sampled_token_ranks,
+                        cu_num_generated_tokens=cu_num_generated_tokens,
+                    )
+
+        if self._runner.model_config.enable_return_routed_experts and self._expert_indices is not None:
+            all_expert_indices_cpu = np.asarray(
+                jax.device_get(self._expert_indices))
+            if all_expert_indices_cpu is not None and self._scheduler_output is not None:
+                all_expert_indices_cpu = all_expert_indices_cpu[:actual_steps]
+                if self.logits_indices_selector is not None:
+                    all_expert_indices_cpu = all_expert_indices_cpu[:, :, self.
+                                                                    logits_indices_selector, :]
+                expert_indices_list = []
+                expert_slots_list = []
+                for req_idx, req_id in enumerate(
+                        self._model_runner_output.req_ids):
+                    req_state = self._runner.requests.get(req_id)
+                    actual_len = len(sampled_token_ids[req_idx])
+                    if actual_len > 0:
+                        req_experts = all_expert_indices_cpu[:actual_len, :,
+                                                             req_idx, :]
+                        expert_indices_list.append(
+                            req_experts.transpose(1, 0, 2))
+                        if req_state is not None:
+                            slots_arr = _reconstruct_slots_for_request(
+                                req_state,
+                                actual_len,
+                                self._runner.block_size,
+                                start_pos=req_state.num_computed_tokens)
+                            expert_slots_list.append(slots_arr)
+                if expert_indices_list and expert_slots_list:
+                    routing_data = np.concatenate(expert_indices_list,
+                                                  axis=1).transpose(1, 0, 2)
+                    slot_mapping = np.concatenate(expert_slots_list, axis=0)
+                    self._model_runner_output.routed_experts = RoutedExpertsLists(
+                        routing_data=routing_data,
+                        slot_mapping=slot_mapping,
+                    )
+
+        return self._model_runner_output
 
     def get_output(self) -> ModelRunnerOutput:
+        if getattr(self, "_is_continue_decode", False):
+            return self._get_continue_decode_output()
+
         valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
             self._runner, self._spec_decode_metadata, self._next_tokens,
             self.logits_indices_selector,
@@ -246,6 +360,12 @@ class AsyncPreResults:
     spec_decode_num_rejected_tokens: Optional[
         jax.Array] = None  # [max_num_reqs]
     spec_decode_metadata: Optional[SpecDecodeMetadata] = None
+
+    # For continue decode async scheduling
+    is_continue_decode: bool = False
+    continue_decode_actual_steps: Optional[jax.Array] = None
+    continue_decode_max_steps: int = 0
+    next_tokens_in_tpu: Optional[jax.Array] = None
 
 
 @dataclass
@@ -1129,6 +1249,52 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         pre_spec_decode_metadata = self._pre_async_results.spec_decode_metadata
         pre_scheduler_output = self._pre_async_results.scheduler_output
 
+        if getattr(self._pre_async_results, "is_continue_decode", False):
+            generated_tokens_cpu, actual_steps = jax.device_get((
+                pre_next_tokens,
+                self._pre_async_results.continue_decode_actual_steps,
+            ))
+            actual_steps = int(actual_steps)
+            generated_tokens_cpu = np.asarray(
+                generated_tokens_cpu)[:actual_steps].T
+            if pre_logits_indices_selector is not None:
+                generated_tokens_cpu = generated_tokens_cpu[
+                    pre_logits_indices_selector]
+
+            for pre_req_idx, req_state, _ in pre_request_seq_lens:
+                req_id = pre_req_ids[pre_req_idx]
+                if req_id not in self.input_batch.req_id_to_index:
+                    continue
+                req_idx = self.input_batch.req_id_to_index[req_id]
+
+                tokens = generated_tokens_cpu[pre_req_idx]
+                eos_arr = np.atleast_1d(self.eos_token_id)
+                is_eos = np.any(tokens[:, None] == eos_arr[None, :], axis=-1)
+                eos_indices = np.where(is_eos)[0]
+                if len(eos_indices) > 0:
+                    valid_tokens = tokens[:eos_indices[0] + 1].tolist()
+                else:
+                    valid_tokens = tokens.tolist()
+
+                start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+                actual_len = len(valid_tokens)
+
+                self.input_batch.token_ids_cpu[req_idx, start_idx:start_idx +
+                                               actual_len] = valid_tokens
+                self.input_batch.num_tokens_no_spec[
+                    req_idx] = start_idx + actual_len
+                self.input_batch.num_tokens[req_idx] = start_idx + actual_len
+                self.input_batch.num_computed_tokens_cpu[
+                    req_idx] = start_idx + actual_len
+                req_state.num_computed_tokens = start_idx + actual_len
+
+                req_state.output_token_ids.extend(valid_tokens)
+
+                if pre_scheduler_output is not None:
+                    pre_scheduler_output.num_scheduled_tokens[
+                        req_id] = actual_len
+            return
+
         valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
             self, pre_spec_decode_metadata, pre_next_tokens,
             pre_logits_indices_selector,
@@ -1425,7 +1591,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _execute_continue_decode(
         self,
         scheduler_output: "VllmSchedulerOutput",
-    ) -> ModelRunnerOutput:
+    ) -> ModelRunnerOutput | None:
+        if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
+            self._modify_prev_results()
+
         (
             input_ids,
             input_positions,
@@ -1506,6 +1675,83 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                  max_logprobs=self.model_config.max_logprobs,
                  logprobs_mode=self.model_config.logprobs_mode,
              )
+
+        if self.scheduler_config.async_scheduling:
+            self.rng_params_for_sampling = final_rng
+            self.kv_caches = final_kv_caches
+
+            if hasattr(final_state, "step_counter") and type(
+                    final_state.step_counter).__name__ != "MagicMock":
+                last_step_idx = jnp.clip(final_state.step_counter - 1, 0,
+                                         self.static_max_decode_steps - 1)
+                next_tokens_in_tpu = generated_tokens[
+                    last_step_idx,
+                    jnp.arange(generated_tokens.shape[1])]
+            else:
+                next_tokens_in_tpu = generated_tokens[0] if hasattr(
+                    generated_tokens, "shape") else None
+
+            generated_tokens_async = jax.copy_to_host_async(generated_tokens)
+            actual_steps_async = jax.copy_to_host_async(
+                final_state.step_counter)
+
+            num_reqs = self.input_batch.num_reqs
+            request_seq_lens: list[tuple[int, CachedRequestState, int]] = []
+            placeholder_req_id_to_index: dict[str, int] = {}
+            for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                req_state = self.requests[req_id]
+                seq_len = (req_state.num_computed_tokens +
+                           scheduler_output.num_scheduled_tokens[req_id])
+                request_seq_lens.append((i, req_state, seq_len))
+
+                start_idx = self.input_batch.num_tokens_no_spec[i]
+                end_idx = start_idx + max_decode_steps
+                self.input_batch.num_tokens_no_spec[i] = end_idx
+                self.input_batch.num_tokens[i] = end_idx
+                req_state.output_token_ids.extend([0] * max_decode_steps)
+                placeholder_req_id_to_index[req_id] = (
+                    i if tokens_indices_selector is None else
+                    tokens_indices_selector[i])
+
+            self._pre_async_results = AsyncPreResults(
+                req_ids=cast(list[str], self.input_batch.req_ids[:num_reqs]),
+                next_tokens=generated_tokens_async,
+                request_seq_lens=request_seq_lens,
+                discard_sampled_tokens_req_indices=[],
+                placeholder_req_id_to_index=placeholder_req_id_to_index,
+                logits_indices_selector=tokens_indices_selector,
+                scheduler_output=scheduler_output,
+                is_continue_decode=True,
+                continue_decode_actual_steps=actual_steps_async,
+                continue_decode_max_steps=max_decode_steps,
+            )
+            self._pre_async_results.next_tokens_in_tpu = next_tokens_in_tpu
+
+            model_runner_output = ModelRunnerOutput(
+                req_ids=cast(list[str], self.input_batch.req_ids[:num_reqs]),
+                req_id_to_index=self.input_batch.req_id_to_index.copy(),
+                sampled_token_ids=[],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                kv_connector_output=kv_connector_output,
+            )
+
+            async_output = AsyncTPUModelRunnerOutput(
+                model_runner_output,
+                generated_tokens_async,
+                num_reqs,
+                [],
+                logits_indices_selector=tokens_indices_selector,
+                logprobs_tensors=logprobs_tensors,
+                expert_indices=all_expert_indices,
+                scheduler_output=scheduler_output,
+                runner=self,
+            )
+            async_output._is_continue_decode = True
+            async_output._actual_steps_future = actual_steps_async
+            self._continue_decode_output = async_output
+            return None
         self.rng_params_for_sampling = final_rng
 
         self.kv_caches = final_kv_caches
@@ -2697,19 +2943,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 all_token_indices_to_substitute.extend(cur_indices)
                 all_pre_next_tokens_indices.extend(pre_indices)
 
-            if self.scheduler_config.async_scheduling and self._pre_async_results:
-                if self.speculative_config:
-                    next_tokens = self._pre_async_results.spec_decode_next_tokens
-                else:
-                    next_tokens = self._pre_async_results.next_tokens
-                token_in_tpu_cur_input_indices = np.array(
-                    all_token_indices_to_substitute)
-                token_in_tpu_pre_next_tokens_indices = np.array(
-                    all_pre_next_tokens_indices)
+            if self.speculative_config:
+                next_tokens = self._pre_async_results.spec_decode_next_tokens
+            elif getattr(self._pre_async_results, "next_tokens_in_tpu",
+                         None) is not None:
+                next_tokens = self._pre_async_results.next_tokens_in_tpu
+            else:
+                next_tokens = self._pre_async_results.next_tokens
+            token_in_tpu_cur_input_indices = np.array(
+                all_token_indices_to_substitute)
+            token_in_tpu_pre_next_tokens_indices = np.array(
+                all_pre_next_tokens_indices)
 
-                input_ids = self._apply_async_token_substitution(
-                    input_ids, next_tokens, token_in_tpu_cur_input_indices,
-                    token_in_tpu_pre_next_tokens_indices)
+            input_ids = self._apply_async_token_substitution(
+                input_ids, next_tokens, token_in_tpu_cur_input_indices,
+                token_in_tpu_pre_next_tokens_indices)
 
         num_scheduled_tokens_per_req = np.concatenate([
             np.array(scheduled_tokens_per_dp_rank[dp_rank], dtype=np.int32)
