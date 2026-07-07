@@ -84,8 +84,9 @@ class TestGemma4ForConditionalGeneration:
 
         with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
             model = Gemma4ForConditionalGeneration(vllm_config, rng, mesh)
-            start_layer_idx = model.model.start_layer
-            layer_0: Gemma4DecoderLayer = model.model.layers[start_layer_idx]
+            start_layer_idx = model.language_model.start_layer
+            layer_0: Gemma4DecoderLayer = model.language_model.layers[
+                start_layer_idx]
             num_key_value_heads = layer_0.self_attn.num_kv_heads
             qk_head_dim = layer_0.self_attn.head_dim_original
 
@@ -105,8 +106,8 @@ class TestGemma4ForConditionalGeneration:
             with set_current_vllm_config(vllm_config):
                 loader.load_weights(model, model_config)
 
-        layer_idx_in_model = model.model.start_layer
-        jax_layer_0 = model.model.layers[layer_idx_in_model]
+        layer_idx_in_model = model.language_model.start_layer
+        jax_layer_0 = model.language_model.layers[layer_idx_in_model]
 
         input_tensor_jax = jnp.array(input, dtype=jnp.bfloat16)
 

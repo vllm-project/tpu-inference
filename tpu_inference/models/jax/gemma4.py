@@ -1039,11 +1039,11 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
-        self.model = Gemma4Model(
+        self.language_model = Gemma4Model(
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
-            prefix="model",
+            prefix="model.language_model",
         )
         model_config = vllm_config.model_config
 
@@ -1053,7 +1053,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
             None)
 
         if not model_config.hf_config.tie_word_embeddings:
-            if self.model.is_last_rank:
+            if self.language_model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
                 hidden_size = model_config.hf_config.text_config.hidden_size
                 self.lm_head = JaxLmHead(
@@ -1068,21 +1068,14 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
         allowed_layers = set(f"layers.{i}."
-                             for i in range(len(self.model.layers)))
-        ignored_prefixes = (
-            "model.audio_tower.",
-            "model.vision_tower.",
-            "model.multi_modal_projector.",
-            "model.embed_audio.",
-        )
-        stripped_weights = (
-            (clean_name, tensor) for name, tensor in weights
-            if (clean_name := name.replace("language_model.", "")).startswith((
-                "model.", "lm_head")) and "vision" not in clean_name
-            and  # Exclude vision tower weights for now
-            not any(clean_name.startswith(p) for p in ignored_prefixes))
+                             for i in range(len(self.language_model.layers)))
+        # Checkpoint names already use model.language_model.* which matches
+        # the JAX prefix exactly; no stripping needed. Exclude vision weights.
+        filtered = ((name, tensor) for name, tensor in weights
+                    if name.startswith(("model.",
+                                        "lm_head")) and "vision" not in name)
         return super().load_weights(
-            (name, tensor) for name, tensor in stripped_weights
+            (name, tensor) for name, tensor in filtered
             if not ("layers." in name and not any(
                 layer_prefix in name for layer_prefix in allowed_layers)))
 
@@ -1109,7 +1102,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         layer_name_to_kv_cache = dict(
             _layer_name_to_kv_cache) if _layer_name_to_kv_cache else None
         # Text-only causal LM has no multimodal tokens; pass None.
-        kv_caches, x, expert_indices = self.model(
+        kv_caches, x, expert_indices = self.language_model(
             kv_caches,
             input_ids,
             attention_metadata,
@@ -1127,7 +1120,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         if hasattr(self, 'lm_head'):
             logits = self.lm_head(hidden_states)
         else:
-            logits = self.model.embed_tokens.decode(hidden_states)
+            logits = self.language_model.embed_tokens.decode(hidden_states)
 
         # Gemma4: Use Logit Soft-capping
         if self.final_logit_softcapping is not None:
