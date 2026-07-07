@@ -64,6 +64,7 @@ nav:
   - 'Features & Usage':
     - 'Recommended Models': recommended_models.md
     - 'Recommended Features': recommended_features.md
+    - 'Support Matrix': support_matrix.md
     - 'Deploying on GCE':
       - 'v7x setup (Ironwood)': deployment_guides/ironwood.md
       - 'v6e setup (Trillium)': deployment_guides/trillium.md
