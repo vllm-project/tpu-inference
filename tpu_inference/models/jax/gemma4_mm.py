@@ -667,7 +667,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         vllm_config.sharding_config.apply_vision_sharding()
 
-        self.language_model = Gemma4MmModel(
+        self.model = Gemma4MmModel(
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
@@ -756,7 +756,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                                    pixel_position_ids: jax.Array) -> jax.Array:
         input_mask = pixel_position_ids[..., 0] != -1
 
-        vision_outputs = self.language_model.vision_tower(
+        vision_outputs = self.model.vision_tower(
             pixel_values,
             input_mask=input_mask,
             pixel_position_ids=pixel_position_ids)
@@ -764,7 +764,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         projected_vision_features = vision_outputs[0][0]
         pooler_mask = vision_outputs[0][1]
 
-        projected_vision_features = self.language_model.embed_vision(
+        projected_vision_features = self.model.embed_vision(
             projected_vision_features)
 
         seq_len = pooler_mask.shape[1]
@@ -1153,7 +1153,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 dtype=jax_dtype,
             )
 
-            p = self.language_model.vision_tower.patch_embedder.patch_size
+            p = self.model.vision_tower.patch_embedder.patch_size
             h_p, w_p = h_input // p, w_input // p
             dummy_pixel_position_ids = jnp.ones((1, h_p * w_p, 2),
                                                 dtype=jnp.int32)
