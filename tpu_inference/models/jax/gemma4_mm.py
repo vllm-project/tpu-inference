@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 from itertools import islice
 from typing import (Any, Callable, Iterable, List, Literal, NamedTuple,
                     Optional, Tuple, TypedDict)
@@ -40,8 +41,9 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     merge_multimodal_embeddings
-from tpu_inference.models.jax.utils.weight_utils import (LoadableWithIterator,
-                                                         StandardWeightLoader)
+from tpu_inference.models.jax.utils.weight_utils import (
+    LoadableWithIterator, StandardWeightLoader,
+    load_nnx_param_from_reshaped_torch)
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
@@ -137,7 +139,8 @@ class Gemma4VisionFlashAttention(JaxModule):
                  dtype: jnp.dtype,
                  rng: nnx.Rngs,
                  mesh: Mesh,
-                 quant_config: Optional[VllmQuantConfig] = None):
+                 quant_config: Optional[VllmQuantConfig] = None,
+                 prefix: str = ""):
         self.features = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = getattr(config, "num_key_value_heads",
@@ -158,21 +161,24 @@ class Gemma4VisionFlashAttention(JaxModule):
                                     init_fn,
                                     (None, ShardingAxisName.VIT_MODEL, None)),
                                 rngs=rng,
-                                quant_config=quant_config)
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.q_proj")
         self.k_proj = JaxEinsum(
             "BTD,DKH->BTKH", (self.features, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
-            quant_config=quant_config)
+            quant_config=quant_config,
+            prefix=f"{prefix}.k_proj")
         self.v_proj = JaxEinsum(
             "BTD,DKH->BTKH", (self.features, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
-            quant_config=quant_config)
+            quant_config=quant_config,
+            prefix=f"{prefix}.v_proj")
         self.o_proj = JaxEinsum("BTNH,NHD->BTD",
                                 (self.num_heads, self.head_dim, self.features),
                                 param_dtype=dtype,
@@ -180,7 +186,8 @@ class Gemma4VisionFlashAttention(JaxModule):
                                     init_fn,
                                     (ShardingAxisName.VIT_MODEL, None, None)),
                                 rngs=rng,
-                                quant_config=quant_config)
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.o_proj")
 
         self.q_norm = JaxRmsNorm(self.head_dim,
                                  param_dtype=dtype,
@@ -272,7 +279,12 @@ class Gemma4VisionPatchEmbedder(JaxModule):
     adding factorized positional embeddings.
     """
 
-    def __init__(self, config, dtype, rngs: nnx.Rngs, quant_config=None):
+    def __init__(self,
+                 config,
+                 dtype,
+                 rngs: nnx.Rngs,
+                 quant_config=None,
+                 prefix: str = ""):
         self.config = config
         self.dtype = dtype
 
@@ -287,12 +299,15 @@ class Gemma4VisionPatchEmbedder(JaxModule):
             bias_init=None,
             rngs=rngs,
             quant_config=quant_config,
-            prefix="input_proj",
+            prefix=f"{prefix}.input_proj",
         )
 
         self.position_embedding_table = nnx.Param(
             jax.random.normal(rngs.params(), (10240, 2, config.hidden_size),
-                              dtype=dtype))
+                              dtype=dtype),
+            # PyTorch (2, 10240, hidden) -> JAX (10240, 2, hidden)
+            weight_loader=functools.partial(load_nnx_param_from_reshaped_torch,
+                                            permute_dims=(1, 0, 2)))
 
     def _factorized_posemb(self, pixel_position_ids: jax.Array) -> jax.Array:
         posemb = self.position_embedding_table.get_value()
@@ -334,7 +349,8 @@ class Gemma4VisionMLP(JaxModule):
                  config: PretrainedConfig,
                  dtype: jnp.dtype,
                  rng: nnx.Rngs,
-                 quant_config: Optional[VllmQuantConfig] = None):
+                 quant_config: Optional[VllmQuantConfig] = None,
+                 prefix: str = ""):
         self.features = config.hidden_size
         self.hidden_dim = config.intermediate_size
 
@@ -347,6 +363,7 @@ class Gemma4VisionMLP(JaxModule):
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
+            prefix=f"{prefix}.gate_proj",
         )
 
         self.up_proj = JaxEinsum(
@@ -358,6 +375,7 @@ class Gemma4VisionMLP(JaxModule):
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
+            prefix=f"{prefix}.up_proj",
         )
 
         self.down_proj = JaxEinsum(
@@ -367,6 +385,7 @@ class Gemma4VisionMLP(JaxModule):
             kernel_init=nnx.with_partitioning(
                 init_fn, (ShardingAxisName.VIT_MODEL, None)),
             bias_init=None,
+            prefix=f"{prefix}.down_proj",
             rngs=rng,
             quant_config=quant_config,
         )
@@ -383,7 +402,8 @@ class Gemma4VisionEncoderLayer(JaxModule):
                  dtype: jnp.dtype,
                  rng: nnx.Rngs,
                  mesh: Mesh,
-                 quant_config: Optional[VllmQuantConfig] = None):
+                 quant_config: Optional[VllmQuantConfig] = None,
+                 prefix: str = ""):
         self.input_layernorm = JaxRmsNorm(config.hidden_size,
                                           param_dtype=dtype,
                                           scale_init=nnx.with_partitioning(
@@ -391,8 +411,13 @@ class Gemma4VisionEncoderLayer(JaxModule):
                                           rngs=rng,
                                           quant_config=quant_config)
 
-        self.self_attn = Gemma4VisionFlashAttention(config, dtype, rng, mesh,
-                                                    quant_config)
+        self.self_attn = Gemma4VisionFlashAttention(
+            config,
+            dtype,
+            rng,
+            mesh,
+            quant_config,
+            prefix=f"{prefix}.self_attn")
 
         self.post_attention_layernorm = JaxRmsNorm(
             config.hidden_size,
@@ -407,7 +432,11 @@ class Gemma4VisionEncoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config)
-        self.mlp = Gemma4VisionMLP(config, dtype, rng, quant_config)
+        self.mlp = Gemma4VisionMLP(config,
+                                   dtype,
+                                   rng,
+                                   quant_config,
+                                   prefix=f"{prefix}.mlp")
         self.post_feedforward_layernorm = JaxRmsNorm(
             config.hidden_size,
             param_dtype=dtype,
@@ -483,19 +512,29 @@ class Gemma4VisionModel(JaxModule):
                  dtype: jnp.dtype,
                  rng: nnx.Rngs,
                  mesh: Mesh,
-                 quant_config: Optional[VllmQuantConfig] = None):
+                 quant_config: Optional[VllmQuantConfig] = None,
+                 prefix: str = "vision_tower"):
         self.config = config
 
         self.dtype = dtype
         self.mesh = mesh
 
         self.patch_embedder = Gemma4VisionPatchEmbedder(
-            config, dtype, rng, quant_config)
+            config,
+            dtype,
+            rng,
+            quant_config,
+            prefix=f"{prefix}.patch_embedder")
 
         num_layers = getattr(config, "num_hidden_layers", 32)
         self.start_layer, self.end_layer, self.layers = make_layers(
-            num_layers, lambda *_: Gemma4VisionEncoderLayer(
-                config, dtype, rng, self.mesh, quant_config))
+            num_layers,
+            lambda i: Gemma4VisionEncoderLayer(config,
+                                               dtype,
+                                               rng,
+                                               self.mesh,
+                                               quant_config,
+                                               prefix=f"{prefix}.layers.{i}"))
 
         self.pooler = Gemma4VisionPooler(config, dtype)
 
@@ -568,6 +607,50 @@ class Gemma4MultimodalEmbedder(JaxModule):
         return x
 
 
+class Gemma4MmModel(Gemma4Model):
+    """Gemma4 model that includes vision tower.
+
+    Keeping the vision tower nested under ``model.`` (instead of as a
+    sibling of ``model`` on `Gemma4ForConditionalGeneration`) makes the JAX
+    parameter prefix match the PyTorch checkpoint's `model.vision_tower.*`
+    naming exactly. `Fp8Config.is_layer_skipped` substring-matches each
+    layer's construction-time `prefix` (threaded through every vision tower
+    submodule below) against `modules_to_not_convert` (e.g.
+    `["model.vision_tower", "lm_head"]`) to decide whether it should be
+    quantized — both the `model.` nesting and the per-layer prefix string
+    need to agree with the checkpoint's naming for that to work.
+    """
+
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 rng: nnx.Rngs,
+                 mesh: Mesh,
+                 prefix: str = "model"):
+        super().__init__(vllm_config=vllm_config,
+                         rng=rng,
+                         mesh=mesh,
+                         prefix=prefix)
+
+        model_config = vllm_config.model_config
+        vision_config = model_config.hf_config.vision_config
+
+        self.vision_tower = Gemma4VisionModel(
+            config=vision_config,
+            dtype=model_config.dtype,
+            rng=rng,
+            quant_config=vllm_config.quant_config,
+            mesh=mesh,
+            prefix=f"{prefix}.vision_tower")
+
+        self.embed_vision = Gemma4MultimodalEmbedder(
+            vision_hidden_size=vision_config.hidden_size,
+            text_hidden_size=model_config.hf_config.text_config.hidden_size,
+            dtype=model_config.dtype,
+            rng=rng,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{prefix}.embed_vision")
+
+
 class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
     packed_modules_mapping = Gemma4ForCausalLM.packed_modules_mapping
     WeightLoader = StandardWeightLoader
@@ -584,7 +667,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         vllm_config.sharding_config.apply_vision_sharding()
 
-        self.model = Gemma4Model(
+        self.model = Gemma4MmModel(
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
@@ -597,21 +680,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         self.pooling_kernel_size = vision_config.pooling_kernel_size
         self.max_soft_tokens = vision_config.default_output_length
         self.patch_pixels = vision_config.patch_size**2 * 3
-
-        self.vision_tower = Gemma4VisionModel(
-            config=vision_config,
-            dtype=model_config.dtype,
-            rng=rng,
-            quant_config=vllm_config.quant_config,
-            mesh=mesh)
-
-        self.embed_vision = Gemma4MultimodalEmbedder(
-            vision_hidden_size=vision_config.hidden_size,
-            text_hidden_size=model_config.hf_config.text_config.hidden_size,
-            dtype=model_config.dtype,
-            rng=rng,
-            quant_config=vllm_config.quant_config,
-            prefix="embed_vision")
 
         self.final_logit_softcapping = getattr(
             model_config.hf_config.text_config, "final_logit_softcapping",
@@ -639,10 +707,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         def map_name(name: str) -> str:
             # Gemma 4 multimodal remappings
-            name = name.replace("model.embed_vision.", "embed_vision.")
-            name = name.replace("model.vision_tower.encoder.", "vision_tower.")
-            name = name.replace("model.vision_tower.", "vision_tower.")
-
+            name = name.replace("vision_tower.encoder.", "vision_tower.")
             if "vision_tower.layers." in name:
                 name = name.replace(".linear.weight", ".weight")
 
@@ -652,13 +717,6 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 name = name.replace("model.lm_head", "lm_head")
 
             return name
-
-        def process_tensor(mapped_name, tensor):
-            if "position_embedding_table" in mapped_name:
-                # PyTorch (2, 10240, hidden) -> JAX (10240, 2, hidden)
-                return tensor.transpose(0, 1)
-
-            return tensor
 
         def filter_weights(weights_iterator):
             import re
@@ -693,7 +751,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                             if jax_attn.qkv_proj is None:
                                 continue
 
-                yield mapped_name, process_tensor(mapped_name, weight)
+                yield mapped_name, weight
 
         return super().load_weights(filter_weights(weights))
 
@@ -720,7 +778,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                                    pixel_position_ids: jax.Array) -> jax.Array:
         input_mask = pixel_position_ids[..., 0] != -1
 
-        vision_outputs = self.vision_tower(
+        vision_outputs = self.model.vision_tower(
             pixel_values,
             input_mask=input_mask,
             pixel_position_ids=pixel_position_ids)
@@ -728,7 +786,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         projected_vision_features = vision_outputs[0][0]
         pooler_mask = vision_outputs[0][1]
 
-        projected_vision_features = self.embed_vision(
+        projected_vision_features = self.model.embed_vision(
             projected_vision_features)
 
         seq_len = pooler_mask.shape[1]
@@ -1116,7 +1174,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 dtype=jax_dtype,
             )
 
-            p = self.vision_tower.patch_embedder.patch_size
+            p = self.model.vision_tower.patch_embedder.patch_size
             h_p, w_p = h_input // p, w_input // p
             dummy_pixel_position_ids = jnp.ones((1, h_p * w_p, 2),
                                                 dtype=jnp.int32)

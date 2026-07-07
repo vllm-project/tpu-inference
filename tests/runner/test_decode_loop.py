@@ -178,6 +178,7 @@ def test_continue_decode_early_exit():
         final_state,
         current_rng,
         all_expert_indices,
+        logprobs_tensors,
     ) = continue_decode(
         state={},
         model_fn=mock_model_fn,
@@ -221,6 +222,7 @@ def test_continue_decode_early_exit():
     assert np.array_equal(final_state.attn_metadata.input_positions, [2, 1])
     assert np.array_equal(final_state.attn_metadata.seq_lens, [3, 2])
     assert all_expert_indices is None
+    assert logprobs_tensors is None
 
 
 def test_continue_decode_with_experts():
@@ -270,6 +272,7 @@ def test_continue_decode_with_experts():
         final_state,
         current_rng,
         all_expert_indices,
+        logprobs_tensors,
     ) = continue_decode(
         state={},
         model_fn=mock_model_fn,
@@ -296,3 +299,4 @@ def test_continue_decode_with_experts():
     expected_experts[2] = 2
 
     assert np.array_equal(all_expert_indices, expected_experts)
+    assert logprobs_tensors is None

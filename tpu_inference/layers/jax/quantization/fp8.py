@@ -33,7 +33,8 @@ from tpu_inference.layers.common.quantization import fp8 as common_fp8
 from tpu_inference.layers.common.utils import cpu_mesh, cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.base import create_param
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import (JaxEinsum,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import (QuantizationConfig,
@@ -42,8 +43,8 @@ from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
-    jax_array_from_reshaped_torch, load_nnx_param_from_reshaped_torch,
-    shard_put)
+    assign_and_shard_param, jax_array_from_reshaped_torch,
+    load_nnx_param_from_reshaped_torch, shard_put)
 from tpu_inference.utils import t2j
 
 logger = init_logger(__name__)
@@ -166,10 +167,18 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
 class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
     """Block-wise Fp8 method for JAX Linear layer."""
 
-    def __init__(self, quant_config: "Fp8Config", layer: JaxEinsum,
-                 linear_config: QuantLinearConfig):
+    def __init__(self,
+                 quant_config: "Fp8Config",
+                 layer: JaxEinsum,
+                 linear_config: QuantLinearConfig,
+                 weight_scale_name: str = "weight_scale_inv"):
         common_fp8.Fp8LinearMethod.__init__(self, linear_config)
         self.quant_config = quant_config
+        # Checkpoint-dependent name of the dequant scale: DeepSeek-style fp8
+        # checkpoints serialize "weight_scale_inv" while compressed-tensors
+        # uses "weight_scale". Both are the same quantity (the multiplier in
+        # x ~= q * scale); only the serialized name differs.
+        self.weight_scale_name = weight_scale_name
         self.einsum_str = layer.einsum_str
 
         self.out_features = linear_config.out_features
@@ -208,15 +217,17 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             layer.weight.set_metadata('sharding', self.weight_sharding)
 
             # Per-output-channel scale (1D, covers the free weight dim).
-            layer.weight_scale_inv = nnx.Param(
-                jnp.ones((out_features, ), dtype=layer.dtype),
-                weight_loader=partial(
-                    load_nnx_param_from_reshaped_torch,
-                    permute_dims=None,
-                    param_name=layer.prefix + ".weight_scale_inv",
-                ),
-                eager_sharding=False)
-            layer.weight_scale_inv.set_metadata('sharding', ())
+            scale_param = nnx.Param(jnp.ones((out_features, ),
+                                             dtype=layer.dtype),
+                                    weight_loader=partial(
+                                        load_nnx_param_from_reshaped_torch,
+                                        permute_dims=None,
+                                        param_name=layer.prefix + "." +
+                                        self.weight_scale_name,
+                                    ),
+                                    eager_sharding=False)
+            scale_param.set_metadata('sharding', ())
+            setattr(layer, self.weight_scale_name, scale_param)
             return
 
         # Follow upstream limitation that only float8_e4m3 is supported.
@@ -233,25 +244,26 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         # Block-wise quantization scale
         block_n, block_k = self.quant_config.weight_block_size[
             0], self.quant_config.weight_block_size[1]
-        layer.weight_scale_inv = nnx.Param(
-            kernel_init(
-                rngs.params(),
-                [(self.in_features + block_k - 1) // block_k,
-                 (out_features + block_n - 1) // block_n],
-                layer.dtype,
-            ),
-            weight_loader=partial(
-                load_nnx_param_from_reshaped_torch,
-                permute_dims=(1, 0),
-                param_name=layer.prefix + ".weight_scale_inv",
-            ),
-            eager_sharding=False)
-        layer.weight_scale_inv.set_metadata('sharding', self.weight_sharding)
+        scale_param = nnx.Param(kernel_init(
+            rngs.params(),
+            [(self.in_features + block_k - 1) // block_k,
+             (out_features + block_n - 1) // block_n],
+            layer.dtype,
+        ),
+                                weight_loader=partial(
+                                    load_nnx_param_from_reshaped_torch,
+                                    permute_dims=(1, 0),
+                                    param_name=layer.prefix + "." +
+                                    self.weight_scale_name,
+                                ),
+                                eager_sharding=False)
+        scale_param.set_metadata('sharding', self.weight_sharding)
+        setattr(layer, self.weight_scale_name, scale_param)
 
         # Force the parameters to be loaded onto CPU, such that in `process_weights_after_loading`
         # we can process the weights on CPU to avoid OOM on device.
         layer.weight.set_metadata('mesh', cpu_mesh())
-        layer.weight_scale_inv.set_metadata('mesh', cpu_mesh())
+        scale_param.set_metadata('mesh', cpu_mesh())
         if layer.bias is not None:
             layer.bias.set_metadata('mesh', cpu_mesh())
 
@@ -264,9 +276,9 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             # needed — the batched matmul uses dot_general with FP8 natively.
             return True
 
+        scale_param = getattr(layer, self.weight_scale_name)
         if not layer.weight.get_metadata(
-                "_is_loaded",
-                False) or not layer.weight_scale_inv.get_metadata(
+                "_is_loaded", False) or not scale_param.get_metadata(
                     "_is_loaded", False):
             # Weight and scale could spread across multiple files,
             # so we only process once both of them are loaded.
@@ -275,7 +287,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         # Do the re-quant process on CPU to avoid OOM on device.
         with cpu_mesh_context():
             weight = layer.weight[...]
-            weight_scale_inv = layer.weight_scale_inv[...]
+            weight_scale_inv = scale_param[...]
             bias = layer.bias[...] if getattr(layer, 'bias',
                                               None) is not None else None
             if bias is not None:
@@ -293,7 +305,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
                 enable_kernel=self.linear_config.enable_quantized_matmul_kernel
             )
             delattr(layer, 'weight')
-            delattr(layer, 'weight_scale_inv')
+            delattr(layer, self.weight_scale_name)
             delattr(layer, 'bias')
 
         # Put onto the device.
@@ -305,7 +317,8 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         )
         if self.linear_config.fuse_matmuls:
             layer.weight = nnx.Param(weights.weight)
-            layer.weight_scale_inv = nnx.Param(weights.weight_scale)
+            setattr(layer, self.weight_scale_name,
+                    nnx.Param(weights.weight_scale))
             layer.bias = nnx.Param(weights.bias) if bias is not None else None
         else:
             raise NotImplementedError(
@@ -319,7 +332,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             out = sharded_quantized_batched_matmul(
                 x,
                 layer.weight[...],
-                layer.weight_scale_inv[...],
+                getattr(layer, self.weight_scale_name)[...],
                 einsum_str=self.einsum_str,
                 weight_sharding=self.weight_sharding,
                 mesh=self.linear_config.mesh)
@@ -328,13 +341,79 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
         if not self.linear_config.fuse_matmuls:
             raise NotImplementedError(
                 "Fp8 block-wise linear method only supports fuse_matmuls.")
-        weight, scale = layer.weight[...], layer.weight_scale_inv[...]
+        weight = layer.weight[...]
+        scale = getattr(layer, self.weight_scale_name)[...]
         bias = layer.bias[...] if layer.bias is not None else None
         if len(x.shape) > 2:
             x = x.reshape(-1, self.in_features)
         out = self._apply_fused(x, weight, scale, bias=bias)
         out = out.reshape(out.shape[:-1] + self.out_features)
         return out
+
+
+class Fp8BlockwiseMergedLinearMethod(Fp8BlockwiseLinearMethod):
+    """Block-wise Fp8 method for ``JaxMergedColumnParallelLinear`` layers.
+
+    Mirrors ``UnquantizedMergedLinearMethod`` (see unquantized.py): a merged
+    column-parallel linear (e.g. fused ``gate_up_proj``) holds one kernel,
+    but a checkpoint that ships native (unfused) FP8 weights still stores
+    each projection (``gate_proj``, ``up_proj``) as a separate tensor with
+    its own block-wise scale. ``create_weights_jax`` attaches a
+    ``weight_loader`` that accumulates each projection's ``weight`` and
+    ``weight_scale_inv`` tensor (by ``shard_id``) and, once all projections
+    for a given param have arrived, concatenates them in declaration order.
+
+    Unlike the unquantized merge loader, this does not interleave shards for
+    TP sharding here: ``process_weights_after_loading``
+    (``process_blockwise_fp8_linear_weights``, inherited unchanged from
+    ``Fp8BlockwiseLinearMethod``) consumes the plain concatenated
+    ``[proj0, proj1, ...]`` layout and performs the requant + interleave
+    itself, given ``output_sizes``/``n_shards``.
+    """
+
+    @staticmethod
+    def _load_merged_shard(param: nnx.Param,
+                           torch_tensor,
+                           shard_id: int = -1,
+                           *,
+                           permute_dims,
+                           param_name: str):
+        shards = param.get_metadata("_merged_shards")
+        with cpu_mesh_context():
+            if shard_id == -1:
+                merged = jax_array_from_reshaped_torch(
+                    torch_tensor, permute_dims=permute_dims)
+            else:
+                shards[shard_id] = torch_tensor
+                if any(s is None for s in shards):
+                    return
+                merged = jnp.concatenate([
+                    jax_array_from_reshaped_torch(t, permute_dims=permute_dims)
+                    for t in shards
+                ],
+                                         axis=-1)
+        assign_and_shard_param(param, merged, param_name=param_name)
+
+    def create_weights_jax(self, layer: JaxModule, *weight_args, rngs,
+                           **extra_weight_attrs):
+        assert isinstance(layer, JaxMergedColumnParallelLinear)
+        super().create_weights_jax(layer,
+                                   *weight_args,
+                                   rngs=rngs,
+                                   **extra_weight_attrs)
+        n_proj = len(layer.output_sizes)
+        layer.weight.set_metadata("_merged_shards", [None] * n_proj)
+        layer.weight.set_metadata(
+            "weight_loader",
+            functools.partial(self._load_merged_shard,
+                              permute_dims=(1, 0),
+                              param_name=layer.prefix + ".weight"))
+        layer.weight_scale_inv.set_metadata("_merged_shards", [None] * n_proj)
+        layer.weight_scale_inv.set_metadata(
+            "weight_loader",
+            functools.partial(self._load_merged_shard,
+                              permute_dims=(1, 0),
+                              param_name=layer.prefix + ".weight_scale_inv"))
 
 
 class Fp8FusedMoEMethod(QuantizeMethodBase):
@@ -633,10 +712,16 @@ class Fp8Config(QuantizationConfig):
                                             ["ignored_layers"], None)
         weight_block_size = self.get_from_keys(hf_quant_config,
                                                ["weight_block_size"], None)
+        # `ignored_layers` lists exact leaf module names (exact match);
+        # `modules_to_not_convert` lists container/module names meant to
+        # skip everything nested under them (needs substring match) — see
+        # `QuantizationConfig.is_layer_skipped`.
+        self.skip_with_substr = False
         if not ignored_layers:
             ignored_layers = self.get_from_keys(hf_quant_config,
                                                 ["modules_to_not_convert"],
                                                 None)
+            self.skip_with_substr = True
 
         if activation_scheme not in self.ACTIVATION_SCHEMES:
             raise ValueError(
@@ -663,15 +748,20 @@ class Fp8Config(QuantizationConfig):
         if isinstance(layer, JaxEinsum):
             linear_config = QuantLinearConfig(layer, enable_sp=False)
             if self.is_layer_skipped(prefix,
-                                     ignored_layers=self.ignored_layers):
+                                     ignored_layers=self.ignored_layers,
+                                     skip_with_substr=self.skip_with_substr):
                 return UnquantizedLinearMethod(linear_config)
             if self.weight_block_size is not None:
+                if isinstance(layer, JaxMergedColumnParallelLinear):
+                    return Fp8BlockwiseMergedLinearMethod(
+                        self, layer, linear_config)
                 return Fp8BlockwiseLinearMethod(self, layer, linear_config)
             else:
                 return Fp8TensorwiseLinearMethod(layer, linear_config)
         elif isinstance(layer, (JaxRoutedExperts, JaxMoE)):
             if self.is_layer_skipped(prefix,
-                                     ignored_layers=self.ignored_layers):
+                                     ignored_layers=self.ignored_layers,
+                                     skip_with_substr=self.skip_with_substr):
                 return UnquantizedFusedMoEMethod()
             return Fp8FusedMoEMethod(self.weight_block_size)
         return None
