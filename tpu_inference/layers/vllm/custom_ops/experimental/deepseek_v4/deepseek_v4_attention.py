@@ -29,6 +29,8 @@ rebinds it on ``amd.model`` directly. It is invoked from
 ``_maybe_patch_for_deepseek_v4`` in ``vllm_model_wrapper`` while ``is_rocm`` is
 forced True and the package has been reloaded onto the AMD implementation.
 """
+from unittest.mock import patch
+
 import jax
 import jax.numpy as jnp
 import torch
@@ -38,6 +40,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4 import attention as dsv4_attention
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import (KVCacheSpec, MLAAttentionSpec,
                                         SlidingWindowMLASpec)
@@ -119,17 +122,29 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
         dsv4_attention.DeepseekV4Indexer = VllmDeepseekV4Indexer
         dsv4_attention.DeepseekCompressor = VllmDeepseekCompressor
         dsv4_attention.DeepseekV4SWACache = VllmDeepseekV4SWACache
+
+        # The base ctor also allocates CUDA-backed stream-sync events
+        # (``torch.Event()``), used only for GPU stream overlap. Mock
+        # it out.
+        orig_event = torch.Event
+        torch.Event = lambda *args, **kwargs: None
         try:
-            super().__init__(
-                vllm_config,
-                prefix=prefix,
-                topk_indices_buffer=topk_indices_buffer,
-                aux_stream_list=aux_stream_list,
-            )
+            # DeepSeek-V4's implementation use sth like:
+            # torch.zeros(.. device=device). Pass `cpu``
+            # instead of tpu to avoid error. Those buffer won't
+            # be used in the forward anyway.
+            with patch.object(current_platform, "device_type", "cpu"):
+                super().__init__(
+                    vllm_config,
+                    prefix=prefix,
+                    topk_indices_buffer=topk_indices_buffer,
+                    aux_stream_list=aux_stream_list,
+                )
         finally:
             dsv4_attention.DeepseekV4Indexer = orig_indexer
             dsv4_attention.DeepseekCompressor = orig_compressor
             dsv4_attention.DeepseekV4SWACache = orig_swa_cache
+            torch.Event = orig_event
 
     # Abstract platform hooks required to instantiate the DeepseekV4Attention
     # ABC; unused on the TPU pass-through path.
@@ -456,17 +471,3 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
         )
 
         return self._o_proj(attn_output, positions)
-
-
-def patch_deepseek_v4_mla_cls() -> None:
-    """Rebind ``DeepseekV4ROCMAiterMLAAttention`` to the TPU subclass.
-
-    Must run after ``vllm.models.deepseek_v4.amd.model`` is imported (it holds
-    its own ``from ...amd.rocm import DeepseekV4ROCMAiterMLAAttention``
-    reference) and before the model is constructed.
-    """
-    import vllm.models.deepseek_v4.amd.model as ds_v4_amd_model
-    ds_v4_amd_model.DeepseekV4ROCMAiterMLAAttention = VllmDeepseekV4MLAAttention
-    logger.info(
-        "Patched DeepseekV4ROCMAiterMLAAttention -> VllmDeepseekV4MLAAttention for TPU."
-    )

@@ -15,7 +15,7 @@
 import copy
 import time
 from collections.abc import Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from functools import partial
 from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
@@ -38,7 +38,6 @@ from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.model_executor.models.interfaces_base import is_pooling_model
-from vllm.platforms import current_platform
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import \
@@ -91,83 +90,6 @@ def _get_sc_allreduce_allgather_offload_min_size_bytes() -> int:
                 f"'{sc_threshold_val}'. Defaulting to 0 (always offload).")
             sc_threshold_bytes = 0
     return sc_threshold_bytes
-
-
-@contextmanager
-def _maybe_patch_for_deepseek_v4(vllm_config: VllmConfig):
-    architectures = getattr(vllm_config.model_config.hf_config,
-                            "architectures", None) or []
-    is_ds_v4 = any("DeepseekV4ForCausalLM" in arch for arch in architectures)
-    if not is_ds_v4:
-        yield
-        return
-
-    # There is two model.py, one NVIDIA variant, one AMD variant.
-    # NVIDIA variant is the default one picked by vLLM's registry.
-    # NVIDIA variant has CUDA/cutedsl ops do not run on TPU.
-    # And the AMD variant uses more extensible, e.g. allows us to
-    # swap in custom MHCPreOp, MHCPostOp etc.
-    # Therefore, we patch the registry to resolve to AMD variant.
-    import vllm.models.deepseek_v4 as ds_v4
-    from vllm.models.deepseek_v4.amd.model import \
-        DeepseekV4ForCausalLM as _AmdDeepseekV4ForCausalLM
-    ds_v4.DeepseekV4ForCausalLM = _AmdDeepseekV4ForCausalLM
-
-    # Clear cached resolved architecture so the AMD model.py are picked up.
-    from vllm.model_executor.model_loader import utils as _ml_utils
-    from vllm.model_executor.models.registry import _try_load_model_cls
-    _ml_utils._MODEL_ARCH_BY_HASH.clear()
-    _try_load_model_cls.cache_clear()
-
-    # DeepseekV4ROCMAiterMLAAttention is a plain nn.Module instantiated directly
-    # in amd/model.py (not CustomOp/register_oot hook).
-    # Swap the class symbol for the TPU subclass before the
-    # model is built.
-    from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_attention import \
-        patch_deepseek_v4_mla_cls
-    patch_deepseek_v4_mla_cls()
-
-    # DeepSeek-V4 builds CUDA streams (``torch.cuda.Stream``) at construction
-    # which is unavailable on TPU. Mock it to return None.
-    _orig_cuda_stream = torch.cuda.Stream
-    torch.cuda.Stream = lambda *args, **kwargs: None
-    try:
-        # DeepSeek-V4's implementation use sth like:
-        # torch.zeros(.. device=device). Pass `cpu``
-        # instead of tpu to avoid error. Those buffer won't
-        # be used in the forward anyway.
-        with patch.object(current_platform, "device_type", "cpu"):
-            yield
-    finally:
-        torch.cuda.Stream = _orig_cuda_stream
-
-
-def _disable_ds_v4_mtp_buffer(vllm_config: VllmConfig,
-                              vllm_model: torch.nn.Module):
-
-    class _NoOpBuffer:
-        """Sentinel that absorbs ``buf[:n].copy_(x)`` as a no-op.
-        """
-
-        def __getitem__(self, idx):
-            return self
-
-        def copy_(self, *args, **kwargs):
-            return self
-
-    architectures = getattr(vllm_config.model_config.hf_config,
-                            "architectures", None) or []
-    is_ds_v4 = any("DeepseekV4ForCausalLM" in arch for arch in architectures)
-    if not is_ds_v4:
-        return
-
-    # self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1)) in
-    # DS V4 causes error on torchax path. Mock it out as DS V4 MTP is not yet
-    # supported in tpu-inference.
-    inner = getattr(vllm_model, "model", None)
-    if inner is not None and getattr(inner, "_mtp_hidden_buffer",
-                                     None) is not None:
-        inner._mtp_hidden_buffer = _NoOpBuffer()
 
 
 class _VllmRunner(torch.nn.Module):
@@ -304,14 +226,11 @@ class VllmModelWrapper:
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
 
-        with _maybe_patch_for_deepseek_v4(
-                vllm_config_for_load
-        ), load_context, jax_context, set_current_vllm_config(
+        with load_context, jax_context, set_current_vllm_config(
                 self.vllm_config):
             model_config_for_load = vllm_config_for_load.speculative_config.draft_model_config if self.is_draft_model else vllm_config_for_load.model_config
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
                                         model_config=model_config_for_load)
-        _disable_ds_v4_mtp_buffer(vllm_config_for_load, vllm_model)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
             # Replace layers in the model with LoRA layers.
