@@ -17,6 +17,7 @@ import dataclasses
 import html
 import json
 import logging
+import math
 import os
 import re
 import urllib.error
@@ -59,15 +60,22 @@ REPORT_OUTPUT_PATH_PREFIX = "/tmp/kernel_tuning/kernel_autotune_report"
 class KernelAutoTuneResultProcessor:
 
     def __init__(self):
-        self.autotune_id = _AUTOTUNE_ID.value
-        self.gcp_project_id = _GCP_PROJECT_ID.value
-        self.spanner_instance_id = _SPANNER_INSTANCE_ID.value
-        self.spanner_database_id = _SPANNER_DATABASE_ID.value
-        assert _PROCESS_STEP.value in [
+        self.autotune_id = self._get_flag_value(_AUTOTUNE_ID)
+        self.gcp_project_id = self._get_flag_value(_GCP_PROJECT_ID)
+        self.spanner_instance_id = self._get_flag_value(_SPANNER_INSTANCE_ID)
+        self.spanner_database_id = self._get_flag_value(_SPANNER_DATABASE_ID)
+        process_step = self._get_flag_value(_PROCESS_STEP)
+        assert process_step in [
             'EVALUATE_AND_CREATE_PR', 'PATCH_KERNEL_AUTOTUNE_RESULT'
-        ], f"Invalid process step: {_PROCESS_STEP.value}. Must be one of ['EVALUATE_AND_CREATE_PR', 'PATCH_KERNEL_AUTOTUNE_RESULT']"
-        self.process_step = _PROCESS_STEP.value
+        ], f"Invalid process step: {process_step}. Must be one of ['EVALUATE_AND_CREATE_PR', 'PATCH_KERNEL_AUTOTUNE_RESULT']"
+        self.process_step = process_step
         self._spanner_db = None
+
+    def _get_flag_value(self, flag_def):
+        try:
+            return flag_def.value
+        except Exception:  # pylint: disable=broad-exception-caught
+            return flag_def.default
 
     def _get_spanner_db(self, project, instance_id, database_id):
         if self._spanner_db is None:
@@ -225,7 +233,18 @@ class KernelAutoTuneResultProcessor:
 
         mapping_text = self._build_mapping_text(module)
         lines[start_idx:end_idx] = [mapping_text]
-        file_path.write_text(''.join(lines), encoding='utf-8')
+        new_source = ''.join(lines)
+        self._validate_generated_source(new_source, file_path)
+        file_path.write_text(new_source, encoding='utf-8')
+
+    def _validate_generated_source(self, source: str, file_path: Path) -> None:
+        try:
+            ast.parse(source, filename=str(file_path))
+            compile(source, str(file_path), 'exec')
+        except SyntaxError as exc:
+            raise ValueError(
+                f"Generated source for 'tuned_params_mapping' in '{file_path}' "
+                f"is invalid: {exc}") from exc
 
     def _build_mapping_text(self, module) -> str:
         key_cls = module.TuningKey
@@ -266,6 +285,36 @@ class KernelAutoTuneResultProcessor:
 
     def _py_repr(self, value):
         return repr(value)
+
+    def _evaluate_metric_result(self, baseline, tuned, metric, threshold,
+                                lower_is_better_metrics):
+        delta_pct = None
+        verdict = 'NO_DATA'
+
+        if baseline is None or tuned is None:
+            verdict = 'MISSING'
+        elif math.isclose(baseline, 0.0, abs_tol=1e-12):
+            verdict = 'BASELINE_ZERO'
+        else:
+            if metric in lower_is_better_metrics:
+                delta_pct = (baseline - tuned) / baseline
+            else:
+                delta_pct = (tuned - baseline) / baseline
+
+            improved = delta_pct > threshold
+            regressed = delta_pct < -threshold
+            if regressed:
+                verdict = 'REGRESSION'
+            elif improved:
+                verdict = 'IMPROVED'
+            else:
+                verdict = 'NEUTRAL'
+
+        return delta_pct, verdict
+
+    def _should_create_pr(self, monitor_improved, has_regression,
+                          hard_blocker):
+        return monitor_improved and not has_regression and not hard_blocker
 
     def patch_tuned_results(self):
         for kernel_tuner_name in kernel_autotune_mapping.keys():
@@ -524,31 +573,15 @@ class KernelAutoTuneResultProcessor:
             for metric in all_metrics:
                 baseline = pre['metrics'][metric]
                 tuned = post['metrics'][metric]
-                delta_pct = None
-                improved = False
-                regressed = False
-                verdict = 'NO_DATA'
-
-                if baseline is None or tuned is None:
-                    verdict = 'MISSING'
-                elif baseline == 0.0:
-                    verdict = 'BASELINE_ZERO'
-                else:
-                    if metric in lower_is_better_metrics:
-                        # Positive means better (lower latency after tuning).
-                        delta_pct = (baseline - tuned) / baseline
-                    else:
-                        # Positive means better (higher throughput after tuning).
-                        delta_pct = (tuned - baseline) / baseline
-
-                    improved = delta_pct > 0
-                    regressed = delta_pct < -threshold
-                    if regressed:
-                        verdict = 'REGRESSION'
-                    elif improved:
-                        verdict = 'IMPROVED'
-                    else:
-                        verdict = 'NEUTRAL'
+                delta_pct, verdict = self._evaluate_metric_result(
+                    baseline,
+                    tuned,
+                    metric,
+                    threshold,
+                    lower_is_better_metrics,
+                )
+                improved = verdict == 'IMPROVED'
+                regressed = verdict == 'REGRESSION'
 
                 if metric in monitor_metrics and improved:
                     monitor_improved = True
@@ -566,7 +599,8 @@ class KernelAutoTuneResultProcessor:
                     'verdict': verdict,
                 })
 
-        should_create_pr = monitor_improved and not has_regression and not hard_blocker
+        should_create_pr = self._should_create_pr(monitor_improved,
+                                                  has_regression, hard_blocker)
 
         def _fmt_float(value):
             if value is None:

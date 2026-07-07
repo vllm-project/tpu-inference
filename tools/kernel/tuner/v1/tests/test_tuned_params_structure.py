@@ -24,10 +24,15 @@ function).
 """
 
 import ast
+import importlib.util
+import tempfile
+import textwrap
 from pathlib import Path
 
 from absl.testing import absltest
 
+from tools.kernel.tuner.v1.autotune.autotune_result_processing import \
+    KernelAutoTuneResultProcessor
 from tools.kernel.tuner.v1.autotune.kernel_autotune_config import \
     kernel_autotune_mapping
 
@@ -139,6 +144,110 @@ class TunedParamsStructureTest(absltest.TestCase):
                 f"contains 'def _get_tuned_params(...)'. This function is "
                 f"created by the autotuning pipeline's monkey-patch — its "
                 f"presence in the source file suggests a corrupted commit.")
+
+    def test_write_tuned_params_mapping_round_trips(self):
+        """The mapping writer should preserve existing entries and add new ones."""
+        processor = KernelAutoTuneResultProcessor()
+        module_source = textwrap.dedent("""
+            from dataclasses import dataclass
+
+            @dataclass(frozen=True)
+            class TuningKey:
+                model: str
+                block: int
+
+            @dataclass(frozen=True)
+            class TunableParams:
+                enabled: bool
+
+            def get_tuned_params():
+                return None
+
+            tuned_params_mapping: dict[TuningKey, TunableParams] = {
+                TuningKey(model="baseline", block=1): TunableParams(enabled=True),
+            }
+        """)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sample_tuned_params.py"
+            path.write_text(module_source, encoding="utf-8")
+
+            spec = importlib.util.spec_from_file_location(
+                "sample_tuned_params_module", path)
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            module.tuned_params_mapping.update({
+                module.TuningKey(model="new", block=2):
+                module.TunableParams(enabled=False),
+            })
+
+            processor._write_tuned_params_mapping(path, module)
+            rewritten_source = path.read_text(encoding="utf-8")
+            self.assertIn("tuned_params_mapping", rewritten_source)
+            ast.parse(rewritten_source, filename=str(path))
+
+            reloaded_spec = importlib.util.spec_from_file_location(
+                "sample_tuned_params_module_reloaded", path)
+            self.assertIsNotNone(reloaded_spec)
+            self.assertIsNotNone(reloaded_spec.loader)
+            reloaded_module = importlib.util.module_from_spec(reloaded_spec)
+            reloaded_spec.loader.exec_module(reloaded_module)
+
+            expected = {
+                reloaded_module.TuningKey(model="baseline", block=1):
+                reloaded_module.TunableParams(enabled=True),
+                reloaded_module.TuningKey(model="new", block=2):
+                reloaded_module.TunableParams(enabled=False),
+            }
+            self.assertEqual(reloaded_module.tuned_params_mapping, expected)
+
+    def test_metric_evaluation_helper(self):
+        """The metric evaluation helper should capture delta and verdicts."""
+        processor = KernelAutoTuneResultProcessor()
+        lower_is_better_metrics = {"MedianITL"}
+        threshold = 0.004
+
+        cases = [
+            ("Throughput", 100.0, 120.0, 0.2, "IMPROVED"),
+            ("MedianITL", 100.0, 95.0, 0.05, "IMPROVED"),
+            ("Throughput", 100.0, 90.0, -0.1, "REGRESSION"),
+            ("Throughput", 0.0, 10.0, None, "BASELINE_ZERO"),
+            ("Throughput", 1e-12, 10.0, None, "BASELINE_ZERO"),
+            ("Throughput", 100.0, None, None, "MISSING"),
+            ("Throughput", 100.0, 100.3, 0.003, "NEUTRAL"),
+        ]
+
+        for metric, baseline, tuned, expected_delta, expected_verdict in cases:
+            with self.subTest(metric=metric, baseline=baseline, tuned=tuned):
+                delta, verdict = processor._evaluate_metric_result(
+                    baseline, tuned, metric, threshold,
+                    lower_is_better_metrics)
+                if expected_delta is None:
+                    self.assertIsNone(delta)
+                else:
+                    self.assertAlmostEqual(delta, expected_delta)
+                self.assertEqual(verdict, expected_verdict)
+
+    def test_should_create_pr_gate(self):
+        """The PR gate should only allow PR creation under the expected conditions."""
+        processor = KernelAutoTuneResultProcessor()
+        cases = [
+            (True, False, False, True),
+            (False, False, False, False),
+            (True, True, False, False),
+            (True, False, True, False),
+        ]
+        for monitor_improved, has_regression, hard_blocker, expected in cases:
+            with self.subTest(monitor_improved=monitor_improved,
+                              has_regression=has_regression,
+                              hard_blocker=hard_blocker):
+                self.assertEqual(
+                    processor._should_create_pr(monitor_improved,
+                                                has_regression, hard_blocker),
+                    expected)
 
 
 if __name__ == "__main__":
