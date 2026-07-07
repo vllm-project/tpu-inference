@@ -671,7 +671,7 @@ class TPUConnectorWorker:
                         self.runner.kv_caches = scatter_kv_slices(
                             self.runner.kv_caches, kv, indices)
 
-                        # jax.block_until_ready(self.runner.kv_caches)
+                        jax.block_until_ready(self.runner.kv_caches)
 
                         # self.runner.kv_caches = insert_kv_chunks(
                         #     self.runner.kv_caches, kv, block_numbers,
