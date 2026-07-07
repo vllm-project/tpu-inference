@@ -395,11 +395,23 @@ def inner_kernel(
             tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(
                 cfgs.lhs_cfgs.dtype)
             num_blocks = cfgs.num_quant_blocks_per_tile_k
-            tiled_rhs_dequant = tiled_rhs.astype(cfgs.lhs_cfgs.dtype).reshape(
-                num_blocks, rhs_qbs, rhs_tile_n)
-            tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
-            tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
-                                                  rhs_tile_n)
+
+            # Squeeze out the middle singleton dimension (axis 1) from the
+            # BlockSpec layout so tiled_rhs_scale becomes a clean 2D matrix.
+            if tiled_rhs_scale.ndim == 3:
+                tiled_rhs_scale = jnp.squeeze(tiled_rhs_scale, axis=1)
+
+            # Exact safe upper bound for the K dimension (handles the case where
+            # num_blocks * quant_block_size overshoots tile_k, e.g. a 192-wide
+            # shard block tiled into tile_k=256).
+            k_bound = min(num_blocks * rhs_qbs, cfgs.tiles.tile_k)
+
+            # Stretch the small scale matrix along K to match the blocks, then
+            # slice to the weight tile size exactly -- no weight reshape needed.
+            expanded_scale = jnp.repeat(tiled_rhs_scale, rhs_qbs,
+                                        axis=0)[:k_bound, :]
+
+            tiled_rhs = tiled_rhs.astype(cfgs.lhs_cfgs.dtype) * expanded_scale
             rhs_qbs = cfgs.tiles.tile_k
 
         valid_k = cfgs.dims.size_k % cfgs.tiles.tile_k
