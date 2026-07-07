@@ -28,7 +28,7 @@ from jax.sharding import PartitionSpec as P
 from jax.sharding import Sharding
 
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
-import tpu_inference.kernels.experimental.context_parallelism_rpa.kernel as rpa_experimental
+import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_v3_cp
 from tpu_inference import envs
 from tpu_inference.kernels.flash_attention.kernel import (
     encoder_only_flash_attention, flash_attention)
@@ -483,7 +483,7 @@ def sharded_ragged_paged_attention_experimental(
     v_scale: float | None = None,
     # kv_cache_lens: jax.Array | None = None,
     # Flags for CP
-    kv_write_back: bool = True,
+    update_kv_cache: bool = True,
     return_lse: bool = False,
     skip_cache_attn: bool = False,
     skip_current_attn: bool = False,
@@ -530,8 +530,7 @@ def sharded_ragged_paged_attention_experimental(
         P(ShardingAxisName.ATTN_DATA),  # page_indices
         P(ShardingAxisName.ATTN_DATA),  # cu_q_lens
         P(ShardingAxisName.ATTN_DATA),  # distribution
-        # P(ShardingAxisName.ATTN_DATA),  # kv_cache_lens
-        P(ShardingAxisName.CONTEXT),    # cp_rank - each device gets its rank
+        P(ShardingAxisName.CONTEXT),    # cp_rank
     ]
 
     args = [q, k, v, kv_cache, kv_lens, paged_indices, cu_q_lens, distribution, cp_rank_global]
@@ -557,13 +556,13 @@ def sharded_ragged_paged_attention_experimental(
             v_scale=v_scale,
             cp_rank=cp_rank,
             cp_group_size=cp_group_size,
-            kv_write_back=kv_write_back,
+            update_kv_cache=update_kv_cache,
             skip_cache_attn=skip_cache_attn,
             skip_current_attn=skip_current_attn,
             return_lse=return_lse,
             use_causal_mask=use_causal_mask
         )
-        return rpa_experimental.ragged_paged_attention(
+        return rpa_v3_cp.ragged_paged_attention(
             *kernel_args,
             **kwargs
         )
@@ -661,7 +660,6 @@ def merge_attn_states(
 
     sum_exp = exp_context + exp_query
 
-    # Use [..., None] to expand LSE dim to broadcast scaler across head_dim
     merged_out = (context_out * exp_context[..., None] + query_out * exp_query[..., None]) / sum_exp[..., None]
     merged_lse = max_lse + jnp.log(sum_exp)
 
@@ -698,10 +696,6 @@ def forward_with_dcp(
 
     md = attention_metadata
 
-
-    # q_len_per_seq = jnp.maximum(0, md.query_start_loc[1:] - md.query_start_loc[:-1])
-    # global_kv_cache_lens = md.seq_lens - q_len_per_seq
-
     # ==========================================================================
     # Phase 1: Context Attention (Attending to KV caches)
     # `kv_caches` is not modified in the phase.
@@ -723,8 +717,7 @@ def forward_with_dcp(
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
-        # kv_cache_lens=global_kv_cache_lens,
-        kv_write_back=False,
+        update_kv_cache=False,
         is_context_phase=True,
         return_lse=True,
         skip_current_attn=True,
@@ -752,8 +745,7 @@ def forward_with_dcp(
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
-        # kv_cache_lens=global_kv_cache_lens,
-        kv_write_back=True,
+        update_kv_cache=True,
         skip_cache_attn=True,
         return_lse=True,
     )
@@ -780,11 +772,11 @@ def attention(
     mesh: Mesh,
     head_dim_original: int | None = None,  # before padding,
     sm_scale: float | None = None,
-    sinks: jax.Array | None = None,
     attention_chunk_size: int | None = None,
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    sinks: jax.Array | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
     shared_attention_metadata: SharedAttentionMetadata | None = None,
