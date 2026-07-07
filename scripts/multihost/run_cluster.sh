@@ -144,6 +144,8 @@ docker run \
     --entrypoint /bin/bash \
     --network host \
     --shm-size=16G \
+    --log-opt max-size=50m \
+    --log-opt max-file=2 \
     --name "${CONTAINER_NAME}" \
     -v "${PATH_TO_HF_HOME}:/root/.cache/huggingface" \
     "${GCLOUD_MOUNT_ARGS[@]}" \

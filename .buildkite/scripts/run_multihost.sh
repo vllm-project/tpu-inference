@@ -406,7 +406,15 @@ docker exec \
   node bash -c "${VLLM_SERVE_CMD} > /root/vllm_serve.log 2>&1"
 
 # 4. Wait for the server to be healthy
-wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log"
+SERVER_TIMEOUT=7200
+if [[ -n "${SERVER_CMD_ENVS:-}" ]]; then
+    for env_item in "${SERVER_CMD_ENVS[@]}"; do
+        if [[ "$env_item" == VLLM_ENGINE_READY_TIMEOUT_S=* ]]; then
+            SERVER_TIMEOUT="${env_item#*=}"
+        fi
+    done
+fi
+wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log" "$SERVER_TIMEOUT"
 
 # 5. Run Benchmarks / Validation
 if [ -n "${CLIENT_BENCH_CMD}" ]; then
