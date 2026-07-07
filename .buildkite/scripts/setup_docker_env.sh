@@ -95,9 +95,22 @@ verify_image_vllm() {
     echo "[verify-vllm] RUN_WITH_PYPI=true; skipping vLLM commit verification."
     return 0
   fi
-  local actual_vllm
+  # Read the vLLM commit baked into the image. Capture the exit code separately
+  # so an infra failure to *read* the commit (git missing, /workspace/vllm
+  # absent, safe.directory "dubious ownership", etc.) is reported as such
+  # instead of masquerading as a vLLM mismatch. -c safe.directory pre-empts the
+  # most common trip: the container running git as a non-owner user.
+  local actual_vllm rc=0 err
+  err=$(mktemp)
   actual_vllm=$(docker run --rm --entrypoint git "${image_ref}" \
-    -C /workspace/vllm rev-parse HEAD 2>/dev/null || echo "unknown")
+    -C /workspace/vllm -c safe.directory=/workspace/vllm rev-parse HEAD 2>"${err}") || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    echo "[FATAL][verify-vllm] Could not read the vLLM commit from ${image_ref} (git exit ${rc}):" >&2
+    cat "${err}" >&2
+    rm -f "${err}"
+    exit 1
+  fi
+  rm -f "${err}"
   if [[ "${actual_vllm}" != "${expected_vllm}" ]]; then
     echo "[FATAL][verify-vllm] Image ${image_ref} contains vLLM ${actual_vllm}, but expected ${expected_vllm}."
     echo "[FATAL][verify-vllm] Aborting to avoid testing or promoting the wrong vLLM."
@@ -171,6 +184,16 @@ setup_environment() {
   local CACHE_TAG="${TPU_INFERENCE_HASH}-${LOCAL_TPU_VERSION}"
   if [[ -n "${VLLM_COMMIT_HASH}" ]]; then
     CACHE_TAG="${TPU_INFERENCE_HASH}-${VLLM_COMMIT_HASH}-${LOCAL_TPU_VERSION}"
+  elif [[ -n "${BUILDKITE:-}" && "${RUN_WITH_PYPI:-false}" != "true" ]]; then
+    # In a real pipeline an empty VLLM_COMMIT_HASH is a bug (bootstrap didn't set
+    # the metadata, or the Dockerfile will clone vLLM HEAD non-deterministically).
+    # Falling back to the vLLM-agnostic tag here would silently re-introduce the
+    # cross-pipeline clobber this change eliminates, so fail loudly instead.
+    echo "[FATAL][setup_docker_env] VLLM_COMMIT_HASH is empty in a Buildkite build." >&2
+    echo "[FATAL][setup_docker_env] Refusing the vLLM-agnostic tag '${CACHE_TAG}' (can collide" >&2
+    echo "[FATAL][setup_docker_env] across CI/integration). Ensure bootstrap set the" >&2
+    echo "[FATAL][setup_docker_env] VLLM_COMMIT_HASH metadata (LKG or HEAD)." >&2
+    exit 1
   fi
 
   # ==========================================
