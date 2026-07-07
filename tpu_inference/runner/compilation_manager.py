@@ -1139,6 +1139,9 @@ class CompilationManager:
             self._precompile_eagle3_helpers()
         if self.runner.speculative_config.method == "mtp":
             self._precompile_mtp_helpers()
+        if (self.runner.speculative_config.method == "dflash"
+                and envs.DRAFT_MODEL_IMPL_TYPE == "torchax"):
+            self.runner.drafter.precompile()
 
     def _precompile_extract_draft_token_ids(self) -> None:
         logger.info(

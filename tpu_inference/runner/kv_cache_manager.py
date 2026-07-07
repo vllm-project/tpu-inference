@@ -563,6 +563,24 @@ class KVCacheManager:
                             kv_cache_spec[
                                 f"draft_layer.{i}"] = self._create_attention_spec(
                                     block_size, num_kv_heads, head_size)
+                elif method == "dflash":
+                    num_kv_heads = common_utils.get_padded_num_heads(
+                        draft_hf_config.num_key_value_heads, model_cnt)
+                    head_size = common_utils.get_padded_head_dim(
+                        draft_hf_config.hidden_size //
+                        draft_hf_config.num_attention_heads)
+                    # DFlash draft has num_hidden_layers layers
+                    draft_num_layers = getattr(draft_hf_config,
+                                               'num_hidden_layers', 1)
+                    for i in range(draft_num_layers):
+                        if self.use_mla:
+                            kv_cache_spec[
+                                f"draft_layer.{i}"] = self._create_attention_spec(
+                                    block_size, 1, mla_head_size)
+                        else:
+                            kv_cache_spec[
+                                f"draft_layer.{i}"] = self._create_attention_spec(
+                                    block_size, num_kv_heads, head_size)
         else:
             # Else propagate attention modules from compilation config.
             layers = get_layers_from_vllm_config(

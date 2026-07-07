@@ -247,7 +247,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
                      ["auto", "vllm", "flax_nnx", "jetpack"]),
     "DRAFT_MODEL_IMPL_TYPE":
     env_with_choices("DRAFT_MODEL_IMPL_TYPE", "auto",
-                     ["auto", "vllm", "flax_nnx"]),
+                     ["auto", "vllm", "flax_nnx", "torchax"]),
     # Enable 2D tensor parallelism, shard attention heads across multiple axes
     "USE_2D_TP":
     env_bool("USE_2D_TP", default=False),

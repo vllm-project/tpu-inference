@@ -22,11 +22,14 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
 from vllm.sampling_params import SamplingType
 from vllm.v1.outputs import DraftTokenIds
 
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.speculative_decoding_manager import \
     SpecDecodeMetadata
 from tpu_inference.runner.tpu_runner import TPUModelRunner
+from tpu_inference.spec_decode.jax.dflash import DFlashProposer
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
+from tpu_inference.spec_decode.torchax.dflash import DFlashTorchaxProposer
 
 
 class TestSpeculativeDecodingManager:
@@ -401,3 +404,104 @@ class TestSpeculativeDecodingManager:
         assert result == [[10, 11], [20, 21]]
         self.runner.drafter.prepare_inputs.assert_called_once()
         self.runner.drafter.propose.assert_called_once()
+
+    @pytest.mark.parametrize(("proposer_cls", "draft_impl_env"), [
+        (DFlashProposer, "flax_nnx"),
+        (DFlashTorchaxProposer, "torchax"),
+    ])
+    @pytest.mark.parametrize("spec_decode_metadata_is_none", [True, False])
+    def test_propose_dflash_draft_token_ids(self, monkeypatch, proposer_cls,
+                                            draft_impl_env,
+                                            spec_decode_metadata_is_none):
+        """Tests the logic for proposing DFlash draft tokens."""
+        # 1. ===== Setup =====
+        monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", draft_impl_env)
+        self.runner.drafter = MagicMock(spec=proposer_cls)
+        self.runner.speculative_config.method = "dflash"
+
+        # Mock TPUModelRunner attributes
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.req_ids = ["req-1", "req-2"]
+        # propose_dflash_draft_token_ids reads num_tokens_no_spec to derive the
+        # accepted context length (advance by len(token_ids) - 1 per request
+        # that sampled). Provide a real array so slicing/copy work.
+        self.runner.input_batch.num_tokens_no_spec = np.array([10, 12],
+                                                              dtype=np.int32)
+        self.runner.requests = {
+            "req-1": MagicMock(),
+            "req-2": MagicMock(),
+        }
+        self.runner.mesh = self.mock_mesh
+        self.runner.max_num_reqs = 8
+        self.runner.dp_size = 1
+        self.runner.kv_caches = MagicMock()
+
+        # Mock drafter methods
+        mock_attn_metadata = MagicMock()
+        mock_target_token_ids = MagicMock()
+        mock_last_token_indices = MagicMock()
+        mock_target_hidden_states = MagicMock()
+        self.runner.drafter.prepare_inputs.return_value = (
+            mock_target_hidden_states,
+            mock_target_token_ids,
+            mock_last_token_indices,
+            mock_attn_metadata,
+        )
+        mock_draft_token_ids = [[10, 11], [20, 21]]
+        self.runner.drafter.propose.return_value = (
+            self.runner.kv_caches,
+            mock_draft_token_ids,
+        )
+
+        # Inputs.  Real AttentionMetadata (not a MagicMock) because
+        # propose_dflash_draft_token_ids invokes `dataclasses.replace` on it.
+        sampled_token_ids = [[1], [2]]
+        aux_hidden_states = MagicMock()
+        attn_metadata = AttentionMetadata(
+            input_positions=np.zeros(0, dtype=np.int32),
+            seq_lens=np.array([10, 12], dtype=np.int32),
+        )
+        if spec_decode_metadata_is_none:
+            spec_decode_metadata = None
+        else:
+            spec_decode_metadata = MagicMock(spec=SpecDecodeMetadata)
+            spec_decode_metadata.draft_lengths_cpu = np.array([2, 3])
+        scheduler_output = MagicMock()
+        input_ids = MagicMock()
+
+        # 2. ===== Act =====
+        with patch(
+                "tpu_inference.runner.speculative_decoding_manager.device_array",
+                side_effect=lambda mesh, x: x):
+            result = self.runner.speculative_decoding_manager.propose_dflash_draft_token_ids(
+                sampled_token_ids,
+                aux_hidden_states,
+                attn_metadata,
+                spec_decode_metadata,
+                scheduler_output,
+                input_ids,
+            )
+
+        # 3. ===== Assert =====
+        assert result == [[10, 11], [20, 21]]
+        self.runner.drafter.prepare_inputs.assert_called_once()
+        self.runner.drafter.propose.assert_called_once()
+
+        # Each req sampled one token this step (len(token_ids) - 1 == 0), so the
+        # accepted context length stays at num_tokens_no_spec (the newest token
+        # has no hidden state yet).
+        prepare_call_args = self.runner.drafter.prepare_inputs.call_args.args
+        corrected_metadata = prepare_call_args[0]
+        np.testing.assert_array_equal(np.asarray(corrected_metadata.seq_lens),
+                                      np.array([10, 12], dtype=np.int32))
+
+        # num_rejected_tokens shape: with draft_lengths=[2,3] and each req
+        # sampling 1 token, num_rejected = [2+1-1, 3+1-1] = [2, 3] padded to
+        # runner.max_num_reqs (=8) with zeros. None when spec metadata absent.
+        passed_num_rejected = prepare_call_args[4]
+        if spec_decode_metadata_is_none:
+            assert passed_num_rejected is None
+        else:
+            np.testing.assert_array_equal(
+                np.asarray(passed_num_rejected),
+                np.array([2, 3, 0, 0, 0, 0, 0, 0], dtype=np.int32))
