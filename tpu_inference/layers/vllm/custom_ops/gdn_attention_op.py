@@ -59,18 +59,16 @@ def gdn_attention_core_tpu(
        in the cache.
     """
     fc = get_forward_context()
-    # attn_metadata = fc.attn_metadata[layer_name]
-    key = list(fc.attn_metadata.keys())[0]
-    first_attn_metadata = fc.attn_metadata[key]
-
-    padded_num_reqs = first_attn_metadata.padded_num_reqs
-    request_distribution = first_attn_metadata.request_distribution
-    query_start_loc = first_attn_metadata.query_start_loc
-    seq_lens = first_attn_metadata.seq_lens
-    state_indices = first_attn_metadata.mamba_state_indices
-
     layer_module = fc.no_compile_layers[layer_name]
+
     vllm_context = get_vllm_model_wrapper_context()
+    shared_attn_metadata = vllm_context.shared_attn_metadata
+    assert shared_attn_metadata is not None, "shared_attn_metadata is None in gdn_attention_core_tpu"
+    padded_num_reqs = shared_attn_metadata.padded_num_reqs
+    request_distribution = shared_attn_metadata.request_distribution
+    query_start_loc = shared_attn_metadata.query_start_loc
+    seq_lens = shared_attn_metadata.seq_lens
+    state_indices = shared_attn_metadata.mamba_state_indices
 
     n_kq = layer_module.num_k_heads
     n_v = layer_module.num_v_heads
