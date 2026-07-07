@@ -1072,13 +1072,12 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         # attr path "language_model.*".  mapper.apply() runs before the loader's
         # packed routing so params_dict lookups succeed.
         mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
-        skip = [
-            "audio_tower.", "vision_tower.", "multi_modal_projector.",
-            "embed_audio."
-        ]
-        if not hasattr(self, 'lm_head'):
-            skip.append("lm_head")
-        loader = JaxAutoWeightsLoader(self, skip_prefixes=skip)
+        loader = JaxAutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else []),
+            skip_substrs=["vision", "audio", "multi_modal"],
+        )
         return loader.load_weights(mapper.apply(weights))
 
     def __call__(
