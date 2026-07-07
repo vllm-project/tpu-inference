@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 
 MXFP4_BLOCK_SIZE = 32
+MXFP4_REQUANTIZED_BLOCK_SIZE = 512
 
 
 def quantize_tensor_to_mxfp4_packed(
