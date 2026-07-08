@@ -444,6 +444,12 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E test for Ray-based multi-host"
         key: "${TPU_VERSION:-tpu6e}_test_26"
+        # Temporarily disabled: consistently times out (~2h) and squats the
+        # scarce tpu_v7x_16_queue. Two independent causes -- (1) the multi-host
+        # image tag omitted the vLLM commit so workers could pull a clobbered
+        # image (fixed separately), and (2) a bad multi-host machine whose Runai
+        # weight-streamer stalls at ~50%. Re-enable once both are resolved.
+        skip: "Times out ~2h; re-enable after #3121 + bad-machine fix"
         soft_fail: true
         agents:
           queue: tpu_v7x_16_queue
