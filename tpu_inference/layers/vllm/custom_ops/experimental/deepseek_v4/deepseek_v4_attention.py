@@ -123,11 +123,16 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
         dsv4_attention.DeepseekCompressor = VllmDeepseekCompressor
         dsv4_attention.DeepseekV4SWACache = VllmDeepseekV4SWACache
 
-        # The base ctor also allocates CUDA-backed stream-sync events
-        # (``torch.Event()``), used only for GPU stream overlap. Mock
-        # it out.
+        # The base ctor also allocates CUDA-backed stream-sync events (the
+        # ``ln_events``), used only for GPU stream overlap. Mock them to no-ops.
+        # vLLM #47668 reverted these from ``torch.Event`` back to
+        # ``torch.cuda.Event``, so both symbols must be neutralized -- the
+        # ``torch.Event`` mock alone no longer matches the reverted code, and a
+        # real ``torch.cuda.Event`` is a dummy stub on TPU (no CUDA).
         orig_event = torch.Event
+        orig_cuda_event = torch.cuda.Event
         torch.Event = lambda *args, **kwargs: None
+        torch.cuda.Event = lambda *args, **kwargs: None
         try:
             # DeepSeek-V4's implementation use sth like:
             # torch.zeros(.. device=device). Pass `cpu``
@@ -145,6 +150,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             dsv4_attention.DeepseekCompressor = orig_compressor
             dsv4_attention.DeepseekV4SWACache = orig_swa_cache
             torch.Event = orig_event
+            torch.cuda.Event = orig_cuda_event
 
     # Abstract platform hooks required to instantiate the DeepseekV4Attention
     # ABC; unused on the TPU pass-through path.

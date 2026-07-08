@@ -30,6 +30,7 @@ from vllm.model_executor.models.utils import (AutoWeightsLoader,
                                               extract_layer_index,
                                               is_pp_missing_parameter,
                                               make_layers, maybe_prefix)
+from vllm.model_executor.offloader import NoopOffloader, set_offloader
 from vllm.sequence import IntermediateTensors
 
 from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_attention import \
@@ -422,6 +423,17 @@ class DeepseekV4Model(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        # DeepSeek-V4's config selects vLLM's weight-prefetch offloader, which
+        # make_layers (below) uses to wrap every decoder layer: it allocates
+        # torch.cuda.Event stream-sync events and installs CUDA-stream forward
+        # hooks. None of that works on TPU (there is no CUDA) -- it is a GPU-HBM
+        # offload optimization with no TPU analog. Force the no-op offloader
+        # before make_layers so the layers are built and run unwrapped. (This was
+        # surfaced by vLLM #47668, which reverted the offloader from torch.Event
+        # back to torch.cuda.Event, turning a previously-silent wrap into a hard
+        # "Tried to instantiate dummy base class Event" failure at construction.)
+        set_offloader(NoopOffloader())
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
