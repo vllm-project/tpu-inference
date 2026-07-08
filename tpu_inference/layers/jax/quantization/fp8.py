@@ -15,7 +15,7 @@
 import functools
 import math
 from functools import partial
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -466,10 +466,12 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
     TODO (jacobplatin): support weight loading -- currently, model-dependent.
     """
 
-    def __init__(self, weight_block_size: Tuple[int, int], *args, **kwargs):
+    def __init__(self, weight_block_size: Optional[Sequence[int]], *args,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.extra_backend_kwargs = {}
-        self.weight_block_size = weight_block_size
+        self.weight_block_size = None if weight_block_size is None else tuple(
+            weight_block_size)
         self.block_quant: bool = self.weight_block_size is not None
         self.weight_scale_name = ("weight_scale_inv"
                                   if self.block_quant else "weight_scale")
@@ -542,19 +544,37 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
             layer: The layer to create weights for.
         """
 
-        quant_config = layer.quant_config
-        assert isinstance(
-            quant_config,
-            Fp8Config), "Expected fp8 config for Fp8FusedMoEMethod!"
-
         # TODO (#1681): support other backends
         if layer.moe_backend in FP8_QUANT_METHOD_SUPPORTED_MOE_BACKENDS:
             # vLLM reference here:
             # https://github.com/vllm-project/vllm/blob/9bdb06b/vllm/model_executor/layers/quantization/fp8.py#L763
             if not self.block_quant:
-                raise NotImplementedError(
-                    "Expected blockwise quantization when using Fp8FusedMoEMethod!"
-                )
+                # Tensorwise (per-channel) FP8: weights are fp8, scales are per
+                # output channel with shape [E, N_out, 1] (CT format).
+                for param_name in [
+                        "kernel_gating_EDF", "kernel_up_proj_EDF",
+                        "kernel_down_proj_EFD"
+                ]:
+                    param = getattr(layer, param_name, None)
+                    assert isinstance(
+                        param, nnx.Param
+                    ), f"Expected nnx.Param for {param_name}, got {type(param)}"
+                    init_fn = param.init_fn
+                    E, K, N = param[...].shape
+                    value = init_fn(rngs.params(), (E, K, N),
+                                    jnp.float8_e4m3fn)
+                    param.set_raw_value(value)
+                    # Placeholder shape [E, N, 1]: N is the output-channel count.
+                    # Actual per-expert scale loaded by load_weights as [1, N, 1]
+                    # and concatenated to [E, N, 1] in process_weights_after_loading.
+                    scale_value = jnp.zeros((E, N, 1),
+                                            dtype=jnp.float32,
+                                            device=jax.devices('cpu')[0])
+                    setattr(
+                        layer, f"{param_name}_{self.weight_scale_name}",
+                        nnx.Param(scale_value,
+                                  _weights_to_load=[None for _ in range(E)],
+                                  _is_moe_scale=True))
             else:
                 assert len(
                     self.weight_block_size

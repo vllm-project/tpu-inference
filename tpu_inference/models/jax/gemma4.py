@@ -198,42 +198,44 @@ class Gemma4MoE(JaxRoutedExperts):
     def load_weights(self, weights: Iterable):
         """Load weights for Gemma4 MoE layer.
 
-        Unlike other MoE, Gemma4 didn't provide per-expert weights, but
-        already consolidates each projection weights into a single tensor
-        stacked along the expert axis
-        — e.g. `down_proj` is `(E, D, F)` rather than separate
-        per-expert `(D, F)` tensors in. The generic per-expert loader
-        (`JaxMoE._load_weights` / `Fp8FusedMoEMethod.load_weights`) expects
-        the latter, keyed as `"<expert_id>.<param_name>"`. Slice each stacked
-        tensor into per-expert pieces and synthesize that naming, then
-        delegate to super().
+        Handles two checkpoint formats:
 
-        Per-expert slices are handed over as-is (no transpose): the generic
-        loader does no permute itself (just adds the expert dim back via
-        reshape), and `*FusedMoEMethod.process_weights_after_loading`
-        concatenates gate/up scale halves along the same axis it
-        concatenates the gate/up weight halves — so the checkpoint's native
-        per-expert orientation already lines up for both weights and their
-        scales, for the same reason the un-permuted raw weights do.
+        1. Stacked non-FP8 (google/gemma-4-26B-A4B-it): gate_up_proj and
+           down_proj are pre-stacked along the expert axis (E, ...); each is
+           sliced into per-expert pieces and renamed for the generic loader.
+
+        2. Per-expert (FP8 CT or any other standard checkpoint): individual
+           per-expert tensors arrive as "experts.N.proj.param"; strip the
+           "experts." prefix and pass bare "N.proj.param" names to super() so
+           Fp8FusedMoEMethod.load_weights handles weight_scale entries and
+           JaxRoutedExperts._load_weights handles weight entries directly.
         """
+        weight_list = list(weights)
 
-        def per_expert_slice(stacked_tensor, param_name: str):
-            return ((f"{i}.{param_name}", expert_tensor)
-                    for i, expert_tensor in enumerate(stacked_tensor))
+        is_fused = any(
+            n.endswith("gate_up_proj") or n.endswith("down_proj")
+            for n, _ in weight_list)
 
-        synthesized = []
-        for name, tensor in weights:
-            if name.endswith("down_proj"):
-                synthesized.extend(per_expert_slice(tensor,
-                                                    "down_proj.weight"))
-            elif name.endswith("gate_up_proj"):
-                F = tensor.shape[1] // 2
-                synthesized.extend(
-                    per_expert_slice(tensor[:, :F, :], "gate_proj.weight"))
-                synthesized.extend(
-                    per_expert_slice(tensor[:, F:, :], "up_proj.weight"))
+        if is_fused:
+            synthesized = []
+            for name, tensor in weight_list:
+                if name.endswith("down_proj"):
+                    for i, shard in enumerate(tensor):
+                        synthesized.append((f"{i}.down_proj.weight", shard))
+                elif name.endswith("gate_up_proj"):
+                    F = tensor.shape[1] // 2
+                    for i, shard in enumerate(tensor[:, :F, :]):
+                        synthesized.append((f"{i}.gate_proj.weight", shard))
+                    for i, shard in enumerate(tensor[:, F:, :]):
+                        synthesized.append((f"{i}.up_proj.weight", shard))
+            return super().load_weights(synthesized)
 
-        return super().load_weights(synthesized)
+        # Per-expert format: strip the "experts." prefix added during routing so
+        # downstream loaders see bare "N.proj.param" names as they expect.
+        _PREFIX = "experts."
+        stripped = ((name[len(_PREFIX):] if name.startswith(_PREFIX) else name,
+                     w) for name, w in weight_list)
+        return super().load_weights(stripped)
 
 
 class Gemma4Attention(JaxModule):
