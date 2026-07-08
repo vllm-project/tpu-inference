@@ -181,7 +181,11 @@ setup_environment() {
   # pipeline (LKG vLLM) and the integration pipeline (HEAD vLLM) produce the same
   # tag for the same tpu-inference commit and can overwrite each other's image in
   # the registry -- a test could then silently run a different vLLM than intended.
-  local CACHE_TAG="${TPU_INFERENCE_HASH}-${LOCAL_TPU_VERSION}"
+  # Exposed as a shell global (not `local`) so callers that source this script --
+  # notably run_multihost.sh -- can distribute the exact vLLM-qualified image
+  # instead of a tpu-inference-commit-only tag that another build (different
+  # vLLM) may have clobbered in the registry.
+  CACHE_TAG="${TPU_INFERENCE_HASH}-${LOCAL_TPU_VERSION}"
   if [[ -n "${VLLM_COMMIT_HASH}" ]]; then
     CACHE_TAG="${TPU_INFERENCE_HASH}-${VLLM_COMMIT_HASH}-${LOCAL_TPU_VERSION}"
   elif [[ -n "${BUILDKITE:-}" && "${RUN_WITH_PYPI:-false}" != "true" ]]; then
@@ -237,5 +241,9 @@ setup_environment() {
     gcloud auth configure-docker us-central1-docker.pkg.dev
     docker push "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
     docker push "${IMAGE_NAME}:latest"
+    # Also push the vLLM-qualified tag so consumers (e.g. run_multihost.sh) can
+    # pull an image that cannot be clobbered by another build on the same
+    # tpu-inference commit built against a different vLLM.
+    docker push "${IMAGE_NAME}:${CACHE_TAG}"
   fi
 }
