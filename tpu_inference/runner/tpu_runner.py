@@ -55,7 +55,8 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (AttentionMetadata,
+                                                           SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -255,7 +256,7 @@ class ExecuteModelState:
 
     scheduler_output: "VllmSchedulerOutput"
     attn_metadata: AttentionMetadata
-    shared_attn_metadata: AttentionMetadata
+    shared_attn_metadata: SharedAttentionMetadata
     sampling_metadata: TPUSupportedSamplingMetadata
     input_ids: Optional[jax.Array]
     hidden_states: jax.Array
@@ -2662,16 +2663,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             )
 
             return attention_metadata_gid
+        def build_shared_attn() -> SharedAttentionMetadata:
+            return SharedAttentionMetadata(
+                input_positions=positions,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                request_distribution=request_distribution,
+                mamba_state_indices=mamba_state_indices,
+                padded_num_reqs=attn_padded_num_reqs,
+            )
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
-        shared_attention_metadata: AttentionMetadata
+        shared_attention_metadata: SharedAttentionMetadata
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             # Pooling model will not using kv cache
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
             block_tables = metadata.get(
                 "block_tables_gid_0") if not no_kv_cache else None
             attention_metadata = build_attn(block_tables)
-            shared_attention_metadata = build_attn(block_tables)
+            shared_attention_metadata = build_shared_attn()
         else:
             attention_metadata = {
                 name: build_attn(metadata[f"block_tables_gid_{gid}"])
@@ -2679,7 +2689,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     self.kv_cache_config.kv_cache_groups)
                 for name in kv_cache_group.layer_names
             }
-            shared_attention_metadata = build_attn(block_tables=None)
+            shared_attention_metadata = build_shared_attn()
 
         # Async scheduling: substitute placeholder tokens for DP
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:

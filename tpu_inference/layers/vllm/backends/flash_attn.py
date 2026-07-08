@@ -21,7 +21,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import (
     attention, encoder_only_attention)
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \

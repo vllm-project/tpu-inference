@@ -20,7 +20,10 @@ import jax
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata,
+    SharedAttentionMetadata,
+)
 
 
 @dataclass
@@ -30,7 +33,7 @@ class VllmModelWrapperContext:
     layer_name_to_kvcache_index: Dict[str, int]
     vllm_config: Optional[VllmConfig] = None
     expert_indices_list: List[jax.Array] = field(default_factory=list)
-    shared_attn_metadata: AttentionMetadata = field(default_factory=None)
+    shared_attn_metadata: SharedAttentionMetadata = field(default_factory=None)
 
 
 _vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None
@@ -51,7 +54,7 @@ def set_vllm_model_wrapper_context(
     mesh: Mesh,
     layer_name_to_kvcache_index: Dict[str, int] = None,
     vllm_config: Optional[VllmConfig] = None,
-    shared_attn_metadata: AttentionMetadata = None,
+    shared_attn_metadata: SharedAttentionMetadata = None,
 ):
     global _vllm_model_wrapper_context
     prev_context = _vllm_model_wrapper_context

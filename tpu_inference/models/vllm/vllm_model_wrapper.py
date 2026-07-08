@@ -46,7 +46,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import \
 from tpu_inference import envs
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
