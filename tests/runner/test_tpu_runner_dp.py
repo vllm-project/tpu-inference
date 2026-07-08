@@ -524,12 +524,15 @@ class TestTPUJaxRunnerDPInputsLightweight:
              padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
              attn_padded_num_reqs, padded_total_num_scheduled_tokens,
              padded_num_reqs_per_dp_rank, logits_indices_selector,
-             max_num_reqs_per_dp_rank) = result
+             tokens_indices_selector, max_num_reqs_per_dp_rank) = result
 
             # In continue decode + decode only mode:
             # padded_num_scheduled_tokens_per_dp_rank should be equal to padded_num_reqs_per_dp_rank (16)
             assert padded_num_scheduled_tokens_per_dp_rank == 16
             assert padded_num_reqs_per_dp_rank == 16
+            assert isinstance(tokens_indices_selector, np.ndarray)
+            np.testing.assert_array_equal(tokens_indices_selector,
+                                          np.array([0, 1, 16, 17]))
 
     @patch('jax.device_put', side_effect=lambda x, y: x)
     @patch('tpu_inference.runner.tpu_runner.NamedSharding')
