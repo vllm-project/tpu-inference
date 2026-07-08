@@ -154,6 +154,7 @@ class TestMaybeReduceSharedExpertOutput:
         with patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
                           new_callable=PropertyMock, return_value=True), \
              patch.object(fm, "_get_mesh", return_value=mesh), \
+             patch.object(fm, "is_attn_dp", return_value=False), \
              patch.object(fm, "_all_reduce_over_tp",
                           return_value=reduced) as reduce:
             out = runner._maybe_reduce_shared_expert_output(shared)
@@ -174,9 +175,8 @@ class TestMaybeReduceSharedExpertOutput:
              patch.object(fm, "is_attn_dp", return_value=True), \
              patch.object(fm, "_all_reduce_over_tp",
                           return_value=reduced) as reduce:
-            out = runner._maybe_reduce_shared_expert_output(shared)
-        reduce.assert_called_once_with(shared, mesh)
-        assert out is reduced
+            runner._maybe_reduce_shared_expert_output(shared)
+        reduce.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

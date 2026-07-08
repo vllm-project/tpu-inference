@@ -118,12 +118,15 @@ class VllmMoERunner(MoERunner):
         two match before being summed downstream. Under sequence parallelism a
         separate all-gather step in the model handles this instead.
         """
-        if (shared_output is not None
+        mesh = _get_mesh()
+
+        if mesh is None:
+            return shared_output
+
+        if (shared_output is not None and self._fused_output_is_reduced
                 and not self.moe_config.is_sequence_parallel
-                and self._fused_output_is_reduced):
-            mesh = _get_mesh()
-            if mesh is not None:
-                shared_output = _all_reduce_over_tp(shared_output, mesh)
+                and not is_attn_dp(mesh)):
+            shared_output = _all_reduce_over_tp(shared_output, mesh)
         return shared_output
 
     def _maybe_reduce_final_output(
