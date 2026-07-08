@@ -26,6 +26,7 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.models.gemma4_mm import \
     Gemma4ForConditionalGeneration as PtGemma4MM
+from vllm.model_executor.models.utils import WeightsMapper
 
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
@@ -42,7 +43,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     merge_multimodal_embeddings
 from tpu_inference.models.jax.utils.weight_utils import (
-    LoadableWithIterator, StandardWeightLoader,
+    JaxAutoWeightsLoader, LoadableWithIterator, StandardWeightLoader,
     load_nnx_param_from_reshaped_torch)
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -607,18 +608,13 @@ class Gemma4MultimodalEmbedder(JaxModule):
         return x
 
 
-class Gemma4MmModel(Gemma4Model):
-    """Gemma4 model that includes vision tower.
+class Gemma4MmModel(JaxModule):
+    """Gemma4 multimodal model combining text backbone and vision encoder.
 
-    Keeping the vision tower nested under ``model.`` (instead of as a
-    sibling of ``model`` on `Gemma4ForConditionalGeneration`) makes the JAX
-    parameter prefix match the PyTorch checkpoint's `model.vision_tower.*`
-    naming exactly. `Fp8Config.is_layer_skipped` substring-matches each
-    layer's construction-time `prefix` (threaded through every vision tower
-    submodule below) against `modules_to_not_convert` (e.g.
-    `["model.vision_tower", "lm_head"]`) to decide whether it should be
-    quantized — both the `model.` nesting and the per-layer prefix string
-    need to agree with the checkpoint's naming for that to work.
+    Mirrors the HF checkpoint layout:
+      model.language_model.layers.*  — transformer text layers
+      model.vision_tower.*           — SigLIP encoder
+      model.embed_vision.*           — vision-text projection
     """
 
     def __init__(self,
@@ -626,13 +622,15 @@ class Gemma4MmModel(Gemma4Model):
                  rng: nnx.Rngs,
                  mesh: Mesh,
                  prefix: str = "model"):
-        super().__init__(vllm_config=vllm_config,
-                         rng=rng,
-                         mesh=mesh,
-                         prefix=prefix)
-
         model_config = vllm_config.model_config
         vision_config = model_config.hf_config.vision_config
+
+        self.language_model = Gemma4Model(
+            vllm_config=vllm_config,
+            rng=rng,
+            mesh=mesh,
+            prefix=prefix + ".language_model",
+        )
 
         self.vision_tower = Gemma4VisionModel(
             config=vision_config,
@@ -640,7 +638,8 @@ class Gemma4MmModel(Gemma4Model):
             rng=rng,
             quant_config=vllm_config.quant_config,
             mesh=mesh,
-            prefix=f"{prefix}.vision_tower")
+            prefix=f"{prefix}.vision_tower",
+        )
 
         self.embed_vision = Gemma4MultimodalEmbedder(
             vision_hidden_size=vision_config.hidden_size,
@@ -648,7 +647,8 @@ class Gemma4MmModel(Gemma4Model):
             dtype=model_config.dtype,
             rng=rng,
             quant_config=vllm_config.quant_config,
-            prefix=f"{prefix}.embed_vision")
+            prefix=f"{prefix}.embed_vision",
+        )
 
 
 class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
@@ -686,7 +686,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             None)
 
         if not model_config.hf_config.tie_word_embeddings:
-            if self.model.is_last_rank:
+            if self.model.language_model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
                 hidden_size = model_config.hf_config.text_config.hidden_size
                 from tpu_inference.layers.jax.linear import JaxLmHead
@@ -704,66 +704,44 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
-
-        def map_name(name: str) -> str:
-            # Gemma 4 multimodal remappings
-            name = name.replace("vision_tower.encoder.", "vision_tower.")
-            if "vision_tower.layers." in name:
-                name = name.replace(".linear.weight", ".weight")
-
-            # Text model remapping
-            name = name.replace("model.language_model.", "model.")
-            if "model.lm_head" in name:
-                name = name.replace("model.lm_head", "lm_head")
-
-            return name
-
-        def filter_weights(weights_iterator):
-            import re
-            for name, weight in weights_iterator:
-                mapped_name = map_name(name)
-
-                # Skip audio tower weights — audio path is deferred for
-                # E-family. Audio re-introduction is a separate follow-up.
-                if "audio_tower" in mapped_name or "embed_audio" in mapped_name:
-                    continue
-
-                # Skip activation-calibration metadata that ships in E2B/E4B
-                # HF checkpoints (vision tower) but isn't a JAX parameter.
-                # The JAX vision module doesn't track these min/max scalars.
-                if any(
-                        mapped_name.endswith(suffix) for suffix in (
-                            ".input_max",
-                            ".input_min",
-                            ".output_max",
-                            ".output_min",
-                        )):
-                    continue
-
-                # Handle packed QKV weights for the text tower when the model uses separate projections (e.g. k_eq_v layers)
-                if "qkv_proj" in mapped_name and "model.layers." in mapped_name:
-                    m = re.search(r"layers\.(\d+)\.", mapped_name)
-                    if m:
-                        layer_idx = int(m.group(1))
-                        if self.model.start_layer <= layer_idx < self.model.end_layer:
-                            jax_attn = self.model.layers[layer_idx].self_attn
-
-                            if jax_attn.qkv_proj is None:
-                                continue
-
-                yield mapped_name, weight
-
-        return super().load_weights(filter_weights(weights))
+        # Remap checkpoint names to Python attr paths.  self.model makes
+        # "model.*" resolve naturally (has_model_child=True), so no prefix
+        # stripping is needed for the text/vision/embed weights.
+        # vision_tower.encoder.* is a checkpoint-only sub-level; .linear is
+        # a checkpoint-only wrapper on vision attention projections.
+        # model.lm_head lives at the top level in the JAX model.
+        mapper = WeightsMapper(
+            orig_to_new_prefix={
+                "model.vision_tower.encoder.": "model.vision_tower.",
+                "model.lm_head.": "lm_head.",
+            },
+            orig_to_new_suffix={".linear.weight": ".weight"},
+        )
+        loader = JaxAutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else []),
+            skip_substrs=[
+                "audio_tower",
+                "embed_audio",
+                ".input_max",
+                ".input_min",
+                ".output_max",
+                ".output_min",
+            ],
+        )
+        return loader.load_weights(mapper.apply(weights))
 
     def embed_input_ids(self,
                         input_ids: jax.Array,
                         multimodal_embeddings: Optional[jax.Array] = None,
                         **kwargs) -> jax.Array:
-        inputs_embeds = self.model.embed_tokens(input_ids)
+        inputs_embeds = self.model.language_model.embed_tokens(input_ids)
         target_dtype = inputs_embeds.dtype
 
-        inputs_embeds = (inputs_embeds *
-                         self.model.embedding_scale).astype(target_dtype)
+        inputs_embeds = (
+            inputs_embeds *
+            self.model.language_model.embedding_scale).astype(target_dtype)
 
         if multimodal_embeddings is not None and multimodal_embeddings.shape[
                 0] > 0:
@@ -1118,7 +1096,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         is_multimodal = (input_ids == self.image_token_id
                          ) if input_ids is not None else None
 
-        kv_caches, x, expert_indices = self.model(
+        kv_caches, x, expert_indices = self.model.language_model(
             kv_caches,
             input_ids,
             attention_metadata,
@@ -1138,7 +1116,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         if hasattr(self, 'lm_head'):
             logits = self.lm_head(hidden_states)
         else:
-            logits = self.model.embed_tokens.decode(hidden_states)
+            logits = self.model.language_model.embed_tokens.decode(
+                hidden_states)
 
         if self.final_logit_softcapping is not None:
             logits = jnp.tanh(
