@@ -225,7 +225,7 @@ def _process_continue_decode_outputs(
             logprobs_tensors.logprobs,
             logprobs_tensors.selected_token_ranks,
         ))
-    elif not is_async or expert_indices is not None:
+    elif expert_indices is not None:
         generated_tokens_cpu, all_expert_indices_cpu, actual_steps_cpu = jax.device_get(
             (generated_tokens, expert_indices, actual_steps))
         lp_token_ids_cpu = None
