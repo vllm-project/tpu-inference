@@ -24,7 +24,7 @@ on_crash() {
     local line_no=$1
     local command="$2"
     
-    # Ignore normal exits (Fixed SC2086 by adding double quotes)
+    # Ignore normal exits
     if [ "$exit_code" -eq 0 ]; then
         return
     fi
@@ -136,22 +136,26 @@ RUN_TYPE="${RUN_TYPE:-DAILY}"
 # Define Result_file name
 RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
 
-  # Upload logs to GCS if bucket is provided
-  if [[ -n "${GCS_BUCKET:-}" && "${SERVER_ALREADY_RUNNING:-false}" != "true" ]]; then
-    REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
-    if command -v gsutil &> /dev/null; then
-      echo "--- Uploading $LOG_FOLDER to unified GCS: $REMOTE_LOG_ROOT"
-      gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT" || echo "Warning: Failed to upload log folder to GCS."
-    else
-      echo "Warning: gsutil not found. Skipping log upload to GCS."
-    fi
+# Upload logs to GCS if bucket is provided
+if [[ -n "${GCS_BUCKET:-}" && "${SERVER_ALREADY_RUNNING:-false}" != "true" ]]; then
+  # TODO: When switching to Production after validation is complete, 
+  # please change to use `$GCS_BUCKET` as the log storage bucket. 
+  # For now, it is hardcoded to use the `vllm-bm-bk-storage` bucket.
+  # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
+  REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
+  if command -v gsutil &> /dev/null; then
+    echo "--- Uploading $LOG_FOLDER to unified GCS: $REMOTE_LOG_ROOT"
+    gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT" || echo "Warning: Failed to upload log folder to GCS."
   else
-    if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
-      echo "Multi-host mode detected (SERVER_ALREADY_RUNNING=true). Skipping unified GCS upload; logs will be uploaded to the legacy GCS location by host script."
-    else
-      echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
-    fi
+    echo "Warning: gsutil not found. Skipping log upload to GCS."
   fi
+else
+  if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
+    echo "Multi-host mode detected (SERVER_ALREADY_RUNNING=true). Skipping unified GCS upload; logs will be uploaded to the legacy GCS location by host script."
+  else
+    echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
+  fi
+fi
 
 (
   if [ "${BUILDKITE:-false}" == "true" ]; then
@@ -187,6 +191,18 @@ RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
     
     if [[ -z "$throughput" || ! "$throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
       echo "Failed to get the throughput and this is not an accuracy run."
+      exit 1
+    fi
+
+    output_token_throughput=$(grep "^OutputTokenThroughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
+    if [[ -z "$output_token_throughput" || ! "$output_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      echo "Failed to get output_token_throughput."
+      exit 1
+    fi
+
+    total_token_throughput=$(grep "^TotalTokenThroughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
+    if [[ -z "$total_token_throughput" || ! "$total_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      echo "Failed to get total_token_throughput."
       exit 1
     fi
 

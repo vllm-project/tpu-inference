@@ -144,7 +144,6 @@ def build_command(cmd_type, args_dict):
     return shlex.join(cmd_parts)
 
 
-
 def main():
     if len(sys.argv) < 2:
         print("echo 'Error: Missing config file.' >&2; exit 1")
