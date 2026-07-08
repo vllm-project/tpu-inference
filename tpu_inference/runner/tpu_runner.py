@@ -1303,6 +1303,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # NOTE: right now, mm model will use embeddings as the input,
         # but text-only model will use input_ids
         with self.maybe_forbid_compile:
+            # attn_metadata=None (and no num_tokens) is intentional: vLLM's
+            # set_forward_context only builds DP metadata when
+            # `attn_metadata is not None or num_tokens is not None`, so the
+            # num_tokens-requiring MoE sequence-parallel path is skipped here.
+            # Do NOT add num_tokens without also handling that path -- unlike the
+            # VllmModelWrapper forward, this native path does not need it.
             with set_forward_context(
                     None,
                     self.vllm_config,
@@ -1460,6 +1466,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Run continue-decode as a single JIT'd on-device loop (JAX while_loop with
         # donated KV cache) to avoid host syncs. EOS early-exit happens on-device.
         # Mirror standard path wrappers to preserve forward context and KV hooks.
+        # attn_metadata=None (and no num_tokens) is intentional -- see the note in
+        # the standard execute path: it skips vLLM's num_tokens-requiring MoE
+        # sequence-parallel DP-metadata path, which this native runner does not use.
         with self.maybe_forbid_compile, \
              set_forward_context(None, self.vllm_config), \
              self.maybe_get_kv_connector_output(
