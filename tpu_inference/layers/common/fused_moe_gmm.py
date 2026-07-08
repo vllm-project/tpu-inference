@@ -503,7 +503,7 @@ def expert_parallel_gmm(
         dp_axes = (dp_axes, )
     else:
         dp_axes = tuple(dp_axes)
-    x_p_spec = P(*(dp_axes + (ShardingAxisName.EXPERT, )))
+    x_p_spec = P(dp_axes + (ShardingAxisName.EXPERT, ))
     ep_data_p_spec = P(ShardingAxisName.EXPERT_DATA)
     attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
     num_experts = w1.shape[0]
@@ -598,7 +598,7 @@ def hybrid_parallel_gmm(
         dp_axes = (dp_axes, )
     else:
         dp_axes = tuple(dp_axes)
-    x_p_spec = P(*(dp_axes + ep_axis))
+    x_p_spec = P(dp_axes + ep_axis)
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     ep_p_spec = P(ep_axis)
 
@@ -632,7 +632,7 @@ def hybrid_parallel_gmm(
     else:
         final_out_specs = data_p_spec
 
-    return jax.shard_map(
+    out = jax.shard_map(
         functools.partial(
             moe_gmm_local,
             activation=activation,
@@ -643,6 +643,8 @@ def hybrid_parallel_gmm(
             enable_rs_kernel=enable_rs_kernel,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             scatter_results=scatter_results,
+            moe_chunk_size=moe_chunk_size,
+            defer_all_reduce=defer_all_reduce,
         ),
         mesh=mesh,
         in_specs=(
@@ -673,6 +675,9 @@ def hybrid_parallel_gmm(
         topk_argsort_revert_indices,
         topk_weights,
     )
+
+    jax.debug.print("hybrid_parallel_gmm out sum: {sum}", sum=out.sum())
+    return out
 
 
 def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
@@ -893,7 +898,7 @@ def fused_moe_func(
         else:
             active_ep_axis = tuple(active_ep_axis)
 
-        x_out_spec = P(*(dp_axes + active_ep_axis))
+        x_out_spec = P(dp_axes + active_ep_axis)
     else:
         x_out_spec = P(ShardingAxisName.MLP_DATA)
 
@@ -921,6 +926,14 @@ def fused_moe_func(
         raise ValueError(
             f"Error when padding input hidden states from {hidden_size} to {padded_hidden_size}."
         ) from e
+    
+    tp_axis, ep_axis = get_hybrid_moe_axes(mesh)
+
+    x_sum = x.sum()
+    x_weighted_sum = (x * topk_weights[..., None]).sum()
+    jax.debug.print("Pre-Hybrid | x_sum: {x} | weighted: {w}", 
+                    x=x_sum, 
+                    w=x_weighted_sum)
 
     if use_hybrid and len(tp_axis) > 0 and len(ep_axis) > 0:
         x = hybrid_parallel_gmm(
@@ -983,5 +996,19 @@ def fused_moe_func(
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
         )
-
-    return x[:num_tokens, :hidden_size]
+    x_out = x[:num_tokens, :hidden_size]
+    
+    jax.debug.print(
+        "MoE Trace | tp_axis: {tp} | ep_axis: {ep} | h_sum: {h_sum} | w1_sum: {w1_sum} | out_sum: {x_sum}",
+        tp=str(tp_axis),
+        ep=str(ep_axis),
+        h_sum=hidden_states.sum(),
+        w1_sum=w1.sum(),
+        x_sum=x_out.sum()
+    )
+    
+    jax.debug.print("Post-Hybrid | expected weighted: {w} | actual x_sum: {x}", 
+                    w=x_weighted_sum, 
+                    x=x_out.sum()) # Checking for scrambling!
+    
+    return x_out
