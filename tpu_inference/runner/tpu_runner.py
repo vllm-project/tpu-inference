@@ -2653,13 +2653,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
-                input_positions=positions,
                 block_tables=block_tables,
-                seq_lens=seq_lens,
-                query_start_loc=query_start_loc,
-                request_distribution=request_distribution,
-                mamba_state_indices=mamba_state_indices,
-                padded_num_reqs=attn_padded_num_reqs,
             )
 
             return attention_metadata_gid
