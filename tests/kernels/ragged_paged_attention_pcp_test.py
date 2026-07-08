@@ -21,12 +21,16 @@ current KV; ``kernel_ring_extern.py`` streams the KV one shard per launch; and
 launch. All are validated against the plain full-causal reference.
 """
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
+from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as PS
 
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
     merge_kv, ragged_paged_attention, ref_ragged_paged_attention)
@@ -383,6 +387,136 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                            jnp.array(gv_p), jnp.array(qpos), jnp.array(kpos_p),
                            sm_scale=sm_scale))
         self.assertAllClose(padded, base, atol=1e-4, rtol=1e-4)
+
+
+    # ----------------- multi-device PCP-vs-TP benchmark ----------------------
+    # Correctness half of tests/kernels/ragged_paged_attention_pcp_benchmark.py:
+    # on `P` real devices, PCP (all-gather KV + head-tail sequence shard, all
+    # heads) must match TP (head shard, full sequence) for a causal prefill, and
+    # the PCP strided KV-cache write must round-trip to the current KV.
+
+    def _flat_cache(self, nkv_local, npages, page, hd, dtype):
+        kvp = get_dtype_packing(dtype)
+        nkv2 = align_to(2 * nkv_local, kvp)
+        return jnp.zeros((npages, page, nkv2 // kvp, kvp, hd), dtype)
+
+    @parameterized.product(P=[2, 4])
+    def test_pcp_vs_tp_prefill_equivalence(self, P):
+        """PCP output (reassembled head-tail chunks) == TP output (head-sharded),
+        computed on P devices via shard_map over the same random q/k/v."""
+        if jax.device_count() < P:
+            self.skipTest(f"needs >= {P} devices")
+        dtype = jnp.float32
+        page = 16
+        # nkv must be divisible by P (TP shards KV heads across the mesh).
+        S, nq, nkv, hd = 512, 8, 4, 128
+        C = S // (2 * P)
+        npages = cdiv(S, page)
+        sm = hd**-0.5
+        rng = np.random.default_rng(0)
+        q = self._rand(rng, (S, nq, hd), dtype)
+        k = self._rand(rng, (S, nkv, hd), dtype)
+        v = self._rand(rng, (S, nkv, hd), dtype)
+        mesh = Mesh(np.array(jax.devices()[:P]), ("x", ))
+        pi = jnp.arange(npages, dtype=jnp.int32)
+        dist = jnp.array([0, 0, 1], jnp.int32)
+
+        # TP: shard heads, full-S causal.
+        hs = PS(None, "x", None)
+
+        @partial(shard_map, mesh=mesh, in_specs=(hs, hs, hs), out_specs=hs,
+                 check_rep=False)
+        def tp(q, k, v):
+            out, _ = ragged_paged_attention(
+                q, k, v, self._flat_cache(k.shape[1], npages, page, hd, dtype),
+                jnp.array([S], jnp.int32), pi, jnp.array([0, S], jnp.int32),
+                dist, sm_scale=sm, use_causal_mask=True, update_kv_cache=True)
+            return out
+
+        out_tp = np.asarray(jax.jit(tp)(q, k, v), np.float32)
+
+        # PCP: all-gather KV (replicated here), head-tail sequence shard.
+        chunks = []
+        for r in range(P):
+            for ch in (r, 2 * P - 1 - r):
+                chunks.append(q[ch * C:ch * C + C])
+        q2 = jnp.stack(chunks).reshape(P, 2, C, nq, hd)
+        qsp = PS("x", None, None, None, None)
+
+        @partial(shard_map, mesh=mesh, in_specs=(qsp, PS(), PS()),
+                 out_specs=qsp, check_rep=False)
+        def pcp(q2, k, v):
+            r = jax.lax.axis_index("x")
+            cp_rank = jax.lax.reshape(r, (1, )).astype(jnp.int32)
+            cc = self._flat_cache(nkv, npages, page, hd, dtype)
+            offs = (r * C, (2 * P - 1 - r) * C)
+            outs = []
+            for i in range(2):
+                qpos = jax.lax.reshape(offs[i], (1, )).astype(jnp.int32)
+                qb = jnp.zeros((S, nq, hd), dtype).at[:C].set(q2[0][i])
+                o, _ = ragged_paged_attention(
+                    qb, k, v, cc, jnp.array([S], jnp.int32), pi,
+                    jnp.array([0, C], jnp.int32), dist, cp_rank=cp_rank,
+                    cp_group_size=P, all_gather_kv=True, q_pos_offsets=qpos,
+                    sm_scale=sm, update_kv_cache=False, use_causal_mask=True)
+                outs.append(o[:C])
+            return jnp.stack(outs)[None]
+
+        og = np.asarray(jax.jit(pcp)(q2, k, v), np.float32)  # [P, 2, C, nq, hd]
+        out_pcp = np.zeros((S, nq, hd), np.float32)
+        for r in range(P):
+            for i, ch in enumerate((r, 2 * P - 1 - r)):
+                out_pcp[ch * C:ch * C + C] = og[r, i]
+
+        # Guard against a trivially-passing all-zero/NaN match.
+        self.assertTrue(np.all(np.isfinite(out_tp)))
+        self.assertGreater(float(np.abs(out_tp).max()), 0.0)
+        self.assertAllClose(out_pcp, out_tp, atol=self._tol(dtype),
+                            rtol=self._tol(dtype))
+
+    @parameterized.product(P=[2, 3, 4])
+    def test_pcp_kv_cache_write_matches_merged(self, P):
+        """De-strided PCP cache write == merge_kv(current KV): whole-sequence
+        view of test_pcp_strided_cache_write, run across P devices."""
+        if jax.device_count() < P:
+            self.skipTest(f"needs >= {P} devices")
+        dtype = jnp.float32
+        page, nq, nkv, hd, C = 16, 8, 2, 128, 64
+        S = 2 * P * C  # gathered current KV length
+        npages = cdiv(S, page)
+        rng = np.random.default_rng(7)
+        k = self._rand(rng, (S, nkv, hd), dtype)
+        v = self._rand(rng, (S, nkv, hd), dtype)
+        ref = np.asarray(merge_kv(k, v))
+        mesh = Mesh(np.array(jax.devices()[:P]), ("x", ))
+
+        @partial(shard_map, mesh=mesh, in_specs=(PS(), PS()),
+                 out_specs=PS("x", None, None, None, None, None),
+                 check_rep=False)
+        def fn(k, v):
+            r = jax.lax.axis_index("x")
+            cp_rank = jax.lax.reshape(r, (1, )).astype(jnp.int32)
+            cc = self._flat_cache(nkv, npages, page, hd, dtype)
+            q = jnp.zeros((S, nq, hd), dtype)
+            _, nc = ragged_paged_attention(
+                q, k, v, cc, jnp.array([S], jnp.int32),
+                jnp.arange(npages, dtype=jnp.int32), jnp.array([0, C], jnp.int32),
+                jnp.array([0, 0, 1], jnp.int32), cp_rank=cp_rank,
+                cp_group_size=P, all_gather_kv=True, update_kv_cache=True,
+                use_causal_mask=False)
+            return nc[None]
+
+        caches = np.asarray(jax.jit(fn)(k, v))  # [P, npages, page, h1, h2, hd]
+        flat = caches.reshape(P, -1, caches.shape[3], caches.shape[4], hd)
+        # DCP-strided: global token g -> rank g%P, local slot g//P.
+        g = np.arange(S)
+        recon = flat[g % P, g // P]
+        # Guard against a silently-zeroed cache (would trivially compare equal
+        # only if the reference were also zero, but assert it explicitly).
+        self.assertTrue(np.all(np.isfinite(recon)))
+        self.assertGreater(float(np.abs(recon).max()), 0.0)
+        self.assertLess(float((recon == 0).mean()), 0.5)
+        self.assertArraysEqual(recon, ref)
 
 
 if __name__ == "__main__":

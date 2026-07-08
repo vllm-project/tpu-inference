@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 MESH_AXIS_NAMES = ("data", "attn_dp", "attn_dp_expert", "expert", "model",
-                   "dcp")
+                   "dcp", "pcp")
 MESH_AXIS_NAMES_2D = ('data', 'model')
 
 
@@ -41,14 +41,18 @@ class ShardingAxisNameBase:
         'attn_dp',
         'attn_dp_expert',
     )
-    ATTN_DATA = ('data', 'attn_dp', 'attn_dp_expert')
+    ATTN_DATA = ('data', 'pcp', 'attn_dp', 'attn_dp_expert')
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
-    MLP_DATA = 'data'
-    ATTN_HEAD = ('model', 'expert', 'dcp')
+    MLP_DATA = ('data', 'pcp')
+    # Query heads are sharded over `dcp` (replicated over `pcp`). KV heads are
+    # replicated over both context-parallel axes (see KV_HEAD); DCP instead
+    # strides the KV-cache context (KV_CONTEXT) and merges ranks via LSE.
+    ATTN_HEAD = ('model', 'expert', 'dcp') #todo: rename as Q_HEAD
+    KV_HEAD = ('model', 'expert') # DO WE NEED to chnage the sharding spec somewhere?
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp')
     MOE_TENSOR = ('attn_dp', 'model', 'dcp')
-    EXPERT = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp')
+    EXPERT = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
     EXPERT_DATA = ('data', 'attn_dp', 'attn_dp_expert', 'expert', 'model',
                    'dcp')
     VOCAB = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp')
@@ -61,7 +65,8 @@ class ShardingAxisNameBase:
     # These axes are used in KV caches management.
     BATCH = ('data', 'attn_dp', 'attn_dp_expert')
     CONTEXT = 'dcp'
-    KV_CACHE_HEAD = ('model', 'expert')
+    PREFILL_CONTEXT = 'pcp' # TODO: rename to PCP
+    KV_CONTEXT = ('pcp', 'dcp')
 
     # Vision encoder sharding axes
     VIT_BATCH = ('data', 'attn_dp', 'attn_dp_expert')
@@ -78,6 +83,7 @@ class ShardingAxisName2D:
     ATTN_DATA = 'data'
     MLP_DATA = 'data'
     ATTN_HEAD = 'model'
+    KV_HEAD = 'model'
     ATTN_TENSOR = None
     MLP_TENSOR = 'model'
     MOE_TENSOR = 'model'
@@ -86,7 +92,8 @@ class ShardingAxisName2D:
     VOCAB = ('data', 'model')
     BATCH = 'data'
     CONTEXT = None
-    KV_CACHE_HEAD = 'model'
+    PREFILL_CONTEXT = None
+    KV_CONTEXT = None
     MODEL = 'model'
 
     # Vision encoder sharding axes
@@ -169,6 +176,7 @@ class ShardingStrategy:
     attention_data_parallelism: int = 1
     attention_data_expert_parallelism: int = 1
     decode_context_parallelism: int = 1
+    prefill_context_parallelism: int = 1
 
 
 class ShardingConfigManager:
@@ -217,6 +225,7 @@ class ShardingConfigManager:
         device_indexes = sharding_strategy.get("device_indexes", None)
 
         decode_context_parallelism = parallel_config.decode_context_parallel_size
+        prefill_context_parallelism = parallel_config.prefill_context_parallel_size
 
         if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
             # The user has explicitly set the tensor parallelism in the sharding config.
@@ -291,7 +300,8 @@ class ShardingConfigManager:
             sequence_parallelism=sequence_parallelism,
             attention_data_parallelism=attn_dp,
             attention_data_expert_parallelism=attn_dp_expert,
-            decode_context_parallelism=decode_context_parallelism)
+            decode_context_parallelism=decode_context_parallelism,
+            prefill_context_parallelism=prefill_context_parallelism)
 
         # Must override here to avoid vLLM spinning up multiple DP engines.
         if (not envs.TPU_MULTIPROCESS_DP
@@ -326,6 +336,15 @@ class ShardingConfigManager:
                 raise ValueError(
                     "Must run Context Parallelism with NEW_MODEL_DESIGN enabled. Please set "
                     "NEW_MODEL_DESIGN=True")
+        if sharding_strategy.prefill_context_parallelism > 1:
+            if not envs.NEW_MODEL_DESIGN:
+                raise ValueError(
+                    "Must run Prefill Context Parallelism with NEW_MODEL_DESIGN "
+                    "enabled. Please set NEW_MODEL_DESIGN=True")
+            if sharding_strategy.decode_context_parallelism > 1:
+                raise ValueError(
+                    "Only one of prefill/decode context parallelism may be "
+                    "enabled at a time.")
 
     @property
     def total_dp_size(self) -> int:
@@ -358,6 +377,10 @@ class ShardingConfigManager:
     @property
     def decode_cp_size(self) -> int:
         return self.sharding_strategy.decode_context_parallelism
+
+    @property
+    def prefill_cp_size(self) -> int:
+        return self.sharding_strategy.prefill_context_parallelism
 
     @property
     def total_devices(self) -> int:
@@ -524,6 +547,7 @@ def build_mesh(devices, strategy: dict[str, int]) -> Mesh:
         "seq": strategy.get("sequence_parallelism", 1),
         "model": strategy.get("tensor_parallelism", 1),
         "dcp": strategy.get("decode_context_parallelism", 1),
+        "pcp": strategy.get("prefill_context_parallelism", 1),
     }
     # TODO: add logic to infer axis when the degree is -1
     mesh_axis_names = []

@@ -27,6 +27,8 @@ import jax
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "q_pos_offsets",
+        "pcp_kv_write_lens",
     ],
     meta_fields=["padded_num_reqs"],
 )
@@ -51,6 +53,19 @@ class AttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+
+    # (max_num_seqs,) int32 — prefill context parallelism (PCP) only. Per
+    # request, the global position (within that request's current tokens) of the
+    # first *local* query token this pcp rank processes. Feeds the RPA kernel's
+    # `q_pos_offsets` so the causal mask sees each head-tail-sharded token at its
+    # true global position. None when PCP is disabled.
+    q_pos_offsets: jax.Array | None = None
+
+    # (max_num_seqs,) int32 — PCP only. Per-request REAL total kv length
+    # (num_computed + real current), i.e. seq_lens BEFORE the head-tail padding
+    # inflation. Bounds the strided cache write so padding tokens aren't written
+    # past the sequence's allocated pages. None when PCP disabled.
+    pcp_kv_write_lens: jax.Array | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket
     # contains only max_reqs by default to reduce model precompilation time.

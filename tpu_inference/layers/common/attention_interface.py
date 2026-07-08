@@ -18,6 +18,8 @@ from typing import Any, Callable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+from jax import lax
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import \
     splash_attention_kernel as splash
@@ -58,6 +60,12 @@ else:
 
 ragged_paged_attention = rpa.ragged_paged_attention
 get_kv_cache_shape = rpa.get_kv_cache_shape
+
+# Prefill context parallelism always uses the dedicated context-parallel RPA
+# kernel (drop-in: identical signature + kv_cache_shape as the default kernel).
+import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as pcp_rpa
+
+pcp_ragged_paged_attention_kernel = pcp_rpa.ragged_paged_attention
 
 ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
 get_kv_cache_shape_hd64 = rpa_hd64.get_kv_cache_shape
@@ -767,6 +775,159 @@ def forward_with_dcp(
     )
 
     return updated_kv_cache, final_output
+def _lse_all_reduce(o: jax.Array, lse: jax.Array, axis: str):
+    """Merge per-rank partial attention (o, lse) across a mesh axis via LSE.
+
+    Each rank holds a partial softmax `o` (normalised over its KV shard) and its
+    `lse = m + log(l)`. Returns the fully-merged `(o, lse)` on every rank.
+    """
+    m = lax.pmax(lse, axis)
+    # Guard the all-empty case (every rank saw no KV -> lse=-inf): -inf - (-inf)
+    # is NaN. A row with denom==0 merges to (o=0, lse=-inf), which contributes
+    # nothing in the downstream LSE combine.
+    m_safe = jnp.where(jnp.isinf(m), 0.0, m)
+    w = jnp.exp(lse - m_safe)
+    denom = lax.psum(w, axis)
+    o_merged = (lax.psum(o * w[..., None], axis) /
+                jnp.where(denom == 0.0, 1.0, denom)[..., None])
+    lse_merged = jnp.where(denom == 0.0, -jnp.inf, m_safe + jnp.log(denom))
+    return o_merged, lse_merged
+
+
+def _lse_combine(o1: jax.Array, lse1: jax.Array, o2: jax.Array,
+                 lse2: jax.Array):
+    """LSE-combine two attention terms over disjoint KV sets (e.g. cache vs new)."""
+    m = jnp.maximum(lse1, lse2)
+    # Guard rows where BOTH terms are empty (lse=-inf): -inf - (-inf) = NaN, and
+    # that NaN otherwise poisons the whole network (pad rows attend nothing).
+    m_safe = jnp.where(jnp.isinf(m), 0.0, m)
+    e1 = jnp.exp(lse1 - m_safe)
+    e2 = jnp.exp(lse2 - m_safe)
+    denom = jnp.where((e1 + e2) == 0.0, 1.0, e1 + e2)
+    return (o1 * e1[..., None] + o2 * e2[..., None]) / denom[..., None]
+
+
+def pcp_ragged_paged_attention(
+    mesh: Mesh,
+    q: jax.Array,  # [2*pcp*C, num_q_heads, head_dim] local: [head_chunk | tail_chunk]
+    k: jax.Array,  # [2*pcp*C, num_kv_heads, head_dim]
+    v: jax.Array,  # [2*pcp*C, num_kv_heads, head_dim]
+    kv_cache: jax.Array,
+    kv_lens: jax.Array,  # i32[max_num_seqs] total kv length = num_computed + padded_S
+    page_indices: jax.Array,
+    cu_q_lens: jax.Array,  # i32[max_num_seqs+1] chunk size C (cumsum): [0, C, ...]
+    distribution: jax.Array,
+    kv_write_lens: jax.Array,  # i32[max_num_seqs] REAL total kv len (num_computed + real current); bounds the strided cache write so padding tokens aren't written past the seq's allocated pages
+    sm_scale: float,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+    update_kv_cache: bool = True,
+    use_causal_mask: bool = True,
+):
+    """Single-request prefill context-parallel (PCP) attention.
+
+    The one request's `S = 2*pcp*C` current tokens are split head-tail into
+    `2*pcp` chunks of size `C`; rank `r` holds chunk `r` (head) and chunk
+    `2*pcp-1-r` (tail), so its local buffer is `[head_chunk | tail_chunk]`.
+
+    Four kernel launches per rank -- each of {head, tail} runs two phases and is
+    LSE-combined:
+      * cache phase:  all-gather the chunk across pcp (-> all `pcp` same-half
+        chunks), attend the pcp-strided PREVIOUS cache (non-causal, no write),
+        LSE all-reduce over pcp, slice back this rank's chunk.
+      * current phase: the LOCAL chunk attends the CURRENT tokens (causal,
+        `all_gather_kv`, per-chunk `q_pos_offset`); the tail phase writes the
+        strided cache. Single request => pad tokens are written only into this
+        request's own pages, so no `kv_write_lens` bound needed.
+
+    The current K/V is all-gathered from rank order and reordered into global
+    token order -- a permutation fully determined by `pcp` and `C` (the head-tail
+    chunk row order), so it is computed here rather than passed in.
+    """
+    pcp_axis = ShardingAxisName.PREFILL_CONTEXT
+    pcp_size = get_mesh_shape_product(mesh, pcp_axis)
+    two_p = 2 * pcp_size
+    sum_s = q.shape[0]  # padded current tokens across all pcp ranks = 2*pcp*C
+    C = sum_s // two_p  # head-tail chunk size (this rank holds 2*C)
+    # Rank order lays chunks out as rank r -> [chunk r, chunk 2P-1-r]; inv_row
+    # maps a natural chunk index to its row in the all-gathered buffer, so
+    # gathering rows by inv_row restores global token order.
+    _row = [c for r in range(pcp_size) for c in (r, two_p - 1 - r)]
+    _inv = [0] * two_p
+    for _i, _c in enumerate(_row):
+        _inv[_c] = _i
+    inv_row = jnp.array(_inv, jnp.int32)
+
+    q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
+    kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
+    kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                      ShardingAxisName.KV_HEAD, None, None)
+    repl = P()  # per-seq metadata replicated across the pcp group
+
+    def _rank_i32(r):
+        return jnp.reshape(r, (1, )).astype(jnp.int32)
+
+    def _fn(q_l, k_l, v_l, kvc, kvl, pi, cu, kwl):
+        r = lax.axis_index(pcp_axis)
+        ag = lambda x: lax.all_gather(x, pcp_axis, axis=0, tiled=True)
+
+        def to_token_order(x):  # rank-order chunks -> global token order
+            g = ag(x).reshape(two_p, C, *x.shape[1:])
+            return g[inv_row].reshape(sum_s, *x.shape[1:])
+
+        k_cur, v_cur = to_token_order(k_l), to_token_order(v_l)
+        common = dict(cp_rank=_rank_i32(r), cp_group_size=pcp_size,
+                      return_lse=True, sm_scale=sm_scale, q_scale=q_scale,
+                      k_scale=k_scale, v_scale=v_scale)
+        # Cache phase sees `pcp*C` query tokens (one same-half chunk per rank),
+        # so its kv_lens must be num_computed + pcp*C. kvl = num_computed + S and
+        # S = 2*pcp*C, so num_computed + pcp*C = kvl - pcp*C = kvl - sum_s//2.
+        kvl_cache = kvl - sum_s // 2
+        cu_cache = jnp.zeros_like(cu).at[1].set(pcp_size * C)
+
+        def section(q_chunk, q_pos_offset, writes_cache):
+            # --- cache phase: all-gather chunk vs strided previous cache. ---
+            ag_q = ag(q_chunk)  # [pcp*C] -- all ranks' same-half chunks
+            # `skip_current_attn` ignores k/v, but the kernel still requires
+            # q/k/v to share length; give it a matching-length dummy.
+            kv_dummy = jnp.zeros((ag_q.shape[0], k_l.shape[1], k_l.shape[2]),
+                                 k_l.dtype)
+            o1, kvc1, l1 = pcp_ragged_paged_attention_kernel(
+                ag_q, kv_dummy, kv_dummy, kvc, kvl_cache, pi, cu_cache,
+                distribution, skip_current_attn=True, use_causal_mask=False,
+                update_kv_cache=False, **common)
+            o1, l1 = _lse_all_reduce(o1, l1, pcp_axis)
+            o1 = lax.dynamic_slice_in_dim(o1, r * C, C, 0)  # this rank's chunk
+            l1 = lax.dynamic_slice_in_dim(l1, r * C, C, 0)
+            # --- current phase: local chunk vs sorted current tokens (causal). ---
+            # The kernel requires q/k/v to share length under `all_gather_kv`,
+            # so pad the local chunk to the all-gathered current length.
+            q_buf = jnp.zeros((sum_s, q_chunk.shape[1], q_chunk.shape[2]),
+                              q_chunk.dtype).at[:C].set(q_chunk)
+            q_pos = jnp.zeros_like(cu[:-1]).at[0].set(q_pos_offset)
+            o2, kvc2, l2 = pcp_ragged_paged_attention_kernel(
+                q_buf, k_cur, v_cur, kvc1, kvl, pi, cu, distribution,
+                all_gather_kv=True, q_pos_offsets=q_pos, skip_cache_attn=True,
+                kv_write_lens=kwl, use_causal_mask=use_causal_mask,
+                update_kv_cache=writes_cache, **common)
+            out = _lse_combine(o1, l1, o2[:C], l2[:C])
+            return out, kvc2
+
+        head_out, kvc = section(q_l[:C], r * C, False)
+        tail_out, kvc = section(q_l[C:2 * C], (two_p - 1 - r) * C,
+                                update_kv_cache)
+        out = jnp.concatenate([head_out, tail_out], axis=0)  # [head | tail]
+        return out.astype(q.dtype), kvc
+
+    return jax.shard_map(
+        _fn,
+        mesh=mesh,
+        in_specs=(q_spec, kv_spec, kv_spec, kv_cache_spec, repl, repl, repl,
+                  repl),
+        out_specs=(q_spec, kv_cache_spec),
+        check_vma=False,
+    )(q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, kv_write_lens)
 
 
 def attention(
@@ -822,6 +983,35 @@ def attention(
             k_scale=k_scale,
             v_scale=v_scale,
         )
+    # Prefill context parallelism: when the `pcp` mesh axis is active, route to
+    # the head-tail PCP attention (all-gather + LSE-merged cache/new terms).
+    pcp_axis = ShardingAxisName.PREFILL_CONTEXT
+    pcp_size = (get_mesh_shape_product(mesh, pcp_axis)
+                if pcp_axis is not None and pcp_axis in mesh.axis_names else 1)
+    if pcp_size > 1:
+        if sinks is not None:
+            raise NotImplementedError(
+                "Attention sink is not supported with prefill context "
+                "parallelism yet.")
+        output, kv_cache = pcp_ragged_paged_attention(
+            mesh,
+            q,
+            k,
+            v,
+            kv_cache,
+            md.seq_lens,
+            md.block_tables,
+            md.query_start_loc,  # PCP: chunk size C (cumsum [0, C])
+            md.request_distribution,
+            md.pcp_kv_write_lens,
+            sm_scale=sm_scale,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            update_kv_cache=update_kv_cache,
+            use_causal_mask=use_causal_mask,
+        )
+        return kv_cache, output
 
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
