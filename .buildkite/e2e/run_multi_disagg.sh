@@ -15,7 +15,6 @@
 
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
-set -x
 
 # We are running ON the head node.
 export SSH_USER="${SSH_USER:-$(whoami)}"
@@ -303,12 +302,12 @@ start_vllm_log_streaming() {
   echo "--- Streaming vLLM Prefill and Decode logs while waiting for health..."
 
   docker exec node bash -c "touch /root/vllm_serve_prefill.log && tail -n +1 -F /root/vllm_serve_prefill.log" \
-    2>&1 | sed -u 's/^/[prefill] /' &
+    > >(sed -u 's/^/[prefill] /') 2>&1 &
   PREFILL_LOG_TAIL_PID=$!
 
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
     "docker exec node bash -c 'touch /root/vllm_serve_decode.log && tail -n +1 -F /root/vllm_serve_decode.log'" \
-    2>&1 | sed -u 's/^/[decode] /' &
+    > >(sed -u 's/^/[decode] /') 2>&1 &
   DECODE_LOG_TAIL_PID=$!
 }
 
@@ -499,7 +498,7 @@ TOP_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
 
 # Prune Head Node BEFORE building the new image to ensure we have disk space
 echo "--- Pruning Docker on Head Node to clear disk space..."
-docker system prune -a --volumes -f || true
+docker system prune -a --volumes -f >/dev/null 2>&1 || true
 
 # Source the environment setup script
 # shellcheck disable=SC1091
@@ -541,7 +540,7 @@ wait_for_ray_head "${PREFILL_HEAD_IP}"
 for worker_ip in "${PREFILL_WORKER_IPS[@]}"; do
     echo "--- Distributing and starting Prefill Ray Worker on ${worker_ip}"
     echo "   -> Pruning Docker on worker to free disk space..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f >/dev/null 2>&1" || true
 
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
     # shellcheck disable=SC2002
@@ -570,7 +569,7 @@ done
 # 2. Start Decode Ray Cluster
 # -----------------------------------------------------------------
 echo "--- Starting Decode Ray Head Node on ${DECODE_HEAD_IP}"
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker system prune -a --volumes -f" || true
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker system prune -a --volumes -f >/dev/null 2>&1" || true
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
 # shellcheck disable=SC2002
 cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
@@ -598,7 +597,7 @@ wait_for_ray_head "${DECODE_HEAD_IP}"
 for worker_ip in "${DECODE_WORKER_IPS[@]}"; do
     echo "--- Distributing and starting Decode Ray Worker on ${worker_ip}"
     echo "   -> Pruning Docker on worker to free disk space..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f >/dev/null 2>&1" || true
 
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
     # shellcheck disable=SC2002
