@@ -602,7 +602,9 @@ def mla_attention(
         num_kv_pages_per_block = (
             batched_decode_tuned_params.num_kv_pages_per_block, 1, 1)
         num_queries_per_block = (
-            batched_decode_tuned_params.num_queries_per_block, 16, 16)
+            batched_decode_tuned_params.num_queries_per_block, 16,
+            envs.MIXED_NUM_QUERIES_PER_BLOCK)
+        mixed_q_split = envs.MIXED_Q_SPLIT
         decode_batch_size = batched_decode_tuned_params.decode_batch_size
         logger.info(
             f"Using MLA tuned block sizes for batched decode: {batched_decode_tuned_params} for input shapes: {batched_decode_tuning_key}"
@@ -619,6 +621,7 @@ def mla_attention(
             num_kv_pages_per_block=num_kv_pages_per_block,
             num_queries_per_block=num_queries_per_block,
             decode_batch_size=decode_batch_size,
+            mixed_q_split=mixed_q_split,
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,

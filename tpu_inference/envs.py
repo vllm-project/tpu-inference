@@ -77,6 +77,8 @@ if TYPE_CHECKING:
     KIMI_QUANTIZE_ATTN_TO_FP8: bool = False
     QUANTIZE_ON_LOAD_PREFIXES: list[str] = []
     MLA_TRANSPOSE_KV_CACHE: bool = False
+    MIXED_Q_SPLIT: int = 1
+    MIXED_NUM_QUERIES_PER_BLOCK: int = 16
 
 
 def env_with_choices(
@@ -432,6 +434,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_str_list("QUANTIZE_ON_LOAD_PREFIXES"),
     "MLA_TRANSPOSE_KV_CACHE":
     env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
+    "MIXED_Q_SPLIT":
+    lambda: int(os.getenv("MIXED_Q_SPLIT", "1")),
+    "MIXED_NUM_QUERIES_PER_BLOCK":
+    lambda: int(os.getenv("MIXED_NUM_QUERIES_PER_BLOCK", "16")),
 }
 
 
