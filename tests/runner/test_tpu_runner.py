@@ -203,6 +203,7 @@ class TestTPUJaxRunner:
             self, mock_device_get, mock_continue_decode):
         """_execute_continue_decode() should retrieve and format MoE expert indices correctly."""
         runner = MagicMock()
+        runner.scheduler_config.async_scheduling = False
         runner.max_num_reqs = 8
         runner.max_model_len = 512
         runner.dp_size = 1
@@ -313,6 +314,7 @@ class TestTPUJaxRunner:
                                               mock_continue_decode):
         """_execute_continue_decode() should compute steps, slice/trim generated tokens, and update cpu state."""
         runner = MagicMock()
+        runner.scheduler_config.async_scheduling = False
         runner.max_num_reqs = 8
         runner.max_model_len = 512
         runner.dp_size = 1
@@ -469,6 +471,7 @@ class TestTPUJaxRunner:
                                              mock_continue_decode):
         """_execute_continue_decode() should realign generated tokens correctly when dp_size > 1."""
         runner = MagicMock()
+        runner.scheduler_config.async_scheduling = False
         runner.max_num_reqs = 8
         runner.max_model_len = 512
         runner.dp_size = 2
