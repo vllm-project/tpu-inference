@@ -28,21 +28,23 @@ KERNEL_TUNING_ENV_VARS=(
     -e KERNEL_TUNING_TPU_CORES="${KERNEL_TUNING_TPU_CORES:-}"
 )
 
-# Validation logic
-for entry in "${KERNEL_TUNING_ENV_VARS[@]}"; do
-    # Extract the variable name from the 'NAME=VALUE' string, skip '-e' 
-    if [[ "$entry" = "-e" ]]; then
-        continue
-    fi
-    # This pattern removes everything before '='
-    var_name="${entry%%=*}"
+# Validation logic only activated when pipeline is manually triggered. 
+if [[ -z "${KERNEL_TUNING_AUTOTUNE_ID:-}" ]]; then
+    for entry in "${KERNEL_TUNING_ENV_VARS[@]}"; do
+        # Extract the variable name from the 'NAME=VALUE' string, skip '-e' 
+        if [[ "$entry" = "-e" ]]; then
+            continue
+        fi
+        # This pattern removes everything before '='
+        var_name="${entry%%=*}"
 
-    # Check if the variable is defined and not empty
-    if [[ -z "${!var_name:-}" ]]; then
-        echo "Error: Required environment variable $var_name is not defined or is empty."
-        exit 1
-    fi
-done
+        # Check if the variable is defined and not empty
+        if [[ -z "${!var_name:-}" ]]; then
+            echo "Error: Required environment variable $var_name is not defined or is empty."
+            exit 1
+        fi
+    done
+fi
 
 # Optional environment variables that can be added if they are set in the environment
 KERNEL_TUNING_ENV_VARS+=(

@@ -161,5 +161,45 @@ class KernelTunerRunnerSmokeTest(absltest.TestCase):
         self._run_tuner_smoke_test("mla_kernel_tuner")
 
 
+class TuningCaseSerializationTest(absltest.TestCase):
+    """Tests for TuningCase serialization and deserialization."""
+
+    def test_from_string_returns_tuning_case(self):
+        from dataclasses import dataclass
+
+        from tools.kernel.tuner.v1.common.kernel_tuner_base import TuningCase
+
+        @dataclass
+        class MockTuningKey:
+            name: str
+            size: int
+
+        @dataclass
+        class MockTunableParams:
+            batch_size: int
+
+        # Given a string created by TuningCase.__str__
+        original_case = TuningCase(
+            tuning_key=MockTuningKey(name="test", size=128),
+            tunable_params=MockTunableParams(batch_size=8),
+            is_baseline=True)
+        serialized_str = str(original_case)
+
+        # When we deserialize it
+        restored_case = TuningCase.from_string(
+            serialized_str,
+            tuning_key_class=MockTuningKey,
+            tunable_params_class=MockTunableParams)
+
+        # Then it should return a TuningCase (not a tuple as it did previously)
+        self.assertIsInstance(restored_case, TuningCase)
+
+        # And the data should match exactly
+        self.assertEqual(restored_case.tuning_key.name, "test")
+        self.assertEqual(restored_case.tuning_key.size, 128)
+        self.assertEqual(restored_case.tunable_params.batch_size, 8)
+        self.assertEqual(restored_case.is_baseline, True)
+
+
 if __name__ == "__main__":
     absltest.main()

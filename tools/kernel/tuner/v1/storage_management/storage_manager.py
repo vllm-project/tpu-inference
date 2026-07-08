@@ -247,3 +247,57 @@ class StorageManager:
         """
         raise NotImplementedError(
             "Subclasses must implement get_timestamp_sec")
+
+    def close(self):
+        """Closes any open connections or resources held by the storage manager."""
+        raise NotImplementedError("Subclasses must implement close")
+
+    def add_autotune_case(self,
+                          case_set_id: str,
+                          case_str: str,
+                          kernel_tuner_name: str,
+                          tpu: str = None):
+        """Adds a tuning case to the AutoTuneCase table for logging purposes.
+
+        Called by the autotuning pipeline to log the tuning key and tuned params
+        for each case.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            case_str: String encoding of the tuning case (e.g. in 'key:value' format).
+            kernel_tuner_name: Name of the kernel tuner.
+            tpu: Optional TPU identifier.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement add_autotune_case")
+
+    def read_autotune_cases(self,
+                            case_set_id: str,
+                            kernel_tuner_name: str = None,
+                            tpu: str = None) -> list[dict]:
+        """Reads tuning cases from the AutoTuneCase table for a given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            kernel_tuner_name: Optional name of the kernel tuner.
+            tpu: Optional TPU identifier.
+
+        Returns:
+            List of tuning cases. For example, each case is represented as a dict with keys:
+                'CaseKeyValue': tuning case string,
+                'KernelTunerName': name of the kernel tuner,
+                'TPU': TPU identifier.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement read_autotune_cases")
+
+    def get_all_cases(self, case_set_id) -> list[tuple[int, str]]:
+        """Returns all cases in the given case set.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+
+        Returns:
+            A list of all cases in the case set in the formate of [CaseId, CaseKeyValue].
+        """
+        raise NotImplementedError("Subclasses must implement get_all_cases")

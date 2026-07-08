@@ -22,6 +22,7 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import Gemma4TextConfig
 from vllm.config import VllmConfig
+from vllm.model_executor.models.utils import WeightsMapper
 
 from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
@@ -45,7 +46,7 @@ from tpu_inference.models.common.kv_share import compute_kv_share_map
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
-    LoadableWithIterator, StandardWeightLoader,
+    JaxAutoWeightsLoader, LoadableWithIterator, StandardWeightLoader,
     load_nnx_param_from_reshaped_torch)
 
 logger = init_logger(__name__)
@@ -1039,11 +1040,11 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
-        self.model = Gemma4Model(
+        self.language_model = Gemma4Model(
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
-            prefix="model",
+            prefix="model.language_model",
         )
         model_config = vllm_config.model_config
 
@@ -1053,7 +1054,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
             None)
 
         if not model_config.hf_config.tie_word_embeddings:
-            if self.model.is_last_rank:
+            if self.language_model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
                 hidden_size = model_config.hf_config.text_config.hidden_size
                 self.lm_head = JaxLmHead(
@@ -1067,18 +1068,17 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                 self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
-        allowed_layers = set(f"layers.{i}."
-                             for i in range(len(self.model.layers)))
-        stripped_weights = (
-            (clean_name, tensor) for name, tensor in weights
-            if (clean_name := name.replace("language_model.", "")).startswith((
-                "model.", "lm_head")) and
-            "vision" not in clean_name  # Exclude vision tower weights for now
+        # Strip "model." prefix so checkpoint names resolve against the Python
+        # attr path "language_model.*".  mapper.apply() runs before the loader's
+        # packed routing so params_dict lookups succeed.
+        mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
+        loader = JaxAutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else []),
+            skip_substrs=["vision", "audio", "multi_modal"],
         )
-        return super().load_weights(
-            (name, tensor) for name, tensor in stripped_weights
-            if not ("layers." in name and not any(
-                layer_prefix in name for layer_prefix in allowed_layers)))
+        return loader.load_weights(mapper.apply(weights))
 
     def __call__(
         self,
@@ -1103,7 +1103,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         layer_name_to_kv_cache = dict(
             _layer_name_to_kv_cache) if _layer_name_to_kv_cache else None
         # Text-only causal LM has no multimodal tokens; pass None.
-        kv_caches, x, expert_indices = self.model(
+        kv_caches, x, expert_indices = self.language_model(
             kv_caches,
             input_ids,
             attention_metadata,
@@ -1121,7 +1121,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         if hasattr(self, 'lm_head'):
             logits = self.lm_head(hidden_states)
         else:
-            logits = self.model.embed_tokens.decode(hidden_states)
+            logits = self.language_model.embed_tokens.decode(hidden_states)
 
         # Gemma4: Use Logit Soft-capping
         if self.final_logit_softcapping is not None:
