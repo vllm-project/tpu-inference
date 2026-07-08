@@ -219,7 +219,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             TunableParams, TuningKey)
 
         current_dir = Path(__file__).resolve().parent
-        file_path = current_dir / "batched_rpa_gemma4_tuning_cases.json"
+        file_path = current_dir / "tuning_cases/batched_rpa_gemma4_tuning_cases.json"
         tuning_case_logger = TuningCaseLogger(log_file_path=file_path,
                                               key_class=TuningKey,
                                               params_class=TunableParams)
