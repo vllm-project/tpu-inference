@@ -1424,9 +1424,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.input_batch.num_tokens[req_idx] = start_idx + actual_len
                 self.input_batch.num_computed_tokens_cpu[
                     req_idx] = start_idx + actual_len
-                req_state.num_computed_tokens = start_idx + actual_len
-
-                req_state.output_token_ids.extend(valid_tokens)
 
                 if pre_scheduler_output is not None:
                     pre_scheduler_output.num_scheduled_tokens[

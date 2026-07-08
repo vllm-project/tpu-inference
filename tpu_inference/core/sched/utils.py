@@ -51,26 +51,25 @@ def patch_vllm_scheduler_for_continue_decode():
 
         Scheduler.__init__ = patched_init
 
-        original_update_from_output = Scheduler.update_from_output
+    # Scheduler.update_from_output does not need to be overridden as AsyncScheduler._update_after_schedule
+    # and modify_prev_results_continue_decode handle the continue-decode token count lifecycle correctly.
 
-        def patched_update_from_output(scheduler_self, scheduler_output,
-                                       model_runner_output):
-            for req_id, req_idx in model_runner_output.req_id_to_index.items():
-                request = scheduler_self.requests.get(req_id)
-                if request is not None and len(request._output_token_ids) > 0:
-                    if model_runner_output.sampled_token_ids:
-                        num_tokens = len(
-                            model_runner_output.sampled_token_ids[req_idx])
-                        scheduler_output.num_scheduled_tokens[
-                            req_id] = num_tokens
-                        if scheduler_self.scheduler_config.async_scheduling:
-                            if hasattr(
-                                    request, "num_output_placeholders"
-                            ) and request.num_output_placeholders < num_tokens:
-                                request.num_output_placeholders = num_tokens
-            return original_update_from_output(scheduler_self,
-                                               scheduler_output,
-                                               model_runner_output)
+    from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
-        Scheduler.update_from_output = patched_update_from_output
-        Scheduler._continue_decode_patched = True
+    if not getattr(AsyncScheduler, "_continue_decode_patched", False):
+        original_async_update_req = AsyncScheduler._update_request_with_output
+
+        def patched_async_update_request_with_output(scheduler_self, request,
+                                                     new_token_ids):
+            if len(new_token_ids) > 1:
+                # In continue-decode, 1 scheduling step generated N tokens on device.
+                # AsyncScheduler._update_request_with_output subtracts len(new_token_ids) from num_output_placeholders.
+                # We add back (len(new_token_ids) - 1) so that exactly 1 placeholder step is decremented.
+                request.num_output_placeholders += (len(new_token_ids) - 1)
+            return original_async_update_req(scheduler_self, request,
+                                             new_token_ids)
+
+        AsyncScheduler._update_request_with_output = patched_async_update_request_with_output
+        AsyncScheduler._continue_decode_patched = True
+
+    Scheduler._continue_decode_patched = True
