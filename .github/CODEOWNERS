@@ -29,13 +29,13 @@
 # Model layers
 /tpu_inference/layers/ @kyuyeunk @lk-chen @jrplatin @gxd3
 /tpu_inference/layers/jax/ @jrplatin @gpolovets1 @lk-chen
-/tpu_inference/layers/jax/gemma* @jrplatin @gpolovets1 @lk-chen @kwang3939
 /tpu_inference/layers/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
 /tpu_inference/layers/vllm/custom_ops/experimental/deepseek_v4/ @gxd3 @a1yssan13 @inucool12
 
 # Model Implementations and wrappers
 /tpu_inference/models/ @kyuyeunk @lk-chen @jrplatin
-/tpu_inference/models/jax/qwen2_5_vl.py @kwang3939 @JiriesKaileh
+/tpu_inference/models/jax/ @kyuyeunk @lk-chen @jrplatin @kwang3939
+/tpu_inference/models/jax/qwen2_5_vl.py @kyuyeunk @lk-chen @jrplatin @kwang3939 @JiriesKaileh
 /tpu_inference/models/jax/deepseek_v3.py @gpolovets1 @jrplatin @gxd3
 /tpu_inference/models/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
 
