@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import contextlib
 import gc
+import json
 import logging
 import random
 import time
@@ -522,6 +523,7 @@ def main(args: argparse.Namespace):
                 tokenizer=tokenizer,
                 return_prompt_formatted=False,
                 request_id_prefix=args.request_id_prefix,
+                chat_template_kwargs=json.loads(args.chat_template_kwargs),
             )
         else:
             assert tokenizer.chat_template or tokenizer.default_chat_template, (
@@ -535,6 +537,7 @@ def main(args: argparse.Namespace):
                 tokenizer=tokenizer,
                 return_prompt_formatted=True,
                 request_id_prefix=args.request_id_prefix,
+                chat_template_kwargs=json.loads(args.chat_template_kwargs),
             )
     else:
         # For datasets that follow a similar structure, use a mapping.
@@ -550,6 +553,7 @@ def main(args: argparse.Namespace):
                                     input_len=args.mmlu_input_len,
                                     output_len=args.mmlu_output_len,
                                     chat_template_system_prompt=args.chat_template_system_prompt,
+                                    chat_template_kwargs=json.loads(args.chat_template_kwargs),
                                     ),
             "mlperf":
             lambda: MLPerfDataset(random_seed=args.seed,
@@ -567,6 +571,7 @@ def main(args: argparse.Namespace):
                                     num_requests=args.num_prompts,
                                     output_len=args.gpqa_output_len,
                                     chat_template_system_prompt=args.chat_template_system_prompt,
+                                    chat_template_kwargs=json.loads(args.chat_template_kwargs),
                                     ),
             "mmmu_pro":
             lambda: MMMUProDataset(
@@ -823,6 +828,12 @@ if __name__ == "__main__":
         type=str,
         default="Reasoning effort: high",
         help="The system prompt to use when applying a chat template.",
+    )
+    parser.add_argument(
+        "--chat-template-kwargs",
+        type=str,
+        default="{}",
+        help="A JSON string containing kwargs to pass to apply_chat_template.",
     )
 
     # group for dataset specific arguments
