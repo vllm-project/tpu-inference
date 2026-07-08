@@ -47,6 +47,7 @@ class MockVllmConfig:
         self.quant_config = None
         self.additional_config = {}
         self.parallel_config = None
+        self.speculative_config = None
 
 
 @pytest.fixture(scope="module")

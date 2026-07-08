@@ -320,12 +320,13 @@ class Qwen3Model(Qwen2Model):
             self.norm = PPMissingLayer()
 
         self.aux_hidden_state_layers = []
-        if vllm_config.speculative_config and vllm_config.speculative_config.method == "dflash":
+        spec_config = getattr(vllm_config, "speculative_config", None)
+        if spec_config and spec_config.method == "dflash":
             self.aux_hidden_state_layers = self.get_dflash_aux_hidden_state_layers(
                 vllm_config)
 
     def get_dflash_aux_hidden_state_layers(self, vllm_config):
-        spec_config = vllm_config.speculative_config
+        spec_config = getattr(vllm_config, "speculative_config", None)
         if spec_config is None or spec_config.draft_model_config is None:
             return []
         draft_hf_config = spec_config.draft_model_config.hf_config
