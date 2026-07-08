@@ -36,12 +36,8 @@ MESH_AXIS_NAMES_2D = ('data', 'model')
 
 class ShardingAxisNameBase:
     """Base class for sharding axis names."""
-    SEQUENCE = (
-        'data',
-        'attn_dp',
-        'attn_dp_expert',
-    )
-    ATTN_DATA = ('data', 'attn_dp', 'attn_dp_expert')
+    SEQUENCE = 'data'
+    ATTN_DATA = 'data'
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = 'data'
     ATTN_HEAD = ('model', 'expert', 'dcp')
@@ -59,7 +55,7 @@ class ShardingAxisNameBase:
     MODEL = 'model'
 
     # These axes are used in KV caches management.
-    BATCH = ('data', 'attn_dp', 'attn_dp_expert')
+    BATCH = 'data'
     CONTEXT = 'dcp'
     KV_CACHE_HEAD = ('model', 'expert')
 
