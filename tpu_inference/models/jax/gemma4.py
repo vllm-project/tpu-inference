@@ -198,17 +198,7 @@ class Gemma4MoE(JaxRoutedExperts):
     def load_weights(self, weights: Iterable):
         """Load weights for Gemma4 MoE layer.
 
-        Handles two checkpoint formats:
-
-        1. Stacked non-FP8 (google/gemma-4-26B-A4B-it): gate_up_proj and
-           down_proj are pre-stacked along the expert axis (E, ...); each is
-           sliced into per-expert pieces and renamed for the generic loader.
-
-        2. Per-expert (FP8 CT or any other standard checkpoint): individual
-           per-expert tensors arrive as "experts.N.proj.param"; strip the
-           "experts." prefix and pass bare "N.proj.param" names to super() so
-           Fp8FusedMoEMethod.load_weights handles weight_scale entries and
-           JaxRoutedExperts._load_weights handles weight entries directly.
+        See https://github.com/vllm-project/vllm/blob/979f5511d78b317760d45df9290233c27793a0af/vllm/model_executor/models/gemma4.py#L1640-L1694
         """
         weight_list = list(weights)
 

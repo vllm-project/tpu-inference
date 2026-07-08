@@ -1116,15 +1116,13 @@ class JaxDummyModelLoader(DummyModelLoader):
                 is_moe = hasattr(param, "_weights_to_load")
                 param_shape = param.get_value().shape
 
-                is_moe_scale = getattr(param, "_is_moe_scale", False)
-                num_experts = param_shape[0]
-                if is_moe and not is_moe_scale:
+                if is_moe:
                     # For MoE parameters, the normal loading flow reads PyTorch
                     # weights which are transposed (out_features, in_features)
                     # compared to JAX. The downstream post-loading fusion methods
                     # expect this transposed shape (E, F, D) instead of (E, D, F).
                     # E = number of experts, D = input dimension, F = feed forward dimension
-                    _, input_dim, intermediate_dim = param_shape
+                    num_experts, input_dim, intermediate_dim = param_shape
                     param_shape = (num_experts, intermediate_dim, input_dim)
 
                 if jnp.issubdtype(param.get_value().dtype, jnp.integer):

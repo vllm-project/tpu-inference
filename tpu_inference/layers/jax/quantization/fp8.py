@@ -573,8 +573,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     setattr(
                         layer, f"{param_name}_{self.weight_scale_name}",
                         nnx.Param(scale_value,
-                                  _weights_to_load=[None for _ in range(E)],
-                                  _is_moe_scale=True))
+                                  _weights_to_load=[None for _ in range(E)]))
             else:
                 assert len(
                     self.weight_block_size

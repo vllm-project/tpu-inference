@@ -707,10 +707,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         # Remap checkpoint names to Python attr paths.  self.model makes
         # "model.*" resolve naturally (has_model_child=True), so no prefix
         # stripping is needed for the text/vision/embed weights.
-        # The JaxEinsum prefix strings use "encoder.layers.*" and "*.linear"
-        # to match the CT ignore list, but the Python attr tree has the layers
-        # directly under vision_tower (no encoder node) and no linear wrapper,
-        # so WeightsMapper still needs to strip both for weight loading.
+        # vision_tower.encoder.* is a checkpoint-only sub-level; .linear is
+        # a checkpoint-only wrapper on vision attention projections.
         # model.lm_head lives at the top level in the JAX model.
         mapper = WeightsMapper(
             orig_to_new_prefix={
