@@ -340,7 +340,7 @@ fi
 # Since Buildkite inserts steps in reverse order, uploading this last 
 # ensures the Docker build steps appear at the very top of the UI.
 upload_with_priority .buildkite/pipeline_build.yml "$JOB_PRIORITY"
-set_jax_envs v6
+set_jax_envs v7
 upload_with_priority .buildkite/pipeline_test.yml "$JOB_PRIORITY"
 set_jax_envs unset
 echo "--- Buildkite Bootstrap Finished"
