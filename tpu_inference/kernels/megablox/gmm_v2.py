@@ -23,6 +23,10 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
+
 # Util.
 
 
@@ -410,6 +414,9 @@ def inner_kernel(
 
         # Step 2: Matmul.
         acc_list = []
+        logger.info(
+            "[Pallas compile] Checking lhs_cfgs.quant_dtype inside _matmul: %s",
+            cfgs.lhs_cfgs.quant_dtype)
         if cfgs.lhs_cfgs.quant_dtype is None:
             # Unquantized matmul path.
             for start_n in range(0, rhs_tile_n, mxu_size):
@@ -1166,6 +1173,11 @@ def make_gmm_configs(
         tiles = tile_info
     else:
         tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act)
+
+    logger.info(
+        "GMM compilation config: lhs_dtype=%s, rhs_dtype=%s, lhs_q_dtype=%s, acc_dtype=%s, out_dtype=%s, tile_m=%d, tile_k=%d, tile_n=%d",
+        lhs.dtype, rhs.dtype, lhs_cfgs.quant_dtype, acc_dtype, out_dtype,
+        tiles.tile_m, tiles.tile_k, tiles.tile_n)
 
     return GmmConfigs(
         dims=dims,

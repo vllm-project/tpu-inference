@@ -114,8 +114,18 @@ def _fallback_implementation(
     valid_rows_mask: jax.Array,
     reduce_group_size: int,
 ) -> jax.Array:
-    out = x[indices] * topk_weights[:, None].astype(jnp.float32)
+    # 1. Gather the tokens using indices
+    gathered = x[indices]
+
+    # 2. Explicitly cast gathered FP8 to FP32 to support multiplication without TypePromotionError
+    if gathered.dtype == jnp.float8_e4m3fn:
+        gathered = gathered.astype(jnp.float32)
+
+    # 3. Apply routing weights and mask out invalid rows
+    out = gathered * topk_weights[:, None].astype(jnp.float32)
     out = jnp.where(valid_rows_mask[:, None], out, 0)
+
+    # 4. Group-reshape and sum
     out = out.reshape(-1, reduce_group_size, out.shape[-1])
     out = jnp.sum(out, axis=1).astype(jnp.bfloat16)
     return out

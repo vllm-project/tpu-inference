@@ -534,7 +534,7 @@ def expert_parallel_gmm(
 
 
 def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
-                          dtype: jnp.dtype) -> jax.Array:
+                          dtype: jnp.dtype) -> tuple[jax.Array, jax.Array]:
     logger.info("Apply FP8 all-gather on input of MOE")
     hidden_states_q, scale = quantize_tensor(
         jnp.float8_e4m3fn,
@@ -544,15 +544,14 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     # quantize_tensor squeezes the scale if axis is int. We need to expand it back.
     scale = jnp.expand_dims(scale, -1)
 
-    # Dequantize if needed
+    # All-gather both FP8 activations and their scales over MLP_DATA
     return jax.shard_map(
-        lambda x, s: (x.astype(jnp.float32) * s).astype(dtype),
+        lambda x, s: (x, s),
         mesh=mesh,
-        in_specs=(
-            P(ShardingAxisName.MLP_DATA, None),
-            P(ShardingAxisName.MLP_DATA, None),
-        ),
-        out_specs=P(ShardingAxisName.MLP_DATA, None),
+        in_specs=(P(ShardingAxisName.MLP_DATA,
+                    None), P(ShardingAxisName.MLP_DATA, None)),
+        out_specs=(P(ShardingAxisName.MLP_DATA,
+                     None), P(ShardingAxisName.MLP_DATA, None)),
     )(hidden_states_q, scale)
 
 
@@ -667,7 +666,8 @@ def fused_moe_func(
         topk_indices = _override_token_indices_for_random_routing(
             topk_indices, global_num_experts)
 
-    def _process_tokens_locally(hidden_states_local, topk_indices_local):
+    def _process_tokens_locally(hidden_states_local, topk_indices_local,
+                                scale_local):
         num_tokens_local = hidden_states_local.shape[0]
         topk_indices_flat = topk_indices_local.flatten()
         topk_argsort_indices = jnp.argsort(topk_indices_flat)
@@ -693,14 +693,19 @@ def fused_moe_func(
                                                include_initial=True)
             shard_output_start = group_offsets[experts_start]
             shard_output_end = group_offsets[experts_end]
-            num_tokens = token_indices_sorted.shape[0]
-            if num_tokens <= onehot_moe_permute_threshold:
+            num_tokens_sorted = token_indices_sorted.shape[0]
+            if num_tokens_sorted <= onehot_moe_permute_threshold:
                 # Use one-hot matmul for permutation, which can be faster
                 # for small batch size
                 onehot = jax.nn.one_hot(token_indices_sorted,
                                         hidden_states_local.shape[0],
                                         dtype=hidden_states_local.dtype)
                 x = onehot @ hidden_states_local
+
+                onehot_scale = jax.nn.one_hot(token_indices_sorted,
+                                              scale_local.shape[0],
+                                              dtype=scale_local.dtype)
+                scale_gathered = onehot_scale @ scale_local
             else:
                 x = ragged_gather(
                     hidden_states_local,
@@ -708,18 +713,35 @@ def fused_moe_func(
                     shard_output_start,
                     shard_output_end,
                 )
+                scale_gathered = ragged_gather(
+                    scale_local,
+                    token_indices_sorted,
+                    shard_output_start,
+                    shard_output_end,
+                )
         else:
             x = hidden_states_local[token_indices_sorted]
+            scale_gathered = scale_local[token_indices_sorted]
+
+        # Dequantize gathered FP8 activations back to bfloat16/float32
+        if all_gather_fp8:
+            x = (x.astype(jnp.float32) * scale_gathered).astype(dtype)
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
     if all_gather_fp8:
-        hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
+        hidden_states, scale = _apply_all_gather_fp8(hidden_states, mesh,
+                                                     dtype)
+    else:
+        scale = jnp.ones((hidden_states.shape[0], 1), dtype=dtype)
+        scale = jax.lax.with_sharding_constraint(
+            scale, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
 
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,
         mesh=mesh,
         in_specs=(
+            P(ShardingAxisName.MLP_DATA, None),
             P(ShardingAxisName.MLP_DATA, None),
             P(ShardingAxisName.MLP_DATA, None),
         ),
@@ -729,7 +751,7 @@ def fused_moe_func(
             P(ShardingAxisName.MLP_DATA),
         ),
         check_vma=False,
-    )(hidden_states, topk_indices)
+    )(hidden_states, topk_indices, scale)
 
     try:
         x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))

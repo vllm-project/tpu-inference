@@ -229,18 +229,29 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
         end = end[None]
 
     dtype = x.dtype
-    if dtype not in (jnp.bfloat16, jnp.float32, jnp.int8, jnp.int4):
+    # SparseCore does not natively support FP8. Bitcast to int8 to gather.
+    is_fp8 = dtype == jnp.float8_e4m3fn
+    if is_fp8:
+        x = jax.lax.bitcast_convert_type(x, jnp.int8)
+        dtype = x.dtype
+
+    # any data type with a size of {4,8,16,32} should be fine
+    dtype_bits = jax.dtypes.itemsize_bits(dtype)
+    if dtype_bits not in (4, 8, 16, 32):
         raise ValueError(
-            f"dtype must be f32, bf16, int8, or int4, but got {dtype}")
+            f"dtype bit width must be one of 4, 8, 16, or 32, but got {dtype_bits} ({dtype})"
+        )
 
     sc_info = pltpu.get_tpu_info().sparse_core
     if sc_info is None:
-        return x[indices]
+        out = x[indices]
+        if is_fp8:
+            out = jax.lax.bitcast_convert_type(out, jnp.float8_e4m3fn)
+        return out
 
     hidden_size = x.shape[-1]
     out_size = indices.size
 
-    dtype_bits = jax.dtypes.itemsize_bits(dtype)
     packing = 32 // dtype_bits
     col_size = calculate_col_size(hidden_size, packing)
 
@@ -268,7 +279,7 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
         core_axis_name="core",
         subcore_axis_name="subcore",
     )
-    return core_map_helper.kernel(
+    out = core_map_helper.kernel(
         functools.partial(
             main_kernel_v2,
             core_axis_name=vector_mesh.core_axis_name,
@@ -290,3 +301,8 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
         mesh=vector_mesh,
         name="sc_ragged_gather_v2",
     )(start, end, x, indices)[:out_size, :hidden_size]
+
+    if is_fp8:
+        out = jax.lax.bitcast_convert_type(out, jnp.float8_e4m3fn)
+
+    return out
