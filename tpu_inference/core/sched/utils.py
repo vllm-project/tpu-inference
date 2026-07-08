@@ -16,7 +16,20 @@ DEFAULT_MAX_DECODE_STEPS = 10
 
 
 def patch_vllm_scheduler_for_continue_decode():
-    # Monkeypatch vLLM Scheduler to support continue decode multi-step scheduling
+    """Monkeypatches vLLM's Scheduler and AsyncScheduler for Continue Decode.
+
+    In Continue Decode, the host schedules 1 step while the TPU runner executes
+    up to max_decode_steps (N) decode iterations on-device in a single step.
+
+    This function applies three patches:
+    1. patched_init: Forces KVCacheManager to reserve enough KV cache blocks for
+       all N tokens during schedule() (num_lookahead_tokens = max_decode_steps - 1).
+    2. patched_update_base: Reconciles request.num_computed_tokens on host by
+       adding the extra (N - 1) tokens generated on-device once model output returns.
+    3. patched_async_update_request_with_output: Pre-compensates in-flight
+       num_output_placeholders in AsyncScheduler by adding (N - 1) before
+       subtracting N, preventing placeholder underflow in async mode.
+    """
     from vllm.v1.core.sched.scheduler import Scheduler
 
     # Avoid patching multiple times
@@ -24,11 +37,12 @@ def patch_vllm_scheduler_for_continue_decode():
         original_update_base = Scheduler._update_request_with_output
 
         def patched_update_base(scheduler_self, request, new_token_ids):
-            # Call original first (which trims new_token_ids in-place if stopped)
+            # Original update appends new_token_ids to request output and trims on stop token.
             res_token_ids, stopped = original_update_base(
                 scheduler_self, request, new_token_ids)
 
-            # Update num_computed_tokens using the trimmed token length
+            # schedule() only incremented num_computed_tokens by 1. Advance by the remaining
+            # (N - 1) tokens generated on-device so host-side num_computed_tokens is accurate.
             diff = len(res_token_ids) - 1
             if diff > 0:
                 request.num_computed_tokens += diff
@@ -45,14 +59,12 @@ def patch_vllm_scheduler_for_continue_decode():
             additional_config = getattr(vllm_config, "additional_config", {})
             max_decode_steps = additional_config.get("max_decode_steps",
                                                      DEFAULT_MAX_DECODE_STEPS)
-            # We need max_decode_steps - 1 lookahead tokens to ensure we have enough blocks.
+            # Reserve max_decode_steps - 1 lookahead tokens so KVCacheManager allocates
+            # sufficient blocks for up to max_decode_steps tokens before execution on TPU.
             scheduler_self.num_lookahead_tokens = max(
                 scheduler_self.num_lookahead_tokens, max_decode_steps - 1)
 
         Scheduler.__init__ = patched_init
-
-    # Scheduler.update_from_output does not need to be overridden as AsyncScheduler._update_after_schedule
-    # and modify_prev_results_continue_decode handle the continue-decode token count lifecycle correctly.
 
     from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
@@ -62,9 +74,10 @@ def patch_vllm_scheduler_for_continue_decode():
         def patched_async_update_request_with_output(scheduler_self, request,
                                                      new_token_ids):
             if len(new_token_ids) > 1:
-                # In continue-decode, 1 scheduling step generated N tokens on device.
-                # AsyncScheduler._update_request_with_output subtracts len(new_token_ids) from num_output_placeholders.
-                # We add back (len(new_token_ids) - 1) so that exactly 1 placeholder step is decremented.
+                # In AsyncScheduler, _update_after_schedule() added 1 in-flight placeholder token.
+                # When N tokens return, original_async_update_req will subtract N from
+                # num_output_placeholders. Pre-compensate by adding (N - 1) first so that
+                # num_output_placeholders cleanly decrements by 1 without underflowing < 0.
                 request.num_output_placeholders += (len(new_token_ids) - 1)
             return original_async_update_req(scheduler_self, request,
                                              new_token_ids)
