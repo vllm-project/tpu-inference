@@ -33,6 +33,7 @@ import itertools
 import logging
 import time
 from dataclasses import asdict
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -40,11 +41,11 @@ import numpy as np
 from vllm.utils.math_utils import cdiv
 
 from tools.kernel.tuner.v1.batched_rpa_tuned_cases import ENTRIES
-from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
-                                                            RunConfig,
-                                                            TunerConfig,
-                                                            TuningCase,
-                                                            TuningStatus)
+from tools.kernel.tuner.v1.common.kernel_tuner_base import KernelTunerBase
+from tools.kernel.tuner.v1.common.tuner_datatypes import (RunConfig,
+                                                          TunerConfig,
+                                                          TuningCase,
+                                                          TuningStatus)
 from tpu_inference.kernels.experimental.batched_rpa.tuned_params import (
     TunableParams, TuningKey)
 from tpu_inference.kernels.experimental.batched_rpa.wrapper import \
@@ -186,7 +187,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             tunable_params_class=TunableParams,
             kernel_tuner_name="batched_rpa_kernel_tuner",
             jit_kernel_pattern=r"RPAm-",  #r"(jit_ragged_paged_attention\()",
-            support_bayesian_optimization=True,
+            support_bayesian_optimization=False,
             n_bayesian_trials=50,
         )
         super().__init__(tuner_config=self.tuner_config, run_config=run_config)
@@ -216,20 +217,22 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             TuningCaseLogger
         from tpu_inference.kernels.experimental.batched_rpa.tuned_params import (
             TunableParams, TuningKey)
-        tuning_case_logger = TuningCaseLogger(
-            '/workspace/tpu_inference/tools/kernel/tuner/v1/batched_rpa_gemma4_tuning_cases.json',
-            key_class=TuningKey,
-            params_class=TunableParams)
+
+        current_dir = Path(__file__).resolve().parent
+        file_path = current_dir / "batched_rpa_gemma4_tuning_cases.json"
+        tuning_case_logger = TuningCaseLogger(log_file_path=file_path,
+                                              key_class=TuningKey,
+                                              params_class=TunableParams)
         # Collect unique TuningKeys from the log (prefill cases with large
         # enough token count only).
         seen_keys: set[TuningKey] = set()
         unique_keys: list[TuningKey] = []
-        for log_key, _ in tuning_case_logger.get_logged_tuning_cases():
-            if (log_key.total_q_tokens >= 16 * 1024
-                    and log_key.case == 'prefill'
-                    and log_key not in seen_keys):
-                seen_keys.add(log_key)
-                unique_keys.append(log_key)
+        for case in tuning_case_logger.get_logged_tuning_cases():
+            if (case.tuning_key.total_q_tokens >= 16 * 1024
+                    and case.tuning_key.case == 'prefill'
+                    and case.tuning_key not in seen_keys):
+                seen_keys.add(case.tuning_key)
+                unique_keys.append(case.tuning_key)
         # Build the full Cartesian product of the search space for every key.
         cases: list[TuningCase] = []
         for tuning_key in unique_keys:

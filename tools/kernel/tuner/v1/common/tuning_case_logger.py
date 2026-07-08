@@ -15,9 +15,9 @@
 # define a class that can accept a TuningKey and TunableParams, then construct the TuningCase and log it to a file, which is specified when created.
 # and it should also able to return the list of TuningCases that have been logged so far.
 
-from tools.kernel.tuner.v1.common.kernel_tuner_base import (TunableParams,
-                                                            TuningCase,
-                                                            TuningKey)
+from tools.kernel.tuner.v1.common.tuner_datatypes import (TunableParams,
+                                                          TuningCase,
+                                                          TuningKey)
 
 
 class TuningCaseLogger:
