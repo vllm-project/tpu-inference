@@ -222,4 +222,7 @@ else
   echo "[WARN] Docker exited with non-zero code ${DOCKER_EXIT_CODE}. Skipping syncing local JAX Cache back to GCS to avoid potential cache corruption."
 fi
 
+echo "--- Cleaning up Docker resources after run"
+cleanup_docker_resource "${IMAGE_NAME}"
+
 exit $DOCKER_EXIT_CODE
