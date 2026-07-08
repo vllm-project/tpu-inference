@@ -332,8 +332,9 @@ else
   else
     # If it's NOT a Pull Request (e.g., branch push, tag, manual build)
     echo "This is not a Pull Request build. Uploading main pipeline."
-    upload_pipeline
-    upload_benchmark_pipeline
+    # upload_pipeline
+    # upload_benchmark_pipeline
+    upload_with_priority .buildkite/pipeline_test.yml "$JOB_PRIORITY"
   fi
 fi
 
