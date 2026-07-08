@@ -681,6 +681,8 @@ def fused_moe_func(
                                            dtype=jnp.int32).sum(axis=0)
         topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
 
+        is_fp8 = hidden_states_local.dtype == jnp.float8_e4m3fn
+
         if use_ep:
             num_ep_shard = get_mesh_shape_product(mesh,
                                                   ShardingAxisName.EXPERT)
@@ -707,12 +709,19 @@ def fused_moe_func(
                                               dtype=scale_local.dtype)
                 scale_gathered = onehot_scale @ scale_local
             else:
+                # Bitcast FP8 to int8 before calling ragged_gather
+                hs_local = (jax.lax.bitcast_convert_type(
+                    hidden_states_local, jnp.int8)
+                            if is_fp8 else hidden_states_local)
                 x = ragged_gather(
-                    hidden_states_local,
+                    hs_local,
                     token_indices_sorted,
                     shard_output_start,
                     shard_output_end,
                 )
+                if is_fp8:
+                    x = jax.lax.bitcast_convert_type(x, jnp.float8_e4m3fn)
+
                 scale_gathered = ragged_gather(
                     scale_local,
                     token_indices_sorted,
