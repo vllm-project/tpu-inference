@@ -1017,14 +1017,14 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         input_mask = pixel_position_ids[..., 0] != POSITIONS_PAD_VALUE
 
-        vision_outputs = self.vision_tower(
+        vision_outputs = self.model.vision_tower(
             pixel_values,
             input_mask=input_mask,
             pixel_position_ids=pixel_position_ids,
         )
         projected = vision_outputs[0][0]
         pooler_mask = vision_outputs[0][1]
-        projected = self.embed_vision(projected)
+        projected = self.model.embed_vision(projected)
 
         seq_len = pooler_mask.shape[1]
         sort_indices = jnp.arange(seq_len)
