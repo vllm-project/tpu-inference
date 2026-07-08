@@ -79,7 +79,7 @@ PROFILE_FOLDER="${LOG_FOLDER}/profile"
 cleanup_artifact_log() {
   if [ -d "$ARTIFACT_FOLDER" ]; then
     echo "--- Reclaiming artifact folder ownership for CI cleanup..."
-    sudo chown -R "$(id -u):$(id -g)" "$ARTIFACT_FOLDER" || true
+    sudo -n chown -R "$(id -u):$(id -g)" "$ARTIFACT_FOLDER" || true
   fi
   echo "deleting artifacts: $ARTIFACT_FOLDER"
   rm -rf "$ARTIFACT_FOLDER"

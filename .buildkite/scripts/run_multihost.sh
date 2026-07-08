@@ -116,7 +116,7 @@ cleanup() {
         tail -n 50 "/tmp/worker_${worker_ip}.log" || true
         rm -f "/tmp/worker_${worker_ip}.log"
       fi
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true; sudo rm -rf /tmp/ray/* /tmp/vllm/*" || true
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true; sudo -n rm -rf /tmp/ray/* /tmp/vllm/*" || true
     done
   fi
 
@@ -131,7 +131,7 @@ cleanup() {
   rm -f "${TEMP_EXPORT_FILE:-}" >/dev/null 2>&1 || true
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
-  sudo rm -rf /tmp/ray/* /tmp/vllm/* >/dev/null 2>&1 || true
+  sudo -n rm -rf /tmp/ray/* /tmp/vllm/* >/dev/null 2>&1 || true
 
   echo "✅ Cleanup complete."
   set -e
