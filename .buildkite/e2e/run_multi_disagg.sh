@@ -182,51 +182,28 @@ cleanup() {
   local exit_code=$?
   echo "🧹 Cleaning up containers on all hosts..."
   
-  # 1. Capture server and Ray logs first (in parallel)
-  echo "   -> Capturing server and Ray logs..."
-  local log_pids=()
-  (
-    timeout 3 docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
-    timeout 5 docker cp node:/tmp/ray/session_latest/logs "$LOG_DIR/prefill_ray_logs" >/dev/null 2>&1 || true
-  ) &
-  log_pids+=($!)
-  
-  if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
-    (
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "timeout 3 docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" && \
-      timeout 5 scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1
-    ) &
-    log_pids+=($!)
-    (
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "timeout 5 docker cp node:/tmp/ray/session_latest/logs /tmp/decode_ray_logs >/dev/null 2>&1 || true" && \
-      timeout 10 scp -r "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/decode_ray_logs" "$LOG_DIR/decode_ray_logs" >/dev/null 2>&1
-    ) &
-    log_pids+=($!)
-  fi
-  
-  # Wait only for log capture jobs
-  for pid in "${log_pids[@]}"; do
-    wait "$pid"
-  done
-  
-  # 2. Dump logs
+  # 1. Dump logs directly from containers
   echo "--- 🚨 Dumping logs..."
-  for log_file in "prefill.txt" "decode.txt" "proxy.txt" "correctness.txt" "benchmark.txt"; do
-    if [ -f "$LOG_DIR/$log_file" ] && [ -s "$LOG_DIR/$log_file" ]; then
-      echo "+++ 📄 Log: $log_file"
-      cat "$LOG_DIR/$log_file"
-    fi
-  done
+  
+  echo "--- 📄 Prefill vLLM Log ---"
+  docker exec node cat /root/vllm_serve_prefill.log 2>/dev/null || true
+  
+  echo "--- 📄 Prefill Ray Logs ---"
+  docker exec node bash -c 'if [ -d /tmp/ray/session_latest/logs ]; then for f in $(find /tmp/ray/session_latest/logs -type f); do echo "+++ Ray Log: $f"; cat "$f"; done; fi' 2>/dev/null || true
 
-  # Dump Ray logs
-  for ray_log_dir in "prefill_ray_logs" "decode_ray_logs"; do
-    if [ -d "$LOG_DIR/$ray_log_dir" ]; then
-      echo "--- 🚨 Dumping Ray logs from $ray_log_dir..."
-      # Dump all files in the ray log directory
-      find "$LOG_DIR/$ray_log_dir" -type f | while read -r file; do
-        echo "+++ 📄 Ray Log: ${file#$LOG_DIR/}"
-        cat "$file"
-      done
+  if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
+    echo "--- 📄 Decode vLLM Log ---"
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker exec node cat /root/vllm_serve_decode.log" 2>/dev/null || true
+    
+    echo "--- 📄 Decode Ray Logs ---"
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker exec node bash -c 'if [ -d /tmp/ray/session_latest/logs ]; then for f in \$(find /tmp/ray/session_latest/logs -type f); do echo \"+++ Ray Log: \$f\"; cat \"\$f\"; done; fi'" 2>/dev/null || true
+  fi
+
+  # Dump host logs (proxy, correctness, benchmark)
+  for log_file in "proxy.txt" "correctness.txt" "benchmark.txt"; do
+    if [ -f "$LOG_DIR/$log_file" ] && [ -s "$LOG_DIR/$log_file" ]; then
+      echo "+++ 📄 Host Log: $log_file"
+      cat "$LOG_DIR/$log_file"
     fi
   done
 
