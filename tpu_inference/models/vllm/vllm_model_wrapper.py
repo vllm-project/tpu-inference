@@ -349,7 +349,7 @@ class VllmModelWrapper:
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
             attn_metadata: AttentionMetadata,
-            shared_attn_metadata: AttentionMetadata,
+            shared_attn_metadata: SharedAttentionMetadata,
             input_embeds: jax.Array,
             input_positions: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],

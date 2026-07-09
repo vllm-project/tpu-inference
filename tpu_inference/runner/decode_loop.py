@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 from vllm.v1.outputs import LogprobsTensors
 
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (AttentionMetadata, SharedAttentionMetadata)
 
 
 @functools.partial(
@@ -182,7 +182,7 @@ def _decode_core(
             kvc,
             ct,
             attn_metadata,
-            attn_metadata,
+            shared_attn_metadata,
             inputs_embeds,
             attn_metadata.input_positions,
             layer_name_to_kvcache_index,

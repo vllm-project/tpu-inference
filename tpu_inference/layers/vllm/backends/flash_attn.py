@@ -344,7 +344,7 @@ def _jax_attn_func(
     v: jax.Array,
     sinks: jax.Array | None,
     attention_metadata: AttentionMetadata,
-    shared_attention_metadata: AttentionMetadata,
+    shared_attention_metadata: SharedAttentionMetadata,
     mesh: Mesh,
     scale: float,
     head_size: int,
