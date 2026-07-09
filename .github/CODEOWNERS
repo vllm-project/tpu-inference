@@ -25,6 +25,7 @@
 /tpu_inference/kernels/ @kyuyeunk @bythew3i @a1yssan13 @jrplatin
 /tpu_inference/kernels/mla/ @m-liu @gxd3 @gpolovets1 @kyuyeunk
 /tpu_inference/kernels/experimental/deepseek_v4/ @gxd3 @a1yssan13 @inucool12
+/tpu_inference/kernels/experimental/rpa_v3_cp/ @kyuyeunk @wenxindongwork @weiyu0824
 
 # Model layers
 /tpu_inference/layers/ @kyuyeunk @lk-chen @jrplatin @gxd3
@@ -34,12 +35,15 @@
 
 # Model Implementations and wrappers
 /tpu_inference/models/ @kyuyeunk @lk-chen @jrplatin
-/tpu_inference/models/jax/qwen2_5_vl.py @kwang3939 @JiriesKaileh
+/tpu_inference/models/jax/ @kyuyeunk @lk-chen @jrplatin @kwang3939
+/tpu_inference/models/jax/qwen2_5_vl.py @kyuyeunk @lk-chen @jrplatin @kwang3939 @JiriesKaileh
 /tpu_inference/models/jax/deepseek_v3.py @gpolovets1 @jrplatin @gxd3
 /tpu_inference/models/vllm/ @kyuyeunk @vanbasten23 @gxd3 @jrplatin
 
 # Runner and Execution
 /tpu_inference/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google  @mrjunwan-lang @gxd3 @a1yssan13
+/tpu_inference/runner/mm_encoder_jit_manager.py @lk-chen @kwang3939 @jrplatin
+/tpu_inference/runner/multimodal_manager.py @lk-chen @kwang3939 @jrplatin
 /tpu_inference/runner/tpu_runner.py @jrplatin @kyuyeunk @wenxindongwork @sixiang-google
 /tpu_inference/runner/persistent_batch_manager.py @jrplatin @wenxindongwork
 /tpu_inference/executors/ @sixiang-google @mrjunwan-lang @Lumosis
@@ -80,6 +84,7 @@
 /tests/executors/ @sixiang-google @mrjunwan-lang
 /tests/kernels/ @kyuyeunk @bythew3i @a1yssan13
 /tests/kernels/deepseek_v4 @gxd3 @a1yssan13 @inucool12
+/tests/kernels/rpa_v3_cp/ @kyuyeunk @wenxindongwork @weiyu0824 
 /tests/layers/ @kyuyeunk @lk-chen
 /tests/layers/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/lora/ @vanbasten23 @kyuyeunk

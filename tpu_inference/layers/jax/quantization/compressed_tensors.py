@@ -27,14 +27,17 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     check_equal_or_regex_match, should_ignore_layer)
 
 from tpu_inference.layers.jax import JaxModule
-from tpu_inference.layers.jax.linear import JaxEinsum
+from tpu_inference.layers.jax.linear import (JaxEinsum,
+                                             JaxMergedColumnParallelLinear)
+from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import (QuantizationConfig,
                                                            QuantLinearConfig)
 from tpu_inference.layers.jax.quantization.fp8 import (
-    Fp8BlockwiseLinearMethod, Fp8TensorwiseLinearMethod)
-from tpu_inference.layers.jax.quantization.unquantized import \
-    UnquantizedLinearMethod
+    Fp8BlockwiseLinearMethod, Fp8FusedMoEMethod, Fp8TensorwiseLinearMethod,
+    Fp8TensorwiseMergedLinearMethod)
+from tpu_inference.layers.jax.quantization.unquantized import (
+    UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 
 
 class _Fp8BlockConfigShim:
@@ -78,14 +81,28 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return self._target_scheme_map[target]
         # compressed-tensors also targets layers by module class name (e.g.
         # "Linear"). Upstream matches on module.__class__.__name__; our JAX
-        # layers are named differently, so map JaxEinsum onto "Linear".
-        if isinstance(layer,
-                      JaxEinsum) and "Linear" in self._target_scheme_map:
+        # layers are named differently, so map JaxEinsum and MoE fused-expert
+        # layers onto "Linear" (expert sub-layers are linear modules in CT).
+        if isinstance(layer, (JaxEinsum, JaxRoutedExperts,
+                              JaxMoE)) and "Linear" in self._target_scheme_map:
             return self._target_scheme_map["Linear"]
         return None
 
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
+        if isinstance(layer, (JaxRoutedExperts, JaxMoE)):
+            if should_ignore_layer(prefix,
+                                   ignore=self._ignore,
+                                   fused_mapping=self._fused_mapping):
+                return UnquantizedFusedMoEMethod()
+            scheme = self._match_target(layer, prefix)
+            if scheme is None:
+                return UnquantizedFusedMoEMethod()
+            weight_quant = scheme.get("weights")
+            input_quant = scheme.get("input_activations")
+            if self._ct._is_fp8_w8a8(weight_quant, input_quant):
+                return Fp8FusedMoEMethod(_weight_block_size(weight_quant))
+            return UnquantizedFusedMoEMethod()
         if not isinstance(layer, JaxEinsum):
             return None
 
@@ -107,6 +124,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self._ct._is_fp8_w8a8(weight_quant, input_quant):
             block = _weight_block_size(weight_quant)
             if block is not None:
+                if isinstance(layer, JaxMergedColumnParallelLinear):
+                    # TODO(#2261): need to implement blockwise fp8 for JaxMergedColumnParallelLinear
+                    raise NotImplementedError(
+                        "compressed-tensors blockwise fp8 is not yet supported "
+                        "for JaxMergedColumnParallelLinear layers.")
                 # compressed-tensors serializes the dequant scale as
                 # "weight_scale" (DeepSeek-style checkpoints, the method's
                 # default, use "weight_scale_inv"), so create the param under
@@ -116,6 +138,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                     layer,
                     linear_config,
                     weight_scale_name="weight_scale")
+            if isinstance(layer, JaxMergedColumnParallelLinear):
+                return Fp8TensorwiseMergedLinearMethod(layer, linear_config)
             return Fp8TensorwiseLinearMethod(layer, linear_config)
 
         # TODO: w4a8 / wNa16 schemes need their own JAX methods (not yet ported).

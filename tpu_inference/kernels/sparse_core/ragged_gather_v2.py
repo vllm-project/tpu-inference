@@ -229,9 +229,12 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
         end = end[None]
 
     dtype = x.dtype
-    if dtype not in (jnp.bfloat16, jnp.float32, jnp.int8, jnp.int4):
+    # any data type with a size of {4,8,16,32} should be fine
+    dtype_bits = jax.dtypes.itemsize_bits(dtype)
+    if dtype_bits not in (4, 8, 16, 32):
         raise ValueError(
-            f"dtype must be f32, bf16, int8, or int4, but got {dtype}")
+            f"dtype bit width must be one of 4, 8, 16, or 32, but got {dtype_bits} ({dtype})"
+        )
 
     sc_info = pltpu.get_tpu_info().sparse_core
     if sc_info is None:
@@ -240,7 +243,6 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
     hidden_size = x.shape[-1]
     out_size = indices.size
 
-    dtype_bits = jax.dtypes.itemsize_bits(dtype)
     packing = 32 // dtype_bits
     col_size = calculate_col_size(hidden_size, packing)
 

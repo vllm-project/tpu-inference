@@ -163,7 +163,7 @@ class Gemma4VisionFlashAttention(JaxModule):
                                     (None, ShardingAxisName.VIT_MODEL, None)),
                                 rngs=rng,
                                 quant_config=quant_config,
-                                prefix=f"{prefix}.q_proj")
+                                prefix=f"{prefix}.q_proj.linear")
         self.k_proj = JaxEinsum(
             "BTD,DKH->BTKH", (self.features, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
@@ -171,7 +171,7 @@ class Gemma4VisionFlashAttention(JaxModule):
                 init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
             quant_config=quant_config,
-            prefix=f"{prefix}.k_proj")
+            prefix=f"{prefix}.k_proj.linear")
         self.v_proj = JaxEinsum(
             "BTD,DKH->BTKH", (self.features, self.num_kv_heads, self.head_dim),
             param_dtype=dtype,
@@ -179,7 +179,7 @@ class Gemma4VisionFlashAttention(JaxModule):
                 init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
             quant_config=quant_config,
-            prefix=f"{prefix}.v_proj")
+            prefix=f"{prefix}.v_proj.linear")
         self.o_proj = JaxEinsum("BTNH,NHD->BTD",
                                 (self.num_heads, self.head_dim, self.features),
                                 param_dtype=dtype,
@@ -188,7 +188,7 @@ class Gemma4VisionFlashAttention(JaxModule):
                                     (ShardingAxisName.VIT_MODEL, None, None)),
                                 rngs=rng,
                                 quant_config=quant_config,
-                                prefix=f"{prefix}.o_proj")
+                                prefix=f"{prefix}.o_proj.linear")
 
         self.q_norm = JaxRmsNorm(self.head_dim,
                                  param_dtype=dtype,
@@ -364,7 +364,7 @@ class Gemma4VisionMLP(JaxModule):
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_proj",
+            prefix=f"{prefix}.gate_proj.linear",
         )
 
         self.up_proj = JaxEinsum(
@@ -376,7 +376,7 @@ class Gemma4VisionMLP(JaxModule):
             bias_init=None,
             rngs=rng,
             quant_config=quant_config,
-            prefix=f"{prefix}.up_proj",
+            prefix=f"{prefix}.up_proj.linear",
         )
 
         self.down_proj = JaxEinsum(
@@ -386,7 +386,7 @@ class Gemma4VisionMLP(JaxModule):
             kernel_init=nnx.with_partitioning(
                 init_fn, (ShardingAxisName.VIT_MODEL, None)),
             bias_init=None,
-            prefix=f"{prefix}.down_proj",
+            prefix=f"{prefix}.down_proj.linear",
             rngs=rng,
             quant_config=quant_config,
         )
@@ -529,13 +529,13 @@ class Gemma4VisionModel(JaxModule):
 
         num_layers = getattr(config, "num_hidden_layers", 32)
         self.start_layer, self.end_layer, self.layers = make_layers(
-            num_layers,
-            lambda i: Gemma4VisionEncoderLayer(config,
-                                               dtype,
-                                               rng,
-                                               self.mesh,
-                                               quant_config,
-                                               prefix=f"{prefix}.layers.{i}"))
+            num_layers, lambda i: Gemma4VisionEncoderLayer(
+                config,
+                dtype,
+                rng,
+                self.mesh,
+                quant_config,
+                prefix=f"{prefix}.encoder.layers.{i}"))
 
         self.pooler = Gemma4VisionPooler(config, dtype)
 
@@ -1017,14 +1017,14 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         input_mask = pixel_position_ids[..., 0] != POSITIONS_PAD_VALUE
 
-        vision_outputs = self.vision_tower(
+        vision_outputs = self.model.vision_tower(
             pixel_values,
             input_mask=input_mask,
             pixel_position_ids=pixel_position_ids,
         )
         projected = vision_outputs[0][0]
         pooler_mask = vision_outputs[0][1]
-        projected = self.embed_vision(projected)
+        projected = self.model.embed_vision(projected)
 
         seq_len = pooler_mask.shape[1]
         sort_indices = jnp.arange(seq_len)

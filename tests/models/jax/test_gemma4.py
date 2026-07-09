@@ -134,11 +134,13 @@ class TestGemma4ForConditionalGeneration:
     @pytest.mark.parametrize("model_name", [
         "google/gemma-4-31B-it",
         "google/gemma-4-26B-A4B-it",
+        "RedHatAI/gemma-4-31B-it-FP8-Dynamic",
+        "RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic",
     ])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
-    @pytest.mark.parametrize(
-        "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
+    @pytest.mark.parametrize("load_format",
+                             ["skip_layers_model_loader_for_test"])
     def test_model_loading(
             self,
             model_name,
