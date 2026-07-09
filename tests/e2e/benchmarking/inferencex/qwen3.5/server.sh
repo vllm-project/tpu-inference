@@ -61,8 +61,8 @@ export RAGGED_GATED_DELTA_RULE_IMPL=chunked_kernel_p_recurrent_kernel_d
 export NEW_MODEL_DESIGN=1
 # Slice rope cache to max_model_len (envs.SLICE_ROPE_CACHE is off by default).
 export SLICE_ROPE_CACHE=1
-# Disable DP-scheduler batched prefill, which is for variable isl and osl.
-export DP_SCHED_BATCH_PREFILL=false
+# Enable DP-scheduler batched prefill, better performance for random range ratio.
+export DP_SCHED_BATCH_PREFILL=true
 export LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false'
 
 args=(
