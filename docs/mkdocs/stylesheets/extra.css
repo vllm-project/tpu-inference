@@ -25,3 +25,42 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
   color: rgba(255, 255, 255, 0.8) !important;
   font-weight: 700;
 }
+
+/* Custom 3-Column Grid for Persona Cards */
+@media screen and (min-width: 961px) {
+  .grid.cards.three-columns > ul {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}
+
+@media screen and (max-width: 960px) {
+  .grid.cards.three-columns > ul {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media screen and (max-width: 720px) {
+  .grid.cards.three-columns > ul {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}
+
+/* Status Badges */
+.cg-badge {
+  display: inline-block;
+  padding: 0.2em 0.6em;
+  font-size: 0.75em;
+  font-weight: 700;
+  border-radius: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+.cg-badge-recommended {
+  background-color: #e6f4ea;
+  color: #1e8e3e;
+}
+.cg-badge-experimental {
+  background-color: #fef7e0;
+  color: #f9ab00;
+}
