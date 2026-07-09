@@ -62,7 +62,6 @@ Our comprehensive support matrices detailing compatibility across models, featur
 
 ## Contribute
 
-
 We're thrilled you're interested in contributing to the vLLM TPU project! Your help is essential for making our tools better for everyone. There are many ways to get involved, even if you're not ready to write code.
 
 **Ways to Contribute:**

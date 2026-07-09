@@ -22,41 +22,41 @@ vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardw
 
 <div class="grid cards three-columns" markdown>
 
--   :material-rocket-launch:{ .lg .middle } __I'm New__
+- :material-rocket-launch:{ .lg .middle } __I'm New__
 
-    ---
+  ---
 
-    Get started quickly with core concepts, hardware setup, and step-by-step tutorials.
+  Get started quickly with core concepts, hardware setup, and step-by-step tutorials.
 
-    [:octicons-arrow-right-24: Quickstart: Serving a Model](getting_started/quickstart.md)
+  [:octicons-arrow-right-24: Quickstart: Serving a Model](getting_started/quickstart.md)
 
-    [:octicons-arrow-right-24: Installation Guide](getting_started/installation.md)
+  [:octicons-arrow-right-24: Installation Guide](getting_started/installation.md)
 
-    [:octicons-arrow-right-24: TPU Setup](getting_started/tpu_setup.md)
+  [:octicons-arrow-right-24: TPU Setup](getting_started/tpu_setup.md)
 
--   :material-server-network:{ .lg .middle } __I Want to Deploy__
+- :material-server-network:{ .lg .middle } __I Want to Deploy__
 
-    ---
+  ---
 
-    Guides on infrastructure setup, deployment recipes, and hardware capabilities.
+  Guides on infrastructure setup, deployment recipes, and hardware capabilities.
 
-    [:octicons-arrow-right-24: Deploying on GCE (Ironwood)](deployment_guides/ironwood.md)
+  [:octicons-arrow-right-24: Deploying on GCE (Ironwood)](deployment_guides/ironwood.md)
 
-    [:octicons-arrow-right-24: Deploying on GCE (Trillium)](deployment_guides/trillium.md)
+  [:octicons-arrow-right-24: Deploying on GCE (Trillium)](deployment_guides/trillium.md)
 
-    [:octicons-arrow-right-24: Supported Models](recommended_models.md)
+  [:octicons-arrow-right-24: Supported Models](recommended_models.md)
 
--   :material-code-tags:{ .lg .middle } __I Want to Build__
+- :material-code-tags:{ .lg .middle } __I Want to Build__
 
-    ---
+  ---
 
-    Contribute code, dive into inference examples, or explore the core architecture.
+  Contribute code, dive into inference examples, or explore the core architecture.
 
-    [:octicons-arrow-right-24: Inference Examples](api_and_code_examples/multi_modal_inference.md)
+  [:octicons-arrow-right-24: Inference Examples](api_and_code_examples/multi_modal_inference.md)
 
-    [:octicons-arrow-right-24: Developer Guides](developers_guide/contributing.md)
+  [:octicons-arrow-right-24: Developer Guides](developers_guide/contributing.md)
 
-    [:octicons-arrow-right-24: Add a New Model to CI](developers_guide/buildkite.md)
+  [:octicons-arrow-right-24: Add a New Model to CI](developers_guide/buildkite.md)
 
 </div>
 
