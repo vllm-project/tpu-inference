@@ -184,22 +184,30 @@ cleanup() {
   
   # 1. Capture server and Ray logs first (in parallel)
   echo "   -> Capturing server and Ray logs..."
+  local log_pids=()
   (
     timeout 3 docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
     timeout 5 docker cp node:/tmp/ray/session_latest/logs "$LOG_DIR/prefill_ray_logs" >/dev/null 2>&1 || true
   ) &
+  log_pids+=($!)
   
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
     (
       ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "timeout 3 docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" && \
       timeout 5 scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1
     ) &
+    log_pids+=($!)
     (
       ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "timeout 5 docker cp node:/tmp/ray/session_latest/logs /tmp/decode_ray_logs >/dev/null 2>&1 || true" && \
       timeout 10 scp -r "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/decode_ray_logs" "$LOG_DIR/decode_ray_logs" >/dev/null 2>&1
     ) &
+    log_pids+=($!)
   fi
-  wait # wait for logs to be captured
+  
+  # Wait only for log capture jobs
+  for pid in "${log_pids[@]}"; do
+    wait "$pid"
+  done
   
   # 2. Dump logs
   echo "--- 🚨 Dumping logs..."
