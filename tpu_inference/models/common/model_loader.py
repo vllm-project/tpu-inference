@@ -31,6 +31,7 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common import layer_types as layer_type_names
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
 from tpu_inference.models.jax.utils.multi_modal_utils import \
@@ -56,11 +57,14 @@ _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset({
     "Qwen3MoeForCausalLM",
     "KimiK25ForConditionalGeneration",
     "Qwen3_5MoeForConditionalGeneration",
+    "Qwen3NextForCausalLM",
 })
 
 # List of architectures that don't have pipeline parallelism support in jax yet.
-_PP_DISABLED_MODELS: frozenset[str] = frozenset(
-    {"DeepseekV3ForCausalLM", "Eagle3LlamaForCausalLM", "GptOssForCausalLM"})
+_PP_DISABLED_MODELS: frozenset[str] = frozenset({
+    "DeepseekV3ForCausalLM", "Eagle3LlamaForCausalLM", "GptOssForCausalLM",
+    "Qwen3NextForCausalLM"
+})
 
 
 class UnsupportedArchitectureError(ValueError):
@@ -88,7 +92,9 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         Qwen2_5_VLForConditionalGeneration
     from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
     from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
+    from tpu_inference.models.jax.qwen3_next import Qwen3NextForCausalLM
     _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
+    _MODEL_REGISTRY["Qwen3NextForCausalLM"] = Qwen3NextForCausalLM
     _MODEL_REGISTRY["DeepseekV3ForCausalLM"] = DeepseekV3ForCausalLM
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Llama4ForConditionalGeneration"] = LlamaGuard4ForCausalLM
@@ -355,6 +361,28 @@ def get_flax_model(
         mesh,
         PartitionSpec(ShardingAxisName.ATTN_DATA, None,
                       ShardingAxisName.ATTN_HEAD))
+    # Hybrid models carry (conv_state, ssm_state) tuples for their linear
+    # attention layers, whose ranks differ from the paged attention cache.
+    # Build a per layer sharding tree in that case; a single sharding works
+    # as a pytree prefix for the uniform case.
+    if not is_draft_model:
+        text_config = getattr(vllm_config.model_config, "hf_text_config",
+                              vllm_config.model_config.hf_config)
+        layer_types = list(getattr(text_config, "layer_types", None) or [])
+        if layer_type_names.LINEAR_ATTENTION in layer_types:
+            conv_state_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(ShardingAxisName.ATTN_DATA, None,
+                              ShardingAxisName.ATTN_HEAD))
+            ssm_state_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(ShardingAxisName.ATTN_DATA,
+                              ShardingAxisName.ATTN_HEAD, None, None))
+            kv_cache_sharding = [
+                (conv_state_sharding, ssm_state_sharding) if layer_type
+                == layer_type_names.LINEAR_ATTENTION else kv_cache_sharding
+                for layer_type in layer_types
+            ]
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,

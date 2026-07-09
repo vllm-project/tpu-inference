@@ -24,6 +24,8 @@ from vllm.config import get_layers_from_vllm_config, set_current_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.mla import MLAAttention
 from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
                                                DeepseekV4IndexerCache)
@@ -41,6 +43,7 @@ from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common import layer_types as layer_type_names
 from tpu_inference.models.common.kv_share import compute_kv_share_map
 from tpu_inference.offload.utils import get_kv_connector_cache_layout
 from tpu_inference.runner import utils as runner_utils
@@ -141,6 +144,48 @@ class KVCacheManager:
                                          dtype=self.runner.kv_cache_dtype,
                                          page_size_padded=page_size_padded)
 
+    def _create_jax_gdn_mamba_spec(self, text_config) -> MambaSpec:
+        """Build the MambaSpec for a GDN (gated delta net) linear attention
+        layer of a JAX-native model, mirroring what vLLM's
+        `QwenGatedDeltaNetAttention.get_kv_cache_spec` produces on the
+        torchax path (with tp_size=1; the JAX side shards the global arrays
+        through NamedSharding instead)."""
+        from vllm.v1.attention.backends.registry import \
+            MambaAttentionBackendEnum
+
+        cache_config = self.runner.cache_config
+        speculative_config = self.runner.speculative_config
+        num_spec = (speculative_config.num_speculative_tokens
+                    if speculative_config else 0)
+        # Pass tp_size=1: the JAX side stores the full per-layer arrays and
+        # shards them through NamedSharding, unlike the torchax path which
+        # bakes the TP split into the shape. The temporal state comes back as
+        # (num_v_heads, head_v_dim, head_k_dim); the GDN kernel labels its
+        # axes (n_v, d_k, d_v), which matches only while head_k_dim ==
+        # head_v_dim (true for every released Qwen3-Next config).
+        shapes = MambaStateShapeCalculator.gated_delta_net_state_shape(
+            1, text_config.linear_num_key_heads,
+            text_config.linear_num_value_heads,
+            text_config.linear_key_head_dim, text_config.linear_value_head_dim,
+            text_config.linear_conv_kernel_dim, num_spec)
+        dtypes = MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            self.runner.model_config.dtype, cache_config.mamba_cache_dtype,
+            cache_config.mamba_ssm_cache_dtype)
+        # vLLM's hybrid config check sets mamba_block_size before layers are
+        # built; fall back to max_model_len (its non-prefix-caching default)
+        # in case the model was not recognized as hybrid.
+        mamba_block_size = (cache_config.mamba_block_size
+                            or self.runner.model_config.max_model_len)
+        return MambaSpec(
+            shapes=tuple(shapes),
+            dtypes=tuple(dtypes),
+            block_size=mamba_block_size,
+            page_size_padded=cache_config.mamba_page_size_padded,
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+            mamba_cache_mode=cache_config.mamba_cache_mode,
+            num_speculative_blocks=num_spec,
+        )
+
     def update_mamba_page_size_padded(
             self, layers: dict[str, AttentionLayerBase]) -> None:
         """Pad attention and mamba page sizes so vLLM's num_blocks matches
@@ -227,6 +272,16 @@ class KVCacheManager:
         unpadded_mamba_page_size = dataclasses.replace(
             first_mamba_spec, page_size_padded=None).page_size_bytes
 
+        self._update_hybrid_page_size(attn_page_size_bytes,
+                                      int(unpadded_mamba_page_size),
+                                      num_attn=len(attn_modules),
+                                      num_mamba=len(mamba_modules))
+
+    def _update_hybrid_page_size(self, attn_page_size_bytes: int,
+                                 unpadded_mamba_page_size: int, num_attn: int,
+                                 num_mamba: int) -> None:
+        """Module-free core of `update_mamba_page_size_padded`, shared with
+        the JAX-native spec path where no vLLM modules exist."""
         # Derive vLLM's kv-cache group layout. vLLM splits each type into
         # equal-sized groups of `group_size` layers, then allocates
         # `group_size` `KVCacheTensor`s, each `shared_by` one layer from
@@ -252,8 +307,6 @@ class KVCacheManager:
         # spec creation depends on padding). Keep in sync if that
         # heuristic ever changes — it has been stable since the hybrid
         # allocator landed.
-        num_attn = len(attn_modules)
-        num_mamba = len(mamba_modules)
         min_count = min(num_attn, num_mamba)
         max_count = max(num_attn, num_mamba)
         # Match vLLM exactly: float comparison, no int() truncation (matters
@@ -483,7 +536,36 @@ class KVCacheManager:
             # the common case.
             kv_share_map = compute_kv_share_map(text_config)
 
-            for i in range(model_config.get_num_layers(parallel_config)):
+            # Hybrid attention + linear attention (GDN) models, e.g.
+            # Qwen3-Next. The JAX path has no vLLM MambaBase modules, so
+            # derive the MambaSpec from the HF config the same way vLLM's
+            # GDN layer does and reuse the hybrid page size reconciliation.
+            num_layers = model_config.get_num_layers(parallel_config)
+            layer_types = list(getattr(text_config, "layer_types", None) or [])
+            num_linear_attn = layer_types.count(
+                layer_type_names.LINEAR_ATTENTION)
+            jax_mamba_spec = None
+            if num_linear_attn > 0:
+                jax_mamba_spec = self._create_jax_gdn_mamba_spec(text_config)
+                attn_page_size_bytes = get_attention_page_size_bytes(
+                    self.runner.mesh, block_size,
+                    common_utils.get_padded_num_heads(base_num_kv_heads,
+                                                      model_cnt),
+                    common_utils.get_padded_head_dim(base_head_size),
+                    self.runner.kv_cache_dtype, False)
+                self._update_hybrid_page_size(
+                    int(attn_page_size_bytes),
+                    int(
+                        dataclasses.replace(
+                            jax_mamba_spec,
+                            page_size_padded=None).page_size_bytes),
+                    num_attn=num_layers - num_linear_attn,
+                    num_mamba=num_linear_attn)
+                jax_mamba_spec = dataclasses.replace(
+                    jax_mamba_spec,
+                    page_size_padded=self._hybrid_uniform_page_size_bytes)
+
+            for i in range(num_layers):
                 # If this layer is KV-shared, register the redirect and skip
                 # spec creation (so no slot is allocated). The forward-time
                 # remap at line ~835 picks the source layer's slot.
@@ -496,13 +578,17 @@ class KVCacheManager:
                     kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
                         block_size, 1, mla_head_size)
                 else:
-                    # TODO(kwang3939): unify the hybrid kv cache of jax path and tochax path.
-                    layer_type = "full_attention"
-                    if hasattr(text_config, "layer_types") and i < len(
-                            text_config.layer_types):
-                        layer_type = text_config.layer_types[i]
+                    layer_type = layer_type_names.FULL_ATTENTION
+                    if i < len(layer_types):
+                        layer_type = layer_types[i]
 
-                    is_sliding = layer_type == "sliding_attention"
+                    if layer_type == layer_type_names.LINEAR_ATTENTION:
+                        assert jax_mamba_spec is not None
+                        kv_cache_spec[f"layer.{i}"] = jax_mamba_spec
+                        continue
+
+                    is_sliding = (
+                        layer_type == layer_type_names.SLIDING_ATTENTION)
                     # Use `or` instead of getattr default so we also handle
                     # the case where the attribute is present but None
                     # (e.g. Gemma-4 E2B has num_global_key_value_heads=None).
