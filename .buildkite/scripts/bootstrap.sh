@@ -55,7 +55,7 @@ JOB_PRIORITY=$(determine_job_priority)
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
 
-# --- Skip build if only docs/icons changed ---
+# --- Skip build if only docs, icons, or CODEOWNERS changed ---
 echo "--- :git: Checking changed files"
 
 BASE_BRANCH=${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-"main"}
@@ -82,10 +82,10 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "$FILES_CHANGED"
 
     # Filter out files we want to skip builds for.
-    NON_SKIPPABLE_FILES=$(echo "$FILES_CHANGED" | grep -vE "(\.md$|\.ico$|\.png$|^README$|^docs\/|support_matrices\/.*\.csv$)" || true)
+    NON_SKIPPABLE_FILES=$(echo "$FILES_CHANGED" | grep -vE "(\.md$|\.ico$|\.png$|^README$|^docs\/|^\.github\/CODEOWNERS$|support_matrices\/.*\.csv$)" || true)
 
     if [ -z "$NON_SKIPPABLE_FILES" ]; then
-      echo "Only documentation or icon files changed. Skipping build."
+      echo "Only documentation, icon, or CODEOWNERS files changed. Skipping build."
       # No pipeline will be uploaded, and the build will complete.
       exit 0
     else
