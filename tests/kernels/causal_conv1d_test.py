@@ -51,17 +51,8 @@ def reference_causal_conv1d(
         start_row = row - kernel_size + 1
         s_idx = int(row_to_seq_idx[row])
         seq_start = int(query_start_loc[s_idx])
-        token_step = row - seq_start
+        state_idx = int(state_indices[s_idx])
         has_init = bool(has_initial_state[s_idx])
-
-        # In speculative decoding (2D state_indices), read from the initial state (Slot 0)
-        # and write to the corresponding history slot for the current token step.
-        if state_indices.ndim == 2:
-            state_idx_read = int(state_indices[s_idx, 0])
-            state_idx_write = int(state_indices[s_idx, token_step + 1])
-        else:
-            state_idx_read = int(state_indices[s_idx])
-            state_idx_write = int(state_indices[s_idx])
 
         row_out = jnp.zeros_like(x[0], dtype=jnp.float32)
         window_vals = []
@@ -72,7 +63,7 @@ def reference_causal_conv1d(
             if idx < seq_start:
                 state_offset = idx - (seq_start - kernel_size + 1)
                 if has_init:
-                    val = conv_state[state_idx_read, state_offset]
+                    val = conv_state[state_idx, state_offset]
                 else:
                     val = jnp.zeros_like(x[0])
             else:
@@ -87,9 +78,9 @@ def reference_causal_conv1d(
 
         out_list.append(row_out.astype(x.dtype))
 
-        # Update the state at every token step to build the history
-        update = jnp.stack(window_vals[1:], axis=0)
-        new_conv_state = new_conv_state.at[state_idx_write].set(update)
+        if row == int(query_start_loc[s_idx + 1]) - 1:
+            update = jnp.stack(window_vals[1:], axis=0)
+            new_conv_state = new_conv_state.at[state_idx].set(update)
 
     out = jnp.stack(out_list, axis=0)
     return out, new_conv_state

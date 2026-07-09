@@ -147,28 +147,6 @@ def ragged_gated_delta_rule_wrapper(
     is_decode_only = distribution[0] == distribution[2]
 
     def decode_only_branch(_):
-        # For speculative decoding (2D state_indices), we force-route to the reference
-        # recurrent JAX implementation. While the chunked JAX kernel supports 2D indices,
-        # the fused decode kernel does not yet support reading from and writing to separate
-        # history slots, so we uniformly fallback here.
-        if state_indices.ndim == 2:
-            return ref_recurrent_impl(
-                mixed_qkv,
-                b,
-                a,
-                recurrent_state,
-                A_log,
-                dt_bias,
-                query_start_loc,
-                state_indices,
-                distribution,
-                has_initial_state,
-                n_kq=n_kq,
-                n_v=n_v,
-                d_k=d_k,
-                d_v=d_v,
-            )
-
         num_tokens = mixed_qkv.shape[0]
         pad_size = max(0, num_tokens - state_indices.shape[0])
         padded_state_indices = jnp.pad(state_indices, (0, pad_size),
@@ -230,31 +208,6 @@ def ragged_gated_delta_rule_wrapper(
             raise ValueError(f'Unknown decode_impl: {impl}')
 
     def mixed_prefill_branch(_):
-        # Speculative decoding requires writing the intermediate Mamba state history
-        # for every token step. Parallel chunked implementations (like chunked JAX or
-        # Pallas chunked scan) do not materialize these intermediate states for every
-        # token because doing so would defeat the parallelization.
-        # Therefore, when state_indices is 2D (indicating speculative decoding verification), we
-        # force-route the execution to the reference recurrent JAX implementation, which
-        # runs token-by-token and has been updated to build the state history.
-        if state_indices.ndim == 2:
-            return ref_recurrent_impl(
-                mixed_qkv=mixed_qkv,
-                b=b,
-                a=a,
-                recurrent_state=recurrent_state,
-                A_log=A_log,
-                dt_bias=dt_bias,
-                query_start_loc=query_start_loc,
-                state_indices=state_indices,
-                distribution=distribution,
-                has_initial_state=has_initial_state,
-                n_kq=n_kq,
-                n_v=n_v,
-                d_k=d_k,
-                d_v=d_v,
-            )
-
         impl = config.prefill_impl
         if impl == 'jax':
             qkv_in = jax.nn.silu(mixed_qkv)

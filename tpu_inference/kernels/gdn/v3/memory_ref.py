@@ -77,6 +77,8 @@ class MetadataRef:
     p_id_is_last_tile: SmemWrapper
     s_idx_has_initial_state: Any
     s_idx_to_state_indices: Any
+    s_idx_to_read_state_indices: Any
+    s_idx_to_write_state_indices: Any
 
     @classmethod
     def create(
@@ -90,7 +92,13 @@ class MetadataRef:
         p_id_is_last_tile: jax.Array,
         s_idx_has_initial_state: jax.Array,
         s_idx_to_state_indices: jax.Array,
+        s_idx_to_read_state_indices: jax.Array | None = None,
+        s_idx_to_write_state_indices: jax.Array | None = None,
     ):
+        if s_idx_to_read_state_indices is None:
+            s_idx_to_read_state_indices = s_idx_to_state_indices
+        if s_idx_to_write_state_indices is None:
+            s_idx_to_write_state_indices = s_idx_to_state_indices
         # NOTE: First dim does not matter when it comes to calculating stride.
         shape = (1, cfgs.seq_tile_size)
         return cls(
@@ -102,6 +110,8 @@ class MetadataRef:
             p_id_is_last_tile=SmemWrapper(p_id_is_last_tile, shape),
             s_idx_has_initial_state=s_idx_has_initial_state,
             s_idx_to_state_indices=s_idx_to_state_indices,
+            s_idx_to_read_state_indices=s_idx_to_read_state_indices,
+            s_idx_to_write_state_indices=s_idx_to_write_state_indices,
         )
 
     def __len__(self) -> int:
@@ -242,7 +252,7 @@ class StateBufferedRef(BaseBufferedRef):
 
             is_first_tile = self.metadata_ref.p_id_is_first_tile[p_id, idx]
             s_idx = self.metadata_ref.p_id_to_s_idx[p_id, idx]
-            state_idx = self.metadata_ref.s_idx_to_state_indices[s_idx]
+            state_idx = self.metadata_ref.s_idx_to_read_state_indices[s_idx]
             has_initial_state = self.metadata_ref.s_idx_has_initial_state[
                 s_idx]
             should_read = jnp.logical_and(is_first_tile, has_initial_state)
@@ -288,7 +298,7 @@ class StateBufferedRef(BaseBufferedRef):
         for idx in range(self.cfg.seq_tile_size):
             is_last_tile = self.metadata_ref.p_id_is_last_tile[p_id, idx]
             s_idx = self.metadata_ref.p_id_to_s_idx[p_id, idx]
-            state_idx = self.metadata_ref.s_idx_to_state_indices[s_idx]
+            state_idx = self.metadata_ref.s_idx_to_write_state_indices[s_idx]
             dma_size = jnp.where(is_last_tile, 1, 0)
 
             pltpu.make_async_copy(

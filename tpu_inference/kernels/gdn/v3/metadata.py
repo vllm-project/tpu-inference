@@ -39,6 +39,13 @@ def compute_batched_seq_metadata(
     has_initial_state = (seq_lens - query_lens) > 0
     all_valid_seqs = jnp.where(is_valid_seqs, all_seqs, 0)
 
+    if state_indices.ndim == 2:
+        read_state_indices = state_indices[:, 0]
+        write_state_indices = state_indices[:, 1]
+    else:
+        read_state_indices = state_indices
+        write_state_indices = state_indices
+
     return memory_ref.MetadataRef.create(
         cfgs=cfg,
         num_tiles=pl.cdiv(end_seq, cfg.tile_size),
@@ -49,6 +56,8 @@ def compute_batched_seq_metadata(
         p_id_is_last_tile=is_valid_seqs,
         s_idx_has_initial_state=has_initial_state,
         s_idx_to_state_indices=state_indices,
+        s_idx_to_read_state_indices=read_state_indices,
+        s_idx_to_write_state_indices=write_state_indices,
     )
 
 
@@ -70,7 +79,13 @@ def compute_per_seq_metadata(
     # Shift to ensure first element is for start_seq.
     query_start_loc = jnp.roll(query_start_loc, shift=-start_seq)
     seq_lens = jnp.roll(seq_lens, shift=-start_seq)
-    state_indices = jnp.roll(state_indices, shift=-start_seq)
+    state_indices = jnp.roll(state_indices, shift=-start_seq, axis=0)
+    if state_indices.ndim == 2:
+        read_state_indices = state_indices[:, 0]
+        write_state_indices = state_indices[:, 1]
+    else:
+        read_state_indices = state_indices
+        write_state_indices = state_indices
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     # NOTE: query_lens is used for calculating num_tiles. Defensive programming
@@ -133,4 +148,6 @@ def compute_per_seq_metadata(
         p_id_is_last_tile=p_id_is_last_tile,
         s_idx_has_initial_state=has_initial_state,
         s_idx_to_state_indices=state_indices,
+        s_idx_to_read_state_indices=read_state_indices,
+        s_idx_to_write_state_indices=write_state_indices,
     )

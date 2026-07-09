@@ -348,13 +348,17 @@ def fused_conv1d_gdn(
     conv_state = conv_state.astype(jnp.float32)
 
     # Step 1: Validate inputs.
-    num_seqs = state_indices.size
+    num_seqs = state_indices.shape[0]
     batch_size, dim = qkv.shape
     assert conv_weight.shape == (dim, 1, kernel_size)
     if conv_bias is not None:
         assert conv_bias.shape == (dim, )
     assert query_start_loc.shape == (num_seqs + 1, )
-    assert state_indices.shape == (num_seqs, )
+    assert state_indices.ndim in (1, 2)
+    if state_indices.ndim == 1:
+        assert state_indices.shape == (num_seqs, )
+    else:
+        assert state_indices.shape[0] == num_seqs
     assert distribution.shape == (3, )
     act_in_dtype = qkv.dtype
     assert a.dtype == b.dtype == qkv.dtype == act_in_dtype

@@ -54,9 +54,6 @@ class MetadataRef:
     b_idx_should_write: Any
     s_idx_to_state_idx: Any
     s_idx_has_initial_state: Any
-    b_idx_to_token_step: Any
-    read_state_indices: Any
-    write_state_indices: Any
 
     def __len__(self) -> int:
         return len(dataclasses.fields(self))
@@ -147,7 +144,8 @@ class ConvStateBuffer(BufferWrapper):
 
         for idx in range(self.cfgs.tile_size):
             b_idx = b_start + idx
-            state_idx = self.metadata_ref.read_state_indices[b_idx]
+            s_idx = self.metadata_ref.b_idx_to_s_idx[b_idx]
+            state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx]
             sz_from_old = self.metadata_ref.b_idx_to_sz_from_old[b_idx]
             start_from_old = self.cfgs.prev_kernel_size - sz_from_old
             sz_from_old = jnp.where(is_no_op, 0, sz_from_old)
@@ -174,7 +172,8 @@ class ConvStateBuffer(BufferWrapper):
     def copy_out(self, b_start, slot, sem):
         for idx in range(self.cfgs.tile_size):
             b_idx = b_start + idx
-            state_idx = self.metadata_ref.write_state_indices[b_idx]
+            s_idx = self.metadata_ref.b_idx_to_s_idx[b_idx]
+            state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx]
             should_write = self.metadata_ref.b_idx_should_write[b_idx]
 
             pltpu.make_async_copy(
@@ -389,7 +388,7 @@ def preprocess_metadata(
     # NOTE: Following sequence of execution are the same for all layers. Compiler
     # may decide to perform CSE to remove redundant computations.
 
-    max_seqs = state_indices.shape[0]
+    max_seqs = state_indices.size
 
     # Mask out padded locations.
     num_tokens = query_start_loc[num_seqs]
@@ -414,67 +413,9 @@ def preprocess_metadata(
     b_idx_to_sz_from_old = jnp.minimum(b_idx_to_sz_from_old,
                                        cfgs.prev_kernel_size)
 
-    # Determine if we should write the intermediate state history (Slot 1..num_spec+1) per token.
-    # We only write history when state_indices is 2D, the request already has computed prior
-    # context (has_initial_state is True), and the query length is <= num_spec + 1 (speculative verification).
-    if state_indices.ndim == 2:
-        num_spec = state_indices.shape[1] - 2
-        req_has_initial_state = has_initial_state[b_idx_to_s_idx]
-        write_history = req_has_initial_state & (query_lens[b_idx_to_s_idx]
-                                                 <= num_spec + 1)
-    else:
-        write_history = False
-
-    # Determine which row needs to write its conv_state to HBM using tracer-safe jnp.where.
-    last_token_idx = b_idx_query_start_loc + query_lens[b_idx_to_s_idx] - 1
-    if state_indices.ndim == 2:
-        # is_last_token: True only for the final token in the prompt (index T-1).
-        is_last_token = (all_b_idx == last_token_idx)
-        # is_second_to_last_token: True only for the token right before the last one (index T-2).
-        is_second_to_last_token = (all_b_idx == last_token_idx - 1)
-        # has_multiple_tokens: True if the prompt has more than 1 token.
-        has_multiple_tokens = (query_lens[b_idx_to_s_idx] > 1)
-
-        # During prompt prefill, write both the last and second-to-last tokens.
-        should_write_prefill = is_last_token | (has_multiple_tokens
-                                                & is_second_to_last_token)
-        b_idx_should_write = jnp.where(
-            write_history,
-            all_b_idx < num_tokens,  # Speculative: write all valid tokens
-            should_write_prefill,  # Prefill: write historical anchors
-        )
-    else:
-        b_idx_should_write = (all_b_idx == last_token_idx)
+    # Determine which row needs to write its conv_state to HBM.
+    b_idx_should_write = all_b_idx == (query_start_loc[b_idx_to_s_idx + 1] - 1)
     b_idx_should_write = b_idx_should_write.astype(jnp.int32)
-
-    # Compute 1D slot index arrays for read and write.
-    if state_indices.ndim == 2:
-        # All tokens load their initial state from Slot 0 (either prompt initial state or rollback initial state)
-        read_state_indices = state_indices[b_idx_to_s_idx, 0]
-
-        # Determine the target write slot for prompt prefill:
-        # - The last token writes to Slot 1.
-        # - The second-to-last token writes to Slot 0.
-        # - Other tokens default to Slot 0 (but are masked out by b_idx_should_write).
-        write_slot_prefill = jnp.where(
-            is_last_token,
-            state_indices[b_idx_to_s_idx, 1],  # Slot 1 (after last token)
-            state_indices[b_idx_to_s_idx, 0],  # Slot 0 (before last token)
-        )
-
-        token_step_idx = all_b_idx - b_idx_query_start_loc
-        write_state_indices = jnp.where(
-            write_history,
-            state_indices[b_idx_to_s_idx, token_step_idx + 1],
-            write_slot_prefill,
-        )
-    else:
-        read_state_indices = state_indices[b_idx_to_s_idx]
-        write_state_indices = state_indices[b_idx_to_s_idx]
-
-    # Compute the 0-based token step index within each request's speculative window.
-    # This maps 1-to-1 with the token index in the request.
-    b_idx_to_token_step = b_idx_query_len - 1
 
     return MetadataRef(
         num_tiles=pl.cdiv(num_tokens, cfgs.tile_size),
@@ -483,9 +424,6 @@ def preprocess_metadata(
         b_idx_should_write=b_idx_should_write,
         s_idx_to_state_idx=state_indices,
         s_idx_has_initial_state=has_initial_state,
-        b_idx_to_token_step=b_idx_to_token_step,
-        read_state_indices=read_state_indices,
-        write_state_indices=write_state_indices,
     )
 
 
@@ -527,22 +465,13 @@ def ragged_causal_conv1d(
     """
 
     # Step 1: Validate inputs.
-    num_seqs = state_indices.shape[0]
+    num_seqs = state_indices.size
     batch_size, dim = x.shape
     assert conv_weight.shape == (dim, 1, kernel_size)
     if conv_bias is not None:
         assert conv_bias.shape == (dim, )
     assert query_start_loc.shape == (num_seqs + 1, )
-    # state_indices can be 1D (normal decoding, shape (num_seqs,)) or 2D (speculative
-    # decoding, shape (num_seqs, num_spec + 1)).
-    assert state_indices.ndim in (1, 2)
-    if state_indices.ndim == 1:
-        assert state_indices.shape == (num_seqs, )
-    else:
-        # In speculative decoding, the first dimension represents the requests, and
-        # the second dimension represents the history slots (which must be >= 2).
-        assert state_indices.shape[0] == num_seqs
-        assert state_indices.shape[1] >= 2
+    assert state_indices.shape == (num_seqs, )
     assert distribution.shape == (3, )
 
     # Step 2: Input pre-processing.

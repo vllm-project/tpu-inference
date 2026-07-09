@@ -178,28 +178,14 @@ def ragged_gated_delta_rule(
     # which now holds zeros for new prefills regardless of what stale data
     # the slot may have held from a previous request. Mirrors GPU's
     # `initial_state[~has_initial_state, ...] = 0`.
-    # For 2D state_indices (speculative decoding), the initial state for this step
-    # is always stored in Slot 0 (which was copied from the last accepted slot of the
-    # previous step by the runner). Thus, we only need to mask/initialize Slot 0.
-    if state_indices.ndim == 2:
-        initial_state_indices = state_indices[:, 0]
-    else:
-        initial_state_indices = state_indices
-
-    gathered_states = recurrent_state[initial_state_indices]
+    gathered_states = recurrent_state[state_indices]
     masked_initial_states = jnp.where(
         has_initial_state[:, None, None, None],
         gathered_states,
         jnp.zeros_like(gathered_states),
     )
-    recurrent_state = recurrent_state.at[initial_state_indices].set(
+    recurrent_state = recurrent_state.at[state_indices].set(
         masked_initial_states)
-
-    num_spec = state_indices.shape[1] - 2 if state_indices.ndim == 2 else 0
-
-    # Compute the 0-based token index (step) within each request's speculative window.
-    # This is used to index into the 2D state_indices history buffer.
-    token_step_idx = token_idx - effective_query_start_loc[req_indices]
 
     def scan_fn(carry, xs):
         recurrent_state_all = carry
@@ -211,7 +197,6 @@ def ragged_gated_delta_rule(
             curr_a,
             request_index,
             is_valid_token,
-            token_step,
         ) = xs
 
         curr_q = curr_q[None, None, :]
@@ -220,58 +205,8 @@ def ragged_gated_delta_rule(
         curr_b = curr_b[None, None, :]
         curr_a = curr_a[None, None, :]
 
-        # In speculative decoding (2D state_indices), we implement a sequential recurrence:
-        # - If write_history is True: Token at step `i` reads from Slot `i`, writes to Slot `i + 1`.
-        # - If write_history is False (prompt prefill): We carefully route intermediate states
-        #   through Slot 2 (scratch) while ensuring the final token's state lands in Slot 1.
-        # For normal decoding (1D state_indices), we read and write to the same single slot
-        if state_indices.ndim == 2:
-            # Speculative verification step: reads Slot token_step, writes Slot token_step + 1
-            read_slot_verify = token_step
-            write_slot_verify = token_step + 1
-
-            # Prompt prefill step:
-            # - The last token (T-1) writes its state to Slot 1.
-            # - The second-to-last token (T-2) writes its state to Slot 0.
-            # - Other intermediate tokens write to Slot 2 (scratch).
-            # - Token 0 reads initial state from Slot 0.
-            # - Token T-1 reads Token T-2's state from Slot 0.
-            # - Other tokens read from Slot 2.
-            query_lens = query_start_loc[1:] - query_start_loc[:-1]
-            req_len = query_lens[request_index]
-            last_step = req_len - 1
-
-            # is_first_step: True only for the very first token in the prompt (index 0).
-            is_first_step = (token_step == 0)
-            # is_last_step: True only for the final token in the prompt (index T-1).
-            is_last_step = (token_step == last_step)
-            # is_second_to_last_step: True only for the token right before the last one (index T-2).
-            is_second_to_last_step = (token_step == last_step - 1)
-
-            # Token 0 and Token T-1 read from Slot 0; others read from Slot 2.
-            read_slot_prefill = jnp.where(is_first_step | is_last_step, 0, 2)
-
-            # Token T-1 writes to Slot 1; Token T-2 writes to Slot 0; others write to Slot 2.
-            write_slot_prefill = jnp.where(
-                is_last_step, 1, jnp.where(is_second_to_last_step, 0, 2))
-
-            # Select slot based on write_history (which is a dynamic tracer per request)
-            req_has_initial_state = has_initial_state[request_index]
-            req_write_history = req_has_initial_state & (req_len
-                                                         <= num_spec + 1)
-
-            read_slot = jnp.where(req_write_history, read_slot_verify,
-                                  read_slot_prefill)
-            write_slot = jnp.where(req_write_history, write_slot_verify,
-                                   write_slot_prefill)
-
-            read_state_index = state_indices[request_index, read_slot]
-            write_state_index = state_indices[request_index, write_slot]
-        else:
-            read_state_index = state_indices[request_index]
-            write_state_index = state_indices[request_index]
-
-        recurrent_state = recurrent_state_all[read_state_index][None, ...]
+        state_index = state_indices[request_index]
+        recurrent_state = recurrent_state_all[state_index][None, ...]
 
         B, T = 1, 1
         query_reshaped = curr_q.reshape(B, T, n_kq, d_k)
@@ -316,7 +251,7 @@ def ragged_gated_delta_rule(
 
         recurrent_state_all = jnp.where(
             is_valid_token,
-            recurrent_state_all.at[write_state_index].set(
+            recurrent_state_all.at[state_index].set(
                 new_recurrent_state[0].astype(recurrent_state_all.dtype)),
             recurrent_state_all,
         )
@@ -324,7 +259,7 @@ def ragged_gated_delta_rule(
         return recurrent_state_all, output[0, 0]
 
     carry_init = recurrent_state
-    xs = (query, key, value, b, a, req_indices, valid_mask, token_step_idx)
+    xs = (query, key, value, b, a, req_indices, valid_mask)
 
     new_recurrent_state, output = jax.lax.scan(scan_fn, carry_init, xs)
     return new_recurrent_state, output
