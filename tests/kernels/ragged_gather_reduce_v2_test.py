@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 import itertools
 import time
 
@@ -24,7 +23,6 @@ from jax._src import test_util as jtu
 
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
     ragged_gather_reduce as ragged_gather_reduce_v2
-from tpu_inference.kernels.sparse_core.ragged_scatter import ragged_scatter
 
 jax.config.parse_flags_with_absl()
 
@@ -41,27 +39,6 @@ def reference_ragged_gather_reduce(
     out = jnp.where(valid_rows_mask[:, None], out, 0)
     out = out.reshape(-1, reduce_group_size, out.shape[-1])
     out = jnp.sum(out, axis=1).astype(jnp.bfloat16)
-    return out
-
-
-@functools.partial(jax.jit, static_argnames="reduce_group_size")
-def ragged_scatter_and_reduce(
-    x: jax.Array,
-    indices: jax.Array,
-    topk_weights: jax.Array,
-    valid_rows_mask: jax.Array,
-    start: jax.Array,
-    end: jax.Array,
-    reduce_group_size: int,
-) -> jax.Array:
-    """Reference implementation of ragged gather reduce."""
-    x = ragged_scatter(x, indices, start, end)
-    out = x.reshape((-1, reduce_group_size, x.shape[-1]))
-    topk_weights = topk_weights.reshape((-1, reduce_group_size))[..., None]
-    out = out * topk_weights
-    out = jnp.where(
-        valid_rows_mask.reshape((-1, reduce_group_size))[:, :, None], out, 0.0)
-    out = out.sum(axis=-2)
     return out
 
 
@@ -226,18 +203,6 @@ class ScatterTest(jtu.JaxTestCase):
                 print(f"{name}: {t_val*1000:.3f} ms")
             except Exception as e:  # pylint: disable=broad-except
                 print(f"{name} failed: {e}")
-
-        run_and_time(
-            "ragged_scatter_and_reduce",
-            ragged_scatter_and_reduce,
-            x,
-            indices,
-            topk_weights,
-            valid_rows_mask,
-            start,
-            end,
-            reduce_group_size,
-        )
 
         run_and_time(
             "ragged_gather_reduce_v2",
