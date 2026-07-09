@@ -27,8 +27,8 @@ from jax.sharding import NamedSharding, PartitionSpec
 import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
-from tpu_inference.layers.common.attention_metadata import (AttentionMetadata,
-                                                           SharedAttentionMetadata)
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)

@@ -46,7 +46,8 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import \
 from tpu_inference import envs
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
-from tpu_inference.layers.common.attention_metadata import (AttentionMetadata, SharedAttentionMetadata)
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
@@ -377,10 +378,9 @@ class VllmModelWrapper:
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index,
                     vllm_config=self.vllm_config,
                     shared_attn_metadata=shared_attn_metadata
-            ), set_forward_context(
-                        attn_metadata=attn_metadata,
-                        vllm_config=self.vllm_config,
-                        num_tokens=num_tokens):
+            ), set_forward_context(attn_metadata=attn_metadata,
+                                   vllm_config=self.vllm_config,
+                                   num_tokens=num_tokens):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
                 original_lora_metadata = replace_lora_metadata(

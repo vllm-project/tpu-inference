@@ -34,7 +34,8 @@ from tpu_inference.kernels.flash_attention.kernel import (
 from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
-from tpu_inference.layers.common.attention_metadata import (AttentionMetadata, SharedAttentionMetadata)
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore, get_mesh_shape_product

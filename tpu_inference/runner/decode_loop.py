@@ -20,7 +20,8 @@ import jax
 import jax.numpy as jnp
 from vllm.v1.outputs import LogprobsTensors
 
-from tpu_inference.layers.common.attention_metadata import (AttentionMetadata, SharedAttentionMetadata)
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 
 
 @functools.partial(

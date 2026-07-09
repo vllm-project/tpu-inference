@@ -20,10 +20,8 @@ import jax
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
-from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata,
-    SharedAttentionMetadata,
-)
+from tpu_inference.layers.common.attention_metadata import \
+    SharedAttentionMetadata
 
 
 @dataclass
