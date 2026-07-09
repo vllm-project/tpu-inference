@@ -187,28 +187,45 @@ cleanup() {
   local exit_code=$?
   echo "🧹 Cleaning up containers on all hosts..."
   
-  # 1. Capture server logs first (in parallel)
-  echo "   -> Capturing server logs..."
-  (timeout 3 docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true) &
+  # 1. Capture server and Ray logs first (in parallel)
+  echo "   -> Capturing server and Ray logs..."
+  (
+    timeout 3 docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
+    timeout 5 docker cp node:/tmp/ray/session_latest/logs "$LOG_DIR/prefill_ray_logs" >/dev/null 2>&1 || true
+  ) &
   
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
     (
       ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "timeout 3 docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" && \
       timeout 5 scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1
     ) &
+    (
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "timeout 5 docker cp node:/tmp/ray/session_latest/logs /tmp/decode_ray_logs >/dev/null 2>&1 || true" && \
+      timeout 10 scp -r "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/decode_ray_logs" "$LOG_DIR/decode_ray_logs" >/dev/null 2>&1
+    ) &
   fi
   wait # wait for logs to be captured
   
-  # 2. Dump logs on failure IMMEDIATELY
-  if [ $exit_code -ne 0 ]; then
-    echo "--- 🚨 Script failed or timed out (Exit Code: $exit_code). Dumping logs..."
-    for log_file in "prefill.txt" "decode.txt" "proxy.txt" "correctness.txt" "benchmark.txt"; do
-      if [ -f "$LOG_DIR/$log_file" ] && [ -s "$LOG_DIR/$log_file" ]; then
-        echo "+++ 📄 Log: $log_file"
-        cat "$LOG_DIR/$log_file"
-      fi
-    done
-  fi
+  # 2. Dump logs
+  echo "--- 🚨 Dumping logs..."
+  for log_file in "prefill.txt" "decode.txt" "proxy.txt" "correctness.txt" "benchmark.txt"; do
+    if [ -f "$LOG_DIR/$log_file" ] && [ -s "$LOG_DIR/$log_file" ]; then
+      echo "+++ 📄 Log: $log_file"
+      cat "$LOG_DIR/$log_file"
+    fi
+  done
+
+  # Dump Ray logs
+  for ray_log_dir in "prefill_ray_logs" "decode_ray_logs"; do
+    if [ -d "$LOG_DIR/$ray_log_dir" ]; then
+      echo "--- 🚨 Dumping Ray logs from $ray_log_dir..."
+      # Dump all files in the ray log directory
+      find "$LOG_DIR/$ray_log_dir" -type f | while read -r file; do
+        echo "+++ 📄 Ray Log: ${file#$LOG_DIR/}"
+        cat "$file"
+      done
+    fi
+  done
 
   # 3. Cleanup containers (in parallel, backgrounded)
   echo "   -> Stopping and removing containers..."
@@ -238,7 +255,7 @@ wait_for_server_remote() {
   local host=$1
   local port=$2
   local service_name=$3
-  local timeout=${4:-7200}
+  local timeout=${4:-3600}
 
   echo "Waiting for $service_name on ${host}:${port} to become healthy (Timeout: ${timeout}s)..."
 
@@ -453,8 +470,8 @@ echo "--- Executing start_decode.sh on Decode Head Node (${DECODE_HEAD_IP})..."
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "bash ~/tpu-inference/scripts/start_decode.sh"
 
 # Wait for healthiness
-wait_for_server_remote "localhost" "$PREFILL_VLLM_PORT" "vLLM Prefill" 7200
-wait_for_server_remote "$DECODE_HEAD_IP" "$DECODE_VLLM_PORT" "vLLM Decode" 7200
+wait_for_server_remote "localhost" "$PREFILL_VLLM_PORT" "vLLM Prefill" 3600
+wait_for_server_remote "$DECODE_HEAD_IP" "$DECODE_VLLM_PORT" "vLLM Decode" 3600
 
 # -----------------------------------------------------------------
 # 4. Start Proxy & Run Tests
