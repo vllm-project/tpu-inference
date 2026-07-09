@@ -17,10 +17,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import torch
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from transformers import AutoModelForCausalLM
 from vllm.config import ModelConfig, set_current_vllm_config
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
@@ -43,10 +41,16 @@ class MockVllmConfig:
         self.model_config.dtype = jnp.bfloat16
         self.load_config = MagicMock()
         self.load_config.download_dir = None
-        self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
+        # block_size must be a real int: apply_qwix_quantization builds
+        # kv caches from cache_config.block_size for its dummy forward pass.
+        self.cache_config = MagicMock(cache_dtype=kv_cache_dtype,
+                                      block_size=32)
         self.quant_config = None
         self.additional_config = {}
         self.parallel_config = None
+        # apply_qwix_quantization reads sharding_config.total_dp_size when
+        # building the dummy inputs for the quantization forward pass.
+        self.sharding_config = MagicMock(total_dp_size=1)
 
 
 @pytest.fixture(scope="module")
@@ -110,18 +114,24 @@ def mock_get_pp_group():
 
 class TestQwen3ForCausalLM:
 
+    QWIX_FP8_RULES = [{
+        "module_path": ".*",
+        "weight_qtype": "float8_e4m3fn",
+        "act_qtype": "float8_e4m3fn"
+    }]
+
     @pytest.mark.parametrize("model_name", ["Qwen/Qwen3-0.6B"])
     @pytest.mark.parametrize("kv_cache_type", ["auto", "fp8"])
-    @pytest.mark.parametrize("qwix_rules", [
-        None,
-        [{
-            "module_path": ".*",
-            "weight_qtype": "float8_e4m3fn",
-            "act_qtype": "float8_e4m3fn"
-        }]
+    # qwix quantization is orthogonal to pipeline parallelism, so it is
+    # exercised only on the single-stage config instead of the full PP
+    # matrix to keep the test time bounded.
+    @pytest.mark.parametrize("qwix_rules,pp_rank,pp_world_size", [
+        (None, 0, 1),
+        (None, 0, 4),
+        (None, 1, 4),
+        (None, 3, 4),
+        (QWIX_FP8_RULES, 0, 1),
     ])
-    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
-                                                       (3, 4)])
     def test_qwen3_600M(self, model_name, kv_cache_type, qwix_rules, rng, mesh,
                         mock_model_inputs, pp_rank, pp_world_size):
         """Tests model init and model forward for the 0.6B model variant."""
@@ -134,7 +144,7 @@ class TestQwen3ForCausalLM:
         )
         mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
         if qwix_rules:
-            mock_vllm_config.additional_config["quanntization"] = dict(
+            mock_vllm_config.additional_config["quantization"] = dict(
                 qwix=dict(rules=qwix_rules))
 
         # Test model init
@@ -328,32 +338,8 @@ class TestQwen3ForCausalLM:
                 ),
             )
         assert jax_output is not None
-
-        # TODO(#1604): Enable HF comparison when issue resolved.
-        # Currently there's a shape mismatch during rope.
-        if True:
-            return
-        with torch.no_grad():
-            # Use transformer library to load the HF model, for reference.
-
-            input_tensor_hf = torch.tensor(input, dtype=torch.bfloat16)
-            hf_model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                torch_dtype='auto',
-                low_cpu_mem_usage=True,
-            )
-            hf_model = hf_model.eval()
-
-            hf_model.config.num_hidden_layers = 1
-            hf_output = hf_model(
-                inputs_embeds=input_tensor_hf, ).float().numpy()
-            np.testing.assert_allclose(
-                jax_output,
-                hf_output,
-                rtol=1e-2,
-                atol=1e-2,
-            )
+        # TODO(#1604): Compare jax_output against the HF reference model once
+        # the rope shape mismatch is resolved.
 
     def test_vocab_padding_for_sharding(self, rng, mesh):
         """Verify that embed_tokens shape is rounded up when tensor_parallel_size > 1."""
