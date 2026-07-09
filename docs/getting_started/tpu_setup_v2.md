@@ -15,26 +15,26 @@ The following TPU versions are compatible with `tpu-inference`. Selecting a topo
 
 <div class="grid cards" markdown>
 
--   __TPU v7x (Ironwood)__
-    <span class="cg-badge cg-badge-recommended">Recommended</span>
-    
-    Next-generation architecture for bleeding-edge research and ultra-large model training.
-    
-    [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/tpu7x)
+- __TPU v7x (Ironwood)__
+  <span class="cg-badge cg-badge-recommended">Recommended</span>
+  
+  Next-generation architecture for bleeding-edge research and ultra-large model training.
+  
+  [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/tpu7x)
 
--   __TPU v6e (Trillium)__
-    <span class="cg-badge cg-badge-recommended">Recommended</span>
-    
-    Optimal performance for mainstream AI workloads with balanced memory and compute.
-    
-    [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v6e#configurations)
+- __TPU v6e (Trillium)__
+  <span class="cg-badge cg-badge-recommended">Recommended</span>
+  
+  Optimal performance for mainstream AI workloads with balanced memory and compute.
+  
+  [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v6e#configurations)
 
--   __TPU v5e__
-    <span class="cg-badge cg-badge-recommended">Recommended</span>
-    
-    Cost-effective performance for medium-to-large scale inference and training.
-    
-    [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v5e#tpu-v5e-config)
+- __TPU v5e__
+  <span class="cg-badge cg-badge-recommended">Recommended</span>
+  
+  Cost-effective performance for medium-to-large scale inference and training.
+  
+  [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v5e#tpu-v5e-config)
 
 </div>
 
@@ -42,26 +42,26 @@ The following TPU versions are compatible with `tpu-inference`. Selecting a topo
 
 <div class="grid cards" markdown>
 
--   __TPU v5p__
-    <span class="cg-badge cg-badge-experimental">Experimental</span>
-    
-    High-performance architecture optimized for peak compute and memory bandwidth.
-    
-    [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v5p#tpu-v5p-config)
+- __TPU v5p__
+  <span class="cg-badge cg-badge-experimental">Experimental</span>
+  
+  High-performance architecture optimized for peak compute and memory bandwidth.
+  
+  [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v5p#tpu-v5p-config)
 
--   __TPU v4__
-    <span class="cg-badge cg-badge-experimental">Experimental</span>
-    
-    Previous generation flagship architecture for large-scale training.
-    
-    [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v4#tpu-v4-config)
+- __TPU v4__
+  <span class="cg-badge cg-badge-experimental">Experimental</span>
+  
+  Previous generation flagship architecture for large-scale training.
+  
+  [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v4#tpu-v4-config)
 
--   __TPU v3__
-    <span class="cg-badge cg-badge-experimental">Experimental</span>
-    
-    Legacy architecture suitable for smaller scale experimentation.
-    
-    [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v3)
+- __TPU v3__
+  <span class="cg-badge cg-badge-experimental">Experimental</span>
+  
+  Legacy architecture suitable for smaller scale experimentation.
+  
+  [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v3)
 
 </div>
 
