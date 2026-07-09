@@ -56,14 +56,16 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  use_mla: bool = False):
     """Gets the KV cache shape based on the mesh configuration.
 
-    This function scales block_size by the CONTEXT (DCP) axis and num_heads by duplicate kv heads.
-
+    Scales block_size by the context-parallel axes (KV_CONTEXT = pcp*dcp) and
+    num_heads by duplicate kv heads. The page_size dim is sharded on KV_CONTEXT,
+    so a physical block holds `block_size * cp` tokens (each cp rank owns
+    `block_size`). block_size here is the RAW (pre-parallelization) size,
+    matching vLLM's kv-cache coordinator.
     """
 
-    model_cnt = utils.get_mesh_shape_product(mesh,
-                                             ShardingAxisName.KV_HEAD)
-
-    context_cnt = utils.get_mesh_shape_product(mesh, ShardingAxisName.CONTEXT)
+    model_cnt = utils.get_mesh_shape_product(mesh, ShardingAxisName.KV_HEAD)
+    context_cnt = utils.get_mesh_shape_product(mesh,
+                                               ShardingAxisName.KV_CONTEXT)
     physical_block_size = block_size * context_cnt
 
     # NOTE(chengjiyao): Currently, the attention kernel is tailored to the

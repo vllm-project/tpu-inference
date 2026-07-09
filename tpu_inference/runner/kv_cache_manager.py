@@ -442,8 +442,13 @@ class KVCacheManager:
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully
 
-        # NOTE(weiyu0824): Pass raw block_size (size before any parallelization).
-        # vLLM applies dcp_size scaling internally; pre-multiplying block size causes a dcp_size miscalculation.
+        # NOTE(weiyu0824): pass the RAW (pre-parallelization) block_size. vLLM's
+        # KV cache coordinator scales it internally by dcp_world_size AND
+        # pcp_world_size; pre-multiplying here would double-scale and mis-index
+        # the block table into the context-strided cache (works offline,
+        # corrupts under serve). The physical scaling (block_size * KV_CONTEXT)
+        # happens once, in get_kv_cache_shape_with_mesh and
+        # maybe_reinitialize_input_batch.
         block_size = self.runner.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
 
@@ -673,12 +678,13 @@ class KVCacheManager:
 
     def maybe_reinitialize_input_batch(self,
                                        kv_cache_config: KVCacheConfig) -> None:
-        # kv_cache_spec.block_size is the raw block size.
-        # The block table must use the physical size: one page covers block_size * dcp_size
-        # tokens globally.
-        # Read dcp_size from the mesh (CONTEXT axis) to stay consistent with get_kv_cache_shape_with_mesh.
+        # kv_cache_spec.block_size is the RAW block size; the runner's block
+        # table must use the PHYSICAL size (one page covers block_size * cp
+        # tokens globally), scaled by KV_CONTEXT = pcp*dcp (read from the mesh)
+        # to stay consistent with get_kv_cache_shape_with_mesh and vLLM's
+        # coordinator.
         context_cnt = utils.get_mesh_shape_product(self.runner.mesh,
-                                                   ShardingAxisName.CONTEXT)
+                                                   ShardingAxisName.KV_CONTEXT)
         block_sizes = [
             kv_cache_group.kv_cache_spec.block_size * context_cnt
             for kv_cache_group in kv_cache_config.kv_cache_groups
