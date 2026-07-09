@@ -254,6 +254,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable new experimental model design
     "NEW_MODEL_DESIGN":
     env_bool("NEW_MODEL_DESIGN", default=False),
+    # Chunk the (Qwen3-VL) vision encoder over video frames to bound peak VMEM:
+    # encode at most this many frames per vision forward, then concatenate the
+    # per-chunk outputs. 0 disables (encode the whole video in one batch).
+    # Qwen3-VL vision attention is segmented per frame with spatial-only
+    # position embeddings, so chunking is bit-exact lossless (deepstack
+    # preserved); it auto-disables when EVS video-token pruning is on.
+    "MM_ENCODER_FRAME_CHUNK":
+    lambda: int(os.getenv("MM_ENCODER_FRAME_CHUNK") or "0"),
     # Directory to store phased profiling output
     "PHASED_PROFILING_DIR":
     lambda: os.getenv("PHASED_PROFILING_DIR", ""),
