@@ -44,13 +44,6 @@ if TYPE_CHECKING:
     FORCE_MOE_RANDOM_ROUTING: bool = False
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
-    # SparseCore MoE gather kernel version used by fused_moe_gmm.
-    # "v2" (default) = ragged_gather_v2; "v1" = legacy ragged_gather.
-    RAGGED_GATHER_VERSION: str = "v2"
-    # SparseCore MoE gather-reduce (combine) kernel version used by
-    # fused_moe_gmm. "v2" (default) = ragged_gather_reduce_v2; "v1" = legacy
-    # ragged_gather_reduce.
-    RAGGED_GATHER_REDUCE_VERSION: str = "v2"
     MOE_ALL_GATHER_ACTIVATION_DTYPE: str = ""
     TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
     TPU_OFFLOAD_DECODE_SAVE: bool = False
@@ -331,10 +324,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_str_list("JITTED_MM_MODULE_KEYS"),
     "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
     env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
-    "RAGGED_GATHER_VERSION":
-    env_with_choices("RAGGED_GATHER_VERSION", "v2", ["v1", "v2"]),
-    "RAGGED_GATHER_REDUCE_VERSION":
-    env_with_choices("RAGGED_GATHER_REDUCE_VERSION", "v2", ["v1", "v2"]),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
     # kv offload to dram: skip pre-compiling swap-related jax functions
