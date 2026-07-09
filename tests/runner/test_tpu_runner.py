@@ -377,10 +377,10 @@ class TestTPUJaxRunner:
         # (generated_tokens, all_expert_indices, step_counter) and trims to
         # step_counter (= 5 here, so all rows are kept).
         def device_get_side_effect(arg):
-            if isinstance(arg, tuple) and len(arg) == 3:
-                tokens_arg, experts_arg, _ = arg
-                if tokens_arg is mock_generated_tokens and experts_arg is None:
-                    return mock_tokens_cpu, None, np.int32(5)
+            if isinstance(arg, tuple) and len(arg) == 2:
+                tokens_arg, _ = arg
+                if tokens_arg is mock_generated_tokens:
+                    return mock_tokens_cpu, np.int32(5)
             return arg
 
         mock_device_get.side_effect = device_get_side_effect
@@ -531,10 +531,10 @@ class TestTPUJaxRunner:
         # (generated_tokens, all_expert_indices, step_counter) and trims to
         # step_counter (= 5 here, so all rows are kept).
         def device_get_side_effect(arg):
-            if isinstance(arg, tuple) and len(arg) == 3:
-                tokens_arg, experts_arg, _ = arg
-                if tokens_arg is mock_generated_tokens and experts_arg is None:
-                    return mock_tokens_cpu, None, np.int32(5)
+            if isinstance(arg, tuple) and len(arg) == 2:
+                tokens_arg, _ = arg
+                if tokens_arg is mock_generated_tokens:
+                    return mock_tokens_cpu, np.int32(5)
             return arg
 
         mock_device_get.side_effect = device_get_side_effect

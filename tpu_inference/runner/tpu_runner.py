@@ -1815,16 +1815,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.rng_params_for_sampling = final_rng
             self.kv_caches = final_kv_caches
 
-            if hasattr(final_state, "step_counter") and type(
-                    final_state.step_counter).__name__ != "MagicMock":
-                last_step_idx = jnp.clip(final_state.step_counter - 1, 0,
-                                         self.static_max_decode_steps - 1)
-                next_tokens_in_tpu = generated_tokens[
-                    last_step_idx,
-                    jnp.arange(generated_tokens.shape[1])]
-            else:
-                next_tokens_in_tpu = generated_tokens[0] if hasattr(
-                    generated_tokens, "shape") else None
+            last_step_idx = jnp.clip(final_state.step_counter - 1, 0,
+                                     self.static_max_decode_steps - 1)
+            next_tokens_in_tpu = generated_tokens[
+                last_step_idx,
+                jnp.arange(generated_tokens.shape[1])]
 
             generated_tokens_async = jax.copy_to_host_async(generated_tokens)
             actual_steps_async = jax.copy_to_host_async(
