@@ -131,6 +131,7 @@ cleanup() {
   rm -f "${TEMP_EXPORT_FILE:-}" >/dev/null 2>&1 || true
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
+  rm -f /root/vllm_serve.log || true
   sudo -n rm -rf /tmp/ray/* /tmp/vllm/* >/dev/null 2>&1 || true
 
   echo "✅ Cleanup complete."
@@ -170,6 +171,8 @@ wait_for_server() {
   local loop_count=0
   while [[ $SECONDS -lt $end_time ]]; do
     # 2. Check health
+    # max-time 10 is crucial to prevent curl from hanging indefinitely if the server 
+    # accepts the TCP connection but is deadlocked or blocked from sending an HTTP response.
     if curl -fs --max-time 10 "localhost:${port}/health" > /dev/null; then
       echo "===== $service_name is healthy on port: $port. ==="
       return 0
@@ -185,10 +188,6 @@ wait_for_server() {
 
     sleep 5
     loop_count=$((loop_count + 1))
-    if (( loop_count % 12 == 0 )); then
-      echo "[$(date)] Still waiting for $service_name to be healthy... (Last log lines:)"
-      docker exec "$container_name" tail -n 2 "$log_path" || true
-    fi
   done
 
   echo "Error: $service_name on $port failed to become healthy within ${timeout}s."
@@ -226,7 +225,7 @@ DOCKER_ENV_STR=""
 
 if [ "$#" -ge 1 ]; then
     if [[ "$1" == *.json ]]; then
-        # JSON configuration mode (New pipeline)
+        # JSON configuration mode (multihost benchmark)
         CASE_FILE="$1"
         TARGET_CASE_NAME="$2"
         echo "--- Multi-host JSON case configuration detected: $CASE_FILE ($TARGET_CASE_NAME)"
@@ -275,10 +274,13 @@ if [ "$#" -ge 1 ]; then
         done
         
     else
-        # Legacy mode (raw server/client commands passed)
+        # Direct CLI configuration mode
+        # If the first argument is not a .json file, the script directly assigns 
+        # $1 as the server command and the remaining arguments ($*) as the client command.
         if [ "$#" -gt 0 ]; then
             VLLM_SERVE_CMD="$1"
             echo "Using provided VLLM_SERVE_CMD: $VLLM_SERVE_CMD"
+            # Shift so that remaining args are treated as the benchmark command
             shift
             if [ "$#" -gt 0 ]; then
                 CLIENT_BENCH_CMD="${*:-}"
@@ -343,7 +345,7 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     
     # shellcheck disable=SC2087
     # shellcheck disable=SC2029
-    # Redirect output to a temp file so it doesn't flood the Buildkite console and bypass the 10-minute output timeout
+    # Redirect output to a temp file so it doesn't flood the Buildkite console with mixed logs.
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" > "/tmp/worker_${worker_ip}.log" 2>&1 << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
   -e HF_TOKEN='${HF_TOKEN:-}' \
@@ -370,19 +372,11 @@ sleep 120
 echo "--- Starting vLLM server on head node"
 
 if [ -z "${VLLM_SERVE_CMD}" ]; then
-    # Fallback default serve command
-    VLLM_SERVE_CMD="vllm serve ${MODEL} \
-      --port ${VLLM_PORT} \
-      --tensor-parallel-size ${TENSOR_PARALLEL_SIZE:-16} \
-      --trust-remote-code \
-      --no-enable-prefix-caching \
-      --kv_cache_dtype=fp8 \
-      --async-scheduling \
-      --load-format=runai_streamer \
-      --max-model-len 1024"
+    echo "Error: VLLM_SERVE_CMD cannot be empty! Please provide a JSON config or a command string."
+    exit 1
 fi
 
-# Rewrite generation config if GCS path is used
+# Pre-download generation config from GCS into the container workspace and rewrite the server command
 if [[ "${VLLM_SERVE_CMD}" =~ --generation-config[=\ ]+gs://([^ ]+) ]]; then
     gcs_path="gs://${BASH_REMATCH[1]}"
     config_url="${gcs_path%/*}"
@@ -406,7 +400,7 @@ docker exec \
   node bash -c "${VLLM_SERVE_CMD} > /root/vllm_serve.log 2>&1"
 
 # 4. Wait for the server to be healthy
-SERVER_TIMEOUT=7200
+SERVER_TIMEOUT=""
 if [[ -n "${SERVER_CMD_ENVS:-}" ]]; then
     for env_item in "${SERVER_CMD_ENVS[@]}"; do
         if [[ "$env_item" == VLLM_ENGINE_READY_TIMEOUT_S=* ]]; then
@@ -421,7 +415,6 @@ if [ -n "${CLIENT_BENCH_CMD}" ]; then
   if [[ "${CASE_FILE:-}" == *.json ]]; then
     echo "--- Invoking run_bm.sh for advanced benchmark logic on Head Node..."
     docker exec \
-      -e PYTHONUNBUFFERED=1 \
       -e HF_HOME=/root/.cache/huggingface \
       -e SERVER_ALREADY_RUNNING="true" \
       -e VLLM_PORT="${VLLM_PORT}" \
@@ -429,7 +422,6 @@ if [ -n "${CLIENT_BENCH_CMD}" ]; then
   else
     echo "--- Running Benchmark Command on Head Node"
     docker exec \
-      -e PYTHONUNBUFFERED=1 \
       -e HF_HOME=/root/.cache/huggingface \
       node bash -c "cd /workspace/tpu_inference && ${CLIENT_BENCH_CMD}"
   fi

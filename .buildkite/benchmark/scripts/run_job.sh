@@ -127,8 +127,8 @@ BENCHMARK_DOCKER_ARGS_STR="$(printf '%s\n' "${BENCHMARK_DOCKER_ARGS[@]}")"
 export BENCHMARK_DOCKER_ARGS_STR
 
 # Determine if it is a multi-host run.
-IS_MULTI_HOST="false"
-if [[ ( "${VERSION:-}" == "7x" && ${COUNT:-0} -gt 8 ) || -n "${WORKER_IPS:-}" || "${TPU_MULTIHOST_BACKEND:-}" == "ray" ]]; then
+IS_MULTI_HOST="${IS_MULTI_HOST:-false}"
+if [[ ( "${VERSION:-}" == "7x" && ${COUNT:-0} -gt 8 ) || "${TPU_MULTIHOST_BACKEND:-}" == "ray" ]]; then
     IS_MULTI_HOST="true"
 fi
 

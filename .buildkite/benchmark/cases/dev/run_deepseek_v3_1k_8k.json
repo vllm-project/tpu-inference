@@ -4,7 +4,8 @@
         "GCS_BUCKET": "vllm-cb-storage2",
         "GCP_INSTANCE_ID": "vllm-bm-inst",
         "GCP_DATABASE_ID": "vllm-bm-bk-runs",
-        "RUN_ONCE": "true"
+        "RUN_ONCE": "true",
+        "IS_MULTI_HOST": true
       },
       "benchmark_cases": [
         {
