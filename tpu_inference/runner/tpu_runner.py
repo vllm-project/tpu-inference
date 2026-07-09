@@ -18,6 +18,7 @@ import random
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+import json
 
 import jax
 import jax.numpy as jnp
@@ -1236,6 +1237,49 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_ids_dp,
             padded_num_scheduled_tokens_per_dp_rank,
         ) = self._prepare_inputs(scheduler_output)
+
+
+
+        # Dump a jsonl with line corresponding to forward-pass metadata statistics
+        with open("/mnt/pd/pridon/debug/bench8k_1k_max_concur8.json", 'a') as f:
+            shard_decode_lens = [[] for _ in range(self.dp_size)]
+            shard_prefill_lens = [[] for _ in range(self.dp_size)]
+            shard_decode_context_lens = [[] for _ in range(self.dp_size)]
+            shard_prefill_context_lens = [[] for _ in range(self.dp_size)]
+            shard_total_tokens = [0 for _ in range(self.dp_size)]
+
+            for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+                rank = scheduler_output.assigned_dp_rank[req_id]
+                num_tokens_int = int(num_tokens)
+                shard_total_tokens[rank] += num_tokens_int
+
+                # Get context length (tokens already in cache)
+                context_len = self.requests[req_id].num_computed_tokens
+
+                if num_tokens_int == 1:
+                    shard_decode_lens[rank].append(num_tokens_int)
+                    shard_decode_context_lens[rank].append(int(context_len))
+                else:
+                    shard_prefill_lens[rank].append(num_tokens_int)
+                    shard_prefill_context_lens[rank].append(int(context_len))
+
+            padded_tokens_per_shard = input_ids.shape[0] // self.dp_size
+            shard_padding = [padded_tokens_per_shard - actual for actual in shard_total_tokens]
+
+            metrics = {
+                "shard_decode_lens": shard_decode_lens,
+                "shard_prefill_lens": shard_prefill_lens,
+                "shard_decode_context_lens": shard_decode_context_lens,
+                "shard_prefill_context_lens": shard_prefill_context_lens,
+                "shard_total_tokens": shard_total_tokens,
+                "shard_padding_tokens": shard_padding,
+                "total_padding_tokens": input_ids.shape[0] - scheduler_output.total_num_scheduled_tokens,
+                "total_decode_reqs": sum(len(shard) for shard in shard_decode_lens),
+                "total_prefill_reqs": sum(len(shard) for shard in shard_prefill_lens),
+            }
+            f.write(json.dumps(metrics) + "\n")
+
+
 
         # multi-modal support
         if self.is_multimodal_model:
