@@ -103,7 +103,8 @@ class RhsRef(ABC):
         ...
 
     @abstractmethod
-    def get_scale(self) -> jax.Array:
+    def get_scale(self, replicate_size: int | None = None) -> jax.Array:
+        """Returns scale array, optionally replicated across sublanes."""
         ...
 
     @abstractmethod
@@ -123,8 +124,11 @@ class WeightsRef(RhsRef):
     def get_weight(self) -> jax.Array:
         return self.weight[...]
 
-    def get_scale(self) -> jax.Array:
+    def get_scale(self, replicate_size: int | None = None) -> jax.Array:
         assert self.scale is not None
+        if replicate_size is not None:
+            # Perform zero-stride load for efficient broadcasting across sublanes.
+            return self.scale[:, pl.ds(0, replicate_size, 0), :]
         return self.scale[...]
 
     def get_bias(self) -> jax.Array:
@@ -145,9 +149,9 @@ class FusedWeightsRef(RhsRef):
         w_up = self.up.get_weight()
         return jnp.concatenate([w_gate, w_up], axis=-1)
 
-    def get_scale(self) -> jax.Array:
-        s_gate = self.gate.get_scale()
-        s_up = self.up.get_scale()
+    def get_scale(self, replicate_size: int | None = None) -> jax.Array:
+        s_gate = self.gate.get_scale(replicate_size)
+        s_up = self.up.get_scale(replicate_size)
         return jnp.concatenate([s_gate, s_up], axis=-1)
 
     def get_bias(self) -> jax.Array:
@@ -392,8 +396,8 @@ def inner_kernel(
         # contracting dimmensions
         rhs_qbs = cfgs.rhs_cfgs.quant_block_size
         if cfgs.rhs_cfgs.should_dequantize_before_matmul:
-            tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(
-                cfgs.lhs_cfgs.dtype)
+            tiled_rhs_scale = tiled_rhs_ref.get_scale(
+                replicate_size=rhs_qbs).astype(cfgs.lhs_cfgs.dtype)
             num_blocks = cfgs.num_quant_blocks_per_tile_k
             tiled_rhs_dequant = tiled_rhs.astype(cfgs.lhs_cfgs.dtype).reshape(
                 num_blocks, rhs_qbs, rhs_tile_n)
@@ -429,10 +433,11 @@ def inner_kernel(
 
                     if cfgs.rhs_cfgs.should_dequantize_after_matmul:
                         b_id = start_k // rhs_qbs
-                        tiled_rhs_scale = tiled_rhs_ref.get_scale()
-                        block_acc *= tiled_rhs_scale[b_id, :,
-                                                     start_n:end_n].astype(
-                                                         acc_ref.dtype)
+                        rhs_scale_replicated = tiled_rhs_ref.get_scale(
+                            replicate_size=cfgs.tiles.tile_m)[b_id, :,
+                                                              start_n:start_n +
+                                                              col_size]
+                        block_acc *= rhs_scale_replicated.astype(acc_ref.dtype)
 
                     acc_n += block_acc
                 acc_list.append(acc_n)
@@ -501,10 +506,11 @@ def inner_kernel(
                     # Apply rhs subchannel scale per quant block.
                     if cfgs.rhs_cfgs.should_dequantize_after_matmul:
                         b_id = start_k // rhs_qbs
-                        rhs_scale_slice = tiled_rhs_ref.get_scale()
-                        block_acc *= rhs_scale_slice[b_id, :,
-                                                     start_n:end_n].astype(
-                                                         acc_ref.dtype)
+                        rhs_scale_replicated = tiled_rhs_ref.get_scale(
+                            replicate_size=cfgs.tiles.tile_m)[b_id, :,
+                                                              start_n:start_n +
+                                                              col_size]
+                        block_acc *= rhs_scale_replicated.astype(acc_ref.dtype)
 
                     acc_n += block_acc
                 acc_list.append(acc_n)
