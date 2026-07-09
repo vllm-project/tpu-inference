@@ -47,14 +47,15 @@ run_server() {
   ATTN_BUCKETIZED_NUM_REQS=true \
   ATTN_CUSTOM_NUM_REQS_BUCKETS=8,16,32,64 \
   ONEHOT_MOE_PERMUTE_THRESHOLD=32768 \
-  RAGGED_GATED_DELTA_RULE_IMPL=chunked_kernel_p_recurrent_kernel_d \
+  VLLM_MOE_CHUNK_SIZE=256 \
+  LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false' \
   NEW_MODEL_DESIGN=1 \
   exec vllm serve "$target_model" \
     --max-model-len=9216 \
     --max-num-batched-tokens=1024 \
     --max-num-seqs=64 \
     --no-enable-prefix-caching \
-    --gpu-memory-utilization=0.9 \
+    --gpu-memory-utilization=0.88 \
     --tensor-parallel-size=8 \
     --async-scheduling \
     --port=$DEFAULT_PORT \
@@ -66,7 +67,6 @@ run_server() {
     --kv-cache-dtype=fp8 \
     --enable-expert-parallel \
     --additional_config='{"sharding": {"sharding_strategy": {"enable_dp_attention": true}}}' \
-    --mamba-ssm-cache-dtype=bfloat16 \
     --block-size=256
 }
 
