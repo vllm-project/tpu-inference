@@ -25,6 +25,7 @@
 /tpu_inference/kernels/ @kyuyeunk @bythew3i @a1yssan13 @jrplatin
 /tpu_inference/kernels/mla/ @m-liu @gxd3 @gpolovets1 @kyuyeunk
 /tpu_inference/kernels/experimental/deepseek_v4/ @gxd3 @a1yssan13 @inucool12
+/tpu_inference/kernels/experimental/rpa_v3_cp/ @kyuyeunk @wenxindongwork @weiyu0824
 
 # Model layers
 /tpu_inference/layers/ @kyuyeunk @lk-chen @jrplatin @gxd3
@@ -80,6 +81,7 @@
 /tests/executors/ @sixiang-google @mrjunwan-lang
 /tests/kernels/ @kyuyeunk @bythew3i @a1yssan13
 /tests/kernels/deepseek_v4 @gxd3 @a1yssan13 @inucool12
+/tests/kernels/rpa_v3_cp/ @kyuyeunk @wenxindongwork @weiyu0824 
 /tests/layers/ @kyuyeunk @lk-chen
 /tests/layers/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/lora/ @vanbasten23 @kyuyeunk
