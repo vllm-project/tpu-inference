@@ -27,7 +27,7 @@ from parameterized import parameterized
 from vllm.config import ModelConfig
 
 # Assuming the model file is named deepseek_v3.py
-import tpu_inference.kernels.mla.v1.kernel as mla
+import tpu_inference.kernels.mla.v2.kernel as mla
 from tpu_inference.layers.common.attention_interface import get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import (ShardingAxisName,

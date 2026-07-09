@@ -12,7 +12,3 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Fused GDN (Gated Delta Networks) TPU kernels."""
-
-from tpu_inference.kernels.gdn.v1.fused_gdn_kernel_wrapper import fused_gdn
-
-__all__ = ["fused_gdn"]
