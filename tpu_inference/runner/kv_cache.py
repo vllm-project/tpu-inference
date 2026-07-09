@@ -54,10 +54,17 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  actual_head_dim: int,
                                  kv_dtype: any,
                                  use_mla: bool = False):
-    """Gets the KV cache shape based on the mesh configuration."""
+    """Gets the KV cache shape based on the mesh configuration.
+
+    This function scales block_size by the CONTEXT (DCP) axis and num_heads by duplicate kv heads.
+
+    """
 
     model_cnt = utils.get_mesh_shape_product(mesh,
                                              ShardingAxisName.KV_CACHE_HEAD)
+
+    context_cnt = utils.get_mesh_shape_product(mesh, ShardingAxisName.CONTEXT)
+    physical_block_size = block_size * context_cnt
 
     # NOTE(chengjiyao): Currently, the attention kernel is tailored to the
     # specific model, rather than being determined by the head_dim. If new
@@ -70,7 +77,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
         shape = list(
             get_kv_cache_shape_fn(
                 total_num_pages,
-                block_size,
+                physical_block_size,
                 actual_head_dim,
                 kv_dtype,
                 envs.MLA_KV_PACKING_SIZE,
@@ -82,7 +89,7 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                 else rpa.get_kv_cache_shape
         )
         shape = list(
-            get_kv_cache_shape_fn(total_num_pages, block_size,
+            get_kv_cache_shape_fn(total_num_pages, physical_block_size,
                                   actual_num_kv_heads // model_cnt,
                                   actual_head_dim, kv_dtype))
         shape[2] *= model_cnt
