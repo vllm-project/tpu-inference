@@ -431,7 +431,7 @@ elif [ "$#" -gt 0 ]; then
   
   docker exec \
     -e HF_HOME=/root/.cache/huggingface \
-    node bash -c "cd /workspace/tpu_inference && ${COMMAND_ARGS[*]}"
+    node bash -c "${COMMAND_ARGS[*]}"
 else
   # Default: Run the curl test to verify the endpoint
   echo "--- Running default curl test"
