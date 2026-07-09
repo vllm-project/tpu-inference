@@ -45,6 +45,23 @@ LOG_DIR=$HOME/logs
 mkdir -p "$LOG_DIR"
 rm -f "$LOG_DIR"/prefill.txt "$LOG_DIR"/decode.txt "$LOG_DIR"/benchmark.txt "$LOG_DIR"/proxy.txt "$LOG_DIR"/correctness.txt
 
+get_metadata_value() {
+  local path=$1
+  curl -fs -H "Metadata-Flavor: Google" \
+    "http://metadata.google.internal/computeMetadata/v1/${path}" 2>/dev/null || true
+}
+
+get_current_internal_ip() {
+  local metadata_ip
+  metadata_ip="$(get_metadata_value "instance/network-interfaces/0/ip")"
+  if [[ -n "$metadata_ip" ]]; then
+    echo "$metadata_ip"
+    return 0
+  fi
+
+  hostname -I | awk '{print $1}'
+}
+
 # Automatic Worker IP Discovery
 if [[ -z "${WORKER_IPS:-}" ]]; then
   echo "⚠️  WORKER_IPS not provided. Attempting to discover via gcloud..."
@@ -61,13 +78,27 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
 
       # shellcheck disable=SC2206
       ALL_IPS_ARRAY=($ALL_IPS)
-      
+
       if [[ -z "${HEAD_INTERNAL_IP:-}" ]]; then
-        HEAD_INTERNAL_IP="${ALL_IPS_ARRAY[0]}"
-        echo "   -> Discovered Head IP: $HEAD_INTERNAL_IP"
+        HEAD_INTERNAL_IP="$(get_current_internal_ip)"
+        echo "   -> Current VM internal IP: $HEAD_INTERNAL_IP"
       fi
-      
-      WORKER_IPS_LIST=("${ALL_IPS_ARRAY[@]:1}")
+
+      CURRENT_IP_IN_SLICE=0
+      WORKER_IPS_LIST=()
+      for ip in "${ALL_IPS_ARRAY[@]}"; do
+        if [[ "$ip" == "$HEAD_INTERNAL_IP" ]]; then
+          CURRENT_IP_IN_SLICE=1
+        elif [[ -n "$ip" ]]; then
+          WORKER_IPS_LIST+=("$ip")
+        fi
+      done
+
+      if (( CURRENT_IP_IN_SLICE != 1 )); then
+        echo "❌ Current VM IP (${HEAD_INTERNAL_IP}) is not in discovered TPU endpoints: ${ALL_IPS_ARRAY[*]}"
+        exit 1
+      fi
+
       WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
       echo "   -> Discovered Worker IPs: $WORKER_IPS"
 
@@ -97,7 +128,7 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
   exit 1
 fi
 
-HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(hostname -I | awk '{print $1}')}"
+HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(get_current_internal_ip)}"
 
 # Always ensure ACCELERATOR_TYPE is populated if not specified in the environment
 if [[ -z "${ACCELERATOR_TYPE:-}" ]] && command -v gcloud &> /dev/null && command -v curl &> /dev/null; then
@@ -139,15 +170,48 @@ SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/de
 
 # Assemble all IP addresses (Head + Workers)
 IFS=',' read -r -a ALL_WORKERS_ARRAY <<< "${WORKER_IPS}"
-ALL_IPS_ARRAY=("$HEAD_INTERNAL_IP" "${ALL_WORKERS_ARRAY[@]}")
+ALL_IPS_ARRAY=("$HEAD_INTERNAL_IP")
+for ip in "${ALL_WORKERS_ARRAY[@]}"; do
+  if [[ -n "$ip" && "$ip" != "$HEAD_INTERNAL_IP" ]]; then
+    ALL_IPS_ARRAY+=("$ip")
+  fi
+done
 NUM_HOSTS=${#ALL_IPS_ARRAY[@]}
 
+echo "Discovered TPU hosts in launch order: ${ALL_IPS_ARRAY[*]}"
+echo "Current/local head IP: ${HEAD_INTERNAL_IP}"
+echo "Total TPU hosts available: ${NUM_HOSTS}"
+
 # Partition the cluster
-if [[ -z "$PREFILL_HOSTS_COUNT" || -z "$DECODE_HOSTS_COUNT" ]]; then
-  # Default to equal split if neither is explicitly provided
+if [[ -z "$PREFILL_HOSTS_COUNT" && -z "$DECODE_HOSTS_COUNT" ]]; then
+  # Default to equal split if neither is explicitly provided.
   PREFILL_HOSTS_COUNT=$(( NUM_HOSTS / 2 ))
   DECODE_HOSTS_COUNT=$(( NUM_HOSTS - PREFILL_HOSTS_COUNT ))
-  echo "⚠️ PREFILL_HOSTS_COUNT or DECODE_HOSTS_COUNT not specified. Defaulting to equal split: $PREFILL_HOSTS_COUNT hosts for Prefill, $DECODE_HOSTS_COUNT hosts for Decode."
+  echo "⚠️ PREFILL_HOSTS_COUNT and DECODE_HOSTS_COUNT not specified. Defaulting to equal split: $PREFILL_HOSTS_COUNT hosts for Prefill, $DECODE_HOSTS_COUNT hosts for Decode."
+elif [[ -z "$PREFILL_HOSTS_COUNT" ]]; then
+  if [[ ! "$DECODE_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "❌ DECODE_HOSTS_COUNT must be a positive integer. Got: $DECODE_HOSTS_COUNT"
+    exit 1
+  fi
+  PREFILL_HOSTS_COUNT=$(( NUM_HOSTS - DECODE_HOSTS_COUNT ))
+  echo "⚠️ PREFILL_HOSTS_COUNT not specified. Using remaining hosts for Prefill: $PREFILL_HOSTS_COUNT."
+elif [[ -z "$DECODE_HOSTS_COUNT" ]]; then
+  if [[ ! "$PREFILL_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "❌ PREFILL_HOSTS_COUNT must be a positive integer. Got: $PREFILL_HOSTS_COUNT"
+    exit 1
+  fi
+  DECODE_HOSTS_COUNT=$(( NUM_HOSTS - PREFILL_HOSTS_COUNT ))
+  echo "⚠️ DECODE_HOSTS_COUNT not specified. Using remaining hosts for Decode: $DECODE_HOSTS_COUNT."
+fi
+
+if [[ ! "$PREFILL_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "❌ PREFILL_HOSTS_COUNT must be at least 1. Got: $PREFILL_HOSTS_COUNT"
+  exit 1
+fi
+
+if [[ ! "$DECODE_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "❌ DECODE_HOSTS_COUNT must be at least 1. Got: $DECODE_HOSTS_COUNT"
+  exit 1
 fi
 
 TOTAL_HOSTS_USED=$(( PREFILL_HOSTS_COUNT + DECODE_HOSTS_COUNT ))
@@ -166,11 +230,13 @@ DECODE_HEAD_IP="${DECODE_HOSTS[0]}"
 
 PREFILL_WORKER_IPS=("${PREFILL_HOSTS[@]:1}")
 DECODE_WORKER_IPS=("${DECODE_HOSTS[@]:1}")
+echo "Prefill hosts: ${PREFILL_HOSTS[*]}"
+echo "Decode hosts: ${DECODE_HOSTS[*]}"
 
 # Dynamic TP calculation based on accelerator type or TPU Version
-if [[ "$ACCELERATOR_TYPE" == *"4t"* ]] || [[ "$ACCELERATOR_TYPE" == *"-4"* ]]; then
+if [[ "${ACCELERATOR_TYPE:-}" == *"4t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-4"* ]]; then
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
-elif [[ "$ACCELERATOR_TYPE" == *"8t"* ]] || [[ "$ACCELERATOR_TYPE" == *"-8"* ]]; then
+elif [[ "${ACCELERATOR_TYPE:-}" == *"8t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-8"* ]]; then
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
 elif [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
@@ -178,15 +244,58 @@ else
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
 fi
 
-PREFILL_TENSOR_PARALLEL_SIZE=$(( PREFILL_HOSTS_COUNT * CHIPS_PER_HOST ))
-DECODE_TENSOR_PARALLEL_SIZE=$(( DECODE_HOSTS_COUNT * CHIPS_PER_HOST ))
+if [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
+  CORES_PER_CHIP="${CORES_PER_CHIP:-2}"
+else
+  CORES_PER_CHIP="${CORES_PER_CHIP:-1}"
+fi
+
+TOTAL_CHIPS=$(( NUM_HOSTS * CHIPS_PER_HOST ))
+echo "Calculated total TPU chips from hosts: ${TOTAL_CHIPS}"
+echo "Using TPU cores per chip: ${CORES_PER_CHIP}"
+
+if [[ "${TPU_VERSION:-}" == "tpu7x" && "${ACCELERATOR_TYPE:-}" == *"16"* && "$NUM_HOSTS" -lt 2 ]]; then
+  echo "❌ TPU7x-16 should expose multiple host VMs, but discovered ${NUM_HOSTS}: ${ALL_IPS_ARRAY[*]}"
+  exit 1
+fi
+
+PREFILL_TENSOR_PARALLEL_SIZE=$(( PREFILL_HOSTS_COUNT * CHIPS_PER_HOST * CORES_PER_CHIP ))
+DECODE_TENSOR_PARALLEL_SIZE=$(( DECODE_HOSTS_COUNT * CHIPS_PER_HOST * CORES_PER_CHIP ))
 echo "Calculated PREFILL_TENSOR_PARALLEL_SIZE: $PREFILL_TENSOR_PARALLEL_SIZE"
 echo "Calculated DECODE_TENSOR_PARALLEL_SIZE: $DECODE_TENSOR_PARALLEL_SIZE"
+
+TPU_VISIBLE_CHIPS_LOCAL="$(seq -s, 0 $(( CHIPS_PER_HOST - 1 )))"
+SINGLE_HOST_TPU_ENV_ARGS=(
+  -e TPU_PROCESS_BOUNDS=1,1,1
+  -e TPU_CHIPS_PER_PROCESS_BOUNDS="1,${CHIPS_PER_HOST},1"
+  -e TPU_VISIBLE_CHIPS="${TPU_VISIBLE_CHIPS_LOCAL}"
+  -e CLOUD_TPU_TASK_ID=0
+  -e JAX_PROCESS_ID=0
+  -e JAX_NUM_PROCESSES=1
+)
+PREFILL_TPU_ENV_ARGS=()
+DECODE_TPU_ENV_ARGS=()
+if (( PREFILL_HOSTS_COUNT == 1 )); then
+  PREFILL_TPU_ENV_ARGS=("${SINGLE_HOST_TPU_ENV_ARGS[@]}")
+  echo "Prefill is a single-host Ray cluster; forcing single-process TPU env with TPU_VISIBLE_CHIPS=${TPU_VISIBLE_CHIPS_LOCAL}."
+fi
+if (( DECODE_HOSTS_COUNT == 1 )); then
+  DECODE_TPU_ENV_ARGS=("${SINGLE_HOST_TPU_ENV_ARGS[@]}")
+  echo "Decode is a single-host Ray cluster; forcing single-process TPU env with TPU_VISIBLE_CHIPS=${TPU_VISIBLE_CHIPS_LOCAL}."
+fi
 
 cleanup() {
   local exit_code=$?
   echo "🧹 Cleaning up containers on all hosts..."
   
+  # Capture server logs before removing containers.
+  echo "   -> Capturing server logs..."
+  docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
+  if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
+    scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
+  fi
+
   # Cleanup remote hosts
   for ip in "${ALL_IPS_ARRAY[@]}"; do
     if [[ "$ip" != "$HEAD_INTERNAL_IP" ]]; then
@@ -203,14 +312,6 @@ cleanup() {
   # Cleanup local proxy/benchmark container
   docker stop disagg-proxy-benchmark >/dev/null 2>&1 || true
   docker rm -f disagg-proxy-benchmark >/dev/null 2>&1 || true
-
-  # Capture server logs
-  echo "   -> Capturing server logs..."
-  docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
-  if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
-    scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
-  fi
 
   if [ $exit_code -ne 0 ]; then
     echo "--- 🚨 Script failed or timed out (Exit Code: $exit_code). Dumping logs..."
@@ -294,6 +395,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${PREFILL_HEAD_IP}" \
   --head \
   "${HOST_HF_HOME}" \
+  "${PREFILL_TPU_ENV_ARGS[@]}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -319,6 +421,7 @@ for worker_ip in "${PREFILL_WORKER_IPS[@]}"; do
     
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${PREFILL_HEAD_IP}' --worker '${HOST_HF_HOME}' \
+  ${PREFILL_TPU_ENV_ARGS[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -344,6 +447,7 @@ cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECODE_HEAD_IP}' --head '${HOST_HF_HOME}' \
+  ${DECODE_TPU_ENV_ARGS[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -354,7 +458,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECOD
   -e MOE_REQUANTIZE_BLOCK_SIZE="${MOE_REQUANTIZE_BLOCK_SIZE:-}" \
   -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
-  -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" &
+  -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}"
 EOF
 
 sleep 30
@@ -370,6 +474,7 @@ for worker_ip in "${DECODE_WORKER_IPS[@]}"; do
     
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECODE_HEAD_IP}' --worker '${HOST_HF_HOME}' \
+  ${DECODE_TPU_ENV_ARGS[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -393,6 +498,7 @@ sleep 120
 # -----------------------------------------------------------------
 echo "--- Starting vLLM Prefill server on Head Node locally with KV Cache Offloading (D2H)..."
 PREFILL_VLLM_PORT="8400"
+PREFILL_DOCKER_EXEC_ENV_ARGS="${PREFILL_TPU_ENV_ARGS[*]}"
 
 cat << EOF > /tmp/start_prefill.sh
 #!/bin/bash
@@ -402,6 +508,7 @@ docker exec \
   -e HF_HOME=/root/.cache/huggingface \
   -e TPU_ENABLE_D2H_TRANSFER="true" \
   -e TPU_MAX_HOST_KV_BUFFER_SIZE="${TPU_MAX_HOST_KV_BUFFER_SIZE}" \
+  ${PREFILL_DOCKER_EXEC_ENV_ARGS} \
   node bash -c "vllm serve ${MODEL} \
     --port ${PREFILL_VLLM_PORT} \
     --tensor-parallel-size ${PREFILL_TENSOR_PARALLEL_SIZE} \
@@ -417,6 +524,7 @@ bash /tmp/start_prefill.sh
 
 echo "--- Starting vLLM Decode server on remote Head Node (${DECODE_HEAD_IP}) [unchanged]"
 DECODE_VLLM_PORT="9400"
+DECODE_DOCKER_EXEC_ENV_ARGS="${DECODE_TPU_ENV_ARGS[*]}"
 
 cat << EOF > /tmp/start_decode.sh
 #!/bin/bash
@@ -424,6 +532,7 @@ set -x
 docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
+  ${DECODE_DOCKER_EXEC_ENV_ARGS} \
   node bash -c "vllm serve ${MODEL} \
     --port ${DECODE_VLLM_PORT} \
     --tensor-parallel-size ${DECODE_TENSOR_PARALLEL_SIZE} \
