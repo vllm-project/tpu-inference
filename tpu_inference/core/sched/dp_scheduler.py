@@ -144,6 +144,10 @@ def _scheduler_worker_process(
     original_scheduler_cls: type,
 ):
     """Worker process that manages a single scheduler instance."""
+    import atexit
+    import gc
+    atexit._clear()
+    gc.enable()
     # Initialize the scheduler in this process
     import inspect
     sig = inspect.signature(original_scheduler_cls)
@@ -439,6 +443,11 @@ class DPScheduler(SchedulerInterface):
         self.output_conns: List[Connection] = []  # child writes, parent reads
         self.processes: List[Process] = []
 
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        gc.freeze()
+
         for rank in range(self.dp_size):
             # Each pipe gives (parent_end, child_end)
             # Input pipe: parent sends commands, child receives
@@ -471,6 +480,9 @@ class DPScheduler(SchedulerInterface):
             input_child_conn.close()
             output_child_conn.close()
             self.processes.append(process)
+
+        if gc_was_enabled:
+            gc.enable()
 
         # Reverse mapping from output connection to rank for wait()-based collection.
         self._output_conn_to_rank: Dict[int, int] = {
