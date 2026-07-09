@@ -193,13 +193,14 @@ def generate_test_prompts(num_prompts: int = 4) -> list[str]:
     ]
 
 
-@pytest.fixture
-def sampling_params():
+@pytest.fixture(params=[0.0, 1.0])
+def sampling_params(request):
     return SamplingParams(
-        temperature=0.0,
+        temperature=request.param,
         max_tokens=16,
         ignore_eos=True,
         logprobs=1,
+        seed=42,
     )
 
 

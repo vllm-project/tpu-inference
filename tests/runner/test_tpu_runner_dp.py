@@ -487,6 +487,53 @@ class TestTPUJaxRunnerDPInputsLightweight:
             np.testing.assert_array_equal(logits_indices_selector,
                                           expected_positions)
 
+    def test_prepare_dp_input_metadata_continue_decode_decode_only(self):
+        """Test metadata preparation with continue decode enabled and decode only inputs."""
+        num_scheduled_tokens = {"req1": 1, "req2": 1, "req3": 1, "req4": 1}
+        assigned_dp_ranks = {"req1": 0, "req2": 0, "req3": 1, "req4": 1}
+
+        self.runner.input_batch.num_reqs = 4
+        self.runner.input_batch.req_ids = ["req1", "req2", "req3", "req4"]
+        self.runner.max_num_reqs = 8
+        self.runner.enable_continue_decode = True
+
+        # is_decode_only requires request_distribution[0] == num_reqs
+        self.runner.input_batch.request_distribution = [4]
+
+        scheduler_output = self._create_mock_scheduler_output(
+            num_scheduled_tokens, assigned_dp_ranks)
+
+        with patch('tpu_inference.runner.tpu_runner.runner_utils'
+                   ) as mock_runner_utils:
+            self.runner.num_reqs_paddings_per_dp = [16]
+            self.runner.num_tokens_paddings_per_dp = [32]
+
+            def get_padded_token_len_side_effect(paddings, val):
+                if paddings == self.runner.num_reqs_paddings_per_dp:
+                    return 16
+                if paddings == self.runner.num_tokens_paddings_per_dp:
+                    return 32
+                return 64
+
+            mock_runner_utils.get_padded_token_len.side_effect = get_padded_token_len_side_effect
+
+            result = self.runner._prepare_input_metadata(scheduler_output)
+
+            (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
+             scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
+             padded_num_scheduled_tokens_per_dp_rank, padded_num_reqs,
+             attn_padded_num_reqs, padded_total_num_scheduled_tokens,
+             padded_num_reqs_per_dp_rank, logits_indices_selector,
+             tokens_indices_selector, max_num_reqs_per_dp_rank) = result
+
+            # In continue decode + decode only mode:
+            # padded_num_scheduled_tokens_per_dp_rank should be equal to padded_num_reqs_per_dp_rank (16)
+            assert padded_num_scheduled_tokens_per_dp_rank == 16
+            assert padded_num_reqs_per_dp_rank == 16
+            assert isinstance(tokens_indices_selector, np.ndarray)
+            np.testing.assert_array_equal(tokens_indices_selector,
+                                          np.array([0, 1, 16, 17]))
+
     @patch('jax.device_put', side_effect=lambda x, y: x)
     @patch('tpu_inference.runner.tpu_runner.NamedSharding')
     @patch('tpu_inference.runner.tpu_runner.runner_utils')
