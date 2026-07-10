@@ -11,7 +11,7 @@
       "case_name": "Gemma4-31B-1k/500-GBS256",
       "ci_queue": [
         "tpu_v6e_8_queue",
-        "tpu_v7x_2_queue"
+        "tpu_v7x_8_queue"
       ],
       "env": {
         "MODELTAG": "NEW",
@@ -33,12 +33,12 @@
           "max-num-batched-tokens": 4096,
           "data-parallel-size": {
               "v6e-8": 2,
-              "v7x-2": 1,
+              "v7x-8": 4,
               "default": 1
           },
           "tensor-parallel-size": {
             "v6e-8": 4,
-            "v7x-2": 2,
+            "v7x-8": 2,
             "default": 1
           },
           "max-model-len": 2048,
@@ -68,7 +68,7 @@
       "case_name": "Gemma4-31B-1k/1f512x512/500-GBS256",
       "ci_queue": [
         "tpu_v6e_8_queue",
-        "tpu_v7x_2_queue"
+        "tpu_v7x_8_queue"
       ],
       "env": {
         "MODELTAG": "NEW",
@@ -90,12 +90,12 @@
           "max-num-batched-tokens": 4096,
           "data-parallel-size": {
               "v6e-8": 2,
-              "v7x-2": 1,
+              "v7x-8": 4,
               "default": 1
           },
           "tensor-parallel-size": {
             "v6e-8": 4,
-            "v7x-2": 2,
+            "v7x-8": 2,
             "default": 1
           },
           "max-model-len": 2048,
