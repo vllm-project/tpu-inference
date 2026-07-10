@@ -1902,6 +1902,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         self.speculative_decoding_manager._draft_token_ids)
 
             # Save the previous results
+            if isinstance(attn_metadata, dict):
+                first_meta = next(iter(attn_metadata.values()))
+                state_indices = first_meta.mamba_state_indices
+            else:
+                state_indices = attn_metadata.mamba_state_indices
+
             next_tokens = jax.copy_to_host_async(next_tokens)
             self._pre_async_results = AsyncPreResults(
                 req_ids=req_ids,
