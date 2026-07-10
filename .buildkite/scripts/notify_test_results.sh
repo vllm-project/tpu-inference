@@ -15,12 +15,13 @@
 
 set -e
 
-ANY_FAILED=$(buildkite-agent meta-data get "CI_TESTS_FAILED")
+V6_ANY_FAILED=$(buildkite-agent meta-data get "v6_CI_TESTS_FAILED")
+V7_ANY_FAILED=$(buildkite-agent meta-data get "v7_CI_TESTS_FAILED")
 FAILURE_LABEL="Not all models and/or features passed"
 
 echo "--- Checking test outcomes"
 
-if [ "${ANY_FAILED}" = "true" ] ; then
+if [ "${V6_ANY_FAILED}" = "true" ] || [ "${V7_ANY_FAILED}" = "true" ] ; then
   echo "${FAILURE_LABEL}"
   exit 1
 else

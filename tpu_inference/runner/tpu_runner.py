@@ -28,7 +28,6 @@ import torch
 import vllm.envs as vllm_envs
 import vllm.lora.utils as lora_utils_mod
 from flax import nnx
-from jax._src import mesh as mesh_lib
 from jax._src.pallas.utils import next_power_of_2
 from jax.experimental import mesh_utils
 from jax.sharding import NamedSharding, PartitionSpec
@@ -87,6 +86,7 @@ from tpu_inference.runner.speculative_decoding_manager import (
     SpecDecodeMetadata, SpeculativeDecodingManager)
 from tpu_inference.runner.structured_decoding_manager import \
     StructuredDecodingManager
+from tpu_inference.spec_decode.jax.dflash import DFlashProposer
 from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
 from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
@@ -704,10 +704,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             and len(self.vllm_config.sharding_config.device_indexes) > 0)
 
         if enforce_device_order:
-            axis_types = (mesh_lib.AxisType.Auto, ) * len(mesh_shape)
             return jax.make_mesh(mesh_shape,
                                  MESH_AXIS_NAMES_2D,
-                                 axis_types,
                                  devices=self.devices)
         else:
             return make_optimized_mesh(mesh_shape,
@@ -745,6 +743,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.speculative_config:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "dflash":
+                self.drafter = DFlashProposer(self.vllm_config, self)
             elif self.speculative_config.use_eagle():
                 self.drafter = Eagle3Proposer(self.vllm_config, self)
             else:
@@ -777,7 +777,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
         self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(16, next_power_of_2(self.dp_size * kv_packing)),
+            min_token_size=max(envs.MIN_TOKEN_BUCKET,
+                               next_power_of_2(self.dp_size * kv_packing)),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
@@ -923,6 +924,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logger.debug("Universal StepPooler pre-warming successful.")
 
             self.state = model.state
+            self.model = model.model
+            self.state_leaves = model.state_leaves
 
             if self.drafter is not None:
                 logger.info("Loading drafter model...")
@@ -936,9 +939,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # tuple of array leaves and reconstructs the nnx.State inside the
         # jit. Pre-flatten here so subsequent dispatches skip the per-call
         # walk of `nnx.Variable` wrappers
-        self.state_leaves = model.state_leaves
         self.lora_manager = model.lora_manager
-        self.model = model.model
 
         self.precompile_vision_encoder_fn = model.multimodal_fns.precompile_vision_encoder_fn
         self.embed_multimodal_fn = model.multimodal_fns.embed_multimodal_fn
@@ -1383,11 +1384,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 full_hidden_states,
                 lora_metadata,
             )
-            logits = self._select_from_array_fn(full_logits, logits_indices)
+            logits = self._select_from_array_fn(full_logits, logits_indices,
+                                                self.mesh)
         else:
             full_logits = None
             hidden_states = self._select_from_array_fn(hidden_states,
-                                                       logits_indices)
+                                                       logits_indices,
+                                                       self.mesh)
             logits = self.compute_logits_fn(
                 self.state_leaves,
                 hidden_states,
@@ -1751,7 +1754,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 bonus_rng = step_rng
                 rejection_rng = step_rng
             bonus_logits = self._select_from_array_fn(
-                logits, spec_decode_metadata.bonus_logits_indices)
+                logits, spec_decode_metadata.bonus_logits_indices, self.mesh)
             bonus_token_ids, processed_bonus_logits = sample(
                 bonus_rng,
                 self.mesh,
@@ -1759,7 +1762,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 tpu_sampling_metadata,
             )
             target_logits = self._select_from_array_fn(
-                logits, spec_decode_metadata.target_logits_indices)
+                logits, spec_decode_metadata.target_logits_indices, self.mesh)
             assert input_ids is not None
             draft_token_ids = self._extract_draft_token_ids(
                 input_ids, spec_decode_metadata.final_logits_indices,
@@ -1875,6 +1878,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 spec_decode_last_sampled_token_id = last_sampled_token_id
                 spec_decode_num_rejected_tokens = num_rejected_tokens
 
+        spec_decode_next_tokens = None
+        if self.speculative_config and self.scheduler_config.async_scheduling:
+            assert spec_decode_last_sampled_token_id is not None
+            with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
+                spec_decode_next_tokens = concat_last_sampled_tokens_and_draft_tokens(
+                    spec_decode_last_sampled_token_id,
+                    self.speculative_decoding_manager._draft_token_ids)
+
         # If async scheduler enabled
         if self.scheduler_config.async_scheduling:
             # Get previous results from TPU and replace the placeholder.
@@ -1887,14 +1898,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     discard_sampled_tokens_req_indices, request_seq_lens,
                     scheduler_output, logits_indices_selector,
                     spec_decode_metadata)
-
-            spec_decode_next_tokens = None
-            if self.speculative_config:
-                assert spec_decode_last_sampled_token_id is not None
-                with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
-                    spec_decode_next_tokens = concat_last_sampled_tokens_and_draft_tokens(
-                        spec_decode_last_sampled_token_id,
-                        self.speculative_decoding_manager._draft_token_ids)
 
             # Save the previous results
             next_tokens = jax.copy_to_host_async(next_tokens)
@@ -2004,15 +2007,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return model_runner_output
 
-    @jax.jit(static_argnums=(0, ))
-    def _select_from_array_fn(self, array, indices_to_select):
+    @staticmethod
+    @functools.partial(jax.jit, static_argnums=(2, ))
+    def _select_from_array_fn(array, indices_to_select, mesh):
 
         def select_local_fn(local_array, local_indices):
             return local_array[local_indices]
 
         ret = jax.shard_map(
             select_local_fn,
-            mesh=self.mesh,
+            mesh=mesh,
             in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA),
                       PartitionSpec(ShardingAxisName.ATTN_DATA)),
             out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA))(
@@ -2124,20 +2128,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         max_num_scheduled_tokens_across_dp = max(
             num_scheduled_tokens_per_dp_rank.values())
 
-        padded_num_scheduled_tokens_per_dp_rank = runner_utils.get_padded_token_len(
-            self.num_tokens_paddings_per_dp,
-            max_num_scheduled_tokens_across_dp)
+        # Find maximum number of requests across DP ranks
+        max_num_reqs_across_dp = max(
+            len(req_ids) for req_ids in req_ids_dp.values())
+
+        is_decode_only = (self.input_batch.request_distribution[0] ==
+                          self.input_batch.num_reqs)
+
+        padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
+            self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
+        if is_decode_only and self.enable_continue_decode:
+            padded_num_scheduled_tokens_per_dp_rank = padded_num_reqs_per_dp_rank
+        else:
+            padded_num_scheduled_tokens_per_dp_rank = runner_utils.get_padded_token_len(
+                self.num_tokens_paddings_per_dp,
+                max_num_scheduled_tokens_across_dp)
 
         padded_total_num_scheduled_tokens = (
             padded_num_scheduled_tokens_per_dp_rank * dp_size)
 
         assert max_num_scheduled_tokens_across_dp > 0
 
-        # Find maximum number of requests across DP ranks
-        max_num_reqs_across_dp = max(
-            len(req_ids) for req_ids in req_ids_dp.values())
-        padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
-            self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
         padded_num_reqs = padded_num_reqs_per_dp_rank * dp_size
         attn_padded_num_reqs = runner_utils.get_padded_token_len(
             self.attn_num_reqs_paddings_per_dp,

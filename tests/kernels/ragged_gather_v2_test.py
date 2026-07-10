@@ -20,7 +20,6 @@ import numpy as np
 from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
-from tpu_inference.kernels.sparse_core.ragged_gather import ragged_gather
 from tpu_inference.kernels.sparse_core.ragged_gather_v2 import ragged_gather_v2
 
 jax.config.parse_flags_with_absl()
@@ -34,10 +33,8 @@ class GatherTest(jtu.JaxTestCase):
         start_end=[(3, 338), (10, 422)],
         hidden_size=[128, 512, 8192],
         dtype=[jnp.int4, jnp.int8, jnp.bfloat16, jnp.float32],
-        kernel_version=[2],
     )
-    def test_sc_gather(self, in_out_size, hidden_size, start_end, dtype,
-                       kernel_version):
+    def test_sc_gather(self, in_out_size, hidden_size, start_end, dtype):
         in_size, out_size = in_out_size
         start, end = start_end
         start = min(start, out_size)
@@ -50,9 +47,7 @@ class GatherTest(jtu.JaxTestCase):
         start_arr = jnp.array([start], jnp.int32)
         end_arr = jnp.array([end], jnp.int32)
 
-        kernel = ragged_gather if kernel_version == 1 else ragged_gather_v2
-
-        actual = kernel(x, indices, start_arr, end_arr)
+        actual = ragged_gather_v2(x, indices, start_arr, end_arr)
         actual.block_until_ready()
 
         # Correctness check.
@@ -101,10 +96,6 @@ class GatherTest(jtu.JaxTestCase):
             end_arr = jnp.array([end], jnp.int32)
 
             @jax.jit
-            def run_v1(x, indices, start_arr, end_arr):
-                return ragged_gather(x, indices, start_arr, end_arr)
-
-            @jax.jit
             def run_v2(x, indices, start_arr, end_arr):
                 return ragged_gather_v2(x, indices, start_arr, end_arr)
 
@@ -118,25 +109,6 @@ class GatherTest(jtu.JaxTestCase):
             res_jax_sliced = res_jax[start:end]
 
             print(f"JAX:       {t_jax*1000:.3f} ms")
-
-            # V1 Kernel
-            t_v1_str = "FAILED"
-            err_v1_str = "FAILED"
-            try:
-                t_v1 = _time_function(run_v1, x, indices, start_arr, end_arr)
-                t_v1_str = f"{t_v1*1000:.3f} ms"
-                res_v1 = run_v1(x, indices, start_arr, end_arr)
-                res_v1_sliced = res_v1[start:end]
-                err_v1 = jnp.max(jnp.abs(res_v1_sliced - res_jax_sliced))
-                err_v1_str = f"{float(err_v1):.6f}"
-                np.testing.assert_allclose(res_v1_sliced,
-                                           res_jax_sliced,
-                                           atol=1e-2,
-                                           rtol=1e-2)
-            except Exception:  # pylint: disable=broad-except
-                print(
-                    f"[Warning] V1 Kernel failed for shape ({in_size}, {out_size},"
-                    f" {hidden_size})")
 
             # V2 Kernel
             t_v2_str = "FAILED"
@@ -157,9 +129,7 @@ class GatherTest(jtu.JaxTestCase):
                     f"[Warning] V2 Kernel failed for shape ({in_size}, {out_size},"
                     f" {hidden_size})")
 
-            print(f"V1 Kernel: {t_v1_str}")
             print(f"V2 Kernel: {t_v2_str}")
-            print(f"V1 Kernel vs JAX Max Err: {err_v1_str}")
             print(f"V2 Kernel vs JAX Max Err: {err_v2_str}")
 
 

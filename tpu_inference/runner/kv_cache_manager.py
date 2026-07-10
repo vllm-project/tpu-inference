@@ -441,8 +441,10 @@ class KVCacheManager:
 
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully
+
+        # NOTE(weiyu0824): Pass raw block_size (size before any parallelization).
+        # vLLM applies dcp_size scaling internally; pre-multiplying block size causes a dcp_size miscalculation.
         block_size = self.runner.cache_config.block_size
-        block_size *= self.runner.vllm_config.parallel_config.decode_context_parallel_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
 
         tp_axis_name = ShardingAxisName.ATTN_HEAD
@@ -547,14 +549,17 @@ class KVCacheManager:
                         draft_hf_config, text_config)
                     for draft_layer, target_layer in redirects.items():
                         self.shared_kv_cache_layers[draft_layer] = target_layer
-                elif method == "eagle3":
+                elif method in ("eagle3", "dflash"):
+                    draft_num_layers = getattr(draft_hf_config,
+                                               'num_hidden_layers', 1)
+                    if method == "eagle3":
+                        draft_num_layers = 1
                     num_kv_heads = common_utils.get_padded_num_heads(
                         draft_hf_config.num_key_value_heads, model_cnt)
                     head_size = common_utils.get_padded_head_dim(
                         draft_hf_config.hidden_size //
                         draft_hf_config.num_attention_heads)
-                    # Eagle3 has only 1 layer
-                    for i in range(1):
+                    for i in range(draft_num_layers):
                         if self.use_mla:
                             kv_cache_spec[
                                 f"draft_layer.{i}"] = self._create_attention_spec(
@@ -671,8 +676,14 @@ class KVCacheManager:
 
     def maybe_reinitialize_input_batch(self,
                                        kv_cache_config: KVCacheConfig) -> None:
+        # kv_cache_spec.block_size is the raw block size.
+        # The block table must use the physical size: one page covers block_size * dcp_size
+        # tokens globally.
+        # Read dcp_size from the mesh (CONTEXT axis) to stay consistent with get_kv_cache_shape_with_mesh.
+        context_cnt = utils.get_mesh_shape_product(self.runner.mesh,
+                                                   ShardingAxisName.CONTEXT)
         block_sizes = [
-            kv_cache_group.kv_cache_spec.block_size
+            kv_cache_group.kv_cache_spec.block_size * context_cnt
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
         if block_sizes != [self.runner.cache_config.block_size]:

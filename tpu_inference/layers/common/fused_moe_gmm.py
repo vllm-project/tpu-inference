@@ -26,35 +26,16 @@ from tpu_inference.kernels.collectives import \
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
-from tpu_inference.kernels.sparse_core.ragged_gather import \
-    ragged_gather as ragged_gather_v1
-from tpu_inference.kernels.sparse_core.ragged_gather_reduce import \
-    ragged_gather_reduce as ragged_gather_reduce_v1
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
-    ragged_gather_reduce as ragged_gather_reduce_v2
-from tpu_inference.kernels.sparse_core.ragged_gather_v2 import ragged_gather_v2
+    ragged_gather_reduce
+from tpu_inference.kernels.sparse_core.ragged_gather_v2 import \
+    ragged_gather_v2 as ragged_gather
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
-
-# Select the SparseCore MoE gather and gather-reduce kernels independently at
-# import time, driven by the RAGGED_GATHER_VERSION / RAGGED_GATHER_REDUCE_VERSION
-# env vars (set in the server process before boot, so they are fixed for the
-# server's lifetime). Both default to "v2" (the new kernels); set either to "v1"
-# to fall back to the legacy kernel. Call sites below use the bound names.
-if envs.RAGGED_GATHER_VERSION == "v1":
-    ragged_gather = ragged_gather_v1
-else:
-    ragged_gather = ragged_gather_v2
-if envs.RAGGED_GATHER_REDUCE_VERSION == "v1":
-    ragged_gather_reduce = ragged_gather_reduce_v1
-else:
-    ragged_gather_reduce = ragged_gather_reduce_v2
-logger.info("fused_moe_gmm SparseCore kernels: gather=%s gather_reduce=%s",
-            envs.RAGGED_GATHER_VERSION, envs.RAGGED_GATHER_REDUCE_VERSION)
 
 # Target chunk size of 2048 slots was found empirically to be optimal
 # for MoE workloads (e.g., Qwen) to hide ICI/DMA latency during AllReduce.
@@ -600,6 +581,7 @@ def fused_moe_func(
     hash_based_topk_indices: jax.Array | None = None,
     expert_score_correction_bias: jax.Array | None = None,
     moe_chunk_size: int = 0,
+    num_valid_tokens: jax.Array | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -653,6 +635,14 @@ def fused_moe_func(
             topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
+    # Route padding tokens to expert 0 instead of picking a selected expert. This
+    # is especially useful when we have a low number of tokens (e.g. low
+    # concurrency), where padding tokens may activate unnecessary expert weights
+    # and slow down the gmm kernel.
+    if num_valid_tokens is not None:
+        token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
+        topk_indices = jnp.where(token_valid, topk_indices, 0)
+        topk_weights = jnp.where(token_valid, topk_weights, 0.0)
     # All gathering topk_indices and topk_weights if attention dp is used.
     if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
