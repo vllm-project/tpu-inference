@@ -71,7 +71,10 @@ def mock_vllm_config():
             self.model_config.dtype = jnp.bfloat16
             self.load_config = LoadConfig(load_format="auto")
             self.load_config.download_dir = None
-            self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
+            # block_size must be a real int: apply_qwix_quantization sizes
+            # its dummy kv caches from cache_config.block_size.
+            self.cache_config = MagicMock(cache_dtype=kv_cache_dtype,
+                                          block_size=32)
             self.quant_config = None
             self.additional_config = {}
             self.parallel_config = None
