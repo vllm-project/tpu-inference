@@ -567,12 +567,11 @@ def mla_attention(
     """
     in_specs = (
         query_nth_sharding
-        or P(None, ShardingAxisName.MLP_TENSOR, None),  # q (head-major)
+        or P(None, ShardingAxisName.ATTN_DATA, None),  # q (head-major)
         query_tnh_sharding
-        or P(ShardingAxisName.MLP_TENSOR, None, None),  # q_rope (token-major)
-        keyvalue_skh_sharding or P(ShardingAxisName.MLP_TENSOR, None),  # k
-        keyvalue_skh_sharding
-        or P(ShardingAxisName.MLP_TENSOR, None),  # k_rope
+        or P(ShardingAxisName.ATTN_DATA, None, None),  # q_rope (token-major)
+        keyvalue_skh_sharding or P(ShardingAxisName.ATTN_DATA, None),  # k
+        keyvalue_skh_sharding or P(ShardingAxisName.ATTN_DATA, None),  # k_rope
         P(ShardingAxisName.BATCH),  # kv_cache
         P(ShardingAxisName.ATTN_DATA),  # md.seq_lens
         P(ShardingAxisName.ATTN_DATA),  # md.page_indices_flat
@@ -582,7 +581,7 @@ def mla_attention(
     out_specs = (
         P(ShardingAxisName.BATCH),  # kv cache
         attn_o_nth_sharding
-        or P(None, ShardingAxisName.MLP_TENSOR, None)  # attn output
+        or P(None, ShardingAxisName.ATTN_DATA, None)  # attn output
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):

@@ -145,9 +145,15 @@ class VllmMLAAttention(MLAAttention):
             self.W_UV, self.W_UV_scale = quantize_tensor(
                 self.kv_cache_quantized_dtype, jax_view(self.W_UV), axis=1)
             self.W_UV = torch_view(general_device_put(self.W_UV, sharding))
+            # W_UV_scale is laid out (1, num_heads, v_head_dim) so it broadcasts
+            # against the "bnv" einsum output in forward(); its head axis is dim 1,
+            # not dim 0. Shard ATTN_HEAD where the head axis actually lives,
+            # otherwise we try to split the leading size-1 dim under TP.
+            wuv_scale_sharding = NamedSharding(
+                mesh, P(None, ShardingAxisName.ATTN_HEAD))
             self.W_UV_scale = torch_view(
                 general_device_put(jnp.expand_dims(self.W_UV_scale, 0),
-                                   sharding))
+                                   wuv_scale_sharding))
 
             self.W_UK_T = Parameter(self.W_UK_T, requires_grad=False)
             self.W_UK_T_scale = Parameter(self.W_UK_T_scale,
