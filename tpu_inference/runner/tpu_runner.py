@@ -246,7 +246,6 @@ class AsyncPreResults:
     spec_decode_num_rejected_tokens: Optional[
         jax.Array] = None  # [max_num_reqs]
     spec_decode_metadata: Optional[SpecDecodeMetadata] = None
-    mamba_state_indices_ndim: int = 1
 
 
 @dataclass
@@ -1374,12 +1373,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             else:
                 state_indices_to_rollback = attn_metadata.mamba_state_indices
 
-            # For brand new prompt prefill requests, _pre_async_results might still hold stale data
-            # from a previously finished request or prompt prefill state. We must skip the rollback for prefill requests.
-            # We can identify whether the previous step was prefill vs verification because prefill uses a 1D state indices array
-            # whereas verification uses a 2D array.
-            prev_ndim = getattr(self._pre_async_results, "mamba_state_indices_ndim", 1)
-            if state_indices_to_rollback is not None and prev_ndim == 2:
+            # Roll back Mamba states only if the previous step produced speculative verification states,
+            # the current step is also in 2D verification mode, and at least one request from the previous
+            # step is still actively running in the current batch.
+            prev_has_spec_meta = self._pre_async_results.spec_decode_metadata is not None
+            curr_is_2d = getattr(state_indices_to_rollback, "ndim", 1) == 2
+            prev_req_active = any(
+                req_id in self.input_batch.req_id_to_index
+                for req_id in self._pre_async_results.req_ids)
+
+            if state_indices_to_rollback is not None and prev_has_spec_meta and curr_is_2d and prev_req_active:
                 if self.is_first_rank:
                     print(f"[GDN-DEBUG] _execute_model: Triggering device rollback! state_indices_to_rollback.shape={state_indices_to_rollback.shape}, num_accepted_tokens_dev={num_accepted_tokens_dev}", flush=True)
                 self._device_rollback_mamba_states(
@@ -1387,7 +1390,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     num_accepted_tokens_dev,
                 )
             elif self.is_first_rank:
-                print(f"[GDN-DEBUG] _execute_model: Skipping device rollback (prev_ndim={prev_ndim})", flush=True)
+                print(f"[GDN-DEBUG] _execute_model: Skipping device rollback (prev_has_spec_meta={prev_has_spec_meta}, curr_is_2d={curr_is_2d}, prev_req_active={prev_req_active})", flush=True)
         with self.maybe_forbid_compile:
             with set_forward_context(
                     None,
@@ -1902,12 +1905,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         self.speculative_decoding_manager._draft_token_ids)
 
             # Save the previous results
-            if isinstance(attn_metadata, dict):
-                first_meta = next(iter(attn_metadata.values()))
-                state_indices = first_meta.mamba_state_indices
-            else:
-                state_indices = attn_metadata.mamba_state_indices
-
             next_tokens = jax.copy_to_host_async(next_tokens)
             self._pre_async_results = AsyncPreResults(
                 req_ids=req_ids,
@@ -1921,7 +1918,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 spec_decode_next_tokens=spec_decode_next_tokens,
                 spec_decode_num_rejected_tokens=spec_decode_num_rejected_tokens,
                 spec_decode_metadata=spec_decode_metadata,
-                mamba_state_indices_ndim=getattr(state_indices, "ndim", 1),
             )
 
             # Return Model output to executor
