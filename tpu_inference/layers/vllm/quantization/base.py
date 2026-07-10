@@ -19,6 +19,15 @@ import torch
 
 class VllmQuantizationMethod(ABC):
 
+    # Whether this method's matmul honors ``linear_config.defer_all_reduce``
+    # (skipping its own all-reduce over the contracting axis and returning
+    # per-shard partial sums for the caller to reduce later). Methods must NOT
+    # claim support unless their apply() actually threads the flag through:
+    # a plain einsum under GSPMD is always all-reduced by the partitioner, so
+    # deferral silently fails and downstream merged reduces double-count.
+    # Opt in per method class after validating end-to-end numerics.
+    supports_defer_all_reduce: bool = False
+
     @abstractmethod
     def maybe_process_weights(self, layer: torch.nn.Module, param_name: str,
                               args, kwargs):

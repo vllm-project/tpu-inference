@@ -37,9 +37,17 @@ class VllmRowParallelLinear(RowParallelLinear):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        # Only defer the all-reduce when the quant method's matmul actually
+        # honors ``linear_config.defer_all_reduce``. Methods that don't (e.g.
+        # the unquantized method, whose plain einsum is always all-reduced by
+        # the GSPMD partitioner) would silently return an already-reduced
+        # output, and any downstream "merged" reduce would double-count it.
         linear_config = getattr(self.quant_method, "linear_config", None)
         if linear_config is not None:
-            linear_config.defer_all_reduce = not self.reduce_results
+            supports_defer = getattr(self.quant_method,
+                                     "supports_defer_all_reduce", False)
+            linear_config.defer_all_reduce = (not self.reduce_results
+                                              and supports_defer)
 
     def forward(
         self,
