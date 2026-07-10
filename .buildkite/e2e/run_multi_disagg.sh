@@ -189,14 +189,34 @@ cleanup() {
   docker exec node cat /root/vllm_serve_prefill.log 2>/dev/null || true
   
   echo "--- 📄 Prefill Ray Logs ---"
-  docker exec node bash -c 'if [ -d /tmp/ray/session_latest/logs ]; then for f in $(find /tmp/ray/session_latest/logs -type f); do echo "+++ Ray Log: $f"; cat "$f"; done; fi' 2>/dev/null || true
+  docker exec node bash -c '
+    if [ -d /tmp/ray/session_latest/logs ]; then
+      for log_name in gcs_server.out gcs_server.err raylet.out raylet.err monitor.log; do
+        f="/tmp/ray/session_latest/logs/$log_name"
+        if [ -f "$f" ]; then
+          echo "+++ Ray Log: $log_name"
+          cat "$f"
+        fi
+      done
+    fi
+  ' 2>/dev/null || true
 
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
     echo "--- 📄 Decode vLLM Log ---"
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker exec node cat /root/vllm_serve_decode.log" 2>/dev/null || true
     
     echo "--- 📄 Decode Ray Logs ---"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker exec node bash -c 'if [ -d /tmp/ray/session_latest/logs ]; then for f in \$(find /tmp/ray/session_latest/logs -type f); do echo \"+++ Ray Log: \$f\"; cat \"\$f\"; done; fi'" 2>/dev/null || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker exec node bash -c '
+      if [ -d /tmp/ray/session_latest/logs ]; then
+        for log_name in gcs_server.out gcs_server.err raylet.out raylet.err monitor.log; do
+          f=\"/tmp/ray/session_latest/logs/\$log_name\"
+          if [ -f \"\$f\" ]; then
+            echo \"+++ Ray Log: \$log_name\"
+            cat \"\$f\"
+          fi
+        done
+      fi
+    '" 2>/dev/null || true
   fi
 
   # Dump host logs (proxy, correctness, benchmark)
