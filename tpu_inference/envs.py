@@ -67,6 +67,8 @@ if TYPE_CHECKING:
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
     SLICE_ROPE_CACHE: bool = False
+    MIN_TOKEN_BUCKET: int = 16
+    MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
 
 
 def env_with_choices(
@@ -413,6 +415,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("SLICE_ROPE_CACHE", default=False),
     "MLA_TRANSPOSE_KV_CACHE":
     env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
+    # Minimum max num of batched tokens.
+    "MIN_TOKEN_BUCKET":
+    lambda: int(os.getenv("MIN_TOKEN_BUCKET") or "16"),
+    # Route padding tokens to expert 0 instead of picking other experts, to
+    # avoid activating unneeded experts and speed up the GMM kernel by not
+    # loading unnecessary weights. Only applies when DP attention size is 1
+    # (pure TP attention, e.g. TP8_EP), since under DP attention the padding
+    # is interleaved per rank and a single valid-token count cannot describe it.
+    "MOE_ROUTE_PADDING_TO_EXPERT0":
+    env_bool("MOE_ROUTE_PADDING_TO_EXPERT0", default=False),
 }
 
 

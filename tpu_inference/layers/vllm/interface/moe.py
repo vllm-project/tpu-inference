@@ -132,6 +132,25 @@ def vllm_moe_apply(layer: RoutedExperts,
         extra_kwargs["e_score_correction_bias"] = jax_view(
             layer.e_score_correction_bias)
 
+    # Route padding tokens to a single expert instead of activating unnecessary
+    # experts. Applicable when DP attention size is 1 (pure TP attention, e.g.
+    # TP8_EP), since with DP attention the padding for each rank is interleaved.
+    if envs.MOE_ROUTE_PADDING_TO_EXPERT0 and not is_dp:
+        try:
+            from vllm.forward_context import get_forward_context
+            attn_meta = get_forward_context().attn_metadata
+            if isinstance(attn_meta, dict):
+                attn_meta = next(iter(attn_meta.values()))
+            qsl = getattr(attn_meta, "query_start_loc", None)
+            if qsl is not None:
+                if isinstance(qsl, torch.Tensor):
+                    qsl = jax_view(qsl)
+                extra_kwargs["num_valid_tokens"] = qsl[-1]
+        except Exception as e:
+            logger.warning_once(
+                "MOE_ROUTE_PADDING_TO_EXPERT0: failed to read num_valid_tokens "
+                "from attn metadata, skipping padding routing (%s)", e)
+
     return torch_view(
         moe_apply(
             layer=layer,

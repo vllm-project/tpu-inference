@@ -41,17 +41,32 @@ case "$SHARDING" in
       --additional_config='{"sharding": {"sharding_strategy": {"enable_dp_attention": true, "attn_dp_size": 4}}}'
       --enable-expert-parallel
     ) ;;
-  *) echo "ERROR: unknown SHARDING='$SHARDING' (expected DP8_EP|DP4TP2_EP)" >&2; exit 1 ;;
+  TP8_EP)
+    DP_SIZE=1
+    SHARDING_ARGS=(
+      --additional_config='{"sharding": {"sharding_strategy": {"enable_dp_attention": false}}}'
+      --enable-expert-parallel
+    ) ;;
+  *) echo "ERROR: unknown SHARDING='$SHARDING' (expected TP8_EP|DP8_EP|DP4TP2_EP)" >&2; exit 1 ;;
 esac
 
 MAX_MODEL_LEN=$((ISL + OSL + MAX_MODEL_LEN_BUFFER))
 # Floor at 1024 so 1k isl with dp8 doesn't cause the per rank seq len to be too small.
 MAX_NUM_BATCHED_TOKENS=$(( ISL / DP_SIZE > 1024 ? ISL / DP_SIZE : 1024 ))
+# Cap at 2048. Larger value runs into an XLA unimplemented error for async
+# collectives.
+[ "$MAX_NUM_BATCHED_TOKENS" -gt 2048 ] && MAX_NUM_BATCHED_TOKENS=2048
 MAX_NUM_SEQS=$((CONC * 2 / DP_SIZE))
 [ "$MAX_NUM_SEQS" -lt 1 ] && MAX_NUM_SEQS=1
 
 set -x
 export MODEL_IMPL_TYPE=vllm
+# Route padding tokens to expert 0 to minimize the active experts loaded,
+# especially useful at low concurrency like 4 or 8.
+export MOE_ROUTE_PADDING_TO_EXPERT0=1
+# Min decode bucket = 8: lowest swept concurrency is 4, but 4 is invalid -- the
+# gmm_v2 kernel asserts (num_tokens * topk) % 16 == 0 (4*10=40 isn't).
+export MIN_TOKEN_BUCKET=8
 export USE_MOE_EP_KERNEL=0
 export ATTN_BUCKETIZED_NUM_REQS=true
 export ATTN_CUSTOM_NUM_REQS_BUCKETS=4,8,16,32,64

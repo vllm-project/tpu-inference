@@ -175,6 +175,8 @@ def moe_apply(
                     expert_score_correction_bias=extra_backend_kwargs.get(
                         "e_score_correction_bias", None),
                     moe_chunk_size=moe_chunk_size,
+                    num_valid_tokens=extra_backend_kwargs.get(
+                        "num_valid_tokens", None),
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
