@@ -85,7 +85,10 @@ steps:
    - label: "Notify test results"
      <<: *run-on-nightly-or-tag
      key: notify_test_results
-     depends_on: commit_support_matrices
+     depends_on: 
+       - "commit_support_matrices"
+       - "v6_generate_matrices"
+       - "v7_generate_matrices"
      agents:
        queue: cpu
      commands:
