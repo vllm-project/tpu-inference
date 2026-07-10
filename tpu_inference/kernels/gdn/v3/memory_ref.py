@@ -380,7 +380,8 @@ def create_allocs(
     )
     num_state_slots = (
         metadata_ref.s_idx_to_write_state_indices.shape[1]
-        if metadata_ref.s_idx_to_write_state_indices.ndim == 2
+        if (metadata_ref.s_idx_to_write_state_indices.ndim == 2
+            and cfg.mode == config.GDNMode.PER_SEQ)
         else cfg.seq_tile_size
     )
     conv_shape = (num_state_slots, cfg.prev_kernel_size, 1, cfg.dim_size)

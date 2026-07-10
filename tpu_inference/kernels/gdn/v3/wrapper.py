@@ -95,7 +95,8 @@ def inner_kernel(
 
     write_slots = (
         metadata_ref.s_idx_to_write_state_indices.shape[1]
-        if metadata_ref.s_idx_to_write_state_indices.ndim == 2
+        if (metadata_ref.s_idx_to_write_state_indices.ndim == 2
+            and cfg.mode == config.GDNMode.PER_SEQ)
         else 1
     )
 
