@@ -2665,10 +2665,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         req_offset:req_offset +
                         _num_reqs] = local_base_slots[:, None] + arange
                 elif self.speculative_config:
-                    # Point to Slot 1 so the final prefill state lands exactly where the verification
-                    # rollback expects it!
+                    # Point to local_base_slots (Slot 0 of the request's state history) so the
+                    # final prefill state lands precisely where verification step 1 (read_state_indices = state_indices[:, 0])
+                    # expects to read from!
                     mamba_state_indices_cpu[req_offset:req_offset +
-                                            _num_reqs] = local_base_slots + 1
+                                            _num_reqs] = local_base_slots
                 else:
                     mamba_state_indices_cpu[req_offset:req_offset +
                                             _num_reqs] = local_base_slots
