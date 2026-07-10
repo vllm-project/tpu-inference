@@ -651,33 +651,33 @@ class TPUOffloadConnectorScheduler():
             f"num_staging_blocks={self.num_staging_blocks}.")
 
     def _get_num_tp_workers(self) -> int:
-        """
-        Calculates the number of worker actors in the last pipeline stage.
+        """Calculates the number of Tensor Parallel (TP) workers in the last pipeline stage.
 
-        In a multi-host TPU environment, the KV cache tensors are partitioned across
-        multiple TP (Tensor Parallel) workers running on different host nodes. During
-        save or load operations, every TP worker independently processes its slice of the
-        KV cache chunk and reports completion to the driver. Therefore, the driver must
-        track completion counts per chunk and only free staging buffer slots when the
-        completed worker count reaches `num_tp_workers` to prevent race conditions and
-        data corruption.
+        Terminology & Architecture Notes:
+        1. Ray Actor (Worker Actor): In vLLM, distributed workers are instantiated
+           as remote Ray Actors (processes running `RayWorkerWrapper`).
+        2. TPU Worker: In a multi-host TPU environment executing in SPMD mode, there is
+           exactly one worker actor process (Ray Actor) per host node. Thus, the total
+           number of worker actors in the cluster equals `num_nodes`.
+        3. TP (Tensor Parallel) Worker: Under Pipeline Parallelism (PP), the worker actors
+           are divided into `pp_size` stages. Within each stage, they run in a tensor-parallel
+           fashion. Therefore, each stage contains `num_nodes // pp_size` worker actors,
+           representing the TP size per stage.
 
-        In TPU SPMD execution, there is exactly one worker actor process per host node,
-        meaning the total number of worker actors in the cluster equals `num_nodes`.
-        Under pipeline parallelism, these workers are divided into `pp_size` stages.
-        Therefore, each stage contains `num_nodes // pp_size` worker actors, which
-        represents the TP size per stage.
+        In multi-host TPU setups, the KV cache tensors are partitioned across these TP
+        workers. During save or load operations, every TP worker independently processes its
+        slice of the KV cache chunk and reports completion to the driver.
 
-        Because only the workers in the last pipeline parallel (PP) stage return
-        execution outputs and offload statistics to the driver, the driver will receive
-        exactly `num_nodes // pp_size` completion stats for each saved or loaded chunk.
-        
-        To prevent race conditions and data corruption, the driver tracks the completion
-        counts per chunk and only frees staging buffer slots (or marks chunks ready) once
-        the counts reach this target number of TP workers.
+        Since only the workers in the last pipeline parallel (PP) stage return execution
+        outputs and offload statistics to the driver, the driver will receive exactly
+        `num_nodes // pp_size` completion notifications for each saved or loaded chunk.
+        To prevent race conditions and data corruption, the driver tracks these completion
+        counts per chunk and only frees staging buffer slots (or marks chunks as ready)
+        once the count reaches this target number of TP workers.
 
         Returns:
-            int: The number of TP workers in the last pipeline stage.
+            int: The target number of TP workers in the last pipeline stage (representing
+                 the number of expected completion stats per chunk).
         """
         num_nodes = 1
         if ray.is_initialized():
