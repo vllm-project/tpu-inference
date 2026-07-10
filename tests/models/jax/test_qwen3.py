@@ -17,11 +17,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import torch
 from flax.typing import PRNGKey
 from jax.sharding import Mesh
-from transformers import AutoModelForCausalLM
-from vllm.config import ModelConfig, set_current_vllm_config
+from qwix._src.core.qarray import QArray
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 
 from tpu_inference.distributed.jax_parallel_state import \
@@ -34,19 +33,6 @@ from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
     apply_qwix_quantization
 from tpu_inference.runner.kv_cache import create_kv_caches
-
-
-class MockVllmConfig:
-
-    def __init__(self, model: str, kv_cache_dtype: str):
-        self.model_config = ModelConfig(model=model)
-        self.model_config.dtype = jnp.bfloat16
-        self.load_config = MagicMock()
-        self.load_config.download_dir = None
-        self.cache_config = MagicMock(cache_dtype=kv_cache_dtype)
-        self.quant_config = None
-        self.additional_config = {}
-        self.parallel_config = None
 
 
 @pytest.fixture(scope="module")
@@ -110,20 +96,27 @@ def mock_get_pp_group():
 
 class TestQwen3ForCausalLM:
 
+    QWIX_FP8_RULES = [{
+        "module_path": ".*",
+        "weight_qtype": "float8_e4m3fn",
+        "act_qtype": "float8_e4m3fn"
+    }]
+
     @pytest.mark.parametrize("model_name", ["Qwen/Qwen3-0.6B"])
     @pytest.mark.parametrize("kv_cache_type", ["auto", "fp8"])
-    @pytest.mark.parametrize("qwix_rules", [
-        None,
-        [{
-            "module_path": ".*",
-            "weight_qtype": "float8_e4m3fn",
-            "act_qtype": "float8_e4m3fn"
-        }]
+    # qwix quantization is orthogonal to pipeline parallelism, so it is
+    # exercised only on the single-stage config instead of the full PP
+    # matrix to keep the test time bounded.
+    @pytest.mark.parametrize("qwix_rules,pp_rank,pp_world_size", [
+        (None, 0, 1),
+        (None, 0, 4),
+        (None, 1, 4),
+        (None, 3, 4),
+        (QWIX_FP8_RULES, 0, 1),
     ])
-    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
-                                                       (3, 4)])
     def test_qwen3_600M(self, model_name, kv_cache_type, qwix_rules, rng, mesh,
-                        mock_model_inputs, pp_rank, pp_world_size):
+                        mock_model_inputs, pp_rank, pp_world_size,
+                        mock_vllm_config):
         """Tests model init and model forward for the 0.6B model variant."""
         init_pp_distributed_environment(
             ip="",
@@ -132,9 +125,9 @@ class TestQwen3ForCausalLM:
             device=jax.devices()[0],
             need_pp=False,
         )
-        mock_vllm_config = MockVllmConfig(model_name, kv_cache_type)
+        mock_vllm_config = mock_vllm_config(model_name, kv_cache_type)
         if qwix_rules:
-            mock_vllm_config.additional_config["quanntization"] = dict(
+            mock_vllm_config.additional_config["quantization"] = dict(
                 qwix=dict(rules=qwix_rules))
 
         # Test model init
@@ -193,10 +186,19 @@ class TestQwen3ForCausalLM:
                                         mesh,
                                         apply_to_abstract_model=False)
 
+        # Guard against the qwix axis silently regressing to a no-op (the
+        # config key was misspelled before, so quantization never applied):
+        # with rules set, the weights must actually be QArray-quantized.
+        # Qwix wraps the quantized weight in WithAux(array=QArray(...)).
+        gate_proj_weight = model.model.layers[
+            model.model.start_layer].mlp.gate_proj.weight.value
+        gate_proj_weight = getattr(gate_proj_weight, "array", gate_proj_weight)
+        assert isinstance(gate_proj_weight, QArray) == (qwix_rules is not None)
+
         # Test model forward
         kv_caches = create_kv_caches(
             num_blocks=4,
-            block_size=32,
+            block_size=mock_vllm_config.cache_config.block_size,
             num_kv_heads=num_kv_heads,
             head_size=head_dim,
             mesh=mesh,
@@ -204,7 +206,7 @@ class TestQwen3ForCausalLM:
             cache_dtype=jnp.float8_e4m3fn
             if mock_vllm_config.cache_config.cache_dtype == "fp8" else
             jnp.bfloat16)
-        # 1 seq with 16 tokens
+        # 1 seq with 8 tokens (see the mock_model_inputs fixture).
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
         kv_caches, hidden_states, aux_hidden_states, _ = model(
             kv_caches, input_ids, attention_metadata)
@@ -284,7 +286,7 @@ class TestQwen3ForCausalLM:
         kv_dtype = jnp.bfloat16
         num_key_value_heads = model_config.hf_config.num_key_value_heads
         qk_head_dim = model_config.hf_config.head_dim
-        # Create random input for comparison
+        # Create a deterministic input for the single-layer forward pass.
         seq_len = 1
         input = [[0.01 * i for i in range(model_dim)] for _ in range(seq_len)]
 
@@ -307,16 +309,18 @@ class TestQwen3ForCausalLM:
 
         input_tensor_jax = jnp.array(input, dtype=jnp.bfloat16)
 
-        # Forward pass only the 1st layer for comparison
-
+        # Forward pass only the 1st layer.
         block_size = 16
         num_blocks = 8
         cache_shape = get_kv_cache_shape(num_blocks, block_size,
                                          num_key_value_heads, qk_head_dim,
                                          kv_dtype)
 
+        # The layer returns (new_kv_cache, hidden_states); the old unpacking
+        # asserted on the kv cache, which the vacuous `is not None` check
+        # never caught.
         with jax.set_mesh(mesh):
-            jax_output, _ = jax_layer_0(
+            _, jax_output = jax_layer_0(
                 kv_cache=jnp.zeros(cache_shape, dtype=kv_dtype),
                 x=input_tensor_jax,
                 attention_metadata=AttentionMetadata(
@@ -327,35 +331,12 @@ class TestQwen3ForCausalLM:
                     request_distribution=jnp.array([0, 0, 1]),
                 ),
             )
-        assert jax_output is not None
+        assert jax_output.shape == (seq_len, model_dim)
+        assert jnp.isfinite(jax_output).all()
+        # TODO(#1604): Compare jax_output against the HF reference model once
+        # the rope shape mismatch is resolved.
 
-        # TODO(#1604): Enable HF comparison when issue resolved.
-        # Currently there's a shape mismatch during rope.
-        if True:
-            return
-        with torch.no_grad():
-            # Use transformer library to load the HF model, for reference.
-
-            input_tensor_hf = torch.tensor(input, dtype=torch.bfloat16)
-            hf_model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                torch_dtype='auto',
-                low_cpu_mem_usage=True,
-            )
-            hf_model = hf_model.eval()
-
-            hf_model.config.num_hidden_layers = 1
-            hf_output = hf_model(
-                inputs_embeds=input_tensor_hf, ).float().numpy()
-            np.testing.assert_allclose(
-                jax_output,
-                hf_output,
-                rtol=1e-2,
-                atol=1e-2,
-            )
-
-    def test_vocab_padding_for_sharding(self, rng, mesh):
+    def test_vocab_padding_for_sharding(self, rng, mesh, mock_vllm_config):
         """Verify that embed_tokens shape is rounded up when tensor_parallel_size > 1."""
         from tpu_inference.distributed.jax_parallel_state import \
             init_pp_distributed_environment
@@ -369,7 +350,7 @@ class TestQwen3ForCausalLM:
         )
 
         model_name = "Qwen/Qwen3-0.6B"
-        mock_vllm_config = MockVllmConfig(model_name, "auto")
+        mock_vllm_config = mock_vllm_config(model_name, "auto")
 
         # Set tensor_parallel_size = 2
         mock_vllm_config.parallel_config = MagicMock()
