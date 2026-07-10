@@ -412,22 +412,12 @@ def rpa_kernel(
             kv_cache_hbm_ref, q_hbm_ref, cfgs)
 
         actual_steps = schedule_hbm_ref.actual_steps[0]
-        safe_steps = jnp.minimum(actual_steps, cfgs.max_steps_ub)
-        pipeline_func = pltpu.emit_pipeline(
-            body=functools.partial(
-                rpa_body,
-                cfgs=cfgs,
-                cu_q_lens_ref=cu_q_lens_ref,
-                kv_lens_ref=kv_lens_ref,
-            ),
-            grid=(safe_steps, ),
-            in_specs=(q_alloc.spec, kv_cache_alloc.spec),
-            out_specs=(o_alloc.spec, ),
-        )
+        num_safe_step_iterations = pl.cdiv(actual_steps, cfgs.max_steps_ub)
 
         @pl.with_scoped(
             final_allocs=(q_alloc, kv_cache_alloc, o_alloc),
-            schedule_ref=schedule_hbm_ref.scratch_shapes(),
+            schedule_ref=schedule.create_scaled_schedule(
+                cfgs, multiplier=1).scratch_shapes(),
             dma_sem=pltpu.SemaphoreType.DMA((1, )),
             scratches=(
                 pltpu.VMEM(
@@ -445,26 +435,6 @@ def rpa_kernel(
             ),
         )
         def _run(final_allocs, schedule_ref, dma_sem, scratches):
-
-            # Transfer schedule from HBM to SMEM --- we only copy what we need. Since
-            # we almost always over-allocate schedule size, we only want to copy a
-            # small portion of it from HBM to SMEM.
-            flat_hbm = jax.tree_util.tree_leaves(schedule_hbm_ref)
-            flat_smem = jax.tree_util.tree_leaves(schedule_ref)
-            dma_list = []
-            for h, s in zip(flat_hbm, flat_smem):
-                if h.memory_space == pltpu.HBM:
-                    read_size = (h.shape[0] // cfgs.max_steps_ub) * safe_steps
-                    read_size = utils.align_to(read_size, 1024)
-
-                    copy = pltpu.make_async_copy(
-                        h.at[pl.ds(0, read_size)],
-                        s.at[pl.ds(0, read_size)],
-                        dma_sem.at[0],
-                    )
-                    copy.start()
-                    dma_list.append(copy)
-
             # Initialize KV cache to zeros.
             # When perfomring p * v, we perform causal masking on lhs (p) by zeroing
             # out columns that should not be processed for a given row. Even if we
@@ -480,16 +450,65 @@ def rpa_kernel(
                 -1, num_lanes)
             kv_ref_flat[...] = jnp.zeros_like(kv_ref_flat)
 
-            jax.tree.map(lambda x: x.wait(), dma_list)
+            def execute_part(start_step, num_steps):
+                # All reads are aligned to 128 and some extra steps are copied in the
+                # process.
+                aligned_start_step = (start_step // 128) * 128
+                prefix_steps = start_step - aligned_start_step
 
-            pipeline_func(
-                (q_hbm_ref, schedule_ref),
-                (kv_cache_hbm_ref, new_kv_hbm_ref, schedule_ref,
-                 page_indices_ref),
-                (o_hbm_ref, schedule_ref),
-                scratches=(schedule_ref, ) + scratches,
-                allocations=final_allocs,
-            )
+                flat_hbm = jax.tree_util.tree_leaves(schedule_hbm_ref)
+                flat_smem = jax.tree_util.tree_leaves(schedule_ref)
+                dma_list = []
+                for h, s in zip(flat_hbm, flat_smem):
+                    if h.memory_space == pltpu.HBM:
+                        element_size = s.shape[0] // cfgs.max_steps_ub
+                        read_size = element_size * (num_steps + prefix_steps)
+                        read_size = utils.align_to(read_size, 1024)
+                        read_size = jnp.minimum(read_size, s.shape[0])
+
+                        src_off = element_size * aligned_start_step
+                        src_off = pl.multiple_of(src_off, 128)
+
+                        copy = pltpu.make_async_copy(
+                            h.at[pl.ds(src_off, read_size)],
+                            s.at[pl.ds(0, read_size)],
+                            dma_sem.at[0],
+                        )
+                        copy.start()
+                        dma_list.append(copy)
+                jax.tree.map(lambda x: x.wait(), dma_list)
+                pipeline_func = pltpu.emit_pipeline(
+                    body=functools.partial(
+                        rpa_body,
+                        cfgs=cfgs,
+                        cu_q_lens_ref=cu_q_lens_ref,
+                        kv_lens_ref=kv_lens_ref,
+                    ),
+                    grid=(num_steps + prefix_steps, ),
+                    in_specs=(q_alloc.spec, kv_cache_alloc.spec),
+                    out_specs=(o_alloc.spec, ),
+                )
+                pipeline_func(
+                    (q_hbm_ref, schedule_ref),
+                    (kv_cache_hbm_ref, new_kv_hbm_ref, schedule_ref,
+                     page_indices_ref),
+                    (o_hbm_ref, schedule_ref),
+                    scratches=(schedule_ref, ) + scratches,
+                    allocations=final_allocs,
+                )
+
+            # Define the loop body function required by fori_loop
+            def loop_body(step_idx, _):
+                start = step_idx * cfgs.max_steps_ub
+                rem = actual_steps % cfgs.max_steps_ub
+                last_step_size = jnp.where(rem == 0, cfgs.max_steps_ub, rem)
+                is_last_step = step_idx == num_safe_step_iterations - 1
+                size = jnp.where(is_last_step, last_step_size,
+                                 cfgs.max_steps_ub)
+
+                execute_part(start, size)
+
+            jax.lax.fori_loop(0, num_safe_step_iterations, loop_body, None)
 
         _run()
 
