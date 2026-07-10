@@ -35,6 +35,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 
+from tpu_inference.layers.common.linear import sharded_matmul
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
@@ -324,7 +325,18 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             x_jax = jax_view(x)
             bias_jax = jax_view(
                 bias) if bias is not None and not layer.skip_bias_add else None
-            if self.linear_config.fuse_matmuls:
+            if self.linear_config.defer_all_reduce:
+                assert bias_jax is None
+                # the caller reduces this output later
+                # (e.g. VllmMoERunner fuses it with the routed-expert psum),
+                # so the matmul must return unreduced partial sums
+                out_jax = sharded_matmul(x_jax,
+                                         jax_view(layer.weight),
+                                         self.linear_config.weight_sharding,
+                                         mesh=self.linear_config.mesh,
+                                         defer_all_reduce=True)
+                out: torch.Tensor = torch_view(out_jax)
+            elif self.linear_config.fuse_matmuls:
                 weight_jax = jax_view(layer.weight)
                 out_jax = self._apply_fused(x_jax, weight_jax, bias_jax)
                 out: torch.Tensor = torch_view(out_jax)
