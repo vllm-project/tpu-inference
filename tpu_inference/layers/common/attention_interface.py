@@ -806,7 +806,7 @@ def attention(
 
     md = attention_metadata
 
-    if mesh.shape['dcp'] > 1:
+    if 'dcp' in mesh.shape and mesh.shape['dcp'] > 1:
         return forward_with_dcp(
             kv_cache=kv_cache,
             q=q,
