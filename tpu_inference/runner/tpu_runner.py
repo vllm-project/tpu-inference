@@ -2613,7 +2613,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # arrange this request's current tokens into rank order and emit the PCP
         # attention metadata (chunk-size cu, padded seq_len, logits slot).
         # Decode is handled elsewhere.
-        pcp_kv_write_lens = None
+        pcp_kv_cache_lens = None
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         if pcp_size > 1:
             assert dp_size == 1, "PCP with DP>1 not wired yet"
@@ -2635,21 +2635,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             _rearrange(positions)
             _rearrange(input_ids_view)
-            # query_start_loc := [0, C] (the head-tail chunk size C).
+            # query_start_loc := [0, C] (head chunk size). The head chunk is
+            # fully real (num_current > pcp*C); the tail chunk's real length is
+            # derived per-rank in the kernel wrapper from seq_lens - kv_cache_lens.
             query_start_loc_view[:2] = (0, C)
             query_start_loc_view[2:] = C
-            # seq_lens := num_computed + padded current S (= 2*pcp*C).
+            # seq_lens := REAL total kv length (num_computed + real current). The
+            # head-tail padding lives only in the tensor shapes, NOT the metadata.
             req_idx = int(req_indices_dp[0][0])
             num_computed = int(
                 self.input_batch.num_computed_tokens_cpu[req_idx])
-            seq_lens_view[0] = num_computed + padded_S
+            seq_lens_view[0] = num_computed + num_current
             seq_lens_view[1:] = 0
-            # REAL total kv length (num_computed + real current), BEFORE the
-            # padding inflation; bounds the strided cache write so the pad
-            # tokens aren't written past the request's allocated pages (they
-            # would clamp onto the last page and corrupt real tokens).
-            real_seq_lens = np.zeros_like(np.asarray(seq_lens_view))
-            real_seq_lens[0] = num_computed + num_current
+            # kv_cache_lens := num_computed; the kernel derives the real current
+            # KV length as seq_lens - kv_cache_lens, so only real tokens are
+            # attended/written (no padding write-clamp needed).
+            kv_cache_lens_np = np.zeros_like(np.asarray(seq_lens_view))
+            kv_cache_lens_np[0] = num_computed
             # logits_indices: the last real token (natural position
             # num_current-1) lands in rank-order slot inv_row[chunk]*C + within.
             inv_row = np.empty(two_p, np.int64)
@@ -2657,8 +2659,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             last = num_current - 1
             logits_indices_view[0] = inv_row[last // C] * C + (last % C)
             logits_indices_view[1:] = -1
-            pcp_kv_write_lens = device_array(
-                self.mesh, real_seq_lens,
+            pcp_kv_cache_lens = device_array(
+                self.mesh, kv_cache_lens_np,
                 sharding=NamedSharding(self.mesh, PartitionSpec()))
 
         spec_decode_metadata = None
@@ -2791,7 +2793,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
-                pcp_kv_write_lens=pcp_kv_write_lens,
+                pcp_kv_cache_lens=pcp_kv_cache_lens,
             )
 
             return attention_metadata_gid

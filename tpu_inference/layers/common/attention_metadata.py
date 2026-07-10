@@ -28,7 +28,7 @@ import jax
         "request_distribution",
         "mamba_state_indices",
         "q_pos_offsets",
-        "pcp_kv_write_lens",
+        "pcp_kv_cache_lens",
     ],
     meta_fields=["padded_num_reqs"],
 )
@@ -61,11 +61,11 @@ class AttentionMetadata(object):
     # true global position. None when PCP is disabled.
     q_pos_offsets: jax.Array | None = None
 
-    # (max_num_seqs,) int32 — PCP only. Per-request REAL total kv length
-    # (num_computed + real current), i.e. seq_lens BEFORE the head-tail padding
-    # inflation. Bounds the strided cache write so padding tokens aren't written
-    # past the sequence's allocated pages. None when PCP disabled.
-    pcp_kv_write_lens: jax.Array | None = None
+    # (max_num_seqs,) int32 — PCP only. Per-request previously-computed kv length
+    # (num_computed). The kernel derives the REAL current KV length as
+    # `seq_lens - pcp_kv_cache_lens`, so only real tokens are attended/written
+    # (no padding write-clamp). None when PCP disabled.
+    pcp_kv_cache_lens: jax.Array | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket
     # contains only max_reqs by default to reduce model precompilation time.

@@ -61,8 +61,8 @@ else:
 ragged_paged_attention = rpa.ragged_paged_attention
 get_kv_cache_shape = rpa.get_kv_cache_shape
 
-# Prefill context parallelism always uses the dedicated context-parallel RPA
-# kernel (drop-in: identical signature + kv_cache_shape as the default kernel).
+# Prefill context parallelism uses the dedicated context-parallel RPA kernel
+# (drop-in: identical signature + kv_cache_shape as the default kernel).
 import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as pcp_rpa
 
 pcp_ragged_paged_attention_kernel = pcp_rpa.ragged_paged_attention
@@ -813,11 +813,11 @@ def pcp_ragged_paged_attention(
     k: jax.Array,  # [2*pcp*C, num_kv_heads, head_dim]
     v: jax.Array,  # [2*pcp*C, num_kv_heads, head_dim]
     kv_cache: jax.Array,
-    kv_lens: jax.Array,  # i32[max_num_seqs] total kv length = num_computed + padded_S
+    kv_lens: jax.Array,  # i32[max_num_seqs] REAL total kv length = num_computed + num_current
     page_indices: jax.Array,
-    cu_q_lens: jax.Array,  # i32[max_num_seqs+1] chunk size C (cumsum): [0, C, ...]
+    cu_q_lens: jax.Array,  # i32[max_num_seqs+1] head chunk size C (cumsum): [0, C, ...]
     distribution: jax.Array,
-    kv_write_lens: jax.Array,  # i32[max_num_seqs] REAL total kv len (num_computed + real current); bounds the strided cache write so padding tokens aren't written past the seq's allocated pages
+    kv_cache_lens: jax.Array,  # i32[max_num_seqs] previously-computed kv len (num_computed); new KV = kv_lens - kv_cache_lens
     sm_scale: float,
     q_scale: float | None = None,
     k_scale: float | None = None,
@@ -837,8 +837,10 @@ def pcp_ragged_paged_attention(
         chunks), attend the pcp-strided PREVIOUS cache (non-causal, no write),
         LSE all-reduce over pcp, slice back this rank's chunk.
       * current phase: the LOCAL chunk attends the CURRENT tokens (causal,
-        `all_gather_kv`, per-chunk `q_pos_offset`); the tail phase writes the
-        strided cache. Single request => pad tokens are written only into this
+        token-order all-gathered KV, per-chunk `q_pos_offset`); the tail phase
+        writes the strided cache. The current KV length is the REAL current
+        (`kv_lens - kv_cache_lens`), so only real tokens are written (no pad
+        write-clamp needed). Single request => pad tokens are written only into this
         request's own pages, so no `kv_write_lens` bound needed.
 
     The current K/V is all-gathered from rank order and reordered into global
@@ -868,7 +870,7 @@ def pcp_ragged_paged_attention(
     def _rank_i32(r):
         return jnp.reshape(r, (1, )).astype(jnp.int32)
 
-    def _fn(q_l, k_l, v_l, kvc, kvl, pi, cu, kwl):
+    def _fn(q_l, k_l, v_l, kvc, kvl, kvcl, pi, cu):
         r = lax.axis_index(pcp_axis)
         ag = lambda x: lax.all_gather(x, pcp_axis, axis=0, tiled=True)
 
@@ -880,13 +882,15 @@ def pcp_ragged_paged_attention(
         common = dict(cp_rank=_rank_i32(r), cp_group_size=pcp_size,
                       return_lse=True, sm_scale=sm_scale, q_scale=q_scale,
                       k_scale=k_scale, v_scale=v_scale)
-        # Cache phase sees `pcp*C` query tokens (one same-half chunk per rank),
-        # so its kv_lens must be num_computed + pcp*C. kvl = num_computed + S and
-        # S = 2*pcp*C, so num_computed + pcp*C = kvl - pcp*C = kvl - sum_s//2.
-        kvl_cache = kvl - sum_s // 2
+        # REAL current length = kvl - kvcl (kvcl = num_computed). Head chunks are
+        # fully real (num_current > pcp*C); the tail chunk that spans the padded
+        # region is shortened so only real tokens are attended/written.
+        num_current = kvl[0] - kvcl[0]
+        # Cache phase attends the previous cache only (skip_current_attn); its Q
+        # is the pcp all-gathered same-half chunk (pcp*C tokens).
         cu_cache = jnp.zeros_like(cu).at[1].set(pcp_size * C)
 
-        def section(q_chunk, q_pos_offset, writes_cache):
+        def section(q_chunk, q_pos_offset, q_len, writes_cache):
             # --- cache phase: all-gather chunk vs strided previous cache. ---
             ag_q = ag(q_chunk)  # [pcp*C] -- all ranks' same-half chunks
             # `skip_current_attn` ignores k/v, but the kernel still requires
@@ -894,28 +898,33 @@ def pcp_ragged_paged_attention(
             kv_dummy = jnp.zeros((ag_q.shape[0], k_l.shape[1], k_l.shape[2]),
                                  k_l.dtype)
             o1, kvc1, l1 = pcp_ragged_paged_attention_kernel(
-                ag_q, kv_dummy, kv_dummy, kvc, kvl_cache, pi, cu_cache,
-                distribution, skip_current_attn=True, use_causal_mask=False,
-                update_kv_cache=False, **common)
+                ag_q, kv_dummy, kv_dummy, kvc, kvl, pi, cu_cache,
+                distribution, kv_cache_lens=kvcl, skip_current_attn=True,
+                use_causal_mask=False, update_kv_cache=False, **common)
             o1, l1 = _lse_all_reduce(o1, l1, pcp_axis)
             o1 = lax.dynamic_slice_in_dim(o1, r * C, C, 0)  # this rank's chunk
             l1 = lax.dynamic_slice_in_dim(l1, r * C, C, 0)
-            # --- current phase: local chunk vs sorted current tokens (causal). ---
-            # The kernel requires q/k/v to share length under `all_gather_kv`,
-            # so pad the local chunk to the all-gathered current length.
+            # --- current phase: local chunk vs token-order current KV (causal). ---
+            # The kernel requires q/k/v to share length, so pad the local chunk
+            # to the all-gathered current length. `cu` carries the REAL per-chunk
+            # query length; `q_pos_offset` is the chunk's within-current start.
             q_buf = jnp.zeros((sum_s, q_chunk.shape[1], q_chunk.shape[2]),
                               q_chunk.dtype).at[:C].set(q_chunk)
             q_pos = jnp.zeros_like(cu[:-1]).at[0].set(q_pos_offset)
+            cu_cur = jnp.zeros_like(cu).at[1].set(q_len)
             o2, kvc2, l2 = pcp_ragged_paged_attention_kernel(
-                q_buf, k_cur, v_cur, kvc1, kvl, pi, cu, distribution,
-                all_gather_kv=True, q_pos_offsets=q_pos, skip_cache_attn=True,
-                kv_write_lens=kwl, use_causal_mask=use_causal_mask,
-                update_kv_cache=writes_cache, **common)
+                q_buf, k_cur, v_cur, kvc1, kvl, pi, cu_cur, distribution,
+                kv_cache_lens=kvcl, q_pos_offsets=q_pos, skip_cache_attn=True,
+                use_causal_mask=use_causal_mask, update_kv_cache=writes_cache,
+                **common)
             out = _lse_combine(o1, l1, o2[:C], l2[:C])
             return out, kvc2
 
-        head_out, kvc = section(q_l[:C], r * C, False)
-        tail_out, kvc = section(q_l[C:2 * C], (two_p - 1 - r) * C,
+        # Head chunk r (fully real, size C) then tail chunk 2P-1-r (real size
+        # clamped so padding tokens past num_current are excluded).
+        tail_real = jnp.clip(num_current - (two_p - 1 - r) * C, 0, C)
+        head_out, kvc = section(q_l[:C], r * C, C, False)
+        tail_out, kvc = section(q_l[C:2 * C], (two_p - 1 - r) * C, tail_real,
                                 update_kv_cache)
         out = jnp.concatenate([head_out, tail_out], axis=0)  # [head | tail]
         return out.astype(q.dtype), kvc
@@ -927,7 +936,7 @@ def pcp_ragged_paged_attention(
                   repl),
         out_specs=(q_spec, kv_cache_spec),
         check_vma=False,
-    )(q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, kv_write_lens)
+    )(q, k, v, kv_cache, kv_lens, kv_cache_lens, page_indices, cu_q_lens)
 
 
 def attention(
@@ -999,11 +1008,11 @@ def attention(
             k,
             v,
             kv_cache,
-            md.seq_lens,
+            md.seq_lens,  # PCP: REAL total kv len (num_computed + num_current)
             md.block_tables,
-            md.query_start_loc,  # PCP: chunk size C (cumsum [0, C])
+            md.query_start_loc,  # PCP: head chunk size C (cumsum [0, C])
             md.request_distribution,
-            md.pcp_kv_write_lens,
+            md.pcp_kv_cache_lens,  # PCP: num_computed (new KV = seq_lens - this)
             sm_scale=sm_scale,
             q_scale=q_scale,
             k_scale=k_scale,
