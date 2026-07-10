@@ -2633,14 +2633,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # to end up in Slot 1 for the verification step's rollback to correctly copy it).
                 # This 1D array allows `ragged_gated_delta_rule_wrapper` to dynamically route
                 # to the highly optimized chunked implementation!
-                cached_reqs = getattr(scheduler_output,
-                                      "scheduled_cached_reqs", None)
-                num_cached = len(cached_reqs.req_ids
-                                 ) if cached_reqs is not None and hasattr(
-                                     cached_reqs, "req_ids") else 0
-                is_prompt_prefill = (len(scheduler_output.scheduled_new_reqs)
-                                     > 0) or (num_cached > 0)
-                is_spec_verification = not is_prompt_prefill
+                spec_tokens = getattr(scheduler_output,
+                                      "scheduled_spec_decode_tokens", None)
+                is_spec_verification = bool(spec_tokens and len(spec_tokens) > 0)
+                is_prompt_prefill = not is_spec_verification
             else:
                 is_spec_verification = False
 
