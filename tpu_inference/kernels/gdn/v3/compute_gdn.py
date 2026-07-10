@@ -111,6 +111,7 @@ def chunked_gdn_per_seq(
     beta: jax.Array,  # [1, 1, num_v_heads]
     state_prev: jax.Array,  # [num_v_heads, kq_head_dim, v_head_dim]
     cfg: config.GDNConfig,
+    write_slots: int = 1,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform chunked GDN over input [num_heads, chunk, head_dim]."""
 
@@ -228,6 +229,21 @@ def chunked_gdn_per_seq(
     state_updated = state_prev * gating_last
     state = state_updated + state_new
 
+    if write_slots > 1:
+        state_list = []
+        for c in range(write_slots):
+            decay_j_to_c = jnp.exp(g_cum_sum_log[:, c:c+1, :] - g_cum_sum_log[:, :c+1, :])
+            k_u_decay = k_repeat[:, :c+1, :] * decay_j_to_c
+            state_c_new = jax.lax.dot(
+                k_u_decay,
+                u_ws[:, :c+1, :],
+                dimension_numbers=(((1, ), (1, )), ((0, ), (0, ))),
+                preferred_element_type=jnp.float32,
+            )
+            state_c_updated = state_prev * gating_forward[:, c:c+1, :]
+            state_list.append(state_c_updated + state_c_new)
+        state = jnp.stack(state_list, axis=0)
+
     # [num_kq_heads, chunk, chunk]
     out_qk = jax.lax.dot(
         q_large,
@@ -264,6 +280,7 @@ def chunked_gdn(
     a_log: jax.Array,
     dt_bias: jax.Array,
     cfg: config.GDNConfig,
+    write_slots: int = 1,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform chunked GDN over input [seq, num_heads, chunk, head_dim]."""
 
@@ -312,11 +329,17 @@ def chunked_gdn(
             beta[idx],
             state_prev[idx],
             cfg,
+            write_slots=write_slots,
         )
         out_list.append(out.swapaxes(0, 1))
         state_list.append(state)
     out = jnp.stack(out_list, axis=0)
-    state = jnp.stack(state_list, axis=0)
+    if write_slots > 1:
+        state = jnp.stack(state_list, axis=0)
+        if cfg.seq_tile_size == 1:
+            state = state[0]
+    else:
+        state = jnp.stack(state_list, axis=0)
     return out, state
 
 
@@ -329,6 +352,7 @@ def recurrent_gdn_per_seq(
     beta: jax.Array,  # [num_v_heads, chunk, 1, 1]
     state: jax.Array,  # [num_v_heads, kq_head_dim, v_head_dim]
     cfgs: config.GDNConfig,
+    write_slots: int = 1,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform recurrent GDN over input [num_heads, chunk, 1, head_dim]."""
 
@@ -382,7 +406,11 @@ def recurrent_gdn_per_seq(
         ).astype(cfgs.dtypes.compute)
 
         out_list.append(out[:, 0, :])
+        if write_slots > 1 and len(state_list) < write_slots:
+            state_list.append(state)
 
+    if write_slots > 1:
+        state = jnp.stack(state_list, axis=0)
     return jnp.stack(out_list, axis=0), state
 
 
@@ -397,6 +425,7 @@ def recurrent_gdn(
     a_log: jax.Array,
     dt_bias: jax.Array,
     cfg: config.GDNConfig,
+    write_slots: int = 1,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform recurrent GDN over input [seq, num_heads, chunk, 1, head_dim]."""
 
@@ -452,11 +481,17 @@ def recurrent_gdn(
             beta[idx],
             state_prev[idx],
             cfg,
+            write_slots=write_slots,
         )
         out_list.append(out)
         new_state_list.append(state)
 
     out = jnp.stack(out_list, axis=0)
-    new_recurrent_state = jnp.stack(new_state_list, axis=0)
+    if write_slots > 1:
+        new_recurrent_state = jnp.stack(new_state_list, axis=0)
+        if cfg.seq_tile_size == 1:
+            new_recurrent_state = new_recurrent_state[0]
+    else:
+        new_recurrent_state = jnp.stack(new_state_list, axis=0)
 
     return out, new_recurrent_state

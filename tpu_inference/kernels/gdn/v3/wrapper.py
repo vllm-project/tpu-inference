@@ -93,17 +93,26 @@ def inner_kernel(
     if weights_ref.conv.bias is not None:
         conv_bias = weights_ref.conv.bias[...].astype(jnp.float32)
 
+    write_slots = (
+        metadata_ref.s_idx_to_write_state_indices.shape[1]
+        if metadata_ref.s_idx_to_write_state_indices.ndim == 2
+        else 1
+    )
+
     qkv_out_compact, new_conv_state = compute_conv1d.causal_conv1d(
         real_sizes=real_sizes,
         lhs=qkv_in_compact,
         conv_weight=conv_weight,
         conv_bias=conv_bias,
         cfg=cfg,
+        write_slots=write_slots,
     )
 
     conv_state_slot_ref[...] = new_conv_state
     if carry_conv_scratch_ref is not None:
-        carry_conv_scratch_ref[...] = new_conv_state
+        carry_conv_scratch_ref[...] = (
+            new_conv_state[-1:] if write_slots > 1 else new_conv_state
+        )
 
     # Apply activation function.
     qkv_out_compact = jax.nn.silu(qkv_out_compact)
@@ -139,6 +148,7 @@ def inner_kernel(
             dt_bias=dt_bias,
             cfg=cfg,
             real_sizes=real_sizes,
+            write_slots=write_slots,
         )
 
     else:
@@ -162,6 +172,7 @@ def inner_kernel(
             dt_bias=dt_bias,
             cfg=cfg,
             real_sizes=real_sizes,
+            write_slots=write_slots,
         )
 
     # Store output and recurrent to vmem.
@@ -170,7 +181,9 @@ def inner_kernel(
         recurrent_slot_ref.dtype)
 
     if carry_recurrent_scratch_ref is not None:
-        carry_recurrent_scratch_ref[...] = new_recurrent_state
+        carry_recurrent_scratch_ref[...] = (
+            new_recurrent_state[-1:] if write_slots > 1 else new_recurrent_state
+        )
 
 
 def outer_kernel(

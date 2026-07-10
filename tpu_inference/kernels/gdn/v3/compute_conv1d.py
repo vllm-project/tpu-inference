@@ -24,6 +24,7 @@ def causal_conv1d(
     conv_weight: jax.Array,  # [prev_kernel_size, 1, dim_size]
     conv_bias: jax.Array | None,  # [dim_size]
     cfg: config.GDNConfig,
+    write_slots: int = 1,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform causal Conv1D. Returns Conv1D output and convolution states."""
 
@@ -45,22 +46,22 @@ def causal_conv1d(
 
         out_list.append(out)
 
-    # Last prev_kernel_size elements needs to be returned as conv_state. However,
-    # real_sizes may be smaller than chunk_size. Therefore, slicing last
-    # prev_kernel_size elements does not gurantee numeric correctness. Instead,
-    # kernel iterate each rows and perform masking to fetch correct values.
-    # NOTE: lhs[:, : prev_kernel_size] can be skipped since they were loaded from
-    # previous conv states.
-    new_conv_state = lhs[:, 1:cfg.kernel_size]
-    real_sizes = real_sizes.reshape(-1, 1, 1, 1)
-    # NOTE: Even though for loop is invoked twice, since they are static loops,
-    # compiler will perform loop fusion.
-    for c_idx in range(2, cfg.chunk_size + 1):
-        row_end = c_idx + cfg.prev_kernel_size
-        new_conv_state = jnp.where(
-            c_idx == real_sizes,
-            lhs[:, c_idx:row_end],
-            new_conv_state,
-        )
+    if write_slots > 1:
+        new_conv_state = jnp.stack([
+            lhs[0, c_idx : c_idx + cfg.prev_kernel_size]
+            for c_idx in range(1, write_slots + 1)
+        ], axis=0)
+    else:
+        new_conv_state = lhs[:, 1:cfg.kernel_size]
+        real_sizes = real_sizes.reshape(-1, 1, 1, 1)
+        # NOTE: Even though for loop is invoked twice, since they are static loops,
+        # compiler will perform loop fusion.
+        for c_idx in range(2, cfg.chunk_size + 1):
+            row_end = c_idx + cfg.prev_kernel_size
+            new_conv_state = jnp.where(
+                c_idx == real_sizes,
+                lhs[:, c_idx:row_end],
+                new_conv_state,
+            )
 
     return jnp.stack(out_list, axis=1), new_conv_state

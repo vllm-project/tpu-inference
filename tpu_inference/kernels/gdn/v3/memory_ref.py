@@ -295,17 +295,29 @@ class StateBufferedRef(BaseBufferedRef):
         vmem_ref = self.window_ref.at[slot]
         p_id = grid_indices[0]
 
-        for idx in range(self.cfg.seq_tile_size):
-            is_last_tile = self.metadata_ref.p_id_is_last_tile[p_id, idx]
-            s_idx = self.metadata_ref.p_id_to_s_idx[p_id, idx]
-            state_idx = self.metadata_ref.s_idx_to_write_state_indices[s_idx]
-            dma_size = jnp.where(is_last_tile, 1, 0)
+        if self.metadata_ref.s_idx_to_write_state_indices.ndim == 2:
+            s_idx = self.metadata_ref.p_id_to_s_idx[p_id, 0]
+            num_slots = self.metadata_ref.s_idx_to_write_state_indices.shape[1]
+            for m in range(num_slots):
+                state_idx = self.metadata_ref.s_idx_to_write_state_indices[s_idx, m]
+                dma_size = jnp.where(state_idx > 0, 1, 0)
+                pltpu.make_async_copy(
+                    vmem_ref.at[pl.ds(m, dma_size)],
+                    dst_ref.at[pl.ds(state_idx, dma_size)],
+                    sem,
+                ).start()
+        else:
+            for idx in range(self.cfg.seq_tile_size):
+                is_last_tile = self.metadata_ref.p_id_is_last_tile[p_id, idx]
+                s_idx = self.metadata_ref.p_id_to_s_idx[p_id, idx]
+                state_idx = self.metadata_ref.s_idx_to_write_state_indices[s_idx]
+                dma_size = jnp.where(is_last_tile, 1, 0)
 
-            pltpu.make_async_copy(
-                vmem_ref.at[pl.ds(idx, dma_size)],
-                dst_ref.at[pl.ds(state_idx, dma_size)],
-                sem,
-            ).start()
+                pltpu.make_async_copy(
+                    vmem_ref.at[pl.ds(idx, dma_size)],
+                    dst_ref.at[pl.ds(state_idx, dma_size)],
+                    sem,
+                ).start()
 
     def wait_out(self, dst_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
         assert self.sem_sends is not None
@@ -315,16 +327,29 @@ class StateBufferedRef(BaseBufferedRef):
         vmem_ref = self.window_ref.at[slot]
         p_id = grid_indices[0]
 
-        dma_size = 0
-        for idx in range(self.cfg.seq_tile_size):
-            is_last_tile = self.metadata_ref.p_id_is_last_tile[p_id, idx]
-            dma_size += jnp.where(is_last_tile, 1, 0)
+        if self.metadata_ref.s_idx_to_write_state_indices.ndim == 2:
+            s_idx = self.metadata_ref.p_id_to_s_idx[p_id, 0]
+            num_slots = self.metadata_ref.s_idx_to_write_state_indices.shape[1]
+            dma_size = 0
+            for m in range(num_slots):
+                state_idx = self.metadata_ref.s_idx_to_write_state_indices[s_idx, m]
+                dma_size += jnp.where(state_idx > 0, 1, 0)
+            pltpu.make_async_copy(
+                vmem_ref.at[pl.ds(0, dma_size)],
+                vmem_ref.at[pl.ds(0, dma_size)],
+                sem,
+            ).wait()
+        else:
+            dma_size = 0
+            for idx in range(self.cfg.seq_tile_size):
+                is_last_tile = self.metadata_ref.p_id_is_last_tile[p_id, idx]
+                dma_size += jnp.where(is_last_tile, 1, 0)
 
-        pltpu.make_async_copy(
-            vmem_ref.at[pl.ds(0, dma_size)],
-            vmem_ref.at[pl.ds(0, dma_size)],
-            sem,
-        ).wait()
+            pltpu.make_async_copy(
+                vmem_ref.at[pl.ds(0, dma_size)],
+                vmem_ref.at[pl.ds(0, dma_size)],
+                sem,
+            ).wait()
 
 
 def create_allocs(
@@ -353,9 +378,14 @@ def create_allocs(
         cfg.num_v_heads,
         cfg.v_head_dim,
     )
-    conv_shape = (cfg.seq_tile_size, cfg.prev_kernel_size, 1, cfg.dim_size)
+    num_state_slots = (
+        metadata_ref.s_idx_to_write_state_indices.shape[1]
+        if metadata_ref.s_idx_to_write_state_indices.ndim == 2
+        else cfg.seq_tile_size
+    )
+    conv_shape = (num_state_slots, cfg.prev_kernel_size, 1, cfg.dim_size)
     recurrent_shape = (
-        cfg.seq_tile_size,
+        num_state_slots,
         cfg.num_v_heads,
         cfg.kq_head_dim,
         cfg.v_head_dim,

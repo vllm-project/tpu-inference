@@ -41,7 +41,7 @@ def compute_batched_seq_metadata(
 
     if state_indices.ndim == 2:
         read_state_indices = state_indices[:, 0]
-        write_state_indices = state_indices[:, 1]
+        write_state_indices = state_indices[:, 1:]
     else:
         read_state_indices = state_indices
         write_state_indices = state_indices
@@ -90,7 +90,7 @@ def compute_per_seq_metadata(
     state_indices = jnp.roll(state_indices, shift=-start_seq, axis=0)
     if state_indices.ndim == 2:
         read_state_indices = state_indices[:, 0]
-        write_state_indices = state_indices[:, 1]
+        write_state_indices = state_indices[:, 1:]
     else:
         read_state_indices = state_indices
         write_state_indices = state_indices
