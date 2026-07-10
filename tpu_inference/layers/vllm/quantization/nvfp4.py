@@ -260,13 +260,11 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
                      weight_scale_jax: jax.Array,
                      bias: Optional[jax.Array] = None) -> jax.Array:
 
-        outs = sharded_quantized_matmul(
-            x,
-            weight_jax,
-            weight_scale_jax,
-            self.linear_config.weight_sharding,
-            mesh=self.linear_config.mesh,
-            defer_all_reduce=self.linear_config.defer_all_reduce)
+        outs = sharded_quantized_matmul(x,
+                                        weight_jax,
+                                        weight_scale_jax,
+                                        self.linear_config.weight_sharding,
+                                        mesh=self.linear_config.mesh)
 
         if bias is not None:
             outs += bias
@@ -283,13 +281,11 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
         outs = []
         for i, (weight, weight_scale) in enumerate(weight_and_scale):
 
-            out = sharded_quantized_matmul(
-                x,
-                weight,
-                weight_scale,
-                self.linear_config.weight_sharding,
-                mesh=mesh,
-                defer_all_reduce=self.linear_config.defer_all_reduce)
+            out = sharded_quantized_matmul(x,
+                                           weight,
+                                           weight_scale,
+                                           self.linear_config.weight_sharding,
+                                           mesh=mesh)
 
             if bias is not None:
                 out += bias[i]

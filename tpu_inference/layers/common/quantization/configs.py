@@ -25,8 +25,7 @@ class QuantLinearConfig:
                  *,
                  enable_sp: bool,
                  output_sizes: list[int],
-                 weight_sharding: P | None = None,
-                 defer_all_reduce: bool = False):
+                 weight_sharding: P | None = None):
         # Output size across all TP ranks.
         self.output_sizes = output_sizes
         self.weight_sharding = weight_sharding if weight_sharding is not None else P(
@@ -36,13 +35,6 @@ class QuantLinearConfig:
         self.input_sharding = None
         self.output_sharding = None
         self.mesh = None
-
-        # If True, defer the all-reduce (psum) over the contracting (in) axis of
-        # the matmul: it is not performed here even when that axis is sharded.
-        # The matmul then returns per-shard partial sums and the caller is
-        # responsible for reducing them later (e.g. fusing the reduction with a
-        # downstream collective).
-        self.defer_all_reduce = defer_all_reduce
 
         self.bias_sharding = P(self.weight_sharding[1])
         # n_shards is always the TP degree for the weight's output axis, derived

@@ -34,13 +34,6 @@ from tpu_inference.utils import get_mesh_shape_product
 @RowParallelLinear.register_oot
 class VllmRowParallelLinear(RowParallelLinear):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        linear_config = getattr(self.quant_method, "linear_config", None)
-        if linear_config is not None:
-            linear_config.defer_all_reduce = not self.reduce_results
-
     def forward(
         self,
         input_,

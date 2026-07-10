@@ -248,13 +248,11 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
             outs *= weight_scale_jax
             outs = outs.astype(x_jax.dtype)
         else:
-            outs = sharded_quantized_matmul(
-                x_jax,
-                weight_jax,
-                weight_scale_jax,
-                self.linear_config.weight_sharding,
-                mesh=self.linear_config.mesh,
-                defer_all_reduce=self.linear_config.defer_all_reduce)
+            outs = sharded_quantized_matmul(x_jax,
+                                            weight_jax,
+                                            weight_scale_jax,
+                                            self.linear_config.weight_sharding,
+                                            mesh=self.linear_config.mesh)
 
         if bias is not None and not layer.skip_bias_add:
             outs += jax_view(bias)
@@ -298,8 +296,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                     weight_jax,
                     weight_scale_jax,
                     self.linear_config.weight_sharding,
-                    mesh=self.linear_config.mesh,
-                    defer_all_reduce=self.linear_config.defer_all_reduce)
+                    mesh=self.linear_config.mesh)
 
             if bias is not None and not layer.skip_bias_add:
                 out += jax_view(bias[i])

@@ -133,19 +133,6 @@ class LazyShardingAxisName:
 ShardingAxisName = LazyShardingAxisName()
 
 
-def is_attn_dp(mesh: Mesh) -> bool:
-    """Whether attention data-parallelism is active on ``mesh``.
-
-    True when the attention-data axes carry a factor beyond plain data
-    parallelism (i.e. ``attn_dp`` * ``attn_dp_expert`` > 1), meaning attention
-    is replicated over more data-parallel shards than the MLP/data axis alone.
-    """
-    attn_dp_size = utils.get_mesh_shape_product(mesh,
-                                                ShardingAxisName.ATTN_DATA)
-    dp_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.MLP_DATA)
-    return (attn_dp_size // dp_size) > 1
-
-
 @dataclass
 class ShardingStrategy:
     """Defines the high-level parallelism strategy.
