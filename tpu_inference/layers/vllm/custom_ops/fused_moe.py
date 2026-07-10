@@ -85,6 +85,10 @@ class VllmMoERunner(MoERunner):
         #   4. the GMM reduction collapses the same mesh axes as the shared
         #      expert (MLP_TENSOR) -- else one all-reduce over MLP_TENSOR cannot
         #      stand in for the GMM's reduction
+        # E1 probe: disable the deferred merged-reduce path entirely; the
+        # kernel always reduces its own output (pre-#2849 semantics).
+        return True
+
         mesh = _get_mesh()
         if mesh is None:
             return True
@@ -118,6 +122,10 @@ class VllmMoERunner(MoERunner):
         two match before being summed downstream. Under sequence parallelism a
         separate all-gather step in the model handles this instead.
         """
+        # E1 probe: the unquantized shared-expert matmul is already all-reduced
+        # by GSPMD, so the extra collective here double-reduces it. Skip.
+        return shared_output
+
         mesh = _get_mesh()
 
         if mesh is None:
