@@ -46,6 +46,14 @@ def compute_batched_seq_metadata(
         read_state_indices = state_indices
         write_state_indices = state_indices
 
+    jax.debug.print(
+        "[GDN-DEBUG] BATCHED metadata: state_indices.shape={shape}, read_state_indices[0]={read_0}, write_state_indices[0]={write_0}, has_initial_state[0]={has_init}",
+        shape=state_indices.shape,
+        read_0=read_state_indices[0],
+        write_0=write_state_indices[0],
+        has_init=has_initial_state[0],
+    )
+
     return memory_ref.MetadataRef.create(
         cfgs=cfg,
         num_tiles=pl.cdiv(end_seq, cfg.tile_size),
@@ -136,7 +144,13 @@ def compute_per_seq_metadata(
     # NOTE: Since query_lens[i] = 0 where i >= num_seqs, s_idx_to_num_tiles[i]
     # where i >= num_seqs will also be 0. Therefore, s_idx_to_num_tiles.sum()
     # will contain number of tiles for valid sequence.
-    num_tiles = s_idx_to_num_tiles.sum()
+    jax.debug.print(
+        "[GDN-DEBUG] PER_SEQ metadata: state_indices.shape={shape}, read_state_indices[0]={read_0}, write_state_indices[0]={write_0}, has_initial_state[0]={has_init}",
+        shape=state_indices.shape,
+        read_0=read_state_indices[0],
+        write_0=write_state_indices[0],
+        has_init=has_initial_state[0],
+    )
 
     return memory_ref.MetadataRef.create(
         cfgs=cfg,

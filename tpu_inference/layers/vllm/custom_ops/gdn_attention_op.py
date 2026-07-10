@@ -142,6 +142,9 @@ def gdn_attention_core_tpu(
                                               dp_size,
                                               axis=0)
 
+    if layer_idx == 0 and jax.process_index() == 0:
+        print(f"[GDN-DEBUG] gdn_attention_core_tpu (layer 0): state_indices.shape={state_indices.shape}, state_indices_sliced.shape={state_indices_sliced.shape}, conv_state_in.shape={conv_state_in.shape}, request_distribution={request_distribution}", flush=True)
+
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
          j_mixed_qkv,

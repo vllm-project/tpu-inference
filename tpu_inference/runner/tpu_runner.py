@@ -1379,10 +1379,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # triggers the optimized chunked implementation), whereas verification uses a 2D array.
             if state_indices_to_rollback is not None and getattr(
                     state_indices_to_rollback, "ndim", 1) == 2:
+                if self.is_first_rank:
+                    print(f"[GDN-DEBUG] _execute_model: Triggering device rollback! state_indices_to_rollback.shape={state_indices_to_rollback.shape}, num_accepted_tokens_dev={num_accepted_tokens_dev}", flush=True)
                 self._device_rollback_mamba_states(
                     state_indices_to_rollback,
                     num_accepted_tokens_dev,
                 )
+            elif self.is_first_rank:
+                print(f"[GDN-DEBUG] _execute_model: Skipping device rollback (state_indices ndim={getattr(state_indices_to_rollback, 'ndim', None)})", flush=True)
         with self.maybe_forbid_compile:
             with set_forward_context(
                     None,
@@ -2672,6 +2676,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 else:
                     mamba_state_indices_cpu[req_offset:req_offset +
                                             _num_reqs] = local_base_slots
+
+            if self.is_first_rank:
+                print(f"[GDN-DEBUG] _prepare_input_metadata: is_prompt_prefill={is_prompt_prefill}, is_spec_verification={is_spec_verification}, speculative_config={self.speculative_config is not None}, mamba_state_indices_cpu.shape={mamba_state_indices_cpu.shape}, mamba_state_indices_cpu[:2]={mamba_state_indices_cpu[:2]}", flush=True)
+
             (request_distribution, mamba_state_indices,
              dev_arrays_payload) = device_array(
                  self.mesh, (request_distribution, mamba_state_indices_cpu,
