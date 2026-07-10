@@ -295,7 +295,8 @@ class StateBufferedRef(BaseBufferedRef):
         vmem_ref = self.window_ref.at[slot]
         p_id = grid_indices[0]
 
-        if self.metadata_ref.s_idx_to_write_state_indices.ndim == 2:
+        if (self.metadata_ref.s_idx_to_write_state_indices.ndim == 2
+            and self.cfg.mode == config.GDNMode.PER_SEQ):
             s_idx = self.metadata_ref.p_id_to_s_idx[p_id, 0]
             num_slots = self.metadata_ref.s_idx_to_write_state_indices.shape[1]
             for m in range(num_slots):
@@ -327,7 +328,8 @@ class StateBufferedRef(BaseBufferedRef):
         vmem_ref = self.window_ref.at[slot]
         p_id = grid_indices[0]
 
-        if self.metadata_ref.s_idx_to_write_state_indices.ndim == 2:
+        if (self.metadata_ref.s_idx_to_write_state_indices.ndim == 2
+            and self.cfg.mode == config.GDNMode.PER_SEQ):
             s_idx = self.metadata_ref.p_id_to_s_idx[p_id, 0]
             num_slots = self.metadata_ref.s_idx_to_write_state_indices.shape[1]
             dma_size = 0
