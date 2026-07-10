@@ -330,10 +330,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
     # kv offload to dram: skip pre-compiling swap-related jax functions
     "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE":
-    lambda: bool(int(os.getenv("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0"))),
+    env_bool("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", default=False),
     # kv offload to dram: save kv in the decode phase
     "TPU_OFFLOAD_DECODE_SAVE":
-    lambda: bool(int(os.getenv("TPU_OFFLOAD_DECODE_SAVE", "0"))),
+    env_bool("TPU_OFFLOAD_DECODE_SAVE", default=False),
     # kv offload to dram: dram space size in # of chunks / blocks
     "TPU_OFFLOAD_NUM_CPU_CHUNKS":
     lambda: int(os.getenv("TPU_OFFLOAD_NUM_CPU_CHUNKS", "1024")),
@@ -345,13 +345,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("TPU_OFFLOAD_SAVE_THREADS", "1")),
     # kv offload to dram: batch multiple requests' save operations into a single swap call
     "TPU_OFFLOAD_BATCHED_SAVE":
-    lambda: bool(int(os.getenv("TPU_OFFLOAD_BATCHED_SAVE", "0"))),
+    env_bool("TPU_OFFLOAD_BATCHED_SAVE", default=False),
     # kv offload to dram: prometheus metrics log interval in seconds
     "TPU_OFFLOAD_METRICS_LOG_INTERVAL":
     lambda: int(os.getenv("TPU_OFFLOAD_METRICS_LOG_INTERVAL", "10")),
     # kv offload to dram: Whether to use unpinned_host for KV cache tensors on host dram.
     "TPU_OFFLOAD_USE_UNPINNED_HOST":
-    lambda: bool(int(os.getenv("TPU_OFFLOAD_USE_UNPINNED_HOST", "0"))),
+    env_bool("TPU_OFFLOAD_USE_UNPINNED_HOST", default=False),
     "AGGREGATED_STATS_DIR":
     lambda: os.getenv("AGGREGATED_STATS_DIR", ""),
     # kv offload to dram: buckets of sizes for pre-compilation
