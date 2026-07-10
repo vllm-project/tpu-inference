@@ -79,7 +79,7 @@ class VllmMoERunner(MoERunner):
         # holds. Otherwise the fused output is reduced by the kernel itself.
         #
         #   1. a shared expert is present (else there is nothing to fuse with)
-        #   2. attention-DP is disabled (DP resolves the reduction separately)
+        #   2. attention-DP and sequence parallelism are disabled.
         #   3. the backend is GMM_EP / GMM_TP (only those honor defer_all_reduce;
         #      e.g. the FUSED_MOE kernel always reduces)
         #   4. the GMM reduction collapses the same mesh axes as the shared
@@ -122,13 +122,10 @@ class VllmMoERunner(MoERunner):
         separate all-gather step in the model handles this instead.
         """
         mesh = _get_mesh()
-
         if mesh is None:
             return shared_output
 
-        if (shared_output is not None and self._fused_output_is_reduced
-                and not self.moe_config.is_sequence_parallel
-                and not is_attn_dp(mesh)):
+        if shared_output is not None and self._fused_output_is_reduced:
             shared_output = _all_reduce_over_tp(shared_output, mesh)
         return shared_output
 
@@ -149,10 +146,6 @@ class VllmMoERunner(MoERunner):
         if mesh is None:
             return states[..., :trunc_size]
 
-        is_dp = is_attn_dp(mesh)
-        is_sequence_parallel = self.moe_config.is_sequence_parallel
-        is_fused_output_reduced = self._fused_output_is_reduced
-
-        if not is_dp and not is_sequence_parallel and not is_fused_output_reduced:
+        if not self._fused_output_is_reduced:
             states = _all_reduce_over_tp(states, mesh)
         return states[..., :trunc_size]
