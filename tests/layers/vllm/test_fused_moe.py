@@ -123,17 +123,6 @@ class TestMaybeReduceSharedExpertOutput:
             assert runner._maybe_reduce_shared_expert_output(None) is None
         reduce.assert_not_called()
 
-    def test_passthrough_under_sequence_parallel(self):
-        # SP defers the reduction to a separate all-gather in the model.
-        runner = _make_runner(is_sequence_parallel=True)
-        shared = torch.ones(2, 3)
-        with patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
-                          new_callable=PropertyMock, return_value=True), \
-             patch.object(fm, "_all_reduce_over_tp") as reduce:
-            out = runner._maybe_reduce_shared_expert_output(shared)
-        reduce.assert_not_called()
-        assert out is shared
-
     def test_passthrough_when_fused_output_not_reduced(self):
         # The late path will reduce shared + fused together, so don't reduce
         # the shared output on its own here.
@@ -145,6 +134,20 @@ class TestMaybeReduceSharedExpertOutput:
             out = runner._maybe_reduce_shared_expert_output(shared)
         reduce.assert_not_called()
         assert out is shared
+
+    def test_reduces_under_sequence_parallel(self):
+        # SP defers the reduction.
+        runner = _make_runner(is_sequence_parallel=True)
+        shared = torch.ones(2, 3)
+        reduced = torch.full((2, 3), 7.0)
+        mesh = object()
+        with patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
+                          new_callable=PropertyMock, return_value=True), \
+             patch.object(fm, "_get_mesh", return_value=mesh), \
+             patch.object(fm, "_all_reduce_over_tp" , return_value=reduced) as reduce:
+            out = runner._maybe_reduce_shared_expert_output(shared)
+        reduce.assert_called_once_with(shared, mesh)
+        assert out is reduced
 
     def test_reduces_shared_output_on_early_path(self):
         runner = _make_runner()
@@ -163,10 +166,7 @@ class TestMaybeReduceSharedExpertOutput:
 
     def test_reduces_shared_output_under_attention_dp(self):
         # Under attention DP the fused kernel reduces its own output, so the
-        # shared-expert output is reduced separately on the early path. Unlike
-        # the test above this drives the real ``_fused_output_is_reduced``
-        # property (via ``is_attn_dp``) instead of mocking it, exercising the
-        # attn-DP -> early-reduce routing end to end.
+        # shared-expert output is reduced separately on the early path.
         runner = _make_runner(shared_experts=object())
         shared = torch.ones(2, 3)
         reduced = torch.full((2, 3), 7.0)
@@ -175,8 +175,9 @@ class TestMaybeReduceSharedExpertOutput:
              patch.object(fm, "is_attn_dp", return_value=True), \
              patch.object(fm, "_all_reduce_over_tp",
                           return_value=reduced) as reduce:
-            runner._maybe_reduce_shared_expert_output(shared)
-        reduce.assert_not_called()
+            out = runner._maybe_reduce_shared_expert_output(shared)
+        reduce.assert_called_once_with(shared, mesh)
+        assert out is reduced
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +203,7 @@ class TestMaybeReduceFinalOutput:
         with patch.object(fm, "_get_mesh", return_value=object()), \
              patch.object(fm, "is_attn_dp", return_value=False), \
              patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
-                          new_callable=PropertyMock, return_value=False), \
+                          new_callable=PropertyMock, return_value=True), \
              patch.object(fm, "_all_reduce_over_tp") as reduce:
             out = runner._maybe_reduce_final_output(states, trunc_size=2)
         reduce.assert_not_called()
