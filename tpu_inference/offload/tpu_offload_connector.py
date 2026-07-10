@@ -1895,13 +1895,14 @@ class TPUOffloadConnectorWorker:
         return gathered_kv_caches_tpu, manifest, total_num_blocks_to_save
 
     def _transfer_and_register_cpu_chunks(self,
-                                          flat_kv_caches_tpu: Any,
+                                          chunks_on_cpu: Any,
                                           total_num_blocks_to_save: int,
                                           manifest: list[SaveReqInfo],
                                           is_batched: bool = False):
         """
-        Asynchronously transfers KV blocks from TPU to CPU, unstitches them,
-        and registers them with the CPU RAM backend store.
+        Asynchronously waits for KV blocks to finish transfer to CPU,
+        unstitches them, and registers them with the CPU RAM backend store.
+        Note: The transfer (`jax.device_put`) is initiated in the main thread.
 
         Unstitching Mechanism:
         1. Unified Transfer: A single large swap operation moves total_num_blocks_to_save
@@ -1936,15 +1937,8 @@ class TPUOffloadConnectorWorker:
         +---------------------------------------+
         """
         start_time = time.time()
-
         # 1. Swap Out the buffer
-        chunks_on_cpu = None
-        # D2H
-        chunks_on_cpu = []
-        for i in range(total_num_blocks_to_save):
-            chunks_on_cpu.append(
-                jax.device_put(flat_kv_caches_tpu[i],
-                               self.expanded_host_sharding))
+        # Wait for the transfer to finish
         jax.block_until_ready(chunks_on_cpu)
         # no split
 
@@ -2022,8 +2016,14 @@ class TPUOffloadConnectorWorker:
         # Note: We use manifest for the pending future tracking.
         # record_save will be handled in the main thread by _process_completed_saves.
 
+        chunks_on_cpu = []
+        for i in range(total_num_blocks_to_save):
+            chunks_on_cpu.append(
+                jax.device_put(flat_kv_caches_tpu[i],
+                               self.expanded_host_sharding))
+
         future = self.save_executor.submit(_async_batch_transfer_task,
-                                           flat_kv_caches_tpu,
+                                           chunks_on_cpu,
                                            total_num_blocks_to_save,
                                            manifest,
                                            is_batched=True)
@@ -2135,9 +2135,14 @@ class TPUOffloadConnectorWorker:
                 # 2. ASYNC NON-BLOCKING: Transfer to CPU and Register
                 logger.debug(
                     f"Submitting transfer task for request {meta.req_id}")
+                chunks_on_cpu = []
+                for i in range(num_blocks_to_save):
+                    chunks_on_cpu.append(
+                        jax.device_put(flat_kv_caches_tpu[i],
+                                       self.expanded_host_sharding))
+
                 future = self.save_executor.submit(_async_transfer_task,
-                                                   meta.req_id,
-                                                   flat_kv_caches_tpu,
+                                                   meta.req_id, chunks_on_cpu,
                                                    num_blocks_to_save, [info],
                                                    False)
 
