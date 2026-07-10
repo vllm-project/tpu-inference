@@ -170,8 +170,9 @@ def get_attn_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
         logger.info(
             "max_num_reqs must be supported but is not in ATTN_CUSTOM_NUM_REQS_BUCKETS. Adding max_num_reqs to the num_reqs buckets."
         )
-        reqs.append(max_req_size)
+        reqs = list(reqs) + [max_req_size]
 
+    reqs = sorted(list(set(reqs)))
     logger.info(f"Prepared attn request paddings: {reqs}")
 
     return reqs
@@ -214,9 +215,10 @@ def get_token_paddings(min_token_size: int, max_token_size: int,
 def get_padded_token_len(paddings: list[int], x: int) -> int:
     """Return the first element in paddings list greater or equal to x.
     """
-    index = bisect.bisect_left(paddings, x)
-    assert index < len(paddings), f"{paddings=}, {x=}"
-    return paddings[index]
+    sorted_paddings = sorted(paddings)
+    index = bisect.bisect_left(sorted_paddings, x)
+    assert index < len(sorted_paddings), f"{sorted_paddings=}, {x=}"
+    return sorted_paddings[index]
 
 
 class LatencyTracker:
