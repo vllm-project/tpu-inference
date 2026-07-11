@@ -18,34 +18,41 @@ vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardw
 - Provide more flexibility to JAX and PyTorch users by running PyTorch model definitions performantly on TPU without any additional code changes, while also extending native support to JAX.
 - Retain vLLM standardization: keep the same user experience, telemetry, and interface.
 
-## Recommended models and features
+## What are you trying to do today?
 
-Although vLLM TPU’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
+<div class="grid cards three-columns" markdown>
 
-For this reason, we’ve provided a **[Recommended Models and Features](recommended_models_features.md)** page detailing the models and features that are validated through unit, integration, and performance testing.
+- :material-rocket-launch:{ .lg .middle } __I'm New__
 
-## Getting Started
+    Get started quickly with core concepts, hardware setup, and step-by-step tutorials.
 
-If you are new to vLLM on TPU, we recommend starting with the **[Quickstart](getting_started/quickstart.md)** guide. It will walk you through the process of setting up your environment and running your first model. For more detailed installation instructions, you can refer to the **[Installation](getting_started/installation.md)** guide.
+    [:octicons-arrow-right-24: TPU Setup](getting_started/tpu_setup.md)
 
-**Compatible TPU Generations**
+    [:octicons-arrow-right-24: Installation Guide](getting_started/installation.md)
 
-- Recommended: v7x, v5e, v6e
-- Experimental: v3, v4, v5p
+    [:octicons-arrow-right-24: Quickstart: Serving a Model](getting_started/quickstart.md)
 
-**Recipes**
+- :material-server-network:{ .lg .middle } __I Want to Deploy__
 
-Tested end-to-end guides for hosting specific models on specific TPU generations.
+    Guides on infrastructure setup, deployment recipes, and hardware capabilities.
 
-- [v7x (Ironwood) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM)
-- [v6e (Trillium) Recipes](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM)
+    [:octicons-arrow-right-24: Deploying on GCE (Ironwood)](deployment_guides/ironwood.md)
 
-## Developer Guides
+    [:octicons-arrow-right-24: Deploying on GCE (Trillium)](deployment_guides/trillium.md)
 
-If you are interested in contributing to the project or want to learn more about the internals, check out our developer guides:
+    [:octicons-arrow-right-24: Supported Models](recommended_models.md)
 
-- **[JAX Model Development](developer_guides/jax_model_development.md)**
-- **[Torch Model Development](developer_guides/torchax_model_development.md)**
+- :material-code-tags:{ .lg .middle } __I Want to Build__
+
+    Contribute code, dive into inference examples, or explore the core architecture.
+
+    [:octicons-arrow-right-24: Inference Examples](api_and_code_examples/multi_modal_inference.md)
+
+    [:octicons-arrow-right-24: Developer Guides](developers_guide/contributing.md)
+
+    [:octicons-arrow-right-24: Add a New Model to CI](developers_guide/buildkite.md)
+
+</div>
 
 ## Contribute
 

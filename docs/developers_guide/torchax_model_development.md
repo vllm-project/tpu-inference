@@ -1,4 +1,4 @@
-# How is torchax used in vLLM
+# Torchax Model Development Guide
 
 **Authors: Siyuan Liu, Hongmin Fan, Han Qi**
 
