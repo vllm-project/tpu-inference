@@ -754,7 +754,8 @@ def _validate_model_interface(model: Any) -> None:
     if not has_defined_call:
         raise TypeError(f"Model {model.__name__} must have a __call__ method.")
 
-    required_call_args = ("kv_caches", "input_ids", "attention_metadata", "shared_attention_metadata")
+    required_call_args = ("kv_caches", "input_ids", "attention_metadata",
+                          "shared_attention_metadata")
     missing_args = tuple(arg for arg in required_call_args
                          if not supports_kw(model_call, arg))
 
