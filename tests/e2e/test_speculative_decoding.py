@@ -526,11 +526,13 @@ def dflash_baseline():
                                      logprobs=None)
     test_prompts = get_eagle3_test_prompts()
     with pytest.MonkeyPatch.context() as mp:
-        ref_outputs = _get_baseline_results(mp,
-                                            sampling_config,
-                                            model_name,
-                                            test_prompts,
-                                            max_num_seqs=10)
+        ref_outputs = _get_baseline_results(
+            mp,
+            sampling_config,
+            model_name,
+            test_prompts,
+            max_num_seqs=10,
+            extra_kwargs={"gpu_memory_utilization": 0.85})
     return test_prompts, ref_outputs
 
 
@@ -576,7 +578,8 @@ def test_dflash_correctness(
                              ref_outputs=ref_outputs,
                              max_num_seqs=10,
                              async_scheduling=async_scheduling,
-                             enable_dp_attention=enable_dp_attention)
+                             enable_dp_attention=enable_dp_attention,
+                             extra_kwargs={"gpu_memory_utilization": 0.85})
 
 
 @pytest.mark.parametrize(
@@ -604,11 +607,12 @@ def test_dflash_performance(
             "num_speculative_tokens": 9,
             "draft_tensor_parallel_size": 1
         },
-        min_acceptance_rate=0.30,
+        min_acceptance_rate=0.40,
         max_num_seqs=max_num_seqs,
         async_scheduling=async_scheduling,
         enable_dp_attention=enable_dp_attention,
-        model_name='meta-llama/Llama-3.1-8B-Instruct')
+        model_name='meta-llama/Llama-3.1-8B-Instruct',
+        extra_kwargs={"gpu_memory_utilization": 0.85})
 
 
 @pytest.fixture(scope="module")
