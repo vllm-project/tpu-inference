@@ -15,7 +15,6 @@
 import jax
 import jax.numpy as jnp
 from jax import lax
-from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.batched_rpa import configs, utils
 
@@ -33,7 +32,7 @@ def flash_attention_qk_softmax(
     bq_start: int,
 ):
     """Flash attention kernel."""
-    b, k_heads, tq, _ = q.shape
+    b, k_heads, tq, h_size = q.shape
     s = k.shape[2]
 
     if cfgs.serve.scale_q is not None:
@@ -45,13 +44,13 @@ def flash_attention_qk_softmax(
             q = jnp.clip(q, min=minval, max=maxval)
         q = q.astype(k.dtype)
 
-    qk = lax.dot_general(
-        pltpu.einshape("bkth->(bk)th", q, True),
-        pltpu.einshape("bksh->(bk)sh", k, True),
+    qk = lax.dot(
+        q.reshape(-1, tq, h_size),
+        k.reshape(-1, s, h_size),
         dimension_numbers=(([2], [2]), ([0], [0])),
         preferred_element_type=jnp.float32,
     ).astype(cfgs.serve.dtype_out)
-    qk = pltpu.einshape("(bk)ts->bkts", qk, True, b=b)
+    qk = qk.reshape(b, k_heads, tq, s)
 
     qk *= cfgs.model.sm_scale
     if cfgs.serve.scale_k is not None:
@@ -103,14 +102,15 @@ def flash_attention_pv(
     cfgs: configs.RpaConfigs,
 ):
     """Flash attention kernel."""
-    b = p.shape[0]
-    pv = lax.dot_general(
-        pltpu.einshape("bkts->(bk)ts", p, True),
-        pltpu.einshape("bksh->(bk)sh", v, True),
+    b, k_heads, tq, s = p.shape
+    h_size = v.shape[-1]
+    pv = lax.dot(
+        p.reshape(-1, tq, s),
+        v.reshape(-1, s, h_size),
         dimension_numbers=(([2], [1]), ([0], [0])),
         preferred_element_type=jnp.float32,
     ).astype(cfgs.serve.dtype_out)
-    pv = pltpu.einshape("(bk)th->bkth", pv, True, b=b)
+    pv = pv.reshape(b, k_heads, tq, h_size)
 
     if cfgs.serve.scale_v is not None:
         pv *= cfgs.serve.scale_v
