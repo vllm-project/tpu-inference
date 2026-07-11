@@ -23,11 +23,11 @@ const COMMAND_DATA = {
     },
     "docker": { 
         cmd: `export DOCKER_URI=vllm/vllm-tpu:latest\nsudo docker run -it --rm --name $USER-vllm --privileged --net=host \\\n  -v /dev/shm:/dev/shm \\\n  --shm-size 150gb \\\n  -p 8000:8000 \\\n  --entrypoint /bin/bash \${DOCKER_URI}`, 
-        inst: "Run the pre-built Docker container. Include the `--privileged`, `--net=host`, and `--shm-size=150gb` options to enable TPU interaction and shared memory." 
+        inst: "Run the pre-built Docker container. Include the <code>--privileged</code>, <code>--net=host</code>, and <code>--shm-size=150gb</code> options to enable TPU interaction and shared memory." 
     },
     "source": { 
-        cmd: `# 1. Install system dependencies:\nsudo apt-get update && sudo apt-get install -y libopenblas-base libopenmpi-dev\n\n# 2. Clone the vllm and tpu-inference repositories:\ngit clone https://github.com/vllm-project/tpu-inference.git\nexport VLLM_COMMIT_HASH=$(cat tpu-inference/.buildkite/vllm_lkg_version)\ngit clone https://github.com/vllm-project/vllm.git\ncd vllm\ngit checkout "\${VLLM_COMMIT_HASH}"\ncd ..\n\n# 3. Install uv and set up a Python virtual environment:\ncurl -LsSf https://astral.sh/uv/install.sh | sh\nsource $HOME/.local/bin/env\nuv venv vllm_env --python 3.12\nsource vllm_env/bin/activate\n\n# 4. Install vllm from source, targeting the TPU device:\ncd vllm\nuv pip install -r requirements/tpu.txt --torch-backend=cpu\nVLLM_TARGET_DEVICE="tpu" uv pip install -e . --no-build-isolation\ncd ..\n\n# 5. Install tpu-inference from source:\ncd tpu-inference\nuv pip install -e .\ncd ..`, 
-        inst: "For debugging or development purposes, you can install `tpu-inference` from source. `tpu-inference` is a plugin for `vllm`, so you need to install both from source." 
+        cmd: `# 1. Install system dependencies:\nsudo apt-get update && sudo apt-get install -y libopenblas-base libopenmpi-dev libomp-dev\n\n# 2. Clone the vllm and tpu-inference repositories:\ngit clone https://github.com/vllm-project/tpu-inference.git\nexport VLLM_COMMIT_HASH=$(cat tpu-inference/.buildkite/vllm_lkg.version)\ngit clone https://github.com/vllm-project/vllm.git\ncd vllm\ngit checkout "\${VLLM_COMMIT_HASH}"\ncd ..\n\n# 3. Install uv and set up a Python virtual environment:\ncurl -LsSf https://astral.sh/uv/install.sh | sh\nsource $HOME/.local/bin/env\nuv venv vllm_env --python 3.12\nsource vllm_env/bin/activate\n\n# 4. Install vllm from source, targeting the TPU device:\ncd vllm\nuv pip install -r requirements/tpu.txt --torch-backend=cpu\nVLLM_TARGET_DEVICE="tpu" uv pip install -e . --no-build-isolation\ncd ..\n\n# 5. Install tpu-inference from source:\ncd tpu-inference\nuv pip install -e .\ncd ..`, 
+        inst: "For debugging or development purposes, you can install <code>tpu-inference</code> from source. <code>tpu-inference</code> is a plugin for <code>vllm</code>, so you need to install both from source." 
     }
 };
 
@@ -51,7 +51,7 @@ function updateCommandGenerator() {
 const PROVISION_DATA = {
     "v7x": {
         is_gce_only: true,
-        inst: "TPU v7x (Ironwood) is provisioned directly via Google Compute Engine (GCE) or GKE, not through the legacy Cloud TPU API. Please see the <a href='../deployment_guides/ironwood/'>Deploying on GCE -> v7x setup</a> guide for exact provisioning instructions."
+        inst: "TPU v7x (Ironwood) is provisioned directly via Google Compute Engine (GCE) or GKE, not through the legacy Cloud TPU API. Please see the <a href='../../deployment_guides/ironwood/'>Deploying on GCE -> v7x setup</a> guide for exact provisioning instructions."
     },
     "v6e": {
         runtime: "v2-alpha-tpuv6e",
@@ -123,6 +123,9 @@ function initCommandGenerator() {
     if (btns.length === 0) return;
     
     btns.forEach(btn => {
+        if (btn.dataset.cgInitialized === 'true') return;
+        btn.dataset.cgInitialized = 'true';
+
         btn.addEventListener('click', function() {
             const group = this.getAttribute('data-group');
             // Remove active from others in group
@@ -149,9 +152,7 @@ function initCommandGenerator() {
 
 function initInteractiveComponents() {
     initCommandGenerator();
-    if (typeof $ !== 'undefined') {
-        setTimeout(initDataGrids, 100);
-    }
+    initSimpleSearch();
 }
 
 document.addEventListener("DOMContentLoaded", function() {
@@ -193,7 +194,6 @@ function initSimpleSearch() {
         searchInput.addEventListener('focus', function() { this.style.border = '1px solid var(--md-primary-fg-color)'; });
         searchInput.addEventListener('blur', function() { this.style.border = '1px solid var(--md-default-fg-color--lightest)'; });
 
-        // Vanilla JS Table Filter (No DataTables required)
         searchInput.addEventListener('keyup', function() {
             const val = this.value.toLowerCase();
             const tablesInSet = tabSet.querySelectorAll('table');
@@ -218,10 +218,6 @@ function initSimpleSearch() {
 
         searchWrapper.appendChild(searchInput);
         labelsContainer.appendChild(searchWrapper);
-        
-        // Expose search inputs for global filter
-        if (!window._searchInputs) window._searchInputs = [];
-        window._searchInputs.push(searchInput);
     });
 }
 
@@ -233,18 +229,14 @@ function updateRowVisibility(row) {
     }
 }
 
-function initDataGrids() {
-    if (typeof $ === 'undefined' || !$.fn.dataTable) {
-        return;
-    }
-    initSimpleSearch();
-}
-
 function initInteractivePicker() {
     const fwFilter = document.getElementById('framework-filter');
     const hwFilter = document.getElementById('hardware-filter');
     
     if (!fwFilter || !hwFilter) return;
+    if (fwFilter.dataset.interactivePickerInitialized === 'true') return;
+    fwFilter.dataset.interactivePickerInitialized = 'true';
+    hwFilter.dataset.interactivePickerInitialized = 'true';
 
     function filterTable() {
         const fw = fwFilter.value.toLowerCase();

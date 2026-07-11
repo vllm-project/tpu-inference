@@ -1,4 +1,4 @@
-# E2E code example
+# Torchax Model Development Guide
 
 **Authors: Siyuan Liu, Hongmin Fan, Han Qi**
 

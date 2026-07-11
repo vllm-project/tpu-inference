@@ -58,7 +58,6 @@ nav:
   - 'Home': README.md
   - 'Getting Started':
     - 'TPU Setup': getting_started/tpu_setup.md
-    - 'TPU Setup v2': getting_started/tpu_setup_v2.md
     - 'Installation': getting_started/installation.md
     - 'Quickstart': getting_started/quickstart.md
   - 'Features & Usage':
@@ -119,12 +118,9 @@ markdown_extensions:
 extra_css:
   - mkdocs/stylesheets/extra.css
   - mkdocs/stylesheets/interactive.css
-  - https://cdn.datatables.net/1.13.7/css/jquery.dataTables.min.css
 
 extra_javascript:
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
-  - https://code.jquery.com/jquery-3.7.1.min.js
-  - https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js
   - mkdocs/javascripts/interactive.js
 
 use_directory_urls: true
