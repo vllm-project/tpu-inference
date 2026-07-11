@@ -215,6 +215,16 @@ def _scheduler_worker_process(
                     model_runner_output = data
                     scheduler_output = _cached_scheduler_outputs.popleft()
 
+                    if model_runner_output.sampled_token_ids:
+                        # Synchronize the locally cached `num_scheduled_tokens` with the actual
+                        # count of generated tokens from the continue-decode multi-step execution.
+                        # This ensures correct request state updates and MoE experts slicing inside
+                        # local `scheduler.update_from_output(...)`.
+                        for req_id, req_idx in model_runner_output.req_id_to_index.items(
+                        ):
+                            scheduler_output.num_scheduled_tokens[req_id] = len(
+                                model_runner_output.sampled_token_ids[req_idx])
+
                     result = scheduler.update_from_output(
                         scheduler_output, model_runner_output)
                     _send_result(result)

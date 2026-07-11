@@ -1739,8 +1739,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
             padded_num_reqs,
-            _,
-            _,
+            req_ids_dp,
+            padded_num_scheduled_tokens_per_dp_rank,
             tokens_indices_selector,
         ) = self._prepare_inputs(scheduler_output)
 
