@@ -623,11 +623,14 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
 
+        # run_model jits the forward with a 4-tuple out_shardings:
+        # (kv_caches, hidden, aux_hidden_states, expert_ids).
         if not self.is_last_rank:
-            return kv_caches, JaxIntermediateTensors({"hidden_states": x_TD}), []
+            return kv_caches, JaxIntermediateTensors({"hidden_states":
+                                                      x_TD}), [], None
 
         final_activation_TD = self.final_norm(x_TD)
-        return kv_caches, final_activation_TD, []
+        return kv_caches, final_activation_TD, [], None
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         logits_TV = jnp.dot(hidden_states,
