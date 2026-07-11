@@ -666,7 +666,15 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         if pixel_values is None:
             return []
 
-        # Ensure JAX handling
+        # Ensure JAX handling. torch bfloat16 tensors cannot go through
+        # numpy directly (unsupported ScalarType); bit-view via int16 like
+        # gemma4_mm does.
+        if isinstance(pixel_values, torch.Tensor):
+            if pixel_values.dtype == torch.bfloat16:
+                pixel_values = pixel_values.contiguous().view(
+                    torch.int16).numpy().view(jnp.bfloat16)
+            else:
+                pixel_values = pixel_values.contiguous().float().numpy()
         pixel_values = jnp.asarray(pixel_values, dtype=jnp.bfloat16)
 
         # 1. Transpose Input from NCHW to NHWC
