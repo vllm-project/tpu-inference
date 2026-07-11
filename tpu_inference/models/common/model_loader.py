@@ -31,6 +31,8 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.compiler_options import \
+    get_step_fn_compiler_options
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
 from tpu_inference.models.jax.utils.multi_modal_utils import \
@@ -371,24 +373,6 @@ def get_flax_model(
     # costs ~17 ms/step on Gemma-4-31B decode at TP=2.
     _state_treedef = jax.tree_util.tree_structure(state)
 
-    from tpu_inference.models.vllm.vllm_model_wrapper import \
-        _get_sc_allreduce_allgather_offload_min_size_bytes
-    _compiler_options = {
-        "xla_tpu_all_gather_collective_matmul_mode": "post_spmd_conservative",
-        "xla_tpu_reduce_scatter_collective_matmul_mode":
-        "post_spmd_conservative",
-        "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
-    }
-    _sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
-    if _sc_offload_bytes > 0:
-        _threshold = str(_sc_offload_bytes)
-        _compiler_options[
-            "xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes"] = (
-                _threshold)
-        _compiler_options[
-            "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
-                _threshold)
-
     @jax.jit(
         out_shardings=(
             kv_cache_sharding,
@@ -400,7 +384,7 @@ def get_flax_model(
         static_argnums=(
             6, 9, 10
         ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
-        compiler_options=_compiler_options,
+        compiler_options=get_step_fn_compiler_options(),
     )
     def run_model(state_leaves, *args):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
