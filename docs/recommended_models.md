@@ -1,5 +1,5 @@
 
-# Recommended Model and Feature Matrices
+# Recommended Models
 
 Although vLLM TPU’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
 For this reason, until we land more capabilities, we recommend starting from this list of stress tested models and features below.

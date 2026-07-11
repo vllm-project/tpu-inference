@@ -9,26 +9,67 @@ integrated circuits (ASICs) used to accelerate machine learning workloads. TPUs
 are available in different versions each with different hardware specifications.
 For more information about TPUs, see [TPU System Architecture](https://cloud.google.com/tpu/docs/system-architecture-tpu-vm).
 
-The following TPU versions are compatible with `tpu-inference`:
+The following TPU versions are compatible with `tpu-inference`. Selecting a topology allows you to configure the physical arrangements of the TPU chips, improving throughput and networking performance.
 
 ### Recommended
-- [TPU v7x](https://cloud.google.com/tpu/docs/tpu7x)
-- [TPU v6e](https://cloud.google.com/tpu/docs/v6e)
-- [TPU v5e](https://cloud.google.com/tpu/docs/v5e)
+
+<div class="grid cards" markdown>
+
+- __TPU v7x (Ironwood)__
+
+    <span class="cg-badge cg-badge-recommended">Recommended</span>
+
+    Next-generation architecture for bleeding-edge research and ultra-large model training.
+
+    [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/tpu7x)
+
+- __TPU v6e (Trillium)__
+
+    <span class="cg-badge cg-badge-recommended">Recommended</span>
+
+    Optimal performance for mainstream AI workloads with balanced memory and compute.
+
+    [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v6e#configurations)
+
+- __TPU v5e__
+
+    <span class="cg-badge cg-badge-recommended">Recommended</span>
+
+    Cost-effective performance for medium-to-large scale inference and training.
+
+    [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v5e#tpu-v5e-config)
+
+</div>
 
 ### Experimental
-- [TPU v5p](https://cloud.google.com/tpu/docs/v5p)
-- [TPU v4](https://cloud.google.com/tpu/docs/v4)
-- [TPU v3](https://cloud.google.com/tpu/docs/v3)
 
-These TPU versions allow you to configure the physical arrangements of the TPU
-chips. This can improve throughput and networking performance. For more
-information see:
+<div class="grid cards" markdown>
 
-- [TPU v6e topologies](https://cloud.google.com/tpu/docs/v6e#configurations)
-- [TPU v5e topologies](https://cloud.google.com/tpu/docs/v5e#tpu-v5e-config)
-- [TPU v5p topologies](https://cloud.google.com/tpu/docs/v5p#tpu-v5p-config)
-- [TPU v4 topologies](https://cloud.google.com/tpu/docs/v4#tpu-v4-config)
+- __TPU v5p__
+
+    <span class="cg-badge cg-badge-experimental">Experimental</span>
+
+    High-performance architecture optimized for peak compute and memory bandwidth.
+
+    [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v5p#tpu-v5p-config)
+
+- __TPU v4__
+
+    <span class="cg-badge cg-badge-experimental">Experimental</span>
+
+    Previous generation flagship architecture for large-scale training.
+
+    [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v4#tpu-v4-config)
+
+- __TPU v3__
+
+    <span class="cg-badge cg-badge-experimental">Experimental</span>
+
+    Legacy architecture suitable for smaller scale experimentation.
+
+    [View Topology Guidelines &rarr;](https://cloud.google.com/tpu/docs/v3)
+
+</div>
 
 ## Quota and Pricing
 
@@ -37,14 +78,11 @@ Google Cloud project. For more information, see [TPU quota](https://cloud.google
 
 For TPU pricing information, see [Cloud TPU pricing](https://cloud.google.com/tpu/pricing).
 
-You may need additional persistent storage for your TPU VMs. For more
-information, see [Storage options for Cloud TPU data](https://cloud.devsite.corp.google.com/tpu/docs/storage-options).
-
 ## Provisioning Cloud TPUs
 
 You can provision Cloud TPUs using the [Cloud TPU API](https://cloud.google.com/tpu/docs/reference/rest)
 or the [queued resources](https://cloud.google.com/tpu/docs/queued-resources)
-API (preferred). This section shows how to create TPUs using the queued resource API.
+API. This section shows how to create TPUs using the queued resource API.
 
 ### Provision a Cloud TPU with the queued resource API
 

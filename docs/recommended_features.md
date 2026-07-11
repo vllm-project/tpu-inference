@@ -1,5 +1,3 @@
-## Recommended Features
-
 This table shows the features currently tested for accuracy and performance.
 
 === "Release"
