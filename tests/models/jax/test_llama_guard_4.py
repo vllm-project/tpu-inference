@@ -86,6 +86,13 @@ class MockVllmConfig:
         text_config_mock.num_attention_heads = 4
         text_config_mock.num_key_value_heads = 2
         text_config_mock.head_dim = 32
+        # transformers >= 5.6 layout: rope_theta lives in rope_parameters and
+        # the flat rope_theta attribute no longer exists on the config.
+        text_config_mock.rope_parameters = {
+            "rope_theta": 500000.0,
+            "rope_type": "default"
+        }
+        del text_config_mock.rope_theta
 
         hf_config_mock = MagicMock()
         hf_config_mock.text_config = text_config_mock
@@ -95,7 +102,11 @@ class MockVllmConfig:
         vision_config_mock.patch_size = 14
         vision_config_mock.hidden_size = 1408
         vision_config_mock.num_attention_heads = 16
-        vision_config_mock.rope_theta = 10000.0
+        vision_config_mock.rope_parameters = {
+            "rope_theta": 10000.0,
+            "rope_type": "default"
+        }
+        del vision_config_mock.rope_theta
         vision_config_mock.intermediate_size = 5632
         vision_config_mock.projector_input_dim = 4096
         vision_config_mock.projector_output_dim = 4096

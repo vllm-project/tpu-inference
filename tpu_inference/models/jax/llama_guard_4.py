@@ -35,6 +35,7 @@ from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.rope import \
     Llama4VisionRotaryEmbedding
+from tpu_inference.layers.jax.rope_interface import get_rope_theta
 from tpu_inference.layers.jax.misc import shard_put
 from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
                                                get_start_end_layer)
@@ -372,8 +373,9 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         intermediate_size = getattr(self.text_config, "intermediate_size",
                                     8192)
 
-        self.rope_theta_text = getattr(self.text_config, "rope_theta",
-                                       500000.0)
+        # transformers >= 5.6 moved rope_theta into the rope_parameters dict;
+        # get_rope_theta handles both layouts.
+        self.rope_theta_text = get_rope_theta(self.text_config, 500000.0)
         self.rope_scaling = getattr(self.text_config, "rope_scaling")
 
         self.image_token_id = getattr(self.model_config.hf_config,
@@ -402,7 +404,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
             patch_size=self.vision_config.patch_size,
             hidden_size=self.vision_config.hidden_size,
             num_attention_heads=self.vision_config.num_attention_heads,
-            rope_theta=self.vision_config.rope_theta,
+            rope_theta=get_rope_theta(self.vision_config, 10000.0),
             dtype=self.dtype,
         )
 
