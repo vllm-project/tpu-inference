@@ -32,7 +32,8 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
-from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.moe import \
+    FusedMoEMethodBase as TpuFusedMoEMethodBase
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
@@ -271,7 +272,7 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             return torch_view(out)
 
 
-class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
+class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, TpuFusedMoEMethodBase):
 
     def __init__(self,
                  quant_config: vllm_fp8.Fp8Config,
@@ -288,10 +289,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
 
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
-
-        self.extra_backend_kwargs = {}
-        if self.moe_backend == MoEBackend.FUSED_MOE:
-            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
+        TpuFusedMoEMethodBase.__init__(self, self.moe_backend, ep_axis_name)
 
     @property
     def is_monolithic(self) -> bool:

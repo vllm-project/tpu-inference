@@ -213,3 +213,14 @@ def moe_apply(
                                        mesh=mesh)
 
         return output
+
+
+# TODO(#3041): Inherit from vLLM's FusedMoEMethodBase, so it can take FusedMoeConfig
+# as init arg, and unify more logic.
+class FusedMoEMethodBase:
+    """Base class that prepare TPU specific configs"""
+
+    def __init__(self, moe_backend: MoEBackend, ep_axis_name: str):
+        self.extra_backend_kwargs = {}
+        if moe_backend == MoEBackend.FUSED_MOE:
+            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name)
