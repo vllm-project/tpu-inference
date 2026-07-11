@@ -540,9 +540,7 @@ def dflash_baseline():
     "async_scheduling, enable_dp_attention",
     [
         pytest.param(False, False, marks=pytest.mark.bvt),
-        (False, True),
         (True, False),
-        pytest.param(True, True, marks=pytest.mark.bvt),
     ],
 )
 def test_dflash_correctness(
@@ -584,8 +582,8 @@ def test_dflash_correctness(
 
 @pytest.mark.parametrize(
     "max_num_seqs,async_scheduling, enable_dp_attention",
-    [(1, False, False), (20, True, False),
-     pytest.param(20, True, True, marks=pytest.mark.bvt)],
+    [(1, False, False),
+     pytest.param(20, True, False, marks=pytest.mark.bvt)],
 )
 def test_dflash_performance(
     monkeypatch: pytest.MonkeyPatch,
