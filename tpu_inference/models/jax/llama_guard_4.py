@@ -616,8 +616,10 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         for (i, block) in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
             kv_cache = kv_caches[i]
-            new_kv_cache, x_TD = block(x_TD, is_prefill, kv_cache,
-                                       attention_metadata)
+            # TransformerBlock returns (kv_cache, hidden, expert_ids); the
+            # routed-experts output is unused here.
+            new_kv_cache, x_TD, _ = block(x_TD, is_prefill, kv_cache,
+                                          attention_metadata)
             jax.block_until_ready(x_TD)
             kv_caches[i] = new_kv_cache
 
