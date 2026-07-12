@@ -1384,14 +1384,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 for req_id in self._pre_async_results.req_ids)
 
             if state_indices_to_rollback is not None and prev_ndim == 2 and curr_ndim == 2 and prev_req_active:
-                if self.is_first_rank:
-                    print(f"[GDN-DEBUG] _execute_model: Triggering device rollback! state_indices_to_rollback.shape={state_indices_to_rollback.shape}, num_accepted_tokens_dev={num_accepted_tokens_dev}", flush=True)
                 self._device_rollback_mamba_states(
                     state_indices_to_rollback,
                     num_accepted_tokens_dev,
                 )
-            elif self.is_first_rank:
-                print(f"[GDN-DEBUG] _execute_model: Skipping device rollback (prev_ndim={prev_ndim}, curr_ndim={curr_ndim}, prev_req_active={prev_req_active})", flush=True)
         with self.maybe_forbid_compile:
             with set_forward_context(
                     None,
@@ -2686,8 +2682,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     mamba_state_indices_cpu[req_offset:req_offset +
                                             _num_reqs] = local_base_slots
 
-            if self.is_first_rank:
-                print(f"[GDN-DEBUG] _prepare_input_metadata: is_prompt_prefill={is_prompt_prefill}, is_spec_verification={is_spec_verification}, speculative_config={self.speculative_config is not None}, mamba_state_indices_cpu.shape={mamba_state_indices_cpu.shape}, mamba_state_indices_cpu[:2]={mamba_state_indices_cpu[:2]}", flush=True)
 
             (request_distribution, mamba_state_indices,
              dev_arrays_payload) = device_array(
