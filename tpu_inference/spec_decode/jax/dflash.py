@@ -81,10 +81,6 @@ class DFlashProposer:
 
         self.runner = runner
         self.mesh = runner.mesh
-        if self.mesh.shape.get(ShardingAxisName.ATTN_DATA, 1) > 1:
-            raise NotImplementedError(
-                "DFlash currently does not support Data Parallelism (DP) attention "
-                "(ATTN_DATA > 1).")
         self.num_speculative_tokens = (
             self.speculative_config.num_speculative_tokens)
 
@@ -230,16 +226,6 @@ class DFlashProposer:
         """Project auxiliary hidden states (JIT-compiled within prepare_inputs)."""
         concat_hidden = jnp.concatenate(aux_hidden_states, axis=-1)
         return self.combine_hidden_states_fn(state_leaves, concat_hidden)
-
-    @staticmethod
-    def _next_padded_size(n: int) -> int:
-        """Round n up to the next power-of-two (min 16)."""
-        if n <= 16:
-            return 16
-        p = 16
-        while p < n:
-            p *= 2
-        return p
 
     @functools.partial(jax.jit, static_argnums=(0, 3, 4))
     def _build_noise_block(
@@ -453,30 +439,42 @@ class DFlashProposer:
              num_reqs_dp, num_rejected_tokens, input_ids, aux_hidden_states,
              attn_metadata.input_positions)
 
+        data_spec = PartitionSpec(ShardingAxisName.ATTN_DATA)
         # Project new auxiliary hidden states
         projected = self._project_aux_hidden(state_leaves,
                                              aux_states_processed)
         target_hidden = projected.astype(jnp.bfloat16)
 
         # Build noise block (vectorized for batching)
-        noise_input_ids, noise_positions = self._build_noise_block(
-            new_seq_lens,
-            next_token_ids,
-            self.mask_token_id,
-            self.block_size,
-        )
+        noise_input_ids, noise_positions = jax.shard_map(
+            lambda sl, nti: self._build_noise_block(
+                sl, nti, self.mask_token_id, self.block_size),
+            mesh=self.mesh,
+            in_specs=(data_spec, data_spec),
+            out_specs=(data_spec, data_spec),
+        )(new_seq_lens, next_token_ids)
 
-        num_reqs = attn_metadata.seq_lens.shape[0]
+        def _get_sharded_draft_query_start_loc(seq_lens):
+            num_reqs_local = seq_lens.shape[0]
+            return jnp.arange(num_reqs_local + 1,
+                              dtype=jnp.int32) * self.block_size
+
+        draft_query_start_loc = jax.shard_map(
+            _get_sharded_draft_query_start_loc,
+            mesh=self.mesh,
+            in_specs=data_spec,
+            out_specs=data_spec,
+        )(new_seq_lens)
+
         draft_attn_metadata = replace(
             attn_metadata,
             input_positions=noise_positions,
             seq_lens=new_seq_lens,
-            query_start_loc=jnp.arange(num_reqs + 1, dtype=jnp.int32) *
-            self.block_size,
+            query_start_loc=draft_query_start_loc,
             block_tables=block_tables,
         )
 
-        dummy_last_indices = jnp.zeros(num_reqs, dtype=jnp.int32)
+        dummy_last_indices = jnp.zeros_like(new_seq_lens, dtype=jnp.int32)
         return (
             (target_hidden, new_query_start_loc, new_input_positions),
             noise_input_ids,
@@ -522,31 +520,29 @@ class DFlashProposer:
             target_hidden_states,
             attn_metadata,
         )
+        draft_token_ids = self._get_draft_token_ids(state_leaves,
+                                                    hidden_states)
+        return kv_caches, draft_token_ids
 
-        num_reqs = hidden_states.shape[0] // self.block_size
-        hidden_states_batched = hidden_states.reshape(
-            (num_reqs, self.block_size, -1))
+    def _get_draft_token_ids(self, state_leaves: Any,
+                             hidden_states: jax.Array) -> jax.Array:
+        """Extract candidate draft tokens and compute logits across DP ranks."""
+        hidden_states_batched = hidden_states.reshape(-1, self.block_size,
+                                                      hidden_states.shape[-1])
         draft_hidden = hidden_states_batched[:, 1:1 +
                                              self.num_speculative_tokens, :]
-
-        # Flatten draft_hidden to 2D for compute_logits_fn which expects 2D
-        # shape to satisfy PartitionSpec('data', 'model') for the output logits
         draft_hidden_flat = draft_hidden.reshape(-1, draft_hidden.shape[-1])
         logits_flat = self.compute_logits_fn(state_leaves, draft_hidden_flat,
                                              None)
-
-        logits = logits_flat.reshape(num_reqs, self.num_speculative_tokens, -1)
-
+        logits = logits_flat.reshape(-1, self.num_speculative_tokens,
+                                     logits_flat.shape[-1])
         draft_ids = jnp.argmax(logits, axis=-1)
+
+        data_spec_2d = PartitionSpec(ShardingAxisName.ATTN_DATA, None)
         draft_token_ids = lax.with_sharding_constraint(
-            draft_ids,
-            NamedSharding(self.mesh,
-                          PartitionSpec(ShardingAxisName.ATTN_DATA, None)))
+            draft_ids, NamedSharding(self.mesh, data_spec_2d))
 
-        if draft_token_ids.ndim == 1:
-            draft_token_ids = draft_token_ids[jnp.newaxis, :]
-
-        return kv_caches, draft_token_ids
+        return draft_token_ids
 
     def propose(
         self,
