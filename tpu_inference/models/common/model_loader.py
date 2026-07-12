@@ -379,8 +379,8 @@ def get_flax_model(
         ),
         donate_argnums=1,  # 0 is state_leaves, 1 is kv_cache
         static_argnums=(
-            6, 9, 10
-        ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
+            7, 10, 11
+        ),  # 7 is layer_name_to_kvcache_index, 10 is is_first_rank, 11 is is_last_rank
     )
     def run_model(state_leaves, *args):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
@@ -395,7 +395,7 @@ def get_flax_model(
             None,  # expert ids
         ),
         donate_argnums=1,  # 0 is state_leaves, 1 is kv_cache
-        static_argnums=(5, ),  # 5 is layer_name_to_kvcache_index
+        static_argnums=(6, ),  # 6 is layer_name_to_kvcache_index
     )
     def run_draft_model(state_leaves, *args):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
