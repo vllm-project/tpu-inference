@@ -14,8 +14,16 @@
 
 import os
 
-os.environ["LIBTPU_INIT_ARGS"] = (os.environ.get("LIBTPU_INIT_ARGS", "") +
-                                  " --xla_tpu_scoped_vmem_limit_kib=65536")
+# MLA-kernel-only vmem budget. Two constraints (see #3011 / #3159):
+# 1. Must run before libtpu/TPU backend initialization (module top,
+#    before the jax import below).
+# 2. Must NOT move into tests/conftest.py: a global setting changes XLA
+#    codegen for every e2e test in the suite (that is exactly how #3011
+#    caused a deterministic multimodal output drift and e2e slowdowns).
+if "--xla_tpu_scoped_vmem_limit_kib" not in os.environ.get(
+        "LIBTPU_INIT_ARGS", ""):
+    os.environ["LIBTPU_INIT_ARGS"] = (os.environ.get("LIBTPU_INIT_ARGS", "") +
+                                      " --xla_tpu_scoped_vmem_limit_kib=65536")
 
 import time
 
