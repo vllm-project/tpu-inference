@@ -226,8 +226,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
         "num_heads",
         "num_kv_heads",
         "q_scale",
-        "k_scale",
-        "v_scale",
         "sliding_window",
     ),
     donate_argnames=("kv_cache"),
@@ -258,6 +256,27 @@ def _jax_attn_func(
     k = k.reshape(k_len, num_kv_heads, head_size)
     v = v.reshape(k_len, num_kv_heads, head_size)
 
+    # Fold the fp8 KV-cache dequant scale PRE-SHARD (before attention() shards the kv
+    # heads across TP/DP ranks). k_scale/v_scale may be a scalar (per-tensor), a
+    # [num_kv_heads] per-head, or a [num_kv_heads, head_size] per-channel array: a
+    # per-rank shard can't match a [num_kv_heads, *] row count inside the kernel, and
+    # an in-kernel scalar fold de-optimizes the prefill exp2. Fold here for any layout:
+    # K scale commutes onto Q (q.(k_q*s) == (q*s).k_q); V scale factors out of PV. The
+    # kernel then always sees k_scale=v_scale=None (constant softmax-scale path).
+    if k_scale is not None:
+        ks = jnp.asarray(k_scale, jnp.float32)
+        if ks.ndim == 0:
+            q = (q.astype(jnp.float32) * ks).astype(q.dtype)
+        else:
+            kq = jnp.repeat(ks, num_heads // num_kv_heads, axis=0)
+            q = (q.astype(jnp.float32)
+                 * (kq[None] if ks.ndim == 2 else kq[None, :, None])).astype(q.dtype)
+        k_scale = None
+    v_scale_fold = None
+    if v_scale is not None:
+        v_scale_fold = jnp.asarray(v_scale, jnp.float32)
+        v_scale = None
+
     new_kv_cache, outputs = attention(
         kv_cache,
         q,
@@ -272,6 +291,15 @@ def _jax_attn_func(
         sinks=sinks,
         attention_chunk_size=sliding_window,
     )
+
+    if v_scale_fold is not None:
+        if v_scale_fold.ndim == 0:
+            outputs = (outputs.astype(jnp.float32) * v_scale_fold).astype(outputs.dtype)
+        else:
+            vq = jnp.repeat(v_scale_fold, num_heads // num_kv_heads, axis=0)
+            outputs = (outputs.astype(jnp.float32)
+                       * (vq[None] if v_scale_fold.ndim == 2
+                          else vq[None, :, None])).astype(outputs.dtype)
 
     # Convert the shape back to vLLM's convention
     assert outputs.shape[0] == q_len
