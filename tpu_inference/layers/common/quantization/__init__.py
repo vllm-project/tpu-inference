@@ -282,16 +282,31 @@ def static_per_tensor_quantize_tensor(
     return jnp.clip(tensor / scale, dtype_min, dtype_max).astype(dtype)
 
 
+def _kv_scale_bcast(scale, tensor: jax.Array):
+    """Reshape a KV scale to broadcast over a [tokens, num_kv_heads, head_dim] tensor:
+    scalar -> unchanged; per-head [num_kv_heads] -> (1, K, 1...); per-channel
+    [num_kv_heads, head_dim] -> (1..., K, head_dim)."""
+    s = jnp.asarray(scale)
+    if s.ndim == 0:
+        return scale
+    if s.ndim == 1:
+        return s.reshape((1, s.shape[0]) + (1,) * (tensor.ndim - 2))
+    return s.reshape((1,) * (tensor.ndim - 2) + s.shape)
+
+
 def quantize_kv(
     dtype: jnp.dtype,
     key: jax.Array,
     value: jax.Array | None = None,
-    k_scale: float = 1.0,
-    v_scale: float = 1.0,
+    k_scale=1.0,
+    v_scale=1.0,
 ) -> Tuple[jax.Array, jax.Array]:
-    """Static quantize key and value tensors."""
-    key = static_per_tensor_quantize_tensor(dtype, key, k_scale)
+    """Static quantize key and value tensors. k_scale/v_scale may be a scalar
+    (per-tensor), a [num_kv_heads] per-head, or a [num_kv_heads, head_dim]
+    per-channel array (broadcast over tokens)."""
+    key = static_per_tensor_quantize_tensor(dtype, key, _kv_scale_bcast(k_scale, key))
     if value is None:
         return key, None
-    value = static_per_tensor_quantize_tensor(dtype, value, v_scale)
+    value = static_per_tensor_quantize_tensor(
+        dtype, value, _kv_scale_bcast(v_scale, value))
     return key, value
