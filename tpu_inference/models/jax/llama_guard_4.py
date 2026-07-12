@@ -35,7 +35,8 @@ from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import DenseFFW, Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.rope import \
     Llama4VisionRotaryEmbedding
-from tpu_inference.layers.jax.rope_interface import get_rope_theta
+from tpu_inference.layers.jax.rope_interface import (get_rope_scaling,
+                                                     get_rope_theta)
 from tpu_inference.layers.jax.misc import shard_put
 from tpu_inference.layers.jax.pp_utils import (PPMissingLayer,
                                                get_start_end_layer)
@@ -43,8 +44,8 @@ from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.llama4 import (JAXLlama4MultiModalProjector,
                                              JAXLlama4VisionModel)
-from tpu_inference.models.jax.utils.multi_modal_utils import \
-    merge_multimodal_embeddings
+from tpu_inference.models.jax.utils.multi_modal_utils import (
+    convert_torch_tensor_to_jax, merge_multimodal_embeddings)
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -376,7 +377,9 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         # transformers >= 5.6 moved rope_theta into the rope_parameters dict;
         # get_rope_theta handles both layouts.
         self.rope_theta_text = get_rope_theta(self.text_config, 500000.0)
-        self.rope_scaling = getattr(self.text_config, "rope_scaling")
+        # Normalized dict (factor -> scale_factor) or None; handles both the
+        # legacy rope_scaling attribute and the >=5.6 rope_parameters layout.
+        self.rope_scaling = get_rope_scaling(self.text_config)
 
         self.image_token_id = getattr(self.model_config.hf_config,
                                       "image_token_index")
@@ -454,16 +457,7 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                 num_key_value_heads=self.num_key_value_heads,
                 head_dim=self.head_dim,
                 rope_theta=self.rope_theta_text,
-                rope_scaling={
-                    "scale_factor":
-                    self.rope_scaling["factor"],
-                    "low_freq_factor":
-                    self.rope_scaling["low_freq_factor"],
-                    "high_freq_factor":
-                    self.rope_scaling["high_freq_factor"],
-                    "original_max_position_embeddings":
-                    self.rope_scaling["original_max_position_embeddings"]
-                },
+                rope_scaling=self.rope_scaling,
                 rngs=self.rng,
                 rope_input_ordering="interleaved",
                 # TODO (jacobplatin): we should refactor this to pass a dtype (or config) directly
@@ -596,7 +590,8 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         attention_metadata: AttentionMetadata,
         inputs_embeds: Optional[jax.Array] = None,
         *args,
-    ) -> Tuple[List[KVCacheType], jax.Array]:
+    ) -> Tuple[List[KVCacheType], jax.Array, List[jax.Array],
+               Optional[jax.Array]]:
         is_prefill = False
 
         if self.is_first_rank:
@@ -609,9 +604,12 @@ class LlamaGuard4ForCausalLM(nnx.Module):
                     "Cannot run forward pass: Both input_ids and inputs_embeds are None."
                 )
         else:
-            # For pipeline parallelism (not active here, but good practice)
-            # x_TD would come from intermediate_tensors
-            pass
+            # Pipeline parallelism is not wired up for this model: __call__
+            # takes no intermediate_tensors, so x_TD would be unbound here.
+            raise NotImplementedError(
+                "[llama_guard_4] pipeline parallelism (is_first_rank=False) "
+                "is not supported; forward has no intermediate_tensors input."
+            )
 
         for (i, block) in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
@@ -666,16 +664,11 @@ class LlamaGuard4ForCausalLM(nnx.Module):
         if pixel_values is None:
             return []
 
-        # Ensure JAX handling. torch bfloat16 tensors cannot go through
-        # numpy directly (unsupported ScalarType); bit-view via int16 like
-        # gemma4_mm does.
+        # Ensure JAX handling (torch bf16 cannot pass through numpy).
         if isinstance(pixel_values, torch.Tensor):
-            if pixel_values.dtype == torch.bfloat16:
-                pixel_values = pixel_values.contiguous().view(
-                    torch.int16).numpy().view(jnp.bfloat16)
-            else:
-                pixel_values = pixel_values.contiguous().float().numpy()
-        pixel_values = jnp.asarray(pixel_values, dtype=jnp.bfloat16)
+            pixel_values = convert_torch_tensor_to_jax(pixel_values)
+        else:
+            pixel_values = jnp.asarray(pixel_values, dtype=jnp.bfloat16)
 
         # 1. Transpose Input from NCHW to NHWC
         # vLLM/HF loaders typically give NCHW (Channels First)
