@@ -206,7 +206,8 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(mesh)
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
+            mesh)
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
@@ -230,7 +231,8 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(mesh)
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
+            mesh)
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
@@ -314,13 +316,14 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(mesh)
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
+            mesh)
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
                 mesh=mesh,
-                shared_attn_metadata=shared_metadata), pytest.raises(RuntimeError,
-                                          match="should be empty but has"):
+                shared_attn_metadata=shared_metadata), pytest.raises(
+                    RuntimeError, match="should be empty but has"):
             impl.forward(layer, query, key, value, torch.tensor([1]), metadata)
 
     def test_forward_with_output_scale_raises_error(self, mesh):
@@ -338,14 +341,15 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(mesh)
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
+            mesh)
         output_scale = torch.tensor([1.0])
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
                 mesh=mesh,
-                shared_attn_metadata=shared_metadata), pytest.raises(NotImplementedError,
-                                          match="fused output quantization"):
+                shared_attn_metadata=shared_metadata), pytest.raises(
+                    NotImplementedError, match="fused output quantization"):
             impl.forward(layer,
                          query,
                          key,
@@ -369,14 +373,15 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(mesh)
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
+            mesh)
         output_block_scale = torch.tensor([1.0])
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
                 mesh=mesh,
-                shared_attn_metadata=shared_metadata), pytest.raises(NotImplementedError,
-                                          match="fused output quantization"):
+                shared_attn_metadata=shared_metadata), pytest.raises(
+                    NotImplementedError, match="fused output quantization"):
             impl.forward(layer,
                          query,
                          key,
@@ -439,7 +444,7 @@ class TestPallasAttentionBackendImpl:
                 kv_caches=[kv_cache],
                 mesh=mesh,
                 layer_name_to_kvcache_index={'0': 0},
-                shared_attn_metadata = shared_metadata
+                shared_attn_metadata=shared_metadata
         ), pytest.raises(
                 NotImplementedError,
                 match=
@@ -462,8 +467,8 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, _, metadata, shared_metadata = create_inputs(mesh,
-                                                       num_kv_heads=NUM_HEADS)
+        query, key, value, _, metadata, shared_metadata = create_inputs(
+            mesh, num_kv_heads=NUM_HEADS)
         metadata.padded_num_reqs = MAX_NUM_SEQS
 
         from vllm.config import VllmConfig
