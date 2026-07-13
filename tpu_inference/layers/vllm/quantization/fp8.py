@@ -272,7 +272,7 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
             return torch_view(out)
 
 
-class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, TpuFusedMoEMethodBase):
+class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod):
 
     def __init__(self,
                  quant_config: vllm_fp8.Fp8Config,

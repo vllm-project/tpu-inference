@@ -348,7 +348,6 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
 
 
 class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
-                                    TpuFusedMoEMethodBase,
                                     VllmQuantizationMethod):
 
     def __init__(

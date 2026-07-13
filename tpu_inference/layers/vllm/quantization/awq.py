@@ -239,7 +239,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
         return torch_view(out)
 
 
-class VllmAWQMoEMethod(FusedMoEMethodBase, TpuFusedMoEMethodBase):
+class VllmAWQMoEMethod(FusedMoEMethodBase):
 
     def __init__(
         self,
