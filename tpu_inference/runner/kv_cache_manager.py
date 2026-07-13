@@ -696,6 +696,7 @@ class KVCacheManager:
                 pin_memory=False,
                 vocab_size=self.runner.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
+                is_spec_decode=bool(self.runner.vllm_config.speculative_config),
                 num_speculative_tokens=num_speculative_tokens,
                 dp_size=self.runner.dp_size,
             )
