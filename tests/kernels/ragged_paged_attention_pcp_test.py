@@ -13,12 +13,21 @@
 # limitations under the License.
 """Correctness tests for prefill context parallelism (PCP) in RPA v3.
 
-PCP shards a prompt across ``cp_group_size`` ranks in a load-balanced head-tail
-layout (the sequence is cut into ``2 * cp_group_size`` equal chunks; rank ``r``
-owns chunk ``r`` and chunk ``2P-1-r``). ``kernel.py`` attends the all-gathered
-current KV; ``kernel_ring_extern.py`` streams the KV one shard per launch; and
-``kernel_ring_fused.py`` streams the shards around the ring inside a single
-launch. All are validated against the plain full-causal reference.
+Exercises the production PCP kernel
+(``tpu_inference.kernels.experimental.rpa_v3_cp.kernel``) that the attention
+wrapper dispatches to. PCP shards one prompt across ``cp_group_size`` ranks in a
+load-balanced head-tail layout (the current tokens are cut into
+``2 * cp_group_size`` chunks; rank ``r`` owns chunk ``r`` and chunk ``2P-1-r``).
+
+New length contract (no ``all_gather_kv`` / ``kv_write_lens``):
+  * ``kv_lens``        = REAL total kv length (num_computed + real current).
+  * ``kv_cache_lens``  = num_computed; the kernel derives the current KV length
+                         as ``kv_lens - kv_cache_lens`` (so only real tokens are
+                         attended/written -- no padding write-clamp).
+  * ``cu_q_lens``      = ``[0, q_len]`` with the launch's REAL chunk length.
+  * ``q_pos_offsets``  = the chunk's within-current start position.
+  * current phase: ``skip_cache_attn=True`` (attend/write the current KV).
+  * cache phase:   ``skip_current_attn=True`` (attend the previous cache only).
 """
 
 from functools import partial
@@ -32,12 +41,8 @@ from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as PS
 
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
+from tpu_inference.kernels.experimental.rpa_v3_cp.kernel import (
     merge_kv, ragged_paged_attention, ref_ragged_paged_attention)
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel_ring_extern import \
-    ragged_paged_attention as ragged_paged_attention_ring
-from tpu_inference.kernels.ragged_paged_attention.v3.kernel_ring_fused import (
-    PADDING_POSITION, ring_attention)
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing)
 
@@ -79,14 +84,19 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         cache = self._empty_cache(dtype)
         return cache.at[:kv.shape[0]].set(kv)
 
+    def _flat_cache(self, nkv_local, npages, page, hd, dtype):
+        kvp = get_dtype_packing(dtype)
+        nkv2 = align_to(2 * nkv_local, kvp)
+        return jnp.zeros((npages, page, nkv2 // kvp, kvp, hd), dtype)
+
     def _pi(self, npages):
         pi = jnp.arange(npages, dtype=jnp.int32)
         return jnp.pad(pi, (0, self.MAX_SEQ * npages - npages))
 
-    def _pad1(self, xs):  # length max_num_seqs (kv_lens, q/kv_pos_offsets)
+    def _pad1(self, xs):  # length max_num_seqs (kv_lens, kv_cache_lens, q_pos)
         return jnp.pad(jnp.array(xs, jnp.int32), (0, self.MAX_SEQ - len(xs)))
 
-    def _padcu(self, xs):  # length max_num_seqs + 1 (cu_q_lens, cu_kv_lens)
+    def _padcu(self, xs):  # length max_num_seqs + 1 (cu_q_lens)
         return jnp.pad(jnp.array(xs, jnp.int32), (0, self.MAX_SEQ + 1 - len(xs)))
 
     def _merge_lse(self, acc_o, acc_l, o, l):
@@ -103,11 +113,16 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
     # ------------------------------ tests ------------------------------------
     @parameterized.product(dtype=[jnp.float32, jnp.bfloat16], P=[1, 2, 4])
-    def test_pcp_all_gather_head_tail(self, dtype, P):
-        """Head/tail chunks vs full-causal reference (all-gather KV)."""
+    def test_pcp_current_head_tail(self, dtype, P):
+        """Current-phase head/tail chunks vs full-causal reference.
+
+        num_computed=0, so only the current phase runs: each head/tail chunk
+        attends the (replicated here) current KV causally at its within-current
+        position and must match the plain full-causal reference for that chunk.
+        """
         self.PAGE = 16
         S, nq, nkv, hd = 256, 8, 2, 128
-        C = S // (2 * P)
+        C = S // (2 * P)  # S is a multiple of 2P -> every chunk is fully real
         rng = np.random.default_rng(0)
         q = self._rand(rng, (S, nq, hd), dtype)
         k = self._rand(rng, (S, nkv, hd), dtype)
@@ -120,29 +135,31 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         exp = exp[:S]
         for r in range(P):
             for chunk in (r, 2 * P - 1 - r):
-                q_buf = jnp.zeros((S, nq, hd), dtype).at[:C].set(q[chunk * C:chunk * C + C])
+                q_buf = jnp.zeros((S, nq, hd), dtype).at[:C].set(
+                    q[chunk * C:chunk * C + C])
                 out, _ = ragged_paged_attention(
                     q_buf, k, v, self._empty_cache(dtype), self._pad1([S]),
                     self._pi(pps), self._padcu([0, C]),
                     jnp.array([0, 0, 1], jnp.int32),
                     cp_rank=jnp.array([r], jnp.int32), cp_group_size=P,
-                    all_gather_kv=True,
+                    kv_cache_lens=self._pad1([0]),
                     q_pos_offsets=self._pad1([chunk * C]),
-                    update_kv_cache=False, use_causal_mask=True)
+                    skip_cache_attn=True, update_kv_cache=False,
+                    use_causal_mask=True)
                 self.assertAllClose(out[:C], exp[chunk * C:chunk * C + C],
                                     atol=self._tol(dtype), rtol=self._tol(dtype))
 
     @parameterized.product(dtype=[jnp.float32])
     def test_pcp_two_phase_chunked_prefill(self, dtype):
-        """Non-causal prev-cache + causal current, merged via LSE.
+        """Nonzero kv_cache_lens: non-causal prev-cache + causal current, LSE.
 
-        Uses cp_group_size=1 (previous cache replicated, so no cross-rank merge
-        is needed on a single device); with the derived gather factor this means
-        the current tokens split into 2 head-tail chunks (C = Scur / 2).
+        cp_group_size=1 (prev cache replicated, so no cross-rank merge needed on
+        one device); the current tokens split into 2 head-tail chunks. Validates
+        that ``kv_cache_lens = num_computed`` drives the cache/current split.
         """
         self.PAGE = 16
         Lprev, Scur, nq, nkv, hd = 128, 128, 8, 2, 128
-        C = Scur // 2  # cp_group_size=1 -> 2*cp_group_size = 2 head-tail chunks
+        C = Scur // 2  # cp_group_size=1 -> 2 head-tail chunks
         kv_total = Lprev + Scur
         pps = cdiv(kv_total, self.PAGE)
         rng = np.random.default_rng(3)
@@ -158,33 +175,40 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         for chunk in (0, 1):
             q_buf = jnp.zeros((Scur, nq, hd), dtype).at[:C].set(
                 q_cur[chunk * C:chunk * C + C])
-            common = dict(cp_rank=jnp.array([0], jnp.int32),
-                          cp_group_size=1, all_gather_kv=True,
-                          q_pos_offsets=self._pad1([chunk * C]),
+            common = dict(cp_rank=jnp.array([0], jnp.int32), cp_group_size=1,
+                          kv_cache_lens=self._pad1([Lprev]),
                           update_kv_cache=False, return_lse=True)
+            # kv_cache is donated, so give each phase its own (identical) copy.
+            # Cache phase: attend the previous cache (non-causal), no q_pos.
             o1, _, l1 = ragged_paged_attention(
                 q_buf, k_all[Lprev:], v_all[Lprev:],
                 self._cache_from_kv(k_all[:Lprev], v_all[:Lprev], Lprev, dtype),
                 self._pad1([kv_total]), self._pi(pps), self._padcu([0, C]),
                 jnp.array([0, 0, 1], jnp.int32), use_causal_mask=False,
                 skip_current_attn=True, **common)
+            # Current phase: causal over the current KV (read from HBM).
             o2, _, l2 = ragged_paged_attention(
                 q_buf, k_all[Lprev:], v_all[Lprev:],
                 self._cache_from_kv(k_all[:Lprev], v_all[:Lprev], Lprev, dtype),
                 self._pad1([kv_total]), self._pi(pps), self._padcu([0, C]),
                 jnp.array([0, 0, 1], jnp.int32), use_causal_mask=True,
-                skip_cache_attn=True, **common)
+                q_pos_offsets=self._pad1([chunk * C]), skip_cache_attn=True,
+                **common)
             o, _ = self._merge_lse(o1[:C], l1[:C], o2[:C], l2[:C])
             self.assertAllClose(o, exp[chunk * C:chunk * C + C],
                                 atol=self._tol(dtype), rtol=self._tol(dtype))
 
     @parameterized.product(P=[2, 3, 4])
     def test_pcp_strided_cache_write(self, P):
-        """Interleaved (strided) write of the all-gathered current KV."""
+        """Interleaved (strided) write of the current KV, non-causal.
+
+        Each rank writes its 1/P round-robin share (global token g -> rank g%P,
+        local slot g//P); de-strided it must equal ``merge_kv`` of the current.
+        """
         dtype = jnp.float32
         self.PAGE = 16
         S, nq, nkv, hd = 192, 8, 2, 128
-        C = S // (2 * P)  # per-chunk local q; gathered KV len = 2*P*C = S
+        C = S // (2 * P)
         pps = cdiv(S, self.PAGE)
         rng = np.random.default_rng(7)
         k = self._rand(rng, (S, nkv, hd), dtype)
@@ -193,15 +217,13 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         c = self._cfg(dtype)
         kv_merged = merge_kv(k, v)
         for r in range(P):
-            # Non-causal chunk-sized launch: fetches + strided-writes the full
-            # gathered current KV (derived length 2*P*C = S).
             _, cache = ragged_paged_attention(
                 q, k, v, self._empty_cache(dtype), self._pad1([S]),
                 self._pi(pps), self._padcu([0, C]),
                 jnp.array([0, 0, 1], jnp.int32),
                 cp_rank=jnp.array([r], jnp.int32), cp_group_size=P,
-                all_gather_kv=True, update_kv_cache=True,
-                use_causal_mask=False)  # non-causal -> fetch + write full shard
+                kv_cache_lens=self._pad1([0]), update_kv_cache=True,
+                skip_cache_attn=True, use_causal_mask=False)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
             local_len = (S + P - 1 - r) // P
             pi = np.arange(pps)
@@ -213,7 +235,8 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
     @parameterized.product(P=[2, 3, 4])
     def test_pcp_causal_tail_write_full_coverage(self, P):
         """A *causal* tail launch must still write this rank's whole strided
-        share, even for KV tokens beyond the tail chunk's causal range."""
+        share, even for KV tokens beyond the tail chunk's causal range (the
+        ``fetch_kv_len = kv_len`` extension)."""
         dtype = jnp.float32
         self.PAGE = 16
         S, nq, nkv, hd = 192, 8, 2, 128
@@ -226,17 +249,15 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         c = self._cfg(dtype)
         kv_merged = merge_kv(k, v)
         for r in range(P):
-            tail_off = (2 * P - 1 - r) * C  # tail chunk global offset
-            # Causal + update_kv_cache + all_gather_kv -> kernel extends the
-            # fetch/write to the full current KV so the strided share is complete
-            # even though the causal attention only spans [0, tail_off + C).
+            tail_off = (2 * P - 1 - r) * C  # tail chunk within-current offset
             _, cache = ragged_paged_attention(
                 q, k, v, self._empty_cache(dtype), self._pad1([S]),
                 self._pi(pps), self._padcu([0, C]),
                 jnp.array([0, 0, 1], jnp.int32),
                 cp_rank=jnp.array([r], jnp.int32), cp_group_size=P,
-                all_gather_kv=True, q_pos_offsets=self._pad1([tail_off]),
-                update_kv_cache=True, use_causal_mask=True)
+                kv_cache_lens=self._pad1([0]),
+                q_pos_offsets=self._pad1([tail_off]),
+                update_kv_cache=True, skip_cache_attn=True, use_causal_mask=True)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
             local_len = (S + P - 1 - r) // P
             pi = np.arange(pps)
@@ -245,171 +266,60 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 slot = pi[m // self.PAGE] * self.PAGE + m % self.PAGE
                 self.assertArraysEqual(flat[slot], kv_merged[g])
 
-    @parameterized.product(dtype=[jnp.float32, jnp.bfloat16], P=[1, 2])
-    def test_pcp_ring_attention(self, dtype, P):
-        """Ring: stream KV chunks, merge via LSE, vs full-causal reference."""
-        self.PAGE = 16
-        S, nq, nkv, hd = 256, 8, 2, 128
-        nchunk = 2 * P
-        C = S // nchunk
-        rng = np.random.default_rng(11)
-        q = self._rand(rng, (S, nq, hd), dtype)
-        k = self._rand(rng, (S, nkv, hd), dtype)
-        v = self._rand(rng, (S, nkv, hd), dtype)
-        pps_full = cdiv(S, self.PAGE)
-        exp, _ = ref_ragged_paged_attention(q, k, v, self._empty_cache(dtype),
-                                             self._pad1([S]), self._pi(pps_full),
-                                             self._padcu([0, S]),
-                                             jnp.array([0, 0, 1], jnp.int32))
-        exp = exp[:S]
-        pps = cdiv(C, self.PAGE)
-        for cq in range(nchunk):
-            q_buf = jnp.zeros((C, nq, hd), dtype).at[:C].set(q[cq * C:cq * C + C])
-            acc_o = acc_l = None
-            for ck in range(cq + 1):  # future chunks are fully masked -> skipped
-                o, _, l = ragged_paged_attention_ring(
-                    q_buf, k[ck * C:ck * C + C], v[ck * C:ck * C + C],
-                    self._empty_cache(dtype), self._pad1([C]), self._pi(pps),
-                    self._padcu([0, C]), jnp.array([0, 0, 1], jnp.int32),
-                    cp_rank=jnp.array([0], jnp.int32), cp_group_size=1,
-                    cu_kv_lens=self._padcu([0, C]),
-                    q_pos_offsets=self._pad1([cq * C]),
-                    kv_pos_offsets=self._pad1([ck * C]),
-                    update_kv_cache=False, use_causal_mask=True, return_lse=True)
-                acc_o, acc_l = self._merge_lse(acc_o, acc_l, o[:C], l[:C])
-            self.assertAllClose(acc_o, exp[cq * C:cq * C + C],
-                                atol=self._tol(dtype), rtol=self._tol(dtype))
-
-    # ----------------------- fused in-kernel ring ----------------------------
-    def _full_causal_ref(self, q, k, v, sm_scale):
-        S, nq, _ = q.shape
-        G = nq // k.shape[1]
-        kk = jnp.repeat(k, G, axis=1)
-        vv = jnp.repeat(v, G, axis=1)
-        s = jnp.einsum("ihd,jhd->hij", q, kk).astype(jnp.float32) * sm_scale
-        s = jnp.where(jnp.tril(jnp.ones((S, S), bool))[None], s, -jnp.inf)
-        p = jax.nn.softmax(s, axis=-1)
-        return jnp.einsum("hij,jhd->ihd", p.astype(vv.dtype), vv)
-
-    @parameterized.product(dtype=[jnp.float32, jnp.bfloat16], P=[1, 2, 4])
-    def test_fused_ring_attention(self, dtype, P):
-        """Single-launch in-kernel ring vs full-causal reference (head-tail)."""
-        if jax.device_count() < P:
-            self.skipTest(f"needs >= {P} devices")
-        nq, nkv, hd = 8, 2, 128
-        C = 64
-        S = 2 * P * C
-        t_local = 2 * C
-        sm_scale = hd**-0.5
-        rng = np.random.default_rng(0)
-        q = self._rand(rng, (S, nq, hd), dtype)
-        k = self._rand(rng, (S, nkv, hd), dtype)
-        v = self._rand(rng, (S, nkv, hd), dtype)
-        exp = np.array(self._full_causal_ref(q, k, v, sm_scale))
-
-        # Head-tail: device r owns chunks {r, 2P-1-r} for both Q and its KV shard.
-        gq = np.zeros((P * t_local, nq, hd), np.float32)
-        gk = np.zeros((P * t_local, nkv, hd), np.float32)
-        gv = np.zeros((P * t_local, nkv, hd), np.float32)
-        gpos = np.zeros((P * t_local, ), np.int32)
-        gpos_of_row = {}
-        for r in range(P):
-            for ci, ch in enumerate((r, 2 * P - 1 - r)):
-                for j in range(C):
-                    g = ch * C + j
-                    row = r * t_local + ci * C + j
-                    gq[row], gk[row], gv[row] = q[g], k[g], v[g]
-                    gpos[row] = g
-                    gpos_of_row[row] = g
-        mesh = Mesh(np.array(jax.devices()[:P]).reshape(P), ("pcp", ))
-        out, lse = ring_attention(
-            mesh, "pcp", jnp.array(gq).astype(dtype), jnp.array(gk).astype(dtype),
-            jnp.array(gv).astype(dtype), jnp.array(gpos), jnp.array(gpos),
-            sm_scale=sm_scale, return_lse=True)
-        out = np.array(out)
-        for row, g in gpos_of_row.items():
-            self.assertAllClose(out[row], exp[g], atol=self._tol(dtype),
-                                rtol=self._tol(dtype))
-        # LSE must be finite for every (valid) query row.
-        self.assertTrue(bool(np.all(np.isfinite(np.array(lse)))))
-
-    def test_fused_ring_padding_masked(self):
-        """Padded KV tokens (sentinel position + garbage) change nothing."""
-        P = 2
-        if jax.device_count() < P:
-            self.skipTest(f"needs >= {P} devices")
+    @parameterized.product(P=[2, 4])
+    def test_pcp_all_padding_tail_write(self, P):
+        """A rank whose tail chunk is ENTIRELY padding (q_len=0) must still write
+        its full strided KV share. num_current sits low in the next_pow2 bucket
+        so the last chunk(s) are all padding; the kernel floors num_bq to >=1 on
+        the writing launch so its strided write still runs."""
         dtype = jnp.float32
-        nq, nkv, hd = 4, 1, 128
+        self.PAGE = 16
+        nq, nkv, hd = 8, 2, 128
+        two_p = 2 * P
+        # Head chunks (< pcp*C) are all real; put num_current just above pcp*C so
+        # the last tail chunk(s) (offset (2P-1-r)*C >= S) are wholly padding.
         C = 64
-        real, pad = C, 8  # real + padded KV tokens per device (t_q stays `real`)
-        sm_scale = hd**-0.5
-        rng = np.random.default_rng(5)
+        S = P * C + 1  # pcp*C < S <= (2P-1)*C -> rank 0's tail chunk is all-pad
+        pps = cdiv(S, self.PAGE)
+        rng = np.random.default_rng(13)
+        k = self._rand(rng, (S, nkv, hd), dtype)
+        v = self._rand(rng, (S, nkv, hd), dtype)
+        q = self._rand(rng, (S, nq, hd), dtype)  # q/k/v must share length
+        c = self._cfg(dtype)
+        kv_merged = merge_kv(k, v)
+        saw_all_pad = False
+        for r in range(P):
+            tail_off = (two_p - 1 - r) * C
+            tail_real = max(0, min(S - tail_off, C))  # clamp -> 0 when all-pad
+            saw_all_pad = saw_all_pad or tail_real == 0
+            _, cache = ragged_paged_attention(
+                q, k, v, self._empty_cache(dtype), self._pad1([S]),
+                self._pi(pps), self._padcu([0, tail_real]),
+                jnp.array([0, 0, 1], jnp.int32),
+                cp_rank=jnp.array([r], jnp.int32), cp_group_size=P,
+                kv_cache_lens=self._pad1([0]),
+                q_pos_offsets=self._pad1([tail_off]),
+                update_kv_cache=True, skip_cache_attn=True, use_causal_mask=True)
+            flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
+            local_len = (S + P - 1 - r) // P
+            pi = np.arange(pps)
+            for m in range(local_len):
+                g = r + m * P
+                slot = pi[m // self.PAGE] * self.PAGE + m % self.PAGE
+                self.assertArraysEqual(flat[slot], kv_merged[g])
+        self.assertTrue(saw_all_pad, "test config did not exercise an all-pad "
+                        "tail chunk")
 
-        def build(t_kv):
-            gq = self._rand(rng, (P * real, nq, hd), dtype)
-            gk = self._rand(rng, (P * t_kv, nkv, hd), dtype)
-            gv = self._rand(rng, (P * t_kv, nkv, hd), dtype)
-            qpos = np.zeros((P * real, ), np.int32)
-            kpos = np.zeros((P * t_kv, ), np.int32)
-            for r in range(P):
-                for j in range(real):
-                    qpos[r * real + j] = r * real + j
-                for j in range(t_kv):
-                    kpos[r * t_kv + j] = (r * real + j
-                                          if j < real else PADDING_POSITION)
-            return gq, gk, gv, qpos, kpos
-
-        mesh = Mesh(np.array(jax.devices()[:P]).reshape(P), ("pcp", ))
-        # Baseline: no padding.
-        gq, gk, gv, qpos, kpos = build(real)
-        base = np.array(
-            ring_attention(mesh, "pcp", jnp.array(gq), jnp.array(gk),
-                           jnp.array(gv), jnp.array(qpos), jnp.array(kpos),
-                           sm_scale=sm_scale))
-        # Same queries/real KV, but each shard has extra garbage padded tokens.
-        gk_p = np.concatenate([
-            np.concatenate([gk[r * real:(r + 1) * real],
-                            1e3 * np.ones((pad, nkv, hd), np.float32)])
-            for r in range(P)
-        ])
-        gv_p = np.concatenate([
-            np.concatenate([gv[r * real:(r + 1) * real],
-                            1e3 * np.ones((pad, nkv, hd), np.float32)])
-            for r in range(P)
-        ])
-        kpos_p = np.concatenate([
-            np.concatenate([qpos[r * real:(r + 1) * real],
-                            np.full((pad, ), PADDING_POSITION, np.int32)])
-            for r in range(P)
-        ])
-        padded = np.array(
-            ring_attention(mesh, "pcp", jnp.array(gq), jnp.array(gk_p),
-                           jnp.array(gv_p), jnp.array(qpos), jnp.array(kpos_p),
-                           sm_scale=sm_scale))
-        self.assertAllClose(padded, base, atol=1e-4, rtol=1e-4)
-
-
-    # ----------------- multi-device PCP-vs-TP benchmark ----------------------
-    # Correctness half of tests/kernels/ragged_paged_attention_pcp_benchmark.py:
-    # on `P` real devices, PCP (all-gather KV + head-tail sequence shard, all
-    # heads) must match TP (head shard, full sequence) for a causal prefill, and
-    # the PCP strided KV-cache write must round-trip to the current KV.
-
-    def _flat_cache(self, nkv_local, npages, page, hd, dtype):
-        kvp = get_dtype_packing(dtype)
-        nkv2 = align_to(2 * nkv_local, kvp)
-        return jnp.zeros((npages, page, nkv2 // kvp, kvp, hd), dtype)
-
+    # ----------------- multi-device PCP-vs-TP equivalence --------------------
     @parameterized.product(P=[2, 4])
     def test_pcp_vs_tp_prefill_equivalence(self, P):
-        """PCP output (reassembled head-tail chunks) == TP output (head-sharded),
-        computed on P devices via shard_map over the same random q/k/v."""
+        """PCP output (reassembled head-tail chunks, all heads) == TP output
+        (head-sharded, full sequence), on P devices over the same q/k/v."""
         if jax.device_count() < P:
             self.skipTest(f"needs >= {P} devices")
         dtype = jnp.float32
         page = 16
-        # nkv must be divisible by P (TP shards KV heads across the mesh).
-        S, nq, nkv, hd = 512, 8, 4, 128
+        S, nq, nkv, hd = 512, 8, 4, 128  # nkv % P == 0 (TP shards KV heads)
         C = S // (2 * P)
         npages = cdiv(S, page)
         sm = hd**-0.5
@@ -421,7 +331,6 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         pi = jnp.arange(npages, dtype=jnp.int32)
         dist = jnp.array([0, 0, 1], jnp.int32)
 
-        # TP: shard heads, full-S causal.
         hs = PS(None, "x", None)
 
         @partial(shard_map, mesh=mesh, in_specs=(hs, hs, hs), out_specs=hs,
@@ -435,7 +344,7 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
         out_tp = np.asarray(jax.jit(tp)(q, k, v), np.float32)
 
-        # PCP: all-gather KV (replicated here), head-tail sequence shard.
+        # PCP: replicated (all-gathered) KV, head-tail sequence shard.
         chunks = []
         for r in range(P):
             for ch in (r, 2 * P - 1 - r):
@@ -457,8 +366,9 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 o, _ = ragged_paged_attention(
                     qb, k, v, cc, jnp.array([S], jnp.int32), pi,
                     jnp.array([0, C], jnp.int32), dist, cp_rank=cp_rank,
-                    cp_group_size=P, all_gather_kv=True, q_pos_offsets=qpos,
-                    sm_scale=sm, update_kv_cache=False, use_causal_mask=True)
+                    cp_group_size=P, kv_cache_lens=jnp.array([0], jnp.int32),
+                    q_pos_offsets=qpos, skip_cache_attn=True, sm_scale=sm,
+                    update_kv_cache=False, use_causal_mask=True)
                 outs.append(o[:C])
             return jnp.stack(outs)[None]
 
@@ -468,7 +378,6 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
             for i, ch in enumerate((r, 2 * P - 1 - r)):
                 out_pcp[ch * C:ch * C + C] = og[r, i]
 
-        # Guard against a trivially-passing all-zero/NaN match.
         self.assertTrue(np.all(np.isfinite(out_tp)))
         self.assertGreater(float(np.abs(out_tp).max()), 0.0)
         self.assertAllClose(out_pcp, out_tp, atol=self._tol(dtype),
@@ -476,13 +385,13 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
     @parameterized.product(P=[2, 3, 4])
     def test_pcp_kv_cache_write_matches_merged(self, P):
-        """De-strided PCP cache write == merge_kv(current KV): whole-sequence
-        view of test_pcp_strided_cache_write, run across P devices."""
+        """De-strided PCP cache write == merge_kv(current KV), across P devices
+        (whole-sequence view of test_pcp_strided_cache_write)."""
         if jax.device_count() < P:
             self.skipTest(f"needs >= {P} devices")
         dtype = jnp.float32
         page, nq, nkv, hd, C = 16, 8, 2, 128, 64
-        S = 2 * P * C  # gathered current KV length
+        S = 2 * P * C  # current KV length
         npages = cdiv(S, page)
         rng = np.random.default_rng(7)
         k = self._rand(rng, (S, nkv, hd), dtype)
@@ -502,17 +411,15 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 q, k, v, cc, jnp.array([S], jnp.int32),
                 jnp.arange(npages, dtype=jnp.int32), jnp.array([0, C], jnp.int32),
                 jnp.array([0, 0, 1], jnp.int32), cp_rank=cp_rank,
-                cp_group_size=P, all_gather_kv=True, update_kv_cache=True,
+                cp_group_size=P, kv_cache_lens=jnp.array([0], jnp.int32),
+                update_kv_cache=True, skip_cache_attn=True,
                 use_causal_mask=False)
             return nc[None]
 
         caches = np.asarray(jax.jit(fn)(k, v))  # [P, npages, page, h1, h2, hd]
         flat = caches.reshape(P, -1, caches.shape[3], caches.shape[4], hd)
-        # DCP-strided: global token g -> rank g%P, local slot g//P.
         g = np.arange(S)
-        recon = flat[g % P, g // P]
-        # Guard against a silently-zeroed cache (would trivially compare equal
-        # only if the reference were also zero, but assert it explicitly).
+        recon = flat[g % P, g // P]  # DCP-strided: token g -> rank g%P, slot g//P
         self.assertTrue(np.all(np.isfinite(recon)))
         self.assertGreater(float(np.abs(recon).max()), 0.0)
         self.assertLess(float((recon == 0).mean()), 0.5)
