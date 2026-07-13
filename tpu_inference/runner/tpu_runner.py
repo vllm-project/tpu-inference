@@ -2711,7 +2711,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                             _num_reqs] = local_base_slots
 
 
-            if self.has_mamba_layers and mamba_state_indices_cpu is not None:
+            if self.input_batch.has_mamba_layers and mamba_state_indices_cpu is not None:
                 try:
                     self._step_counter = getattr(self, "_step_counter", 0) + 1
                     _prep_lines = []
