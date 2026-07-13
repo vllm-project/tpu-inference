@@ -21,10 +21,15 @@ import jax.experimental.pallas.tpu as pltpu
 import jax.numpy as jnp
 from jax import lax
 
+# yapf: disable
 from tpu_inference.kernels.experimental.batched_rpa import (bref_override,
                                                             configs,
                                                             flash_attention,
-                                                            schedule, utils)
+                                                            schedule,
+                                                            stitch_utils,
+                                                            utils)
+
+# yapf: enable
 
 # Define inner kernel.
 
@@ -39,7 +44,7 @@ def strided_load_bkv(
     assert start % cfgs.serve.packing_kv == 0
     start //= cfgs.serve.packing_kv
     kv_u32_ref = kv_in_vref.at[b_idx].bitcast(jnp.uint32)
-    kv_ref = kv_u32_ref.reshape(-1, cfgs.model.head_dim)
+    kv_ref = kv_u32_ref.reshape(-1, cfgs.aligned_kv_head_dim)
 
     if cfgs.serve.packing_kv == 1:
         k = utils.strided_load(
@@ -90,7 +95,17 @@ def calculate_and_store_out(
         out = result.astype(cfgs.serve.dtype_out)
 
         o_u32_vref = o_vref.at[b_idx].bitcast(jnp.uint32)
-        out_ref = o_u32_vref.reshape(-1, cfgs.model.head_dim)
+        out_ref = o_u32_vref.reshape(-1, cfgs.aligned_q_head_dim)
+        if cfgs.aligned_q_head_dim != cfgs.aligned_kv_head_dim:
+            out = jnp.pad(
+                out,
+                (
+                    (0, 0),
+                    (0, 0),
+                    (0, cfgs.aligned_q_head_dim - cfgs.aligned_kv_head_dim),
+                ),
+                constant_values=0,
+            )
         out = pltpu.bitcast(out, out_ref.dtype).reshape(out_ref.shape)
         utils.strided_store(out_ref, 0, out_ref.shape[0], 1, out)
 
@@ -132,6 +147,9 @@ def rpa_body(
     processed_q_len = []
     processed_kv_len = []
     effective_kv_len = []
+    # Lists to hold the 2 variables needed for stitching
+    bkv_sz_frm_cache_list = []
+    new_kv_len_start_list = []
     int_ty = cfgs.serve.int_ty
     for b_idx in range(cfgs.batch_size):
         s_idx = schedule_ref.s_idx[step, b_idx]
@@ -154,6 +172,17 @@ def rpa_body(
         processed_kv_len.append(k_id.astype(int_ty))
         effective_kv_len.append(kv_len.astype(int_ty))
 
+        # Stitching metadata
+        kv_left = jnp.maximum(kv_len - k_id, 0)
+        kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
+        kv_left_frm_new = jnp.maximum(kv_left - kv_left_frm_cache, 0)
+
+        bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, cfgs.bkv_sz)
+        new_kv_len_start = q_end - kv_left_frm_new
+
+        bkv_sz_frm_cache_list.append(bkv_sz_frm_cache.astype(int_ty))
+        new_kv_len_start_list.append(new_kv_len_start.astype(int_ty))
+
         start_k_idx = 0
         if (sliding_window := cfgs.model.sliding_window) is not None:
             sw_start_idx = kv_len - q_len + q_idx * cfgs.bq_sz - sliding_window + 1
@@ -169,7 +198,7 @@ def rpa_body(
 
     # Step 2: Fetch inputs.
     q_p = cfgs.aligned_num_q_heads_per_kv_head // cfgs.serve.packing_q
-    q_ref = q_vref.bitcast(jnp.uint32).reshape(-1, cfgs.model.head_dim)
+    q_ref = q_vref.bitcast(jnp.uint32).reshape(-1, cfgs.aligned_q_head_dim)
     q_loaded = utils.strided_load(
         q_ref,
         0,
@@ -181,8 +210,10 @@ def rpa_body(
         cfgs.batch_size,
         cfgs.model.num_kv_heads,
         cfgs.bq_sz * cfgs.aligned_num_q_heads_per_kv_head,
-        cfgs.model.head_dim,
+        cfgs.aligned_q_head_dim,
     )
+    if cfgs.aligned_q_head_dim != cfgs.aligned_kv_head_dim:
+        q = q[..., :cfgs.aligned_kv_head_dim]
 
     # We want to load k, v from (batch, bkv_sz, bkv_stride, kv_packing, d)
     # where bkv_stride ~= num_kv_heads * 2 // kv_packing
@@ -190,27 +221,61 @@ def rpa_body(
     # We use strided_load to avoid the expensive transpose.
     k_b = []
     v_b = []
-    for b_idx in range(cfgs.batch_size):
-        heads_per_load = pl.cdiv(cfgs.serve.packing_kv, 2)
-        ks = []
-        vs = []
-        for kv_head_start in range(0, cfgs.model.num_kv_heads, heads_per_load):
-            bkv_lst = strided_load_bkv(
+
+    if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
+        stitch_results = []
+        for b_idx in range(cfgs.batch_size):
+            res = stitch_utils.stitch_new_kv_lane(
                 kv_in_vref,
                 b_idx,
-                kv_head_start * 2,
+                bkv_sz_frm_cache_list[b_idx],
+                new_kv_len_start_list[b_idx],
                 cfgs=cfgs,
             )
-            ks.append(jnp.stack([k for k, _ in bkv_lst], axis=0))
-            vs.append(jnp.stack([v for _, v in bkv_lst], axis=0))
-        k, v = jnp.concat(ks, axis=0), jnp.concat(vs, axis=0)
-        k = k.reshape(-1, cfgs.bkv_sz, cfgs.model.head_dim)
-        v = v.reshape(-1, cfgs.bkv_sz, cfgs.model.head_dim)
+            stitch_results.append(res)
+        for b_idx in range(cfgs.batch_size):
+            stitch_utils.store_new_kv_lane(
+                kv_in_vref,
+                b_idx,
+                stitch_results[b_idx],
+                cfgs=cfgs,
+            )
+        for b_idx in range(cfgs.batch_size):
+            ks = []
+            vs = []
+            for kv_head in range(cfgs.model.num_kv_heads):
+                k_head = kv_in_vref[b_idx, kv_head * 2, :, :, 0:cfgs.bkv_sz]
+                v_head = kv_in_vref[b_idx, kv_head * 2 + 1, :, :,
+                                    0:cfgs.bkv_sz]
+                ks.append(k_head.reshape(cfgs.aligned_kv_head_dim,
+                                         cfgs.bkv_sz))
+                vs.append(v_head.reshape(cfgs.aligned_kv_head_dim,
+                                         cfgs.bkv_sz))
+            k_b.append(jnp.stack(ks, axis=0))
+            v_b.append(jnp.stack(vs, axis=0))
+    else:
+        for b_idx in range(cfgs.batch_size):
+            heads_per_load = pl.cdiv(cfgs.serve.packing_kv, 2)
+            ks = []
+            vs = []
+            for kv_head_start in range(0, cfgs.model.num_kv_heads,
+                                       heads_per_load):
+                bkv_lst = strided_load_bkv(
+                    kv_in_vref,
+                    b_idx,
+                    kv_head_start * 2,
+                    cfgs=cfgs,
+                )
+                ks.append(jnp.stack([k for k, _ in bkv_lst], axis=0))
+                vs.append(jnp.stack([v for _, v in bkv_lst], axis=0))
+            k, v = jnp.concat(ks, axis=0), jnp.concat(vs, axis=0)
+            k = k.reshape(-1, cfgs.bkv_sz, cfgs.aligned_kv_head_dim)
+            v = v.reshape(-1, cfgs.bkv_sz, cfgs.aligned_kv_head_dim)
 
-        k = k[:cfgs.model.num_kv_heads]
-        v = v[:cfgs.model.num_kv_heads]
-        k_b.append(k)
-        v_b.append(v)
+            k = k[:cfgs.model.num_kv_heads]
+            v = v[:cfgs.model.num_kv_heads]
+            k_b.append(k)
+            v_b.append(v)
     # Stack to (batch, num_heads, bkv_sz, num_lanes)
     k = jnp.stack(k_b, axis=0)
     v = jnp.stack(v_b, axis=0)
@@ -223,8 +288,8 @@ def rpa_body(
     prev_p = prev_alpha = prev_q_slice = None
     for bq_start in range(0, cfgs.bq_sz, cfgs.bq_c_sz):
         bq_end = min(bq_start + cfgs.bq_c_sz, cfgs.bq_sz)
-        q_start = bq_start * cfgs.model.num_q_heads_per_kv_head
-        q_end = bq_end * cfgs.model.num_q_heads_per_kv_head
+        q_start = bq_start * cfgs.aligned_num_q_heads_per_kv_head
+        q_end = bq_end * cfgs.aligned_num_q_heads_per_kv_head
         q_slice = slice(q_start, q_end)
 
         p, alpha, m_next, l_next = flash_attention.flash_attention_qk_softmax(
@@ -307,7 +372,12 @@ def create_allocs(
         pipeline_mode=pl.Buffered(buffer_count=2, use_lookahead=False),
     )
 
-    kv_cache_alloc = bref_override.KVBufferedRef.input_output(
+    if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
+        kv_cache_alloc_cls = bref_override.KVBufferedRefSeqAlongLane
+    else:
+        kv_cache_alloc_cls = bref_override.KVBufferedRefHeadAlongSublane
+
+    kv_cache_alloc = kv_cache_alloc_cls.input_output(
         spec=kv_cache_spec,
         dtype_or_type=kv_cache_hbm_ref,
         buffer_count=cfgs.n_buffer,
@@ -365,31 +435,31 @@ def rpa_kernel(
 ) -> tuple[jax.Array, jax.Array]:
     """Perform batched ragged paged attention with scheduler data.
 
-    Args:
-        cu_q_lens: [max_num_seqs + 1]. Cumulative sum of each sequence's query
-            length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
-            b=cu_q_lens[i+1] represents q/k/v of sequence i.
-        kv_lens: [max_num_seqs]. Existing kv cache length of each sequence.
-        page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
-            sequence.
-        schedule: Output of scheduler kernel. It informs which: 1. seqs 2. q block
-            3. kv block that should be processed at a given step.
-        q_hbm: [max_num_tokens, num_q_heads_per_kv_heads, cdiv(num_kv_heads,
-            q_packing), q_packing, head_dim]. Output of q projection that has been
-            pre-processed to align with existing kv cache data layout.
-        new_kv_hbm: [max_num_tokens, cdiv(num_kv_heads * 2, kv_packing), kv_packing,
-            head_dim]. Output of k & v projection that has been pre-processed to align
-            with existing kv cache data layout.
-        kv_cache_hbm: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
-            kv_packing, head_dim]. Stores existing kv cache data where k & vs are
-            concatenated along num kv heads dim.
-        cfgs: Configuration of the kernel.
+  Args:
+    cu_q_lens: [max_num_seqs + 1]. Cumulative sum of each sequence's query
+      length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
+      b=cu_q_lens[i+1] represents q/k/v of sequence i.
+    kv_lens: [max_num_seqs]. Existing kv cache length of each sequence.
+    page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
+      sequence.
+    schedule_hbm: Output of scheduler kernel. It informs which: 1. seqs 2. q
+      block 3. kv block that should be processed at a given step.
+    q_hbm: [max_num_tokens, num_q_heads_per_kv_heads, cdiv(num_kv_heads,
+      q_packing), q_packing, head_dim]. Output of q projection that has been
+      pre-processed to align with existing kv cache data layout.
+    new_kv_hbm: [max_num_tokens, cdiv(num_kv_heads * 2, kv_packing), kv_packing,
+      head_dim]. Output of k & v projection that has been pre-processed to align
+      with existing kv cache data layout.
+    kv_cache_hbm: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
+      kv_packing, head_dim]. Stores existing kv cache data where k & vs are
+      concatenated along num kv heads dim.
+    cfgs: Configuration of the kernel.
 
-    Returns:
-        out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
-        new_kv_cache: [num_pages, page_size, num_kv_heads // kv_packing, kv_packing,
-            head_dim]. Result of new kv cache.
-    """
+  Returns:
+    out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
+    new_kv_cache: [num_pages, page_size, num_kv_heads // kv_packing, kv_packing,
+      head_dim]. Result of new kv cache.
+  """
 
     def ragged_paged_attention_pipeline(
         # Scalar prefetch.
