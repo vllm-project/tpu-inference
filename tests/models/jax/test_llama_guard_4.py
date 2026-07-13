@@ -86,6 +86,27 @@ class MockVllmConfig:
         text_config_mock.num_attention_heads = 4
         text_config_mock.num_key_value_heads = 2
         text_config_mock.head_dim = 32
+        # Explicit numeric values: MagicMock auto-attrs are Mock objects and
+        # blow up only at forward time inside jitted math.
+        text_config_mock.num_layers = 2
+        text_config_mock.rms_norm_eps = 1e-5
+        text_config_mock.intermediate_size = 256
+        text_config_mock.hidden_act = "silu"
+        # transformers >= 5.6 layout: rope_theta lives in rope_parameters,
+        # the flat rope_theta attribute no longer exists, and rope_scaling
+        # is a property alias of rope_parameters. Llama-Guard-4 ships
+        # llama3-style scaling keys, so mirror that faithfully.
+        llama3_rope_parameters = {
+            "rope_type": "llama3",
+            "rope_theta": 500000.0,
+            "factor": 8.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192,
+        }
+        text_config_mock.rope_parameters = llama3_rope_parameters
+        text_config_mock.rope_scaling = llama3_rope_parameters
+        del text_config_mock.rope_theta
 
         hf_config_mock = MagicMock()
         hf_config_mock.text_config = text_config_mock
@@ -95,7 +116,11 @@ class MockVllmConfig:
         vision_config_mock.patch_size = 14
         vision_config_mock.hidden_size = 1408
         vision_config_mock.num_attention_heads = 16
-        vision_config_mock.rope_theta = 10000.0
+        vision_config_mock.rope_parameters = {
+            "rope_theta": 10000.0,
+            "rope_type": "default"
+        }
+        del vision_config_mock.rope_theta
         vision_config_mock.intermediate_size = 5632
         vision_config_mock.projector_input_dim = 4096
         vision_config_mock.projector_output_dim = 4096
@@ -270,3 +295,74 @@ class TestLlamaGuard4WeightLoader:
 
             # Check if the shape of the array passed to shard_put matches the model's expected shape.
             assert called_with_weight.shape == mock_param.value.shape
+
+
+class TestLlamaGuard4ForwardContract:
+    """Pins the forward-return contract expected by run_model's jit
+    out_shardings (kv_caches, hidden, aux_hidden_states, expert_ids)."""
+
+    def test_forward_returns_4_tuple(self, mock_vllm_config_llama_guard_4,
+                                     rng):
+        from tpu_inference.layers.common.attention_metadata import \
+            AttentionMetadata
+        from tpu_inference.runner.kv_cache import create_kv_caches
+
+        # Single-device mesh: the ragged-attention shard_map requires the
+        # tiny request metadata to divide the data axis evenly.
+        if not jax.devices():
+            pytest.skip("No JAX devices available for mesh creation.")
+        device_mesh = np.array(jax.local_devices()[:1]).reshape((1, 1, 1, 1))
+        mesh = Mesh(device_mesh,
+                    axis_names=('data', 'attn_dp', 'model', 'expert'))
+
+        with jax.set_mesh(mesh):
+            model = LlamaGuard4ForCausalLM(
+                vllm_config=mock_vllm_config_llama_guard_4,
+                rng=rng,
+                mesh=mesh,
+                force_random_weights=True)
+
+            # num_blocks must be divisible by the mesh's data-axis size
+            # (this file's mesh fixture uses all local devices).
+            kv_caches = create_kv_caches(
+                num_blocks=16,
+                block_size=32,
+                num_kv_heads=model.num_key_value_heads,
+                head_size=model.head_dim,
+                mesh=mesh,
+                layer_names=["layer"] * len(model.layers),
+                cache_dtype=jnp.bfloat16)
+
+            num_tokens = 8
+            num_reqs = 1
+            input_ids = jnp.ones((num_tokens, ), dtype=jnp.int32)
+            attention_metadata = AttentionMetadata(
+                input_positions=jnp.ones((num_tokens, ), dtype=jnp.int32),
+                block_tables=jnp.zeros((num_reqs, 4),
+                                       dtype=jnp.int32).reshape(-1),
+                seq_lens=jnp.ones((num_reqs, ), dtype=jnp.int32),
+                query_start_loc=jnp.ones((num_reqs + 1, ), dtype=jnp.int32),
+                request_distribution=jnp.array([0, 0, 0], dtype=jnp.int32),
+            )
+
+            out = model(kv_caches, input_ids, attention_metadata)
+
+        assert len(out) == 4
+        new_kv_caches, hidden, aux_hidden, expert_ids = out
+        assert len(new_kv_caches) == len(kv_caches)
+        assert hidden.shape == (num_tokens, model.hidden_size)
+        assert aux_hidden == []
+        assert expert_ids is None
+
+    def test_vision_rope_call_returns_jax_array(self):
+        from tpu_inference.layers.jax.rope import Llama4VisionRotaryEmbedding
+        rope = Llama4VisionRotaryEmbedding(image_size=336,
+                                           patch_size=14,
+                                           hidden_size=1408,
+                                           num_attention_heads=16,
+                                           rope_theta=10000.0,
+                                           dtype=jnp.bfloat16)
+        out = rope()
+        # Must be a concrete array, not an nnx.Param: newer JAX no longer
+        # implicitly converts nnx.Param via __jax_array__ inside jit.
+        assert isinstance(out, jax.Array)
