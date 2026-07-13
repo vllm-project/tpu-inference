@@ -500,19 +500,27 @@ class CompilationManager:
                 next_tokens_size=next_tokens_size,
             )
 
+        all_token_sizes = sorted(
+            list(
+                set(self.runner.num_tokens_paddings +
+                    self.runner.num_reqs_paddings)))
+
         if self.runner.speculative_config:
             num_spec_tokens = (
                 self.runner.speculative_config.num_speculative_tokens)
             spec_next_tokens_size = self.runner.max_num_reqs * (
                 num_spec_tokens + 1)
-            for num_tokens in self.runner.num_tokens_paddings:
+            for num_tokens in all_token_sizes:
                 _compile_one(num_tokens, dp_sharding, spec_next_tokens_size,
                              dp_sharding)
             for num_logits in self.runner.num_logits_paddings:
                 _compile_one(num_logits, replicated_sharding,
                              spec_next_tokens_size, dp_sharding)
         else:
-            for num_tokens in self.runner.num_tokens_paddings:
+            for num_tokens in all_token_sizes:
+                for next_tokens_size in all_token_sizes:
+                    _compile_one(num_tokens, dp_sharding, next_tokens_size,
+                                 dp_sharding)
                 for num_reqs in self.runner.num_reqs_paddings:
                     _compile_one(num_tokens, dp_sharding, num_reqs,
                                  replicated_sharding)
