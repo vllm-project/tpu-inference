@@ -218,7 +218,6 @@ setup_environment() {
       echo "--- Pushing pre-built Docker image(s) to registry for worker nodes..."
       gcloud auth configure-docker us-central1-docker.pkg.dev
       docker push "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
-      docker push "${IMAGE_NAME}:latest"
     fi
     return 0
   fi
