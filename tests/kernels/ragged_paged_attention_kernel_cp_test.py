@@ -84,12 +84,12 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         return jnp.pad(jnp.array(xs, jnp.int32),
                        (0, self.MAX_SEQ + 1 - len(xs)))
 
-    def _merge_lse(self, acc_o, acc_l, o, l):
+    def _merge_lse(self, acc_o, acc_l, o, lse):
         if acc_o is None:
-            return o, l
-        m = jnp.maximum(acc_l, l)
+            return o, lse
+        m = jnp.maximum(acc_l, lse)
         e1 = jnp.exp(acc_l - m)
-        e2 = jnp.exp(l - m)
+        e2 = jnp.exp(lse - m)
         o = (acc_o * e1[..., None] + o * e2[..., None]) / (e1 + e2)[..., None]
         return o, m + jnp.log(e1 + e2)
 
