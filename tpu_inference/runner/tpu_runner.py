@@ -16,6 +16,7 @@ import functools
 import logging
 import random
 import sys
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
@@ -1029,10 +1030,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             get_kv_transfer_group().register_runner(self)
 
     def delete_kv_cache(self) -> None:
+        start = time.perf_counter()
+        logger.error("KV_CACHE_PROFILE TPUModelRunner.delete_kv_cache start")
         self.kv_cache_manager.delete_kv_cache()
+        logger.error(
+            "KV_CACHE_PROFILE TPUModelRunner.delete_kv_cache done | "
+            "total_s=%.6f",
+            time.perf_counter() - start)
 
     def reinitialize_kv_cache(self) -> None:
+        start = time.perf_counter()
+        logger.error(
+            "KV_CACHE_PROFILE TPUModelRunner.reinitialize_kv_cache start")
         self.kv_cache_manager.reinitialize_kv_cache()
+        logger.error(
+            "KV_CACHE_PROFILE TPUModelRunner.reinitialize_kv_cache done | "
+            "total_s=%.6f",
+            time.perf_counter() - start)
 
     def capture_model(self) -> None:
         self.compilation_manager.capture_model()

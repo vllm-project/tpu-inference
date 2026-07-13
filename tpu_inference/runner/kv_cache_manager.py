@@ -13,6 +13,7 @@
 # limitations under the License.
 import dataclasses
 import os
+import time
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -708,12 +709,21 @@ class KVCacheManager:
             self.runner.persistent_batch_manager.input_batch = new_input_batch
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        profile_start = time.perf_counter()
+        stage_start = profile_start
         self.maybe_reinitialize_input_batch(kv_cache_config)
+        maybe_input_batch_s = time.perf_counter() - stage_start
 
         # There will be no KV cache for pooling models.
         if not kv_cache_config.kv_cache_groups:
+            logger.error(
+                "KV_CACHE_PROFILE initialize_kv_cache no_cache | "
+                "maybe_input_batch_s=%.6f | total_s=%.6f",
+                maybe_input_batch_s,
+                time.perf_counter() - profile_start)
             return
 
+        stage_start = time.perf_counter()
         layer_name_to_spec = {}
         for group in kv_cache_config.kv_cache_groups:
             group_spec = group.kv_cache_spec
@@ -724,9 +734,11 @@ class KVCacheManager:
             else:
                 for layer_name in group.layer_names:
                     layer_name_to_spec[layer_name] = group.kv_cache_spec
+        layer_spec_map_s = time.perf_counter() - stage_start
 
         # set the kv cache layout which is needed by kv connectors
         # NOTE(jcgu): please update the default value when the order changes
+        stage_start = time.perf_counter()
         set_kv_cache_layout(DEFAULT_KV_CACHE_LAYOUT)
         # verify kv cache layout is matched between the cache manager and
         # the kv connector (if configured)
@@ -736,6 +748,7 @@ class KVCacheManager:
             raise ValueError(
                 f"KV cache layout ({DEFAULT_KV_CACHE_LAYOUT}) does not match with the "
                 f"kv_connector's required layout ({_required_kv_layout})")
+        layout_setup_s = time.perf_counter() - stage_start
 
         kv_caches = self.runner.kv_caches
         num_blocks_list = []
@@ -748,6 +761,7 @@ class KVCacheManager:
         # If this is true, then we'll initialize a new KV cache for each layer in "shared_by"
         # instead of the default behavior of initializing a single KV cache for each of the
         # shared layers
+        stage_start = time.perf_counter()
         duplicate_shared_layers = False
         if not duplicate_shared_layers:
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
@@ -774,8 +788,15 @@ class KVCacheManager:
                                 kv_cache_tensor.shared_by
                             ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
                     break
+        duplicate_check_s = time.perf_counter() - stage_start
 
+        allocation_loop_start = time.perf_counter()
+        block_count_s = 0.0
+        mamba_alloc_s = 0.0
+        attention_alloc_s = 0.0
+        index_update_s = 0.0
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+            stage_start = time.perf_counter()
             if duplicate_shared_layers:
                 total_group_page_size = 0
                 for name in kv_cache_tensor.shared_by:
@@ -841,10 +862,12 @@ class KVCacheManager:
                                 num_blocks)
             if self.actual_mamba_num_blocks is None:
                 self.actual_mamba_num_blocks = mamba_num_blocks
+            block_count_s += time.perf_counter() - stage_start
 
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
                 layer_spec = layer_name_to_spec[layer_name]
                 if isinstance(layer_spec, MambaSpec):
+                    stage_start = time.perf_counter()
                     mamba_states = []
                     for state_index, (shape, dtype) in enumerate(
                             zip(layer_spec.shapes, layer_spec.dtypes)):
@@ -875,6 +898,13 @@ class KVCacheManager:
                         mamba_allocate = jax.jit(_allocate_mamba,
                                                  out_shardings=sharding)
                         mamba_states.append(mamba_allocate())
+                    mamba_alloc_s += time.perf_counter() - stage_start
+                    logger.error(
+                        "KV_CACHE_PROFILE initialize_kv_cache create_mamba | "
+                        "tensor_i=%d | layer=%s | states=%d | "
+                        "mamba_num_blocks=%d | alloc_s=%.6f",
+                        i, layer_name, len(mamba_states), mamba_num_blocks,
+                        time.perf_counter() - stage_start)
 
                     metadata["mamba"].count += 1
                     if metadata["mamba"].shape is None:
@@ -938,6 +968,7 @@ class KVCacheManager:
                                 block_size = (kv_caches[-1].shape[1] *
                                               kv_caches[-1].shape[2])
 
+                        stage_start = time.perf_counter()
                         kv_cache = create_kv_caches(
                             num_blocks=num_blocks,
                             block_size=block_size,
@@ -948,6 +979,17 @@ class KVCacheManager:
                             cache_dtype=t2j_dtype(layer_spec.dtype),
                             use_mla=self.use_mla,
                         )[0]
+                        attention_alloc_s += time.perf_counter() - stage_start
+                        logger.error(
+                            "KV_CACHE_PROFILE initialize_kv_cache "
+                            "create_attention | tensor_i=%d | layer=%s | "
+                            "shared_by=%d | num_blocks=%d | block_size=%d | "
+                            "num_kv_heads=%d | head_size=%d | dtype=%s | "
+                            "alloc_call_s=%.6f",
+                            i, layer_name, len(kv_cache_tensor.shared_by),
+                            num_blocks, block_size, layer_spec.num_kv_heads,
+                            layer_spec.head_size, layer_spec.dtype,
+                            time.perf_counter() - stage_start)
                         kv_caches.append(kv_cache)
 
                         # Update Regular Attention Metadata
@@ -963,15 +1005,21 @@ class KVCacheManager:
                 if j == 0 or duplicate_shared_layers:
                     num_blocks_list.append(mamba_num_blocks if isinstance(
                         layer_spec, MambaSpec) else num_blocks)
+                stage_start = time.perf_counter()
                 layer_idx = (i * num_shared_layers
                              ) + j if duplicate_shared_layers else i
                 self.runner.layer_name_to_kvcache_index[layer_name] = layer_idx
+                index_update_s += time.perf_counter() - stage_start
+        allocation_loop_s = time.perf_counter() - allocation_loop_start
+
+        stage_start = time.perf_counter()
         if self.shared_kv_cache_layers:
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
             ):
                 self.runner.layer_name_to_kvcache_index[
                     layer_name] = self.runner.layer_name_to_kvcache_index[
                         target_layer_name]
+        shared_map_s = time.perf_counter() - stage_start
 
         logger.info(
             "Hybrid KV cache layout: num_kv_cache_groups=%d, "
@@ -998,10 +1046,25 @@ class KVCacheManager:
                              f"mamba_sharding={metadata['mamba'].sharding} | "
                              f"mamba_dtype={metadata['mamba'].dtype}")
 
-        log_parts.append(
-            f"hbm={utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
+        stage_start = time.perf_counter()
+        hbm = utils.hbm_usage_gb(self.runner.mesh.devices.flatten())
+        hbm_usage_s = time.perf_counter() - stage_start
+        log_parts.append(f"hbm={hbm}Gb")
 
         logger.info(" | ".join(log_parts))
+        logger.error(
+            "KV_CACHE_PROFILE initialize_kv_cache summary | "
+            "maybe_input_batch_s=%.6f | layer_spec_map_s=%.6f | "
+            "layout_setup_s=%.6f | duplicate_check_s=%.6f | "
+            "allocation_loop_s=%.6f | block_count_s=%.6f | "
+            "attention_alloc_s=%.6f | mamba_alloc_s=%.6f | "
+            "index_update_s=%.6f | shared_map_s=%.6f | hbm_usage_s=%.6f | "
+            "num_tensors=%d | num_total_layers=%d | total_s=%.6f",
+            maybe_input_batch_s, layer_spec_map_s, layout_setup_s,
+            duplicate_check_s, allocation_loop_s, block_count_s,
+            attention_alloc_s, mamba_alloc_s, index_update_s, shared_map_s,
+            hbm_usage_s, len(kv_cache_config.kv_cache_tensors),
+            len(kv_caches), time.perf_counter() - profile_start)
 
     def delete_kv_cache(self) -> None:
         """Delete KV cache JAX arrays to free HBM.
@@ -1057,13 +1120,28 @@ class KVCacheManager:
                 "Cannot reinitialize KV cache: no kv_cache_config found. "
                 "initialize_kv_cache must be called first.")
 
+        profile_start = time.perf_counter()
+        stage_start = profile_start
+        hbm_before = utils.hbm_usage_gb(self.runner.mesh.devices.flatten())
+        hbm_before_s = time.perf_counter() - stage_start
         logger.info(
             f"Reinitializing kv-cache | "
-            f"hbm_before="
-            f"{utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
+            f"hbm_before={hbm_before}Gb")
 
+        stage_start = time.perf_counter()
         with set_current_vllm_config(self.runner.vllm_config):
             self.initialize_kv_cache(kv_cache_config)
+        initialize_s = time.perf_counter() - stage_start
+
+        stage_start = time.perf_counter()
+        jax.block_until_ready(self.runner.kv_caches)
+        block_until_ready_s = time.perf_counter() - stage_start
+        logger.error(
+            "KV_CACHE_PROFILE reinitialize_kv_cache summary | "
+            "hbm_before_s=%.6f | initialize_s=%.6f | "
+            "block_until_ready_s=%.6f | num_layers=%d | total_s=%.6f",
+            hbm_before_s, initialize_s, block_until_ready_s,
+            len(self.runner.kv_caches), time.perf_counter() - profile_start)
 
     @staticmethod
     @jax.jit

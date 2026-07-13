@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
+import time
 from typing import List
 
 import jax
@@ -129,13 +130,17 @@ def create_kv_caches(
     # TODO(xiang): fix this together with get_kv_cache_spec
     # cache_dtype = kv_cache_spec.dtype
 
+    profile_start = time.perf_counter()
+    stage_start = profile_start
     cache_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
                                                num_kv_heads, head_size,
                                                cache_dtype, use_mla)
+    shape_s = time.perf_counter() - stage_start
 
     # num_blocks --> shard by data batch
     # block_size --> shard by context
     # head       --> shard by heads
+    stage_start = time.perf_counter()
     if use_mla:
         sharding = NamedSharding(
             mesh,
@@ -145,6 +150,7 @@ def create_kv_caches(
             mesh,
             PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT,
                           ShardingAxisName.KV_CACHE_HEAD))
+    sharding_s = time.perf_counter() - stage_start
 
     def _allocate() -> jax.Array:
         return jnp.zeros(
@@ -152,10 +158,23 @@ def create_kv_caches(
             dtype=cache_dtype,
         )
 
+    stage_start = time.perf_counter()
     sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
+    jit_create_s = time.perf_counter() - stage_start
+
+    stage_start = time.perf_counter()
     kv_caches = []
     for _ in layer_names:
         kv_caches.append(sharded_allocate())
+    dispatch_s = time.perf_counter() - stage_start
+    logger.error(
+        "KV_CACHE_PROFILE create_kv_caches | layers=%d | shape=%s | "
+        "dtype=%s | num_blocks=%d | block_size=%d | num_kv_heads=%d | "
+        "head_size=%d | use_mla=%s | shape_s=%.6f | sharding_s=%.6f | "
+        "jit_create_s=%.6f | dispatch_s=%.6f | total_s=%.6f",
+        len(layer_names), cache_shape, cache_dtype, num_blocks, block_size,
+        num_kv_heads, head_size, use_mla, shape_s, sharding_s, jit_create_s,
+        dispatch_s, time.perf_counter() - profile_start)
     return kv_caches
 
 
