@@ -40,6 +40,7 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
+from tpu_inference.layers.vllm.custom_ops.fused_moe import _all_reduce_over_tp
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
@@ -205,6 +206,85 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
         jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
 
     torch.testing.assert_close(output, jax_output)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
+def test_row_parallel_linear_defer_all_reduce(model, num_devices):
+    """reduce_results=False routes through sharded_matmul: the layer returns
+    per-shard partial sums (the psum is actually skipped, which a plain einsum
+    under GSPMD cannot do) and the caller's single deferred all-reduce
+    (VllmMoERunner._all_reduce_over_tp) reconstructs the full result.
+
+    No bias: vLLM's RowParallelLinear rejects reduce_results=False with an
+    in-layer bias."""
+    mesh = test_utils.get_spmd_mesh(num_devices)
+    dtype = torch.bfloat16
+
+    engine_args = EngineArgs(
+        model=model,
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+    vllm_config = engine_args.create_engine_config()
+
+    # Reference: fully reduced output.
+    with set_current_vllm_config(vllm_config):
+        row_linear = RowParallelLinear(
+            input_size=4096,
+            output_size=8192,
+            bias=False,
+            params_dtype=dtype,
+            return_bias=False,
+        )
+
+    input_tensor = torch.rand(10, row_linear.input_size, dtype=dtype) / 10
+    input_tensor = input_tensor.to('cpu')
+
+    weight_data = torch.rand_like(row_linear.weight.data) / 10
+    row_linear.weight.data = weight_data
+    row_linear = row_linear.to('cpu')
+    row_linear.quant_method.process_weights_after_loading(row_linear)
+    expected = row_linear(input_tensor).to(dtype)
+
+    vllm_config.model_config.dtype = dtype
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    with set_current_vllm_config(vllm_config):
+        jax_row_linear = RowParallelLinear(
+            input_size=4096,
+            output_size=8192,
+            bias=False,
+            params_dtype=dtype,
+            reduce_results=False,
+            return_bias=False,
+            quant_config=quant_config,
+        )
+    # What VllmRowParallelLinear.__init__ derives from reduce_results=False.
+    jax_row_linear.quant_method.linear_config.defer_all_reduce = True
+
+    jax_row_linear.weight.data = weight_data
+
+    jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
+    jax_input_tensor.apply_jax_(jax.device_put,
+                                NamedSharding(mesh, P(None, None)))
+    with torchax.default_env():
+        assert isinstance(jax_row_linear.quant_method,
+                          VllmUnquantizedLinearMethod)
+        jax_row_linear.quant_method.process_weights_after_loading(
+            jax_row_linear)
+        deferred = jax_row_linear(jax_input_tensor)
+
+        if num_devices > 1:
+            # The psum was actually skipped: pre-reduction output is partial,
+            # not the full matmul.
+            partial = j2t(deferred.to(torch.float32)).to(dtype)
+            assert not torch.allclose(partial, expected)
+
+        reduced = _all_reduce_over_tp(deferred, mesh)
+        jax_output = j2t(reduced.to(torch.float32)).to(dtype)
+
+    torch.testing.assert_close(expected, jax_output)
 
 
 @pytest.mark.parametrize("model", MODELS)
