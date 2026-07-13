@@ -1084,6 +1084,49 @@ class TestDPScheduler:
         mock_process_0.join.assert_called()
         mock_process_1.join.assert_called()
 
+    def test_update_from_output_num_scheduled_tokens_not_overwritten_for_prefill(
+        self,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test update_from_output preserves prefill num_scheduled_tokens."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler_output = MagicMock(spec=DPSchedulerOutput)
+        scheduler_output.num_scheduled_tokens = {"req1": 100}
+        scheduler_output.req_ids_per_rank = {0: ["req1"], 1: []}
+        scheduler_output.finished_req_ids = []
+        scheduler_output.scheduled_cached_reqs = MagicMock(
+            req_ids=[], num_output_tokens=[])
+
+        scheduler.cached_schedulers_output.append(scheduler_output)
+
+        model_runner_output = ModelRunnerOutput(
+            req_ids=["req1"],
+            req_id_to_index={"req1": 0},
+            sampled_token_ids=[[42]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=None,
+            num_nans_in_logits=None,
+            kv_connector_output=None,
+        )
+
+        with patch.object(scheduler, '_send_command'):
+            with patch.object(scheduler,
+                              '_collect_results_unordered',
+                              return_value={
+                                  0: {},
+                                  1: {}
+                              }):
+                scheduler.update_from_output(scheduler_output,
+                                             model_runner_output)
+
+        # num_scheduled_tokens should remain 100 for prefill, not overwritten with len(sampled_token_ids) == 1
+        assert scheduler_output.num_scheduled_tokens["req1"] == 100
+
 
 class TestUpdateVllmConfigForDPScheduler:
     """Test the update_vllm_config_for_dp_scheduler function."""

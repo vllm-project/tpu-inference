@@ -220,10 +220,18 @@ def _scheduler_worker_process(
                         # count of generated tokens from the continue-decode multi-step execution.
                         # This ensures correct request state updates and MoE experts slicing inside
                         # local `scheduler.update_from_output(...)`.
+                        cached_data = scheduler_output.scheduled_cached_reqs
+                        num_output_tokens_dict = dict(
+                            zip(cached_data.req_ids,
+                                cached_data.num_output_tokens))
                         for req_id, req_idx in model_runner_output.req_id_to_index.items(
                         ):
-                            scheduler_output.num_scheduled_tokens[req_id] = len(
-                                model_runner_output.sampled_token_ids[req_idx])
+                            if num_output_tokens_dict.get(req_id, 0) > 0:
+                                num_sampled = len(model_runner_output.
+                                                  sampled_token_ids[req_idx])
+                                if num_sampled > 0:
+                                    scheduler_output.num_scheduled_tokens[
+                                        req_id] = num_sampled
 
                     result = scheduler.update_from_output(
                         scheduler_output, model_runner_output)
@@ -1139,8 +1147,11 @@ class DPScheduler(SchedulerInterface):
         for req_id, req_idx in model_runner_output.req_id_to_index.items():
             if num_output_tokens_dict.get(req_id, 0) > 0:
                 if model_runner_output.sampled_token_ids:
-                    scheduler_output.num_scheduled_tokens[req_id] = len(
+                    num_sampled = len(
                         model_runner_output.sampled_token_ids[req_idx])
+                    if num_sampled > 0:
+                        scheduler_output.num_scheduled_tokens[
+                            req_id] = num_sampled
 
         # Split model output by DP rank (each rank gets only its req_ids).
         rank_model_outputs = self._split_model_output_by_rank(
