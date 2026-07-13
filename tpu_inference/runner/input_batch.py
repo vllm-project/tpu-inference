@@ -394,7 +394,7 @@ class InputBatch:
             if request.mamba_state_slot in pool:
                 pool.remove(request.mamba_state_slot)
         self.mamba_state_indices_cpu[req_index] = request.mamba_state_slot
-        logger.info("[MAMBA-SLOT-ALLOC] Assigned slot %s to req %s (req_index=%d, dp_rank=%d). Remaining pool sample on rank %d: %s", request.mamba_state_slot, request.request_id, req_index, dp_rank, dp_rank, self._free_mamba_slots_per_rank[dp_rank][:5] if self._free_mamba_slots_per_rank and dp_rank < len(self._free_mamba_slots_per_rank) else [])
+        logger.info("[MAMBA-SLOT-ALLOC] Assigned slot %s to req %s (req_index=%d, dp_rank=%d). Remaining pool sample on rank %d: %s", request.mamba_state_slot, request.req_id, req_index, dp_rank, dp_rank, self._free_mamba_slots_per_rank[dp_rank][:5] if self._free_mamba_slots_per_rank and dp_rank < len(self._free_mamba_slots_per_rank) else [])
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
