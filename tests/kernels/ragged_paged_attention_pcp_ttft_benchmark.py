@@ -67,7 +67,11 @@ from tpu_inference.kernels.experimental.rpa_v3_cp.kernel import (  # noqa: E402
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (  # noqa: E402
     align_to, cdiv, get_dtype_packing)
 
-NQ, NKV, HD = 8, 4, 128  # 8 attention heads, GQA with 4 kv heads (total)
+# 16 attention heads, GQA with 4 kv heads (total). NQ=16 (not 8) so tp8 lands on
+# 2 q-heads/device: the kernel pads num_q_heads_per_kv_head up to q_packing (=2
+# for bf16), so any config with 1 q-head/device (NQ=8 at tp8) silently does 2x
+# the necessary work and misreads as "tp8 == tp4".
+NQ, NKV, HD = 16, 4, 128
 PAGE = 256
 DTYPE = jnp.bfloat16
 SM = HD**-0.5
@@ -99,6 +103,23 @@ def _bench(fn, *args):
 
 def _i32(xs):
     return jnp.array(xs, jnp.int32)
+
+
+def _lse_all_reduce(o, lse, axis):
+    """Merge per-rank partial attention (o, lse) across `axis` via LSE.
+
+    Verbatim mirror of attention_interface._lse_all_reduce: each pcp rank's cache
+    phase attends only its strided 1/pcp shard of the prev cache, so the partial
+    softmaxes must be merged across ranks. 3 collectives: pmax + 2x psum.
+    """
+    m = jax.lax.pmax(lse, axis)
+    m_safe = jnp.where(jnp.isinf(m), 0.0, m)
+    w = jnp.exp(lse - m_safe)
+    denom = jax.lax.psum(w, axis)
+    o_merged = (jax.lax.psum(o * w[..., None], axis) /
+                jnp.where(denom == 0.0, 1.0, denom)[..., None])
+    lse_merged = jnp.where(denom == 0.0, -jnp.inf, m_safe + jnp.log(denom))
+    return o_merged, lse_merged
 
 
 # ------------------------------- TP latency ---------------------------------
@@ -196,6 +217,11 @@ def make_pcp(pcp, tp, chunk, max_ctx):
                                                use_causal_mask=False,
                                                update_kv_cache=False,
                                                **common)
+            # Each rank's cache phase only attended its STRIDED 1/pcp shard of
+            # the prev cache, so the partial softmaxes must be LSE-merged ACROSS
+            # ranks (pmax + 2x psum). This is a real PCP collective -- mirrors
+            # `_lse_all_reduce` in attention_interface.pcp_ragged_paged_attention.
+            o1, l1 = _lse_all_reduce(o1, l1, "x")
             o1 = jax.lax.dynamic_slice_in_dim(o1, r * C, C, 0)
             l1 = jax.lax.dynamic_slice_in_dim(l1, r * C, C, 0)
             q_buf = jnp.zeros((chunk, nq_local, HD),
@@ -231,8 +257,11 @@ def human(n):
 
 def context_sweep(max_ctx, CH):
     steps = list(range(CH, max_ctx + 1, CH))
+    # Only report context points that are >= the chunk size (a context below CH
+    # has no chunks, so its cumulative TTFT is an empty sum -> 0.00/nan).
     report = [
-        n for n in [8, 16, 32, 64, 128, 256, 512, 1024] if n * 1024 <= max_ctx
+        n for n in [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+        if CH <= n * 1024 <= max_ctx
     ]
     makers = [("tp4", make_tp(4, CH, max_ctx)),
               ("tp8", make_tp(8, CH, max_ctx)),
