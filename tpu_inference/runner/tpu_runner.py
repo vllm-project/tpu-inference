@@ -1393,6 +1393,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 for req_id in self._pre_async_results.req_ids)
 
             if state_indices_to_rollback is not None and prev_ndim == 2 and curr_ndim == 2 and prev_req_active:
+                try:
+                    import numpy as _np
+                    _host_indices = _np.asarray(jax.device_get(state_indices_to_rollback))
+                    _host_accepted = _np.asarray(jax.device_get(num_accepted_tokens_dev))
+                    _valid_dev = getattr(self, "_async_rollback_valid_dev", None)
+                    _host_valid = _np.asarray(jax.device_get(_valid_dev)) if _valid_dev is not None else _np.ones(self.max_num_reqs, dtype=bool)
+                    _active_req_ids = self.input_batch.req_ids[:self.max_num_reqs]
+                    _log_lines = []
+                    for _pos in range(self.max_num_reqs):
+                        _rid = _active_req_ids[_pos]
+                        if _rid is not None:
+                            _src_idx = int(_host_accepted[_pos]) + 1
+                            _src_slot = _host_indices[_pos, min(_src_idx, _host_indices.shape[1] - 1)] if 0 <= _src_idx < _host_indices.shape[1] else -999
+                            _log_lines.append(f"slot={_pos}: req_id={_rid} | target_slot={_host_indices[_pos, 0]} | source_slot={_src_slot} (accepted={_host_accepted[_pos]} + 1) | valid={_host_valid[_pos]}")
+                    logger.info("[MAMBA-ROLLBACK-DEBUG] step=%s | prev_ndim=%d curr_ndim=%d:\n  %s", getattr(self, "_step_counter", 0), prev_ndim, curr_ndim, "\n  ".join(_log_lines))
+                except Exception as _e:
+                    logger.warning("[MAMBA-ROLLBACK-DEBUG] Failed to log rollback debug info: %s", _e)
+
                 self._device_rollback_mamba_states(
                     state_indices_to_rollback,
                     num_accepted_tokens_dev,
@@ -2692,6 +2710,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     mamba_state_indices_cpu[req_offset:req_offset +
                                             _num_reqs] = local_base_slots
 
+
+            if self.has_mamba_layers and mamba_state_indices_cpu is not None:
+                try:
+                    self._step_counter = getattr(self, "_step_counter", 0) + 1
+                    _prep_lines = []
+                    for _pos in range(self.max_num_reqs):
+                        _rid = self.input_batch.req_ids[_pos] if _pos < len(self.input_batch.req_ids) else None
+                        if _rid is not None:
+                            _prep_lines.append(f"slot={_pos}: req_id={_rid} | indices={mamba_state_indices_cpu[_pos]} | spec_verify={is_spec_verification}")
+                    logger.info("[MAMBA-PREP-DEBUG] step=%s | is_spec_verification=%s:\n  %s", self._step_counter, is_spec_verification, "\n  ".join(_prep_lines))
+                except Exception as _e:
+                    pass
 
             (request_distribution, mamba_state_indices,
              dev_arrays_payload) = device_array(
