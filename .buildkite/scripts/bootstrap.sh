@@ -47,13 +47,18 @@ determine_job_priority() {
         priority="$PRIORITY_DEFAULT"
         echo "Build type: General - Priority: $priority" >&2
     fi
-    
+
     echo "$priority"
 }
 
 JOB_PRIORITY=$(determine_job_priority)
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
+
+# Temporary escape hatch for targeted multihost disaggregation E2E runs.
+# Keep this after shared bootstrap metadata is configured so downstream Docker
+# setup can still resolve VLLM_COMMIT_HASH.
+UPLOAD_ONLY_MULTI_HOST_DISAGG="${UPLOAD_ONLY_MULTI_HOST_DISAGG:-1}"
 
 # --- Skip build if only docs, icons, or CODEOWNERS changed ---
 echo "--- :git: Checking changed files"
@@ -63,27 +68,27 @@ FILES_CHANGED=""
 
 if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "PR detected. Target branch: $BASE_BRANCH"
-    
+
     # Fetch base and current commit to ensure local history exists for diff
     git fetch origin "$BASE_BRANCH" --depth=20 --quiet || echo "Base fetch failed"
     git fetch origin "$BUILDKITE_COMMIT" --depth=20 --quiet || true
-    
+
     # Get all changes in this PR using triple-dot diff (common ancestor to HEAD)
     # This correctly captures changes even if the last commit is a merge from main
     FILES_CHANGED=$(git diff --name-only origin/"$BASE_BRANCH"..."$BUILDKITE_COMMIT" 2>/dev/null || true)
-    
+
     # Fallback to single commit diff if PR history is unavailable
     if [ -z "$FILES_CHANGED" ]; then
         echo "Warning: PR diff failed. Falling back to single commit check."
         FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
     fi
-    
+
     echo "Files changed:"
     echo "$FILES_CHANGED"
-    
+
     # Filter out files we want to skip builds for.
     NON_SKIPPABLE_FILES=$(echo "$FILES_CHANGED" | grep -vE "(\.md$|\.ico$|\.png$|^README$|^docs\/|^\.github\/CODEOWNERS$|support_matrices\/.*\.csv$)" || true)
-    
+
     if [ -z "$NON_SKIPPABLE_FILES" ]; then
         echo "Only documentation, icon, or CODEOWNERS files changed. Skipping build."
         # No pipeline will be uploaded, and the build will complete.
@@ -91,10 +96,10 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     else
         echo "Code files changed. Proceeding with pipeline upload."
     fi
-    
+
     # Count files not matching the benchmark prefix
     NON_BENCHMARK_COUNT=$(printf "%s\n" "$NON_SKIPPABLE_FILES" | grep -c -v "^\.buildkite/benchmark" || true)
-    
+
     # Validate custom pipeline metadata (Uniqueness & Completeness)
     if .buildkite/scripts/validate_pipeline_metadata.sh "$NON_SKIPPABLE_FILES"; then
         echo "Pipeline metadata validation passed."
@@ -102,7 +107,7 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
         echo "+++ ❌ Pipeline metadata validation failed. Failing build."
         exit 1
     fi
-    
+
     # Validate modified YAML pipelines using bk pipeline validate
     if .buildkite/scripts/validate_buildkite_ymls.sh "$NON_SKIPPABLE_FILES"; then
         echo "All pipelines syntax are valid. Proceeding with pipeline upload."
@@ -110,14 +115,14 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
         echo "Some pipelines syntax are invalid. Failing build."
         exit 1
     fi
-    
+
     MODEL_FILES="add_model_to_ci\.py|tpu_optimized_model_template\.yml|vllm_native_model_template\.yml"
     FEATURE_FILES="add_feature_to_ci\.py|feature_template\.yml|parallelism_template\.yml"
-    
+
     if echo "$FILES_CHANGED" | grep -qE "$MODEL_FILES"; then
         .buildkite/pipeline_generation/test_generation.sh --models
     fi
-    
+
     if echo "$FILES_CHANGED" | grep -qE "$FEATURE_FILES"; then
         .buildkite/pipeline_generation/test_generation.sh --features
     fi
@@ -180,17 +185,17 @@ upload_pipeline() {
         set_jax_envs v6
         upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
         set_jax_envs unset
-        
+
         # Upload JAX pipeline for v7
         set_jax_envs v7
         upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
         set_jax_envs unset
-        
+
         # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
         upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
         upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
     fi
-    
+
     upload_with_priority .buildkite/nightly_verify.yml "$JOB_PRIORITY"
 }
 
@@ -205,12 +210,12 @@ upload_benchmark_pipeline() {
     buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
     echo "[BM-DEBUG] Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     echo "[BM-DEBUG] Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
-    
+
     # Upload benchmark pipelines
     local case_folder=".buildkite/benchmark/cases/ci"
     local generator_script="${SCRIPT_DIR}/../benchmark/scripts/generate_bk_pipeline.py"
     local changed_cases=""
-    
+
     # For PR builds, identify changed benchmark cases outside of ci folder
     if [ "$BUILDKITE_PULL_REQUEST" != "false" ] && [ -n "${FILES_CHANGED:-}" ]; then
         echo "--- Identifying changed benchmark cases in PR"
@@ -221,15 +226,22 @@ upload_benchmark_pipeline() {
             echo "$changed_cases"
             # Note: We keep changed_cases as a newline-separated string
             # to correctly handle filenames with spaces in process_json_benchmark_cases.
-            
+
             # Upload global case name validation step
             upload_with_priority .buildkite/validate_benchmark_case_name.yml "$JOB_PRIORITY"
             export BENCHMARK_VALIDATION_UPLOADED="true"
         fi
     fi
-    
+
     # Process both fixed ci folder and any extra changed cases
     process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY" "$changed_cases"
+}
+
+upload_multihost_disagg_only_pipeline() {
+    echo "--- 🚨 HACK: Only uploading multi_host_disagg.yml"
+    export TPU_VERSION="tpu7x"
+    upload_with_priority .buildkite/features/multi_host_disagg.yml "$JOB_PRIORITY"
+    echo "--- 🚨 HACK: Finished uploading only multi-host disaggregation pipeline"
 }
 
 echo "--- Starting Buildkite Bootstrap"
@@ -262,7 +274,7 @@ notify:
   - email: "$BUILDKITE_BUILD_CREATOR_EMAIL"
     if: build.state == "failed"
 EOF
-    
+
 fi
 
 upload_with_priority "$NOTIFY_FILE" "$JOB_PRIORITY"
@@ -274,48 +286,61 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
+
+    if [[ "$UPLOAD_ONLY_MULTI_HOST_DISAGG" == "1" ]]; then
+        upload_multihost_disagg_only_pipeline
+        echo "--- Buildkite Bootstrap Finished"
+        exit 0
+    fi
+
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
     upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
-    
+
     # Upload JAX pipeline for v7
     set_jax_envs v7
     upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
     set_jax_envs unset
-    
+
     # Upload JAX pipeline for v6 (default)
     set_jax_envs v6
     upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
     set_jax_envs unset
-    
+
 else
     # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
     VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
-    
+
+    if [[ "$UPLOAD_ONLY_MULTI_HOST_DISAGG" == "1" ]]; then
+        upload_multihost_disagg_only_pipeline
+        echo "--- Buildkite Bootstrap Finished"
+        exit 0
+    fi
+
     # Check if the current build is a pull request
     if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
         echo "This is a Pull Request build."
-        
+
         # Wait for GitHub API to sync labels
         echo "Sleeping for 5 seconds to ensure GitHub API is updated..."
         sleep 5
-        
+
         API_URL="https://api.github.com/repos/vllm-project/tpu-inference/pulls/$BUILDKITE_PULL_REQUEST"
         echo "Fetching PR details from: $API_URL"
-        
+
         # Fetch the response body and save to a temporary file
         GITHUB_PR_RESPONSE_FILE="github_api_logs.json"
         curl -s "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
-        
+
         # Upload the full response body as a Buildkite artifact
         echo "Uploading GitHub API response as artifact..."
         buildkite-agent artifact upload "$GITHUB_PR_RESPONSE_FILE"
-        
+
         # Extract labels using input redirection
         PR_LABELS=$(jq -r '.labels[].name' < "$GITHUB_PR_RESPONSE_FILE")
         echo "Extracted PR Labels: $PR_LABELS"
-        
+
         # If it's a PR, check for the specific label
         if [[ $PR_LABELS == *"ready"* ]]; then
             echo "Found 'ready' label on PR. Uploading main pipeline..."
