@@ -125,7 +125,7 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
     yml_content=$(grep -v "^steps:" "${yml_file}")
 
     # Store the content for both hardware types
-    if [[ "$subject_name" != "multi-host" ]]; then
+    if [[ "$subject_name" != "multi-host" && "$subject_name" != *"Multi-host"* ]]; then
       pipeline_v6e_fragments+=("${yml_content}")
     fi
     pipeline_v7x_fragments+=("${yml_content}")
