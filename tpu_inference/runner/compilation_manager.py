@@ -1192,6 +1192,11 @@ class CompilationManager:
                                                      dtype=jnp.int32),
                                            sharding=dp_sharding)
 
+        rollback_valid = device_array(self.runner.mesh,
+                                      jnp.zeros((max_num_reqs, ),
+                                                dtype=jnp.bool_),
+                                      sharding=dp_sharding)
+
         self._run_compilation(
             f"worker{self.runner.rank} _rollback_mamba_layer_states_fn",
             _rollback_mamba_layer_states_fn,
@@ -1199,6 +1204,7 @@ class CompilationManager:
             recurrent_state,
             state_indices,
             num_accepted_tokens,
+            rollback_valid,
         )
 
     def _precompile_extract_draft_token_ids(self) -> None:

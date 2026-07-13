@@ -337,7 +337,7 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
         rollback_valid, num_rejected_tokens[rollback_subtract_indices], 0)
     num_accepted_tokens_dev = rollback_draft_lengths - mapped_num_rejected
 
-    return seq_lens, positions, num_accepted_tokens_dev
+    return seq_lens, positions, num_accepted_tokens_dev, rollback_valid
 
 
 @jax.jit
@@ -346,6 +346,7 @@ def _rollback_mamba_layer_states_fn(
     recurrent_state: jax.Array,
     state_indices: jax.Array,
     num_accepted_tokens: jax.Array,
+    rollback_valid: jax.Array,
 ):
     """Rollback a single Mamba layer's states on the device by copying Slot[num_accepted] to Slot[0].
 
@@ -362,9 +363,14 @@ def _rollback_mamba_layer_states_fn(
     source_slot_indices = num_accepted_tokens + 1
     source_slots = state_indices[jnp.arange(max_num_reqs), source_slot_indices]
 
-    updated_conv = conv_state.at[target_slots].set(conv_state[source_slots])
-    updated_rec = recurrent_state.at[target_slots].set(
-        recurrent_state[source_slots])
+    conv_mask = rollback_valid.reshape((max_num_reqs,) + (1,) * (conv_state.ndim - 1))
+    rec_mask = rollback_valid.reshape((max_num_reqs,) + (1,) * (recurrent_state.ndim - 1))
+
+    conv_update = jnp.where(conv_mask, conv_state[source_slots], conv_state[target_slots])
+    rec_update = jnp.where(rec_mask, recurrent_state[source_slots], recurrent_state[target_slots])
+
+    updated_conv = conv_state.at[target_slots].set(conv_update)
+    updated_rec = recurrent_state.at[target_slots].set(rec_update)
     return updated_conv, updated_rec
 
 
@@ -1263,6 +1269,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         state_indices: jax.Array,
         num_accepted_tokens: jax.Array,
+        rollback_valid: Optional[jax.Array] = None,
     ) -> None:
         """Rollback Mamba states for all layers on the device.
 
@@ -1279,6 +1286,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     recurrent_state,
                     state_indices,
                     num_accepted_tokens,
+                    rollback_valid,
                 )
                 self.kv_caches[layer_idx] = (new_conv, new_rec)
 
@@ -1384,20 +1392,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 for req_id in self._pre_async_results.req_ids)
 
             if state_indices_to_rollback is not None and prev_ndim == 2 and curr_ndim == 2 and prev_req_active:
-                if self.is_first_rank:
-                    prev_map = getattr(self._pre_async_results, "placeholder_req_id_to_index", {})
-                    curr_map = self.input_batch.req_id_to_index
-                    new_or_shifted = []
-                    for rid, c_idx in curr_map.items():
-                        p_idx = prev_map.get(rid, -1)
-                        if p_idx != c_idx:
-                            new_or_shifted.append((rid, f"prev_slot={p_idx} -> curr_slot={c_idx}"))
-                    if new_or_shifted:
-                        print(f"\n[MAMBA-ROLLBACK-CHECK] MISALIGNMENT across {len(curr_map)} slots! {len(new_or_shifted)} requests newly entered or shifted slots: {new_or_shifted[:5]}", flush=True)
-                        print(f"[MAMBA-ROLLBACK-CHECK] Rolling back across ALL rows unconditionally will copy Slot 1 (source_slots=num_accepted+1=1) into Slot 0 for newly entered requests, corrupting their baseline Mamba states!", flush=True)
                 self._device_rollback_mamba_states(
                     state_indices_to_rollback,
                     num_accepted_tokens_dev,
+                    getattr(self, "_async_rollback_valid_dev", None),
                 )
         with self.maybe_forbid_compile:
             with set_forward_context(
@@ -2332,11 +2330,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens_subtract_indices[
                     i + rank * (self.max_num_reqs // self.dp_size)] = idx
 
-                rollback_subtract_indices[
-                    i + rank * (self.max_num_reqs // self.dp_size)] = idx
                 prev_draft_token_ids = self._pre_async_results.scheduler_output.scheduled_spec_decode_tokens.get(
                     req_id)
                 if prev_draft_token_ids is not None:
+                    rollback_subtract_indices[
+                        i + rank * (self.max_num_reqs // self.dp_size)] = idx
                     rollback_draft_lengths[
                         i + rank * (self.max_num_reqs // self.dp_size)] = len(
                             prev_draft_token_ids)
@@ -2353,12 +2351,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                          rollback_subtract_indices, rollback_draft_lengths))
 
         with self.maybe_forbid_compile:
-            seq_lens, positions, num_accepted_tokens_dev = _subtract_num_rejected_tokens_fn(
+            seq_lens, positions, num_accepted_tokens_dev, rollback_valid_dev = _subtract_num_rejected_tokens_fn(
                 seq_lens, positions,
                 self._pre_async_results.spec_decode_num_rejected_tokens,
                 seq_lens_subtract_indices, positions_subtract_indices,
                 rollback_subtract_indices, rollback_draft_lengths)
-        return seq_lens, positions, num_accepted_tokens_dev
+        return seq_lens, positions, num_accepted_tokens_dev, rollback_valid_dev
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -2716,10 +2714,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # proposed tokens from the previous step were accepted. Subtract the
         # actual rejection counts from `seq_lens` and `positions` on TPU.
         if self.speculative_config and self.scheduler_config.async_scheduling and self._pre_async_results is not None:
-            seq_lens, positions, num_accepted_tokens_dev = self._subtract_num_rejected_tokens(
+            seq_lens, positions, num_accepted_tokens_dev, rollback_valid_dev = self._subtract_num_rejected_tokens(
                 seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank,
                 padded_num_reqs_per_dp_rank)
             self._async_num_accepted_tokens_dev = num_accepted_tokens_dev
+            self._async_rollback_valid_dev = rollback_valid_dev
+        else:
+            self._async_rollback_valid_dev = None
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
