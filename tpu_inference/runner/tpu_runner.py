@@ -1384,6 +1384,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 for req_id in self._pre_async_results.req_ids)
 
             if state_indices_to_rollback is not None and prev_ndim == 2 and curr_ndim == 2 and prev_req_active:
+                if self.is_first_rank:
+                    prev_map = getattr(self._pre_async_results, "placeholder_req_id_to_index", {})
+                    curr_map = self.input_batch.req_id_to_index
+                    new_or_shifted = []
+                    for rid, c_idx in curr_map.items():
+                        p_idx = prev_map.get(rid, -1)
+                        if p_idx != c_idx:
+                            new_or_shifted.append((rid, f"prev_slot={p_idx} -> curr_slot={c_idx}"))
+                    if new_or_shifted:
+                        print(f"\n[MAMBA-ROLLBACK-CHECK] MISALIGNMENT across {len(curr_map)} slots! {len(new_or_shifted)} requests newly entered or shifted slots: {new_or_shifted[:5]}", flush=True)
+                        print(f"[MAMBA-ROLLBACK-CHECK] Rolling back across ALL rows unconditionally will copy Slot 1 (source_slots=num_accepted+1=1) into Slot 0 for newly entered requests, corrupting their baseline Mamba states!", flush=True)
                 self._device_rollback_mamba_states(
                     state_indices_to_rollback,
                     num_accepted_tokens_dev,
