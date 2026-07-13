@@ -1003,6 +1003,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
         self.input_batch.has_mamba_layers = kv_cache_config.has_mamba_layers
+        # The torchax model wrapper consumes the unified-pool layer mapping;
+        # `model` may be absent when kv caches are initialized without a
+        # loaded model (e.g. unit tests).
+        model = getattr(self, "model", None)
+        if model is not None and hasattr(model, "set_kv_cache_metadata"):
+            model.set_kv_cache_metadata(
+                self.kv_cache_manager.attn_flat_indices)
 
         if self.kv_cache_manager.actual_mamba_num_blocks is not None:
             self.input_batch.init_mamba_pools(

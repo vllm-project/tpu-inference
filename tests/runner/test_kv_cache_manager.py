@@ -579,12 +579,16 @@ class TestKVCacheManager:
         # assert kv cache config with multiple kv cache groups will reinit
         # input batch.
         assert original_input_batch != self.runner.input_batch
-        assert len(self.runner.kv_caches) == 10
+        # Qwen3 is a unified-KV-cache arch: the 10 shared tensors live in one
+        # 6D block-major pool with num_layers as dim1.
+        assert len(self.runner.kv_caches) == 1
+        assert self.runner.kv_caches[0].shape == (num_blocks, 10, block_size,
+                                                  num_kv_heads * 2 //
+                                                  kv_packing, kv_packing,
+                                                  head_size)
+        assert self.runner.kv_cache_manager.attn_flat_indices == tuple(
+            range(10))
         for i in range(10):
-            assert self.runner.kv_caches[i].shape == (num_blocks, block_size,
-                                                      num_kv_heads * 2 //
-                                                      kv_packing, kv_packing,
-                                                      head_size)
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
             assert self.runner.layer_name_to_kvcache_index[
                 f'layer.{i + 10}'] == i
@@ -626,10 +630,11 @@ class TestKVCacheManager:
         self.runner.initialize_kv_cache(kv_cache_config)
 
         # Assert that the allocated KV cache has size equal to override_blocks, not num_blocks!
+        # Unified 6D pool: (num_blocks, num_layers=1, page, heads, packing, hd).
         assert len(self.runner.kv_caches) == 1
-        assert self.runner.kv_caches[0].shape == (override_blocks, block_size,
-                                                  num_kv_heads * 2 //
-                                                  kv_packing, kv_packing,
+        assert self.runner.kv_caches[0].shape == (override_blocks, 1,
+                                                  block_size, num_kv_heads *
+                                                  2 // kv_packing, kv_packing,
                                                   head_size)
 
     def test_get_kv_cache_spec_with_eagle3(self):
@@ -782,7 +787,8 @@ class TestKVCacheManager:
         )
 
         self.runner.initialize_kv_cache(kv_cache_config)
-        assert len(self.runner.kv_caches) == 10
+        # Unified pool: 10 attention layers in one 6D array.
+        assert len(self.runner.kv_caches) == 1
         assert len(self.runner.layer_name_to_kvcache_index) == 10
 
         # Now reset.
@@ -848,19 +854,20 @@ class TestKVCacheManager:
         )
 
         self.runner.initialize_kv_cache(kv_cache_config)
-        assert len(self.runner.kv_caches) == 10
+        # Unified pool: 10 attention layers in one 6D array.
+        assert len(self.runner.kv_caches) == 1
 
         # Reset and then reinitialize.
         self.runner.delete_kv_cache()
         assert len(self.runner.kv_caches) == 0
 
         self.runner.reinitialize_kv_cache()
-        assert len(self.runner.kv_caches) == 10
+        assert len(self.runner.kv_caches) == 1
+        assert self.runner.kv_caches[0].shape == (num_blocks, 10, block_size,
+                                                  num_kv_heads * 2 //
+                                                  kv_packing, kv_packing,
+                                                  head_size)
         for i in range(10):
-            assert self.runner.kv_caches[i].shape == (num_blocks, block_size,
-                                                      num_kv_heads * 2 //
-                                                      kv_packing, kv_packing,
-                                                      head_size)
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
 
     def test_reinitialize_kv_cache_without_init_raises(self):
@@ -970,9 +977,10 @@ class TestKVCacheManager:
         self.runner.initialize_kv_cache(kv_cache_config)
 
         # it should initialize 1 KV cache shared by all 4 layers
+        # (one shared group == one slot in the unified 6D pool).
         assert len(self.runner.kv_caches) == 1
 
-        assert self.runner.kv_caches[0].shape == (num_blocks, block_size,
+        assert self.runner.kv_caches[0].shape == (num_blocks, 1, block_size,
                                                   num_kv_heads * 2 //
                                                   kv_packing, kv_packing,
                                                   head_size)

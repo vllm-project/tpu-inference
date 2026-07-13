@@ -289,6 +289,13 @@ def _async_copy_jit(
     if was_padded:
         dest_out_list = [x[..., :orig_shape[-1]] for x in dest_out_list]
 
+    if len(dest_out_list) == 1:
+        # With a single cache (the unified block-major pool), the donated dest
+        # would flow from the DMA kernels straight to the jit output with a
+        # mismatched memory space, failing XLA's aliasing verifier. The
+        # barrier keeps the donation in place (same buffer, no copy).
+        dest_out_list = [jax.lax.optimization_barrier(dest_out_list[0])]
+
     return dest_out_list
 
 

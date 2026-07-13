@@ -117,6 +117,7 @@ class VllmModelWrapper:
         self.mesh = mesh
         self.is_draft_model = is_draft_model
         self._mm_encoder_jit_manager: MMEncoderJITManager | None = None
+        self.attn_flat_indices: Tuple[int, ...] = ()
 
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
@@ -136,6 +137,12 @@ class VllmModelWrapper:
             if module_name.startswith("vllm.model_executor.models"):
                 if hasattr(module, "get_pp_group"):
                     setattr(module, "get_pp_group", jax_get_pp_group)
+
+    def set_kv_cache_metadata(
+        self,
+        attn_flat_indices: Tuple[int, ...],
+    ):
+        self.attn_flat_indices = attn_flat_indices
 
     def load_weights(self,
                      shared_params: Optional[dict[str, jax.Array]] = None):
@@ -338,10 +345,11 @@ class VllmModelWrapper:
                     kv_caches=kv_caches,
                     mesh=self.mesh,
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index,
-                    vllm_config=self.vllm_config), set_forward_context(
-                        attn_metadata=attn_metadata,
-                        vllm_config=self.vllm_config,
-                        num_tokens=num_tokens):
+                    vllm_config=self.vllm_config,
+                    attn_flat_indices=self.attn_flat_indices
+            ), set_forward_context(attn_metadata=attn_metadata,
+                                   vllm_config=self.vllm_config,
+                                   num_tokens=num_tokens):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
                 original_lora_metadata = replace_lora_metadata(
@@ -402,7 +410,8 @@ class VllmModelWrapper:
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
-                    layer_name_to_kvcache_index=layer_name_to_kvcache_index
+                    layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+                    attn_flat_indices=self.attn_flat_indices
             ), set_forward_context(attn_metadata=attn_metadata,
                                    vllm_config=self.vllm_config,
                                    num_tokens=num_tokens):

@@ -166,6 +166,8 @@ class Qwen3Attention(JaxModule):
         kv_cache: Optional[jax.Array],
         x: jax.Array,
         attention_metadata: AttentionMetadata,
+        layer_idx: Optional[int] = None,
+        num_layers: Optional[int] = None,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
         # q: (T, N, H)
@@ -203,6 +205,8 @@ class Qwen3Attention(JaxModule):
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            layer_idx=layer_idx,
+            num_layers=num_layers,
         )
         # (T, D)
         o = self.o_proj(outputs)
@@ -353,20 +357,41 @@ class Qwen3Model(Qwen2Model):
         else:
             x = self.embed_tokens(input_ids)
 
+        # Check if we are using unified KV cache
+        is_unified = len(kv_caches) == 1 and (self.end_layer -
+                                              self.start_layer) > 1
+
         aux_hidden_states = []
-        for i, layer in enumerate(
-                islice(self.layers, self.start_layer, self.end_layer)):
-            kv_cache = kv_caches[i]
-            kv_cache, x = layer(
-                kv_cache,
-                x,
-                attention_metadata,
-            )
-            kv_caches[i] = kv_cache
-            if i in self.aux_hidden_state_layers:
-                aux_hidden_states.append(x)
+        if is_unified:
+            large_kv_cache = kv_caches[0]
+            num_layers = self.end_layer - self.start_layer
+            for i, layer in enumerate(
+                    islice(self.layers, self.start_layer, self.end_layer)):
+                large_kv_cache, x = layer(
+                    large_kv_cache,
+                    x,
+                    attention_metadata,
+                    layer_idx=i,
+                    num_layers=num_layers,
+                )
+                if i in self.aux_hidden_state_layers:
+                    aux_hidden_states.append(x)
+            new_kv_caches = [large_kv_cache]
+        else:
+            for i, layer in enumerate(
+                    islice(self.layers, self.start_layer, self.end_layer)):
+                kv_cache = kv_caches[i]
+                kv_cache, x = layer(
+                    kv_cache,
+                    x,
+                    attention_metadata,
+                )
+                kv_caches[i] = kv_cache
+                if i in self.aux_hidden_state_layers:
+                    aux_hidden_states.append(x)
+            new_kv_caches = kv_caches
         x = self.norm(x)
-        return kv_caches, x, aux_hidden_states
+        return new_kv_caches, x, aux_hidden_states
 
 
 class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
