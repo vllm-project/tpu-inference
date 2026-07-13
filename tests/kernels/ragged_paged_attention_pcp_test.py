@@ -66,21 +66,22 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         return dict(kvp=kvp, phd=128, nkv2=align_to(2 * 2, kvp))
 
     def _rand(self, rng, shape, dtype):
-        return jnp.array(rng.random(size=shape, dtype=np.float32)).astype(dtype)
+        return jnp.array(rng.random(size=shape,
+                                    dtype=np.float32)).astype(dtype)
 
     def _empty_cache(self, dtype):
         c = self._cfg(dtype)
         return jnp.full((self.NUM_PAGES, self.PAGE, c["nkv2"] // c["kvp"],
-                        c["kvp"], c["phd"]), jnp.nan, dtype)
+                         c["kvp"], c["phd"]), jnp.nan, dtype)
 
     def _cache_from_kv(self, k, v, ntok, dtype):
         c = self._cfg(dtype)
         kv = merge_kv(k, v)
         pad = cdiv(ntok, self.PAGE) * self.PAGE - ntok
         kv = jnp.pad(kv, ((0, pad), (0, 0), (0, 0), (0, 0)),
-                     constant_values=jnp.nan).reshape(
-                         -1, self.PAGE, c["nkv2"] // c["kvp"], c["kvp"],
-                         c["phd"])
+                     constant_values=jnp.nan).reshape(-1, self.PAGE,
+                                                      c["nkv2"] // c["kvp"],
+                                                      c["kvp"], c["phd"])
         cache = self._empty_cache(dtype)
         return cache.at[:kv.shape[0]].set(kv)
 
@@ -97,7 +98,8 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         return jnp.pad(jnp.array(xs, jnp.int32), (0, self.MAX_SEQ - len(xs)))
 
     def _padcu(self, xs):  # length max_num_seqs + 1 (cu_q_lens)
-        return jnp.pad(jnp.array(xs, jnp.int32), (0, self.MAX_SEQ + 1 - len(xs)))
+        return jnp.pad(jnp.array(xs, jnp.int32),
+                       (0, self.MAX_SEQ + 1 - len(xs)))
 
     def _merge_lse(self, acc_o, acc_l, o, l):
         if acc_o is None:
@@ -129,25 +131,34 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         v = self._rand(rng, (S, nkv, hd), dtype)
         pps = cdiv(S, self.PAGE)
         exp, _ = ref_ragged_paged_attention(q, k, v, self._empty_cache(dtype),
-                                             self._pad1([S]), self._pi(pps),
-                                             self._padcu([0, S]),
-                                             jnp.array([0, 0, 1], jnp.int32))
+                                            self._pad1([S]), self._pi(pps),
+                                            self._padcu([0, S]),
+                                            jnp.array([0, 0, 1], jnp.int32))
         exp = exp[:S]
         for r in range(P):
             for chunk in (r, 2 * P - 1 - r):
-                q_buf = jnp.zeros((S, nq, hd), dtype).at[:C].set(
-                    q[chunk * C:chunk * C + C])
+                q_buf = jnp.zeros((S, nq, hd),
+                                  dtype).at[:C].set(q[chunk * C:chunk * C + C])
                 out, _ = ragged_paged_attention(
-                    q_buf, k, v, self._empty_cache(dtype), self._pad1([S]),
-                    self._pi(pps), self._padcu([0, C]),
+                    q_buf,
+                    k,
+                    v,
+                    self._empty_cache(dtype),
+                    self._pad1([S]),
+                    self._pi(pps),
+                    self._padcu([0, C]),
                     jnp.array([0, 0, 1], jnp.int32),
-                    cp_rank=jnp.array([r], jnp.int32), cp_group_size=P,
+                    cp_rank=jnp.array([r], jnp.int32),
+                    cp_group_size=P,
                     kv_cache_lens=self._pad1([0]),
                     q_pos_offsets=self._pad1([chunk * C]),
-                    skip_cache_attn=True, update_kv_cache=False,
+                    skip_cache_attn=True,
+                    update_kv_cache=False,
                     use_causal_mask=True)
-                self.assertAllClose(out[:C], exp[chunk * C:chunk * C + C],
-                                    atol=self._tol(dtype), rtol=self._tol(dtype))
+                self.assertAllClose(out[:C],
+                                    exp[chunk * C:chunk * C + C],
+                                    atol=self._tol(dtype),
+                                    rtol=self._tol(dtype))
 
     @parameterized.product(dtype=[jnp.float32])
     def test_pcp_two_phase_chunked_prefill(self, dtype):
@@ -173,30 +184,48 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
             jnp.array([0, 0, 1], jnp.int32))
         exp = exp[:Scur]
         for chunk in (0, 1):
-            q_buf = jnp.zeros((Scur, nq, hd), dtype).at[:C].set(
-                q_cur[chunk * C:chunk * C + C])
-            common = dict(cp_rank=jnp.array([0], jnp.int32), cp_group_size=1,
+            q_buf = jnp.zeros((Scur, nq, hd),
+                              dtype).at[:C].set(q_cur[chunk * C:chunk * C + C])
+            common = dict(cp_rank=jnp.array([0], jnp.int32),
+                          cp_group_size=1,
                           kv_cache_lens=self._pad1([Lprev]),
-                          update_kv_cache=False, return_lse=True)
+                          update_kv_cache=False,
+                          return_lse=True)
             # kv_cache is donated, so give each phase its own (identical) copy.
             # Cache phase: attend the previous cache (non-causal), no q_pos.
             o1, _, l1 = ragged_paged_attention(
-                q_buf, k_all[Lprev:], v_all[Lprev:],
-                self._cache_from_kv(k_all[:Lprev], v_all[:Lprev], Lprev, dtype),
-                self._pad1([kv_total]), self._pi(pps), self._padcu([0, C]),
-                jnp.array([0, 0, 1], jnp.int32), use_causal_mask=False,
-                skip_current_attn=True, **common)
+                q_buf,
+                k_all[Lprev:],
+                v_all[Lprev:],
+                self._cache_from_kv(k_all[:Lprev], v_all[:Lprev], Lprev,
+                                    dtype),
+                self._pad1([kv_total]),
+                self._pi(pps),
+                self._padcu([0, C]),
+                jnp.array([0, 0, 1], jnp.int32),
+                use_causal_mask=False,
+                skip_current_attn=True,
+                **common)
             # Current phase: causal over the current KV (read from HBM).
             o2, _, l2 = ragged_paged_attention(
-                q_buf, k_all[Lprev:], v_all[Lprev:],
-                self._cache_from_kv(k_all[:Lprev], v_all[:Lprev], Lprev, dtype),
-                self._pad1([kv_total]), self._pi(pps), self._padcu([0, C]),
-                jnp.array([0, 0, 1], jnp.int32), use_causal_mask=True,
-                q_pos_offsets=self._pad1([chunk * C]), skip_cache_attn=True,
+                q_buf,
+                k_all[Lprev:],
+                v_all[Lprev:],
+                self._cache_from_kv(k_all[:Lprev], v_all[:Lprev], Lprev,
+                                    dtype),
+                self._pad1([kv_total]),
+                self._pi(pps),
+                self._padcu([0, C]),
+                jnp.array([0, 0, 1], jnp.int32),
+                use_causal_mask=True,
+                q_pos_offsets=self._pad1([chunk * C]),
+                skip_cache_attn=True,
                 **common)
             o, _ = self._merge_lse(o1[:C], l1[:C], o2[:C], l2[:C])
-            self.assertAllClose(o, exp[chunk * C:chunk * C + C],
-                                atol=self._tol(dtype), rtol=self._tol(dtype))
+            self.assertAllClose(o,
+                                exp[chunk * C:chunk * C + C],
+                                atol=self._tol(dtype),
+                                rtol=self._tol(dtype))
 
     @parameterized.product(P=[2, 3, 4])
     def test_pcp_strided_cache_write(self, P):
@@ -217,13 +246,21 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         c = self._cfg(dtype)
         kv_merged = merge_kv(k, v)
         for r in range(P):
-            _, cache = ragged_paged_attention(
-                q, k, v, self._empty_cache(dtype), self._pad1([S]),
-                self._pi(pps), self._padcu([0, C]),
-                jnp.array([0, 0, 1], jnp.int32),
-                cp_rank=jnp.array([r], jnp.int32), cp_group_size=P,
-                kv_cache_lens=self._pad1([0]), update_kv_cache=True,
-                skip_cache_attn=True, use_causal_mask=False)
+            _, cache = ragged_paged_attention(q,
+                                              k,
+                                              v,
+                                              self._empty_cache(dtype),
+                                              self._pad1([S]),
+                                              self._pi(pps),
+                                              self._padcu([0, C]),
+                                              jnp.array([0, 0, 1], jnp.int32),
+                                              cp_rank=jnp.array([r],
+                                                                jnp.int32),
+                                              cp_group_size=P,
+                                              kv_cache_lens=self._pad1([0]),
+                                              update_kv_cache=True,
+                                              skip_cache_attn=True,
+                                              use_causal_mask=False)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
             local_len = (S + P - 1 - r) // P
             pi = np.arange(pps)
@@ -251,13 +288,21 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         for r in range(P):
             tail_off = (2 * P - 1 - r) * C  # tail chunk within-current offset
             _, cache = ragged_paged_attention(
-                q, k, v, self._empty_cache(dtype), self._pad1([S]),
-                self._pi(pps), self._padcu([0, C]),
+                q,
+                k,
+                v,
+                self._empty_cache(dtype),
+                self._pad1([S]),
+                self._pi(pps),
+                self._padcu([0, C]),
                 jnp.array([0, 0, 1], jnp.int32),
-                cp_rank=jnp.array([r], jnp.int32), cp_group_size=P,
+                cp_rank=jnp.array([r], jnp.int32),
+                cp_group_size=P,
                 kv_cache_lens=self._pad1([0]),
                 q_pos_offsets=self._pad1([tail_off]),
-                update_kv_cache=True, skip_cache_attn=True, use_causal_mask=True)
+                update_kv_cache=True,
+                skip_cache_attn=True,
+                use_causal_mask=True)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
             local_len = (S + P - 1 - r) // P
             pi = np.arange(pps)
@@ -293,13 +338,21 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
             tail_real = max(0, min(S - tail_off, C))  # clamp -> 0 when all-pad
             saw_all_pad = saw_all_pad or tail_real == 0
             _, cache = ragged_paged_attention(
-                q, k, v, self._empty_cache(dtype), self._pad1([S]),
-                self._pi(pps), self._padcu([0, tail_real]),
+                q,
+                k,
+                v,
+                self._empty_cache(dtype),
+                self._pad1([S]),
+                self._pi(pps),
+                self._padcu([0, tail_real]),
                 jnp.array([0, 0, 1], jnp.int32),
-                cp_rank=jnp.array([r], jnp.int32), cp_group_size=P,
+                cp_rank=jnp.array([r], jnp.int32),
+                cp_group_size=P,
                 kv_cache_lens=self._pad1([0]),
                 q_pos_offsets=self._pad1([tail_off]),
-                update_kv_cache=True, skip_cache_attn=True, use_causal_mask=True)
+                update_kv_cache=True,
+                skip_cache_attn=True,
+                use_causal_mask=True)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
             local_len = (S + P - 1 - r) // P
             pi = np.arange(pps)
@@ -307,8 +360,9 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 g = r + m * P
                 slot = pi[m // self.PAGE] * self.PAGE + m % self.PAGE
                 self.assertArraysEqual(flat[slot], kv_merged[g])
-        self.assertTrue(saw_all_pad, "test config did not exercise an all-pad "
-                        "tail chunk")
+        self.assertTrue(
+            saw_all_pad, "test config did not exercise an all-pad "
+            "tail chunk")
 
     # ----------------- multi-device PCP-vs-TP equivalence --------------------
     @parameterized.product(P=[2, 4])
@@ -333,13 +387,25 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
         hs = PS(None, "x", None)
 
-        @partial(shard_map, mesh=mesh, in_specs=(hs, hs, hs), out_specs=hs,
+        @partial(shard_map,
+                 mesh=mesh,
+                 in_specs=(hs, hs, hs),
+                 out_specs=hs,
                  check_rep=False)
         def tp(q, k, v):
-            out, _ = ragged_paged_attention(
-                q, k, v, self._flat_cache(k.shape[1], npages, page, hd, dtype),
-                jnp.array([S], jnp.int32), pi, jnp.array([0, S], jnp.int32),
-                dist, sm_scale=sm, use_causal_mask=True, update_kv_cache=True)
+            out, _ = ragged_paged_attention(q,
+                                            k,
+                                            v,
+                                            self._flat_cache(
+                                                k.shape[1], npages, page, hd,
+                                                dtype),
+                                            jnp.array([S], jnp.int32),
+                                            pi,
+                                            jnp.array([0, S], jnp.int32),
+                                            dist,
+                                            sm_scale=sm,
+                                            use_causal_mask=True,
+                                            update_kv_cache=True)
             return out
 
         out_tp = np.asarray(jax.jit(tp)(q, k, v), np.float32)
@@ -352,8 +418,11 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         q2 = jnp.stack(chunks).reshape(P, 2, C, nq, hd)
         qsp = PS("x", None, None, None, None)
 
-        @partial(shard_map, mesh=mesh, in_specs=(qsp, PS(), PS()),
-                 out_specs=qsp, check_rep=False)
+        @partial(shard_map,
+                 mesh=mesh,
+                 in_specs=(qsp, PS(), PS()),
+                 out_specs=qsp,
+                 check_rep=False)
         def pcp(q2, k, v):
             r = jax.lax.axis_index("x")
             cp_rank = jax.lax.reshape(r, (1, )).astype(jnp.int32)
@@ -363,16 +432,28 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
             for i in range(2):
                 qpos = jax.lax.reshape(offs[i], (1, )).astype(jnp.int32)
                 qb = jnp.zeros((S, nq, hd), dtype).at[:C].set(q2[0][i])
-                o, _ = ragged_paged_attention(
-                    qb, k, v, cc, jnp.array([S], jnp.int32), pi,
-                    jnp.array([0, C], jnp.int32), dist, cp_rank=cp_rank,
-                    cp_group_size=P, kv_cache_lens=jnp.array([0], jnp.int32),
-                    q_pos_offsets=qpos, skip_cache_attn=True, sm_scale=sm,
-                    update_kv_cache=False, use_causal_mask=True)
+                o, _ = ragged_paged_attention(qb,
+                                              k,
+                                              v,
+                                              cc,
+                                              jnp.array([S], jnp.int32),
+                                              pi,
+                                              jnp.array([0, C], jnp.int32),
+                                              dist,
+                                              cp_rank=cp_rank,
+                                              cp_group_size=P,
+                                              kv_cache_lens=jnp.array(
+                                                  [0], jnp.int32),
+                                              q_pos_offsets=qpos,
+                                              skip_cache_attn=True,
+                                              sm_scale=sm,
+                                              update_kv_cache=False,
+                                              use_causal_mask=True)
                 outs.append(o[:C])
             return jnp.stack(outs)[None]
 
-        og = np.asarray(jax.jit(pcp)(q2, k, v), np.float32)  # [P, 2, C, nq, hd]
+        og = np.asarray(jax.jit(pcp)(q2, k, v),
+                        np.float32)  # [P, 2, C, nq, hd]
         out_pcp = np.zeros((S, nq, hd), np.float32)
         for r in range(P):
             for i, ch in enumerate((r, 2 * P - 1 - r)):
@@ -380,7 +461,9 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
         self.assertTrue(np.all(np.isfinite(out_tp)))
         self.assertGreater(float(np.abs(out_tp).max()), 0.0)
-        self.assertAllClose(out_pcp, out_tp, atol=self._tol(dtype),
+        self.assertAllClose(out_pcp,
+                            out_tp,
+                            atol=self._tol(dtype),
                             rtol=self._tol(dtype))
 
     @parameterized.product(P=[2, 3, 4])
@@ -399,7 +482,9 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         ref = np.asarray(merge_kv(k, v))
         mesh = Mesh(np.array(jax.devices()[:P]), ("x", ))
 
-        @partial(shard_map, mesh=mesh, in_specs=(PS(), PS()),
+        @partial(shard_map,
+                 mesh=mesh,
+                 in_specs=(PS(), PS()),
                  out_specs=PS("x", None, None, None, None, None),
                  check_rep=False)
         def fn(k, v):
@@ -407,19 +492,28 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
             cp_rank = jax.lax.reshape(r, (1, )).astype(jnp.int32)
             cc = self._flat_cache(nkv, npages, page, hd, dtype)
             q = jnp.zeros((S, nq, hd), dtype)
-            _, nc = ragged_paged_attention(
-                q, k, v, cc, jnp.array([S], jnp.int32),
-                jnp.arange(npages, dtype=jnp.int32), jnp.array([0, C], jnp.int32),
-                jnp.array([0, 0, 1], jnp.int32), cp_rank=cp_rank,
-                cp_group_size=P, kv_cache_lens=jnp.array([0], jnp.int32),
-                update_kv_cache=True, skip_cache_attn=True,
-                use_causal_mask=False)
+            _, nc = ragged_paged_attention(q,
+                                           k,
+                                           v,
+                                           cc,
+                                           jnp.array([S], jnp.int32),
+                                           jnp.arange(npages, dtype=jnp.int32),
+                                           jnp.array([0, C], jnp.int32),
+                                           jnp.array([0, 0, 1], jnp.int32),
+                                           cp_rank=cp_rank,
+                                           cp_group_size=P,
+                                           kv_cache_lens=jnp.array([0],
+                                                                   jnp.int32),
+                                           update_kv_cache=True,
+                                           skip_cache_attn=True,
+                                           use_causal_mask=False)
             return nc[None]
 
         caches = np.asarray(jax.jit(fn)(k, v))  # [P, npages, page, h1, h2, hd]
         flat = caches.reshape(P, -1, caches.shape[3], caches.shape[4], hd)
         g = np.arange(S)
-        recon = flat[g % P, g // P]  # DCP-strided: token g -> rank g%P, slot g//P
+        recon = flat[g % P,
+                     g // P]  # DCP-strided: token g -> rank g%P, slot g//P
         self.assertTrue(np.all(np.isfinite(recon)))
         self.assertGreater(float(np.abs(recon).max()), 0.0)
         self.assertLess(float((recon == 0).mean()), 0.5)

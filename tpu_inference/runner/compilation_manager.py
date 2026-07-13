@@ -385,10 +385,12 @@ class CompilationManager:
         # matching dummy) or the cached pytree structure won't be reused.
         pcp_kv_cache_lens = None
         if pcp_size > 1:
-            pcp_kv_cache_lens = device_array(
-                self.runner.mesh,
-                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
-                sharding=NamedSharding(self.runner.mesh, PartitionSpec()))
+            pcp_kv_cache_lens = device_array(self.runner.mesh,
+                                             np.zeros(self.runner.max_num_reqs,
+                                                      dtype=np.int32),
+                                             sharding=NamedSharding(
+                                                 self.runner.mesh,
+                                                 PartitionSpec()))
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
         # populate for hybrid attn+mamba models — for pure-attention models we
         # pass None at runtime (see `_prepare_inputs`), and the precompile
@@ -617,9 +619,8 @@ class CompilationManager:
                 # pcp is inactive, so this is a no-op for non-PCP.
                 metadata_attn_sharding = NamedSharding(
                     self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
-                input_ids = self._create_dummy_tensor((num_tokens, ),
-                                                      jnp.int32,
-                                                      metadata_attn_sharding)
+                input_ids = self._create_dummy_tensor(
+                    (num_tokens, ), jnp.int32, metadata_attn_sharding)
                 if self.runner.uses_mrope:
                     mrope_sharding = NamedSharding(
                         self.runner.mesh,

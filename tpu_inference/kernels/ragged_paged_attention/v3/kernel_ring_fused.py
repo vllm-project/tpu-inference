@@ -198,7 +198,8 @@ def _ring_attention_kernel(
             l_ref[:, h:h + 1] = correction * l_ref[:, h:h + 1] + jnp.sum(
                 p, axis=1, keepdims=True)
             m_ref[:, h:h + 1] = m_cur
-            pv = jnp.dot(p.astype(v_h.dtype), v_h,
+            pv = jnp.dot(p.astype(v_h.dtype),
+                         v_h,
                          preferred_element_type=jnp.float32)  # [t_q, head_dim]
             acc_ref[:, h, :] = correction * acc_ref[:, h, :] + pv
 
@@ -221,7 +222,8 @@ def _ring_attention_kernel(
     # Always emit LSE (cheap); the wrapper drops it unless requested.
     lse_vmem_ref[...] = jnp.where(l == 0.0, -jnp.inf,
                                   m_ref[...] + jnp.log(l_safe))
-    store_lse = pltpu.make_async_copy(lse_vmem_ref, lse_hbm_ref, local_copy_sem)
+    store_lse = pltpu.make_async_copy(lse_vmem_ref, lse_hbm_ref,
+                                      local_copy_sem)
     store_lse.start()
     store_lse.wait()
 
@@ -297,7 +299,8 @@ def ring_attention(
     k: jax.Array,  # [t_kv, num_kv_heads, head_dim] (per-device local KV shard)
     v: jax.Array,  # [t_kv, num_kv_heads, head_dim]
     q_positions: jax.Array,  # i32[t_q]   global position of each local query
-    kv_positions: jax.Array,  # i32[t_kv]  global position of each local KV token
+    kv_positions: jax.
+    Array,  # i32[t_kv]  global position of each local KV token
     *,
     sm_scale: float,
     soft_cap: float | None = None,
@@ -332,9 +335,8 @@ def ring_attention(
         out_dtype = q.dtype
     cp_group_size = mesh.shape[axis_name]
     if q.shape[1] % k.shape[1] != 0:
-        raise ValueError(
-            f"num_q_heads={q.shape[1]} must be divisible by "
-            f"num_kv_heads={k.shape[1]}.")
+        raise ValueError(f"num_q_heads={q.shape[1]} must be divisible by "
+                         f"num_kv_heads={k.shape[1]}.")
 
     kv = jnp.concatenate([k, v], axis=-1)
     q_pos = q_positions.astype(jnp.int32).reshape(-1, 1)

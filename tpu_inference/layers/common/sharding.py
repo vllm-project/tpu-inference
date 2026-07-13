@@ -47,8 +47,9 @@ class ShardingAxisNameBase:
     # Query heads are sharded over `dcp` (replicated over `pcp`). KV heads are
     # replicated over both context-parallel axes (see KV_HEAD); DCP instead
     # strides the KV-cache context (KV_CONTEXT) and merges ranks via LSE.
-    ATTN_HEAD = ('model', 'expert', 'dcp') #todo: rename as Q_HEAD
-    KV_HEAD = ('model', 'expert') # DO WE NEED to chnage the sharding spec somewhere?
+    ATTN_HEAD = ('model', 'expert', 'dcp')  #todo: rename as Q_HEAD
+    KV_HEAD = ('model', 'expert'
+               )  # DO WE NEED to chnage the sharding spec somewhere?
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp')
     MOE_TENSOR = ('attn_dp', 'model', 'dcp')
@@ -65,7 +66,7 @@ class ShardingAxisNameBase:
     # These axes are used in KV caches management.
     BATCH = ('data', 'attn_dp', 'attn_dp_expert')
     CONTEXT = 'dcp'
-    PREFILL_CONTEXT = 'pcp' # TODO: rename to PCP
+    PREFILL_CONTEXT = 'pcp'  # TODO: rename to PCP
     KV_CONTEXT = ('pcp', 'dcp')
 
     # Vision encoder sharding axes

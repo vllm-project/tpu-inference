@@ -1221,8 +1221,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return placeholder_req_id_to_index
 
-    def _pcp_debug_dump(self, input_ids, input_positions, attn_metadata,
-                        full_hidden_states, lora_metadata, logits_indices=None):
+    def _pcp_debug_dump(self,
+                        input_ids,
+                        input_positions,
+                        attn_metadata,
+                        full_hidden_states,
+                        lora_metadata,
+                        logits_indices=None):
         """Set PCP_DEBUG=1 to dump, per model-execution step: the input tokens,
         their position ids, the key attention metadata, and the model's
         argmax-predicted next token at EVERY position (prompt tokens included).
@@ -1246,10 +1251,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         iid = np.asarray(jax.device_get(input_ids)).reshape(-1)
         pos = np.asarray(jax.device_get(input_positions)).reshape(-1)
         n = min(len(iid), 96)
-        get = lambda a: (None if a is None else np.asarray(
-            jax.device_get(a)).reshape(-1)[:16].tolist())
+        get = lambda a: (None if a is None else np.asarray(jax.device_get(a)).
+                         reshape(-1)[:16].tolist())
         md = attn_metadata
-        print(f"\n===== PCP_DEBUG step (n_tokens={len(iid)}) =====", flush=True)
+        print(f"\n===== PCP_DEBUG step (n_tokens={len(iid)}) =====",
+              flush=True)
         print(f"  input_ids       : {iid[:n].tolist()}")
         print(f"  positions       : {pos[:n].tolist()}")
         print(f"  pred_tokens     : {pred[:n].tolist()}")
@@ -2659,9 +2665,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             last = num_current - 1
             logits_indices_view[0] = inv_row[last // C] * C + (last % C)
             logits_indices_view[1:] = -1
-            pcp_kv_cache_lens = device_array(
-                self.mesh, kv_cache_lens_np,
-                sharding=NamedSharding(self.mesh, PartitionSpec()))
+            pcp_kv_cache_lens = device_array(self.mesh,
+                                             kv_cache_lens_np,
+                                             sharding=NamedSharding(
+                                                 self.mesh, PartitionSpec()))
 
         spec_decode_metadata = None
         if self.speculative_config:

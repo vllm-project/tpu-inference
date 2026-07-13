@@ -18,7 +18,6 @@ from typing import Any, Callable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax import lax
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
 from jax.experimental.pallas.ops.tpu.splash_attention import \
@@ -809,15 +808,19 @@ def _lse_combine(o1: jax.Array, lse1: jax.Array, o2: jax.Array,
 
 def pcp_ragged_paged_attention(
     mesh: Mesh,
-    q: jax.Array,  # [2*pcp*C, num_q_heads, head_dim] local: [head_chunk | tail_chunk]
+    q: jax.
+    Array,  # [2*pcp*C, num_q_heads, head_dim] local: [head_chunk | tail_chunk]
     k: jax.Array,  # [2*pcp*C, num_kv_heads, head_dim]
     v: jax.Array,  # [2*pcp*C, num_kv_heads, head_dim]
     kv_cache: jax.Array,
-    kv_lens: jax.Array,  # i32[max_num_seqs] REAL total kv length = num_computed + num_current
+    kv_lens: jax.
+    Array,  # i32[max_num_seqs] REAL total kv length = num_computed + num_current
     page_indices: jax.Array,
-    cu_q_lens: jax.Array,  # i32[max_num_seqs+1] head chunk size C (cumsum): [0, C, ...]
+    cu_q_lens: jax.
+    Array,  # i32[max_num_seqs+1] head chunk size C (cumsum): [0, C, ...]
     distribution: jax.Array,
-    kv_cache_lens: jax.Array,  # i32[max_num_seqs] previously-computed kv len (num_computed); new KV = kv_lens - kv_cache_lens
+    kv_cache_lens: jax.
+    Array,  # i32[max_num_seqs] previously-computed kv len (num_computed); new KV = kv_lens - kv_cache_lens
     sm_scale: float,
     q_scale: float | None = None,
     k_scale: float | None = None,
@@ -879,9 +882,13 @@ def pcp_ragged_paged_attention(
             return g[inv_row].reshape(sum_s, *x.shape[1:])
 
         k_cur, v_cur = to_token_order(k_l), to_token_order(v_l)
-        common = dict(cp_rank=_rank_i32(r), cp_group_size=pcp_size,
-                      return_lse=True, sm_scale=sm_scale, q_scale=q_scale,
-                      k_scale=k_scale, v_scale=v_scale)
+        common = dict(cp_rank=_rank_i32(r),
+                      cp_group_size=pcp_size,
+                      return_lse=True,
+                      sm_scale=sm_scale,
+                      q_scale=q_scale,
+                      k_scale=k_scale,
+                      v_scale=v_scale)
         # REAL current length = kvl - kvcl (kvcl = num_computed). Head chunks are
         # fully real (num_current > pcp*C); the tail chunk that spans the padded
         # region is shortened so only real tokens are attended/written.
@@ -898,9 +905,19 @@ def pcp_ragged_paged_attention(
             kv_dummy = jnp.zeros((ag_q.shape[0], k_l.shape[1], k_l.shape[2]),
                                  k_l.dtype)
             o1, kvc1, l1 = pcp_ragged_paged_attention_kernel(
-                ag_q, kv_dummy, kv_dummy, kvc, kvl, pi, cu_cache,
-                distribution, kv_cache_lens=kvcl, skip_current_attn=True,
-                use_causal_mask=False, update_kv_cache=False, **common)
+                ag_q,
+                kv_dummy,
+                kv_dummy,
+                kvc,
+                kvl,
+                pi,
+                cu_cache,
+                distribution,
+                kv_cache_lens=kvcl,
+                skip_current_attn=True,
+                use_causal_mask=False,
+                update_kv_cache=False,
+                **common)
             o1, l1 = _lse_all_reduce(o1, l1, pcp_axis)
             o1 = lax.dynamic_slice_in_dim(o1, r * C, C, 0)  # this rank's chunk
             l1 = lax.dynamic_slice_in_dim(l1, r * C, C, 0)
@@ -913,9 +930,19 @@ def pcp_ragged_paged_attention(
             q_pos = jnp.zeros_like(cu[:-1]).at[0].set(q_pos_offset)
             cu_cur = jnp.zeros_like(cu).at[1].set(q_len)
             o2, kvc2, l2 = pcp_ragged_paged_attention_kernel(
-                q_buf, k_cur, v_cur, kvc1, kvl, pi, cu_cur, distribution,
-                kv_cache_lens=kvcl, q_pos_offsets=q_pos, skip_cache_attn=True,
-                use_causal_mask=use_causal_mask, update_kv_cache=writes_cache,
+                q_buf,
+                k_cur,
+                v_cur,
+                kvc1,
+                kvl,
+                pi,
+                cu_cur,
+                distribution,
+                kv_cache_lens=kvcl,
+                q_pos_offsets=q_pos,
+                skip_cache_attn=True,
+                use_causal_mask=use_causal_mask,
+                update_kv_cache=writes_cache,
                 **common)
             out = _lse_combine(o1, l1, o2[:C], l2[:C])
             return out, kvc2
@@ -1012,7 +1039,8 @@ def attention(
             md.block_tables,
             md.query_start_loc,  # PCP: head chunk size C (cumsum [0, C])
             md.request_distribution,
-            md.pcp_kv_cache_lens,  # PCP: num_computed (new KV = seq_lens - this)
+            md.
+            pcp_kv_cache_lens,  # PCP: num_computed (new KV = seq_lens - this)
             sm_scale=sm_scale,
             q_scale=q_scale,
             k_scale=k_scale,

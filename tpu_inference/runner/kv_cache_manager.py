@@ -822,7 +822,7 @@ class KVCacheManager:
                 num_blocks = kv_cache_tensor.size // page_size_bytes
 
             # Default KV cache is sharded over (BATCH=(dp, attn_dp)) on the
-            # num_blocks dim, and over (KV_CONTEXT=(dcp, pcp)) in the 
+            # num_blocks dim, and over (KV_CONTEXT=(dcp, pcp)) in the
             # block_size dim.
             divisor = common_utils.get_mesh_shape_product(
                 self.runner.mesh, ShardingAxisName.BATCH)

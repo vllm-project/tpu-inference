@@ -91,20 +91,21 @@ from tpu_inference.kernels.ragged_paged_attention.v3.util import (  # noqa: E402
 # lengths (RAGGED multi-query prefill), e.g. "512,256,768".
 _a1 = sys.argv[1] if len(sys.argv) > 1 else str(64 * 1024)
 RAGGED_LENS = [int(x) for x in _a1.split(",")] if "," in _a1 else None
-S = sum(RAGGED_LENS) if RAGGED_LENS else int(_a1)          # total current tokens
-PCP = int(sys.argv[2]) if len(sys.argv) > 2 else 4         # context-parallel size
-TP = int(sys.argv[3]) if len(sys.argv) > 3 else 4          # tensor-parallel size
-PREV = int(sys.argv[4]) if len(sys.argv) > 4 else 0        # prev cache tokens
+S = sum(RAGGED_LENS) if RAGGED_LENS else int(_a1)  # total current tokens
+PCP = int(sys.argv[2]) if len(sys.argv) > 2 else 4  # context-parallel size
+TP = int(sys.argv[3]) if len(sys.argv) > 3 else 4  # tensor-parallel size
+PREV = int(sys.argv[4]) if len(sys.argv) > 4 else 0  # prev cache tokens
 
-NQ, NKV, HD = 16, 4, 128        # q heads, kv heads, head dim (GQA ratio 4)
-PAGE = 32                       # kv-cache page size
+NQ, NKV, HD = 16, 4, 128  # q heads, kv heads, head dim (GQA ratio 4)
+PAGE = 32  # kv-cache page size
 DTYPE = jnp.bfloat16
 SM_SCALE = HD**-0.5
 
-CUR = S                                 # current chunk length
-NUM_PAGES_CUR = cdiv(CUR, PAGE)         # pages for the current all-gathered KV
+CUR = S  # current chunk length
+NUM_PAGES_CUR = cdiv(CUR, PAGE)  # pages for the current all-gathered KV
 NUM_PAGES_PREV = cdiv(PREV, PAGE) if PREV else 0
-NUM_PAGES_TP = cdiv(PREV + CUR, PAGE)   # TP chunked cache: prev + written current
+NUM_PAGES_TP = cdiv(PREV + CUR,
+                    PAGE)  # TP chunked cache: prev + written current
 KVP = get_dtype_packing(DTYPE)
 # Head-tail layout: device r owns chunk r and chunk (2*PCP-1-r), each of size C.
 C = CUR // (2 * PCP)
@@ -132,8 +133,8 @@ def make_prev_cache(prev_k, prev_v, npages):
     h1, h2 = kv.shape[1], kv.shape[2]  # capture before reshape reassigns kv
     pages_prev = cdiv(PREV, PAGE)
     pad = pages_prev * PAGE - PREV
-    kv = jnp.pad(kv, ((0, pad), (0, 0), (0, 0), (0, 0))).reshape(
-        pages_prev, PAGE, h1, h2, HD)
+    kv = jnp.pad(kv, ((0, pad), (0, 0), (0, 0),
+                      (0, 0))).reshape(pages_prev, PAGE, h1, h2, HD)
     cache = jnp.zeros((npages, PAGE, h1, h2, HD), DTYPE)
     return cache.at[:pages_prev].set(kv)
 
@@ -198,14 +199,24 @@ def run_tp(q, k, v):
     hs = PS(None, "x", None)
     q, k, v = put(mesh, hs, q), put(mesh, hs, k), put(mesh, hs, v)
 
-    @partial(shard_map, mesh=mesh,
+    @partial(shard_map,
+             mesh=mesh,
              in_specs=(hs, hs, hs, PS(), PS(), PS(), PS()),
-             out_specs=hs, check_rep=False)
+             out_specs=hs,
+             check_rep=False)
     def fn(q, k, v, kv_lens, page_indices, cu_q_lens, distribution):
         cache = make_cache(k.shape[1], NUM_PAGES_CUR)
-        out, _ = ragged_paged_attention(
-            q, k, v, cache, kv_lens, page_indices, cu_q_lens, distribution,
-            sm_scale=SM_SCALE, use_causal_mask=True, update_kv_cache=True)
+        out, _ = ragged_paged_attention(q,
+                                        k,
+                                        v,
+                                        cache,
+                                        kv_lens,
+                                        page_indices,
+                                        cu_q_lens,
+                                        distribution,
+                                        sm_scale=SM_SCALE,
+                                        use_causal_mask=True,
+                                        update_kv_cache=True)
         return out
 
     args = (i32([CUR]), jnp.arange(NUM_PAGES_CUR, dtype=jnp.int32),
@@ -228,11 +239,21 @@ def _pcp_body(qc, k_full, v_full, kv_lens, page_indices, cu_q_lens,
     for i in range(2):
         qpos = jax.lax.reshape(offsets[i], (1, )).astype(jnp.int32)
         q_buf = jnp.zeros((CUR, NQ, HD), DTYPE).at[:C].set(qc[i])
-        out, _ = ragged_paged_attention(
-            q_buf, k_full, v_full, cache, kv_lens, page_indices, cu_q_lens,
-            distribution, cp_rank=cp_rank, cp_group_size=PCP,
-            all_gather_kv=True, q_pos_offsets=qpos, sm_scale=SM_SCALE,
-            update_kv_cache=False, use_causal_mask=True)
+        out, _ = ragged_paged_attention(q_buf,
+                                        k_full,
+                                        v_full,
+                                        cache,
+                                        kv_lens,
+                                        page_indices,
+                                        cu_q_lens,
+                                        distribution,
+                                        cp_rank=cp_rank,
+                                        cp_group_size=PCP,
+                                        all_gather_kv=True,
+                                        q_pos_offsets=qpos,
+                                        sm_scale=SM_SCALE,
+                                        update_kv_cache=False,
+                                        use_causal_mask=True)
         outs.append(out[:C])
     return jnp.stack(outs)[None]
 
@@ -246,9 +267,11 @@ def run_pcp(q2, k_full, v_full, gather):
     q2 = put(mesh, qspec, q2)
     k_full, v_full = put(mesh, kspec, k_full), put(mesh, kspec, v_full)
 
-    @partial(shard_map, mesh=mesh,
+    @partial(shard_map,
+             mesh=mesh,
              in_specs=(qspec, kspec, kspec, PS(), PS(), PS(), PS()),
-             out_specs=PS("x", None, None, None, None), check_rep=False)
+             out_specs=PS("x", None, None, None, None),
+             check_rep=False)
     def fn(q2, k, v, kv_lens, page_indices, cu_q_lens, distribution):
         if gather:
             k = jax.lax.all_gather(k, "x", axis=0, tiled=True)
@@ -256,8 +279,9 @@ def run_pcp(q2, k_full, v_full, gather):
         return _pcp_body(q2[0], k, v, kv_lens, page_indices, cu_q_lens,
                          distribution)
 
-    args = (i32([CUR]), jnp.arange(NUM_PAGES_CUR, dtype=jnp.int32),
-            i32([0, C]), i32([0, 0, 1]))
+    args = (i32([CUR]), jnp.arange(NUM_PAGES_CUR,
+                                   dtype=jnp.int32), i32([0,
+                                                          C]), i32([0, 0, 1]))
     return bench(jax.jit(fn), q2, k_full, v_full, *args)
 
 
@@ -270,16 +294,25 @@ def run_tp_chunked(q, cur_k, cur_v, prev_k, prev_v):
     cur_k, cur_v = put(mesh, hs, cur_k), put(mesh, hs, cur_v)
     prev_k, prev_v = put(mesh, hs, prev_k), put(mesh, hs, prev_v)
 
-    @partial(shard_map, mesh=mesh,
+    @partial(shard_map,
+             mesh=mesh,
              in_specs=(hs, hs, hs, hs, hs, PS(), PS(), PS(), PS()),
-             out_specs=hs, check_rep=False)
+             out_specs=hs,
+             check_rep=False)
     def fn(q, cur_k, cur_v, prev_k, prev_v, kv_lens, page_indices, cu_q_lens,
            distribution):
         cache = make_prev_cache(prev_k, prev_v, NUM_PAGES_TP)
-        out, _ = ragged_paged_attention(
-            q, cur_k, cur_v, cache, kv_lens, page_indices, cu_q_lens,
-            distribution, sm_scale=SM_SCALE, use_causal_mask=True,
-            update_kv_cache=True)
+        out, _ = ragged_paged_attention(q,
+                                        cur_k,
+                                        cur_v,
+                                        cache,
+                                        kv_lens,
+                                        page_indices,
+                                        cu_q_lens,
+                                        distribution,
+                                        sm_scale=SM_SCALE,
+                                        use_causal_mask=True,
+                                        update_kv_cache=True)
         return out
 
     args = (i32([PREV + CUR]), jnp.arange(NUM_PAGES_TP, dtype=jnp.int32),
@@ -307,16 +340,35 @@ def _pcp_chunk_body(qc, cur_k, cur_v, prev_k, prev_v):
         qpos = jax.lax.reshape(offsets[i], (1, )).astype(jnp.int32)
         q_buf = jnp.zeros((CUR, NQ, HD), DTYPE).at[:C].set(qc[i])
         # Current: causal attention over the all-gathered current KV.
-        o_cur, _, l_cur = ragged_paged_attention(
-            q_buf, cur_k, cur_v, cur_cache, i32([CUR]), pi_cur, cu, dist,
-            cp_rank=cp_rank, cp_group_size=PCP, all_gather_kv=True,
-            q_pos_offsets=qpos, sm_scale=SM_SCALE, update_kv_cache=False,
-            use_causal_mask=True, return_lse=True)
+        o_cur, _, l_cur = ragged_paged_attention(q_buf,
+                                                 cur_k,
+                                                 cur_v,
+                                                 cur_cache,
+                                                 i32([CUR]),
+                                                 pi_cur,
+                                                 cu,
+                                                 dist,
+                                                 cp_rank=cp_rank,
+                                                 cp_group_size=PCP,
+                                                 all_gather_kv=True,
+                                                 q_pos_offsets=qpos,
+                                                 sm_scale=SM_SCALE,
+                                                 update_kv_cache=False,
+                                                 use_causal_mask=True,
+                                                 return_lse=True)
         # Prev: non-causal attention over the previous cache (cur_k/v ignored).
-        o_prev, _, l_prev = ragged_paged_attention(
-            q_buf, cur_k, cur_v, prev_cache, i32([PREV]), pi_prev, cu, dist,
-            sm_scale=SM_SCALE, update_kv_cache=False, use_causal_mask=False,
-            return_lse=True)
+        o_prev, _, l_prev = ragged_paged_attention(q_buf,
+                                                   cur_k,
+                                                   cur_v,
+                                                   prev_cache,
+                                                   i32([PREV]),
+                                                   pi_prev,
+                                                   cu,
+                                                   dist,
+                                                   sm_scale=SM_SCALE,
+                                                   update_kv_cache=False,
+                                                   use_causal_mask=False,
+                                                   return_lse=True)
         o, _ = merge_lse(o_prev[:C], l_prev[:C], o_cur[:C], l_cur[:C])
         outs.append(o)
     return jnp.stack(outs)[None]
@@ -331,8 +383,10 @@ def run_pcp_chunked(q2, cur_k, cur_v, prev_k, prev_v, gather):
     cur_k, cur_v = put(mesh, kspec, cur_k), put(mesh, kspec, cur_v)
     prev_k, prev_v = put(mesh, PS(), prev_k), put(mesh, PS(), prev_v)
 
-    @partial(shard_map, mesh=mesh,
-             in_specs=(qspec, kspec, kspec, PS(), PS()), out_specs=qspec,
+    @partial(shard_map,
+             mesh=mesh,
+             in_specs=(qspec, kspec, kspec, PS(), PS()),
+             out_specs=qspec,
              check_rep=False)
     def fn(q2, cur_k, cur_v, prev_k, prev_v):
         if gather:
@@ -355,7 +409,7 @@ def check_kv_update():
     """
     P = PCP
     hd, nq, nkv, page, C_kv = 128, 8, 2, 16, 64
-    Skv = 2 * P * C_kv          # gathered current KV length = 2*P*C
+    Skv = 2 * P * C_kv  # gathered current KV length = 2*P*C
     npages = cdiv(Skv, page)
     nkv2 = align_to(2 * nkv, KVP)
     rng = np.random.default_rng(7)
@@ -366,20 +420,34 @@ def check_kv_update():
     mesh = Mesh(np.array(jax.devices()[:P]), ("x", ))
     k, v = put(mesh, PS(), k), put(mesh, PS(), v)
 
-    @partial(shard_map, mesh=mesh, in_specs=(PS(), PS()),
-             out_specs=PS("x", None, None, None, None, None), check_rep=False)
+    @partial(shard_map,
+             mesh=mesh,
+             in_specs=(PS(), PS()),
+             out_specs=PS("x", None, None, None, None, None),
+             check_rep=False)
     def fn(k, v):
         r = jax.lax.axis_index("x")
         cp_rank = jax.lax.reshape(r, (1, )).astype(jnp.int32)
         cache = jnp.zeros((npages, page, nkv2 // KVP, KVP, hd), DTYPE)
         q = jnp.zeros((Skv, nq, hd), DTYPE)
-        _, new_cache = ragged_paged_attention(
-            q, k, v, cache, i32([Skv]), jnp.arange(npages, dtype=jnp.int32),
-            i32([0, C_kv]), i32([0, 0, 1]), cp_rank=cp_rank, cp_group_size=P,
-            all_gather_kv=True, update_kv_cache=True, use_causal_mask=False)
+        _, new_cache = ragged_paged_attention(q,
+                                              k,
+                                              v,
+                                              cache,
+                                              i32([Skv]),
+                                              jnp.arange(npages,
+                                                         dtype=jnp.int32),
+                                              i32([0, C_kv]),
+                                              i32([0, 0, 1]),
+                                              cp_rank=cp_rank,
+                                              cp_group_size=P,
+                                              all_gather_kv=True,
+                                              update_kv_cache=True,
+                                              use_causal_mask=False)
         return new_cache[None]
 
-    caches = np.asarray(jax.jit(fn)(k, v))  # [P, npages, page, nkv2//kvp, kvp, hd]
+    caches = np.asarray(jax.jit(fn)(
+        k, v))  # [P, npages, page, nkv2//kvp, kvp, hd]
     flat = caches.reshape(P, -1, caches.shape[3], caches.shape[4], hd)
     g = np.arange(Skv)
     recon = flat[g % P, g // P]  # gather token g from its owning rank/slot
@@ -393,10 +461,12 @@ def check_kv_update():
     zfrac = float((rf == 0).mean())
     nnan = int(np.isnan(rf).sum())
     nondeg = mx > 0.0 and nnan == 0 and zfrac < 0.5
-    print(f"  PCP strided KV write vs merged current KV (hd=128): exact={exact}  "
-          f"mismatched-elems={mism}/{ref.size}")
-    print(f"  written cache non-degenerate: max|x|={mx:.4e}  mean|x|={mean_abs:.4e}"
-          f"  zero-frac={zfrac:.3f}  nan={nnan}  ok={nondeg}")
+    print(
+        f"  PCP strided KV write vs merged current KV (hd=128): exact={exact}  "
+        f"mismatched-elems={mism}/{ref.size}")
+    print(
+        f"  written cache non-degenerate: max|x|={mx:.4e}  mean|x|={mean_abs:.4e}"
+        f"  zero-frac={zfrac:.3f}  nan={nnan}  ok={nondeg}")
     return exact and nondeg
 
 
@@ -406,7 +476,10 @@ def run_allgather_only(k, v):
     ksp = PS("x", None, None)
     k, v = put(mesh, ksp, k), put(mesh, ksp, v)
 
-    @partial(shard_map, mesh=mesh, in_specs=(ksp, ksp), out_specs=(PS(), PS()),
+    @partial(shard_map,
+             mesh=mesh,
+             in_specs=(ksp, ksp),
+             out_specs=(PS(), PS()),
              check_rep=False)
     def fn(k, v):
         return (jax.lax.all_gather(k, "x", axis=0, tiled=True),
@@ -428,9 +501,10 @@ def describe(out, label):
     frac_zero = float((x == 0).sum()) / n
     mx = float(np.abs(x).max())
     ok = (n_nan == 0 and n_inf == 0 and mx > 0.0 and frac_zero < 0.5)
-    print(f"  {label:<18}: max|x|={mx:.4e}  mean|x|={float(np.abs(x).mean()):.4e}"
-          f"  nan={n_nan}  inf={n_inf}  zero-frac={frac_zero:.3f}  "
-          f"non-degenerate={ok}")
+    print(
+        f"  {label:<18}: max|x|={mx:.4e}  mean|x|={float(np.abs(x).mean()):.4e}"
+        f"  nan={n_nan}  inf={n_inf}  zero-frac={frac_zero:.3f}  "
+        f"non-degenerate={ok}")
     return ok
 
 
@@ -478,11 +552,13 @@ def run_ragged_test(lens):
     """
     N = len(lens)
     for l in lens:
-        assert l % (2 * PCP) == 0, f"len {l} must be a multiple of 2*PCP={2*PCP}"
+        assert l % (2 *
+                    PCP) == 0, f"len {l} must be a multiple of 2*PCP={2*PCP}"
     CUR_r = sum(lens)
-    starts = np.concatenate([[0], np.cumsum(lens)]).astype(int)  # req boundaries
-    Cs = [l // (2 * PCP) for l in lens]         # per-request head-tail chunk size
-    sumC = sum(Cs)                              # local Q rows per half per device
+    starts = np.concatenate([[0],
+                             np.cumsum(lens)]).astype(int)  # req boundaries
+    Cs = [l // (2 * PCP) for l in lens]  # per-request head-tail chunk size
+    sumC = sum(Cs)  # local Q rows per half per device
     # The kernel reshapes page_indices to [max_num_seqs, pages_per_seq], so give
     # every request a uniform page count (>= its own). The current KV is read
     # from HBM under all_gather_kv, so these cache pages only back the (unused,
@@ -504,21 +580,31 @@ def run_ragged_test(lens):
     mesh_tp = Mesh(np.array(jax.devices()[:TP]), ("x", ))
     hs = PS(None, "x", None)
 
-    @partial(shard_map, mesh=mesh_tp,
-             in_specs=(hs, hs, hs, PS(), PS(), PS(), PS()), out_specs=hs,
+    @partial(shard_map,
+             mesh=mesh_tp,
+             in_specs=(hs, hs, hs, PS(), PS(), PS(), PS()),
+             out_specs=hs,
              check_rep=False)
     def tp_fn(q, k, v, kvl, pi, cu, d):
         cache = make_cache(k.shape[1], npages)
-        out, _ = ragged_paged_attention(q, k, v, cache, kvl, pi, cu, d,
-                                        sm_scale=SM_SCALE, use_causal_mask=True,
+        out, _ = ragged_paged_attention(q,
+                                        k,
+                                        v,
+                                        cache,
+                                        kvl,
+                                        pi,
+                                        cu,
+                                        d,
+                                        sm_scale=SM_SCALE,
+                                        use_causal_mask=True,
                                         update_kv_cache=True)
         return out
 
-    ref = np.asarray(
-        jax.jit(tp_fn)(put(mesh_tp, hs, q), put(mesh_tp, hs, k),
-                       put(mesh_tp, hs, v), i32(lens),
-                       jnp.arange(npages, dtype=jnp.int32), i32(starts.tolist()),
-                       dist), dtype=np.float32)
+    ref = np.asarray(jax.jit(tp_fn)(put(mesh_tp, hs, q), put(mesh_tp, hs, k),
+                                    put(mesh_tp, hs, v), i32(lens),
+                                    jnp.arange(npages, dtype=jnp.int32),
+                                    i32(starts.tolist()), dist),
+                     dtype=np.float32)
 
     # ---- PCP: head-tail arrange Q per device [PCP, 2, sumC, NQ, HD] ----
     qn = np.asarray(q, np.float32)
@@ -532,13 +618,17 @@ def run_ragged_test(lens):
                 ql[r, half, pos:pos + c] = qn[s + ch * c:s + (ch + 1) * c]
                 pos += c
     ql = jnp.array(ql, DTYPE)
-    cu_pcp = i32(np.concatenate([[0], np.cumsum(Cs)]).tolist())  # [0,C0,C0+C1,..]
+    cu_pcp = i32(np.concatenate([[0],
+                                 np.cumsum(Cs)]).tolist())  # [0,C0,C0+C1,..]
     Cs_j = jnp.array(Cs, jnp.int32)
     mesh_pcp = Mesh(np.array(jax.devices()[:PCP]), ("x", ))
     qspec = PS("x", None, None, None, None)
 
-    @partial(shard_map, mesh=mesh_pcp, in_specs=(qspec, PS(), PS()),
-             out_specs=qspec, check_rep=False)
+    @partial(shard_map,
+             mesh=mesh_pcp,
+             in_specs=(qspec, PS(), PS()),
+             out_specs=qspec,
+             check_rep=False)
     def pcp_fn(q2, k, v):
         r = jax.lax.axis_index("x")
         cp_rank = jax.lax.reshape(r, (1, )).astype(jnp.int32)
@@ -547,19 +637,31 @@ def run_ragged_test(lens):
         for half in range(2):
             base = r if half == 0 else (2 * PCP - 1 - r)
             qpos = (base * Cs_j).astype(jnp.int32)  # per-request chunk offset
-            q_buf = jnp.zeros((CUR_r, NQ, HD), DTYPE).at[:sumC].set(q2[0, half])
-            out, _ = ragged_paged_attention(
-                q_buf, k, v, cache, i32(lens),
-                jnp.arange(npages, dtype=jnp.int32), cu_pcp, dist,
-                cp_rank=cp_rank, cp_group_size=PCP, all_gather_kv=True,
-                q_pos_offsets=qpos, sm_scale=SM_SCALE, update_kv_cache=False,
-                use_causal_mask=True)
+            q_buf = jnp.zeros((CUR_r, NQ, HD), DTYPE).at[:sumC].set(q2[0,
+                                                                       half])
+            out, _ = ragged_paged_attention(q_buf,
+                                            k,
+                                            v,
+                                            cache,
+                                            i32(lens),
+                                            jnp.arange(npages,
+                                                       dtype=jnp.int32),
+                                            cu_pcp,
+                                            dist,
+                                            cp_rank=cp_rank,
+                                            cp_group_size=PCP,
+                                            all_gather_kv=True,
+                                            q_pos_offsets=qpos,
+                                            sm_scale=SM_SCALE,
+                                            update_kv_cache=False,
+                                            use_causal_mask=True)
             outs.append(out[:sumC])
         return jnp.stack(outs)[None]
 
-    pcp_out = np.asarray(
-        jax.jit(pcp_fn)(put(mesh_pcp, qspec, ql), put(mesh_pcp, PS(), k),
-                        put(mesh_pcp, PS(), v)), dtype=np.float32)
+    pcp_out = np.asarray(jax.jit(pcp_fn)(put(mesh_pcp, qspec, ql),
+                                         put(mesh_pcp, PS(), k),
+                                         put(mesh_pcp, PS(), v)),
+                         dtype=np.float32)
 
     # ---- reassemble PCP output to [CUR, NQ, HD], compare per request ----
     out_full = np.zeros((CUR_r, NQ, HD), np.float32)
@@ -582,8 +684,9 @@ def run_ragged_test(lens):
         rel = d / (float(np.abs(a).max()) + 1e-9)
         ok = rel < 0.05
         all_ok = all_ok and ok
-        print(f"  req {i:2d} (len {lens[i]:5d}, C={Cs[i]:4d}): max|Δ|={d:.4e}  "
-              f"rel={rel:.4e}  {'OK' if ok else 'FAIL'}")
+        print(
+            f"  req {i:2d} (len {lens[i]:5d}, C={Cs[i]:4d}): max|Δ|={d:.4e}  "
+            f"rel={rel:.4e}  {'OK' if ok else 'FAIL'}")
     print(f"  RAGGED MULTI-QUERY PCP CORRECT: {all_ok}")
     print("=" * 72)
     return all_ok
@@ -601,8 +704,8 @@ def run_new_test(S):
     two_p = 2 * P
     padded_S = max(two_p, 1 << (S - 1).bit_length())
     Cc = padded_S // two_p
-    per_rank = cdiv(S, P)                 # residue tokens per rank (round-robin)
-    npages = cdiv(per_rank, PAGE)         # local pages per rank
+    per_rank = cdiv(S, P)  # residue tokens per rank (round-robin)
+    npages = cdiv(per_rank, PAGE)  # local pages per rank
     npages_tp = cdiv(S, PAGE)
     rng = np.random.default_rng(1234)
     q = gen_random((S, NQ, HD), DTYPE, rng)
@@ -622,19 +725,31 @@ def run_new_test(S):
     hs = PS()
     cspec = PS()
 
-    @partial(shard_map, mesh=mesh_tp,
+    @partial(shard_map,
+             mesh=mesh_tp,
              in_specs=(hs, hs, hs, PS(), PS(), PS(), PS()),
-             out_specs=(hs, cspec), check_rep=False)
+             out_specs=(hs, cspec),
+             check_rep=False)
     def tp_fn(q, k, v, kvl, pi, cu, d):
         cache = make_cache(k.shape[1], npages_tp)
-        out, new_cache = ragged_paged_attention(
-            q, k, v, cache, kvl, pi, cu, d, sm_scale=SM_SCALE,
-            use_causal_mask=True, update_kv_cache=True)
+        out, new_cache = ragged_paged_attention(q,
+                                                k,
+                                                v,
+                                                cache,
+                                                kvl,
+                                                pi,
+                                                cu,
+                                                d,
+                                                sm_scale=SM_SCALE,
+                                                use_causal_mask=True,
+                                                update_kv_cache=True)
         return out, new_cache
 
-    ref_out, ref_cache = jax.jit(tp_fn)(
-        put(mesh_tp, hs, q), put(mesh_tp, hs, k), put(mesh_tp, hs, v),
-        i32([S]), jnp.arange(npages_tp, dtype=jnp.int32), i32([0, S]), dist)
+    ref_out, ref_cache = jax.jit(tp_fn)(put(mesh_tp, hs,
+                                            q), put(mesh_tp, hs, k),
+                                        put(mesh_tp, hs, v), i32([S]),
+                                        jnp.arange(npages_tp, dtype=jnp.int32),
+                                        i32([0, S]), dist)
     ref_out = np.asarray(ref_out, np.float32)
     ref_cache = np.asarray(ref_cache, np.float32)  # [npages_tp,PAGE,h1,h2,HD]
     rc = ref_cache.reshape(-1, ref_cache.shape[2], ref_cache.shape[3], HD)
@@ -651,23 +766,28 @@ def run_new_test(S):
             if e > s:
                 ql[r, half, :e - s] = qn[s:e]  # pad rows past S stay zero
     ql = jnp.array(ql, DTYPE)
-    kbuf = jnp.array(np.pad(np.asarray(k, np.float32),
-                            ((0, padded_S - S), (0, 0), (0, 0))), DTYPE)
-    vbuf = jnp.array(np.pad(np.asarray(v, np.float32),
-                            ((0, padded_S - S), (0, 0), (0, 0))), DTYPE)
+    kbuf = jnp.array(
+        np.pad(np.asarray(k, np.float32), ((0, padded_S - S), (0, 0), (0, 0))),
+        DTYPE)
+    vbuf = jnp.array(
+        np.pad(np.asarray(v, np.float32), ((0, padded_S - S), (0, 0), (0, 0))),
+        DTYPE)
     mesh_pcp = Mesh(np.array(jax.devices()[:P]), ("x", ))
     qspec = PS("x", None, None, None, None)
     ccspec = PS("x", None, None, None, None, None)
 
-    @partial(shard_map, mesh=mesh_pcp, in_specs=(qspec, PS(), PS()),
-             out_specs=(qspec, ccspec), check_rep=False)
+    @partial(shard_map,
+             mesh=mesh_pcp,
+             in_specs=(qspec, PS(), PS()),
+             out_specs=(qspec, ccspec),
+             check_rep=False)
     def pcp_fn(q2, k, v):
         r = jax.lax.axis_index("x")
         cp_rank = jax.lax.reshape(r, (1, )).astype(jnp.int32)
         cache = make_cache(NKV, npages)
         pi = jnp.arange(npages, dtype=jnp.int32)
-        kvl = i32([S])              # real total (num_computed=0)
-        kvcl = i32([0])             # num_computed
+        kvl = i32([S])  # real total (num_computed=0)
+        kvcl = i32([0])  # num_computed
         outs = []
         kvc = cache
         for half in range(2):
@@ -675,20 +795,34 @@ def run_new_test(S):
             qpos = jax.lax.reshape(base * Cc, (1, )).astype(jnp.int32)
             q_len = jnp.clip(S - base * Cc, 0, Cc).astype(jnp.int32)
             cu = jnp.zeros((2, ), jnp.int32).at[1].set(q_len)
-            q_buf = jnp.zeros((padded_S, NQ, HD), DTYPE).at[:Cc].set(q2[0, half])
-            writes = (half == 1)  # tail writes (kernel forces >=1 bq if all-pad)
-            out, kvc, _ = ragged_paged_attention(
-                q_buf, k, v, kvc, kvl, pi, cu, dist, kv_cache_lens=kvcl,
-                cp_rank=cp_rank, cp_group_size=P, q_pos_offsets=qpos,
-                skip_cache_attn=True, sm_scale=SM_SCALE,
-                update_kv_cache=writes, use_causal_mask=True, return_lse=True)
+            q_buf = jnp.zeros((padded_S, NQ, HD), DTYPE).at[:Cc].set(q2[0,
+                                                                        half])
+            writes = (half == 1
+                      )  # tail writes (kernel forces >=1 bq if all-pad)
+            out, kvc, _ = ragged_paged_attention(q_buf,
+                                                 k,
+                                                 v,
+                                                 kvc,
+                                                 kvl,
+                                                 pi,
+                                                 cu,
+                                                 dist,
+                                                 kv_cache_lens=kvcl,
+                                                 cp_rank=cp_rank,
+                                                 cp_group_size=P,
+                                                 q_pos_offsets=qpos,
+                                                 skip_cache_attn=True,
+                                                 sm_scale=SM_SCALE,
+                                                 update_kv_cache=writes,
+                                                 use_causal_mask=True,
+                                                 return_lse=True)
             outs.append(out[:Cc])
         return jnp.stack(outs)[None], kvc[None]
 
-    pcp_out, pcp_cache = jax.jit(pcp_fn)(
-        put(mesh_pcp, qspec, ql), put(mesh_pcp, PS(), kbuf),
-        put(mesh_pcp, PS(), vbuf))
-    pcp_out = np.asarray(pcp_out, np.float32)      # [P,2,Cc,NQ,HD]
+    pcp_out, pcp_cache = jax.jit(pcp_fn)(put(mesh_pcp, qspec, ql),
+                                         put(mesh_pcp, PS(), kbuf),
+                                         put(mesh_pcp, PS(), vbuf))
+    pcp_out = np.asarray(pcp_out, np.float32)  # [P,2,Cc,NQ,HD]
     pcp_cache = np.asarray(pcp_cache, np.float32)  # [P,npages,PAGE,h1,h2,HD]
 
     # reassemble output to natural order, compare [0,S)
@@ -741,10 +875,18 @@ def main():
         prev_k = gen_random((PREV, NKV, HD), DTYPE, rng)
         prev_v = gen_random((PREV, NKV, HD), DTYPE, rng)
         tp_ms, out_tp = run_tp_chunked(q_cur, cur_k, cur_v, prev_k, prev_v)
-        pcp_ms, out_pcp_g = run_pcp_chunked(q2, cur_k, cur_v, prev_k, prev_v,
+        pcp_ms, out_pcp_g = run_pcp_chunked(q2,
+                                            cur_k,
+                                            cur_v,
+                                            prev_k,
+                                            prev_v,
                                             gather=False)
-        pcp_ag_ms, out_pcp_ag_g = run_pcp_chunked(q2, cur_k, cur_v, prev_k,
-                                                  prev_v, gather=True)
+        pcp_ag_ms, out_pcp_ag_g = run_pcp_chunked(q2,
+                                                  cur_k,
+                                                  cur_v,
+                                                  prev_k,
+                                                  prev_v,
+                                                  gather=True)
     ag_ms, _ = run_allgather_only(cur_k, cur_v)
 
     out_pcp = reassemble_head_tail(out_pcp_g)
@@ -755,11 +897,14 @@ def main():
     print(f"  PCP kernel only (KV pre-gathered) : {pcp_ms:8.3f} ms")
     print(f"  PCP all-gather KV (standalone)    : {ag_ms:8.3f} ms")
     print(f"  PCP kernel + all-gather (full)    : {pcp_ag_ms:8.3f} ms")
-    print(f"  marginal gather (full - kernel)   : {pcp_ag_ms - pcp_ms:8.3f} ms")
+    print(
+        f"  marginal gather (full - kernel)   : {pcp_ag_ms - pcp_ms:8.3f} ms")
     print(f"  PCP-kernel / TP ratio             : {pcp_ms / tp_ms:8.3f}")
     print(f"  PCP-full   / TP ratio             : {pcp_ag_ms / tp_ms:8.3f}")
     print("-" * 72)
-    print("output sanity (guards against a trivially-passing all-zero/NaN match)")
+    print(
+        "output sanity (guards against a trivially-passing all-zero/NaN match)"
+    )
     d0 = describe(out_tp, "TP")
     d1 = describe(out_pcp, "PCP-kernel")
     d2 = describe(out_pcp_ag, "PCP-allgather")
@@ -771,10 +916,16 @@ def main():
     print(f"  EQUIVALENT: {ok1 and ok2 and d0 and d1 and d2 and ok3} "
           f"(equivalent AND non-degenerate AND kv-write correct)")
     print("-" * 72)
-    print("On the gather: there is a strict data dependency (the kernel reads the")
-    print("gathered KV), so it does NOT overlap the attention compute. 'marginal")
-    print("gather' is small because the standalone number also writes the full")
-    print("gathered KV to HBM -- a materialization the kernel needs anyway; the")
+    print(
+        "On the gather: there is a strict data dependency (the kernel reads the"
+    )
+    print(
+        "gathered KV), so it does NOT overlap the attention compute. 'marginal"
+    )
+    print(
+        "gather' is small because the standalone number also writes the full")
+    print(
+        "gathered KV to HBM -- a materialization the kernel needs anyway; the")
     print("truly-extra part is just the ICI communication.")
     print("=" * 72)
 

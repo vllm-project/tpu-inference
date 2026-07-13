@@ -344,11 +344,14 @@ def _ragged_paged_attention_kernel_loop(
     cp_rank_ref: jax.Array | None,  # i32[1]
     # Prefill context parallelism (PCP): all-gathered KV, head-tail sharded Q.
     cu_kv_lens_ref: jax.Array
-    | None,  # i32[max_num_seqs + 1] - layout of the all-gathered current KV in kv_hbm_ref (decoupled from local cu_q_lens)
+    |
+    None,  # i32[max_num_seqs + 1] - layout of the all-gathered current KV in kv_hbm_ref (decoupled from local cu_q_lens)
     q_pos_offset_ref: jax.Array
-    | None,  # i32[max_num_seqs] - per-seq global position (within current tokens) of this launch's local Q chunk
+    |
+    None,  # i32[max_num_seqs] - per-seq global position (within current tokens) of this launch's local Q chunk
     kv_pos_offset_ref: jax.Array
-    | None,  # i32[max_num_seqs] - per-seq global position (within current tokens) of this launch's streamed KV shard (ring attention)
+    |
+    None,  # i32[max_num_seqs] - per-seq global position (within current tokens) of this launch's streamed KV shard (ring attention)
     # Input
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     kv_hbm_ref,  # [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
@@ -2043,11 +2046,14 @@ def ragged_paged_attention(
     cp_group_size: int | None = None,
     # Prefill context parallelism (PCP). See module docstring / run_rpa_kernel.
     cu_kv_lens: jax.Array
-    | None = None,  # i32[max_num_seqs + 1] - layout of the all-gathered current KV
+    |
+    None = None,  # i32[max_num_seqs + 1] - layout of the all-gathered current KV
     q_pos_offsets: jax.Array
-    | None = None,  # i32[max_num_seqs] - global (within-current) offset of the local Q chunk
+    |
+    None = None,  # i32[max_num_seqs] - global (within-current) offset of the local Q chunk
     kv_pos_offsets: jax.Array
-    | None = None,  # i32[max_num_seqs] - global (within-current) offset of the streamed KV shard (ring attention)
+    |
+    None = None,  # i32[max_num_seqs] - global (within-current) offset of the streamed KV shard (ring attention)
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
     skip_kv_mask: bool = False,
