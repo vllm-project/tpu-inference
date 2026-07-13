@@ -23,7 +23,7 @@ def parse_benchmark_log(log_path, result_path):
     METRIC_MAPPING = {
         "Request throughput": "Throughput",
         "Output token throughput": "OutputTokenThroughput",
-        "Total Token throughput": "TotalTokenThroughput",
+        "Total token throughput": "TotalTokenThroughput",
         "Median TTFT": "MedianTTFT",
         "P99 TTFT": "P99TTFT",
         "Median TPOT": "MedianTPOT",
