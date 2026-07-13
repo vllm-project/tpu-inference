@@ -48,8 +48,8 @@ def ref_ragged_paged_attention_hd64(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
-    attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads]
     *,
+    attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads]
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
@@ -69,7 +69,7 @@ def ref_ragged_paged_attention_hd64(
         page_indices,
         cu_q_lens,
         distribution,
-        attention_sink,
+        attention_sink=attention_sink,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
@@ -104,6 +104,9 @@ def ref_ragged_paged_attention_hd64(
     merged_kv = merge_kv(keys, values)
     queries = jnp.pad(queries, ((0, 0), (0, 0), (0, 64)), constant_values=0.0)
     outputs = []
+
+    if attention_sink is not None:
+        attention_sink = attention_sink.reshape(actual_num_q_heads, 1, 1)
 
     for i in range(distribution[-1]):
         q_start = cu_q_lens[i]
@@ -160,11 +163,7 @@ def ref_ragged_paged_attention_hd64(
         attn = jnp.where(mask, mask_value, attn)
 
         if attention_sink is not None:
-            reshaped_attention_sink = attention_sink.reshape(
-                actual_num_q_heads, 1, 1)
-            reshaped_attention_sink = jnp.repeat(reshaped_attention_sink,
-                                                 q_len,
-                                                 axis=1)
+            reshaped_attention_sink = jnp.repeat(attention_sink, q_len, axis=1)
             attn = jnp.concat([reshaped_attention_sink, attn], axis=2)
             attn = jax.nn.softmax(attn, axis=-1).astype(kv.dtype)
             attn = attn[..., 1:]
@@ -1050,8 +1049,13 @@ def prepare_inputs(
     kv = merge_kv(k, v)
 
     if attention_sink is not None:
-        attention_sink = attention_sink.reshape(
-            (-1, num_q_heads_per_kv_head, 1))
+        attention_sink = jnp.pad(
+            attention_sink.reshape(actual_num_kv_heads,
+                                   actual_num_q_heads_per_kv_head),
+            ((0, 0),
+             (0, num_q_heads_per_kv_head - actual_num_q_heads_per_kv_head)),
+            constant_values=0,
+        )[..., None]
         attention_sink = jnp.repeat(attention_sink, 128, -1)
 
     return q, kv, attention_sink
@@ -1093,8 +1097,8 @@ def dynamic_validate_inputs(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
-    attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads]
     *,
+    attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads]
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
@@ -1121,7 +1125,7 @@ def dynamic_validate_inputs(
         page_indices,
         cu_q_lens,
         distribution,
-        attention_sink,
+        attention_sink=attention_sink,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
@@ -1185,8 +1189,8 @@ def static_validate_inputs(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
-    attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads]
     *,
+    attention_sink: jax.Array | None = None,  # f32[actual_num_q_heads]
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
@@ -1413,7 +1417,7 @@ def ragged_paged_attention_hd64(
         page_indices,
         cu_q_lens,
         distribution,
-        attention_sink,
+        attention_sink=attention_sink,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
