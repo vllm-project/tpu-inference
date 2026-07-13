@@ -204,10 +204,11 @@ def make_pcp(pcp, tp, chunk, max_ctx):
             base = r if half == 0 else (two_p - 1 - r)
             qpos = jax.lax.reshape(base * C, (1, )).astype(jnp.int32)
             ag_q = ag(ql[0, half])  # [pcp*C]
-            kv_dummy = jnp.zeros((ag_q.shape[0], nkv_local, HD), DTYPE)
+            # skip_current_attn never reads the current KV -> pass the same
+            # kcur/vcur as the current phase so XLA CSEs the merge_kv.
             o1, _, l1 = ragged_paged_attention(ag_q,
-                                               kv_dummy,
-                                               kv_dummy,
+                                               kcur,
+                                               vcur,
                                                prev_cache,
                                                ctx.reshape(1),
                                                pi_prev,
@@ -224,8 +225,7 @@ def make_pcp(pcp, tp, chunk, max_ctx):
             o1, l1 = _lse_all_reduce(o1, l1, "x")
             o1 = jax.lax.dynamic_slice_in_dim(o1, r * C, C, 0)
             l1 = jax.lax.dynamic_slice_in_dim(l1, r * C, C, 0)
-            q_buf = jnp.zeros((chunk, nq_local, HD),
-                              DTYPE).at[:C].set(ql[0, half])
+            q_buf = ql[0, half]  # local C-token chunk; no pad to `chunk` needed
             o2, _, l2 = ragged_paged_attention(q_buf,
                                                kcur,
                                                vcur,
@@ -239,9 +239,9 @@ def make_pcp(pcp, tp, chunk, max_ctx):
                                                use_causal_mask=True,
                                                update_kv_cache=False,
                                                **common)
-            m = jnp.maximum(l1, l2[:C])
-            e1, e2 = jnp.exp(l1 - m), jnp.exp(l2[:C] - m)
-            o = (o1 * e1[..., None] + o2[:C] * e2[..., None]) / (e1 + e2)[...,
+            m = jnp.maximum(l1, l2)
+            e1, e2 = jnp.exp(l1 - m), jnp.exp(l2 - m)
+            o = (o1 * e1[..., None] + o2 * e2[..., None]) / (e1 + e2)[...,
                                                                           None]
             outs.append(o)
         return jnp.stack(outs)[None]

@@ -821,6 +821,10 @@ def pcp_ragged_paged_attention(
     distribution: jax.Array,
     kv_cache_lens: jax.
     Array,  # i32[max_num_seqs] previously-computed kv len (num_computed); new KV = kv_lens - kv_cache_lens
+    pcp_cu_q_lens: jax.
+    Array,  # i32[2, pcp, max_num_seqs+1] per-(half, rank) cu_q_lens, pcp-sharded
+    pcp_q_pos_offsets: jax.
+    Array,  # i32[2, pcp, max_num_seqs] per-(half, rank) within-current start, pcp-sharded
     sm_scale: float,
     q_scale: float | None = None,
     k_scale: float | None = None,
@@ -836,19 +840,11 @@ def pcp_ragged_paged_attention(
 
     Four kernel launches per rank -- each of {head, tail} runs two phases and is
     LSE-combined:
-      * cache phase:  all-gather the chunk across pcp (-> all `pcp` same-half
-        chunks), attend the pcp-strided PREVIOUS cache (non-causal, no write),
-        LSE all-reduce over pcp, slice back this rank's chunk.
-      * current phase: the LOCAL chunk attends the CURRENT tokens (causal,
+      * cache phase:  all-gather Q across pcp , attend the pcp-strided 
+        cache (non-causal, no write), LSE all-reduce over pcp.
+      * current phase: the local Q attends the current KV (causal,
         token-order all-gathered KV, per-chunk `q_pos_offset`); the tail phase
-        writes the strided cache. The current KV length is the REAL current
-        (`kv_lens - kv_cache_lens`), so only real tokens are written (no pad
-        write-clamp needed). Single request => pad tokens are written only into this
-        request's own pages, so no `kv_write_lens` bound needed.
-
-    The current K/V is all-gathered from rank order and reordered into global
-    token order -- a permutation fully determined by `pcp` and `C` (the head-tail
-    chunk row order), so it is computed here rather than passed in.
+        writes the strided cache. 
     """
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
@@ -873,7 +869,7 @@ def pcp_ragged_paged_attention(
     def _rank_i32(r):
         return jnp.reshape(r, (1, )).astype(jnp.int32)
 
-    def _fn(q_l, k_l, v_l, kvc, kvl, kvcl, pi, cu):
+    def _fn(q_l, k_l, v_l, kvc, kvl, kvcl, pi, cu, pcp_cu, pcp_qpos):
         r = lax.axis_index(pcp_axis)
         ag = lambda x: lax.all_gather(x, pcp_axis, axis=0, tiled=True)
 
@@ -889,25 +885,19 @@ def pcp_ragged_paged_attention(
                       q_scale=q_scale,
                       k_scale=k_scale,
                       v_scale=v_scale)
-        # REAL current length = kvl - kvcl (kvcl = num_computed). Head chunks are
-        # fully real (num_current > pcp*C); the tail chunk that spans the padded
-        # region is shortened so only real tokens are attended/written.
-        num_current = kvl[0] - kvcl[0]
-        # Cache phase attends the previous cache only (skip_current_attn); its Q
-        # is the pcp all-gathered same-half chunk (pcp*C tokens).
-        cu_cache = jnp.zeros_like(cu).at[1].set(pcp_size * C)
 
-        def section(q_chunk, q_pos_offset, q_len, writes_cache):
-            # --- cache phase: all-gather chunk vs strided previous cache. ---
-            ag_q = ag(q_chunk)  # [pcp*C] -- all ranks' same-half chunks
-            # `skip_current_attn` ignores k/v, but the kernel still requires
-            # q/k/v to share length; give it a matching-length dummy.
-            kv_dummy = jnp.zeros((ag_q.shape[0], k_l.shape[1], k_l.shape[2]),
-                                 k_l.dtype)
+        cu_cache = jnp.zeros_like(cu).at[1].set(pcp_size * C)
+        # `pcp_cu`/`pcp_qpos` arrive pcp-sharded as [2, 1, ...]; index [half, 0]
+        # for this rank's head (0) / tail (1) launch. Built host-side in
+        # `_prepare_inputs`, so the per-rank offsets and the padding-clamped tail
+        # length are plain inputs rather than axis_index-derived scatters here.
+        def section(q_chunk, q_pos, cu_cur, writes_cache):
+            # --- cache phase---
+            ag_q = ag(q_chunk)  # [pcp*C]
             o1, kvc1, l1 = pcp_ragged_paged_attention_kernel(
                 ag_q,
-                kv_dummy,
-                kv_dummy,
+                k_cur,
+                v_cur,
                 kvc,
                 kvl,
                 pi,
@@ -921,16 +911,9 @@ def pcp_ragged_paged_attention(
             o1, l1 = _lse_all_reduce(o1, l1, pcp_axis)
             o1 = lax.dynamic_slice_in_dim(o1, r * C, C, 0)  # this rank's chunk
             l1 = lax.dynamic_slice_in_dim(l1, r * C, C, 0)
-            # --- current phase: local chunk vs token-order current KV (causal). ---
-            # The kernel requires q/k/v to share length, so pad the local chunk
-            # to the all-gathered current length. `cu` carries the REAL per-chunk
-            # query length; `q_pos_offset` is the chunk's within-current start.
-            q_buf = jnp.zeros((sum_s, q_chunk.shape[1], q_chunk.shape[2]),
-                              q_chunk.dtype).at[:C].set(q_chunk)
-            q_pos = jnp.zeros_like(cu[:-1]).at[0].set(q_pos_offset)
-            cu_cur = jnp.zeros_like(cu).at[1].set(q_len)
+            # --- current phase ---
             o2, kvc2, l2 = pcp_ragged_paged_attention_kernel(
-                q_buf,
+                q_chunk,
                 k_cur,
                 v_cur,
                 kvc1,
@@ -944,26 +927,30 @@ def pcp_ragged_paged_attention(
                 use_causal_mask=use_causal_mask,
                 update_kv_cache=writes_cache,
                 **common)
-            out = _lse_combine(o1, l1, o2[:C], l2[:C])
+            out = _lse_combine(o1, l1, o2, l2)
             return out, kvc2
 
         # Head chunk r (fully real, size C) then tail chunk 2P-1-r (real size
         # clamped so padding tokens past num_current are excluded).
-        tail_real = jnp.clip(num_current - (two_p - 1 - r) * C, 0, C)
-        head_out, kvc = section(q_l[:C], r * C, C, False)
-        tail_out, kvc = section(q_l[C:2 * C], (two_p - 1 - r) * C, tail_real,
+        head_out, kvc = section(q_l[:C], pcp_qpos[0, 0], pcp_cu[0, 0], False)
+        tail_out, kvc = section(q_l[C:2 * C], pcp_qpos[1, 0], pcp_cu[1, 0],
                                 update_kv_cache)
         out = jnp.concatenate([head_out, tail_out], axis=0)  # [head | tail]
         return out.astype(q.dtype), kvc
+
+    # pcp_cu/pcp_q_pos_offsets are [2, pcp, ...]; shard dim 1 over the pcp axis
+    # so each rank sees its own [2, 1, ...] row.
+    pcp_spec = P(None, pcp_axis, None)
 
     return jax.shard_map(
         _fn,
         mesh=mesh,
         in_specs=(q_spec, kv_spec, kv_spec, kv_cache_spec, repl, repl, repl,
-                  repl),
+                  repl, pcp_spec, pcp_spec),
         out_specs=(q_spec, kv_cache_spec),
         check_vma=False,
-    )(q, k, v, kv_cache, kv_lens, kv_cache_lens, page_indices, cu_q_lens)
+    )(q, k, v, kv_cache, kv_lens, kv_cache_lens, page_indices, cu_q_lens,
+      pcp_cu_q_lens, pcp_q_pos_offsets)
 
 
 def attention(
@@ -1035,12 +1022,13 @@ def attention(
             k,
             v,
             kv_cache,
-            md.seq_lens,  # PCP: REAL total kv len (num_computed + num_current)
+            md.seq_lens,
             md.block_tables,
-            md.query_start_loc,  # PCP: head chunk size C (cumsum [0, C])
+            md.query_start_loc,
             md.request_distribution,
-            md.
-            pcp_kv_cache_lens,  # PCP: num_computed (new KV = seq_lens - this)
+            md.pcp_kv_cache_lens,
+            md.pcp_cu_q_lens,
+            md.pcp_q_pos_offsets,
             sm_scale=sm_scale,
             q_scale=q_scale,
             k_scale=k_scale,

@@ -1692,10 +1692,6 @@ def static_validate_inputs(
             f"Expected 3D array for {q.shape=}, {k.shape=}, {v.shape=}")
     if k.shape != v.shape:
         raise ValueError(f"Expected {k.shape=} to be equal to {v.shape=}")
-    if not (q.shape[0] == k.shape[0] == v.shape[0]):
-        raise ValueError(
-            f"Expected {q.shape[0]=} to be equal to {k.shape[0]=} and {v.shape[0]=}"
-        )
     if not (q.shape[2] == k.shape[2] == v.shape[2]):
         raise ValueError(
             f"Expected {q.shape[2]=} to be equal to {k.shape[2]=} and {v.shape[2]=}"

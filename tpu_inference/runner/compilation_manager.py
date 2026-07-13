@@ -384,13 +384,28 @@ class CompilationManager:
         # Replicated (P()) at runtime, so the primer must include it (as a
         # matching dummy) or the cached pytree structure won't be reused.
         pcp_kv_cache_lens = None
+        pcp_cu_q_lens = None
+        pcp_q_pos_offsets = None
         if pcp_size > 1:
+            n_reqs = self.runner.max_num_reqs
             pcp_kv_cache_lens = device_array(self.runner.mesh,
-                                             np.zeros(self.runner.max_num_reqs,
-                                                      dtype=np.int32),
+                                             np.zeros(n_reqs, dtype=np.int32),
                                              sharding=NamedSharding(
                                                  self.runner.mesh,
                                                  PartitionSpec()))
+            # Per-(half, rank) PCP launch metadata; pcp-sharded at runtime, so
+            # the primer must match that sharding for the cached HLO to be reused.
+            pcp_spec = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(None, ShardingAxisName.PREFILL_CONTEXT, None))
+            pcp_cu_q_lens = device_array(self.runner.mesh,
+                                         np.zeros((2, pcp_size, n_reqs + 1),
+                                                  dtype=np.int32),
+                                         sharding=pcp_spec)
+            pcp_q_pos_offsets = device_array(self.runner.mesh,
+                                             np.zeros((2, pcp_size, n_reqs),
+                                                      dtype=np.int32),
+                                             sharding=pcp_spec)
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
         # populate for hybrid attn+mamba models — for pure-attention models we
         # pass None at runtime (see `_prepare_inputs`), and the precompile
@@ -425,6 +440,8 @@ class CompilationManager:
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
                 pcp_kv_cache_lens=pcp_kv_cache_lens,
+                pcp_cu_q_lens=pcp_cu_q_lens,
+                pcp_q_pos_offsets=pcp_q_pos_offsets,
             )
             return attention_metadata_gid
 

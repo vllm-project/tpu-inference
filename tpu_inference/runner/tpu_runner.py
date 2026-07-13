@@ -2620,6 +2620,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # attention metadata (chunk-size cu, padded seq_len, logits slot).
         # Decode is handled elsewhere.
         pcp_kv_cache_lens = None
+        pcp_cu_q_lens = None
+        pcp_q_pos_offsets = None
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         if pcp_size > 1:
             assert dp_size == 1, "PCP with DP>1 not wired yet"
@@ -2641,9 +2643,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             _rearrange(positions)
             _rearrange(input_ids_view)
-            # query_start_loc := [0, C] (head chunk size). The head chunk is
-            # fully real (num_current > pcp*C); the tail chunk's real length is
-            # derived per-rank in the kernel wrapper from seq_lens - kv_cache_lens.
+            # query_start_loc := [0, C] (head chunk size).
             query_start_loc_view[:2] = (0, C)
             query_start_loc_view[2:] = C
             # seq_lens := REAL total kv length (num_computed + real current). The
@@ -2658,6 +2658,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # attended/written (no padding write-clamp needed).
             kv_cache_lens_np = np.zeros_like(np.asarray(seq_lens_view))
             kv_cache_lens_np[0] = num_computed
+            # Per-(half, rank) launch metadata for the PCP attention wrapper,
+            # sharded on `pcp` so each rank reads its own row. head (half=0) is
+            # always fully real (C tokens) at within-current offset rank*C; tail
+            # (half=1) sits at (2*pcp-1-rank)*C and is clamped so padding tokens
+            # past num_current are excluded (0 when wholly padding). Building
+            # them here keeps the values out of the traced attention wrapper,
+            # which would otherwise derive them from `lax.axis_index`.
+            n_cu = np.asarray(query_start_loc_view).shape[0]  # max_num_reqs + 1
+            n_off = np.asarray(seq_lens_view).shape[0]  # max_num_reqs
+            pcp_cu_np = np.zeros((2, pcp_size, n_cu), np.int32)
+            pcp_qpos_np = np.zeros((2, pcp_size, n_off), np.int32)
+            for rank in range(pcp_size):
+                tail_off = (two_p - 1 - rank) * C
+                pcp_cu_np[0, rank, 1:] = C
+                pcp_qpos_np[0, rank, 0] = rank * C
+                pcp_cu_np[1, rank, 1:] = int(
+                    np.clip(num_current - tail_off, 0, C))
+                pcp_qpos_np[1, rank, 0] = tail_off
             # logits_indices: the last real token (natural position
             # num_current-1) lands in rank-order slot inv_row[chunk]*C + within.
             inv_row = np.empty(two_p, np.int64)
@@ -2669,6 +2687,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                              kv_cache_lens_np,
                                              sharding=NamedSharding(
                                                  self.mesh, PartitionSpec()))
+            pcp_spec = NamedSharding(
+                self.mesh,
+                PartitionSpec(None, ShardingAxisName.PREFILL_CONTEXT, None))
+            pcp_cu_q_lens = device_array(self.mesh,
+                                         pcp_cu_np,
+                                         sharding=pcp_spec)
+            pcp_q_pos_offsets = device_array(self.mesh,
+                                             pcp_qpos_np,
+                                             sharding=pcp_spec)
 
         spec_decode_metadata = None
         if self.speculative_config:
@@ -2801,6 +2828,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp_kv_cache_lens=pcp_kv_cache_lens,
+                pcp_cu_q_lens=pcp_cu_q_lens,
+                pcp_q_pos_offsets=pcp_q_pos_offsets,
             )
 
             return attention_metadata_gid
