@@ -141,7 +141,6 @@ cleanup() {
     # Do not remove /tmp/vllm_serve.log so that run_job.sh can upload it as an artifact.
     # for debug test
     # rm -f /tmp/vllm_serve.log
-
   fi
   rm -f "${TEMP_EXPORT_FILE:-}" >/dev/null 2>&1 || true
   docker stop node >/dev/null 2>&1 || true
