@@ -2329,12 +2329,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     req_id]
                 seq_lens_subtract_indices[
                     i + rank * (self.max_num_reqs // self.dp_size)] = idx
+                rollback_subtract_indices[
+                    i + rank * (self.max_num_reqs // self.dp_size)] = idx
 
                 prev_draft_token_ids = self._pre_async_results.scheduler_output.scheduled_spec_decode_tokens.get(
                     req_id)
                 if prev_draft_token_ids is not None:
-                    rollback_subtract_indices[
-                        i + rank * (self.max_num_reqs // self.dp_size)] = idx
                     rollback_draft_lengths[
                         i + rank * (self.max_num_reqs // self.dp_size)] = len(
                             prev_draft_token_ids)
