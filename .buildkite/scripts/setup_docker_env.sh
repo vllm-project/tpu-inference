@@ -211,6 +211,15 @@ setup_environment() {
     verify_image_vllm "${CI_IMAGE_REPO}:${CACHE_TAG}" "${VLLM_COMMIT_HASH}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:latest"
+    
+    # In Multihost mode, the Head node pulls the cache but MUST also push it 
+    # to the formal registry so that all Worker VMs can pull it.
+    if [[ "$should_push" == "true" ]]; then
+      echo "--- Pushing pre-built Docker image(s) to registry for worker nodes..."
+      gcloud auth configure-docker us-central1-docker.pkg.dev
+      docker push "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
+      docker push "${IMAGE_NAME}:latest"
+    fi
     return 0
   fi
 

@@ -204,6 +204,12 @@ mkdir -p "$ARTIFACT_FOLDER"
 mkdir -p "$LOG_FOLDER"
 mkdir -p "$VLLM_TORCH_PROFILER_DIR"
 
+ACCURACY_CMD=()
+SERVER_CMD=()
+CLIENT_CMD=()
+CLIENT_CMD_ENVS=()
+SERVER_CMD_ENVS=()
+
 PYTHON_PARSER="$SCRIPT_DIR/parser_case.py"
 # Evaluate the Python output to set variables in the current shell context
 eval "$(python3 "$PYTHON_PARSER" "$CASE_FILE" "$TARGET_CASE_NAME")"
