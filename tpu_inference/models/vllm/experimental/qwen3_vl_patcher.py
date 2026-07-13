@@ -41,11 +41,14 @@ making sure they go through standard function arguments:
    model's cache just-in-time for the execution, and proceed with the original forward pass.
 """
 
+import os
+
 import torch
 import torch.nn as nn
 import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
 import vllm.model_executor.models.utils as vllm_utils
 from torchax.interop import jax_view, torch_view
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
@@ -106,10 +109,21 @@ def _convert_to_torchax_tensor(v):
 
 def _patched_get_deepstack(vllm_model, orig_get_deepstack, num_tokens: int):
     """Retrieves Deepstack embeddings, preferring JAX-compatible cached tensors.
-    
+
     This method is called by the language model layers to retrieve the
     intermediate vision features.
     """
+    # Escape hatch: DISABLE_QWEN3_VL_DEEPSTACK=1 disables deepstack entirely
+    # by returning None here, which causes the LM to skip the
+    # `hidden_states + deepstack_input_embeds[key]` add at
+    # `qwen3_vl_moe.py:118`. Deepstack currently trips a torchax/dynamo
+    # `TypeError: unsupported operand type(s) for +: 'View' and 'Tensor'`
+    # during the backbone-with-embeds precompile, so this is the only way
+    # to reach warmup completion on that code path. Vision quality
+    # degrades because the deepstack residual is dropped, but the server
+    # comes up.
+    if os.environ.get("DISABLE_QWEN3_VL_DEEPSTACK", "0") == "1":
+        return None
     # Default: Use tensors cached locally in `_deepstack_tensors`.
     # These are already converted to Torchax tensors and JIT-compatible.
     if getattr(vllm_model, "_deepstack_tensors", None):
@@ -131,12 +145,18 @@ def _patched_get_deepstack(vllm_model, orig_get_deepstack, num_tokens: int):
 def _patched_embed_input_ids(vllm_model, orig_embed_input_ids, *args,
                              **kwargs):
     """Appends Deepstack features to the main text embeddings.
-    
+
     We concatenate deepstack features to the end of the text embeddings so they can
     pass through the JIT boundary of the LLM model.
     """
     # 1. Get the base text embeddings from the native model.
     inputs_embeds = orig_embed_input_ids(*args, **kwargs)
+
+    # Escape hatch: DISABLE_QWEN3_VL_DEEPSTACK=1 short-circuits packing so
+    # the JIT signature stays visual_dim wide and the LM never sees a
+    # non-None deepstack argument.
+    if os.environ.get("DISABLE_QWEN3_VL_DEEPSTACK", "0") == "1":
+        return inputs_embeds
 
     # 2. Check if there are any deepstack features to pack.
     deepstack_input_embeds = getattr(vllm_model, "deepstack_input_embeds",
@@ -178,10 +198,24 @@ def _patched_forward(vllm_model,
                      inputs_embeds=None,
                      **kwargs):
     """Unpacks vision features from combined embeddings and restores them to model state.
-    
+
     This reverses the packing done in `_patched_embed_input_ids` before passing
     the execution to the original model forward pass.
     """
+    if os.environ.get("DISABLE_QWEN3_VL_DEEPSTACK", "0") == "1":
+        # Escape hatch: clear any deepstack tensor stash so
+        # `orig_forward -> self._get_deepstack_input_embeds(...)` returns
+        # None, and the LM's `hidden_states + deepstack_input_embeds[key]`
+        # add at qwen3_vl_moe.py:118 is skipped entirely. torch.compile
+        # may inline the original bound method rather than our monkey-
+        # patched lambda, so patching `_get_deepstack_input_embeds` alone
+        # isn't sufficient — clearing the state at the outer forward
+        # ensures the LM sees None regardless of how the getter resolves.
+        vllm_model._deepstack_tensors = {}
+        if hasattr(vllm_model, "deepstack_input_embeds"):
+            vllm_model.deepstack_input_embeds = None
+        if hasattr(vllm_model, "deepstack_input_embeds_num_tokens"):
+            vllm_model.deepstack_input_embeds_num_tokens = 0
     if inputs_embeds is not None and jax_get_pp_group().is_first_rank:
         # Check if the embeddings contain packed vision features (indicated by dimension larger than visual_dim)
         if getattr(vllm_model, "use_deepstack",
@@ -260,8 +294,123 @@ def _patched_flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
     return torch.cat(tuple(_patched_flatten_embeddings(t) for t in embeddings))
 
 
+def _patched_get_encoder_cudagraph_config(vllm_model, orig_fn):
+    """Filter modalities down to those actually enabled by the user.
+
+    Upstream `get_encoder_cudagraph_config` hard-codes
+    `modalities = ["image", "video"]` and then unconditionally calls
+    `self.get_max_frames_per_video()` when 'video' is in that list. On
+    workloads that disable video (e.g. `--limit-mm-per-prompt
+    '{"video":0}'`) the video path is a dead branch that still crashes
+    `get_max_frames_per_video` because `self.model_config` is not
+    initialized on `Qwen3VLMoeForConditionalGeneration` (its `__init__`
+    calls `super(Qwen3VLForConditionalGeneration, self).__init__()`
+    which SKIPS `Qwen3VLForConditionalGeneration.__init__` where
+    `self.model_config = vllm_config.model_config` would happen). Drop
+    disabled modalities BEFORE calling the original so both problems
+    disappear together.
+    """
+    vllm_config = get_current_vllm_config()
+    mm_config = getattr(vllm_config.model_config, "multimodal_config", None)
+    if mm_config is not None:
+        # `mm_config.get_limit_per_prompt` returns a plain int regardless
+        # of whether `limit_per_prompt` is stored as a bare int or as a
+        # VideoDummyOptions-typed object. Keep video only if the user
+        # permitted at least one.
+        if mm_config.get_limit_per_prompt("video") == 0:
+            # Temporarily shadow the offending pathway by making the
+            # video-branch predicate false. We patch at the module scope
+            # by wrapping `orig_fn` to run in a context where the
+            # multimodal_config reports video=0. Simplest reliable path:
+            # replace get_max_frames_per_video with a return-1 constant
+            # for the duration of the call, since upstream only uses it
+            # when "video" is in modalities (the list it builds is
+            # ["image", "video"] regardless of user config).
+            #
+            # We mutate the bound method rather than the class so other
+            # models aren't affected. Restore after.
+            orig_max_frames = vllm_model.get_max_frames_per_video
+            vllm_model.get_max_frames_per_video = (
+                lambda: 1)  # video disabled -> value never actually used
+            try:
+                return orig_fn()
+            finally:
+                vllm_model.get_max_frames_per_video = orig_max_frames
+    return orig_fn()
+
+
+def _patched_get_max_frames_per_video(vllm_model, orig_fn):
+    """Fall back to the ambient VllmConfig when `self.model_config` is
+    absent.
+
+    `Qwen3VLMoeForConditionalGeneration.__init__` skips
+    `Qwen3VLForConditionalGeneration.__init__` (via `super(Qwen3VLForCondGen,
+    self).__init__()`), so `self.model_config` is never set on MoE
+    variants. The upstream implementation dereferences
+    `self.model_config.max_model_len` and
+    `mm_registry.get_processing_info(self.model_config)` and raises
+    AttributeError. Route both through `get_current_vllm_config()` when
+    the attribute is missing.
+    """
+    if getattr(vllm_model, "model_config", None) is not None:
+        return orig_fn()
+    from vllm.multimodal import MULTIMODAL_REGISTRY
+    vllm_config = get_current_vllm_config()
+    model_config = vllm_config.model_config
+    info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
+    return info.get_num_frames_with_most_features(
+        seq_len=model_config.max_model_len,
+        mm_counts={
+            "video":
+            model_config.multimodal_config.get_limit_per_prompt("video")
+        },
+    )
+
+
+def _patched_get_encoder_cudagraph_budget_range(vllm_model, orig_fn,
+                                                vllm_config):
+    """Prefer the passed `vllm_config.model_config.max_model_len` over
+    `self.model_config.max_model_len`. Upstream uses `self.model_config`
+    which is not present on `Qwen3VLMoeForConditionalGeneration`.
+    """
+    if getattr(vllm_model, "model_config", None) is not None:
+        return orig_fn(vllm_config)
+    # Bind `model_config` on the instance for the duration of the call.
+    vllm_model.model_config = vllm_config.model_config
+    try:
+        return orig_fn(vllm_config)
+    finally:
+        del vllm_model.model_config
+
+
 def apply_qwen3_vl_patches(vllm_model):
     """Apply Qwen3-VL specific patches for stateless Deepstack support."""
+    # ---- Fixes for Qwen3VLMoe missing `self.model_config` -----------------
+    # These patches are safe to apply for ALL Qwen3VL variants (both the
+    # dense Qwen3VLForConditionalGeneration and the MoE subclass) — the
+    # helpers early-return when `self.model_config` is already set, so the
+    # dense path is a no-op. The MoE subclass hits the fix path.
+    orig_get_encoder_cfg = getattr(vllm_model, "get_encoder_cudagraph_config",
+                                   None)
+    if orig_get_encoder_cfg is not None:
+        vllm_model.get_encoder_cudagraph_config = (
+            lambda: _patched_get_encoder_cudagraph_config(
+                vllm_model, orig_get_encoder_cfg))
+
+    orig_get_max_frames = getattr(vllm_model, "get_max_frames_per_video", None)
+    if orig_get_max_frames is not None:
+        vllm_model.get_max_frames_per_video = (
+            lambda: _patched_get_max_frames_per_video(vllm_model,
+                                                      orig_get_max_frames))
+
+    orig_get_budget_range = getattr(vllm_model,
+                                    "get_encoder_cudagraph_budget_range", None)
+    if orig_get_budget_range is not None:
+        vllm_model.get_encoder_cudagraph_budget_range = (
+            lambda vc: _patched_get_encoder_cudagraph_budget_range(
+                vllm_model, orig_get_budget_range, vc))
+
+    # ---- Deepstack support (only when the model actually uses it) --------
     if not getattr(vllm_model, "use_deepstack", False):
         return
 

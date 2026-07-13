@@ -41,8 +41,7 @@ from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
     extract_last_sampled_tokens, process_and_extend_logits)
-from tpu_inference.utils import (device_array, get_mesh_shape_product,
-                                 time_function, to_jax_dtype)
+from tpu_inference.utils import device_array, time_function, to_jax_dtype
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -662,6 +661,12 @@ class CompilationManager:
         for h_size in hidden_sizes_to_compile:
             for num_tokens in self.runner.num_tokens_paddings:
                 for num_reqs in self.runner.attn_num_reqs_paddings:
+                    # `padded_num_reqs` is a `meta_field` on AttentionMetadata,
+                    # so every distinct num_reqs is its own jit cache key.
+                    # The previous indentation left the helper call outside
+                    # this loop and only primed the last num_reqs bucket per
+                    # (h_size, num_tokens); every other bucket cache-missed at
+                    # runtime and triggered a recompile.
                     sharding = NamedSharding(
                         self.runner.mesh,
                         PartitionSpec(ShardingAxisName.ATTN_DATA, None))
@@ -671,42 +676,44 @@ class CompilationManager:
 
                     inputs_embeds = self._create_dummy_tensor(
                         (num_tokens, h_size), dtype, sharding=sharding)
-                if self.runner.uses_mrope:
-                    mrope_sharding = NamedSharding(
-                        self.runner.mesh,
-                        PartitionSpec(None, ShardingAxisName.ATTN_DATA))
-                    positions = self._create_dummy_tensor(
-                        (3, num_tokens), jnp.int32, sharding=mrope_sharding)
-                else:
-                    positions = self._create_dummy_tensor(
-                        (num_tokens, ), jnp.int32, sharding=input_sharding)
-                is_first_rank = self.runner.is_first_rank
-                is_last_rank = self.runner.is_last_rank
-                if not is_first_rank:
-                    hidden_states = self._create_dummy_tensor(
-                        (num_tokens, hidden_size),
-                        jnp.bfloat16,
-                        sharding=sharding)
-                    residual = self._create_dummy_tensor(
-                        (num_tokens, hidden_size),
-                        jnp.bfloat16,
-                        sharding=sharding)
-                    intermediate_tensors = JaxIntermediateTensors(
-                        tensors={
-                            "hidden_states": hidden_states,
-                            "residual": residual
-                        })
-                else:
-                    intermediate_tensors = None
-                self._precompile_backbone_helper(
-                    f"worker{self.runner.rank} backbone with embeds",
-                    input_ids=None,
-                    positions=positions,
-                    inputs_embeds=inputs_embeds,
-                    intermediate_tensors=intermediate_tensors,
-                    is_first_rank=is_first_rank,
-                    is_last_rank=is_last_rank,
-                    num_reqs=num_reqs)
+                    if self.runner.uses_mrope:
+                        mrope_sharding = NamedSharding(
+                            self.runner.mesh,
+                            PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+                        positions = self._create_dummy_tensor(
+                            (3, num_tokens),
+                            jnp.int32,
+                            sharding=mrope_sharding)
+                    else:
+                        positions = self._create_dummy_tensor(
+                            (num_tokens, ), jnp.int32, sharding=input_sharding)
+                    is_first_rank = self.runner.is_first_rank
+                    is_last_rank = self.runner.is_last_rank
+                    if not is_first_rank:
+                        hidden_states = self._create_dummy_tensor(
+                            (num_tokens, hidden_size),
+                            jnp.bfloat16,
+                            sharding=sharding)
+                        residual = self._create_dummy_tensor(
+                            (num_tokens, hidden_size),
+                            jnp.bfloat16,
+                            sharding=sharding)
+                        intermediate_tensors = JaxIntermediateTensors(
+                            tensors={
+                                "hidden_states": hidden_states,
+                                "residual": residual
+                            })
+                    else:
+                        intermediate_tensors = None
+                    self._precompile_backbone_helper(
+                        f"worker{self.runner.rank} backbone with embeds",
+                        input_ids=None,
+                        positions=positions,
+                        inputs_embeds=inputs_embeds,
+                        intermediate_tensors=intermediate_tensors,
+                        is_first_rank=is_first_rank,
+                        is_last_rank=is_last_rank,
+                        num_reqs=num_reqs)
 
     def _precompile_select_from_array_helper(
         self,
@@ -1031,14 +1038,24 @@ class CompilationManager:
             "Compiling _process_and_extend_logits with different input shapes."
         )
         vocab_size = self.runner.vocab_size
+        # `process_and_extend_logits` at spec_decode/jax/utils.py:304 expects
+        # every input to be batch-sharded on `ATTN_DATA` (data + attn_dp +
+        # attn_dp_expert). Allocating the dummies with an empty
+        # `PartitionSpec()` fully replicates them on every chip during
+        # precompile, which under DP=N is a per-chip N× regression on the
+        # target_logits allocation (float32 × num_logits × vocab is the
+        # biggest single tensor in the runner) and is the direct cause of
+        # the DP-attention warmup OOM on Qwen3-VL 30B FP8 (~2.3 GiB dummy
+        # exhausting the final HBM budget). Match production sharding so
+        # the dummy allocation footprint mirrors real inference.
+        logits_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+        dp_sharding = NamedSharding(self.runner.mesh,
+                                    PartitionSpec(ShardingAxisName.ATTN_DATA))
         for num_logits in self.runner.num_logits_paddings:
             for num_reqs in self.runner.num_reqs_paddings:
                 if num_reqs > num_logits:
                     continue
-
-                logits_sharding = NamedSharding(self.runner.mesh,
-                                                PartitionSpec())
-                dp_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
 
                 target_logits = self._create_dummy_tensor(
                     (num_logits, vocab_size), jnp.float32, logits_sharding)
@@ -1102,14 +1119,17 @@ class CompilationManager:
                 if num_reqs > num_logits:
                     continue
 
-                attn_data_size = get_mesh_shape_product(
-                    self.runner.mesh, ShardingAxisName.ATTN_DATA)
-                if attn_data_size == 1:
-                    logits_spec = PartitionSpec()
-                else:
-                    logits_spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
-                                                None)
-
+                # Runtime `extend_logits_simple` (spec_decode/jax/utils.py:260)
+                # unconditionally uses `PartitionSpec(ATTN_DATA, None)` as
+                # both in/out shard_map specs. Matching that here — even when
+                # ATTN_DATA resolves to a size-1 mesh axis (pure TP, no DP) —
+                # keeps the primer's NamedSharding cache key identical to
+                # runtime. The earlier `PartitionSpec()` special case at
+                # attn_data_size==1 produced a different key and cache-missed
+                # on the first spec-decode logprobs request, which raises
+                # under `VLLM_XLA_CHECK_RECOMPILATION=1` because the caller
+                # is inside `maybe_forbid_compile`.
+                logits_spec = PartitionSpec(ShardingAxisName.ATTN_DATA, None)
                 logits_sharding = NamedSharding(self.runner.mesh, logits_spec)
 
                 target_logits = self._create_dummy_tensor(
@@ -1343,10 +1363,27 @@ class CompilationManager:
                                                 sharding=dp_sharding)
         last_token_indices = self._create_dummy_tensor(
             (self.runner.max_num_reqs, ), jnp.int32, dp_sharding)
+        # M-RoPE targets (Qwen3-VL etc.) feed 2-D positions of shape
+        # (3, num_tokens) with `PartitionSpec(None, ATTN_DATA)` at runtime,
+        # while non-M-RoPE targets use 1-D `(num_tokens,)` on ATTN_DATA. The
+        # eagle3 draft `_prepare_inputs`/`_propose` jits key on that shape,
+        # so precompile has to match or the ForbidCompile guard fires on
+        # the first request.
+        uses_mrope = getattr(self.runner, "uses_mrope", False)
+        if uses_mrope:
+            positions_sharding = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+        else:
+            positions_sharding = dp_sharding
         for num_tokens in self.runner.num_tokens_paddings:
             for num_reqs in self.runner.attn_num_reqs_paddings:
-                positions = self._create_dummy_tensor((num_tokens, ),
-                                                      jnp.int32, dp_sharding)
+                if uses_mrope:
+                    positions = self._create_dummy_tensor(
+                        (3, num_tokens), jnp.int32, positions_sharding)
+                else:
+                    positions = self._create_dummy_tensor(
+                        (num_tokens, ), jnp.int32, positions_sharding)
                 attention_metadata = AttentionMetadata(
                     input_positions=positions,
                     block_tables=block_tables,
@@ -1617,9 +1654,30 @@ class CompilationManager:
             do_sampling=False,
             logprobs=False)
 
+        # M-RoPE targets thread 2-D positions (3, num_tokens) with
+        # `PartitionSpec(None, ATTN_DATA)` through `_prepare_inputs`; other
+        # targets thread 1-D (num_tokens,) on ATTN_DATA. In continue_decode
+        # each request produces one token per step, so num_tokens == num_reqs
+        # for this precompile. If we prime `AttentionMetadata.input_positions`
+        # with the wrong shape/sharding, the jitted `_decode_core` /
+        # `_update_loop_state` in decode_loop.py cache-miss on the first
+        # M-RoPE serving request and re-lower inside `maybe_forbid_compile`.
+        uses_mrope = getattr(self.runner, "uses_mrope", False)
+        if uses_mrope:
+            positions_sharding = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+        else:
+            positions_sharding = dp_sharding
+
         for num_reqs in self.runner.num_reqs_paddings:
             init_tokens = self._create_dummy_tensor((num_reqs, ), jnp.int32,
                                                     dp_sharding)
+            if uses_mrope:
+                positions = self._create_dummy_tensor((3, num_reqs), jnp.int32,
+                                                      positions_sharding)
+            else:
+                positions = init_tokens
             active_mask = self._create_dummy_tensor((num_reqs, ), jnp.bool_,
                                                     dp_sharding)
 
@@ -1660,7 +1718,7 @@ class CompilationManager:
                 block_tables = build_block_table(
                     0) if not no_kv_cache else None
                 attn_metadata = AttentionMetadata(
-                    input_positions=init_tokens,
+                    input_positions=positions,
                     block_tables=block_tables,
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
@@ -1672,7 +1730,7 @@ class CompilationManager:
                 attn_metadata = {
                     name:
                     AttentionMetadata(
-                        input_positions=init_tokens,
+                        input_positions=positions,
                         block_tables=build_block_table(gid),
                         seq_lens=seq_lens,
                         query_start_loc=query_start_loc,

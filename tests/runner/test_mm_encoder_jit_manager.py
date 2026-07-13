@@ -69,7 +69,8 @@ class _DummyModel:
     def get_encoder_cudagraph_config(self):
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            buffer_keys=["pixel_values"],
+            input_key_by_modality={"image": "pixel_values"},
+            buffer_keys=[],
             out_hidden_size=64,
         )
 
@@ -83,8 +84,11 @@ class _DummyModel:
                                                  max_batch_size,
                                                  max_frames_per_batch, device,
                                                  dtype):
-        return EncoderCudaGraphCaptureInputs(
-            values={"pixel_values": torch.zeros(token_budget, 4, dtype=dtype)})
+        return EncoderCudaGraphCaptureInputs(mm_kwargs={
+            "pixel_values":
+            torch.zeros(token_budget, 4, dtype=dtype)
+        },
+                                             buffers={})
 
     def get_encoder_cudagraph_item_specs(self, mm_kwargs):
         return []
@@ -95,7 +99,7 @@ class _DummyModel:
     def prepare_encoder_cudagraph_replay_buffers(self, mm_kwargs,
                                                  max_batch_size,
                                                  max_frames_per_batch):
-        return EncoderCudaGraphReplayBuffers(values={})
+        return EncoderCudaGraphReplayBuffers(buffers={})
 
     def postprocess_encoder_output(self,
                                    output,
@@ -181,22 +185,22 @@ class TestAdapterPostprocessEncoderOutput:
 
 
 class TestPadToTemplate:
-    """Test MMEncoderJITManager._pad_to_template — zero-padding, slicing, and dtype-casting.
+    """Test MMEncoderJITManager._pad_dict_to_template — zero-padding,
+    slicing, and dtype-casting.
 
     Pure torch logic — tested without a full manager init by constructing a
-    bare instance via object.__new__ and setting only budget_templates.
+    bare instance via object.__new__.
     """
 
-    def _manager(self, template: dict) -> MMEncoderJITManager:
-        m = object.__new__(MMEncoderJITManager)
-        m.budget_templates = {256: template}
-        return m
+    def _manager(self) -> MMEncoderJITManager:
+        return object.__new__(MMEncoderJITManager)
 
     def test_general_case_zeros_then_copies(self):
         """src smaller than template: zero the buffer and slice-copy src."""
         tmpl = torch.zeros(10, 4)
         src = torch.ones(4, 4)
-        result = self._manager({"pv": tmpl})._pad_to_template({"pv": src}, 256)
+        result = self._manager()._pad_dict_to_template({"pv": src},
+                                                       {"pv": tmpl})
         assert result["pv"].shape == (10, 4)
         assert torch.all(result["pv"][:4] == 1.0)
         assert torch.all(result["pv"][4:] == 0.0)
@@ -205,29 +209,30 @@ class TestPadToTemplate:
         """src already has the template shape: returned as-is (no allocation)."""
         tmpl = torch.zeros(8, 4)
         src = torch.ones(8, 4)
-        result = self._manager({"pv": tmpl})._pad_to_template({"pv": src}, 256)
+        result = self._manager()._pad_dict_to_template({"pv": src},
+                                                       {"pv": tmpl})
         assert result["pv"] is src
 
     def test_scalar_uses_template_value(self):
         """0-dim scalars (e.g. max_seqlen): always use the budget-fixed template."""
         tmpl = torch.tensor(256)
         src = torch.tensor(64)
-        result = self._manager({
-            "max_seqlen": tmpl
-        })._pad_to_template({"max_seqlen": src}, 256)
+        result = self._manager()._pad_dict_to_template({"max_seqlen": src},
+                                                       {"max_seqlen": tmpl})
         assert result["max_seqlen"] is tmpl
 
     def test_none_src_uses_template(self):
         """Key absent from replay_values (or explicitly None): use template."""
         tmpl = torch.zeros(8, 4)
-        result = self._manager({"optional": tmpl})._pad_to_template({}, 256)
+        result = self._manager()._pad_dict_to_template({}, {"optional": tmpl})
         assert result["optional"] is tmpl
 
     def test_dtype_cast_on_copy(self):
         """src dtype differs from template: cast to template dtype during copy."""
         tmpl = torch.zeros(10, 4, dtype=torch.bfloat16)
         src = torch.ones(4, 4, dtype=torch.float32)
-        result = self._manager({"pv": tmpl})._pad_to_template({"pv": src}, 256)
+        result = self._manager()._pad_dict_to_template({"pv": src},
+                                                       {"pv": tmpl})
         assert result["pv"].dtype == torch.bfloat16
         assert torch.all(result["pv"][:4] == 1.0)
 
@@ -253,9 +258,11 @@ class TestMMEncoderJITManagerInit:
     def test_budget_templates_keyed_by_budget(self):
         """One template entry per budget, shape matches the budget size."""
         manager = _make_manager()
-        assert set(manager.budget_templates.keys()) == set(
+        assert set(manager.mm_kwargs_templates.keys()) == set(
             manager.token_budgets)
-        for budget, tmpl in manager.budget_templates.items():
+        assert set(manager.buffers_templates.keys()) == set(
+            manager.token_budgets)
+        for budget, tmpl in manager.mm_kwargs_templates.items():
             assert "pixel_values" in tmpl
             assert tmpl["pixel_values"].shape[0] == budget
 
@@ -343,22 +350,32 @@ class TestMMEncoderJITManagerIntegration:
     """
 
     def test_prepare_padded_torch_real_model(self, qwen35_mm_encoder):
-        """_prepare_padded_torch produces correctly-shaped outputs for every
-        template key when driven by the real model's replay-buffer method."""
+        """_prepare_padded_torch produces correctly-shaped mm_kwargs and
+        buffers dicts when driven by the real model's replay-buffer method.
+        """
         manager, _ = qwen35_mm_encoder
         mm_kwargs = _image_mm_kwargs()
         smallest_budget = manager.token_budgets[0]
-        padded = manager._prepare_padded_torch(mm_kwargs, smallest_budget)
+        padded_mm, padded_buffers = manager._prepare_padded_torch(
+            mm_kwargs, replay_buffers=None, token_budget=smallest_budget)
 
-        template = manager.budget_templates[smallest_budget]
-        assert set(padded.keys()) == set(template.keys())
-        for key, tmpl in template.items():
+        mm_template = manager.mm_kwargs_templates[smallest_budget]
+        buffers_template = manager.buffers_templates[smallest_budget]
+        assert set(padded_mm.keys()) == set(mm_template.keys())
+        assert set(padded_buffers.keys()) == set(buffers_template.keys())
+        for key, tmpl in mm_template.items():
             if hasattr(tmpl, "shape"):
-                assert padded[key].shape == tmpl.shape, (
-                    f"key={key}: padded {padded[key].shape} != tmpl {tmpl.shape}"
+                assert padded_mm[key].shape == tmpl.shape, (
+                    f"mm key={key}: padded {padded_mm[key].shape} != tmpl {tmpl.shape}"
                 )
+        for key, tmpl in buffers_template.items():
+            if tmpl is None or not hasattr(tmpl, "shape"):
+                continue
+            assert padded_buffers[key].shape == tmpl.shape, (
+                f"buffer key={key}: padded {padded_buffers[key].shape} != tmpl {tmpl.shape}"
+            )
         n_patches = _image_mm_kwargs()["pixel_values"].shape[0]
-        assert padded["pixel_values"].shape[0] >= n_patches
+        assert padded_mm["pixel_values"].shape[0] >= n_patches
 
     def test_capture_budget_graph(self, qwen35_mm_encoder):
         """_capture_budget_graph primes the XLA cache for the smallest budget

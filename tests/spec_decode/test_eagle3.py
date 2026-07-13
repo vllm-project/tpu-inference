@@ -368,3 +368,61 @@ def test_update_inputs_for_loop_speculation_mrope():
     assert new_seq_lens[0] == 6
     assert new_block_tables[0] == 1
     assert new_block_tables[1] == 2
+
+
+@pytest.mark.parametrize("method", ["eagle3", "mtp"])
+def test_select_inputs_for_loop_speculation_mrope(method):
+    """Regression for the (16,)-vs-(128,) broadcasting bug that appeared on
+    Qwen3-VL + Eagle3 under DP-attention.
+
+    Before the fix, the Eagle3 branch of `_select` did
+    ``positions[last_token_indices]`` unconditionally. For 2D M-RoPE positions
+    of shape ``(3, N)`` that indexed axis 0 with a length-B index array and
+    produced ``(B, N)`` instead of ``(3, B)``. The wrongly shaped positions
+    were then fed into ``_update_inputs_for_loop_speculation``, whose
+    ``jnp.where(exceeds_max_model_len_reduced, 1, new_seq_lens)`` failed with
+    "Incompatible shapes for broadcasting" on the first serving request.
+
+    Only the ``method="eagle3"`` case hit the bug in production. But since
+    ``SpeculativeConfig(model=<eagle3_dir>, method="mtp")`` auto-normalises
+    to ``"eagle3"`` internally, we force ``proposer.method`` after construction
+    so each parametrisation actually exercises the branch it names.
+    """
+    proposer = _create_proposer(method, 2)
+    proposer.method = method
+    proposer.runner.max_model_len = 32
+
+    # Mock draft-token selection so we do not need a real model.
+    proposer._select_draft_token_ids = mock.MagicMock(
+        return_value=jnp.zeros(2, dtype=jnp.int32))
+
+    num_reqs = 2
+    total_tokens = 8
+    hidden_size = 4
+
+    # 2D M-RoPE positions: (3, total_tokens).
+    positions = jnp.stack([jnp.arange(total_tokens)] * 3, axis=0)
+    residual = jnp.ones((total_tokens, hidden_size))
+    hidden_states = jnp.ones((total_tokens, hidden_size))
+    # Pick the last token of each of the two requests.
+    last_token_indices = jnp.array([3, 7], dtype=jnp.int32)
+
+    with jax.set_mesh(proposer.mesh):
+        selected_positions, selected_residual, _ = (
+            proposer._select_inputs_for_loop_speculation(
+                state_leaves=None,
+                positions=positions,
+                residual=residual,
+                hidden_states=hidden_states,
+                last_token_indices=last_token_indices,
+            ))
+
+    # Positions must stay 2D shape (3, num_reqs); the pre-fix bug produced
+    # (num_reqs, total_tokens) here.
+    assert selected_positions.shape == (3, num_reqs), (
+        f"expected (3, {num_reqs}), got {selected_positions.shape} — the "
+        "select branch is silently mangling 2D M-RoPE positions")
+    # Values should be [3, 7] for each of the 3 M-RoPE axes.
+    assert jnp.array_equal(selected_positions,
+                           jnp.array([[3, 7], [3, 7], [3, 7]]))
+    assert selected_residual.shape == (num_reqs, hidden_size)

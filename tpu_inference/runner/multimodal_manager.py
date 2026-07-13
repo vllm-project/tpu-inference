@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.sharding import NamedSharding
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
@@ -27,6 +29,106 @@ from tpu_inference.models.jax.utils.multi_modal_utils import \
     sanity_check_mm_encoder_outputs
 
 logger = init_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Encoder-cache offload to pinned_host (opt-in, gated by
+# OFFLOAD_ENCODER_CACHE_TO_HOST=1).
+#
+# Under multimodal workloads (Qwen3-VL MMMU-Pro at concurrency 64+), the
+# runner's `encoder_cache: dict[str, jax.Array]` accumulates variable-shape
+# entries — one per encoded image, sized by per-image patch count. Combined
+# with the compile-cache persistent buffers and KV-pool layout, this is a
+# primary driver of HBM external fragmentation (free > needed >
+# largest_contiguous; libtpu defrag can't relocate live tensors and fails).
+#
+# The offload keeps encoder outputs on host pinned memory between
+# `execute_mm_encoder` (producer) and `gather_mm_embeddings` (consumer);
+# only the memory kind changes, sharding spec is preserved. Same code
+# handles plain `jax.Array` and torchax-wrapped tensors.
+# ---------------------------------------------------------------------------
+
+_OFFLOAD_LOG_ONCE: dict[str, bool] = {}
+
+
+def _offload_encoder_cache_enabled() -> bool:
+    return os.environ.get("OFFLOAD_ENCODER_CACHE_TO_HOST", "0") == "1"
+
+
+def _maybe_unwrap_torchax(arr):
+    """Return (inner_jax_array, is_torchax_wrapped, rewrap_fn) tuple.
+
+    Torchax tensors round-trip through `jax_view`/`torch_view`. Plain
+    `jax.Array` passes through untouched. We avoid a hard torchax import at
+    module scope so the runner works in pure-JAX contexts.
+    """
+    if isinstance(arr, jax.Array):
+        return arr, False, (lambda x: x)
+    try:
+        from torchax.interop import jax_view, torch_view
+    except Exception:
+        return None, True, (lambda x: x)
+    try:
+        inner = jax_view(arr)
+    except Exception:
+        return None, True, (lambda x: x)
+    return inner, True, torch_view
+
+
+def _encoder_cache_to_pinned_host(arr):
+    """Move an encoder-cache entry to `pinned_host` memory_kind.
+
+    Preserves the sharding mesh + PartitionSpec. No-op if the tensor is
+    already on pinned_host, has non-NamedSharding, or is a torchax wrapper
+    we can't unwrap.
+    """
+    inner, is_torchax, rewrap = _maybe_unwrap_torchax(arr)
+    if inner is None:
+        if not _OFFLOAD_LOG_ONCE.get("unwrap_fail"):
+            logger.warning(
+                "[encoder-cache offload] could not unwrap %s; keeping on device",
+                type(arr).__name__,
+            )
+            _OFFLOAD_LOG_ONCE["unwrap_fail"] = True
+        return arr
+
+    src = inner.sharding
+    if not isinstance(src, NamedSharding):
+        if not _OFFLOAD_LOG_ONCE.get("non_named_sharding"):
+            logger.info(
+                "[encoder-cache offload] sharding %s not NamedSharding; "
+                "keeping on device",
+                type(src).__name__)
+            _OFFLOAD_LOG_ONCE["non_named_sharding"] = True
+        return arr
+    if getattr(src, "memory_kind", None) == "pinned_host":
+        return arr
+
+    moved = jax.device_put(
+        inner, NamedSharding(src.mesh, src.spec, memory_kind="pinned_host"))
+
+    if not _OFFLOAD_LOG_ONCE.get("reported"):
+        logger.info(
+            "[encoder-cache offload] active; first entry shape=%s dtype=%s "
+            "torchax=%s -> pinned_host", inner.shape, inner.dtype, is_torchax)
+        _OFFLOAD_LOG_ONCE["reported"] = True
+
+    return rewrap(moved) if is_torchax else moved
+
+
+def _encoder_cache_to_device(arr):
+    """Inverse of `_encoder_cache_to_pinned_host`. No-op if not offloaded."""
+    inner, is_torchax, rewrap = _maybe_unwrap_torchax(arr)
+    if inner is None:
+        return arr
+    src = inner.sharding
+    if not isinstance(src, NamedSharding):
+        return arr
+    if getattr(src, "memory_kind", None) != "pinned_host":
+        return arr
+    moved = jax.device_put(
+        inner, NamedSharding(src.mesh, src.spec, memory_kind="device"))
+    return rewrap(moved) if is_torchax else moved
+
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -156,11 +258,13 @@ class MultiModalManager:
                 encoder_outputs.append(output)
 
         # Cache the encoder outputs.
+        offload_to_host = _offload_encoder_cache_enabled()
         for (mm_hash, _), output in zip(
                 mm_hashes_pos,
                 encoder_outputs,
         ):
-
+            if offload_to_host:
+                output = _encoder_cache_to_pinned_host(output)
             self.runner.encoder_cache[mm_hash] = output
 
     def gather_mm_embeddings(
@@ -241,6 +345,10 @@ class MultiModalManager:
                         mm_hash, None)
                     assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
                     encoder_output = self.runner.encoder_cache[mm_hash]
+                    # If offloaded to pinned_host, bring back to device for
+                    # the slice — the downstream embed_input_ids_fn JIT runs
+                    # on device. No-op if not offloaded.
+                    encoder_output = _encoder_cache_to_device(encoder_output)
 
                     if (is_embed := pos_info.is_embed) is not None:
                         is_embed = is_embed[start_idx:end_idx]
