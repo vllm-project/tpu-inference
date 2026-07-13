@@ -248,6 +248,7 @@ fi
         status_tag="FAILED"
       fi
 
+      # TODO: When switching to Production after validation is complete.
       # for test upload
       legacy_gcs_uri="gs://vllm-bm-bk-storage/job_logs/${MODEL_NAME:-unknown}_${INPUT_LEN:-0}_${OUTPUT_LEN:-0}_${impl_type}_${CODE_HASH:-unknown}_${status_tag}_${run_mode}${routing_tag}_${JOB_REFERENCE}_vllm_serve.log"
       echo "--- Uploading copy of server log to legacy GCS location: $legacy_gcs_uri"
