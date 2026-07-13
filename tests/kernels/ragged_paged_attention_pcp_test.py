@@ -11,24 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Correctness tests for prefill context parallelism (PCP) in RPA v3.
-
-Exercises the production PCP kernel
-(``tpu_inference.kernels.experimental.rpa_v3_cp.kernel``) that the attention
-wrapper dispatches to. PCP shards one prompt across ``cp_group_size`` ranks in a
-load-balanced head-tail layout (the current tokens are cut into
-``2 * cp_group_size`` chunks; rank ``r`` owns chunk ``r`` and chunk ``2P-1-r``).
-
-New length contract (no ``all_gather_kv`` / ``kv_write_lens``):
-  * ``kv_lens``        = REAL total kv length (num_computed + real current).
-  * ``kv_cache_lens``  = num_computed; the kernel derives the current KV length
-                         as ``kv_lens - kv_cache_lens`` (so only real tokens are
-                         attended/written -- no padding write-clamp).
-  * ``cu_q_lens``      = ``[0, q_len]`` with the launch's REAL chunk length.
-  * ``q_pos_offsets``  = the chunk's within-current start position.
-  * current phase: ``skip_cache_attn=True`` (attend/write the current KV).
-  * cache phase:   ``skip_current_attn=True`` (attend the previous cache only).
-"""
+"""Correctness tests for prefill context parallelism (PCP) in RPA v3."""
 
 from functools import partial
 
@@ -101,12 +84,12 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         return jnp.pad(jnp.array(xs, jnp.int32),
                        (0, self.MAX_SEQ + 1 - len(xs)))
 
-    def _merge_lse(self, acc_o, acc_l, o, l):
+    def _merge_lse(self, acc_o, acc_l, o, lse):
         if acc_o is None:
-            return o, l
-        m = jnp.maximum(acc_l, l)
+            return o, lse
+        m = jnp.maximum(acc_l, lse)
         e1 = jnp.exp(acc_l - m)
-        e2 = jnp.exp(l - m)
+        e2 = jnp.exp(lse - m)
         o = (acc_o * e1[..., None] + o * e2[..., None]) / (e1 + e2)[..., None]
         return o, m + jnp.log(e1 + e2)
 
@@ -313,7 +296,7 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
     @parameterized.product(P=[2, 4])
     def test_pcp_all_padding_tail_write(self, P):
-        """A rank whose tail chunk is ENTIRELY padding (q_len=0) must still write
+        """A rank whose tail chunk is entirely padding (q_len=0) must still write
         its full strided KV share. num_current sits low in the next_pow2 bucket
         so the last chunk(s) are all padding; the kernel floors num_bq to >=1 on
         the writing launch so its strided write still runs."""
