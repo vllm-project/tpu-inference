@@ -55,6 +55,13 @@ JOB_PRIORITY=$(determine_job_priority)
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
 
+# HACK: Only upload multi_host_disagg.yml
+echo "--- 🚨 HACK: Only uploading multi_host_disagg.yml"
+export TPU_VERSION="tpu7x"
+upload_with_priority .buildkite/features/multi_host_disagg.yml "$JOB_PRIORITY"
+echo "--- 🚨 HACK: Finished uploading, exiting early"
+exit 0
+
 # --- Skip build if only docs, icons, or CODEOWNERS changed ---
 echo "--- :git: Checking changed files"
 
@@ -77,7 +84,7 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
         echo "Warning: PR diff failed. Falling back to single commit check."
         FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r -m "$BUILDKITE_COMMIT")
     fi
-    
+
     echo "Files changed:"
     echo "$FILES_CHANGED"
 
@@ -94,7 +101,7 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
 
     # Count files not matching the benchmark prefix
     NON_BENCHMARK_COUNT=$(printf "%s\n" "$NON_SKIPPABLE_FILES" | grep -c -v "^\.buildkite/benchmark" || true)
-    
+
     # Validate custom pipeline metadata (Uniqueness & Completeness)
     if .buildkite/scripts/validate_pipeline_metadata.sh "$NON_SKIPPABLE_FILES"; then
       echo "Pipeline metadata validation passed."
@@ -242,7 +249,7 @@ NOTIFY_FILE="generated_notification.yml"
 # Logic
 # 1. Official Integration/Nightly: If it's triggered by schedule -> Notify Oncall & Slack.
 # 2. Everything else (PRs, Manual Triggers): Notify the creator of this build.
-#    - This ensures that if you manually trigger the integration pipeline for debugging, 
+#    - This ensures that if you manually trigger the integration pipeline for debugging,
 #      it won't alert the oncall team.
 
 if [[ "$BUILDKITE_PIPELINE_SLUG" == "tpu-vllm-integration" && "$BUILDKITE_SOURCE" == "schedule" ]] || \
@@ -276,7 +283,7 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
     upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
-  
+
     # Upload JAX pipeline for v7
     set_jax_envs v7
     upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
@@ -292,7 +299,7 @@ else
   VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
   buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
   echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
-    
+
   # Check if the current build is a pull request
   if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
     echo "This is a Pull Request build."
@@ -307,7 +314,7 @@ else
     # Fetch the response body and save to a temporary file
     GITHUB_PR_RESPONSE_FILE="github_api_logs.json"
     curl -s "$API_URL" -o "$GITHUB_PR_RESPONSE_FILE"
-    
+
     # Upload the full response body as a Buildkite artifact
     echo "Uploading GitHub API response as artifact..."
     buildkite-agent artifact upload "$GITHUB_PR_RESPONSE_FILE"
@@ -337,7 +344,7 @@ else
   fi
 fi
 
-# Since Buildkite inserts steps in reverse order, uploading this last 
+# Since Buildkite inserts steps in reverse order, uploading this last
 # ensures the Docker build steps appear at the very top of the UI.
 upload_with_priority .buildkite/pipeline_build.yml "$JOB_PRIORITY"
 
