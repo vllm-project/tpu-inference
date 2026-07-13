@@ -12,6 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+x-tests-plugin-defaults: &tests_plugin_defaults
+  suite-slug: tests
+  test-runner: pytest
+  install-client: false
+  oidc-lifetime: 7200
+  test-cmd: "bash -c 'python3 -m pytest -s -v -x --junit-xml={{resultPath}} {{testExamples}}'"
+
 steps:
   - group: "${TESTS_GROUP_LABEL:-[jax] TPU6e Tests Group}"
     depends_on: "build_docker"
@@ -22,7 +29,6 @@ steps:
       # -----------------------------------------------------------------
       - label: "${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX models"
         key: "${TPU_VERSION:-tpu6e}_test_0"
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -33,7 +39,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX models with quantization"
         key: ${TPU_VERSION:-tpu6e}_test_1
-        soft_fail: true
         env:
           QUANTIZATION: "True"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -45,7 +50,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX new models"
         key: ${TPU_VERSION:-tpu6e}_test_2
-        soft_fail: true
         env:
           NEW_MODEL_DESIGN: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -57,7 +61,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX + vLLM models on single chip"
         key: ${TPU_VERSION:-tpu6e}_test_3
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           MODEL_IMPL_TYPE: "vllm"
@@ -69,7 +72,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E MLperf tests for Llama4 models"
         key: ${TPU_VERSION:-tpu6e}_test_4
-        soft_fail: true
         env:
           NEW_MODEL_DESIGN: "1"
           USE_V6E8_QUEUE: "True"
@@ -87,7 +89,6 @@ steps:
       # BVT_ONLY and therefore always run the full set.
       - label: "${TPU_VERSION:-tpu6e} E2E speculative decoding test"
         key: ${TPU_VERSION:-tpu6e}_test_6
-        soft_fail: true
         # TODO: Look into the latency of precompilation of the e2e spec decoding test
         timeout_in_minutes: 180
         env:
@@ -98,45 +99,49 @@ steps:
         commands:
           - |
               if [ "$${NIGHTLY:-0}" = "1" ]; then export BVT_ONLY=; else export BVT_ONLY=1; fi
-              .buildkite/scripts/run_in_docker.sh \
-                bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py'
+              .buildkite/scripts/run_in_docker.sh bktec run
+        plugins:
+          - tests#v1.0.0:
+              <<: *tests_plugin_defaults
+              test-file-pattern: "/workspace/tpu_inference/tests/e2e/test_speculative_decoding.py"
 
-      - label: "${TPU_VERSION:-tpu6e} JAX unit tests part1"
-        key: ${TPU_VERSION:-tpu6e}_test_7_1
-        soft_fail: true
-        artifact_paths: ".coverage.part1.${TPU_VERSION:-tpu6e}"
+      - label: "${TPU_VERSION:-tpu6e} Unified JAX unit tests"
+        key: ${TPU_VERSION:-tpu6e}_test_7
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+        parallelism: 2
+        artifact_paths: ".coverage.part*.${TPU_VERSION:-tpu6e}"
         commands:
-          - rm -f .coverage.part1.${TPU_VERSION:-tpu6e}
-          - |
-            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py /workspace/tpu_inference/tests/layers/vllm/test_awq.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part1.${TPU_VERSION:-tpu6e}; else exit 1; fi"
-          - cp /mnt/disks/persist/models/.coverage.part1.${TPU_VERSION:-tpu6e} ./
-
-      - label: "${TPU_VERSION:-tpu6e} JAX unit tests part2"
-        key: ${TPU_VERSION:-tpu6e}_test_7_2
-        soft_fail: true
-        artifact_paths: ".coverage.part2.${TPU_VERSION:-tpu6e}"
-        env:
-          USE_PREBUILT_IMAGE: "1"
-          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-        agents:
-          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
-        commands:
-          - rm -f .coverage.part2.${TPU_VERSION:-tpu6e}
-          - |
-            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_multi_request_accuracy_test.py --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_performance_test.py --ignore=/workspace/tpu_inference/tests/core/test_dp_group_sampling_prefix_cache.py --ignore=/workspace/tpu_inference/tests/runner/test_async_logprobs.py --ignore=/workspace/tpu_inference/tests/runner/test_processed_logprobs.py --ignore=/workspace/tpu_inference/tests/runner/test_moe_expert_ids.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; else exit 1; fi"
-          - cp /mnt/disks/persist/models/.coverage.part2.${TPU_VERSION:-tpu6e} ./
+          - rm -f .coverage.part_$$BUILDKITE_PARALLEL_JOB.${TPU_VERSION:-tpu6e}
+          - .buildkite/scripts/run_in_docker.sh bktec run
+          - cp /mnt/disks/persist/models/.coverage.part_$$BUILDKITE_PARALLEL_JOB.${TPU_VERSION:-tpu6e} ./ 2>/dev/null || true
+        plugins:
+          - tests#v1.0.0:
+              <<: *tests_plugin_defaults
+              test-file-pattern: "/workspace/tpu_inference/tests/{**/test_*.py,**/*_test.py}"
+              test-file-exclude-pattern: "/workspace/tpu_inference/{\
+                scripts/**/*.py,\
+                tests/kernels/**/*.py,\
+                tests/lora/**/*.py,\
+                tests/e2e/**/*.py,\
+                tests/models/jax/test_deepseek_v3.py,\
+                tests/offload/tpu_offload_multi_request_accuracy_test.py,\
+                tests/offload/tpu_offload_accuracy_test.py,\
+                tests/offload/tpu_offload_performance_test.py,\
+                tests/core/test_dp_group_sampling_prefix_cache.py,\
+                tests/runner/test_async_logprobs.py,\
+                tests/runner/test_processed_logprobs.py,\
+                tests/runner/test_moe_expert_ids.py\
+                }"
+              test-cmd: "bash -c 'python3 -m pytest -s -v -x --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --junit-xml={{resultPath}} {{testExamples}}; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part_$$BUILDKITE_PARALLEL_JOB.${TPU_VERSION:-tpu6e}; else exit 1; fi'"
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests combine and report"
         depends_on:
-          - "${TPU_VERSION:-tpu6e}_test_7_1"
-          - "${TPU_VERSION:-tpu6e}_test_7_2"
-        key: ${TPU_VERSION:-tpu6e}_test_7_3
-        soft_fail: true
+          - "${TPU_VERSION:-tpu6e}_test_7"
+        key: ${TPU_VERSION:-tpu6e}_test_7_combine
         agents:
           queue: cpu
         commands:
@@ -150,69 +155,64 @@ steps:
             echo "    ." >> .coveragerc
             echo "    /workspace/tpu_inference/" >> .coveragerc
           - |
-            python3 ./coverage.pex combine .coverage.part1.${TPU_VERSION:-tpu6e} .coverage.part2.${TPU_VERSION:-tpu6e}
-            python3 ./coverage.pex report --fail-under=68
+            python3 ./coverage.pex combine .coverage.part*.${TPU_VERSION:-tpu6e}
+            python3 ./coverage.pex report --fail-under=${COV_FAIL_UNDER:-68}
             EXIT_CODE=$?
             rm -f .coverage.part* .coveragerc pex coverage.pex .coverage
             exit $EXIT_CODE
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests - kernels"
         key: ${TPU_VERSION:-tpu6e}_test_8
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
-        # Skips this step without provisioning TPUs unless NIGHTLY=1 or kernel-related files are modified.
-        # Check bootstrap.sh for the exact file regex.
+        parallelism: 2
         if: build.env("NIGHTLY") == "1" || "${RUN_KERNEL_TESTS:-0}" == "1"
         commands:
-          - |
-            .buildkite/scripts/run_in_docker.sh \
-              python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
-              --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
-              --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
-              --ignore=/workspace/tpu_inference/tests/kernels/collectives \
-              --ignore=/workspace/tpu_inference/tests/kernels/spmm_v1_test.py
+          - .buildkite/scripts/run_in_docker.sh bktec run
+        plugins:
+          - tests#v1.0.0:
+              <<: *tests_plugin_defaults
+              test-file-pattern: "/workspace/tpu_inference/tests/kernels/{*.py,*/*.py}"
+              test-file-exclude-pattern: "/workspace/tpu_inference/tests/kernels/{\
+                ragged_paged_attention_kernel_v2_test.py,\
+                ragged_kv_cache_update_v2_test.py,\
+                collectives/*.py,\
+                spmm_v1_test.py\
+                }"
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests - collective kernels"
         key: ${TPU_VERSION:-tpu6e}_test_9
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
-        # Skips this step without provisioning TPUs unless NIGHTLY=1 or collective kernel-related files are modified.
-        # Check bootstrap.sh for the exact file regex.
         if: build.env("NIGHTLY") == "1" || "${RUN_KERNEL_COLLECTIVES_TESTS:-0}" == "1"
         commands:
-          - |
-            .buildkite/scripts/run_in_docker.sh \
-              python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
+          - .buildkite/scripts/run_in_docker.sh bktec run
+        plugins:
+          - tests#v1.0.0:
+              <<: *tests_plugin_defaults
+              test-file-pattern: "/workspace/tpu_inference/tests/kernels/collectives/*.py"
 
-      - label: "${TPU_VERSION:-tpu6e} lora e2e tests for JAX + vLLM models single chip - test_lora"
-        key: ${TPU_VERSION:-tpu6e}_test_10_1
-        soft_fail: true
+      - label: "${TPU_VERSION:-tpu6e} lora e2e tests for JAX + vLLM models single chip"
+        key: ${TPU_VERSION:-tpu6e}_test_10
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         if: build.env("NIGHTLY") == "1"
         commands:
-          - .buildkite/scripts/run_in_docker.sh bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
-
-      - label: "${TPU_VERSION:-tpu6e} lora e2e tests for JAX + vLLM models single chip - test_lora_adapter"
-        key: ${TPU_VERSION:-tpu6e}_test_10_2
-        soft_fail: true
-        agents:
-          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
-        if: build.env("NIGHTLY") == "1"
-        commands:
-          - .buildkite/scripts/run_in_docker.sh bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora_adapter.py'
+          - .buildkite/scripts/run_in_docker.sh bktec run
+        plugins:
+          - tests#v1.0.0:
+              <<: *tests_plugin_defaults
+              test-file-pattern: "/workspace/tpu_inference/tests/lora/{test_lora,test_lora_adapter}.py"
+              test-cmd: "bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x --junit-xml={{resultPath}} {{testExamples}}'"
 
       - label: "${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX + vLLM models on multiple chips"
         key: ${TPU_VERSION:-tpu6e}_test_11
-        soft_fail: true
         env:
           MODEL_IMPL_TYPE: "vllm"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -225,7 +225,6 @@ steps:
       # TODO (jacobplatin): re-enable this after b/467105149 is fixed
       - label: "${TPU_VERSION:-tpu6e} E2E MLperf tests for DeepSeek-R1 (no accuracy, 5-decoder layers only)"
         key: ${TPU_VERSION:-tpu6e}_test_12
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           NEW_MODEL_DESIGN: "1"
@@ -245,7 +244,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E MMLU for DeepSeek-R1 torchax backend"
         key: ${TPU_VERSION:-tpu6e}_test_14
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           NEW_MODEL_DESIGN: "1"
@@ -264,7 +262,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E MMLU for DeepSeek-V4-Flash torchax backend"
         key: ${TPU_VERSION:-tpu6e}_test_37
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           NEW_MODEL_DESIGN: "1"
@@ -281,9 +278,10 @@ steps:
           - |
             .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/deepseek-v4-flash" -n 14042 -l 4
 
+
+
       - label: "${TPU_VERSION:-tpu6e} lora e2e tests for JAX + vLLM models multi chips"
         key: ${TPU_VERSION:-tpu6e}_test_13
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -292,25 +290,29 @@ steps:
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
-          - .buildkite/scripts/run_in_docker.sh bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
+          - .buildkite/scripts/run_in_docker.sh bktec run
+        plugins:
+          - tests#v1.0.0:
+              <<: *tests_plugin_defaults
+              test-file-pattern: "/workspace/tpu_inference/tests/lora/test_lora.py"
+              test-cmd: "bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x --junit-xml={{resultPath}} {{testExamples}}'"
 
       - label: "${TPU_VERSION:-tpu6e} lora unit tests on single chip"
         key: ${TPU_VERSION:-tpu6e}_test_15
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
         commands:
-          - |
-            .buildkite/scripts/run_in_docker.sh \
-              bash -c ' python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_bgmv.py && \
-              python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
+          - .buildkite/scripts/run_in_docker.sh bktec run
+        plugins:
+          - tests#v1.0.0:
+              <<: *tests_plugin_defaults
+              test-file-pattern: "/workspace/tpu_inference/tests/lora/{test_bgmv.py,test_layers.py}"
 
       - label: "${TPU_VERSION:-tpu6e} lora unit tests on multi chips"
         key: ${TPU_VERSION:-tpu6e}_test_16
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -319,11 +321,14 @@ steps:
         agents:
           queue: ${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}
         commands:
-          - .buildkite/scripts/run_in_docker.sh bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
+          - .buildkite/scripts/run_in_docker.sh bktec run
+        plugins:
+          - tests#v1.0.0:
+              <<: *tests_plugin_defaults
+              test-file-pattern: "/workspace/tpu_inference/tests/lora/test_layers.py"
 
       - label: "${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check qwen3 coder with fused moe."
         key: ${TPU_VERSION:-tpu6e}_test_17
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -336,7 +341,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check qwen3 coder with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_18
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -349,7 +353,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check gpt oss."
         key: ${TPU_VERSION:-tpu6e}_test_19
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -364,7 +367,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 1k 8k with fused moe kernel."
         key: ${TPU_VERSION:-tpu6e}_test_20
-        soft_fail: true
         env:
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
@@ -376,7 +378,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 8k 1k with fused moe kernel."
         key: ${TPU_VERSION:-tpu6e}_test_21
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -389,7 +390,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 1k 8k with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_22
-        soft_fail: true
         env:
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
@@ -401,7 +401,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 8k 1k with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_23
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -414,7 +413,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Test EP recompilation."
         key: ${TPU_VERSION:-tpu6e}_test_24
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -427,7 +425,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E test for Multihost DCN-based P/D disaggregation"
         key: ${TPU_VERSION:-tpu6e}_test_25
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -452,7 +449,6 @@ steps:
         # image (fixed separately), and (2) a bad multi-host machine whose Runai
         # weight-streamer stalls at ~50%. Re-enable once both are resolved.
         skip: "Times out ~2h; re-enable after bad-machine fix"
-        soft_fail: true
         agents:
           queue: tpu_v7x_16_queue
         env:
@@ -481,40 +477,51 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer JAX UniProcExecutor"
         key: "${TPU_VERSION:-tpu6e}_test_27"
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
         commands:
-          - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_jax_uni_proc_executor
+          - .buildkite/scripts/run_in_docker.sh bktec run
+        plugins:
+          - tests#v1.0.0:
+              <<: *tests_plugin_defaults
+              test-file-pattern: "/workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py"
+              test-cmd: "bash -c 'python3 -m pytest -s -v -k test_correctness_jax_uni_proc_executor --junit-xml={{resultPath}} {{testExamples}}'"
 
       - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax UniProcExecutor"
         key: "${TPU_VERSION:-tpu6e}_test_28"
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
         commands:
-          - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_uni_proc_executor
+          - .buildkite/scripts/run_in_docker.sh bktec run
+        plugins:
+          - tests#v1.0.0:
+              <<: *tests_plugin_defaults
+              test-file-pattern: "/workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py"
+              test-cmd: "bash -c 'python3 -m pytest -s -v -k test_correctness_torchax_uni_proc_executor --junit-xml={{resultPath}} {{testExamples}}'"
 
       - label: "${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax RayDistributedExecutor"
         key: "${TPU_VERSION:-tpu6e}_test_29"
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
           queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}" # Using a queue with more devices for distributed tests
         commands:
-          - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_ray_distributed_executor
+          - .buildkite/scripts/run_in_docker.sh bktec run
+        plugins:
+          - tests#v1.0.0:
+              <<: *tests_plugin_defaults
+              test-file-pattern: "/workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py"
+              test-cmd: "bash -c 'python3 -m pytest -s -v -k test_correctness_torchax_ray_distributed_executor --junit-xml={{resultPath}} {{testExamples}}'"
 
       - label: "${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check Qwen3.5-397B-A17B with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_30
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -530,7 +537,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Perf regression test for Qwen3.5-397B-A17B 1k 8k with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_31
-        soft_fail: true
         env:
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
         agents:
@@ -545,7 +551,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} Perf regression test for Qwen3.5-397B-A17B 8k 1k with gmm kernel."
         key: ${TPU_VERSION:-tpu6e}_test_32
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -563,7 +568,6 @@ steps:
         key: ${TPU_VERSION:-tpu6e}_test_33
         agents:
           queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
-        soft_fail: true
         env:
           TEST_MODEL: Qwen/Qwen2.5-VL-7B-Instruct
           TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
@@ -574,7 +578,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E test for Single Host DCN-based P/D disaggregation"
         key: ${TPU_VERSION:-tpu6e}_test_34
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -591,7 +594,6 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E test for MPMD data parallelism"
         key: ${TPU_VERSION:-tpu6e}_test_35
-        soft_fail: true
         env:
           USE_PREBUILT_IMAGE: "1"
           NEW_MODEL_DESIGN: "1"
@@ -633,61 +635,9 @@ steps:
           queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
         if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
         commands:
-          - |
-            .buildkite/scripts/run_in_docker.sh bash -c "
-              TPU_VERSION=\${TPU_VERSION} TPU_CORES=\${TPU_CORES} python -m pytest tools/kernel/tuner/v1/tests/test_kernel_tuner_runner.py -v -rs &&
-              python -m pytest tools/kernel/tuner/v1/tests/test_tuned_params_structure.py -v -rs &&
-              python -m pytest tools/kernel/tuner/v1/tests/test_inspect_result_cli.py -v -rs "
-
-      # -----------------------------------------------------------------
-      # NOTIFICATION STEP
-      # -----------------------------------------------------------------
-      - label: "${TPU_VERSION:-tpu6e} TPU Test Notification"
-        key: ${TPU_VERSION:-tpu6e}_tpu_test_notification
-        depends_on:
-          - ${TPU_VERSION:-tpu6e}_test_0
-          - ${TPU_VERSION:-tpu6e}_test_1
-          - ${TPU_VERSION:-tpu6e}_test_2
-          - ${TPU_VERSION:-tpu6e}_test_3
-          - ${TPU_VERSION:-tpu6e}_test_4
-          - ${TPU_VERSION:-tpu6e}_test_6
-          - ${TPU_VERSION:-tpu6e}_test_7_1
-          - ${TPU_VERSION:-tpu6e}_test_7_2
-          - ${TPU_VERSION:-tpu6e}_test_7_3
-          - ${TPU_VERSION:-tpu6e}_test_8
-          - ${TPU_VERSION:-tpu6e}_test_9
-          - ${TPU_VERSION:-tpu6e}_test_10_1
-          - ${TPU_VERSION:-tpu6e}_test_10_2
-          - ${TPU_VERSION:-tpu6e}_test_11
-          - ${TPU_VERSION:-tpu6e}_test_12
-          - ${TPU_VERSION:-tpu6e}_test_13
-          - ${TPU_VERSION:-tpu6e}_test_14
-          - ${TPU_VERSION:-tpu6e}_test_15
-          - ${TPU_VERSION:-tpu6e}_test_16
-          - ${TPU_VERSION:-tpu6e}_test_17
-          - ${TPU_VERSION:-tpu6e}_test_18
-          - ${TPU_VERSION:-tpu6e}_test_19
-          - ${TPU_VERSION:-tpu6e}_test_20
-          - ${TPU_VERSION:-tpu6e}_test_21
-          - ${TPU_VERSION:-tpu6e}_test_22
-          - ${TPU_VERSION:-tpu6e}_test_23
-          - ${TPU_VERSION:-tpu6e}_test_24
-          - ${TPU_VERSION:-tpu6e}_test_25
-          - ${TPU_VERSION:-tpu6e}_test_26
-          - ${TPU_VERSION:-tpu6e}_test_27
-          - ${TPU_VERSION:-tpu6e}_test_28
-          - ${TPU_VERSION:-tpu6e}_test_29
-          - ${TPU_VERSION:-tpu6e}_test_30
-          - ${TPU_VERSION:-tpu6e}_test_31
-          - ${TPU_VERSION:-tpu6e}_test_32
-          - ${TPU_VERSION:-tpu6e}_test_33
-          - ${TPU_VERSION:-tpu6e}_test_34
-          - ${TPU_VERSION:-tpu6e}_test_35
-          - ${TPU_VERSION:-tpu6e}_test_36
-          - ${TPU_VERSION:-tpu6e}_test_37
-        agents:
-          queue: cpu
-        commands:
-          - |
-            .buildkite/scripts/check_results.sh \
-              "TPU JAX Tests Failed" ${TPU_VERSION:-tpu6e}_test_0 ${TPU_VERSION:-tpu6e}_test_1 ${TPU_VERSION:-tpu6e}_test_2 ${TPU_VERSION:-tpu6e}_test_3 ${TPU_VERSION:-tpu6e}_test_4 ${TPU_VERSION:-tpu6e}_test_6 ${TPU_VERSION:-tpu6e}_test_7_1 ${TPU_VERSION:-tpu6e}_test_7_2 ${TPU_VERSION:-tpu6e}_test_7_3 ${TPU_VERSION:-tpu6e}_test_8 ${TPU_VERSION:-tpu6e}_test_9 ${TPU_VERSION:-tpu6e}_test_10_1 ${TPU_VERSION:-tpu6e}_test_10_2 ${TPU_VERSION:-tpu6e}_test_11 ${TPU_VERSION:-tpu6e}_test_12 ${TPU_VERSION:-tpu6e}_test_13 ${TPU_VERSION:-tpu6e}_test_14 ${TPU_VERSION:-tpu6e}_test_15 ${TPU_VERSION:-tpu6e}_test_16 ${TPU_VERSION:-tpu6e}_test_17 ${TPU_VERSION:-tpu6e}_test_18 ${TPU_VERSION:-tpu6e}_test_19 ${TPU_VERSION:-tpu6e}_test_20 ${TPU_VERSION:-tpu6e}_test_21 ${TPU_VERSION:-tpu6e}_test_22 ${TPU_VERSION:-tpu6e}_test_23 ${TPU_VERSION:-tpu6e}_test_24 ${TPU_VERSION:-tpu6e}_test_25 ${TPU_VERSION:-tpu6e}_test_26 ${TPU_VERSION:-tpu6e}_test_27 ${TPU_VERSION:-tpu6e}_test_28 ${TPU_VERSION:-tpu6e}_test_29 ${TPU_VERSION:-tpu6e}_test_30 ${TPU_VERSION:-tpu6e}_test_31 ${TPU_VERSION:-tpu6e}_test_32 ${TPU_VERSION:-tpu6e}_test_33 ${TPU_VERSION:-tpu6e}_test_34 ${TPU_VERSION:-tpu6e}_test_35 ${TPU_VERSION:-tpu6e}_test_37
+          - .buildkite/scripts/run_in_docker.sh bktec run
+        plugins:
+          - tests#v1.0.0:
+              <<: *tests_plugin_defaults
+              test-file-pattern: "/workspace/tpu_inference/tools/kernel/tuner/v1/tests/{test_kernel_tuner_runner.py,test_tuned_params_structure.py,test_inspect_result_cli.py}"
+              test-cmd: "bash -c 'TPU_VERSION=${TPU_VERSION} TPU_CORES=${TPU_CORES} python3 -m pytest -v -rs --junit-xml={{resultPath}} {{testExamples}}'"

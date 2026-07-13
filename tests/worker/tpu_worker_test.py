@@ -42,6 +42,7 @@ def mock_vllm_config():
     mock_parallel_conf.nnodes = 1
     mock_parallel_conf.nnodes_within_dp = 1
     mock_parallel_conf.enable_elastic_ep = False
+    mock_parallel_conf.cpu_distributed_timeout_seconds = None
 
     mock_additional_config = {}
 

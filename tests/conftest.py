@@ -41,6 +41,11 @@ from unittest.mock import patch
 import jax
 import pytest
 
+# Disable vLLM background usage telemetry worker in unit tests to prevent
+# MagicMock serialization errors when tests mock config objects.
+os.environ["VLLM_NO_USAGE_STATS"] = "1"
+os.environ["VLLM_DO_NOT_TRACK"] = "1"
+
 
 def pytest_configure(config):
     """
