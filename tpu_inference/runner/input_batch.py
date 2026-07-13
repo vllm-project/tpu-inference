@@ -190,6 +190,7 @@ class InputBatch:
                 list(
                     range(base + self._mamba_local_slots - stride, base,
                           -stride)))
+        logger.info("[MAMBA-POOL-INIT] __init__ called: mamba_num_blocks=%d dp_size=%d is_spec_decode=%s num_spec=%d stride=%d pool[0]_len=%d pool[0]_sample=%s", mamba_num_blocks, dp_size, is_spec_decode, num_speculative_tokens, stride, len(self._free_mamba_slots_per_rank[0]) if self._free_mamba_slots_per_rank else 0, self._free_mamba_slots_per_rank[0][:10] if self._free_mamba_slots_per_rank else [])
 
         # for pooling models
         self.pooling_params: dict[str, PoolingParams] = {}
@@ -214,6 +215,7 @@ class InputBatch:
                 list(
                     range(base + self._mamba_local_slots - stride, base,
                           -stride)))
+        logger.info("[MAMBA-POOL-INIT] init_mamba_pools called: mamba_num_blocks=%d dp_size=%d is_spec_decode=%s num_spec=%d stride=%d pool[0]_len=%d pool[0]_sample=%s", mamba_num_blocks, self.dp_size, self.is_spec_decode, self.num_speculative_tokens, stride, len(self._free_mamba_slots_per_rank[0]) if self._free_mamba_slots_per_rank else 0, self._free_mamba_slots_per_rank[0][:10] if self._free_mamba_slots_per_rank else [])
 
     def release_mamba_slot(self, slot: Optional[int]) -> None:
         if slot is None:
@@ -389,6 +391,7 @@ class InputBatch:
             if request.mamba_state_slot in pool:
                 pool.remove(request.mamba_state_slot)
         self.mamba_state_indices_cpu[req_index] = request.mamba_state_slot
+        logger.info("[MAMBA-SLOT-ALLOC] Assigned slot %s to req %s (req_index=%d, dp_rank=%d). Remaining pool sample on rank %d: %s", request.mamba_state_slot, request.request_id, req_index, dp_rank, dp_rank, self._free_mamba_slots_per_rank[dp_rank][:5] if self._free_mamba_slots_per_rank and dp_rank < len(self._free_mamba_slots_per_rank) else [])
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
