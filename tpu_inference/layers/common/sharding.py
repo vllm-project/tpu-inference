@@ -44,12 +44,9 @@ class ShardingAxisNameBase:
     ATTN_DATA = ('data', 'pcp', 'attn_dp', 'attn_dp_expert')
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = ('data', 'pcp')
-    # Query heads are sharded over `dcp` (replicated over `pcp`). KV heads are
-    # replicated over both context-parallel axes (see KV_HEAD); DCP instead
-    # strides the KV-cache context (KV_CONTEXT) and merges ranks via LSE.
-    ATTN_HEAD = ('model', 'expert', 'dcp')  #todo: rename as Q_HEAD
+    ATTN_HEAD = ('model', 'expert', 'dcp')
     KV_HEAD = ('model', 'expert'
-               )  # DO WE NEED to chnage the sharding spec somewhere?
+               )
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp')
     MOE_TENSOR = ('attn_dp', 'model', 'dcp')

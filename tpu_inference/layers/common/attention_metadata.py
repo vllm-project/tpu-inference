@@ -62,9 +62,7 @@ class AttentionMetadata(object):
     q_pos_offsets: jax.Array | None = None
 
     # (max_num_seqs,) int32 — PCP only. Per-request previously-computed kv length
-    # (num_computed). The kernel derives the REAL current KV length as
-    # `seq_lens - pcp_kv_cache_lens`, so only real tokens are attended/written
-    # (no padding write-clamp). None when PCP disabled.
+    # (num_computed). None when PCP disabled.
     pcp_kv_cache_lens: jax.Array | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket
