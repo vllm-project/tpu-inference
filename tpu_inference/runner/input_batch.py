@@ -193,7 +193,9 @@ class InputBatch:
                 list(
                     range(base + self._mamba_local_slots - stride, base,
                           -stride)))
-        logger.info("[MAMBA-POOL-INIT] __init__ called: mamba_num_blocks=%d dp_size=%d is_spec_decode=%s num_spec=%d stride=%d pool[0]_len=%d pool[0]_sample=%s", mamba_num_blocks, dp_size, is_spec_decode, num_speculative_tokens, stride, len(self._free_mamba_slots_per_rank[0]) if self._free_mamba_slots_per_rank else 0, self._free_mamba_slots_per_rank[0][:10] if self._free_mamba_slots_per_rank else [])
+        msg = f"[MAMBA-POOL-INIT] __init__ called: mamba_num_blocks={mamba_num_blocks} dp_size={dp_size} is_spec_decode={is_spec_decode} num_spec={num_speculative_tokens} stride={stride} pool[0]_len={len(self._free_mamba_slots_per_rank[0]) if self._free_mamba_slots_per_rank else 0} pool[0]_sample={self._free_mamba_slots_per_rank[0][:10] if self._free_mamba_slots_per_rank else []}"
+        logger.warning("%s", msg)
+        print(msg, flush=True)
 
         # for pooling models
         self.pooling_params: dict[str, PoolingParams] = {}
@@ -218,7 +220,9 @@ class InputBatch:
                 list(
                     range(base + self._mamba_local_slots - stride, base,
                           -stride)))
-        logger.info("[MAMBA-POOL-INIT] init_mamba_pools called: mamba_num_blocks=%d dp_size=%d is_spec_decode=%s num_spec=%d stride=%d pool[0]_len=%d pool[0]_sample=%s", mamba_num_blocks, self.dp_size, self.is_spec_decode, self.num_speculative_tokens, stride, len(self._free_mamba_slots_per_rank[0]) if self._free_mamba_slots_per_rank else 0, self._free_mamba_slots_per_rank[0][:10] if self._free_mamba_slots_per_rank else [])
+        msg = f"[MAMBA-POOL-INIT] init_mamba_pools called: mamba_num_blocks={mamba_num_blocks} dp_size={self.dp_size} is_spec_decode={self.is_spec_decode} num_spec={self.num_speculative_tokens} stride={stride} pool[0]_len={len(self._free_mamba_slots_per_rank[0]) if self._free_mamba_slots_per_rank else 0} pool[0]_sample={self._free_mamba_slots_per_rank[0][:10] if self._free_mamba_slots_per_rank else []}"
+        logger.warning("%s", msg)
+        print(msg, flush=True)
 
     def release_mamba_slot(self, slot: Optional[int]) -> None:
         if slot is None:
@@ -394,7 +398,9 @@ class InputBatch:
             if request.mamba_state_slot in pool:
                 pool.remove(request.mamba_state_slot)
         self.mamba_state_indices_cpu[req_index] = request.mamba_state_slot
-        logger.info("[MAMBA-SLOT-ALLOC] Assigned slot %s to req %s (req_index=%d, dp_rank=%d). Remaining pool sample on rank %d: %s", request.mamba_state_slot, request.req_id, req_index, dp_rank, dp_rank, self._free_mamba_slots_per_rank[dp_rank][:5] if self._free_mamba_slots_per_rank and dp_rank < len(self._free_mamba_slots_per_rank) else [])
+        msg = f"[MAMBA-SLOT-ALLOC] Assigned slot {request.mamba_state_slot} to req {request.req_id} (req_index={req_index}, dp_rank={dp_rank}). Remaining pool sample on rank {dp_rank}: {self._free_mamba_slots_per_rank[dp_rank][:5] if self._free_mamba_slots_per_rank and dp_rank < len(self._free_mamba_slots_per_rank) else []}"
+        logger.warning("%s", msg)
+        print(msg, flush=True)
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.

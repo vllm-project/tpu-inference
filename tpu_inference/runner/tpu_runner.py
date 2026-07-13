@@ -1398,13 +1398,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     _host_indices = _np.asarray(jax.device_get(state_indices_to_rollback))
                     _host_accepted = _np.asarray(jax.device_get(num_accepted_tokens_dev))
                     _valid_dev = getattr(self, "_async_rollback_valid_dev", None)
-                    _host_valid = _np.asarray(jax.device_get(_valid_dev)) if _valid_dev is not None else _np.ones(self.max_num_reqs, dtype=bool)
-                    _active_req_ids = self.input_batch.req_ids[:self.max_num_reqs]
+                    _host_valid = _np.asarray(jax.device_get(_valid_dev)) if _valid_dev is not None else _np.ones(len(_host_indices), dtype=bool)
+                    _active_req_ids = self.input_batch.req_ids[:len(_host_indices)]
                     _log_lines = []
-                    for _pos in range(self.max_num_reqs):
-                        _rid = _active_req_ids[_pos]
+                    for _pos in range(len(_host_indices)):
+                        _rid = _active_req_ids[_pos] if _pos < len(_active_req_ids) else None
                         if _rid is not None:
-                            _src_idx = int(_host_accepted[_pos]) + 1
+                            _src_idx = int(_host_accepted[_pos]) + 1 if _pos < len(_host_accepted) else 1
                             _src_slot = _host_indices[_pos, min(_src_idx, _host_indices.shape[1] - 1)] if 0 <= _src_idx < _host_indices.shape[1] else -999
                             _log_lines.append(f"slot={_pos}: req_id={_rid} | target_slot={_host_indices[_pos, 0]} | source_slot={_src_slot} (accepted={_host_accepted[_pos]} + 1) | valid={_host_valid[_pos]}")
                     logger.info("[MAMBA-ROLLBACK-DEBUG] step=%s | prev_ndim=%d curr_ndim=%d:\n  %s", getattr(self, "_step_counter", 0), prev_ndim, curr_ndim, "\n  ".join(_log_lines))
