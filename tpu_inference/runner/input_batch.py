@@ -16,6 +16,9 @@ from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
 from tpu_inference.runner.block_table import MultiGroupBlockTable
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 
