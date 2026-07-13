@@ -635,7 +635,7 @@ steps:
         commands:
           - |
             .buildkite/scripts/run_in_docker.sh bash -c "
-              pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt tensorflow &&
+              pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt tensorflow==2.21.0 &&
               TPU_VERSION=\${TPU_VERSION} TPU_CORES=\${TPU_CORES} python -m pytest tools/kernel/tuner/v1/tests/test_kernel_tuner_runner.py -v -rs &&
               python -m pytest tools/kernel/tuner/v1/tests/test_tuned_params_structure.py -v -rs &&
               python -m pytest tools/kernel/tuner/v1/tests/test_inspect_result_cli.py -v -rs "

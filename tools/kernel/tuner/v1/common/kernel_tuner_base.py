@@ -601,11 +601,6 @@ class KernelTunerBase(ABC):
                     iters=measurement_iters,
                     warmup_us=warmup_us)
             if status != TuningStatus.SUCCESS:
-                results_buffer.append(
-                    (self.run_config.case_set_id, self.run_config.run_id, cid,
-                     status.value, worker_id, warmup_us, 0, 0,
-                     self.storage_manager.get_timestamp_sec(),
-                     self.run_config.tpu_queue_multi))
                 logger.warning(
                     f"Case {cid} failed during main run with status: {status}. Total time spent: {(time.perf_counter_ns() - begin_case_id_time)/1e9:.2f}s."
                 )

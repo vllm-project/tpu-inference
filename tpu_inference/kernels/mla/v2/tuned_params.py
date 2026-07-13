@@ -56,10 +56,25 @@ class TunableParams:
     q_split: int = 1  # number of query split for running parallel.
 
     def __ge__(self, other) -> bool:
-        return self.decode_batch_size >= other.decode_batch_size and self.num_kv_pages_per_block >= other.num_kv_pages_per_block and self.num_queries_per_block >= other.num_queries_per_block and self.vmem_limit_bytes <= other.vmem_limit_bytes
+        if not isinstance(other, TunableParams):
+            return NotImplemented
+
+        # Higher decode_batch_size, num_kv_pages_per_block, and num_queries_per_block
+        # represent more memory demanding configurations. For vmem_limit_bytes, a larger limit
+        # is less OOM-prone, so the comparison is inverted.
+        return (self.decode_batch_size >= other.decode_batch_size
+                and self.num_kv_pages_per_block >= other.num_kv_pages_per_block
+                and self.num_queries_per_block >= other.num_queries_per_block
+                and self.vmem_limit_bytes <= other.vmem_limit_bytes)
 
     def __le__(self, other) -> bool:
-        return self.decode_batch_size <= other.decode_batch_size and self.num_kv_pages_per_block <= other.num_kv_pages_per_block and self.num_queries_per_block <= other.num_queries_per_block and self.vmem_limit_bytes >= other.vmem_limit_bytes
+        if not isinstance(other, TunableParams):
+            return NotImplemented
+
+        return (self.decode_batch_size <= other.decode_batch_size
+                and self.num_kv_pages_per_block <= other.num_kv_pages_per_block
+                and self.num_queries_per_block <= other.num_queries_per_block
+                and self.vmem_limit_bytes >= other.vmem_limit_bytes)
 
 
 tuned_params_mapping: dict[TuningKey, TunableParams] = {
