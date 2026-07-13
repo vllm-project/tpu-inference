@@ -81,6 +81,10 @@ class DFlashProposer:
 
         self.runner = runner
         self.mesh = runner.mesh
+        if self.mesh.shape.get(ShardingAxisName.ATTN_DATA, 1) > 1:
+            raise NotImplementedError(
+                "DFlash currently does not support Data Parallelism (DP) attention "
+                "(ATTN_DATA > 1).")
         self.num_speculative_tokens = (
             self.speculative_config.num_speculative_tokens)
 
