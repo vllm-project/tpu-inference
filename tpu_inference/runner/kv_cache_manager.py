@@ -388,7 +388,7 @@ class KVCacheManager:
         # to store the state history, plus 1 block for the null slot.
         if self.runner.speculative_config:
             num_spec = self.runner.speculative_config.num_speculative_tokens
-            mamba_num_blocks = self.runner.max_num_reqs * (num_spec + 1) + 1
+            mamba_num_blocks = self.runner.max_num_reqs * (num_spec + 2) + 1
         else:
             mamba_num_blocks = self.runner.max_num_reqs + 1
         mamba_num_blocks = (
