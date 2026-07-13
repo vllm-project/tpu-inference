@@ -333,8 +333,9 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
     positions = positions - pos_subtract
 
     rollback_valid = rollback_subtract_indices >= 0
+    has_drafts_dev = rollback_draft_lengths > 0
     mapped_num_rejected = jnp.where(
-        rollback_valid, num_rejected_tokens[rollback_subtract_indices], 0)
+        rollback_valid & has_drafts_dev, num_rejected_tokens[rollback_subtract_indices], 0)
     num_accepted_tokens_dev = rollback_draft_lengths - mapped_num_rejected
 
     return seq_lens, positions, num_accepted_tokens_dev, rollback_valid
@@ -2329,12 +2330,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     req_id]
                 seq_lens_subtract_indices[
                     i + rank * (self.max_num_reqs // self.dp_size)] = idx
+                rollback_subtract_indices[
+                    i + rank * (self.max_num_reqs // self.dp_size)] = idx
 
                 prev_draft_token_ids = self._pre_async_results.scheduler_output.scheduled_spec_decode_tokens.get(
                     req_id)
                 if prev_draft_token_ids is not None:
-                    rollback_subtract_indices[
-                        i + rank * (self.max_num_reqs // self.dp_size)] = idx
                     rollback_draft_lengths[
                         i + rank * (self.max_num_reqs // self.dp_size)] = len(
                             prev_draft_token_ids)
