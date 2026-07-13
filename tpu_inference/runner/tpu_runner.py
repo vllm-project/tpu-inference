@@ -1278,9 +1278,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         the JIT-compiled `_rollback_mamba_layer_states_fn` to perform the
         in-place copy of the accepted state to Slot 0.
         """
+        target_layer_indices = {
+            idx for layer_name, idx in getattr(self, "layer_name_to_kvcache_index", {}).items()
+            if not any(k in layer_name.lower() for k in ("draft", "proposer", "mtp"))
+        }
         for layer_idx, kv_cache in enumerate(self.kv_caches):
             if isinstance(kv_cache,
                           tuple):  # Mamba layer: (conv_state, recurrent_state)
+                if target_layer_indices and layer_idx not in target_layer_indices:
+                    continue
                 conv_state, recurrent_state = kv_cache
                 new_conv, new_rec = _rollback_mamba_layer_states_fn(
                     conv_state,
@@ -1402,7 +1408,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     _active_req_ids = self.input_batch.req_ids[:len(_host_indices)]
                     _log_lines = []
                     for _pos in range(len(_host_indices)):
-                        _rid = _active_req_ids[_pos] if _pos < len(_active_req_ids) else None
+                        _rid = self._dp_ordered_req_ids[_pos] if getattr(self, "_dp_ordered_req_ids", None) and _pos < len(self._dp_ordered_req_ids) else (_active_req_ids[_pos] if _pos < len(_active_req_ids) else None)
                         if _rid is not None:
                             _src_idx = int(_host_accepted[_pos]) + 1 if _pos < len(_host_accepted) else 1
                             _src_slot = _host_indices[_pos, min(_src_idx, _host_indices.shape[1] - 1)] if 0 <= _src_idx < _host_indices.shape[1] else -999
@@ -2711,12 +2717,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                             _num_reqs] = local_base_slots
 
 
+            dp_ordered_req_ids = [None] * self.max_num_reqs
+            for _dp in range(dp_size):
+                _ro = _dp * max_num_reqs_per_dp_rank
+                for _i, _ridx in enumerate(req_indices_dp[_dp]):
+                    if _ro + _i < self.max_num_reqs and _ridx < len(self.input_batch.req_ids):
+                        dp_ordered_req_ids[_ro + _i] = self.input_batch.req_ids[_ridx]
+            self._dp_ordered_req_ids = dp_ordered_req_ids
+
             if self.input_batch.has_mamba_layers and mamba_state_indices_cpu is not None:
                 try:
                     self._step_counter = getattr(self, "_step_counter", 0) + 1
                     _prep_lines = []
                     for _pos in range(self.max_num_reqs):
-                        _rid = self.input_batch.req_ids[_pos] if _pos < len(self.input_batch.req_ids) else None
+                        _rid = self._dp_ordered_req_ids[_pos] if getattr(self, "_dp_ordered_req_ids", None) and _pos < len(self._dp_ordered_req_ids) else (self.input_batch.req_ids[_pos] if _pos < len(self.input_batch.req_ids) else None)
                         if _rid is not None:
                             _prep_lines.append(f"slot={_pos}: req_id={_rid} | indices={mamba_state_indices_cpu[_pos]} | spec_verify={is_spec_verification}")
                     logger.info("[MAMBA-PREP-DEBUG] step=%s | is_spec_verification=%s:\n  %s", self._step_counter, is_spec_verification, "\n  ".join(_prep_lines))
