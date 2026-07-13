@@ -143,13 +143,17 @@ def convert_torch_tensor_to_jax(tensor: torch.Tensor,
 
     torch bfloat16 tensors cannot pass through numpy (unsupported
     ScalarType), so reinterpret the bits via int16 and view back as
-    bfloat16; other dtypes go through float32.
+    bfloat16; other floating dtypes go through float32 and are cast to
+    `dtype`. Integer/bool tensors keep their own dtype — casting them to
+    a float dtype would silently corrupt values beyond the mantissa.
     """
     if tensor.dtype == torch.bfloat16:
         converted = tensor.contiguous().view(torch.int16).numpy().view(
             jnp.bfloat16)
-    else:
+    elif tensor.dtype.is_floating_point:
         converted = tensor.contiguous().float().numpy()
+    else:
+        return jnp.asarray(tensor.contiguous().numpy())
     return jnp.asarray(converted, dtype=dtype)
 
 

@@ -312,3 +312,18 @@ def test_convert_torch_f32_tensor():
     np.testing.assert_allclose(np.asarray(out.astype(jnp.float32)),
                                t.numpy(),
                                rtol=1e-2)
+
+
+def test_convert_torch_int_tensor_preserves_values():
+    """Integer payloads must not round-trip through float/bf16 (values
+    beyond the bf16 mantissa would silently corrupt)."""
+    import torch
+
+    from tpu_inference.models.jax.utils.multi_modal_utils import \
+        convert_torch_tensor_to_jax
+
+    t = torch.tensor([[0, 1, 257, 65537], [200092, -7, 1 << 20, 3]],
+                     dtype=torch.int64)
+    out = convert_torch_tensor_to_jax(t)
+    assert jnp.issubdtype(out.dtype, jnp.integer)
+    np.testing.assert_array_equal(np.asarray(out), t.numpy())

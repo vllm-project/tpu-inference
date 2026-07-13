@@ -309,8 +309,10 @@ class TestLlamaGuard4ForwardContract:
 
         # Single-device mesh: the ragged-attention shard_map requires the
         # tiny request metadata to divide the data axis evenly.
-        if not jax.devices():
-            pytest.skip("No JAX devices available for mesh creation.")
+        # (jax.devices() raises rather than returning [] when no backend
+        # exists, so check the platform explicitly.)
+        if jax.devices()[0].platform != "tpu":
+            pytest.skip("Forward pass requires a TPU device.")
         device_mesh = np.array(jax.local_devices()[:1]).reshape((1, 1, 1, 1))
         mesh = Mesh(device_mesh,
                     axis_names=('data', 'attn_dp', 'model', 'expert'))
@@ -341,7 +343,7 @@ class TestLlamaGuard4ForwardContract:
                 block_tables=jnp.zeros((num_reqs, 4),
                                        dtype=jnp.int32).reshape(-1),
                 seq_lens=jnp.ones((num_reqs, ), dtype=jnp.int32),
-                query_start_loc=jnp.ones((num_reqs + 1, ), dtype=jnp.int32),
+                query_start_loc=jnp.array([0, num_tokens], dtype=jnp.int32),
                 request_distribution=jnp.array([0, 0, 0], dtype=jnp.int32),
             )
 
