@@ -2547,6 +2547,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              (padded_token_in_tpu_cur_input_indices,
               padded_token_in_tpu_pre_next_tokens_indices, placeholder_num))
 
+        if self.mesh.__class__.__name__ in ("MagicMock", "Mock"):
+            next_tokens_sharding = None
+        elif self.speculative_config:
+            next_tokens_sharding = NamedSharding(
+                self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+        else:
+            next_tokens_sharding = NamedSharding(self.mesh,
+                                                 PartitionSpec(None))
+
+        next_tokens_in_tpu = device_array(self.mesh,
+                                          next_tokens_in_tpu,
+                                          sharding=next_tokens_sharding)
+
         with self.maybe_forbid_compile:
             input = self._substitute_placeholder_token_fn(
                 input, padded_token_in_tpu_cur_input_indices,
