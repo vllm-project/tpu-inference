@@ -1296,8 +1296,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Later, the multi-modality model will take the embedding as the input.
         # For text-only model, this does nothing. It will input the input_ids and
         # leave the embedding job inside the forward pass
+        # Spec-decode (eagle3/mtp) still needs the pre-embed input_ids for
+        # `_extract_draft_token_ids` during sampling — `_get_input_ids_embeds`
+        # nulls `input_ids` on the multimodal path.
+        input_ids_for_spec_decode = input_ids if spec_decode_metadata is not None else None
         input_ids, inputs_embeds = self._get_input_ids_embeds(
             input_ids, mm_embeds, is_mm_embed)
+        # If the multimodal path zeroed input_ids and we need it for spec
+        # decode, keep the pre-embed value for the sampling step.
+        if input_ids is None and input_ids_for_spec_decode is not None:
+            input_ids_for_sampling = input_ids_for_spec_decode
+        else:
+            input_ids_for_sampling = input_ids
 
         lora_metadata = self.lora_utils.extract_lora_metadata()
         # TODO: make _get_input_ids_embeds within this context
@@ -1397,7 +1407,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             scheduler_output=scheduler_output,
             attn_metadata=attn_metadata,
             sampling_metadata=sampling_metadata,
-            input_ids=input_ids,
+            input_ids=input_ids_for_sampling,
             hidden_states=hidden_states,
             logits=logits,
             aux_hidden_states=aux_hidden_states,

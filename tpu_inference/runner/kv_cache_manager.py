@@ -25,8 +25,8 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mla import MLAAttention
-from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
-                                               DeepseekV4IndexerCache)
+from vllm.models.deepseek_v4.attention import (DeepseekV4IndexerCache,
+                                               DeepseekV4MLAAttention)
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
@@ -63,7 +63,7 @@ DEFAULT_KV_CACHE_LAYOUT = "NHD"
 def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
     return isinstance(attn_module, DeepseekV4IndexerCache) or isinstance(
         attn_module, DeepseekV4SWACache) or isinstance(
-            attn_module, DeepseekV4Attention) or isinstance(
+            attn_module, DeepseekV4MLAAttention) or isinstance(
                 attn_module, CompressorStateCache)
 
 
@@ -798,7 +798,7 @@ class KVCacheManager:
                             spec.num_kv_heads, spec.head_size, spec.dtype,
                             self.use_mla)
                 num_blocks = kv_cache_tensor.size // total_group_page_size
-            elif kv_cache_tensor.block_stride:
+            elif getattr(kv_cache_tensor, "block_stride", None):
                 # DeepseekV4 packed layout: vLLM overlays every cache
                 # (main MLA latent + indexer k_cache + compressor state +
                 # SWA) into one contiguous per-block backing buffer, so each
@@ -807,6 +807,11 @@ class KVCacheManager:
                 # own `offset`. `size` is a multiple of `block_stride`, not of
                 # any single layer's page size, and every packed layer shares
                 # the same `num_blocks`.
+                #
+                # `block_stride` is only present in the vLLM builds that carry
+                # the packed-layout PR; on the current LKG (which reverted it)
+                # `getattr` returns None and we fall through to the single-
+                # layer branch below.
                 assert kv_cache_tensor.size % kv_cache_tensor.block_stride == 0
                 num_blocks = (kv_cache_tensor.size //
                               kv_cache_tensor.block_stride)

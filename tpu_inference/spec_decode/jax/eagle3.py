@@ -548,20 +548,12 @@ class Eagle3Proposer:
                                                        last_token_indices)
 
         def _select(positions, residual, hidden_states, last_token_indices):
-            if self.method == "mtp":
-                # We need a separate branch for MTP because:
-                # 1. MTP uses final target output hidden states directly as inputs for the next step,
-                #    whereas Eagle uses intermediate residuals.
-                # 2. M-RoPE positions are 2D (3, total_tokens), requiring specific dim-1 slicing
-                #    which _select_inputs_for_loop_speculation does not support.
-                if positions.ndim == 2:
-                    positions = positions[:, last_token_indices]
-                else:
-                    positions = positions[last_token_indices]
-                residual = residual[last_token_indices]
-                return positions, residual
-
-            positions = positions[last_token_indices]
+            # M-RoPE positions are 2D (3, total_tokens); index along the token
+            # axis. Applies to both Eagle3 (VL targets) and MTP.
+            if positions.ndim == 2:
+                positions = positions[:, last_token_indices]
+            else:
+                positions = positions[last_token_indices]
             residual = residual[last_token_indices]
             return positions, residual
 
