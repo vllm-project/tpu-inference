@@ -347,6 +347,7 @@ def _ragged_paged_attention_kernel_loop(
     cp_group_size: int | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,  # KV-share: False = skip cache writes
+    write_last_seq_only: bool = False,  # PCP fused head+tail: write the current KV once, on the LAST (tail) seq
     skip_kv_mask: bool = False,
     skip_cache_attn: bool = False,
     skip_current_attn: bool = False,
@@ -1273,9 +1274,17 @@ def _ragged_paged_attention_kernel_loop(
                 # KV-share: skip the cache write when update_kv_cache=False
                 # so shared layers don't overwrite the source layer's slot.
                 if update_kv_cache:
+                    _do_write = jnp.logical_and(update_sz > 0,
+                                                bq_idx == num_bq - 1)
+                    # PCP fuses a request's head+tail chunks into ONE launch as
+                    # two "sequences" that share the same request (same
+                    # kv_lens/kv_cache_lens), so each would write the SAME
+                    # strided current KV. Write on exactly one of them.
+                    if write_last_seq_only:
+                        _do_write = jnp.logical_and(
+                            _do_write, seq_idx == end_seq_idx - 1)
 
-                    @pl.when(
-                        jnp.logical_and(update_sz > 0, bq_idx == num_bq - 1))
+                    @pl.when(_do_write)
                     def update_cur_bkv_to_cache():
                         start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
                                               update_sz, src_start_base)
@@ -1939,6 +1948,7 @@ def get_default_block_sizes(
         "disable_bounds_checks",
         "disable_semaphore_checks",
         "update_kv_cache",
+        "write_last_seq_only",
         "cp_group_size",
     ),
     donate_argnames="kv_cache",
@@ -1963,6 +1973,7 @@ def ragged_paged_attention(
     q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs] 
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
+    write_last_seq_only: bool = False,  # PCP fused head+tail: write the current KV once, on the LAST (tail) seq. Cheaper: the writing seq's BKV loop is extended to the full current KV, and the tail already sweeps ~all of it causally, whereas the head would sweep it redundantly.
     skip_kv_mask: bool = False,
     skip_cache_attn: bool = False,
     skip_current_attn: bool = False,
@@ -2250,6 +2261,7 @@ def ragged_paged_attention(
             functools.partial(
                 _ragged_paged_attention_kernel,
                 cp_group_size=cp_group_size,
+                write_last_seq_only=write_last_seq_only,
                 use_causal_mask=use_causal_mask,
                 skip_kv_mask=skip_kv_mask,
                 skip_cache_attn=skip_cache_attn,

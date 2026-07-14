@@ -822,9 +822,10 @@ def pcp_ragged_paged_attention(
     kv_cache_lens: jax.
     Array,  # i32[max_num_seqs] previously-computed kv len (num_computed); new KV = kv_lens - kv_cache_lens
     pcp_cu_q_lens: jax.
-    Array,  # i32[2, pcp, max_num_seqs+1] per-(half, rank) cu_q_lens, pcp-sharded
+    Array,  # i32[pcp, max_num_seqs+1] per-rank [0, C, C+tail_real] (head+tail as 2 seqs)
     pcp_q_pos_offsets: jax.
-    Array,  # i32[2, pcp, max_num_seqs] per-(half, rank) within-current start, pcp-sharded
+    Array,  # i32[pcp, max_num_seqs] per-rank [head_off, tail_off] within-current
+    pcp_distribution: jax.Array,  # i32[3] = [0, 0, 2] (the fused current phase has 2 seqs)
     sm_scale: float,
     q_scale: float | None = None,
     k_scale: float | None = None,
@@ -869,7 +870,7 @@ def pcp_ragged_paged_attention(
     def _rank_i32(r):
         return jnp.reshape(r, (1, )).astype(jnp.int32)
 
-    def _fn(q_l, k_l, v_l, kvc, kvl, kvcl, pi, cu, pcp_cu, pcp_qpos):
+    def _fn(q_l, k_l, v_l, kvc, kvl, kvcl, pi, cu, dist2, pcp_cu, pcp_qpos):
         r = lax.axis_index(pcp_axis)
         ag = lambda x: lax.all_gather(x, pcp_axis, axis=0, tiled=True)
 
@@ -877,7 +878,7 @@ def pcp_ragged_paged_attention(
             g = ag(x).reshape(two_p, C, *x.shape[1:])
             return g[inv_row].reshape(sum_s, *x.shape[1:])
 
-        k_cur, v_cur = to_token_order(k_l), to_token_order(v_l)
+        # k_cur, v_cur = to_token_order(k_l), to_token_order(v_l)
         common = dict(cp_rank=_rank_i32(r),
                       cp_group_size=pcp_size,
                       return_lse=True,
@@ -886,71 +887,70 @@ def pcp_ragged_paged_attention(
                       k_scale=k_scale,
                       v_scale=v_scale)
 
-        cu_cache = jnp.zeros_like(cu).at[1].set(pcp_size * C)
-        # `pcp_cu`/`pcp_qpos` arrive pcp-sharded as [2, 1, ...]; index [half, 0]
-        # for this rank's head (0) / tail (1) launch. Built host-side in
-        # `_prepare_inputs`, so the per-rank offsets and the padding-clamped tail
-        # length are plain inputs rather than axis_index-derived scatters here.
-        def section(q_chunk, q_pos, cu_cur, writes_cache):
-            # --- cache phase---
-            ag_q = ag(q_chunk)  # [pcp*C]
-            o1, kvc1, l1 = pcp_ragged_paged_attention_kernel(
-                ag_q,
-                k_cur,
-                v_cur,
-                kvc,
-                kvl,
-                pi,
-                cu_cache,
-                distribution,
-                kv_cache_lens=kvcl,
-                skip_current_attn=True,
-                use_causal_mask=False,
-                update_kv_cache=False,
-                **common)
-            o1, l1 = _lse_all_reduce(o1, l1, pcp_axis)
-            o1 = lax.dynamic_slice_in_dim(o1, r * C, C, 0)  # this rank's chunk
-            l1 = lax.dynamic_slice_in_dim(l1, r * C, C, 0)
-            # --- current phase ---
-            o2, kvc2, l2 = pcp_ragged_paged_attention_kernel(
-                q_chunk,
-                k_cur,
-                v_cur,
-                kvc1,
-                kvl,
-                pi,
-                cu_cur,
-                distribution,
-                kv_cache_lens=kvcl,
-                q_pos_offsets=q_pos,
-                skip_cache_attn=True,
-                use_causal_mask=use_causal_mask,
-                update_kv_cache=writes_cache,
-                **common)
-            out = _lse_combine(o1, l1, o2, l2)
-            return out, kvc2
+        # ---- cache phase: ONE launch over the all-gathered Q. -------------
+        ag_q = ag(q_l)  # [pcp*2C]
+        cu_cache = jnp.zeros_like(cu).at[1:].set(sum_s)
+        o1, kvc1, l1 = pcp_ragged_paged_attention_kernel(
+            ag_q,
+            k_l,
+            v_l,
+            kvc,
+            kvl,
+            pi,
+            cu_cache,
+            distribution,
+            kv_cache_lens=kvcl,
+            skip_current_attn=True,
+            use_causal_mask=False,
+            update_kv_cache=False,
+            **common)
+        o1, l1 = _lse_all_reduce(o1, l1, pcp_axis)
+        o1 = lax.dynamic_slice_in_dim(o1, r * 2 * C, 2 * C, 0)
+        l1 = lax.dynamic_slice_in_dim(l1, r * 2 * C, 2 * C, 0)
 
-        # Head chunk r (fully real, size C) then tail chunk 2P-1-r (real size
-        # clamped so padding tokens past num_current are excluded).
-        head_out, kvc = section(q_l[:C], pcp_qpos[0, 0], pcp_cu[0, 0], False)
-        tail_out, kvc = section(q_l[C:2 * C], pcp_qpos[1, 0], pcp_cu[1, 0],
-                                update_kv_cache)
-        out = jnp.concatenate([head_out, tail_out], axis=0)  # [head | tail]
-        return out.astype(q.dtype), kvc
+        # ---- current phase: ONE ragged launch, head+tail as two seqs. -----
+        # `pcp_cu` = [0, C, C+tail_real] and `pcp_qpos` = [head_off, tail_off]
+        # (per rank, built in _prepare_inputs). Both seqs are the SAME request
+        # and would each write the whole strided current KV, so
+        # `write_last_seq_only` writes it once, on the TAIL seq: the writing
+        # seq's BKV loop is extended to the full current KV, and the tail's
+        # causal range already sweeps ~all of it, whereas the head would sweep it
+        # redundantly. An all-padding tail (q_len=0) still writes: the kernel
+        # floors num_bq to >=1 on the writing launch. Q is [head|tail]-contiguous.
+        k_cur, v_cur = to_token_order(k_l), to_token_order(v_l)
+        o2, kvc2, l2 = pcp_ragged_paged_attention_kernel(
+            q_l,
+            k_cur,
+            v_cur,
+            kvc1,
+            kvl,
+            pi,
+            pcp_cu[0],
+            dist2,
+            kv_cache_lens=kvcl,
+            q_pos_offsets=pcp_qpos[0],
+            skip_cache_attn=True,
+            use_causal_mask=use_causal_mask,
+            update_kv_cache=update_kv_cache,
+            write_last_seq_only=True,
+            **common)
 
-    # pcp_cu/pcp_q_pos_offsets are [2, pcp, ...]; shard dim 1 over the pcp axis
-    # so each rank sees its own [2, 1, ...] row.
-    pcp_spec = P(None, pcp_axis, None)
+        out = _lse_combine(o1, l1, o2, l2)  # [2C] = [head | tail]
+        return out.astype(q.dtype), kvc2
+
+    # pcp_cu_q_lens/pcp_q_pos_offsets are [pcp, ...]; shard dim 0 over the pcp
+    # axis so each rank sees its own [1, ...] row.
+    pcp_spec = P(pcp_axis, None)
 
     return jax.shard_map(
         _fn,
         mesh=mesh,
         in_specs=(q_spec, kv_spec, kv_spec, kv_cache_spec, repl, repl, repl,
-                  repl, pcp_spec, pcp_spec),
+                  repl, repl, pcp_spec, pcp_spec),
         out_specs=(q_spec, kv_cache_spec),
         check_vma=False,
     )(q, k, v, kv_cache, kv_lens, kv_cache_lens, page_indices, cu_q_lens,
-      pcp_cu_q_lens, pcp_q_pos_offsets)
+      pcp_distribution, pcp_cu_q_lens, pcp_q_pos_offsets)
 
 
 def attention(
@@ -1022,13 +1022,14 @@ def attention(
             k,
             v,
             kv_cache,
-            md.seq_lens,
+            md.pcp_kv_lens,
             md.block_tables,
             md.query_start_loc,
             md.request_distribution,
             md.pcp_kv_cache_lens,
             md.pcp_cu_q_lens,
             md.pcp_q_pos_offsets,
+            md.pcp_distribution,
             sm_scale=sm_scale,
             q_scale=q_scale,
             k_scale=k_scale,

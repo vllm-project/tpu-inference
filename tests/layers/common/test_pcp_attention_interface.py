@@ -11,11 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""End-to-end (interface-level) test for prefill context parallel attention.
+"""End-to-end test for the PCP attention wrapper.
 
-Exercises the real `pcp_ragged_paged_attention` from attention_interface against
-a chunked-prefill reference (new queries attend the strided previous cache +
-causal new KV, merged via LSE).
+Exercises the real `pcp_ragged_paged_attention` from attention_interface on a
+live `pcp` mesh -- the production path the runner dispatches to. Unlike the
+kernel tests (which call `ragged_paged_attention` directly), this covers the
+wrapper's own logic: the head-tail chunk split, the current-KV all-gather into
+token order, the cache/current two-phase split with its LSE all-reduce + combine,
+and the pcp-sharded per-(half, rank) launch metadata built in `_prepare_inputs`.
+
+PCP is single-request; a chunked prefill (num_computed = L > 0) is the case that
+exercises both phases.
 """
 
 import jax
@@ -36,6 +42,26 @@ from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisNameBase)
 
 
+def _pcp_launch_meta(pcp, C, num_current, max_seq):
+    """Per-(half, rank) cu_q_lens / q_pos_offsets.
+
+    Mirrors what `TPUModelRunner._prepare_inputs` builds host-side: head (half=0)
+    is always fully real (C tokens) at within-current offset rank*C; tail
+    (half=1) sits at (2*pcp-1-rank)*C, clamped so padding past num_current is
+    excluded. Shapes are [2, pcp, ...], sharded on `pcp` by the wrapper.
+    """
+    two_p = 2 * pcp
+    cu = np.zeros((2, pcp, max_seq + 1), np.int32)
+    qpos = np.zeros((2, pcp, max_seq), np.int32)
+    for r in range(pcp):
+        tail_off = (two_p - 1 - r) * C
+        cu[0, r, 1:] = C
+        qpos[0, r, 0] = r * C
+        cu[1, r, 1:] = int(np.clip(num_current - tail_off, 0, C))
+        qpos[1, r, 0] = tail_off
+    return jnp.asarray(cu), jnp.asarray(qpos)
+
+
 class PcpAttentionInterfaceTest(jtu.JaxTestCase):
 
     def setUp(self):
@@ -53,10 +79,12 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
 
     @parameterized.product(pcp=[2], dtype=[jnp.float32])
     def test_chunked_prefill(self, pcp, dtype):
+        """Wrapper output == full-causal reference, for a chunked prefill
+        (L previously-computed tokens in a pcp-strided cache + Snew current)."""
         if jax.device_count() < pcp:
             self.skipTest(f"needs >= {pcp} devices")
         L, Snew, nq, nkv, D = 128, 128, 8, 2, 128
-        C = Snew // (2 * pcp)
+        C = Snew // (2 * pcp)  # head-tail chunk size
         kv_total = L + Snew
         page_size, num_pages, max_seq = 16, 512, 8
         sm_scale = D**-0.5
@@ -80,6 +108,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                          jnp.nan, dtype)
             return c.at[:kv.shape[0]].set(kv)
 
+        # --- reference: plain full-causal prefill over the whole context ---
         pps_full = cdiv(kv_total, page_size)
         pi_full = jnp.pad(jnp.arange(pps_full, dtype=jnp.int32),
                           (0, max_seq * pps_full - pps_full))
@@ -96,6 +125,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         exp = np.array(exp[:Snew])
 
         def to_rank_order(x):
+            """Token order -> rank order: rank r holds [chunk r | chunk 2P-1-r]."""
             out = np.zeros_like(np.array(x))
             for r in range(pcp):
                 out[r * 2 * C:r * 2 * C + C] = np.array(x)[r * C:(r + 1) * C]
@@ -106,6 +136,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         q_ro, k_ro, v_ro = to_rank_order(q_new), to_rank_order(
             k_new), to_rank_order(v_new)
 
+        # --- pcp-strided previous cache: global token g -> rank g%pcp ---
         gcache = np.full((num_pages, page_size, nkv2 // kvp, kvp, phd), np.nan,
                          np.float32)
         for r in range(pcp):
@@ -122,18 +153,17 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         pps = cdiv(L, page_size)
         page_indices = jnp.pad(jnp.arange(pps, dtype=jnp.int32),
                                (0, max_seq * pps - pps))
+        # seq_lens = REAL total (num_computed + num_current); kv_cache_lens =
+        # num_computed. The kernel derives the current length as their difference.
         kv_lens = jnp.pad(jnp.array([kv_total], jnp.int32), (0, max_seq - 1))
-        cu_q = jnp.pad(jnp.array([0, 2 * C], jnp.int32), (0, max_seq + 1 - 2))
+        kv_cache_lens = jnp.pad(jnp.array([L], jnp.int32), (0, max_seq - 1))
+        cu_chunk = jnp.pad(jnp.array([0, C], jnp.int32), (0, max_seq + 1 - 2))
         dist = jnp.array([0, 0, 1], jnp.int32)
+        pcp_cu, pcp_qpos = _pcp_launch_meta(pcp, C, Snew, max_seq)
 
         shape = tuple(pcp if a == "pcp" else 1 for a in MESH_AXIS_NAMES)
         mesh = Mesh(
             np.array(jax.devices()[:pcp]).reshape(shape), MESH_AXIS_NAMES)
-        # Single sequence => one head-tail chunk per rank; sort perm is the
-        # whole-buffer perm; cu_q_lens holds the chunk size C.
-        C = Snew // (2 * pcp)
-        perm = _single_seq_perm(pcp, C)
-        cu_chunk = jnp.pad(jnp.array([0, C], jnp.int32), (0, max_seq + 1 - 2))
         out, _ = pcp_ragged_paged_attention(mesh,
                                             q_ro,
                                             k_ro,
@@ -143,102 +173,20 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                                             page_indices,
                                             cu_chunk,
                                             dist,
-                                            jnp.asarray(perm),
+                                            kv_cache_lens,
+                                            pcp_cu,
+                                            pcp_qpos,
                                             sm_scale=sm_scale,
                                             update_kv_cache=True,
                                             use_causal_mask=True)
-        self.assertAllClose(np.array(out),
+        out = np.array(out)
+        # Guard against a trivially-passing all-zero/NaN match.
+        self.assertTrue(np.all(np.isfinite(out)))
+        self.assertGreater(float(np.abs(out).max()), 0.0)
+        self.assertAllClose(out,
                             np.array(to_rank_order(exp)),
                             atol=0.05,
                             rtol=0.05)
-
-    def test_ragged_prefill_from_scratch(self):
-        pcp = 2
-        if jax.device_count() < pcp:
-            self.skipTest(f"needs >= {pcp} devices")
-        dtype = jnp.float32
-        nq, nkv, D = 8, 2, 128
-        Cs = [32, 16]
-        Ss = [2 * pcp * c for c in Cs]
-        max_seq, page_size, num_pages = 8, 16, 512
-        sm_scale = D**-0.5
-        kvp = get_dtype_packing(dtype)
-        phd, nkv2 = align_to(D, 128), align_to(nkv * 2, kvp)
-        rng = np.random.default_rng(1)
-        gen = lambda s: np.asarray(rng.random(size=s, dtype=np.float32), np.
-                                   float32)
-        off = np.cumsum([0] + Ss)
-        Stot = off[-1]
-        q_tok, k_tok, v_tok = gen((Stot, nq, D)), gen((Stot, nkv, D)), gen(
-            (Stot, nkv, D))
-
-        def ref(q, k, v):
-            G = nq // nkv
-            kk, vv = np.repeat(k, G, 1), np.repeat(v, G, 1)
-            S = q.shape[0]
-            s = np.einsum("ihd,jhd->hij", q, kk) * sm_scale
-            s = np.where(np.tril(np.ones((S, S), bool))[None], s, -np.inf)
-            p = np.array(jax.nn.softmax(jnp.array(s), -1))
-            return np.einsum("hij,jhd->ihd", p, vv)
-
-        exp = np.zeros((Stot, nq, D), np.float32)
-        for i, S in enumerate(Ss):
-            exp[off[i]:off[i + 1]] = ref(q_tok[off[i]:off[i + 1]],
-                                         k_tok[off[i]:off[i + 1]],
-                                         v_tok[off[i]:off[i + 1]])
-        ro_gids = []
-        for r in range(pcp):
-            heads, tails = [], []
-            for i, C in enumerate(Cs):
-                b = off[i]
-                heads += [b + p for p in range(r * C, (r + 1) * C)]
-                tails += [
-                    b + p
-                    for p in range((2 * pcp - 1 - r) * C, (2 * pcp - r) * C)
-                ]
-            ro_gids += heads + tails
-        ro_gids = np.array(ro_gids)
-        pos_of = {g: i for i, g in enumerate(ro_gids)}
-        perm = np.array([pos_of[j] for j in range(Stot)], np.int32)
-        to_ro = lambda x: x[ro_gids]
-        cu_chunk = np.pad(
-            np.cumsum([0] + Cs).astype(np.int32),
-            (0, max_seq + 1 - (len(Cs) + 1)))
-        kv_lens = np.pad(np.array(Ss, np.int32), (0, max_seq - len(Ss)))
-        pps = cdiv(max(Ss), page_size)
-        page_indices = np.pad(np.arange(pps, dtype=np.int32),
-                              (0, max_seq * pps - pps))
-        dist = np.array([0, 0, len(Cs)], np.int32)
-        cache = jnp.full((num_pages, page_size, nkv2 // kvp, kvp, phd),
-                         jnp.nan, dtype)
-        shape = tuple(pcp if a == "pcp" else 1 for a in MESH_AXIS_NAMES)
-        mesh = Mesh(
-            np.array(jax.devices()[:pcp]).reshape(shape), MESH_AXIS_NAMES)
-        out, _ = pcp_ragged_paged_attention(
-            mesh,
-            jnp.asarray(to_ro(q_tok)).astype(dtype),
-            jnp.asarray(to_ro(k_tok)).astype(dtype),
-            jnp.asarray(to_ro(v_tok)).astype(dtype),
-            cache,
-            jnp.asarray(kv_lens),
-            jnp.asarray(page_indices),
-            jnp.asarray(cu_chunk),
-            jnp.asarray(dist),
-            jnp.asarray(perm),
-            sm_scale=sm_scale,
-            update_kv_cache=False,
-            use_causal_mask=True)
-        self.assertAllClose(np.array(out), to_ro(exp), atol=0.05, rtol=0.05)
-
-
-def _single_seq_perm(pcp, C):
-    S = 2 * pcp * C
-    perm = np.empty(S, np.int32)
-    for p in range(S):
-        c, w = p // C, p % C
-        perm[p] = (c * 2 * C + w) if c < pcp else ((2 * pcp - 1 - c) * 2 * C +
-                                                   C + w)
-    return perm
 
 
 if __name__ == "__main__":

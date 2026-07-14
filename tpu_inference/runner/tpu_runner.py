@@ -2622,6 +2622,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         pcp_kv_cache_lens = None
         pcp_cu_q_lens = None
         pcp_q_pos_offsets = None
+        pcp_kv_lens = None
+        pcp_distribution = None
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         if pcp_size > 1:
             assert dp_size == 1, "PCP with DP>1 not wired yet"
@@ -2665,17 +2667,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # past num_current are excluded (0 when wholly padding). Building
             # them here keeps the values out of the traced attention wrapper,
             # which would otherwise derive them from `lax.axis_index`.
+            # The head+tail chunks are fused into ONE ragged current-phase
+            # launch as two "sequences": cu = [0, C, C+tail_real] and
+            # q_pos_offsets = [head_off, tail_off], per rank. head is always
+            # fully real (C); tail is clamped so padding past num_current is
+            # excluded (may be 0 when the tail is wholly padding). Both seqs are
+            # the SAME request, so kv_lens/kv_cache_lens carry [T, T] / [P, P]
+            # and the kernel writes the current KV once (write_first_seq_only).
             n_cu = np.asarray(query_start_loc_view).shape[0]  # max_num_reqs + 1
             n_off = np.asarray(seq_lens_view).shape[0]  # max_num_reqs
-            pcp_cu_np = np.zeros((2, pcp_size, n_cu), np.int32)
-            pcp_qpos_np = np.zeros((2, pcp_size, n_off), np.int32)
+            pcp_cu_np = np.zeros((pcp_size, n_cu), np.int32)
+            pcp_qpos_np = np.zeros((pcp_size, n_off), np.int32)
             for rank in range(pcp_size):
                 tail_off = (two_p - 1 - rank) * C
-                pcp_cu_np[0, rank, 1:] = C
-                pcp_qpos_np[0, rank, 0] = rank * C
-                pcp_cu_np[1, rank, 1:] = int(
-                    np.clip(num_current - tail_off, 0, C))
-                pcp_qpos_np[1, rank, 0] = tail_off
+                tail_real = int(np.clip(num_current - tail_off, 0, C))
+                pcp_cu_np[rank, 1] = C                 # seq 0 (head) end
+                pcp_cu_np[rank, 2:] = C + tail_real    # seq 1 (tail) end
+                pcp_qpos_np[rank, 0] = rank * C        # head within-current start
+                pcp_qpos_np[rank, 1] = tail_off        # tail within-current start
+            pcp_kv_lens_np = np.zeros(n_off, np.int32)
+            pcp_kv_lens_np[:2] = num_computed + num_current   # [T, T]
+            kv_cache_lens_np[:2] = num_computed              # [P, P]
+            pcp_dist_np = np.array([0, 0, 2], np.int32)
             # logits_indices: the last real token (natural position
             # num_current-1) lands in rank-order slot inv_row[chunk]*C + within.
             inv_row = np.empty(two_p, np.int64)
@@ -2689,7 +2702,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                                  self.mesh, PartitionSpec()))
             pcp_spec = NamedSharding(
                 self.mesh,
-                PartitionSpec(None, ShardingAxisName.PREFILL_CONTEXT, None))
+                PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
+            repl = NamedSharding(self.mesh, PartitionSpec())
+            pcp_kv_lens = device_array(self.mesh, pcp_kv_lens_np, sharding=repl)
+            pcp_distribution = device_array(self.mesh, pcp_dist_np,
+                                            sharding=repl)
             pcp_cu_q_lens = device_array(self.mesh,
                                          pcp_cu_np,
                                          sharding=pcp_spec)
@@ -2761,6 +2778,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         out=block_tables_view[req_offset:req_offset +
                                               _num_reqs])
 
+            if pcp_size > 1:
+                # PCP fuses the request's head+tail chunks into ONE current-phase
+                # launch as two "sequences" of the SAME request. The kernel
+                # indexes page_indices as `seq_idx * pages_per_seq`, and the
+                # WRITING seq is the tail (seq 1) -- so seq 1 must carry a copy
+                # of the request's block table, not the zero padding, or every
+                # strided KV write lands on page 0.
+                block_tables_view[1] = block_tables_view[0]
+
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
             if not no_kv_cache:
@@ -2830,6 +2856,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 pcp_kv_cache_lens=pcp_kv_cache_lens,
                 pcp_cu_q_lens=pcp_cu_q_lens,
                 pcp_q_pos_offsets=pcp_q_pos_offsets,
+                pcp_kv_lens=pcp_kv_lens,
+                pcp_distribution=pcp_distribution,
             )
 
             return attention_metadata_gid

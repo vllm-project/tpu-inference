@@ -386,6 +386,8 @@ class CompilationManager:
         pcp_kv_cache_lens = None
         pcp_cu_q_lens = None
         pcp_q_pos_offsets = None
+        pcp_kv_lens = None
+        pcp_distribution = None
         if pcp_size > 1:
             n_reqs = self.runner.max_num_reqs
             pcp_kv_cache_lens = device_array(self.runner.mesh,
@@ -397,15 +399,22 @@ class CompilationManager:
             # the primer must match that sharding for the cached HLO to be reused.
             pcp_spec = NamedSharding(
                 self.runner.mesh,
-                PartitionSpec(None, ShardingAxisName.PREFILL_CONTEXT, None))
+                PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
+            _repl = NamedSharding(self.runner.mesh, PartitionSpec())
             pcp_cu_q_lens = device_array(self.runner.mesh,
-                                         np.zeros((2, pcp_size, n_reqs + 1),
+                                         np.zeros((pcp_size, n_reqs + 1),
                                                   dtype=np.int32),
                                          sharding=pcp_spec)
             pcp_q_pos_offsets = device_array(self.runner.mesh,
-                                             np.zeros((2, pcp_size, n_reqs),
+                                             np.zeros((pcp_size, n_reqs),
                                                       dtype=np.int32),
                                              sharding=pcp_spec)
+            pcp_kv_lens = device_array(self.runner.mesh,
+                                       np.zeros(n_reqs, dtype=np.int32),
+                                       sharding=_repl)
+            pcp_distribution = device_array(self.runner.mesh,
+                                            np.array([0, 0, 2], dtype=np.int32),
+                                            sharding=_repl)
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
         # populate for hybrid attn+mamba models — for pure-attention models we
         # pass None at runtime (see `_prepare_inputs`), and the precompile
@@ -442,6 +451,8 @@ class CompilationManager:
                 pcp_kv_cache_lens=pcp_kv_cache_lens,
                 pcp_cu_q_lens=pcp_cu_q_lens,
                 pcp_q_pos_offsets=pcp_q_pos_offsets,
+                pcp_kv_lens=pcp_kv_lens,
+                pcp_distribution=pcp_distribution,
             )
             return attention_metadata_gid
 
