@@ -504,7 +504,8 @@ class CompilationManager:
         replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
         indices_sharding = NamedSharding(self.runner.mesh, PartitionSpec(None))
 
-        placeholder_num = jax.ShapeDtypeStruct((1, ), jnp.int32)
+        placeholder_num = jax.ShapeDtypeStruct(
+            (1, ), jnp.int32, sharding=indices_sharding)
 
         def _compile_one(input_padding: int, input_sharding: NamedSharding,
                          next_tokens_size: int,
