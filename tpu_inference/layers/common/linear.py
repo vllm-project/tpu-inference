@@ -103,6 +103,44 @@ def _get_x_q_dtype(w_q_dtype: jnp.dtype) -> jnp.dtype:
         )
 
 
+def sharded_matmul(x: jax.Array,
+                   w: jax.Array,
+                   weight_sharding: P | NamedSharding,
+                   *,
+                   mesh: Mesh | None = None,
+                   defer_all_reduce: bool = False) -> jax.Array:
+    """Matmul that can skip its all-reduce (``defer_all_reduce=True``).
+
+    A plain einsum under GSPMD is always all-reduced by the partitioner, so it
+    runs in shard_map. No bias: vLLM's RowParallelLinear rejects
+    reduce_results=False with an in-layer bias.
+    """
+    if isinstance(weight_sharding, NamedSharding):
+        mesh = mesh or weight_sharding.mesh
+        weight_sharding = weight_sharding.spec
+    in_axis, out_axis = weight_sharding
+    # x may have extra leading batch dims.
+    batch_dims = (None, ) * (x.ndim - 2)
+    x_spec = P(ShardingAxisName.ATTN_DATA, *batch_dims, in_axis)
+    x = jax.lax.with_sharding_constraint(
+        x,
+        NamedSharding(mesh, x_spec) if mesh else x_spec)
+
+    def wrapper(x, w):
+        out = x @ w
+        if in_axis and not defer_all_reduce:
+            out = jax.lax.psum(out, axis_name=in_axis)
+        return out
+
+    return jax.shard_map(
+        wrapper,
+        mesh=mesh,
+        in_specs=(x_spec, weight_sharding),
+        out_specs=P(ShardingAxisName.ATTN_DATA, *batch_dims, out_axis),
+        check_vma=False,
+    )(x, w)
+
+
 def sharded_quantized_matmul(x: jax.Array,
                              w_q: jax.Array,
                              w_s: jax.Array,
