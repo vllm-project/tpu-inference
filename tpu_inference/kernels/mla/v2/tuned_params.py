@@ -45,17 +45,18 @@ class TuningKey:
 
 @dataclass
 class TunableParams:
-    decode_batch_size: int  # range from 1 to as high as possible before OOM with steps powers of two
-    # Constraint: batch size % decode_batch_size = 0
-
     num_kv_pages_per_block: int  # Number of KV pages to process per block. Range from 1 to as high as possible before OOM,
     # with steps of powers of two.
     num_queries_per_block: int  # for batched_decode, this is always 1
     vmem_limit_bytes: int  # 16MiB(?) to 64MiB, increments of 8MiB.
     # Select lowest value that gives the highest performance
+    decode_batch_size: int = 1  # range from 1 to as high as possible before OOM with steps powers of two
+    # Constraint: batch size % decode_batch_size = 0
+    q_split: int = 1  # number of query split for running parallel.
 
 
 tuned_params_mapping: dict[TuningKey, TunableParams] = {
+    # DeepSeekV3 batched decode. (TPU v7-8)
     TuningKey(
         case="batched_decode",
         max_num_tokens=4,
@@ -361,6 +362,124 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         num_queries_per_block=1,
         vmem_limit_bytes=62914560,
     ),
+    # Kimi 2.6 prefill/mixed. (TPU v7-8)
+    TuningKey(
+        case="mixed",
+        max_num_tokens=4,
+        actual_num_q_heads=64,
+        actual_lkv_dim=512,
+        actual_r_dim=64,
+    ):
+    TunableParams(
+        q_split=16,
+        num_kv_pages_per_block=1,
+        num_queries_per_block=64,
+        vmem_limit_bytes=62914560,
+    ),
+    TuningKey(
+        case="mixed",
+        max_num_tokens=8,
+        actual_num_q_heads=64,
+        actual_lkv_dim=512,
+        actual_r_dim=64,
+    ):
+    TunableParams(
+        q_split=16,
+        num_kv_pages_per_block=1,
+        num_queries_per_block=64,
+        vmem_limit_bytes=62914560,
+    ),
+    TuningKey(
+        case="mixed",
+        max_num_tokens=16,
+        actual_num_q_heads=64,
+        actual_lkv_dim=512,
+        actual_r_dim=64,
+    ):
+    TunableParams(
+        q_split=16,
+        num_kv_pages_per_block=1,
+        num_queries_per_block=64,
+        vmem_limit_bytes=62914560,
+    ),
+    TuningKey(
+        case="mixed",
+        max_num_tokens=32,
+        actual_num_q_heads=64,
+        actual_lkv_dim=512,
+        actual_r_dim=64,
+    ):
+    TunableParams(
+        q_split=16,
+        num_kv_pages_per_block=1,
+        num_queries_per_block=64,
+        vmem_limit_bytes=62914560,
+    ),
+    TuningKey(
+        case="mixed",
+        max_num_tokens=64,
+        actual_num_q_heads=64,
+        actual_lkv_dim=512,
+        actual_r_dim=64,
+    ):
+    TunableParams(
+        q_split=16,
+        num_kv_pages_per_block=1,
+        num_queries_per_block=64,
+        vmem_limit_bytes=62914560,
+    ),
+    TuningKey(
+        case="mixed",
+        max_num_tokens=128,
+        actual_num_q_heads=64,
+        actual_lkv_dim=512,
+        actual_r_dim=64,
+    ):
+    TunableParams(
+        q_split=16,
+        num_kv_pages_per_block=1,
+        num_queries_per_block=64,
+        vmem_limit_bytes=62914560,
+    ),
+    TuningKey(
+        case="mixed",
+        max_num_tokens=160,
+        actual_num_q_heads=64,
+        actual_lkv_dim=512,
+        actual_r_dim=64,
+    ):
+    TunableParams(
+        q_split=16,
+        num_kv_pages_per_block=1,
+        num_queries_per_block=64,
+        vmem_limit_bytes=62914560,
+    ),
+    TuningKey(
+        case="mixed",
+        max_num_tokens=256,
+        actual_num_q_heads=64,
+        actual_lkv_dim=512,
+        actual_r_dim=64,
+    ):
+    TunableParams(
+        q_split=16,
+        num_kv_pages_per_block=1,
+        num_queries_per_block=64,
+        vmem_limit_bytes=62914560,
+    ),
+    TuningKey(
+        case="mixed",
+        max_num_tokens=512,
+        actual_num_q_heads=64,
+        actual_lkv_dim=512,
+        actual_r_dim=64,
+    ):
+    TunableParams(
+        q_split=16,
+        num_kv_pages_per_block=1,
+        num_queries_per_block=64,
+        vmem_limit_bytes=62914560,
+    ),
 }
 
 
@@ -371,6 +490,14 @@ def get_tuned_params(tuning_key: TuningKey) -> TunableParams:
         logger.warning(
             f"No tuned parameters found for the given tuning key: {tuning_key}, using default parameters"
         )
+        if tuning_key.case == "mixed":
+            return TunableParams(
+                num_kv_pages_per_block=1,
+                num_queries_per_block=16,
+                vmem_limit_bytes=62914560,
+            )
+
+        # decode, batched_decode
         return TunableParams(
             decode_batch_size=4,
             num_kv_pages_per_block=3,
