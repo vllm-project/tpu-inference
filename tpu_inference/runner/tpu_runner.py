@@ -1221,55 +1221,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return placeholder_req_id_to_index
 
-    def _pcp_debug_dump(self,
-                        input_ids,
-                        input_positions,
-                        attn_metadata,
-                        full_hidden_states,
-                        lora_metadata,
-                        logits_indices=None):
-        """Set PCP_DEBUG=1 to dump, per model-execution step: the input tokens,
-        their position ids, the key attention metadata, and the model's
-        argmax-predicted next token at EVERY position (prompt tokens included).
-
-        NOTE: under PCP the token buffer is in head-tail *rank order*, so read
-        the rows alongside the `positions` line (which gives each token's true
-        sequence position)."""
-        import os
-        if not os.environ.get("PCP_DEBUG"):
-            return
-        if not hasattr(self, "_dbg_tok"):
-            try:
-                from transformers import AutoTokenizer
-                self._dbg_tok = AutoTokenizer.from_pretrained(
-                    self.vllm_config.model_config.tokenizer)
-            except Exception:
-                self._dbg_tok = None
-        full_logits = self.compute_logits_fn(self.state_leaves,
-                                             full_hidden_states, lora_metadata)
-        pred = np.asarray(jax.device_get(full_logits)).argmax(-1).reshape(-1)
-        iid = np.asarray(jax.device_get(input_ids)).reshape(-1)
-        pos = np.asarray(jax.device_get(input_positions)).reshape(-1)
-        n = min(len(iid), 96)
-        get = lambda a: (None if a is None else np.asarray(jax.device_get(a)).
-                         reshape(-1)[:16].tolist())
-        md = attn_metadata
-        print(f"\n===== PCP_DEBUG step (n_tokens={len(iid)}) =====",
-              flush=True)
-        print(f"  input_ids       : {iid[:n].tolist()}")
-        print(f"  positions       : {pos[:n].tolist()}")
-        print(f"  pred_tokens     : {pred[:n].tolist()}")
-        print(f"  seq_lens        : {get(md.seq_lens)}")
-        print(f"  query_start_loc : {get(md.query_start_loc)}")
-        print(f"  distribution    : {get(md.request_distribution)}")
-        print(f"  q_pos_offsets   : {get(getattr(md, 'q_pos_offsets', None))}")
-        print(f"  block_tables    : {get(md.block_tables)}")
-        print(f"  logits_indices  : {get(logits_indices)}")
-        if self._dbg_tok is not None:
-            dec = lambda ids: [self._dbg_tok.decode([int(t)]) for t in ids]
-            print(f"  input_text      : {dec(iid[:n])}")
-            print(f"  pred_text       : {dec(pred[:n])}")
-
     def _execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
@@ -1420,9 +1371,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             )
 
         full_hidden_states = hidden_states
-
-        self._pcp_debug_dump(input_ids, input_positions, attn_metadata,
-                             full_hidden_states, lora_metadata, logits_indices)
 
         if self.input_batch.num_prompt_logprobs:
             # Compute logits for ALL token positions once.
@@ -2053,16 +2001,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     @jax.jit(static_argnums=(0, ))
     def _select_from_array_fn(self, array, indices_to_select):
-        # Under PCP the token (row) dim is sharded over the pcp axis, but
-        # `indices_to_select` (logits_indices) are GLOBAL token slots. Local
-        # per-shard indexing would clamp an out-of-range global slot into the
-        # wrong rank's rows, so all-gather the rows over pcp first and index
-        # globally on every rank.
         pcp_axis = ShardingAxisName.PREFILL_CONTEXT
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
 
         def select_local_fn(local_array, local_indices):
             if pcp_size > 1:
+                # TODO(wenxindong): Remove the all-gather. 
                 local_array = jax.lax.all_gather(local_array,
                                                  pcp_axis,
                                                  axis=0,
@@ -2199,18 +2143,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.num_tokens_paddings_per_dp,
                 max_num_scheduled_tokens_across_dp)
 
-        # Prefill context parallelism (single-request, prefill-only): pad the
-        # request's current chunk to 2*pcp*C where C (the head-tail chunk size)
-        # is a power of two, so each of the two per-rank halves is a power of
-        # two and the total is a multiple of pcp.
-        pcp_size = self.vllm_config.sharding_config.prefill_cp_size
-        if pcp_size > 1:
-            two_p = 2 * pcp_size
-            n_cur = max_num_scheduled_tokens_across_dp
-            # Bucket the current-token count to a power of two, so the head-tail
-            # chunk size C = padded / (2*pcp) is also a power of two (pcp is).
-            padded_num_scheduled_tokens_per_dp_rank = max(
-                two_p, 1 << (n_cur - 1).bit_length())
         padded_total_num_scheduled_tokens = (
             padded_num_scheduled_tokens_per_dp_rank * dp_size)
 
@@ -2415,11 +2347,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         dp_size = self.dp_size
         data_parallel_attn_sharding = NamedSharding(
             self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-        # Per-request attention metadata (seq_lens, query_start_loc,
-        # request_distribution, ...) is *replicated* over the prefill-context
-        # axis (pcp): only the token dim is head-tail sharded on pcp, so shard
-        # this metadata on BATCH (which excludes pcp) to avoid trying to split a
-        # per-request array by pcp. Equals ATTN_DATA when pcp is inactive.
         metadata_attn_sharding = NamedSharding(
             self.mesh, PartitionSpec(ShardingAxisName.BATCH))
 
@@ -2616,33 +2543,27 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                         dtype=np.int32).ravel()
 
         # Prefill context parallelism (single request, prefill only): head-tail
-        # arrange this request's current tokens into rank order and emit the PCP
-        # attention metadata (chunk-size cu, padded seq_len, logits slot).
-        # Decode is handled elsewhere.
+        # arrange this request's current tokens into rank order  
         pcp_kv_cache_lens = None
-        pcp_cu_q_lens = None
+        pcp_query_start_loc = None
         pcp_q_pos_offsets = None
-        pcp_kv_lens = None
-        pcp_distribution = None
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         if pcp_size > 1:
             assert dp_size == 1, "PCP with DP>1 not wired yet"
             counts = scheduled_tokens_per_dp_rank[0]
-            assert len(counts) == 1, "PCP supports a single request per step"
+            assert len(counts) == 1, "PCP currently only supports a single request at a time."
             num_current = int(counts[0])
             two_p = 2 * pcp_size
-            padded_S = max(two_p, 1 << (num_current - 1).bit_length())
-            C = padded_S // two_p
+            C = padded_num_scheduled_tokens_per_dp_rank // two_p
             # Head-tail row order: rank r owns chunk r (head) and chunk 2P-1-r
             # (tail), laid out contiguously per rank.
             row_perm = np.array(
                 [c for r in range(pcp_size) for c in (r, two_p - 1 - r)])
 
             def _rearrange(buf):  # natural token order -> rank order
-                b = buf[:padded_S].copy()
-                b[num_current:] = 0  # zero the padding tokens
-                buf[:padded_S] = b.reshape(two_p, C)[row_perm].reshape(-1)
-
+                buf[num_current:] = 0
+                buf[:] = buf.reshape(two_p, C)[row_perm].reshape(-1)
+            
             _rearrange(positions)
             _rearrange(input_ids_view)
             # query_start_loc := [0, C] (head chunk size).
@@ -2653,13 +2574,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_idx = int(req_indices_dp[0][0])
             num_computed = int(
                 self.input_batch.num_computed_tokens_cpu[req_idx])
-            seq_lens_view[0] = num_computed + num_current
-            seq_lens_view[1:] = 0
+            # Both fused current-phase seqs are the SAME request, so entries 0
+            # and 1 both carry T. (The cache phase reads only entry 0.)
+            seq_lens_view[:2] = num_computed + num_current      # [T, T]
+            seq_lens_view[2:] = 0
+            # The fused current phase presents head+tail as TWO prefill seqs.
+            # (The cache phase is one seq and synthesizes [0, 0, 1] in-wrapper.)
+            request_distribution[:] = (0, 0, 2)
             # kv_cache_lens := num_computed; the kernel derives the real current
             # KV length as seq_lens - kv_cache_lens, so only real tokens are
             # attended/written (no padding write-clamp needed).
             kv_cache_lens_np = np.zeros_like(np.asarray(seq_lens_view))
-            kv_cache_lens_np[0] = num_computed
+            kv_cache_lens_np[:2] = num_computed                 # [P, P]
             # Per-(half, rank) launch metadata for the PCP attention wrapper,
             # sharded on `pcp` so each rank reads its own row. head (half=0) is
             # always fully real (C tokens) at within-current offset rank*C; tail
@@ -2685,10 +2611,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 pcp_cu_np[rank, 2:] = C + tail_real    # seq 1 (tail) end
                 pcp_qpos_np[rank, 0] = rank * C        # head within-current start
                 pcp_qpos_np[rank, 1] = tail_off        # tail within-current start
-            pcp_kv_lens_np = np.zeros(n_off, np.int32)
-            pcp_kv_lens_np[:2] = num_computed + num_current   # [T, T]
-            kv_cache_lens_np[:2] = num_computed              # [P, P]
-            pcp_dist_np = np.array([0, 0, 2], np.int32)
             # logits_indices: the last real token (natural position
             # num_current-1) lands in rank-order slot inv_row[chunk]*C + within.
             inv_row = np.empty(two_p, np.int64)
@@ -2696,24 +2618,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             last = num_current - 1
             logits_indices_view[0] = inv_row[last // C] * C + (last % C)
             logits_indices_view[1:] = -1
-            pcp_kv_cache_lens = device_array(self.mesh,
-                                             kv_cache_lens_np,
-                                             sharding=NamedSharding(
-                                                 self.mesh, PartitionSpec()))
             pcp_spec = NamedSharding(
                 self.mesh,
                 PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
             repl = NamedSharding(self.mesh, PartitionSpec())
-            pcp_kv_lens = device_array(self.mesh, pcp_kv_lens_np, sharding=repl)
-            pcp_distribution = device_array(self.mesh, pcp_dist_np,
-                                            sharding=repl)
-            pcp_cu_q_lens = device_array(self.mesh,
-                                         pcp_cu_np,
+            pcp_kv_cache_lens = device_array(self.mesh,
+                                             kv_cache_lens_np,
+                                             sharding=repl)
+            # query_start_loc IS the fused current-phase cu under PCP: it needs
+            # per-rank values, so it is built here (pcp-sharded) instead of being
+            # sliced out of the replicated metadata blob below.
+            (pcp_query_start_loc, pcp_q_pos_offsets) = device_array(self.mesh,
+                                         (pcp_cu_np, pcp_qpos_np),
                                          sharding=pcp_spec)
-            pcp_q_pos_offsets = device_array(self.mesh,
-                                             pcp_qpos_np,
-                                             sharding=pcp_spec)
-
         spec_decode_metadata = None
         if self.speculative_config:
             spec_decode_metadata = (
@@ -2833,7 +2750,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
         input_ids = metadata["input_ids"]
-        query_start_loc = metadata["query_start_loc"]
+        # Under PCP query_start_loc carries per-rank values, so it cannot ride
+        # the replicated metadata blob; use the pcp-sharded array built above.
+        query_start_loc = (pcp_query_start_loc if pcp_size > 1 else
+                           metadata["query_start_loc"])
         seq_lens = metadata["seq_lens"]
         logits_indices = metadata["logits_indices"]
 
@@ -2854,10 +2774,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp_kv_cache_lens=pcp_kv_cache_lens,
-                pcp_cu_q_lens=pcp_cu_q_lens,
                 pcp_q_pos_offsets=pcp_q_pos_offsets,
-                pcp_kv_lens=pcp_kv_lens,
-                pcp_distribution=pcp_distribution,
             )
 
             return attention_metadata_gid

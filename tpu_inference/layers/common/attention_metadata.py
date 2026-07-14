@@ -28,10 +28,7 @@ import jax
         "request_distribution",
         "mamba_state_indices",
         "pcp_q_pos_offsets",
-        "pcp_cu_q_lens",
         "pcp_kv_cache_lens",
-        "pcp_kv_lens",
-        "pcp_distribution",
     ],
     meta_fields=["padded_num_reqs"],
 )
@@ -57,28 +54,12 @@ class AttentionMetadata(object):
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
 
-    # (pcp, max_num_seqs) int32 — PCP only, sharded on `pcp`. Per rank, the
-    # within-current start of its head and tail chunk: [rank*C, (2*pcp-1-rank)*C].
-    # The two chunks are fused into ONE ragged current-phase launch as two
-    # "sequences", so these are that launch's per-seq q_pos_offsets.
+    # (max_num_seqs, ) int32 — PCP only. For a single request, it is [rank*C, (2*pcp-1-rank)*C].
     pcp_q_pos_offsets: jax.Array | None = None
 
-    # (pcp, max_num_seqs + 1) int32 — PCP only, sharded on `pcp`. Per rank, the
-    # fused current-phase cu_q_lens: [0, C, C + tail_real]. The head chunk is
-    # always fully real (C); the tail is clamped so padding past the real current
-    # length is excluded (may be 0 when the tail is wholly padding).
-    pcp_cu_q_lens: jax.Array | None = None
-
-    # (3,) int32 — PCP only: [0, 0, 2]. The fused current phase presents the
-    # head+tail chunks as TWO prefill sequences. (The cache phase is a single
-    # sequence and uses `request_distribution`.)
-    pcp_distribution: jax.Array | None = None
-
-    # (max_num_seqs,) int32 — PCP only: [T, T, 0...] where T = num_computed +
-    # num_current. Both fused current-phase seqs are the SAME request, so both
-    # carry the request's real total kv length.
-    pcp_kv_lens: jax.Array | None = None
-
+    # (max_num_seqs,) int32 — PCP only: [P, P, 0...] where P = num_computed.
+    # The kernel derives the new KV length as
+    # `seq_lens - pcp_kv_cache_lens`, so only real tokens are attended/written.
     pcp_kv_cache_lens: jax.Array | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket

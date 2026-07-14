@@ -44,9 +44,8 @@ class ShardingAxisNameBase:
     ATTN_DATA = ('data', 'pcp', 'attn_dp', 'attn_dp_expert')
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = ('data', 'pcp')
-    ATTN_HEAD = ('model', 'expert', 'dcp')
-    KV_HEAD = ('model', 'expert'
-               )
+    ATTN_HEAD = ('model', 'expert', 'dcp') # Q heads
+    KV_HEAD = ('model', 'expert')
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp')
     MOE_TENSOR = ('attn_dp', 'model', 'dcp')
@@ -62,9 +61,10 @@ class ShardingAxisNameBase:
 
     # These axes are used in KV caches management.
     BATCH = ('data', 'attn_dp', 'attn_dp_expert')
-    CONTEXT = 'dcp'
-    PREFILL_CONTEXT = 'pcp'  # TODO: rename to PCP
-    KV_CONTEXT = ('pcp', 'dcp')
+    KV_CONTEXT = ('pcp', 'dcp')  
+    
+    # PCP input sharding
+    PREFILL_CONTEXT = 'pcp'
 
     # Vision encoder sharding axes
     VIT_BATCH = ('data', 'attn_dp', 'attn_dp_expert')
@@ -89,9 +89,9 @@ class ShardingAxisName2D:
     EXPERT_DATA = ('data', 'model')
     VOCAB = ('data', 'model')
     BATCH = 'data'
-    CONTEXT = None
-    PREFILL_CONTEXT = None
     KV_CONTEXT = None
+    PREFILL_CONTEXT = None
+
     MODEL = 'model'
 
     # Vision encoder sharding axes
@@ -343,6 +343,9 @@ class ShardingConfigManager:
                 raise ValueError(
                     "Only one of prefill/decode context parallelism may be "
                     "enabled at a time.")
+            if sharding_strategy.data_parallelism > 1:
+                raise ValueError(
+                    "Prefill context parallelism is not compatible with data parallelism yet.")
 
     @property
     def total_dp_size(self) -> int:
