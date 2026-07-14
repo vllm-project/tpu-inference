@@ -501,7 +501,7 @@ class CompilationManager:
     def _precompile_substitute_placeholder_token(self) -> None:
         dp_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
-        replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
+        replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec(None))
         indices_sharding = NamedSharding(self.runner.mesh, PartitionSpec(None))
 
         placeholder_num = jax.ShapeDtypeStruct(
