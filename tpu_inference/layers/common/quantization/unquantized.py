@@ -22,19 +22,6 @@ from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 
 
-class UnquantizedFusedMoEMethod:
-    """Shared base for jax and vllm unquantized fused-MoE methods.
-
-    Both paths track extra_backend_kwargs (e.g. ep_axis_name, block sizes)
-    that flow through to the kernel call.  Keeping this here avoids
-    duplicating the initialisation in each backend.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.extra_backend_kwargs = {}
-
-
 class UnquantizedLinearMethod:
     """Implements the forward method for unquantized linear layers.
 
