@@ -507,16 +507,17 @@ class VllmModelWrapper:
                 for k, v in kwargs.items()
             }
 
-            output_from_torch = torch.func.functional_call(
-                self.model,
-                torch_view(params_and_buffers),
-                kwargs={
-                    "call_method": "embed_multimodal",
-                    "call_args": (),
-                    "call_kwargs": call_kwargs,
-                },
-                tie_weights=False,
-            )
+            with torchax.default_env():
+                output_from_torch = torch.func.functional_call(
+                    self.model,
+                    torch_view(params_and_buffers),
+                    kwargs={
+                        "call_method": "embed_multimodal",
+                        "call_args": (),
+                        "call_kwargs": call_kwargs,
+                    },
+                    tie_weights=False,
+                )
 
             return jax_view(output_from_torch)
 
