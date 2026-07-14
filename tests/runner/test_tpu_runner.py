@@ -251,11 +251,12 @@ class TestTPUJaxRunner:
                                      dtype=np.int32).reshape(5, 3, 8, 2)
 
         def device_get_side_effect(arg):
-            if isinstance(arg, tuple) and len(arg) == 3:
-                tokens_arg, experts_arg, _ = arg
-                if (tokens_arg is mock_generated_tokens
-                        and experts_arg is mock_all_expert_indices):
-                    return mock_tokens_cpu, mock_experts_cpu, np.int32(5)
+            if isinstance(arg, tuple) and len(arg) == 2:
+                tokens_arg, _ = arg
+                if tokens_arg is mock_generated_tokens:
+                    return mock_tokens_cpu, np.int32(5)
+            elif arg is mock_all_expert_indices:
+                return mock_experts_cpu
             return arg
 
         mock_device_get.side_effect = device_get_side_effect
