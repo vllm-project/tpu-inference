@@ -11,18 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""End-to-end test for the PCP attention wrapper.
 
-Exercises the real `pcp_ragged_paged_attention` from attention_interface on a
-live `pcp` mesh -- the production path the runner dispatches to. Unlike the
-kernel tests (which call `ragged_paged_attention` directly), this covers the
-wrapper's own logic: the head-tail chunk split, the current-KV all-gather into
-token order, the cache/current two-phase split with its LSE all-reduce + combine,
-and the pcp-sharded per-(half, rank) launch metadata built in `_prepare_inputs`.
-
-PCP is single-request; a chunked prefill (num_computed = L > 0) is the case that
-exercises both phases.
-"""
 
 import jax
 import jax.numpy as jnp
@@ -41,24 +30,45 @@ from tpu_inference.layers.common.attention_interface import \
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisNameBase)
 
+PAGE = 16  # per-rank block_size; the GLOBAL page_size dim is PAGE * pcp
+MAX_SEQ = 8
+NQ, NKV, HD = 8, 2, 128
+DTYPE = jnp.float32
+SM_SCALE = HD**-0.5
 
-def _pcp_launch_meta(pcp, C, num_current, max_seq):
-    """Per-(half, rank) cu_q_lens / q_pos_offsets.
 
-    Mirrors what `TPUModelRunner._prepare_inputs` builds host-side: head (half=0)
-    is always fully real (C tokens) at within-current offset rank*C; tail
-    (half=1) sits at (2*pcp-1-rank)*C, clamped so padding past num_current is
-    excluded. Shapes are [2, pcp, ...], sharded on `pcp` by the wrapper.
-    """
+def _row_perm(pcp):
+    """Rank r owns chunk r (head) and chunk 2P-1-r (tail), laid out per rank."""
+    return [c for r in range(pcp) for c in (r, 2 * pcp - 1 - r)]
+
+
+def _inv_row(pcp):
+    """Natural chunk index -> its slot in the rank-order layout."""
+    inv = np.empty(2 * pcp, np.int64)
+    inv[_row_perm(pcp)] = np.arange(2 * pcp)
+    return inv
+
+
+def _to_rank_order(x, pcp, C):
+    """Token order -> rank order (what each rank's local shard must contain)."""
+    x = np.asarray(x)
+    return jnp.asarray(
+        x.reshape(2 * pcp, C, *x.shape[1:])[_row_perm(pcp)].reshape(x.shape))
+
+
+def _pcp_meta(pcp, C, num_current):
+    """The per-rank fused current-phase metadata, exactly as _prepare_inputs
+    builds it: cu = [0, C, C + tail_real] and q_pos_offsets = [head, tail]."""
     two_p = 2 * pcp
-    cu = np.zeros((2, pcp, max_seq + 1), np.int32)
-    qpos = np.zeros((2, pcp, max_seq), np.int32)
+    cu = np.zeros((pcp, MAX_SEQ + 1), np.int32)
+    qpos = np.zeros((pcp, MAX_SEQ), np.int32)
     for r in range(pcp):
         tail_off = (two_p - 1 - r) * C
-        cu[0, r, 1:] = C
-        qpos[0, r, 0] = r * C
-        cu[1, r, 1:] = int(np.clip(num_current - tail_off, 0, C))
-        qpos[1, r, 0] = tail_off
+        tail_real = int(np.clip(num_current - tail_off, 0, C))
+        cu[r, 1] = C  # seq 0 (head) is always fully real
+        cu[r, 2:] = C + tail_real  # seq 1 (tail) is clamped
+        qpos[r, 0] = r * C
+        qpos[r, 1] = tail_off
     return jnp.asarray(cu), jnp.asarray(qpos)
 
 
@@ -68,8 +78,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         super().setUp()
         if not jtu.is_device_tpu_at_least(version=4):
             self.skipTest("Expect TPUv4+")
-        # Force the N-D axis names (which carry the `pcp` axis) regardless of the
-        # ambient NEW_MODEL_DESIGN env, and restore afterwards.
+        # Force the N-D axis names (which carry `pcp`) regardless of the ambient
+        # NEW_MODEL_DESIGN env, and restore afterwards.
         self._saved_cls = sharding_mod.ShardingAxisName._cls
         sharding_mod.ShardingAxisName._cls = ShardingAxisNameBase
 
@@ -77,119 +87,214 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         sharding_mod.ShardingAxisName._cls = self._saved_cls
         super().tearDown()
 
-    @parameterized.product(pcp=[2], dtype=[jnp.float32])
-    def test_chunked_prefill(self, pcp, dtype):
-        """Wrapper output == full-causal reference, for a chunked prefill
-        (L previously-computed tokens in a pcp-strided cache + Snew current)."""
-        if jax.device_count() < pcp:
-            self.skipTest(f"needs >= {pcp} devices")
-        L, Snew, nq, nkv, D = 128, 128, 8, 2, 128
-        C = Snew // (2 * pcp)  # head-tail chunk size
-        kv_total = L + Snew
-        page_size, num_pages, max_seq = 16, 512, 8
-        sm_scale = D**-0.5
-        kvp = get_dtype_packing(dtype)
-        phd, nkv2 = align_to(D, 128), align_to(nkv * 2, kvp)
-        npr = num_pages // pcp
+    # ----------------------------- helpers -----------------------------------
+    @property
+    def _kvp(self):
+        return get_dtype_packing(DTYPE)
+
+    @property
+    def _nkv2(self):
+        return align_to(2 * NKV, self._kvp)
+
+    def _cache_dims(self, pcp):
+        return (self._nkv2 // self._kvp, self._kvp, align_to(HD, 128))
+
+    def _rand(self, rng, shape):
+        return jnp.array(rng.random(size=shape,
+                                    dtype=np.float32)).astype(DTYPE)
+
+    def _ref_cache(self, k, v, ntok, npages):
+        """Plain (non-strided) cache of `ntok` tokens, for the reference call."""
+        kv = merge_kv(k, v)
+        pad = cdiv(ntok, PAGE) * PAGE - ntok
+        kv = jnp.pad(kv, ((0, pad), (0, 0), (0, 0), (0, 0)),
+                     constant_values=jnp.nan)
+        kv = kv.reshape(-1, PAGE, *self._cache_dims(1))
+        cache = jnp.full((npages, PAGE, *self._cache_dims(1)), jnp.nan, DTYPE)
+        return cache.at[:kv.shape[0]].set(kv)
+
+    def _strided_cache(self, k, v, ntok, pcp, npages):
+        """The GLOBAL pcp cache. Build each rank's local shard (its g % pcp
+        round-robin share at local slot g // pcp) and concatenate along the
+        page_size dim -- which is exactly how KV_CONTEXT partitions it."""
+        dims = self._cache_dims(pcp)
+        shards = []
+        for r in range(pcp):
+            idx = np.arange(r, ntok, pcp)
+            kv = np.asarray(merge_kv(k[idx], v[idx])) if len(idx) else None
+            shard = np.full((npages, PAGE, *dims), np.nan, np.float32)
+            if kv is not None:
+                n = kv.shape[0]
+                kv = np.pad(kv, ((0, cdiv(n, PAGE) * PAGE - n), (0, 0), (0, 0),
+                                 (0, 0)),
+                            constant_values=np.nan)
+                kv = kv.reshape(-1, PAGE, *dims)
+                shard[:kv.shape[0]] = kv
+            shards.append(shard)
+        # (npages, PAGE * pcp, ...) -- rank r owns columns [r*PAGE, (r+1)*PAGE)
+        return jnp.asarray(np.concatenate(shards, axis=1), DTYPE)
+
+    def _page_indices(self, pps):
+        """The fused current phase has TWO seqs that are the SAME request. The
+        kernel offsets page_indices by `seq_idx * pages_per_seq` and the WRITING
+        seq is the tail (seq 1), so seq 1 must carry a COPY of the request's
+        pages -- zeros would send every write to page 0."""
+        pi = np.arange(pps, dtype=np.int32)
+        out = np.zeros(MAX_SEQ * pps, np.int32)
+        out[:pps] = pi
+        out[pps:2 * pps] = pi
+        return jnp.asarray(out)
+
+    def _mesh(self, pcp):
+        shape = tuple(pcp if a == "pcp" else 1 for a in MESH_AXIS_NAMES)
+        return Mesh(
+            np.array(jax.devices()[:pcp]).reshape(shape), MESH_AXIS_NAMES)
+
+    def _run(self, pcp, L, num_current, padded_s):
+        """Drive the wrapper; return (out_rank_order, kv_cache, exp_token_order).
+
+        L = num_computed (already in the strided cache), num_current = the real
+        current tokens, padded_s = 2*pcp*C (what the token buffers are sized to).
+        """
+        C = padded_s // (2 * pcp)
+        kv_total = L + num_current  # the REAL kv length
         rng = np.random.default_rng(4)
 
-        def gen(s):
-            return jnp.array(rng.random(size=s,
-                                        dtype=np.float32)).astype(dtype)
+        k_prev = self._rand(rng, (L, NKV, HD))
+        v_prev = self._rand(rng, (L, NKV, HD))
+        q_cur = self._rand(rng, (num_current, NQ, HD))
+        k_cur = self._rand(rng, (num_current, NKV, HD))
+        v_cur = self._rand(rng, (num_current, NKV, HD))
 
-        k_prev, v_prev = gen((L, nkv, D)), gen((L, nkv, D))
-        q_new, k_new, v_new = gen((Snew, nq, D)), gen((Snew, nkv, D)), gen(
-            (Snew, nkv, D))
-
-        def cache_from_kv(k, v, ntok):
-            kv = merge_kv(k, v)
-            kv = jnp.pad(kv, ((0, cdiv(ntok, page_size) * page_size - ntok),
-                              (0, 0), (0, 0), (0, 0)),
-                         constant_values=jnp.nan)
-            kv = kv.reshape(-1, page_size, nkv2 // kvp, kvp, phd)
-            c = jnp.full((num_pages, page_size, nkv2 // kvp, kvp, phd),
-                         jnp.nan, dtype)
-            return c.at[:kv.shape[0]].set(kv)
-
-        # --- reference: plain full-causal prefill over the whole context ---
-        pps_full = cdiv(kv_total, page_size)
-        pi_full = jnp.pad(jnp.arange(pps_full, dtype=jnp.int32),
-                          (0, max_seq * pps_full - pps_full))
+        # --- reference: plain full-causal prefill over the whole context ------
+        ref_pps = cdiv(kv_total, PAGE)
+        ref_pi = jnp.pad(jnp.arange(ref_pps, dtype=jnp.int32),
+                         (0, MAX_SEQ * ref_pps - ref_pps))
+        # NOTE: ref_ragged_paged_attention defaults to sm_scale=1.0, so it MUST
+        # be passed explicitly to match the wrapper.
         exp, _ = ref_ragged_paged_attention(
-            q_new,
-            k_new,
-            v_new,
-            cache_from_kv(k_prev, v_prev, L),
-            jnp.pad(jnp.array([kv_total], jnp.int32), (0, max_seq - 1)),
-            pi_full,
-            jnp.pad(jnp.array([0, Snew], jnp.int32), (0, max_seq - 1)),
+            q_cur,
+            k_cur,
+            v_cur,
+            self._ref_cache(k_prev, v_prev, L, ref_pps),
+            jnp.pad(jnp.array([kv_total], jnp.int32), (0, MAX_SEQ - 1)),
+            ref_pi,
+            jnp.pad(jnp.array([0, num_current], jnp.int32), (0, MAX_SEQ - 1)),
             jnp.array([0, 0, 1], jnp.int32),
-            sm_scale=sm_scale)
-        exp = np.array(exp[:Snew])
+            sm_scale=SM_SCALE)
+        exp = np.asarray(exp[:num_current])
 
-        def to_rank_order(x):
-            """Token order -> rank order: rank r holds [chunk r | chunk 2P-1-r]."""
-            out = np.zeros_like(np.array(x))
-            for r in range(pcp):
-                out[r * 2 * C:r * 2 * C + C] = np.array(x)[r * C:(r + 1) * C]
-                out[r * 2 * C + C:(r + 1) * 2 *
-                    C] = np.array(x)[(2 * pcp - 1 - r) * C:(2 * pcp - r) * C]
-            return jnp.array(out)
+        # --- the wrapper's inputs, exactly as _prepare_inputs lays them out ---
+        # Token buffers are padded to padded_s, padding zeroed, then head-tail
+        # rearranged into rank order.
+        def pad_and_rank_order(x, width):
+            buf = np.zeros((padded_s, width, HD), np.float32)
+            buf[:num_current] = np.asarray(x, np.float32)
+            return _to_rank_order(jnp.asarray(buf, DTYPE), pcp, C)
 
-        q_ro, k_ro, v_ro = to_rank_order(q_new), to_rank_order(
-            k_new), to_rank_order(v_new)
+        q = pad_and_rank_order(q_cur, NQ)
+        k = pad_and_rank_order(k_cur, NKV)
+        v = pad_and_rank_order(v_cur, NKV)
 
-        # --- pcp-strided previous cache: global token g -> rank g%pcp ---
-        gcache = np.full((num_pages, page_size, nkv2 // kvp, kvp, phd), np.nan,
-                         np.float32)
-        for r in range(pcp):
-            idx = np.arange(r, L, pcp)
-            kv = np.array(merge_kv(k_prev[idx], v_prev[idx]))
-            n = kv.shape[0]
-            kv = np.pad(kv, ((0, cdiv(n, page_size) * page_size - n), (0, 0),
-                             (0, 0), (0, 0)),
-                        constant_values=np.nan)
-            kv = kv.reshape(-1, page_size, nkv2 // kvp, kvp, phd)
-            gcache[r * npr:r * npr + kv.shape[0]] = kv
-        gcache = jnp.array(gcache)
+        # Per-rank local cache must hold ceil(kv_total / pcp) tokens after the write.
+        pps = cdiv(cdiv(kv_total, pcp), PAGE)
+        npages = max(pps, 1)
+        cache = self._strided_cache(k_prev, v_prev, L, pcp, npages)
 
-        pps = cdiv(L, page_size)
-        page_indices = jnp.pad(jnp.arange(pps, dtype=jnp.int32),
-                               (0, max_seq * pps - pps))
-        # seq_lens = REAL total (num_computed + num_current); kv_cache_lens =
-        # num_computed. The kernel derives the current length as their difference.
-        kv_lens = jnp.pad(jnp.array([kv_total], jnp.int32), (0, max_seq - 1))
-        kv_cache_lens = jnp.pad(jnp.array([L], jnp.int32), (0, max_seq - 1))
-        cu_chunk = jnp.pad(jnp.array([0, C], jnp.int32), (0, max_seq + 1 - 2))
-        dist = jnp.array([0, 0, 1], jnp.int32)
-        pcp_cu, pcp_qpos = _pcp_launch_meta(pcp, C, Snew, max_seq)
+        pad1 = lambda xs: jnp.pad(jnp.array(xs, jnp.int32),
+                                  (0, MAX_SEQ - len(xs)))
+        # Both fused seqs are the SAME request -> [T, T] / [P, P].
+        kv_lens = pad1([kv_total, kv_total])
+        kv_cache_lens = pad1([L, L])
+        cu_q_lens, q_pos_offsets = _pcp_meta(pcp, C, num_current)
+        distribution = jnp.array([0, 0, 2], jnp.int32)  # head + tail
 
-        shape = tuple(pcp if a == "pcp" else 1 for a in MESH_AXIS_NAMES)
-        mesh = Mesh(
-            np.array(jax.devices()[:pcp]).reshape(shape), MESH_AXIS_NAMES)
-        out, _ = pcp_ragged_paged_attention(mesh,
-                                            q_ro,
-                                            k_ro,
-                                            v_ro,
-                                            gcache,
-                                            kv_lens,
-                                            page_indices,
-                                            cu_chunk,
-                                            dist,
-                                            kv_cache_lens,
-                                            pcp_cu,
-                                            pcp_qpos,
-                                            sm_scale=sm_scale,
-                                            update_kv_cache=True,
-                                            use_causal_mask=True)
-        out = np.array(out)
-        # Guard against a trivially-passing all-zero/NaN match.
-        self.assertTrue(np.all(np.isfinite(out)))
-        self.assertGreater(float(np.abs(out).max()), 0.0)
-        self.assertAllClose(out,
-                            np.array(to_rank_order(exp)),
-                            atol=0.05,
-                            rtol=0.05)
+        out, new_cache = pcp_ragged_paged_attention(self._mesh(pcp),
+                                                    q,
+                                                    k,
+                                                    v,
+                                                    cache,
+                                                    kv_lens,
+                                                    self._page_indices(pps),
+                                                    cu_q_lens,
+                                                    distribution,
+                                                    kv_cache_lens,
+                                                    q_pos_offsets,
+                                                    sm_scale=SM_SCALE,
+                                                    update_kv_cache=True,
+                                                    use_causal_mask=True)
+        return np.asarray(out), np.asarray(new_cache), exp, C
+
+    def _assert_matches(self, out, exp, pcp, C, num_current):
+        """Compare only the REAL tokens: global token g sits in chunk g // C,
+        which the rank-order layout places at slot inv_row[g // C]."""
+        inv = _inv_row(pcp)
+        rows = np.array(
+            [inv[g // C] * C + (g % C) for g in range(num_current)])
+        got = out[rows]
+        # Guard against a trivially-passing all-zero / NaN "match".
+        self.assertTrue(np.all(np.isfinite(got)))
+        self.assertGreater(float(np.abs(got).max()), 0.0)
+        self.assertAllClose(got, exp, atol=2e-2, rtol=2e-2)
+
+    # ------------------------------ tests ------------------------------------
+    @parameterized.product(pcp=[2, 4])
+    def test_chunked_prefill(self, pcp):
+        """Wrapper output == full-causal reference, for a chunked prefill: L
+        previously-computed tokens in the strided cache + a full current chunk."""
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs >= {pcp} devices")
+        L, S = 128, 128  # S == padded_s: every chunk is fully real
+        out, _, exp, C = self._run(pcp, L, S, S)
+        self._assert_matches(out, exp, pcp, C, S)
+
+    @parameterized.product(pcp=[2, 4])
+    def test_partial_tail(self, pcp):
+        """num_current < padded_s: the tail chunks are partly (or wholly)
+        padding, so `tail_real` differs per rank -- the case that forces
+        query_start_loc to be pcp-sharded in the first place."""
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs >= {pcp} devices")
+        L, S, padded_s = 128, 100, 128
+        out, _, exp, C = self._run(pcp, L, S, padded_s)
+        self._assert_matches(out, exp, pcp, C, S)
+
+    @parameterized.product(pcp=[2, 4])
+    def test_first_chunk_no_cache(self, pcp):
+        """num_computed == 0: the cache phase has nothing to attend, so every
+        cache-term LSE is -inf and the combine must fall back cleanly to the
+        current term (no NaNs)."""
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs >= {pcp} devices")
+        S = 128
+        out, _, exp, C = self._run(pcp, 0, S, S)
+        self._assert_matches(out, exp, pcp, C, S)
+
+    @parameterized.product(pcp=[2, 4])
+    def test_kv_cache_write(self, pcp):
+        """The current KV must land in the strided cache: global token g at
+        rank g % pcp, local slot g // pcp -- i.e. global column
+        (g % pcp) * PAGE + (g // pcp) % PAGE of page (g // pcp) // PAGE.
+
+        This is what `write_last_seq_only` + the duplicated page-index row buy;
+        a stale page_indices slice would send every write to page 0."""
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs >= {pcp} devices")
+        L, S = 128, 128
+        rng = np.random.default_rng(4)  # same seed as _run -> same tensors
+        _ = self._rand(rng, (L, NKV, HD)), self._rand(rng, (L, NKV, HD))
+        _ = self._rand(rng, (S, NQ, HD))
+        k_cur, v_cur = self._rand(rng,
+                                  (S, NKV, HD)), self._rand(rng, (S, NKV, HD))
+        ref = np.asarray(merge_kv(k_cur, v_cur))  # [S, nkv2//kvp, kvp, phd]
+
+        _, cache, _, _ = self._run(pcp, L, S, S)
+        for i in range(S):
+            g = L + i  # global position of current token i
+            r, local = g % pcp, g // pcp
+            page, off = local // PAGE, local % PAGE
+            got = cache[page, r * PAGE + off]
+            self.assertAllClose(got, ref[i], atol=2e-2, rtol=2e-2)
 
 
 if __name__ == "__main__":
