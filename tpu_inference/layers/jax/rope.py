@@ -364,6 +364,4 @@ class Llama4VisionRotaryEmbedding(nnx.Module):
         self.freqs_cis_stacked.value = freqs_cis_stacked.astype(jnp.float32)
 
     def __call__(self) -> jax.Array:
-        # Return the underlying array: newer JAX no longer implicitly
-        # converts nnx.Param via __jax_array__ during abstractification.
-        return self.freqs_cis_stacked.value
+        return self.freqs_cis_stacked

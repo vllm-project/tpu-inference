@@ -17,7 +17,6 @@ from typing import Optional, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
-import torch
 from typing_extensions import TypeAlias
 from vllm.logger import init_logger
 
@@ -135,22 +134,6 @@ def normalize_mm_grid_thw(
     raise ValueError(
         "Incorrect type/shape of grid_thw. Expected (3,), (N, 3), or (B, N, 3)."
     )
-
-
-def convert_torch_tensor_to_jax(tensor: torch.Tensor,
-                                dtype: jnp.dtype = jnp.bfloat16) -> jax.Array:
-    """Convert a torch tensor (e.g. pixel_values) to a JAX array.
-
-    torch bfloat16 tensors cannot pass through numpy (unsupported
-    ScalarType), so reinterpret the bits via int16 and view back as
-    bfloat16; other dtypes go through float32.
-    """
-    if tensor.dtype == torch.bfloat16:
-        converted = tensor.contiguous().view(torch.int16).numpy().view(
-            jnp.bfloat16)
-    else:
-        converted = tensor.contiguous().float().numpy()
-    return jnp.asarray(converted, dtype=dtype)
 
 
 def reshape_mm_tensor(mm_input: object, name: str) -> jax.Array:

@@ -276,39 +276,3 @@ def test_flatten_pad_mm_embeds_exact_length():
 
     expected = np.concatenate([np.ones((2, 128)), np.ones((3, 128)) * 2])
     np.testing.assert_array_equal(result, expected)
-
-
-# --- Tests for convert_torch_tensor_to_jax ---
-
-
-def test_convert_torch_bf16_tensor_is_bit_exact():
-    """torch bf16 -> jax bf16 must be a bit-exact reinterpretation."""
-    import torch
-
-    from tpu_inference.models.jax.utils.multi_modal_utils import \
-        convert_torch_tensor_to_jax
-
-    t = torch.randn(2, 3, 14, 14, dtype=torch.float32).to(torch.bfloat16)
-    # Non-contiguous input must be handled too.
-    t_nc = t.transpose(1, 2)
-
-    out = convert_torch_tensor_to_jax(t_nc)
-
-    assert out.dtype == jnp.bfloat16
-    assert out.shape == tuple(t_nc.shape)
-    np.testing.assert_array_equal(np.asarray(out.view(jnp.int16)),
-                                  t_nc.contiguous().view(torch.int16).numpy())
-
-
-def test_convert_torch_f32_tensor():
-    import torch
-
-    from tpu_inference.models.jax.utils.multi_modal_utils import \
-        convert_torch_tensor_to_jax
-
-    t = torch.arange(12, dtype=torch.float32).reshape(3, 4)
-    out = convert_torch_tensor_to_jax(t)
-    assert out.dtype == jnp.bfloat16
-    np.testing.assert_allclose(np.asarray(out.astype(jnp.float32)),
-                               t.numpy(),
-                               rtol=1e-2)
