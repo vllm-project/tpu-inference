@@ -73,7 +73,6 @@ export SKIP_DB_UPLOAD="false"
 export RUN_ACCURACY=""
 export MMLU_OUTPUT_LEN=""
 export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=vllm"
-export USE_UNFUSED_MEGABLOCKS_ENV=""
 export HF_CONFIG=""
 export USE_VLLM_LKG="true"
 export FORCE_MOE_RANDOM_ROUTING_ENV=""
@@ -114,7 +113,6 @@ while [[ $# -gt 0 ]]; do
     --run-accuracy) export RUN_ACCURACY="$2"; shift 2 ;;
     --mmlu-output-len) export MMLU_OUTPUT_LEN="$2"; shift 2 ;;
     --model-impl-type) export MODEL_IMPL_TYPE_ENV="MODEL_IMPL_TYPE=$2"; shift 2 ;;
-    --use-unfused-megablocks) export USE_UNFUSED_MEGABLOCKS_ENV="USE_UNFUSED_MEGABLOCKS=$2"; shift 2 ;;
     --hf-config) export HF_CONFIG="$2"; shift 2 ;;
     --force-moe-random-routing) export FORCE_MOE_RANDOM_ROUTING="$2"; FORCE_MOE_RANDOM_ROUTING_ENV="FORCE_MOE_RANDOM_ROUTING=$2"; shift 2 ;;
     --api-server-count) API_SERVER_COUNT="$2"; shift 2 ;;
@@ -158,7 +156,6 @@ ${MOE_REQUANTIZE_WEIGHT_DTYPE_ENV} \
 ${MOE_ALL_GATHER_ACTIVATION_DTYPE_ENV} \
 ${PHASED_PROFILING_DIR_ENV} \
 ${PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD_ENV} \
-${USE_UNFUSED_MEGABLOCKS_ENV} \
 VLLM_ENGINE_READY_TIMEOUT_S=10800 \
 ${FORCE_MOE_RANDOM_ROUTING_ENV} \
 RAY_LOG_TO_STDERR=1 \

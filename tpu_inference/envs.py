@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     AGGREGATED_STATS_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
-    USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
     NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: bool = False
@@ -258,10 +257,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
     env_bool("USE_MOE_EP_KERNEL", default=False),
-    # Enable megablocks for JAX sparse matmul for MoE (Mixture of Experts)
-    # using Unfused weights
-    "USE_UNFUSED_MEGABLOCKS":
-    env_bool("USE_UNFUSED_MEGABLOCKS", default=False),
     # Enable the dense backend for Jax MoE (Mixture of Experts)
     # NOTE: this is a naive implementation and should not be used in production
     "USE_DENSE_MOE":

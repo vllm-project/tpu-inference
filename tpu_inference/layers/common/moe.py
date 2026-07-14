@@ -59,11 +59,9 @@ class MoEBackend(Enum):
 
     # DENSE_MAT uses a simple dense matmul for the MoE backend,  is intended for testing, and is
     # only used in the JAX path for now
-    # NOTE: for DENSE_MAT in the JAX/Flax path, there are no changes for weights for the unfused backends (DENSE_MAT and MEGABLOX_GMM).
-    # That is, `kernel_gating_EDF`, `kernel_up_proj_EDF`, and `kernel_down_proj_EFD` are unchanged.
+    # NOTE: for DENSE_MAT in the JAX/Flax path, there are no changes for weights:
+    # `kernel_gating_EDF`, `kernel_up_proj_EDF`, and `kernel_down_proj_EFD` are unchanged.
     DENSE_MAT = "dense_mat"
-    # Also only used in the JAX path for now
-    MEGABLX_GMM = "megablox_gmm"
 
     @classmethod
     def fused_moe_backends(cls):
@@ -200,17 +198,6 @@ def moe_apply(
                     activation_ffw_td=layer.activation_ffw_td,
                     hidden_act=layer.hidden_act,
                     mesh=mesh)
-
-            case MoEBackend.MEGABLX_GMM:
-                # NOTE: circular import avoidance
-                from tpu_inference.layers.jax.moe.sparse_moe import \
-                    sparse_moe_func
-
-                return sparse_moe_func(weights=weights,
-                                       x_TD=x,
-                                       gating_output=gating_output,
-                                       layer=layer,
-                                       mesh=mesh)
 
         return output
 

@@ -527,11 +527,6 @@ def process_moe_weights(
             raise NotImplementedError(
                 "process_moe_weights is not yet implemented for dense matmul "
                 "backend.")
-        case MoEBackend.MEGABLX_GMM:
-            # TODO (jacobplatin)
-            raise NotImplementedError(
-                "process_moe_weights is not yet implemented for megablox gmm "
-                "backend")
 
     # Covert scales to jax arrays (they may be torch.Tensors)
     if w13_weight_scale is not None:
