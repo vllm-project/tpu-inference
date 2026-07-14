@@ -34,12 +34,15 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_in_docker.sh \
-          bash -c 'echo "== cache diag: host=$(hostname) dir=$JAX_COMPILATION_CACHE_DIR" \
-          && echo "== cache entries visible in container: $(ls "$JAX_COMPILATION_CACHE_DIR" 2>/dev/null | wc -l)" \
-          && echo "== env flags ==" && (env | grep -iE "LIBTPU|XLA_FLAGS|^TPU_|JAX_" || true) \
-          && pip install --no-deps libtpu==0.0.43 \
-          && python3 -c "import libtpu, os; print(\"libtpu dir:\", os.path.dirname(libtpu.__file__))" \
-          && pip list 2>/dev/null | grep -iE "^(jax|jaxlib|libtpu) " \
-          && JAX_DEBUG_LOG_MODULES=jax._src.compilation_cache,jax._src.compiler \
-          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/transpose_test.py /workspace/tpu_inference/tests/kernels/gmm_test.py \
-          && echo "== cache entries after: $(ls "$JAX_COMPILATION_CACHE_DIR" 2>/dev/null | wc -l)"'
+          bash -c 'echo "== host: $(hostname)" \
+          && python3 -c "import os; d=os.environ.get(\"JAX_COMPILATION_CACHE_DIR\",\"UNSET\"); print(\"cache dir:\", d); print(\"entries:\", len(os.listdir(d)) if os.path.isdir(d) else \"NO DIR\")" \
+          && echo "=== ARM A: libtpu 0.0.42.1, persistent cache DISABLED ===" \
+          && pip install --no-deps libtpu==0.0.42.1 2>&1 | tail -1 \
+          && JAX_ENABLE_COMPILATION_CACHE=false python3 -m pytest -q --durations=15 /workspace/tpu_inference/tests/kernels/transpose_test.py /workspace/tpu_inference/tests/kernels/gmm_test.py \
+          && echo "=== ARM B: libtpu 0.0.43, persistent cache DISABLED ===" \
+          && pip install --no-deps libtpu==0.0.43 2>&1 | tail -1 \
+          && JAX_ENABLE_COMPILATION_CACHE=false python3 -m pytest -q --durations=15 /workspace/tpu_inference/tests/kernels/transpose_test.py /workspace/tpu_inference/tests/kernels/gmm_test.py \
+          && echo "=== PROBE: cache ON, transpose twice (2nd should be fast if cache works) ===" \
+          && python3 -m pytest -q /workspace/tpu_inference/tests/kernels/transpose_test.py \
+          && python3 -c "import os; d=os.environ[\"JAX_COMPILATION_CACHE_DIR\"]; print(\"entries after probe1:\", len(os.listdir(d)))" \
+          && python3 -m pytest -q /workspace/tpu_inference/tests/kernels/transpose_test.py'
