@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import shutil
+import tempfile
 import time
 
 import jax
@@ -28,18 +31,31 @@ from tpu_inference.kernels.mla.v2.tuned_params import (TunableParams,
 
 def _load_xplane_pb2():
     """Locate XSpace proto bindings across available profiler packages."""
-    candidates_modules = (
-        "tensorflow.tsl.profiler.protobuf.xplane_pb2",
-        "tensorflow.core.profiler.protobuf.xplane_pb2",
-        "xprof.protobuf.xplane_pb2",
-        "tensorboard_plugin_profile.protobuf.xplane_pb2",
-        "tensorboard.plugins.profile.protobuf.xplane_pb2",
-    )
-    for modname in candidates_modules:
-        try:
-            return __import__(modname, fromlist=["XSpace"])
-        except ImportError:
-            continue
+    try:
+        from tensorflow.tsl.profiler.protobuf import xplane_pb2
+        return xplane_pb2
+    except ImportError:
+        pass
+    try:
+        from tensorflow.core.profiler.protobuf import xplane_pb2
+        return xplane_pb2
+    except ImportError:
+        pass
+    try:
+        from xprof.protobuf import xplane_pb2
+        return xplane_pb2
+    except ImportError:
+        pass
+    try:
+        from tensorboard_plugin_profile.protobuf import xplane_pb2
+        return xplane_pb2
+    except ImportError:
+        pass
+    try:
+        from tensorboard.plugins.profile.protobuf import xplane_pb2
+        return xplane_pb2
+    except ImportError:
+        pass
     return None
 
 
@@ -105,9 +121,11 @@ def _measure_device_latency_ns(run_fn,
         with open(pb_files[0], "rb") as f:
             xspace.ParseFromString(f.read())
 
-        pattern = re.compile(
-            r"(mla_ragged_paged_attention|paged_attention|fusion|custom_call)",
-            re.IGNORECASE,
+        kernel_keywords = (
+            "mla_ragged_paged_attention",
+            "paged_attention",
+            "fusion",
+            "custom_call",
         )
         durations_ps = []
 
@@ -120,8 +138,8 @@ def _measure_device_latency_ns(run_fn,
             }
             for line in plane.lines:
                 for event in line.events:
-                    name = event_names.get(event.metadata_id, "")
-                    if pattern.search(name):
+                    name = event_names.get(event.metadata_id, "").lower()
+                    if any(k in name for k in kernel_keywords):
                         durations_ps.append(event.duration_ps)
 
         if not durations_ps:
