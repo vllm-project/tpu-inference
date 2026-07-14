@@ -34,7 +34,8 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import (QuantizationConfig,
                                                            QuantLinearConfig)
 from tpu_inference.layers.jax.quantization.fp8 import (
-    Fp8BlockwiseLinearMethod, Fp8FusedMoEMethod, Fp8TensorwiseLinearMethod,
+    Fp8BlockwiseLinearMethod, Fp8BlockwiseMergedLinearMethod,
+    Fp8FusedMoEMethod, Fp8TensorwiseLinearMethod,
     Fp8TensorwiseMergedLinearMethod)
 from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
@@ -124,15 +125,16 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self._ct._is_fp8_w8a8(weight_quant, input_quant):
             block = _weight_block_size(weight_quant)
             if block is not None:
-                if isinstance(layer, JaxMergedColumnParallelLinear):
-                    # TODO(#2261): need to implement blockwise fp8 for JaxMergedColumnParallelLinear
-                    raise NotImplementedError(
-                        "compressed-tensors blockwise fp8 is not yet supported "
-                        "for JaxMergedColumnParallelLinear layers.")
                 # compressed-tensors serializes the dequant scale as
                 # "weight_scale" (DeepSeek-style checkpoints, the method's
                 # default, use "weight_scale_inv"), so create the param under
                 # the name the checkpoint will look up.
+                if isinstance(layer, JaxMergedColumnParallelLinear):
+                    return Fp8BlockwiseMergedLinearMethod(
+                        _Fp8BlockConfigShim(block),
+                        layer,
+                        linear_config,
+                        weight_scale_name="weight_scale")
                 return Fp8BlockwiseLinearMethod(
                     _Fp8BlockConfigShim(block),
                     layer,

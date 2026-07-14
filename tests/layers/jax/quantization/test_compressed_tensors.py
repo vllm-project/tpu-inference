@@ -26,11 +26,13 @@ from flax import nnx
 from jax.sharding import Mesh
 
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
-from tpu_inference.layers.jax.linear import JaxLinear
+from tpu_inference.layers.jax.linear import (JaxLinear,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.quantization.compressed_tensors import \
     CompressedTensorsConfig
 from tpu_inference.layers.jax.quantization.fp8 import (
-    Fp8BlockwiseLinearMethod, Fp8TensorwiseLinearMethod)
+    Fp8BlockwiseLinearMethod, Fp8BlockwiseMergedLinearMethod,
+    Fp8TensorwiseLinearMethod)
 from tpu_inference.layers.jax.quantization.unquantized import \
     UnquantizedLinearMethod
 
@@ -157,6 +159,45 @@ class TestCompressedTensorsConfig:
             mlp = _MLP(16, 16, rngs, config, prefix="mlp")
         assert hasattr(mlp.proj1, "weight_scale")
         assert not hasattr(mlp.proj1, "weight_scale_inv")
+
+    def test_fp8_block_merged_routes_to_merged_method(self, rngs, mesh):
+        """A merged (fused gate_up-style) layer under an fp8-block group ->
+        Fp8BlockwiseMergedLinearMethod, with per-projection shard slots ready.
+        """
+        config = CompressedTensorsConfig(_fp8_block_config())
+        with jax.set_mesh(mesh):
+            layer = JaxMergedColumnParallelLinear(
+                32, [16, 16],
+                rngs,
+                use_bias=False,
+                quant_config=config,
+                kernel_init=nnx.initializers.uniform(),
+                prefix="mlp.gate_up_proj")
+        assert isinstance(layer.quant_method, Fp8BlockwiseMergedLinearMethod)
+        assert layer.weight.get_metadata("_merged_shards") == [None, None]
+
+    def test_fp8_block_merged_scale_param_uses_ct_name(self, rngs, mesh):
+        """The merged blockwise scale param must also be named `weight_scale`.
+
+        Guards against the merged method regressing to the hardcoded DeepSeek
+        name (`weight_scale_inv`): the scale loader is attached by looking the
+        param up via `weight_scale_name`, so a mismatch would either raise at
+        layer construction or leave checkpoint scales with no matching param.
+        """
+        config = CompressedTensorsConfig(_fp8_block_config())
+        with jax.set_mesh(mesh):
+            layer = JaxMergedColumnParallelLinear(
+                32, [16, 16],
+                rngs,
+                use_bias=False,
+                quant_config=config,
+                kernel_init=nnx.initializers.uniform(),
+                prefix="mlp.gate_up_proj")
+        assert hasattr(layer, "weight_scale")
+        assert not hasattr(layer, "weight_scale_inv")
+        assert layer.weight_scale.get_metadata("_merged_shards") == [
+            None, None
+        ]
 
     def test_fp8_tensor_routes_to_tensorwise_method(self, rngs, mesh):
         """Per-tensor fp8 (no block_structure) -> Fp8TensorwiseLinearMethod."""
