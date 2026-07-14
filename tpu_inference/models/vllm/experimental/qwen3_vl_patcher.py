@@ -41,6 +41,8 @@ making sure they go through standard function arguments:
    model's cache just-in-time for the execution, and proceed with the original forward pass.
 """
 
+import jax
+import jax.numpy as jnp
 import torch
 import torch.nn as nn
 import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
@@ -120,6 +122,73 @@ def _convert_to_torchax_tensor(v):
     return v
 
 
+@jax.jit
+def _jit_masked_merge(inputs_embeds, is_multimodal, mm_embeds_parts):
+    """Pure-JAX equivalent of `inputs_embeds[is_multimodal] = cat(mm_embeds_parts)`.
+
+    `embed_input_ids_func` (vllm_model_wrapper.py) is deliberately not
+    jax.jit-wrapped, so torchax's per-call boolean-mask __setitem__ dispatch
+    (torchax.tensor.Tensor.__setitem__ -> _shape_static_boolean_index_put) was
+    recompiling on every call even for shapes it had already seen, since eager
+    op-by-op dispatch outside a persistent jax.jit doesn't reuse JAX's compile
+    cache reliably. Defining this as a module-level @jax.jit function (called
+    the same way every time) restores proper cache reuse across calls with
+    identical shapes. Concatenating `mm_embeds_parts` here too (rather than
+    eagerly beforehand) keeps that op inside the same cached program instead
+    of it recompiling separately every call.
+    """
+    mm_embeds_flat = jnp.concatenate(mm_embeds_parts, axis=0)
+    idx = jnp.cumsum(is_multimodal.astype(jnp.int32)) - 1
+    idx = jnp.clip(idx, 0, mm_embeds_flat.shape[0] - 1)
+    gathered = mm_embeds_flat[idx]
+    return jnp.where(is_multimodal[:, None], gathered, inputs_embeds)
+
+
+def _patched_merge_multimodal_embeddings(inputs_embeds, multimodal_embeddings,
+                                         is_multimodal):
+    """Drop-in replacement for vLLM's `_merge_multimodal_embeddings`.
+
+    Routes both the concatenation of per-item embeddings and the boolean-mask
+    merge through the persistent `_jit_masked_merge`, to avoid the
+    recompile-on-every-call behavior described there.
+    """
+    if len(multimodal_embeddings) == 0:
+        return inputs_embeds
+
+    input_dtype = inputs_embeds.dtype
+    if all(torch.is_tensor(t) for t in multimodal_embeddings):
+        # Fast path: what Qwen3-VL always produces in practice -- a flat
+        # list/tuple of one 2D tensor per image/video. Hand the parts to the
+        # jit uncatted so concatenation happens inside the cached program.
+        mm_parts = tuple(
+            jax_view(t.to(dtype=input_dtype)) for t in multimodal_embeddings)
+    else:
+        # Fallback for arbitrarily nested NestedTensors -- not exercised by
+        # Qwen3-VL today, but kept for correctness/generality. Uses the
+        # existing (already correct) recursive flattener eagerly.
+        mm_parts = (jax_view(
+            _patched_flatten_embeddings(multimodal_embeddings).to(
+                dtype=input_dtype)), )
+    merged = _jit_masked_merge(jax_view(inputs_embeds),
+                               jax_view(is_multimodal), mm_parts)
+    return torch_view(merged)
+
+
+@jax.jit
+def _jit_pack_deepstack(inputs_embeds, level_tensors):
+    """Pure-JAX equivalent of the deepstack stack/transpose/reshape/cat below.
+
+    Same rationale as `_jit_masked_merge`: a persistent @jax.jit function so
+    repeated shapes hit JAX's compile cache instead of recompiling per call.
+    `level_tensors` has a fixed length (deepstack_num_level, a model constant),
+    so its pytree structure is stable across calls.
+    """
+    stacked = jnp.stack(level_tensors,
+                        axis=0)  # [num_levels, cur_tokens, hdim]
+    packed = jnp.transpose(stacked, (1, 0, 2)).reshape(stacked.shape[1], -1)
+    return jnp.concatenate([inputs_embeds, packed], axis=-1)
+
+
 def _patched_get_deepstack(vllm_model, orig_get_deepstack, num_tokens: int):
     """Retrieves Deepstack embeddings, preferring JAX-compatible cached tensors.
 
@@ -179,14 +248,11 @@ def _patched_embed_input_ids(vllm_model, orig_embed_input_ids, *args,
         level_tensors.append(sliced)
 
     try:
-        # 3. Stack levels and reshape: [num_levels, cur_tokens, hdim] → [cur_tokens, num_levels*hdim]
-        stacked = torch.stack(level_tensors, dim=0)
-        packed = stacked.transpose(0, 1).reshape(cur_tokens, -1)
-        try:
-            packed = packed.to(inputs_embeds.device)
-        except Exception:
-            pass  # tensors already on the correct device
-        inputs_embeds = torch.cat([inputs_embeds, packed], dim=-1)
+        # 3. Stack levels, reshape, and append via the persistent jit helper:
+        # [num_levels, cur_tokens, hdim] -> [cur_tokens, num_levels*hdim] -> cat.
+        packed_jax = _jit_pack_deepstack(
+            jax_view(inputs_embeds), tuple(jax_view(t) for t in level_tensors))
+        inputs_embeds = torch_view(packed_jax)
     except (TypeError, RuntimeError) as e:
         logger.warning(
             "_patched_embed_input_ids: failed to pack deepstack: %s", e)
@@ -337,6 +403,12 @@ def apply_qwen3_vl_patches(vllm_model):
 
     # 5. Patch _flatten_embeddings in vllm utils to handle negative indexes correctly in torchax
     vllm_utils._flatten_embeddings = _patched_flatten_embeddings
+
+    # 5b. Patch _merge_multimodal_embeddings (imported into qwen3_vl_mod's own
+    # namespace, so it must be patched there, not on vllm_utils) to route the
+    # boolean-mask merge through a persistent jax.jit instead of torchax's
+    # per-call eager dispatch -- see _jit_masked_merge for why.
+    qwen3_vl_mod._merge_multimodal_embeddings = _patched_merge_multimodal_embeddings
 
     # 6. Force HAS_TRITON to False to prevent JAX/Triton active driver crash on TPU
     qwen3_vl_mod.HAS_TRITON = False
