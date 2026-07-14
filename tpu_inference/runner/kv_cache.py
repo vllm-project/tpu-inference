@@ -49,7 +49,7 @@ def _get_kv_cache_allocator(cache_shape, cache_dtype, sharding):
         return allocator, True
 
     def _allocate() -> jax.Array:
-        return jnp.empty(
+        return jnp.zeros(
             shape=cache_shape,
             dtype=cache_dtype,
         )
@@ -187,7 +187,7 @@ def create_kv_caches(
         kv_caches.append(sharded_allocate())
     dispatch_s = time.perf_counter() - stage_start
     logger.error(
-        "KV_CACHE_PROFILE create_kv_caches | alloc=empty | layers=%d | shape=%s | "
+        "KV_CACHE_PROFILE create_kv_caches | alloc=zeros | layers=%d | shape=%s | "
         "dtype=%s | num_blocks=%d | block_size=%d | num_kv_heads=%d | "
         "head_size=%d | use_mla=%s | shape_s=%.6f | sharding_s=%.6f | "
         "jit_create_s=%.6f | allocator_cache_hit=%s | dispatch_s=%.6f | "
