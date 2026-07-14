@@ -24,8 +24,17 @@ def causal_conv1d(
     conv_weight: jax.Array,  # [prev_kernel_size, 1, dim_size]
     conv_bias: jax.Array | None,  # [dim_size]
     cfg: config.GDNConfig,
+    collect_windows: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
-    """Perform causal Conv1D. Returns Conv1D output and convolution states."""
+    """Perform causal Conv1D. Returns Conv1D output and convolution states.
+
+    With `collect_windows=True` (SPEC mode), the returned state holds one
+    sliding window per token position of shape [seq, chunk,
+    prev_kernel_size, q, dim_size]: window t is the last `prev_kernel_size`
+    inputs ending at token t, i.e. the conv state a sequence resuming right
+    after token t must start from. Windows at positions >= real_sizes are
+    never written back, so their (garbage) contents are harmless.
+    """
 
     assert lhs.ndim == 4
 
@@ -44,6 +53,16 @@ def causal_conv1d(
             out += conv_bias.reshape(1, 1, -1)
 
         out_list.append(out)
+
+    if collect_windows:
+        # One window per token position: rows [t + 1, t + kernel_size) of
+        # `lhs` are exactly the last prev_kernel_size inputs ending at
+        # token t (lhs = [prev_state | tokens]).
+        windows = jnp.stack(
+            [lhs[:, t + 1:t + cfg.kernel_size] for t in range(cfg.chunk_size)],
+            axis=1,
+        )
+        return jnp.stack(out_list, axis=1), windows
 
     # Last prev_kernel_size elements needs to be returned as conv_state. However,
     # real_sizes may be smaller than chunk_size. Therefore, slicing last

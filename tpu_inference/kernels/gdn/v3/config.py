@@ -25,16 +25,14 @@ from jax.experimental.pallas import tpu as pltpu
 class GDNMode(enum.StrEnum):
     BATCHED = enum.auto()
     PER_SEQ = enum.auto()
-
-    def get_seq_tile_size(self, tile_size: int) -> int:
-        if self == GDNMode.BATCHED:
-            return tile_size
-        return 1
-
-    def get_chunk_size(self, tile_size: int) -> int:
-        if self == GDNMode.BATCHED:
-            return 1
-        return tile_size
+    # Speculative-decoding windowed mode: like BATCHED (multiple sequences
+    # per tile, one tile per sequence) but each sequence carries a verify
+    # window of up to `window_size` tokens, processed with the recurrent
+    # scan. The kernel reads the initial state from
+    # `state_indices[s] + read_offset[s]` and writes one state checkpoint
+    # per window position to `state_indices[s] + t`, which is how rejected
+    # draft tokens are rolled back (by checkpoint selection).
+    SPEC = enum.auto()
 
 
 @jax.tree_util.register_dataclass
@@ -61,14 +59,23 @@ class GDNConfig:
     kq_head_dim: int
     v_head_dim: int
     num_buffers: int = 2
+    # SPEC mode only: max tokens per speculative verify window
+    # (= num_speculative_tokens + 1).
+    window_size: int = 1
 
     @property
     def chunk_size(self) -> int:
-        return self.mode.get_chunk_size(self.tile_size)
+        if self.mode == GDNMode.BATCHED:
+            return 1
+        if self.mode == GDNMode.SPEC:
+            return self.window_size
+        return self.tile_size
 
     @property
     def seq_tile_size(self) -> int:
-        return self.mode.get_seq_tile_size(self.tile_size)
+        if self.mode == GDNMode.PER_SEQ:
+            return 1
+        return self.tile_size
 
     @property
     def prev_kernel_size(self) -> int:
@@ -112,9 +119,19 @@ class GDNConfig:
             self.dtypes.act_out,
         )
 
+    # Fraction of VMEM the kernel may use. SPEC mode holds one state
+    # checkpoint per window position in VMEM, so for large-head models
+    # (e.g. Qwen3.5-397B: 64 local v-heads -> 21M per buffered window even
+    # at tile_size=1) the default 0.7 budget is not enough; SPEC gets a
+    # higher limit and the wrapper sizes the tile against the same factor.
+    DEFAULT_VMEM_FRACTION = 0.7
+    SPEC_VMEM_FRACTION = 0.9
+
     def get_vmem_limit_bytes(self) -> int:
         tpu_info = pltpu.get_tpu_info()
-        return int(0.7 * tpu_info.vmem_capacity_bytes)
+        fraction = (self.SPEC_VMEM_FRACTION if self.mode == GDNMode.SPEC else
+                    self.DEFAULT_VMEM_FRACTION)
+        return int(fraction * tpu_info.vmem_capacity_bytes)
 
     def get_scratch_shape_dict(self) -> dict[str, Any]:
         conv_shape = (self.seq_tile_size, self.prev_kernel_size, 1,
@@ -127,9 +144,9 @@ class GDNConfig:
         )
 
         carry_conv_scratch = carry_recurrent_scratch = None
-        # NOTE: Currently, batched mode only supports case where 1 seq = 1 tile.
-        # Therefore, inter tile carry is not needed.
-        if self.mode != GDNMode.BATCHED:
+        # NOTE: In batched and spec modes 1 seq = 1 tile, so inter-tile carry
+        # is not needed.
+        if self.mode == GDNMode.PER_SEQ:
             carry_conv_scratch = pltpu.VMEM(conv_shape, jnp.float32)
             carry_recurrent_scratch = pltpu.VMEM(recurrent_shape, jnp.float32)
 

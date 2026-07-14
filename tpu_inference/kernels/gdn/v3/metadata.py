@@ -49,6 +49,48 @@ def compute_batched_seq_metadata(
         p_id_is_last_tile=is_valid_seqs,
         s_idx_has_initial_state=has_initial_state,
         s_idx_to_state_indices=state_indices,
+        s_idx_to_read_offset=jnp.zeros_like(state_indices),
+    )
+
+
+def compute_spec_seq_metadata(
+    cfg: config.GDNConfig,
+    seq_lens: jax.Array,
+    query_start_loc: jax.Array,
+    state_indices: jax.Array,
+    read_offsets: jax.Array,
+    end_seq: jax.Array,
+) -> memory_ref.MetadataRef:
+    """Metadata for SPEC mode: one speculative verify window per sequence.
+
+    Like `compute_batched_seq_metadata` but each sequence carries
+    `query_lens[s]` tokens (1 <= query_lens[s] <= cfg.window_size). The
+    initial state is read from `state_indices[s] + read_offsets[s]` and one
+    state checkpoint per window position is written back to
+    `state_indices[s] + t`.
+    """
+
+    max_seqs = seq_lens.size
+    all_seqs = jnp.arange(max_seqs)
+
+    # NOTE: Only supports query_lens[i] <= cfg.window_size where i < end_seq.
+    # This must be guaranteed by the function caller.
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    is_valid_seqs = jnp.where(all_seqs < end_seq, True, False)
+    has_initial_state = (seq_lens - query_lens) > 0
+    all_valid_seqs = jnp.where(is_valid_seqs, all_seqs, 0)
+
+    return memory_ref.MetadataRef.create(
+        cfgs=cfg,
+        num_tiles=pl.cdiv(end_seq, cfg.tile_size),
+        p_id_to_s_idx=all_valid_seqs,
+        p_id_to_r_base=query_start_loc[all_valid_seqs],
+        p_id_to_r_size=jnp.where(is_valid_seqs, query_lens, 0),
+        p_id_is_first_tile=is_valid_seqs,
+        p_id_is_last_tile=is_valid_seqs,
+        s_idx_has_initial_state=has_initial_state,
+        s_idx_to_state_indices=state_indices,
+        s_idx_to_read_offset=read_offsets,
     )
 
 
@@ -133,4 +175,6 @@ def compute_per_seq_metadata(
         p_id_is_last_tile=p_id_is_last_tile,
         s_idx_has_initial_state=has_initial_state,
         s_idx_to_state_indices=state_indices,
+        # Prefill/mixed sequences always resume from the group's base slot.
+        s_idx_to_read_offset=jnp.zeros_like(state_indices),
     )

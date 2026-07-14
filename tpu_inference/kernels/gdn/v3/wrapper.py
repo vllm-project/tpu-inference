@@ -66,6 +66,7 @@ def inner_kernel(
     """
 
     p_id = pl.program_id(0)
+    is_spec = cfg.mode == config.GDNMode.SPEC
 
     # Prepare states.
     real_sizes, prev_conv, prev_recurrent = vmem_ldst.load_and_select_states(
@@ -99,6 +100,7 @@ def inner_kernel(
         conv_weight=conv_weight,
         conv_bias=conv_bias,
         cfg=cfg,
+        collect_windows=is_spec,
     )
 
     conv_state_slot_ref[...] = new_conv_state
@@ -118,7 +120,10 @@ def inner_kernel(
     # NOTE: Ideally, we want to move this branching logic into gdn.py. However,
     # load_activation_as_compact and load_activation_as_large leverages vmem ldst.
     # Passing refs into gdn.py breaks strict separation of concerns.
-    if cfg.chunk_size == 1:
+    # SPEC mode uses the token-recurrent path: windows are tiny
+    # (num_spec + 1 tokens) and the scan produces the per-token state
+    # checkpoints the rollback scheme stores.
+    if cfg.chunk_size == 1 or is_spec:
         q_compact, k_compact, v_compact, b_compact, a_compact = (
             vmem_ldst.load_activation_as_compact(
                 qkv_vreg=qkv_out_compact,
@@ -139,6 +144,7 @@ def inner_kernel(
             dt_bias=dt_bias,
             cfg=cfg,
             real_sizes=real_sizes,
+            collect_states=is_spec,
         )
 
     else:
@@ -262,6 +268,7 @@ def outer_kernel(
         "d_k",
         "d_v",
         "kernel_size",
+        "num_spec_tokens",
         "decode_tile_size",
         "mixed_tile_size",
         "zero_initialize_out",
@@ -282,12 +289,14 @@ def fused_conv1d_gdn(
     state_indices: jax.Array,  # [num_seqs]
     distribution: jax.Array,  # [3]
     seq_lens: jax.Array,  # [num_seqs]
+    read_offsets: jax.Array | None = None,  # [num_seqs]
     *,
     n_kq: int,
     n_v: int,
     d_k: int,
     d_v: int,
     kernel_size: int,
+    num_spec_tokens: int = 0,
     zero_initialize_out: bool = True,
     compute_precision: jnp.dtype = jnp.float32.dtype,
     # TODO(kyuyeunk): Calculate tile size based on input dimensions.
@@ -316,15 +325,26 @@ def fused_conv1d_gdn(
         dt_bias: dt_bias tensor of shape [n_v].
         query_start_loc: Start locations of sequences of shape [num_seqs + 1].
         state_indices: Indices mapping sequences to state cache slots of shape
-            [num_seqs].
+            [num_seqs]. With speculative decoding these are the *base* slots
+            of per-request groups of `num_spec_tokens + 1` consecutive slots.
         distribution: Tensor of shape [3] int32 — [decode_end, prefill_end,
-            mixed_end].
+            mixed_end]. With `num_spec_tokens > 0`, the first segment holds
+            windowed sequences (decodes and speculative verify windows of up
+            to `num_spec_tokens + 1` tokens) processed in SPEC mode.
         seq_lens: Sequence lengths for each sequence of shape [num_seqs].
+        read_offsets: Optional [num_seqs] int32 — per-sequence state read
+            offset (num_accepted - 1 from the last verify step). SPEC-mode
+            sequences read their initial state from
+            `state_indices[s] + read_offsets[s]` and write one checkpoint
+            per window position to `state_indices[s] + t`. Required when
+            `num_spec_tokens > 0`.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Key/query dimension.
         d_v: Value dimension.
         kernel_size: Convolution kernel size.
+        num_spec_tokens: Number of speculative draft tokens (0 disables SPEC
+            mode and preserves the original BATCHED decode path).
         zero_initialize_out: Whether to zero-initialize the output buffer before
             executing non-batched sequences.
         compute_precision: Computation precision dtype.
@@ -356,6 +376,13 @@ def fused_conv1d_gdn(
     assert query_start_loc.shape == (num_seqs + 1, )
     assert state_indices.shape == (num_seqs, )
     assert distribution.shape == (3, )
+    if num_spec_tokens > 0:
+        assert read_offsets is not None, (
+            "read_offsets is required when num_spec_tokens > 0")
+    if read_offsets is None:
+        read_offsets = jnp.zeros((num_seqs, ), dtype=jnp.int32)
+    assert read_offsets.shape == (num_seqs, )
+    read_offsets = read_offsets.astype(jnp.int32)
     act_in_dtype = qkv.dtype
     assert a.dtype == b.dtype == qkv.dtype == act_in_dtype
 
@@ -365,6 +392,28 @@ def fused_conv1d_gdn(
     decode_tile_size = min(decode_tile_size, batch_size)
     mixed_tile_size = min(mixed_tile_size, batch_size)
     aligned_num_v_heads = pl.cdiv(n_v, num_lanes) * num_lanes
+
+    if num_spec_tokens > 0:
+        # SPEC mode holds one state checkpoint per window position per
+        # sequence in VMEM, which multiplies the per-sequence footprint by
+        # the window size. Shrink the tile so the double-buffered windows
+        # fit in roughly half the scoped-VMEM budget (the rest goes to
+        # weights, activations scratch and compiler temporaries).
+        window = num_spec_tokens + 1
+        num_buffers = config.GDNConfig.__dataclass_fields__[
+            "num_buffers"].default
+        bytes_per_seq = window * (
+            # Recurrent checkpoints (fp32) — the dominant term.
+            n_v * d_k * d_v * 4
+            # Conv checkpoints (fp32).
+            + (kernel_size - 1) * dim * 4
+            # qkv (fp32), b/a (fp32), out (act_out).
+            + dim * 4 + 2 * aligned_num_v_heads * 4 + n_v * d_v * 2)
+        vmem_budget = int(config.GDNConfig.SPEC_VMEM_FRACTION *
+                          pltpu.get_tpu_info().vmem_capacity_bytes)
+        spec_tile_budget = (vmem_budget // 2) // num_buffers
+        decode_tile_size = max(
+            1, min(decode_tile_size, spec_tile_budget // bytes_per_seq))
 
     batch_padding_size = padded_batch_size - batch_size
     num_v_padding_size = aligned_num_v_heads - n_v
@@ -403,16 +452,17 @@ def fused_conv1d_gdn(
         in_act: jax.Array | None,
         mode: config.GDNMode,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        if mode == config.GDNMode.BATCHED:
-            tile_size = decode_tile_size
-        else:
+        if mode == config.GDNMode.PER_SEQ:
             tile_size = mixed_tile_size
+        else:
+            tile_size = decode_tile_size
 
         cfg = config.GDNConfig(
             mode=mode,
             batch_size=padded_batch_size,
             kernel_size=kernel_size,
             tile_size=tile_size,
+            window_size=num_spec_tokens + 1,
             dim_size=dim,
             num_kq_heads=n_kq,
             num_v_heads=n_v,
@@ -435,6 +485,15 @@ def fused_conv1d_gdn(
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 state_indices=state_indices,
+                end_seq=distribution[0],
+            )
+        elif mode == config.GDNMode.SPEC:
+            metadata_obj = metadata.compute_spec_seq_metadata(
+                cfg=cfg,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                state_indices=state_indices,
+                read_offsets=read_offsets,
                 end_seq=distribution[0],
             )
         else:
@@ -497,8 +556,13 @@ def fused_conv1d_gdn(
             weights,
         )
 
+    # With speculative decoding the first (windowed) segment holds verify
+    # windows of up to `num_spec_tokens + 1` tokens and runs in SPEC mode;
+    # otherwise it holds 1-token decodes and runs in BATCHED mode.
+    first_mode = (config.GDNMode.SPEC
+                  if num_spec_tokens > 0 else config.GDNMode.BATCHED)
     out_act, out_conv_state, out_recurrent_state = call_kernel(
-        conv_state, recurrent_state, None, config.GDNMode.BATCHED)
+        conv_state, recurrent_state, None, first_mode)
     out_act, out_conv_state, out_recurrent_state = call_kernel(
         out_conv_state, out_recurrent_state, out_act, config.GDNMode.PER_SEQ)
 

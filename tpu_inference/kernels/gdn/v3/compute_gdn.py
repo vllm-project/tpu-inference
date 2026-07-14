@@ -329,10 +329,17 @@ def recurrent_gdn_per_seq(
     beta: jax.Array,  # [num_v_heads, chunk, 1, 1]
     state: jax.Array,  # [num_v_heads, kq_head_dim, v_head_dim]
     cfgs: config.GDNConfig,
+    collect_states: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
-    """Perform recurrent GDN over input [num_heads, chunk, 1, head_dim]."""
+    """Perform recurrent GDN over input [num_heads, chunk, 1, head_dim].
+
+    With `collect_states=True` (SPEC mode), the returned state stacks the
+    post-token state of every window position ([chunk, num_v_heads,
+    kq_head_dim, v_head_dim]) instead of only the final state.
+    """
 
     out_list = []
+    state_list = []
     for c_idx in range(cfgs.chunk_size):
         # [num_v_heads, 1, kq_head_dim]
         q_curr = q_compact[:, c_idx]
@@ -382,7 +389,11 @@ def recurrent_gdn_per_seq(
         ).astype(cfgs.dtypes.compute)
 
         out_list.append(out[:, 0, :])
+        if collect_states:
+            state_list.append(state)
 
+    if collect_states:
+        return jnp.stack(out_list, axis=0), jnp.stack(state_list, axis=0)
     return jnp.stack(out_list, axis=0), state
 
 
@@ -397,8 +408,15 @@ def recurrent_gdn(
     a_log: jax.Array,
     dt_bias: jax.Array,
     cfg: config.GDNConfig,
+    collect_states: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
-    """Perform recurrent GDN over input [seq, num_heads, chunk, 1, head_dim]."""
+    """Perform recurrent GDN over input [seq, num_heads, chunk, 1, head_dim].
+
+    With `collect_states=True` the returned state has one checkpoint per
+    window position: [seq, chunk, num_v_heads, kq_head_dim, v_head_dim].
+    Positions >= real_sizes repeat the last valid state; they are never
+    written back to HBM.
+    """
 
     mask_dtype = get_mask_dtype(cfg.dtypes.compute)
     iota = jax.lax.broadcasted_iota(
@@ -452,6 +470,7 @@ def recurrent_gdn(
             beta[idx],
             state_prev[idx],
             cfg,
+            collect_states=collect_states,
         )
         out_list.append(out)
         new_state_list.append(state)

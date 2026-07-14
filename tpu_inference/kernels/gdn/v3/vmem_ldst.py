@@ -175,14 +175,18 @@ def load_and_select_states(
     prev_conv_state_list = []
     prev_recurrent_state_list = []
 
+    is_spec = cfg.mode == config.GDNMode.SPEC
     for idx in range(cfg.seq_tile_size):
         s_idx = metadata_ref.p_id_to_s_idx[p_id, idx]
         real_sizes = metadata_ref.p_id_to_r_size[p_id, idx]
         is_first_tile = metadata_ref.p_id_is_first_tile[p_id, idx]
         has_initial_state = metadata_ref.s_idx_has_initial_state[s_idx]
 
+        # NOTE: In SPEC mode the VMEM window holds one state per window
+        # position; the initial state was DMA'd into position 0.
         # NOTE: Conv1D mandates fp32 due to its usage of compact layout.
-        hbm_conv_state = conv_state_slot_ref[idx].astype(jnp.float32)
+        hbm_conv_state = (conv_state_slot_ref[idx, 0] if is_spec else
+                          conv_state_slot_ref[idx]).astype(jnp.float32)
         prev_conv_state = jnp.where(has_initial_state, hbm_conv_state, 0)
 
         if carry_conv_scratch_ref is not None:
@@ -190,7 +194,8 @@ def load_and_select_states(
             prev_conv_state = jnp.where(is_first_tile, prev_conv_state,
                                         prev_tile_conv)
 
-        hbm_recurrent_state = recurrent_slot_ref[idx]
+        hbm_recurrent_state = (recurrent_slot_ref[idx, 0]
+                               if is_spec else recurrent_slot_ref[idx])
         prev_recurrent_state = jnp.where(has_initial_state,
                                          hbm_recurrent_state, 0)
 
