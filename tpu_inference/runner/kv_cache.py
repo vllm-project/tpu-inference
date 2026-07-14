@@ -135,7 +135,6 @@ def create_kv_caches(
     # num_blocks --> shard by data batch
     # block_size --> shard by context
     # head       --> shard by heads
-
     if use_mla:
         sharding = NamedSharding(
             mesh,

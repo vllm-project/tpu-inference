@@ -58,13 +58,8 @@ else:
     logger.info_once("Using default RPA kernel")
 
 ragged_paged_attention = rpa.ragged_paged_attention
+pcp_ragged_paged_attention_kernel = rpa_v3_cp.ragged_paged_attention
 get_kv_cache_shape = rpa.get_kv_cache_shape
-
-# Prefill context parallelism uses the dedicated context-parallel RPA kernel
-# (drop-in: identical signature + kv_cache_shape as the default kernel).
-import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as pcp_rpa
-
-pcp_ragged_paged_attention_kernel = pcp_rpa.ragged_paged_attention
 
 ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
 get_kv_cache_shape_hd64 = rpa_hd64.get_kv_cache_shape
@@ -524,10 +519,8 @@ def sharded_ragged_paged_attention_experimental(
                       ShardingAxisName.KV_HEAD, None, None)
     print(f"page_size={kv_cache.shape[1]}")
 
-    # Build a global cp_rank array of shape (dcp_size,) sharded along the
-    # context axis. Inside shard_map each device receives a (1,) slice
-    # containing its rank. KV_CONTEXT is ('pcp', 'dcp'), which partitions this
-    # correctly because at most one of pcp/dcp is ever > 1.
+    # Build a global cp_rank array of shape (dcp_size,) sharded along 'dcp'.
+    # Inside shard_map each device receives a (1,) slice containing its rank.
     dcp_size = mesh.shape['dcp']
     cp_rank_global = jnp.arange(dcp_size, dtype=jnp.int32)
 
@@ -664,14 +657,8 @@ def merge_attn_states(context_out: jax.Array, context_lse: jax.Array,
         context_lse = [seq, local_heads]
         query_out = [seq, local_heads, head_dim]
         query_lse = [seq, local_heads]
-
-    Used by both DCP and PCP: the two terms attend DISJOINT KV sets (the cache
-    vs. the current tokens), so LSE-combining them reconstructs the full softmax.
     """
     max_lse = jnp.maximum(context_lse, query_lse)
-    # A token can have -inf on BOTH terms (e.g. a padding query, or a prefill
-    # seq with no cached tokens): then max_lse = -inf and exp(-inf - -inf) = NaN.
-    # Clamp so such tokens fall out as 0 / -inf instead of poisoning the output.
     max_lse_safe = jnp.where(jnp.isinf(max_lse), 0.0, max_lse)
     exp_context = jnp.exp(context_lse - max_lse_safe)
     exp_query = jnp.exp(query_lse - max_lse_safe)
@@ -858,7 +845,9 @@ def pcp_ragged_paged_attention(
 
     def _fn(q_l, k_l, v_l, kvc, kvl, kvcl, pi, cu_q_lens, dist2, pcp_qpos):
         r = lax.axis_index(pcp_axis)
-        ag = lambda x: lax.all_gather(x, pcp_axis, axis=0, tiled=True)
+
+        def ag(x):
+            return lax.all_gather(x, pcp_axis, axis=0, tiled=True)
 
         def to_token_order(x):  # rank-order chunks -> global token order
             g = ag(x).reshape(two_p, C, *x.shape[1:])

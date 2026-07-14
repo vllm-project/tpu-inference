@@ -2023,16 +2023,10 @@ def ragged_paged_attention(
     q_pos_offsets: the position of the query tokens in the global sequence, only needed for PCP. 
     use_causal_mask: if true, use causal mask.
     write_last_seq_only: PCP only. PCP fuses a request's head and tail chunk
-      into ONE launch as two "sequences" that are really the same request (same
+      into one launch as two "sequences" that are really the same request (same
       kv_lens/kv_cache_lens), so each of them would redundantly write the same
       strided current KV to the cache. When true, the write is performed by the
-      LAST seq only. That seq is the tail, chosen because its causal range
-      already sweeps nearly all of the current KV, so extending its BKV loop to
-      cover the full write (`fetch_kv_len = kv_len`, see below) is close to
-      free; the head chunk would have to sweep the tail's KV purely to write it.
-      Requires the writing seq's page_indices row to be a copy of the request's
-      (the kernel offsets page_indices by `seq_idx * pages_per_seq`, so a zeroed
-      row would send every write to page 0).
+      tail seq only.
     skip_kv_mask: only set to true if use_causal_mask=False and each dynamic
       kv_len % bkv_csz == 0. Set to true can improve performance.
     sm_scale: the softmax scale which will be applied to the Q@K^T.

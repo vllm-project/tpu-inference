@@ -92,8 +92,11 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         phd, nkv2 = align_to(D, 128), align_to(nkv * 2, kvp)
         npr = num_pages // pcp
         rng = np.random.default_rng(4)
-        gen = lambda s: jnp.array(rng.random(size=s, dtype=np.float32)).astype(
-            dtype)
+
+        def gen(s):
+            return jnp.array(rng.random(size=s,
+                                        dtype=np.float32)).astype(dtype)
+
         k_prev, v_prev = gen((L, nkv, D)), gen((L, nkv, D))
         q_new, k_new, v_new = gen((Snew, nq, D)), gen((Snew, nkv, D)), gen(
             (Snew, nkv, D))

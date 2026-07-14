@@ -358,12 +358,6 @@ class CompilationManager:
         assert num_tokens is not None
 
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-        # Per-request attention metadata (seq_lens, query_start_loc,
-        # request_distribution, block_tables, ...) is replicated over the
-        # prefill-context axis (pcp): only the token dim is head-tail sharded on
-        # pcp, so shard this metadata on BATCH (excludes pcp) to match
-        # `_prepare_inputs`'s `metadata_attn_sharding`. Equals ATTN_DATA when
-        # pcp is inactive, so this is a no-op for non-PCP runs.
         metadata_attn_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
         pcp_size = self.runner.vllm_config.sharding_config.prefill_cp_size
@@ -380,9 +374,6 @@ class CompilationManager:
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution,
                                             sharding=metadata_attn_sharding)
-        # PCP-only: per-request previously-computed kv length (num_computed).
-        # Replicated (P()) at runtime, so the primer must include it (as a
-        # matching dummy) or the cached pytree structure won't be reused.
         pcp_kv_cache_lens = None
         pcp_q_pos_offsets = None
         if pcp_size > 1:
@@ -392,13 +383,9 @@ class CompilationManager:
                                              sharding=NamedSharding(
                                                  self.runner.mesh,
                                                  PartitionSpec()))
-            # Per-(half, rank) PCP launch metadata; pcp-sharded at runtime, so
-            # the primer must match that sharding for the cached HLO to be reused.
             pcp_spec = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
-            # Under PCP query_start_loc is the fused current-phase cu: per-rank
-            # values, pcp-sharded, so it replaces the replicated dummy above.
             query_start_loc = device_array(self.runner.mesh,
                                            np.zeros((pcp_size, n_reqs + 1),
                                                     dtype=np.int32),
@@ -630,10 +617,6 @@ class CompilationManager:
                 dp_sharding = NamedSharding(
                     self.runner.mesh,
                     PartitionSpec(ShardingAxisName.ATTN_DATA, ))
-                # input_ids rides the per-request metadata blob, sharded on
-                # BATCH (replicated over pcp) at runtime; positions is sharded
-                # on ATTN_DATA (head-tail split over pcp). BATCH==ATTN_DATA when
-                # pcp is inactive, so this is a no-op for non-PCP.
                 metadata_attn_sharding = NamedSharding(
                     self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
                 input_ids = self._create_dummy_tensor(
