@@ -824,6 +824,6 @@ class Fp8Config(QuantizationConfig):
             if self.is_layer_skipped(prefix,
                                      ignored_layers=self.ignored_layers,
                                      skip_with_substr=self.skip_with_substr):
-                return UnquantizedFusedMoEMethod()
+                return UnquantizedFusedMoEMethod(layer)
             return Fp8FusedMoEMethod(self.weight_block_size)
         return None

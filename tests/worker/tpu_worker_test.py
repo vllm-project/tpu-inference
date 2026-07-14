@@ -420,16 +420,21 @@ class TestTPUWorker:
     # --- Profiling and Health Check Tests ---
     #
 
-    @patch('tpu_inference.worker.tpu_worker.jax')
-    @patch.dict('os.environ', {"PYTHON_TRACER_LEVEL": "1"}, clear=True)
-    def test_profile_start(self, mock_jax, mock_vllm_config):
-        """Tests starting the JAX profiler."""
+    def _create_worker(self,
+                       mock_vllm_config,
+                       profile_dir="/tmp/profile_dir") -> TPUWorker:
         worker = TPUWorker(vllm_config=mock_vllm_config,
                            local_rank=0,
                            rank=0,
                            distributed_init_method="test")
-        worker.profile_dir = "/tmp/profile_dir"
+        worker.profile_dir = profile_dir
+        return worker
 
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    @patch.dict('os.environ', {"PYTHON_TRACER_LEVEL": "1"}, clear=True)
+    def test_profile_start(self, mock_jax, mock_vllm_config):
+        """Tests starting the JAX profiler."""
+        worker = self._create_worker(mock_vllm_config)
         worker.profile(is_start=True)
 
         mock_jax.profiler.ProfileOptions.assert_called_once()
@@ -440,21 +445,110 @@ class TestTPUWorker:
         assert kwargs['profiler_options'].python_tracer_level == 1
 
     @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_with_prefix_options(self, mock_jax, mock_vllm_config):
+        """Tests that profile_prefix options are correctly parsed and applied."""
+        worker = self._create_worker(mock_vllm_config)
+
+        mock_options = MagicMock()
+        mock_options.advanced_configuration = {}
+        mock_jax.profiler.ProfileOptions.return_value = mock_options
+
+        prefix = ("host_tracer_level:3;tpu_power_trace_level:2;"
+                  "tpu_perf_counters:true;enable_hlo_proto:false")
+        worker.profile(is_start=True, profile_prefix=prefix)
+
+        assert mock_options.host_tracer_level == 3
+        assert mock_options.advanced_configuration == {
+            "check_experimental_options": True,
+            "tpu_power_trace_level": 2,
+            "tpu_perf_counters": True,
+            "enable_hlo_proto": False,
+        }
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_with_prefix_complex_options(self, mock_jax,
+                                                 mock_vllm_config):
+        """Tests that advanced options with commas (sub-lists) and colons are correctly parsed."""
+        worker = self._create_worker(mock_vllm_config)
+
+        mock_options = MagicMock()
+        mock_options.advanced_configuration = {}
+        mock_jax.profiler.ProfileOptions.return_value = mock_options
+
+        prefix = ("host_tracer_level:2;"
+                  "tpu_cpu_perf_counter_profile_events:event1,event2;"
+                  "tpu_cpu_perf_counter_configs:101:3:cpu_event")
+        worker.profile(is_start=True, profile_prefix=prefix)
+
+        assert mock_options.host_tracer_level == 2
+        assert mock_options.advanced_configuration == {
+            "check_experimental_options": True,
+            "tpu_cpu_perf_counter_profile_events": "event1,event2",
+            "tpu_cpu_perf_counter_configs": "101:3:cpu_event",
+        }
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_with_prefix_options_invalid(self, mock_jax,
+                                                 mock_vllm_config):
+        """Tests that invalid options (e.g. containing special characters) throw ValueError."""
+        worker = self._create_worker(mock_vllm_config)
+
+        prefix = "invalid_opt:\"bad_val\""
+        with pytest.raises(ValueError,
+                           match="Invalid characters in option value"):
+            worker.profile(is_start=True, profile_prefix=prefix)
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_with_prefix_options_malformed(self, mock_jax,
+                                                   mock_vllm_config):
+        """Tests that malformed options (without colons) throw ValueError."""
+        worker = self._create_worker(mock_vllm_config)
+
+        prefix = "host_tracer_level=5;another_option"
+        with pytest.raises(ValueError, match="Expected 'key:value' format"):
+            worker.profile(is_start=True, profile_prefix=prefix)
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_with_prefix_options_non_ascii(self, mock_jax,
+                                                   mock_vllm_config):
+        """Tests that profile_prefix containing non-ascii characters throws ValueError."""
+        worker = self._create_worker(mock_vllm_config)
+
+        prefix = "host_tracer_level:3;test_option:🌟"
+        with pytest.raises(
+                ValueError,
+                match="profile_prefix contains non-ASCII characters"):
+            worker.profile(is_start=True, profile_prefix=prefix)
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_with_prefix_options_empty_parts(self, mock_jax,
+                                                     mock_vllm_config):
+        """Tests that empty parts and extra semicolons are ignored gracefully."""
+        worker = self._create_worker(mock_vllm_config)
+
+        mock_options = MagicMock()
+        mock_options.advanced_configuration = {}
+        mock_jax.profiler.ProfileOptions.return_value = mock_options
+
+        prefix = "host_tracer_level:3;;tpu_power_trace_level:2;"
+        worker.profile(is_start=True, profile_prefix=prefix)
+
+        assert mock_options.host_tracer_level == 3
+        assert mock_options.advanced_configuration == {
+            "check_experimental_options": True,
+            "tpu_power_trace_level": 2,
+        }
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
     def test_profile_stop(self, mock_jax, mock_vllm_config):
         """Tests stopping the JAX profiler."""
-        worker = TPUWorker(vllm_config=mock_vllm_config,
-                           local_rank=0,
-                           rank=0,
-                           distributed_init_method="test")
+        worker = self._create_worker(mock_vllm_config)
         worker.profile(is_start=False)
         mock_jax.profiler.stop_trace.assert_called_once()
 
     def test_check_health(self, mock_vllm_config):
         """Tests that check_health runs without error."""
-        worker = TPUWorker(vllm_config=mock_vllm_config,
-                           local_rank=0,
-                           rank=0,
-                           distributed_init_method="test")
+        worker = self._create_worker(mock_vllm_config)
         try:
             worker.check_health()
         except Exception as e:
@@ -476,10 +570,7 @@ class TestTPUWorker:
                                         runner_method_name, method_args,
                                         mock_vllm_config):
         """Tests methods that are simple pass-throughs to the TPUModelRunner."""
-        worker = TPUWorker(vllm_config=mock_vllm_config,
-                           local_rank=0,
-                           rank=0,
-                           distributed_init_method="test")
+        worker = self._create_worker(mock_vllm_config)
         worker.model_runner = MagicMock()
 
         # Call the worker method and assert the underlying runner method was called
