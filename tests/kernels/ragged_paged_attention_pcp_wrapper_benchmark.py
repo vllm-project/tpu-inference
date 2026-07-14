@@ -30,7 +30,6 @@ Usage:
 """
 import sys
 import time
-from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -59,7 +58,8 @@ NKV2 = align_to(2 * NKV, KVP)
 MAX_SEQ = 4
 WARMUP, ITERS = 1, 3
 _rng = np.random.default_rng(0)
-_rand = lambda s: jnp.array(_rng.random(size=s, dtype=np.float32)).astype(DTYPE)
+_rand = lambda s: jnp.array(_rng.random(size=s, dtype=np.float32)).astype(DTYPE
+                                                                          )
 
 
 def _bench(fn, *a):
@@ -73,9 +73,8 @@ def _bench(fn, *a):
 
 
 def _mesh(pcp, tp):
-    shape = tuple(
-        pcp if a == "pcp" else tp if a == "model" else 1
-        for a in MESH_AXIS_NAMES)
+    shape = tuple(pcp if a == "pcp" else tp if a == "model" else 1
+                  for a in MESH_AXIS_NAMES)
     n = pcp * tp
     return Mesh(np.array(jax.devices()[:n]).reshape(shape), MESH_AXIS_NAMES)
 
@@ -108,13 +107,14 @@ def make_pcp_wrapper(pcp, tp, chunk, max_ctx):
     # indexes page_indices as `seq_idx * pages_per_seq` and the WRITING seq is
     # the tail (seq1), so seq1 needs a copy of the request's pages, not zeros.
     _pg = jnp.arange(npages, dtype=jnp.int32)
-    pi = jnp.zeros((MAX_SEQ * npages, ), jnp.int32).at[:2 * npages].set(
-        jnp.concatenate([_pg, _pg]))
-    cu = jnp.zeros((MAX_SEQ + 1, ), jnp.int32).at[1:].set(C)
-    dist = jnp.array([0, 0, 1], jnp.int32)      # cache phase: 1 seq
-    pcp_dist = jnp.array([0, 0, 2], jnp.int32)  # current phase: head+tail
+    pi = jnp.zeros((MAX_SEQ * npages, ),
+                   jnp.int32).at[:2 * npages].set(jnp.concatenate([_pg, _pg]))
+    # The fused current phase has 2 seqs (head+tail); the cache phase's [0,0,1]
+    # is synthesized inside the wrapper.
+    dist = jnp.array([0, 0, 2], jnp.int32)
 
     # Per-rank fused current-phase metadata (mirrors _prepare_inputs).
+    # cu_q_lens IS the per-rank fused cu under PCP -- [pcp, MAX_SEQ+1].
     pcp_cu = np.zeros((pcp, MAX_SEQ + 1), np.int32)
     pcp_qp = np.zeros((pcp, MAX_SEQ), np.int32)
     for r in range(pcp):
@@ -131,9 +131,18 @@ def make_pcp_wrapper(pcp, tp, chunk, max_ctx):
     @jax.jit
     def fn(q, k, v, kvl, kvcl):
         cache = jnp.zeros((npages, gpage, NKV2 // KVP, KVP, HD), DTYPE)
-        out, _ = pcp_ragged_paged_attention(mesh, q, k, v, cache, kvl, pi, cu,
-                                            dist, kvcl, pcp_cu, pcp_qp,
-                                            pcp_dist, sm_scale=SM,
+        out, _ = pcp_ragged_paged_attention(mesh,
+                                            q,
+                                            k,
+                                            v,
+                                            cache,
+                                            kvl,
+                                            pi,
+                                            pcp_cu,
+                                            dist,
+                                            kvcl,
+                                            pcp_qp,
+                                            sm_scale=SM,
                                             update_kv_cache=True,
                                             use_causal_mask=True)
         return out
@@ -152,17 +161,23 @@ def make_tp(tp, chunk, max_ctx):
     nq, nkv = NQ // tp, max(1, NKV // tp)
     nkv2 = align_to(2 * nkv, KVP)
     npages = max(cdiv(max_ctx, PAGE), 1)
-    q, k, v = (_rand((chunk, nq, HD)), _rand((chunk, nkv, HD)),
-               _rand((chunk, nkv, HD)))
+    q, k, v = (_rand((chunk, nq, HD)), _rand(
+        (chunk, nkv, HD)), _rand((chunk, nkv, HD)))
     pi = jnp.arange(npages, dtype=jnp.int32)
 
     @jax.jit
     def fn(q, k, v, ctx):
         cache = jnp.zeros((npages, PAGE, nkv2 // KVP, KVP, HD), DTYPE)
-        out, _ = ragged_paged_attention(q, k, v, cache, ctx.reshape(1), pi,
+        out, _ = ragged_paged_attention(q,
+                                        k,
+                                        v,
+                                        cache,
+                                        ctx.reshape(1),
+                                        pi,
                                         jnp.array([0, chunk], jnp.int32),
                                         jnp.array([0, 0, 1], jnp.int32),
-                                        sm_scale=SM, use_causal_mask=True,
+                                        sm_scale=SM,
+                                        use_causal_mask=True,
                                         update_kv_cache=True)
         return out
 
@@ -177,8 +192,10 @@ if __name__ == "__main__":
     max_ctx = int(sys.argv[1]) if len(sys.argv) > 1 else 2 * 1024 * 1024
     CH = int(sys.argv[2]) if len(sys.argv) > 2 else 16384
     steps = list(range(CH, max_ctx + 1, CH))
-    report = [n for n in [16, 32, 64, 128, 256, 512, 1024, 2048]
-              if CH <= n * 1024 <= max_ctx]
+    report = [
+        n for n in [16, 32, 64, 128, 256, 512, 1024, 2048]
+        if CH <= n * 1024 <= max_ctx
+    ]
     print(f"# TTFT (ms) via attention_interface.pcp_ragged_paged_attention, "
           f"CH={human(CH)}, NQ={NQ} NKV={NKV} HD={HD} {DTYPE.__name__}")
     m = {

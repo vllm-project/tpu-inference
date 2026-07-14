@@ -62,8 +62,8 @@ from jax.experimental.shard_map import shard_map  # noqa: E402
 from jax.sharding import Mesh  # noqa: E402
 from jax.sharding import PartitionSpec as PS  # noqa: E402
 
-from tpu_inference.kernels.experimental.rpa_v3_cp.kernel import (  # noqa: E402
-    ragged_paged_attention)
+from tpu_inference.kernels.experimental.rpa_v3_cp.kernel import \
+    ragged_paged_attention  # noqa: E402
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (  # noqa: E402
     align_to, cdiv, get_dtype_packing)
 
@@ -190,61 +190,58 @@ def make_pcp(pcp, tp, chunk, max_ctx):
         cp_rank = jax.lax.reshape(r, (1, )).astype(jnp.int32)
         prev = ctx - chunk
         ag = lambda x: jax.lax.all_gather(x, "x", axis=0, tiled=True)
-        kcur = ag(kl[0].reshape(2 * C, nkv_local,
-                                HD))  # [chunk, nkv_local, HD]
+        kcur = ag(kl[0].reshape(2 * C, nkv_local, HD))
         vcur = ag(vl[0].reshape(2 * C, nkv_local, HD))
-        prev_cache = jnp.zeros((max_np, PAGE, nkv2 // KVP, KVP, HD), DTYPE)
-        common = dict(cp_rank=cp_rank,
-                      cp_group_size=pcp,
-                      return_lse=True,
-                      sm_scale=SM,
-                      kv_cache_lens=prev.reshape(1))
-        outs = []
-        for half in range(2):
-            base = r if half == 0 else (two_p - 1 - r)
-            qpos = jax.lax.reshape(base * C, (1, )).astype(jnp.int32)
-            ag_q = ag(ql[0, half])  # [pcp*C]
-            # skip_current_attn never reads the current KV -> pass the same
-            # kcur/vcur as the current phase so XLA CSEs the merge_kv.
-            o1, _, l1 = ragged_paged_attention(ag_q,
-                                               kcur,
-                                               vcur,
-                                               prev_cache,
-                                               ctx.reshape(1),
-                                               pi_prev,
-                                               _i32([0, pcp * C]),
-                                               _i32([0, 0, 1]),
-                                               skip_current_attn=True,
-                                               use_causal_mask=False,
-                                               update_kv_cache=False,
-                                               **common)
-            # Each rank's cache phase only attended its STRIDED 1/pcp shard of
-            # the prev cache, so the partial softmaxes must be LSE-merged ACROSS
-            # ranks (pmax + 2x psum). This is a real PCP collective -- mirrors
-            # `_lse_all_reduce` in attention_interface.pcp_ragged_paged_attention.
-            o1, l1 = _lse_all_reduce(o1, l1, "x")
-            o1 = jax.lax.dynamic_slice_in_dim(o1, r * C, C, 0)
-            l1 = jax.lax.dynamic_slice_in_dim(l1, r * C, C, 0)
-            q_buf = ql[0, half]  # local C-token chunk; no pad to `chunk` needed
-            o2, _, l2 = ragged_paged_attention(q_buf,
-                                               kcur,
-                                               vcur,
-                                               prev_cache,
-                                               ctx.reshape(1),
-                                               pi_cur,
-                                               _i32([0, C]),
-                                               _i32([0, 0, 1]),
-                                               q_pos_offsets=qpos,
-                                               skip_cache_attn=True,
-                                               use_causal_mask=True,
-                                               update_kv_cache=False,
-                                               **common)
-            m = jnp.maximum(l1, l2)
-            e1, e2 = jnp.exp(l1 - m), jnp.exp(l2 - m)
-            o = (o1 * e1[..., None] + o2 * e2[..., None]) / (e1 + e2)[...,
-                                                                          None]
-            outs.append(o)
-        return jnp.stack(outs)[None]
+        cache = jnp.zeros((max_np, PAGE, nkv2 // KVP, KVP, HD), DTYPE)
+        head_off, tail_off = r * C, (two_p - 1 - r) * C
+
+        # --- cache phase: ONE launch (non-causal -> all queries equivalent) ---
+        ag_q = ag(ql[0].reshape(2 * C, nq_local, HD))  # [pcp*2C], rank-ordered
+        o1, _, l1 = ragged_paged_attention(ag_q,
+                                           kcur,
+                                           vcur,
+                                           cache,
+                                           ctx.reshape(1),
+                                           pi_prev,
+                                           _i32([0, two_p * C]),
+                                           _i32([0, 0, 1]),
+                                           skip_current_attn=True,
+                                           use_causal_mask=False,
+                                           update_kv_cache=False,
+                                           cp_rank=cp_rank,
+                                           cp_group_size=pcp,
+                                           return_lse=True,
+                                           sm_scale=SM,
+                                           kv_cache_lens=prev.reshape(1))
+        o1, l1 = _lse_all_reduce(o1, l1, "x")
+        o1 = jax.lax.dynamic_slice_in_dim(o1, r * 2 * C, 2 * C, 0)
+        l1 = jax.lax.dynamic_slice_in_dim(l1, r * 2 * C, 2 * C, 0)
+
+        # --- current phase: ONE ragged launch, head+tail as 2 seqs ---
+        q_both = ql[0].reshape(2 * C, nq_local, HD)
+        o2, _, l2 = ragged_paged_attention(
+            q_both,
+            kcur,
+            vcur,
+            cache,
+            jnp.stack([ctx, ctx]).astype(jnp.int32),
+            jnp.concatenate([pi_cur, pi_cur]),
+            _i32([0, C, 2 * C]),
+            _i32([0, 0, 2]),
+            q_pos_offsets=jnp.stack([head_off, tail_off]).astype(jnp.int32),
+            skip_cache_attn=True,
+            use_causal_mask=True,
+            update_kv_cache=False,
+            cp_rank=cp_rank,
+            cp_group_size=pcp,
+            return_lse=True,
+            sm_scale=SM,
+            kv_cache_lens=jnp.stack([prev, prev]).astype(jnp.int32))
+
+        m = jnp.maximum(l1, l2)
+        e1, e2 = jnp.exp(l1 - m), jnp.exp(l2 - m)
+        o = (o1 * e1[..., None] + o2 * e2[..., None]) / (e1 + e2)[..., None]
+        return o.reshape(2, C, nq_local, HD)[None]
 
     jfn = jax.jit(fn)
     return lambda ctx: _bench(jfn, ql, kl, vl, jnp.array(ctx, jnp.int32))
