@@ -23,8 +23,13 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 import tpu_inference.envs as envs
 import tpu_inference.kernels.mla.v2.kernel as mla
-import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
+
+if envs.USE_BATCHED_RPA_KERNEL:
+    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
+else:
+    import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
+
 from tpu_inference import utils
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger

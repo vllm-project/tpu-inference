@@ -34,6 +34,7 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference import envs
 from tpu_inference.kernels.experimental.batched_rpa import (configs, kernel,
                                                             schedule, utils)
 
@@ -143,8 +144,13 @@ def get_kv_cache_shape(
     actual_num_kv_heads,
     actual_head_dim,
     kv_dtype,
-    kv_layout: configs.KVLayout = configs.KVLayout.HEAD_ALONG_SUBLANE,
+    kv_layout: configs.KVLayout | None = None,
 ):
+    if kv_layout is None:
+        if envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+            kv_layout = configs.KVLayout.SEQ_ALONG_LANE
+        else:
+            kv_layout = configs.KVLayout.HEAD_ALONG_SUBLANE
     num_lanes = pltpu.get_tpu_info().num_lanes
     num_sublanes = pltpu.get_tpu_info().num_sublanes
     kv_packing = utils.get_dtype_packing(kv_dtype)
@@ -403,50 +409,56 @@ def ragged_paged_attention(
     out_dtype: jnp.dtype | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
-    kv_layout: configs.KVLayout = configs.KVLayout.HEAD_ALONG_SUBLANE,
+    kv_layout: configs.KVLayout | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
 
-  Args:
-    queries: [max_num_tokens, num_q_heads, head_dim]. Output of q projection.
-    keys: [max_num_tokens, num_kv_heads, head_dim]. Output of k projection.
-    values: [max_num_tokens, num_kv_heads, head_dim]. Output of v projection.
-    kv_cache: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
-      kv_packing, head_dim]. Stores existing kv cache data where k & vs are
-      concatenated along num kv heads dim.
-    kv_lens: [max_num_seqs]. Existing kv cache length of each sequence.
-    page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
-      sequence.
-    cu_q_lens: [max_num_seqs + 1]. Cumulative sum of each sequence's query
-      length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
-      b=cu_q_lens[i+1] represents q/k/v of sequence i.
-    distribution: [3]. Cumulative sum of number of decode, prefill, and mixed
-      sequences. distribution[2] represents total number of sequences.
-    sm_scale: Softmax scale value.
-    sliding_window: Size of sliding window (also known as local attention). kvs
-      outside of the window is not fetched from hbm and masked out during
-      computation.
-    soft_cap: Cap values of softmax inputs.
-    mask_value: Value to use for causal masking. Defaults to smallest
-      representable value of the activation dtype.
-    q_scale: Quantization scale value of queries.
-    k_scale: Quantization scale value of keys.
-    v_scale: Quantization scale value of values.
-    chunk_prefill_size: Not used.
-    decode_block_sizes: Kernel block size to use during decode.
-    prefill_block_sizes: Kernel block size to use during prefill.
-    vmem_limit_bytes: VMEM size limit of the kernel. Defaults to maximum VMEM
-      size of the hardware.
-    debug_mode: Not used.
-    out_dtype: Dtype of output. Defaults to dtype of queries.
-    use_causal_mask: Not used.
+    Args:
+        queries: [max_num_tokens, num_q_heads, head_dim]. Output of q projection.
+        keys: [max_num_tokens, num_kv_heads, head_dim]. Output of k projection.
+        values: [max_num_tokens, num_kv_heads, head_dim]. Output of v projection.
+        kv_cache: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
+            kv_packing, head_dim]. Stores existing kv cache data where k & vs are
+            concatenated along num kv heads dim.
+        kv_lens: [max_num_seqs]. Existing kv cache length of each sequence.
+        page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
+            sequence.
+        cu_q_lens: [max_num_seqs + 1]. Cumulative sum of each sequence's query
+            length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
+            b=cu_q_lens[i+1] represents q/k/v of sequence i.
+        distribution: [3]. Cumulative sum of number of decode, prefill, and mixed
+            sequences. distribution[2] represents total number of sequences.
+        sm_scale: Softmax scale value.
+        sliding_window: Size of sliding window (also known as local attention). kvs
+            outside of the window is not fetched from hbm and masked out during
+            computation.
+        soft_cap: Cap values of softmax inputs.
+        mask_value: Value to use for causal masking. Defaults to smallest
+            representable value of the activation dtype.
+        q_scale: Quantization scale value of queries.
+        k_scale: Quantization scale value of keys.
+        v_scale: Quantization scale value of values.
+        chunk_prefill_size: Not used.
+        decode_block_sizes: Kernel block size to use during decode.
+        prefill_block_sizes: Kernel block size to use during prefill.
+        vmem_limit_bytes: VMEM size limit of the kernel. Defaults to maximum VMEM
+            size of the hardware.
+        debug_mode: Not used.
+        out_dtype: Dtype of output. Defaults to dtype of queries.
+        use_causal_mask: Not used.
 
-  Returns:
-    out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
-    new_kv_cache: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
-      kv_packing, head_dim]. Result of new kv cache where k & vs are
-      concatenated along num kv heads dim.
-  """
+    Returns:
+        out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
+        new_kv_cache: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
+            kv_packing, head_dim]. Result of new kv cache where k & vs are
+            concatenated along num kv heads dim.
+    """
+
+    if kv_layout is None:
+        if envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+            kv_layout = configs.KVLayout.SEQ_ALONG_LANE
+        else:
+            kv_layout = configs.KVLayout.HEAD_ALONG_SUBLANE
 
     if not use_causal_mask:
         raise ValueError("Only causal attention is supported.")

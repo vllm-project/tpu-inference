@@ -125,9 +125,9 @@ def stitch_new_kv_lane(
 ):
     """Fetches and computes stitched KV tokens (separated to avoid RAW hazards).
 
-  Expects vmem_ref shape: [batch, 2*kv, head_dim / packing, packing, bkv_sz + 2
-  * page_size]
-  """
+    Expects vmem_ref shape: [batch, 2*kv, head_dim / packing, packing, bkv_sz + 2
+    * page_size]
+    """
     bkv_sz_cache = bkv_sz_frm_cache.astype(jnp.int32)
     new_tok_offset = (new_kv_len_start.astype(jnp.int32) %
                       cfgs.serve.page_size)

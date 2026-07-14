@@ -348,7 +348,8 @@ def create_allocs(
     kv_cache_hbm_ref: jax.Ref, o_hbm_ref: jax.Ref, cfgs: configs.RpaConfigs
 ) -> tuple[
         bref_override.BatchingQRef,
-        bref_override.KVBufferedRef,
+        bref_override.KVBufferedRefSeqAlongLane
+        | bref_override.KVBufferedRefHeadAlongSublane,
         bref_override.BatchingORef,
 ]:
     kv_cache_spec = pl.BlockSpec(
@@ -435,31 +436,32 @@ def rpa_kernel(
 ) -> tuple[jax.Array, jax.Array]:
     """Perform batched ragged paged attention with scheduler data.
 
-  Args:
-    cu_q_lens: [max_num_seqs + 1]. Cumulative sum of each sequence's query
-      length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
-      b=cu_q_lens[i+1] represents q/k/v of sequence i.
-    kv_lens: [max_num_seqs]. Existing kv cache length of each sequence.
-    page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
-      sequence.
-    schedule_hbm: Output of scheduler kernel. It informs which: 1. seqs 2. q
-      block 3. kv block that should be processed at a given step.
-    q_hbm: [max_num_tokens, num_q_heads_per_kv_heads, cdiv(num_kv_heads,
-      q_packing), q_packing, head_dim]. Output of q projection that has been
-      pre-processed to align with existing kv cache data layout.
-    new_kv_hbm: [max_num_tokens, cdiv(num_kv_heads * 2, kv_packing), kv_packing,
-      head_dim]. Output of k & v projection that has been pre-processed to align
-      with existing kv cache data layout.
-    kv_cache_hbm: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
-      kv_packing, head_dim]. Stores existing kv cache data where k & vs are
-      concatenated along num kv heads dim.
-    cfgs: Configuration of the kernel.
+    Args:
+        cu_q_lens: [max_num_seqs + 1]. Cumulative sum of each sequence's query
+            length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
+            b=cu_q_lens[i+1] represents q/k/v of sequence i.
+        kv_lens: [max_num_seqs]. Existing kv cache length of each sequence.
+        page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
+            sequence.
+        schedule_hbm: Output of scheduler kernel. It informs which: 1. seqs 2. q
+            block 3. kv block that should be processed at a given step.
+        q_hbm: [max_num_tokens, num_q_heads_per_kv_heads, cdiv(num_kv_heads,
+            q_packing), q_packing, head_dim]. Output of q projection that has been
+            pre-processed to align with existing kv cache data layout.
+        new_kv_hbm: [max_num_tokens, cdiv(num_kv_heads * 2, kv_packing), kv_packing,
+            head_dim]. Output of k & v projection that has been pre-processed to align
+            with existing kv cache data layout.
+        kv_cache_hbm: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
+            kv_packing, head_dim]. Stores existing kv cache data where k & vs are
+            concatenated along num kv heads dim.
+        cfgs: Configuration of the kernel.
 
-  Returns:
-    out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
-    new_kv_cache: [num_pages, page_size, num_kv_heads // kv_packing, kv_packing,
-      head_dim]. Result of new kv cache.
-  """
+    Returns:
+        out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
+        new_kv_cache: [num_pages, page_size, num_kv_heads // kv_packing, kv_packing,
+            head_dim]. Result of new kv cache where k & vs are
+            concatenated along num kv heads dim.
+    """
 
     def ragged_paged_attention_pipeline(
         # Scalar prefetch.
