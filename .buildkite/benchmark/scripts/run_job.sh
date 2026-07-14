@@ -181,6 +181,13 @@ if [[ "$IS_MULTI_HOST" == "true" ]]; then
     if [ -f /tmp/vllm_serve.log ]; then
         mv /tmp/vllm_serve.log "$LOG_FOLDER/vllm_log.txt"
     fi
+
+    # Move Ray worker logs if they exist
+    for f in /tmp/worker_*_ray_logs.tar.gz; do
+        if [ -f "$f" ]; then
+            mv "$f" "$LOG_FOLDER/"
+        fi
+    done
 else
     echo "--- Running job in docker via run_in_docker.sh (Single-Host Mode)"
     .buildkite/scripts/run_in_docker.sh bash -c "
@@ -215,6 +222,17 @@ fi
   set -e
 
   echo "Preparing Buildkite artifacts..."
+  # Upload Ray worker logs
+  for f in "$LOG_FOLDER"/worker_*_ray_logs.tar.gz; do
+    if [ -f "$f" ]; then
+      filename=$(basename "$f")
+      artifact_name="${RECORD_ID}_${filename}"
+      cp "$f" "$artifact_name"
+      buildkite-agent artifact upload "$artifact_name"
+      rm -f "$artifact_name"
+    fi
+  done
+
   if [ -f "$VLLM_LOG" ]; then
     cp "$VLLM_LOG" "$ARTIFACT_VLLM"
     buildkite-agent artifact upload "$ARTIFACT_VLLM"
