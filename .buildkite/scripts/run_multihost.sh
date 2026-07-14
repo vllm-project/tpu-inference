@@ -116,19 +116,6 @@ cleanup() {
         tail -n 50 "/tmp/worker_${worker_ip}.log" || true
         rm -f "/tmp/worker_${worker_ip}.log"
       fi
-      # test: collect debug log
-      # Collect Ray worker logs before cleaning up
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "if sudo -n test -d /tmp/ray/session_latest/logs; then sudo -n tar -czf /tmp/ray_worker_logs.tar.gz -C /tmp/ray/session_latest/logs .; sudo -n chmod 644 /tmp/ray_worker_logs.tar.gz; fi" || true
-      scp "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}:/tmp/ray_worker_logs.tar.gz" "/tmp/worker_${worker_ip}_ray_logs.tar.gz" >/dev/null 2>&1 || true
-      if [[ -f "/tmp/worker_${worker_ip}_ray_logs.tar.gz" ]]; then
-        if command -v buildkite-agent &> /dev/null; then
-          buildkite-agent artifact upload "/tmp/worker_${worker_ip}_ray_logs.tar.gz" || true
-        fi
-        rm -f "/tmp/worker_${worker_ip}_ray_logs.tar.gz"
-      fi
-
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true; sudo -n rm -f /tmp/ray_worker_logs.tar.gz; sudo -n rm -rf /tmp/ray/* /tmp/vllm/*" || true
-      # test end
     done
   fi
 
@@ -138,9 +125,7 @@ cleanup() {
     echo "==================== START OF VLLM SERVE LOG ===================="
     cat /tmp/vllm_serve.log || true
     echo "==================== END OF VLLM SERVE LOG ===================="
-    # Do not remove /tmp/vllm_serve.log so that run_job.sh can upload it as an artifact.
-    # for debug test
-    # rm -f /tmp/vllm_serve.log
+    rm -f /tmp/vllm_serve.log
   fi
   rm -f "${TEMP_EXPORT_FILE:-}" >/dev/null 2>&1 || true
   docker stop node >/dev/null 2>&1 || true
