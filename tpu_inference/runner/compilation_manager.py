@@ -60,6 +60,7 @@ class CompilationManager:
         self.runner = runner
         self._sampling_precompiled = False
         self._gather_logprobs_precompiled = False
+
         if not vllm_envs.VLLM_DISABLE_COMPILE_CACHE:
             logger.info("Enabling JAX compile cache.")
             jax.config.update("jax_compilation_cache_dir",
@@ -161,7 +162,8 @@ class CompilationManager:
             return
 
         try:
-            lowered = fn.lower(*args, **call_kwargs)
+            with jax.set_mesh(self.runner.mesh):
+                lowered = fn.lower(*args, **call_kwargs)
         except Exception as e:
             if compile_only:
                 logger.error(

@@ -68,7 +68,7 @@ class TPUSupportedSamplingMetadata:
         # Use replicated sharding for dummy tensor.
         cache_collision_dummy = device_array(mesh,
                                              cache_collision_dummy,
-                                             sharding=None)
+                                             sharding=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()))
 
         if input_batch.all_greedy:
             return cls(do_sampling=False,
