@@ -33,6 +33,30 @@ from tpu_inference.utils import to_jax_dtype
 logger = init_logger(__name__)
 
 DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
+_KV_CACHE_ALLOCATOR_CACHE = {}
+
+
+def _get_kv_cache_allocator(cache_shape, cache_dtype, sharding):
+    cache_key = (
+        id(sharding.mesh),
+        cache_shape,
+        str(cache_dtype),
+        repr(sharding.spec),
+        getattr(sharding, "memory_kind", None),
+    )
+    allocator = _KV_CACHE_ALLOCATOR_CACHE.get(cache_key)
+    if allocator is not None:
+        return allocator, True
+
+    def _allocate() -> jax.Array:
+        return jnp.empty(
+            shape=cache_shape,
+            dtype=cache_dtype,
+        )
+
+    allocator = jax.jit(_allocate, out_shardings=sharding)
+    _KV_CACHE_ALLOCATOR_CACHE[cache_key] = allocator
+    return allocator, False
 
 
 @dataclass
@@ -152,14 +176,9 @@ def create_kv_caches(
                           ShardingAxisName.KV_CACHE_HEAD))
     sharding_s = time.perf_counter() - stage_start
 
-    def _allocate() -> jax.Array:
-        return jnp.zeros(
-            shape=cache_shape,
-            dtype=cache_dtype,
-        )
-
     stage_start = time.perf_counter()
-    sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
+    sharded_allocate, allocator_cache_hit = _get_kv_cache_allocator(
+        cache_shape, cache_dtype, sharding)
     jit_create_s = time.perf_counter() - stage_start
 
     stage_start = time.perf_counter()
@@ -168,13 +187,14 @@ def create_kv_caches(
         kv_caches.append(sharded_allocate())
     dispatch_s = time.perf_counter() - stage_start
     logger.error(
-        "KV_CACHE_PROFILE create_kv_caches | layers=%d | shape=%s | "
+        "KV_CACHE_PROFILE create_kv_caches | alloc=empty | layers=%d | shape=%s | "
         "dtype=%s | num_blocks=%d | block_size=%d | num_kv_heads=%d | "
         "head_size=%d | use_mla=%s | shape_s=%.6f | sharding_s=%.6f | "
-        "jit_create_s=%.6f | dispatch_s=%.6f | total_s=%.6f",
+        "jit_create_s=%.6f | allocator_cache_hit=%s | dispatch_s=%.6f | "
+        "total_s=%.6f",
         len(layer_names), cache_shape, cache_dtype, num_blocks, block_size,
         num_kv_heads, head_size, use_mla, shape_s, sharding_s, jit_create_s,
-        dispatch_s, time.perf_counter() - profile_start)
+        allocator_cache_hit, dispatch_s, time.perf_counter() - profile_start)
     return kv_caches
 
 
