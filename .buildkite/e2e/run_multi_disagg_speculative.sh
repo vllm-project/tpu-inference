@@ -15,7 +15,7 @@ set -euo pipefail
 
 export SSH_USER="${SSH_USER:-$(whoami)}"
 HOST_HF_HOME="${HOST_HF_HOME:-/mnt/disks/persist/models}"
-MODEL="${MODEL:-Qwen/Qwen3-30B-A3B}"
+MODEL="${MODEL:-Qwen/Qwen3-8B}"
 INPUT_LEN="${INPUT_LEN:-128}"
 OUTPUT_LEN="${OUTPUT_LEN:-128}"
 NUM_PROMPTS="${NUM_PROMPTS:-100}"
@@ -192,8 +192,50 @@ wait_server() {
   echo "Server did not become healthy: $host:$port" >&2
   return 1
 }
-wait_server 127.0.0.1 "$PREFILL_PORT"
-wait_server "$DECODE_HEAD_IP" "$DECODE_PORT"
+
+print_vllm_log() {
+  local host=$1 log_path=$2
+  echo "--- vLLM server log: $host:$log_path ---" >&2
+  if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
+    docker exec node cat "$log_path" 2>&1 || true
+  else
+    ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" "docker exec node cat '$log_path'" 2>&1 || true
+  fi
+  echo "--- end vLLM server log ---" >&2
+}
+
+wait_vllm_server() {
+  local health_host=$1 port=$2 node_host=$3 log_path=$4
+  local vllm_running
+  for attempt in {1..720}; do
+    curl -fs "http://$health_host:$port/health" >/dev/null 2>&1 && return 0
+
+    # Allow up to 10 minutes for model loading and initialization. After that,
+    # if the vLLM process has exited it cannot become healthy, so fail early
+    # and print the server log instead of waiting for the full timeout.
+    if (( attempt > 120 )); then
+      if [[ "$node_host" == "$HEAD_INTERNAL_IP" ]]; then
+        vllm_running="$(docker exec node pgrep -f '[v]llm serve' 2>/dev/null || true)"
+      else
+        vllm_running="$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$node_host" \
+          "docker exec node pgrep -f '[v]llm serve' 2>/dev/null || true" 2>/dev/null || true)"
+      fi
+      if [[ -z "$vllm_running" ]]; then
+        echo "vLLM process exited before server became healthy: $health_host:$port" >&2
+        print_vllm_log "$node_host" "$log_path"
+        return 1
+      fi
+    fi
+    sleep 5
+  done
+
+  echo "Server did not become healthy before timeout: $health_host:$port" >&2
+  print_vllm_log "$node_host" "$log_path"
+  return 1
+}
+
+wait_vllm_server 127.0.0.1 "$PREFILL_PORT" "$PREFILL_HEAD_IP" /root/vllm_serve_prefill.log
+wait_vllm_server "$DECODE_HEAD_IP" "$DECODE_PORT" "$DECODE_HEAD_IP" /root/vllm_serve_decode.log
 ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" \
   "docker exec node pgrep -af '[v]llm serve' | grep -F -- '--speculative-config'"
 
