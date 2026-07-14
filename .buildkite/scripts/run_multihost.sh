@@ -145,7 +145,6 @@ cleanup() {
   rm -f "${TEMP_EXPORT_FILE:-}" >/dev/null 2>&1 || true
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
-  rm -f /root/vllm_serve.log || true
   sudo -n rm -rf /tmp/ray/* /tmp/vllm/* >/dev/null 2>&1 || true
 
   echo "✅ Cleanup complete."

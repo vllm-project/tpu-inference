@@ -545,11 +545,16 @@ if [[ "$SERVER_ALREADY_RUNNING" == "false" ]]; then
       
       echo "[DEBUG] WARMUP_CMD: ${CLIENT_CMD_ENVS[*]} ${WARMUP_CMD[*]}"
       set +e
-      env "${CLIENT_CMD_ENVS[@]}" "${WARMUP_CMD[@]}" > "$LOG_FOLDER/warmup_log.txt" 2>&1
+      timeout 2h env "${CLIENT_CMD_ENVS[@]}" "${WARMUP_CMD[@]}" > "$LOG_FOLDER/warmup_log.txt" 2>&1
       warmup_exit_code=$?
       set -e
       
-      if [[ "$warmup_exit_code" -ne 0 ]]; then
+      if [[ "$warmup_exit_code" -eq 124 ]]; then
+          echo "[ERROR] Warmup phase timed out after 2 hours!"
+          echo "--- Dumping Warmup Log ---"
+          cat "$LOG_FOLDER/warmup_log.txt"
+          exit 1
+      elif [[ "$warmup_exit_code" -ne 0 ]]; then
           echo "[ERROR] Warmup phase failed with exit code $warmup_exit_code!"
           echo "--- Dumping Warmup Log ---"
           cat "$LOG_FOLDER/warmup_log.txt"
@@ -610,11 +615,16 @@ run_benchmark(){
   echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD_ENVS[*]} ${CLIENT_CMD[*]} > $BM_LOG" >&2
   set +e
   # Execute the array directly, preserving strict argument boundaries
-  env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
+  timeout 2h env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
   local client_exit_code=$?
   set -e
 
-  if [ $client_exit_code -ne 0 ]; then
+  if [ $client_exit_code -eq 124 ]; then
+    echo "[ERROR] Client command timed out after 2 hours." >&2
+    echo "--- Dumping BM_LOG for debugging ---" >&2
+    cat "$BM_LOG" >&2
+    return $client_exit_code
+  elif [ $client_exit_code -ne 0 ]; then
     echo "[ERROR] An error occurred while executing client_cmd." >&2
     return $client_exit_code
   fi
