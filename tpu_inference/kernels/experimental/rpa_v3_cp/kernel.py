@@ -346,7 +346,7 @@ def _ragged_paged_attention_kernel_loop(
     # Static kwargs
     cp_group_size: int | None = None,
     use_causal_mask: bool = True,
-    update_kv_cache: bool = True, 
+    update_kv_cache: bool = True,
     write_last_seq_only: bool = False,
     skip_kv_mask: bool = False,
     skip_cache_attn: bool = False,
@@ -1281,8 +1281,8 @@ def _ragged_paged_attention_kernel_loop(
                     # kv_lens/kv_cache_lens), so each would write the SAME
                     # strided current KV. Write on exactly one of them.
                     if write_last_seq_only:
-                        _do_write = jnp.logical_and(
-                            _do_write, seq_idx == end_seq_idx - 1)
+                        _do_write = jnp.logical_and(_do_write,
+                                                    seq_idx == end_seq_idx - 1)
 
                     @pl.when(_do_write)
                     def update_cur_bkv_to_cache():
@@ -1973,7 +1973,7 @@ def ragged_paged_attention(
     q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs] 
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
-    write_last_seq_only: bool = False, 
+    write_last_seq_only: bool = False,
     skip_kv_mask: bool = False,
     skip_cache_attn: bool = False,
     skip_current_attn: bool = False,

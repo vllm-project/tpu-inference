@@ -386,15 +386,22 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
             tail_real = max(0, min(S - tail_off, C))
             # one launch, two seqs: cu=[0, C, C+tail_real]
             _, cache = ragged_paged_attention(
-                q, k, v, self._empty_cache(dtype),
+                q,
+                k,
+                v,
+                self._empty_cache(dtype),
                 self._pad1([S, S]),  # both seqs: same request
-                self._pi2(pps), self._padcu([0, C, C + tail_real]),
+                self._pi2(pps),
+                self._padcu([0, C, C + tail_real]),
                 jnp.array([0, 0, 2], jnp.int32),
-                cp_rank=jnp.array([r], jnp.int32), cp_group_size=P,
+                cp_rank=jnp.array([r], jnp.int32),
+                cp_group_size=P,
                 kv_cache_lens=self._pad1([0, 0]),
                 q_pos_offsets=self._pad1([head_off, tail_off]),
-                update_kv_cache=True, write_last_seq_only=True,
-                skip_cache_attn=True, use_causal_mask=True)
+                update_kv_cache=True,
+                write_last_seq_only=True,
+                skip_cache_attn=True,
+                use_causal_mask=True)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
             local_len = (S + P - 1 - r) // P
             pi = np.arange(pps)

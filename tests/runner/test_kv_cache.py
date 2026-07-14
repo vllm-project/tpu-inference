@@ -58,8 +58,7 @@ def test_create_kv_caches(mesh: Mesh):
                    ]), patch("tpu_inference.envs.NEW_MODEL_DESIGN", True):
         expected_sharding = NamedSharding(
             mesh,
-            PartitionSpec(ShardingAxisName.BATCH,
-                          ShardingAxisName.KV_CONTEXT,
+            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
                           ShardingAxisName.KV_HEAD))
         expected_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks,
                                                       block_size, num_kv_heads,

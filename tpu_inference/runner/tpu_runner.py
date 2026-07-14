@@ -2006,7 +2006,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         def select_local_fn(local_array, local_indices):
             if pcp_size > 1:
-                # TODO(wenxindong): Remove the all-gather. 
+                # TODO(wenxindong): Remove the all-gather.
                 local_array = jax.lax.all_gather(local_array,
                                                  pcp_axis,
                                                  axis=0,
@@ -2543,94 +2543,74 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                         dtype=np.int32).ravel()
 
         # Prefill context parallelism (single request, prefill only): head-tail
-        # arrange this request's current tokens into rank order  
+        # arrange this request's current tokens into rank order
         pcp_kv_cache_lens = None
         pcp_query_start_loc = None
         pcp_q_pos_offsets = None
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         if pcp_size > 1:
-            assert dp_size == 1, "PCP with DP>1 not wired yet"
             counts = scheduled_tokens_per_dp_rank[0]
-            assert len(counts) == 1, "PCP currently only supports a single request at a time."
+            assert len(
+                counts
+            ) == 1, "PCP currently only supports a single request at a time."
             num_current = int(counts[0])
             two_p = 2 * pcp_size
             C = padded_num_scheduled_tokens_per_dp_rank // two_p
-            # Head-tail row order: rank r owns chunk r (head) and chunk 2P-1-r
-            # (tail), laid out contiguously per rank.
+            # Head-tail row order: rank r owns chunk r (head) and chunk 2P-1-r (tail)
             row_perm = np.array(
                 [c for r in range(pcp_size) for c in (r, two_p - 1 - r)])
 
             def _rearrange(buf):  # natural token order -> rank order
                 buf[num_current:] = 0
                 buf[:] = buf.reshape(two_p, C)[row_perm].reshape(-1)
-            
+
             _rearrange(positions)
             _rearrange(input_ids_view)
-            # query_start_loc := [0, C] (head chunk size).
-            query_start_loc_view[:2] = (0, C)
-            query_start_loc_view[2:] = C
-            # seq_lens := REAL total kv length (num_computed + real current). The
-            # head-tail padding lives only in the tensor shapes, NOT the metadata.
+
+            # seq_lens
             req_idx = int(req_indices_dp[0][0])
             num_computed = int(
                 self.input_batch.num_computed_tokens_cpu[req_idx])
-            # Both fused current-phase seqs are the SAME request, so entries 0
-            # and 1 both carry T. (The cache phase reads only entry 0.)
-            seq_lens_view[:2] = num_computed + num_current      # [T, T]
+            seq_lens_view[:2] = num_computed + num_current  # [T, T]
             seq_lens_view[2:] = 0
-            # The fused current phase presents head+tail as TWO prefill seqs.
-            # (The cache phase is one seq and synthesizes [0, 0, 1] in-wrapper.)
+
+            # distribution. The fused current phase presents head+tail as two prefill seqs.
             request_distribution[:] = (0, 0, 2)
-            # kv_cache_lens := num_computed; the kernel derives the real current
-            # KV length as seq_lens - kv_cache_lens, so only real tokens are
-            # attended/written (no padding write-clamp needed).
+
+            # kv_cache_lens
             kv_cache_lens_np = np.zeros_like(np.asarray(seq_lens_view))
-            kv_cache_lens_np[:2] = num_computed                 # [P, P]
-            # Per-(half, rank) launch metadata for the PCP attention wrapper,
-            # sharded on `pcp` so each rank reads its own row. head (half=0) is
-            # always fully real (C tokens) at within-current offset rank*C; tail
-            # (half=1) sits at (2*pcp-1-rank)*C and is clamped so padding tokens
-            # past num_current are excluded (0 when wholly padding). Building
-            # them here keeps the values out of the traced attention wrapper,
-            # which would otherwise derive them from `lax.axis_index`.
-            # The head+tail chunks are fused into ONE ragged current-phase
-            # launch as two "sequences": cu = [0, C, C+tail_real] and
-            # q_pos_offsets = [head_off, tail_off], per rank. head is always
-            # fully real (C); tail is clamped so padding past num_current is
-            # excluded (may be 0 when the tail is wholly padding). Both seqs are
-            # the SAME request, so kv_lens/kv_cache_lens carry [T, T] / [P, P]
-            # and the kernel writes the current KV once (write_first_seq_only).
-            n_cu = np.asarray(query_start_loc_view).shape[0]  # max_num_reqs + 1
+            kv_cache_lens_np[:2] = num_computed  # [P, P]
+
+            # cu_q_lens and q_pos_offsets.
             n_off = np.asarray(seq_lens_view).shape[0]  # max_num_reqs
-            pcp_cu_np = np.zeros((pcp_size, n_cu), np.int32)
+            pcp_cu_np = np.zeros((pcp_size, n_off + 1), np.int32)
             pcp_qpos_np = np.zeros((pcp_size, n_off), np.int32)
             for rank in range(pcp_size):
                 tail_off = (two_p - 1 - rank) * C
                 tail_real = int(np.clip(num_current - tail_off, 0, C))
-                pcp_cu_np[rank, 1] = C                 # seq 0 (head) end
-                pcp_cu_np[rank, 2:] = C + tail_real    # seq 1 (tail) end
-                pcp_qpos_np[rank, 0] = rank * C        # head within-current start
-                pcp_qpos_np[rank, 1] = tail_off        # tail within-current start
-            # logits_indices: the last real token (natural position
-            # num_current-1) lands in rank-order slot inv_row[chunk]*C + within.
+                pcp_cu_np[rank, 1] = C  # seq 0 (head) end
+                pcp_cu_np[rank, 2:] = C + tail_real  # seq 1 (tail) end
+                pcp_qpos_np[rank, 0] = rank * C
+                pcp_qpos_np[rank, 1] = tail_off
+
+            # logits_indices
             inv_row = np.empty(two_p, np.int64)
             inv_row[row_perm] = np.arange(two_p)
             last = num_current - 1
             logits_indices_view[0] = inv_row[last // C] * C + (last % C)
             logits_indices_view[1:] = -1
+
             pcp_spec = NamedSharding(
-                self.mesh,
-                PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
+                self.mesh, PartitionSpec(ShardingAxisName.PREFILL_CONTEXT,
+                                         None))
             repl = NamedSharding(self.mesh, PartitionSpec())
             pcp_kv_cache_lens = device_array(self.mesh,
                                              kv_cache_lens_np,
                                              sharding=repl)
-            # query_start_loc IS the fused current-phase cu under PCP: it needs
-            # per-rank values, so it is built here (pcp-sharded) instead of being
-            # sliced out of the replicated metadata blob below.
-            (pcp_query_start_loc, pcp_q_pos_offsets) = device_array(self.mesh,
-                                         (pcp_cu_np, pcp_qpos_np),
-                                         sharding=pcp_spec)
+            (pcp_query_start_loc,
+             pcp_q_pos_offsets) = device_array(self.mesh,
+                                               (pcp_cu_np, pcp_qpos_np),
+                                               sharding=pcp_spec)
         spec_decode_metadata = None
         if self.speculative_config:
             spec_decode_metadata = (
@@ -2696,10 +2676,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                               _num_reqs])
 
             if pcp_size > 1:
-                # PCP fuses the request's head+tail chunks into ONE current-phase
-                # launch as two "sequences" of the SAME request. The kernel
+                # PCP fuses the request's head+tail chunks into one
+                # launch as two sequences of the same request. The kernel
                 # indexes page_indices as `seq_idx * pages_per_seq`, and the
-                # WRITING seq is the tail (seq 1) -- so seq 1 must carry a copy
+                # writing seq is the tail (seq 1) -- so seq 1 must carry a copy
                 # of the request's block table, not the zero padding, or every
                 # strided KV write lands on page 0.
                 block_tables_view[1] = block_tables_view[0]
@@ -2750,10 +2730,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
         input_ids = metadata["input_ids"]
-        # Under PCP query_start_loc carries per-rank values, so it cannot ride
-        # the replicated metadata blob; use the pcp-sharded array built above.
-        query_start_loc = (pcp_query_start_loc if pcp_size > 1 else
-                           metadata["query_start_loc"])
+        query_start_loc = (pcp_query_start_loc
+                           if pcp_size > 1 else metadata["query_start_loc"])
         seq_lens = metadata["seq_lens"]
         logits_indices = metadata["logits_indices"]
 

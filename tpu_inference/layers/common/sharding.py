@@ -44,7 +44,7 @@ class ShardingAxisNameBase:
     ATTN_DATA = ('data', 'pcp', 'attn_dp', 'attn_dp_expert')
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = ('data', 'pcp')
-    ATTN_HEAD = ('model', 'expert', 'dcp') # Q heads
+    ATTN_HEAD = ('model', 'expert', 'dcp')  # Q heads
     KV_HEAD = ('model', 'expert')
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp')
@@ -61,8 +61,8 @@ class ShardingAxisNameBase:
 
     # These axes are used in KV caches management.
     BATCH = ('data', 'attn_dp', 'attn_dp_expert')
-    KV_CONTEXT = ('pcp', 'dcp')  
-    
+    KV_CONTEXT = ('pcp', 'dcp')
+
     # PCP input sharding
     PREFILL_CONTEXT = 'pcp'
 
@@ -345,7 +345,8 @@ class ShardingConfigManager:
                     "enabled at a time.")
             if sharding_strategy.data_parallelism > 1:
                 raise ValueError(
-                    "Prefill context parallelism is not compatible with data parallelism yet.")
+                    "Prefill context parallelism is not compatible with data parallelism yet."
+                )
 
     @property
     def total_dp_size(self) -> int:

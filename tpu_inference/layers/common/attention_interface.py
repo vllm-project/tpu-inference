@@ -509,10 +509,8 @@ def sharded_ragged_paged_attention_experimental(
             v = jnp.repeat(v, factor, axis=1)
 
     if is_context_phase:
-        q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD,
-                   None)
-        o_spec = P(('data', 'attn_dp', 'dcp'), ShardingAxisName.KV_HEAD,
-                   None)
+        q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
+        o_spec = P(('data', 'attn_dp', 'dcp'), ShardingAxisName.KV_HEAD, None)
     else:
         q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD,
                    None)
@@ -786,6 +784,7 @@ def forward_with_dcp(
 
     return updated_kv_cache, final_output
 
+
 def _lse_all_reduce(o: jax.Array, lse: jax.Array, axis: str):
     """Merge per-rank partial attention (o, lse) across a mesh axis via LSE.
 
@@ -804,21 +803,16 @@ def _lse_all_reduce(o: jax.Array, lse: jax.Array, axis: str):
 
 def pcp_ragged_paged_attention(
     mesh: Mesh,
-    q: jax.
-    Array, 
-    k: jax.Array, 
-    v: jax.Array, 
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
     kv_cache: jax.Array,
-    kv_lens: jax.
-    Array, 
+    kv_lens: jax.Array,
     page_indices: jax.Array,
-    cu_q_lens: jax.
-    Array, 
-    distribution: jax.Array, 
-    kv_cache_lens: jax.
-    Array,  
-    pcp_q_pos_offsets: jax.
-    Array, 
+    cu_q_lens: jax.Array,
+    distribution: jax.Array,
+    kv_cache_lens: jax.Array,
+    pcp_q_pos_offsets: jax.Array,
     sm_scale: float,
     q_scale: float | None = None,
     k_scale: float | None = None,
@@ -842,8 +836,9 @@ def pcp_ragged_paged_attention(
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
     two_p = 2 * pcp_size
-    padded_q_len = q.shape[0]  # padded current tokens across all pcp ranks = 2*pcp*C
-    C = padded_q_len // two_p  # head-tail chunk size  
+    padded_q_len = q.shape[
+        0]  # padded current tokens across all pcp ranks = 2*pcp*C
+    C = padded_q_len // two_p  # head-tail chunk size
 
     _row = [c for r in range(pcp_size) for c in (r, two_p - 1 - r)]
     _inv = [0] * two_p
@@ -856,8 +851,8 @@ def pcp_ragged_paged_attention(
     kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
                       ShardingAxisName.KV_HEAD, None, None)
     pcp_spec = P(pcp_axis, None)
-    repl = P() 
-    
+    repl = P()
+
     def _rank_i32(r):
         return jnp.reshape(r, (1, )).astype(jnp.int32)
 
@@ -925,8 +920,6 @@ def pcp_ragged_paged_attention(
         # cache term vs. current term: disjoint KV, so LSE-combine.
         out, _ = merge_attn_states(o1, l1, o2, l2)  # [2C] = [head | tail]
         return out.astype(q.dtype), kvc2
-
-    
 
     return jax.shard_map(
         _fn,
