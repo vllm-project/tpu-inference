@@ -39,7 +39,7 @@
           "AUTOSCALER_UPDATE_INTERVAL_S": "300"
         },
         "args": {
-          "model-path": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
+          "model-path": "gs://tpu-commons-ci/deepseek/r1",
           "model": "deepseek-ai/DeepSeek-R1",
           "served-model-name": "deepseek-ai/DeepSeek-R1",
           "tokenizer": "deepseek-ai/DeepSeek-R1",
