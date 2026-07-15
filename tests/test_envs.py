@@ -190,6 +190,7 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NUM_SLICES", "1")
     monkeypatch.delenv("REQUANTIZE_BLOCK_SIZE", raising=False)
     monkeypatch.delenv("MOE_REQUANTIZE_BLOCK_SIZE", raising=False)
+    monkeypatch.delenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL", raising=False)
 
     assert envs.PYTHON_TRACER_LEVEL == 1
     monkeypatch.setenv("PYTHON_TRACER_LEVEL", "3")
@@ -213,6 +214,11 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.MOE_REQUANTIZE_BLOCK_SIZE is None
     monkeypatch.setenv("MOE_REQUANTIZE_BLOCK_SIZE", "512")
     assert envs.MOE_REQUANTIZE_BLOCK_SIZE == 512
+
+    # Test CONTINUE_DECODE_EOS_CHECK_INTERVAL (default 1 = stock every-step check)
+    assert envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL == 1
+    monkeypatch.setenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL", "8")
+    assert envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL == 8
 
 
 def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):

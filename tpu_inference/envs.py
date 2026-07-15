@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     LAYOUT_Q_PROJ_AS_NDH: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
+    CONTINUE_DECODE_EOS_CHECK_INTERVAL: int = 1
     USE_BATCHED_RPA_KERNEL: bool = False
     USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
     FORCE_MOE_RANDOM_ROUTING: bool = False
@@ -319,6 +320,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_JAX_PROFILER_SERVER"),
     "JAX_PROFILER_SERVER_PORT":
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
+    # continue_decode: how often the fused multi-step decode loop checks the
+    # any-sequence-hit-EOS early-exit condition. The stock loop tests it every
+    # step (=1), which is a per-step host<->device dispatch for the whole burst.
+    # A larger interval N tests it only on steps that are multiples of N; every
+    # sequence still stops at its own EOS (within <=N-1 tokens of slack, which is
+    # masked in the loss exactly as a normal stop), so the sampled distribution
+    # is unchanged. Trades a few extra decoded-then-masked tokens for far fewer
+    # early-exit dispatches. Measured on TPU v7x DAPO rollout: interval 8 is a
+    # clear win; the benefit saturates by 8 (interval 32 regresses). Default 1
+    # preserves stock behavior exactly.
+    "CONTINUE_DECODE_EOS_CHECK_INTERVAL":
+    lambda: int(os.getenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL") or "1"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
