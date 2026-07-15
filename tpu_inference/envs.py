@@ -42,6 +42,12 @@ if TYPE_CHECKING:
     JAX_PROFILER_SERVER_PORT: int = 9999
     USE_BATCHED_RPA_KERNEL: bool = False
     USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
+    # Optional operator override for the RPA v3 kernel block sizes, one per
+    # case. Each is a comma-separated 4-tuple (bq_sz, bkv_sz, bq_csz, bkv_csz).
+    # Empty (default) = use the built-in tuned/heuristic sizes.
+    RPA_V3_DECODE_BLOCK_SIZES: list[int] = []
+    RPA_V3_PREFILL_BLOCK_SIZES: list[int] = []
+    RPA_V3_MIXED_BLOCK_SIZES: list[int] = []
     FORCE_MOE_RANDOM_ROUTING: bool = False
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
@@ -323,6 +329,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_BATCHED_RPA_KERNEL"),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
+    # Optional operator override for RPA v3 kernel block sizes, per case.
+    # Comma-separated 4-tuple: bq_sz,bkv_sz,bq_csz,bkv_csz. Empty = use the
+    # built-in tuned/heuristic sizes. Lets operators retune the decode
+    # KV-fetch/compute split (e.g. deeper double-buffering) without a rebuild.
+    "RPA_V3_DECODE_BLOCK_SIZES":
+    env_int_list("RPA_V3_DECODE_BLOCK_SIZES"),
+    "RPA_V3_PREFILL_BLOCK_SIZES":
+    env_int_list("RPA_V3_PREFILL_BLOCK_SIZES"),
+    "RPA_V3_MIXED_BLOCK_SIZES":
+    env_int_list("RPA_V3_MIXED_BLOCK_SIZES"),
     # Force random expert routing in MoE layers (for testing purposes only)
     "FORCE_MOE_RANDOM_ROUTING":
     env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
