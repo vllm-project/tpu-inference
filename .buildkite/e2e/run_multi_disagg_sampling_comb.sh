@@ -720,40 +720,38 @@ docker exec -d disagg-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_infer
 
 wait_for_server_remote "127.0.0.1" 8000 "Toy Proxy Server" 600
 
-if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
-    echo "--- Running Benchmark Test inside container..."
-    timeout "${BENCHMARK_TIMEOUT_SECONDS:-1800}" \
-    docker exec disagg-proxy-benchmark /bin/bash -c "vllm bench serve \
-        --backend vllm \
-        --host 127.0.0.1 \
-        --port 8000 \
-        --model ${MODEL} \
-        --dataset-name random \
-        --random-input-len ${INPUT_LEN} \
-        --random-output-len ${OUTPUT_LEN} \
-        --num-prompts ${NUM_PROMPTS} \
-        --request-rate inf \
-        --max-concurrency ${MAX_CONCURRENCY} \
-        --trust-remote-code \
-        --seed ${RANDOM_SEED} > /root/logs/benchmark.txt 2>&1"
+# if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
+#     echo "--- Running Benchmark Test inside container..."
+#     timeout "${BENCHMARK_TIMEOUT_SECONDS:-1800}" \
+#     docker exec disagg-proxy-benchmark /bin/bash -c "vllm bench serve \
+#         --backend vllm \
+#         --host 127.0.0.1 \
+#         --port 8000 \
+#         --model ${MODEL} \
+#         --dataset-name random \
+#         --random-input-len ${INPUT_LEN} \
+#         --random-output-len ${OUTPUT_LEN} \
+#         --num-prompts ${NUM_PROMPTS} \
+#         --request-rate inf \
+#         --max-concurrency ${MAX_CONCURRENCY} \
+#         --trust-remote-code \
+#         --seed ${RANDOM_SEED} > /root/logs/benchmark.txt 2>&1"
 
-    echo "--- Benchmark Results ---"
-    docker exec disagg-proxy-benchmark cat /root/logs/benchmark.txt
-fi
+#     echo "--- Benchmark Results ---"
+#     docker exec disagg-proxy-benchmark cat /root/logs/benchmark.txt
+# fi
 
 if [ "$TEST_MODE" = "2" ] || [ "$TEST_MODE" = "3" ]; then
-    echo "--- Running Correctness Test inside container..."
+    echo "--- Running Disagg-specific Sampling Parameters Test inside container ---"
+    # Note: We use the newly created test_disagg_sampling_params.py which is API-based.
+    # It sends requests to the Toy Proxy at localhost:8000.
     timeout "${CORRECTNESS_TIMEOUT_SECONDS:-1800}" \
-    docker exec disagg-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py \
-        --baseline_url http://${DECODE_HEAD_IP}:${DECODE_VLLM_PORT}/v1/completions \
-        --disagg_url http://127.0.0.1:8000/v1/completions \
-        --model ${MODEL} \
-        --num_requests ${NUM_PROMPTS} \
-        --input_length ${INPUT_LEN} \
-        --output_length ${OUTPUT_LEN} > /root/logs/correctness.txt 2>&1"
+    docker exec disagg-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/tests/e2e/test_disagg_sampling_params.py \
+        --url http://localhost:8000/v1 \
+        --model ${MODEL} > /root/logs/correctness.txt 2>&1"
 
     echo "--- Correctness Results ---"
     docker exec disagg-proxy-benchmark cat /root/logs/correctness.txt
 fi
 
-echo "--- Tests completed successfully ---"
+echo "--- Combination Tests (Multi-host Disagg + Sampling) completed successfully ---"

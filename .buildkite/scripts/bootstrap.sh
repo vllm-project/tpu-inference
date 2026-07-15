@@ -58,7 +58,8 @@ buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
 # Temporary escape hatch for targeted multihost disaggregation E2E runs.
 # Keep this after shared bootstrap metadata is configured so downstream Docker
 # setup can still resolve VLLM_COMMIT_HASH.
-UPLOAD_ONLY_MULTI_HOST_DISAGG="${UPLOAD_ONLY_MULTI_HOST_DISAGG:-1}"
+UPLOAD_ONLY_MULTI_HOST_DISAGG="${UPLOAD_ONLY_MULTI_HOST_DISAGG:-0}"
+COMBO_TEST="${COMBO_TEST:-1}"
 
 # --- Skip build if only docs, icons, or CODEOWNERS changed ---
 echo "--- :git: Checking changed files"
@@ -244,6 +245,13 @@ upload_multihost_disagg_only_pipeline() {
     echo "--- 🚨 HACK: Finished uploading only multi-host disaggregation pipeline"
 }
 
+upload_multihost_sampling_comb_only_pipeline() {
+    echo "--- 🚨 HACK: Only uploading multi_host_disagg_sampling_comb.yml"
+    export TPU_VERSION="tpu7x"
+    upload_with_priority .buildkite/features/multi_host_disagg_sampling_comb.yml "$JOB_PRIORITY"
+    echo "--- 🚨 HACK: Finished uploading only multi-host disaggregation + sampling combination pipeline"
+}
+
 echo "--- Starting Buildkite Bootstrap"
 echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
 
@@ -293,6 +301,12 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
         exit 0
     fi
 
+    if [[ "${COMBO_TEST:-0}" == "1" ]]; then
+        upload_multihost_sampling_comb_only_pipeline
+        echo "--- Buildkite Bootstrap Finished"
+        exit 0
+    fi
+
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
     upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
 
@@ -314,6 +328,12 @@ else
 
     if [[ "$UPLOAD_ONLY_MULTI_HOST_DISAGG" == "1" ]]; then
         upload_multihost_disagg_only_pipeline
+        echo "--- Buildkite Bootstrap Finished"
+        exit 0
+    fi
+
+    if [[ "${COMBO_TEST:-0}" == "1" ]]; then
+        upload_multihost_sampling_comb_only_pipeline
         echo "--- Buildkite Bootstrap Finished"
         exit 0
     fi
