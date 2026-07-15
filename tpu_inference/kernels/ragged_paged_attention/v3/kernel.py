@@ -28,6 +28,8 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.ragged_paged_attention.v3.tuned_block_sizes_v3 import (
+    get_tuned_block_sizes_v3)
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing, get_tpu_version, next_power_of_2)
 
@@ -1882,8 +1884,13 @@ def ragged_paged_attention(
         return run(scalar_prefetches, q, kv, kv_cache)
 
     def _prepare_block_sizes(block_sizes, case):
+        # Precedence: caller override -> v3 tuned table -> heuristic default.
+        # The tuned table (tuned_block_sizes_v3) holds on-silicon-measured
+        # 4-tuples for specific shapes and returns None on any miss, so an
+        # untuned shape always falls through to the heuristic and is never
+        # regressed.
         if block_sizes is None:
-            return get_default_block_sizes(
+            tuned = get_tuned_block_sizes_v3(
                 q.dtype,
                 kv_cache.dtype,
                 actual_num_q_heads,
@@ -1891,10 +1898,24 @@ def ragged_paged_attention(
                 head_dim,
                 page_size,
                 max_num_tokens,
-                max_num_seqs,
                 pages_per_seq,
-                case=case,
+                case.name.lower(),
+                sliding_window,
             )
+            if tuned is None:
+                return get_default_block_sizes(
+                    q.dtype,
+                    kv_cache.dtype,
+                    actual_num_q_heads,
+                    actual_num_kv_heads,
+                    head_dim,
+                    page_size,
+                    max_num_tokens,
+                    max_num_seqs,
+                    pages_per_seq,
+                    case=case,
+                )
+            block_sizes = tuned
         return {
             "bq_sz": block_sizes[0],
             "bkv_sz": block_sizes[1],
