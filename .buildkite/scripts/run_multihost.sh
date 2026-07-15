@@ -184,6 +184,16 @@ wait_for_server() {
       return 1
     fi
 
+    # 4. Fast-fail if EngineCore crashed but left the API server zombie-ing
+    if [[ $((loop_count % 3)) -eq 0 ]]; then
+      if docker exec "$container_name" grep -q -E "EngineCore failed to start|ActorDiedError" "$log_path" 2>/dev/null; then
+        echo "Error: Fatal vLLM engine crash detected in logs (e.g. EngineCore failed to start). Aborting."
+        echo "Displaying logs from $container_name:$log_path"
+        docker exec "$container_name" cat "$log_path" || true
+        return 1
+      fi
+    fi
+
     sleep 5
     loop_count=$((loop_count + 1))
   done
