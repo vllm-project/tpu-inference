@@ -383,7 +383,7 @@ def get_flax_model(
         static_argnums=(
             6, 9, 10
         ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
-        compiler_options=get_step_fn_compiler_options(),
+        compiler_options=None,
     )
     def run_model(state_leaves, *args):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
