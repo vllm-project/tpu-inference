@@ -22,6 +22,8 @@ NUM_PROMPTS="${NUM_PROMPTS:-100}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-20}"
 RANDOM_SEED="${RANDOM_SEED:-10}"
 TEST_MODE="${TEST_MODE:-3}" # 1: benchmark, 2: correctness, 3: both
+NODE_CONTAINER_NAME="node"
+PROXY_CONTAINER_NAME="disagg-proxy-benchmark"
 PREFILL_HOSTS_COUNT="${PREFILL_HOSTS_COUNT:-1}"
 DECODE_HOSTS_COUNT="${DECODE_HOSTS_COUNT:-1}"
 SPECULATIVE_METHOD="${SPECULATIVE_METHOD:-ngram}"
@@ -113,20 +115,16 @@ fi
 SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o IPQoS=none -i "$HOME/.ssh/id_rsa")
 
 PROJECT="$(gcloud config get-value project 2>/dev/null)"
-IMAGE_NAME="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference/vllm-tpu"
+IMAGE_NAME="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference/vllm-tpu-multi-disagg-speculative"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TOP_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
-source "$SCRIPT_DIR/../scripts/setup_docker_env.sh"
-setup_environment "$IMAGE_NAME" "true"
-DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
-
 cleanup() {
   local code=$?
   for ip in "${ALL_IPS_ARRAY[@]}"; do
     [[ "$ip" == "$HEAD_INTERNAL_IP" ]] || ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" \
-      "docker rm -f node >/dev/null 2>&1 || true" || true
+      "docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true" || true
   done
-  docker rm -f node disagg-proxy-benchmark >/dev/null 2>&1 || true
+  docker rm -f "$NODE_CONTAINER_NAME" "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
   if (( code != 0 )); then
     for log in prefill decode proxy benchmark correctness; do
       [[ -s "$LOG_DIR/$log.txt" ]] && { echo "+++ $log.txt"; cat "$LOG_DIR/$log.txt"; }
@@ -134,6 +132,10 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+source "$SCRIPT_DIR/../scripts/setup_docker_env.sh"
+setup_environment "$IMAGE_NAME" "true"
+DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 
 common_env="-e HF_TOKEN='${HF_TOKEN:-}' -e TPU_MULTIHOST_BACKEND=ray -e JAX_PLATFORMS='' -e TPU_BACKEND_TYPE=jax -e MODEL_IMPL_TYPE=vllm"
 visible_chips="$(seq -s, 0 $((CHIPS_PER_HOST - 1)))"
@@ -182,9 +184,9 @@ sleep 90
 
 PREFILL_PORT=8400
 DECODE_PORT=9400
-docker exec -d node bash -c "vllm serve '$MODEL' --port $PREFILL_PORT --tensor-parallel-size $PREFILL_TP --trust-remote-code --no-enable-prefix-caching --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' --max-model-len 1024 > /root/vllm_serve_prefill.log 2>&1"
+docker exec -d "$NODE_CONTAINER_NAME" bash -c "vllm serve '$MODEL' --port $PREFILL_PORT --tensor-parallel-size $PREFILL_TP --trust-remote-code --no-enable-prefix-caching --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' --max-model-len 1024 > /root/vllm_serve_prefill.log 2>&1"
 ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" \
-  "docker exec -d node bash -c \"vllm serve '$MODEL' --port $DECODE_PORT --tensor-parallel-size $DECODE_TP --trust-remote-code --no-enable-prefix-caching --speculative-config '$SPECULATIVE_CONFIG' --kv-transfer-config '{\\\"kv_connector\\\":\\\"TPUConnector\\\",\\\"kv_connector_module_path\\\":\\\"tpu_inference.distributed.tpu_connector\\\",\\\"kv_role\\\":\\\"kv_consumer\\\"}' --max-model-len 1024 > /root/vllm_serve_decode.log 2>&1\""
+  "docker exec -d '$NODE_CONTAINER_NAME' bash -c \"vllm serve '$MODEL' --port $DECODE_PORT --tensor-parallel-size $DECODE_TP --trust-remote-code --no-enable-prefix-caching --speculative-config '$SPECULATIVE_CONFIG' --kv-transfer-config '{\\\"kv_connector\\\":\\\"TPUConnector\\\",\\\"kv_connector_module_path\\\":\\\"tpu_inference.distributed.tpu_connector\\\",\\\"kv_role\\\":\\\"kv_consumer\\\"}' --max-model-len 1024 > /root/vllm_serve_decode.log 2>&1\""
 
 wait_server() {
   local host=$1 port=$2
@@ -197,9 +199,9 @@ print_vllm_log() {
   local host=$1 log_path=$2
   echo "--- vLLM server log: $host:$log_path ---" >&2
   if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
-    docker exec node cat "$log_path" 2>&1 || true
+    docker exec "$NODE_CONTAINER_NAME" cat "$log_path" 2>&1 || true
   else
-    ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" "docker exec node cat '$log_path'" 2>&1 || true
+    ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" "docker exec '$NODE_CONTAINER_NAME' cat '$log_path'" 2>&1 || true
   fi
   echo "--- end vLLM server log ---" >&2
 }
@@ -215,10 +217,10 @@ wait_vllm_server() {
     # and print the server log instead of waiting for the full timeout.
     if (( attempt > 120 )); then
       if [[ "$node_host" == "$HEAD_INTERNAL_IP" ]]; then
-        vllm_running="$(docker exec node pgrep -f '[v]llm serve' 2>/dev/null || true)"
+        vllm_running="$(docker exec "$NODE_CONTAINER_NAME" pgrep -f '[v]llm serve' 2>/dev/null || true)"
       else
         vllm_running="$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$node_host" \
-          "docker exec node pgrep -f '[v]llm serve' 2>/dev/null || true" 2>/dev/null || true)"
+          "docker exec '$NODE_CONTAINER_NAME' pgrep -f '[v]llm serve' 2>/dev/null || true" 2>/dev/null || true)"
       fi
       if [[ -z "$vllm_running" ]]; then
         echo "vLLM process exited before server became healthy: $health_host:$port" >&2
@@ -237,25 +239,25 @@ wait_vllm_server() {
 wait_vllm_server 127.0.0.1 "$PREFILL_PORT" "$PREFILL_HEAD_IP" /root/vllm_serve_prefill.log
 wait_vllm_server "$DECODE_HEAD_IP" "$DECODE_PORT" "$DECODE_HEAD_IP" /root/vllm_serve_decode.log
 ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" \
-  "docker exec node pgrep -af '[v]llm serve' | grep -F -- '--speculative-config'"
+  "docker exec '$NODE_CONTAINER_NAME' pgrep -af '[v]llm serve' | grep -F -- '--speculative-config'"
 
-docker run -d --privileged --network host --shm-size 16G --name disagg-proxy-benchmark \
+docker run -d --privileged --network host --shm-size 16G --name "$PROXY_CONTAINER_NAME" \
   -e HF_HOME=/root/hf -v "$HOST_HF_HOME:/root/hf" -v "$LOG_DIR:/root/logs" \
   --entrypoint /bin/bash "$DOCKER_IMAGE" -c 'tail -f /dev/null'
-docker exec -d disagg-proxy-benchmark /bin/bash -c \
+docker exec -d "$PROXY_CONTAINER_NAME" /bin/bash -c \
   "python3 /workspace/tpu_inference/examples/disagg/toy_proxy_server.py --host 0.0.0.0 --port 8000 --prefiller-hosts 127.0.0.1 --prefiller-ports $PREFILL_PORT --decoder-hosts $DECODE_HEAD_IP --decoder-ports $DECODE_PORT > /root/logs/proxy.txt 2>&1"
 wait_server 127.0.0.1 8000
 
 if [[ "$TEST_MODE" == 2 || "$TEST_MODE" == 3 ]]; then
-  docker exec disagg-proxy-benchmark /bin/bash -c \
+  docker exec "$PROXY_CONTAINER_NAME" /bin/bash -c \
     "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py --baseline_url http://$DECODE_HEAD_IP:$DECODE_PORT/v1/completions --disagg_url http://127.0.0.1:8000/v1/completions --model '$MODEL' --num_requests 20 --input_length 32 --output_length 64 > /root/logs/correctness.txt 2>&1"
-  docker exec disagg-proxy-benchmark cat /root/logs/correctness.txt
+  docker exec "$PROXY_CONTAINER_NAME" cat /root/logs/correctness.txt
 fi
 
 if [[ "$TEST_MODE" == 1 || "$TEST_MODE" == 3 ]]; then
-  docker exec disagg-proxy-benchmark /bin/bash -c \
+  docker exec "$PROXY_CONTAINER_NAME" /bin/bash -c \
     "vllm bench serve --backend vllm --host 127.0.0.1 --port 8000 --model '$MODEL' --dataset-name random --random-input-len $INPUT_LEN --random-output-len $OUTPUT_LEN --num-prompts $NUM_PROMPTS --request-rate inf --max-concurrency $MAX_CONCURRENCY --trust-remote-code --seed $RANDOM_SEED > /root/logs/benchmark.txt 2>&1"
-  docker exec disagg-proxy-benchmark cat /root/logs/benchmark.txt
+  docker exec "$PROXY_CONTAINER_NAME" cat /root/logs/benchmark.txt
 fi
 
 echo "Multi-host P/D speculative test completed: method=$SPECULATIVE_METHOD model=$MODEL"
