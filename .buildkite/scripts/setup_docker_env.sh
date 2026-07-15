@@ -214,11 +214,11 @@ setup_environment() {
     
     # In Multihost mode, the Head node pulls the cache but MUST also push it 
     # to the formal registry so that all Worker VMs can pull it.
-    if [[ "$should_push" == "true" ]]; then
-      echo "--- Pushing pre-built Docker image(s) to registry for worker nodes..."
-      gcloud auth configure-docker us-central1-docker.pkg.dev
-      docker push "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
-    fi
+    # if [[ "$should_push" == "true" ]]; then
+    #   echo "--- Pushing pre-built Docker image(s) to registry for worker nodes..."
+    #   gcloud auth configure-docker us-central1-docker.pkg.dev
+    #   docker push "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
+    # fi
     return 0
   fi
 

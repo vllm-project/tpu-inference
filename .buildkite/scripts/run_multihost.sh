@@ -223,6 +223,7 @@ source "$SCRIPT_DIR/setup_docker_env.sh"
 setup_environment "${IMAGE_NAME}" "true"
 
 DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
+echo "DOCKER_IMAGE: ${DOCKER_IMAGE}"
 
 # Resolve server / client commands and environment variables early
 MODEL="${TEST_MODEL:-gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39}"
