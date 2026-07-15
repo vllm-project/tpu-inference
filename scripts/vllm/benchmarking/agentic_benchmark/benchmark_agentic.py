@@ -41,13 +41,13 @@ def get_percentile(data: List[float], percentile: float) -> float:
     upper = lower + 1
     weight = index - lower
     if upper < len(sorted_data):
-        return sorted_data[lower] * (1.0 - weight) + sorted_data[upper] * weight
+        return sorted_data[lower] * (1.0 -
+                                     weight) + sorted_data[upper] * weight
     return sorted_data[lower]
 
 
-def generate_initial_prompt(
-    tokenizer: AutoTokenizer, args: argparse.Namespace
-) -> str:
+def generate_initial_prompt(tokenizer: AutoTokenizer,
+                            args: argparse.Namespace) -> str:
     """Generates a random initial prompt of a specific token length.
 
     Args:
@@ -57,9 +57,8 @@ def generate_initial_prompt(
     Returns:
         str: Generated prompt text.
     """
-    length = random.randint(
-        args.initial_prompt_len_min, args.initial_prompt_len_max
-    )
+    length = random.randint(args.initial_prompt_len_min,
+                            args.initial_prompt_len_max)
     # Using safe token ID range to avoid special control characters
     token_ids = [random.randint(1000, 50000) for _ in range(length)]
     return tokenizer.decode(token_ids, skip_special_tokens=True)
@@ -92,8 +91,14 @@ async def run_grpo_stream(
     """
     num_turns = random.randint(args.turns_min, args.turns_max)
     messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": initial_prompt},
+        {
+            "role": "system",
+            "content": "You are a helpful assistant."
+        },
+        {
+            "role": "user",
+            "content": initial_prompt
+        },
     ]
 
     stats = []
@@ -116,14 +121,11 @@ async def run_grpo_stream(
         full_response_text = []
 
         try:
-            async with session.post(
-                url, json=payload, headers=headers
-            ) as response:
+            async with session.post(url, json=payload,
+                                    headers=headers) as response:
                 if response.status != 200:
                     err_text = await response.text()
-                    raise RuntimeError(
-                        f"Status {response.status}: {err_text}"
-                    )
+                    raise RuntimeError(f"Status {response.status}: {err_text}")
 
                 async for line in response.content:
                     line = line.decode("utf-8").strip()
@@ -136,9 +138,8 @@ async def run_grpo_stream(
                         try:
                             data = json.loads(data_str)
                             if ttft is None:
-                                ttft = (
-                                    (time.perf_counter() - start_time) * 1000.0
-                                )
+                                ttft = ((time.perf_counter() - start_time) *
+                                        1000.0)
 
                             if "choices" in data and len(data["choices"]) > 0:
                                 delta = data["choices"][0].get("delta", {})
@@ -162,9 +163,10 @@ async def run_grpo_stream(
             else:
                 tpot = total_time_ms
 
-            messages.append(
-                {"role": "assistant", "content": assistant_response}
-            )
+            messages.append({
+                "role": "assistant",
+                "content": assistant_response
+            })
 
             turn_stat = {
                 "group_idx": group_idx,
@@ -175,9 +177,8 @@ async def run_grpo_stream(
                 "tpot_ms": tpot,
                 "total_time_ms": total_time_ms,
                 "output_tokens": assistant_tokens,
-                "input_history_tokens": len(
-                    tokenizer.encode(str(messages[:-1]))
-                ),
+                "input_history_tokens":
+                len(tokenizer.encode(str(messages[:-1]))),
                 "success": True,
             }
 
@@ -186,7 +187,8 @@ async def run_grpo_stream(
             env_token_ids = [
                 random.randint(1000, 50000) for _ in range(env_len)
             ]
-            env_text = tokenizer.decode(env_token_ids, skip_special_tokens=True)
+            env_text = tokenizer.decode(env_token_ids,
+                                        skip_special_tokens=True)
 
             messages.append({"role": "user", "content": env_text})
             turn_stat["env_tokens"] = len(tokenizer.encode(env_text))
@@ -195,21 +197,19 @@ async def run_grpo_stream(
 
         except Exception as e:
             total_time_ms = (time.perf_counter() - start_time) * 1000.0
-            stats.append(
-                {
-                    "group_idx": group_idx,
-                    "stream_idx": stream_idx,
-                    "turn": turn,
-                    "num_turns": num_turns,
-                    "ttft_ms": total_time_ms,
-                    "tpot_ms": 0.0,
-                    "total_time_ms": total_time_ms,
-                    "output_tokens": 0,
-                    "input_history_tokens": 0,
-                    "success": False,
-                    "error": str(e),
-                }
-            )
+            stats.append({
+                "group_idx": group_idx,
+                "stream_idx": stream_idx,
+                "turn": turn,
+                "num_turns": num_turns,
+                "ttft_ms": total_time_ms,
+                "tpot_ms": 0.0,
+                "total_time_ms": total_time_ms,
+                "output_tokens": 0,
+                "input_history_tokens": 0,
+                "success": False,
+                "error": str(e),
+            })
             # End conversation on error
             break
 
@@ -239,10 +239,8 @@ async def run_group(
     """
     initial_prompt = generate_initial_prompt(tokenizer, args)
     initial_prompt_len = len(tokenizer.encode(initial_prompt))
-    print(
-        f"Group {group_idx}: Starting {args.group_size} streams with "
-        f"shared initial prompt of {initial_prompt_len} tokens..."
-    )
+    print(f"Group {group_idx}: Starting {args.group_size} streams with "
+          f"shared initial prompt of {initial_prompt_len} tokens...")
 
     tasks = []
     for stream_idx in range(args.group_size):
@@ -256,8 +254,7 @@ async def run_group(
                 stream_idx,
                 group_idx,
                 args,
-            )
-        )
+            ))
 
     results = await asyncio.gather(*tasks)
 
@@ -287,14 +284,12 @@ def print_report(
     total_turns = len(all_stats)
     successful_turns = sum(1 for s in all_stats if s["success"])
     failed_turns = total_turns - successful_turns
-    success_rate = (
-        (successful_turns / total_turns) * 100.0 if total_turns > 0 else 0.0
-    )
+    success_rate = ((successful_turns / total_turns) *
+                    100.0 if total_turns > 0 else 0.0)
 
     total_groups = len(set(s["group_idx"] for s in all_stats))
     total_streams = len(
-        set((s["group_idx"], s["stream_idx"]) for s in all_stats)
-    )
+        set((s["group_idx"], s["stream_idx"]) for s in all_stats))
 
     total_input_tokens = sum(s["input_history_tokens"] for s in all_stats)
     total_output_tokens = sum(s["output_tokens"] for s in all_stats)
@@ -303,11 +298,9 @@ def print_report(
     print(f"Total Benchmark Time:      {total_duration_sec:.2f} seconds")
     print(f"Simulated GRPO Groups:     {total_groups}")
     print(f"Simulated Streams (g):     {total_streams}")
-    print(
-        f"Total Conversational Turns:{total_turns} (Success: "
-        f"{successful_turns}, Failed: {failed_turns}, "
-        f"Rate: {success_rate:.2f}%)"
-    )
+    print(f"Total Conversational Turns:{total_turns} (Success: "
+          f"{successful_turns}, Failed: {failed_turns}, "
+          f"Rate: {success_rate:.2f}%)")
     print(f"Total Input Tokens (Pref): {total_input_tokens:,}")
     print(f"Total Output Tokens (Dec): {total_output_tokens:,}")
     print(f"Total Tokens Processed:    {total_tokens:,}")
@@ -373,10 +366,8 @@ def print_report(
         p50 = get_percentile(latencies, 50)
         p90 = get_percentile(latencies, 90)
         p99 = get_percentile(latencies, 99)
-        print(
-            f"{label:<30} Avg: {avg:8.2f}ms | p50: {p50:8.2f}ms | "
-            f"p90: {p90:8.2f}ms | p99: {p99:8.2f}ms"
-        )
+        print(f"{label:<30} Avg: {avg:8.2f}ms | p50: {p50:8.2f}ms | "
+              f"p90: {p90:8.2f}ms | p99: {p99:8.2f}ms")
 
     print_latency_row("Turn 1 - Cache Miss (Prefill)", turn1_miss_ttft)
     print_latency_row("Turn 1 - Cache Hit (Cached)", turn1_hit_ttft)
@@ -387,12 +378,17 @@ def print_report(
     total_turn1 = len(turn1_miss_ttft) + len(turn1_hit_ttft)
     if total_turn1 > 0:
         hit_ratio = (len(turn1_hit_ttft) / total_turn1) * 100.0
-        print(f"\nTurn 1 Prefix Cache Hits:  {len(turn1_hit_ttft)}/{total_turn1} ({hit_ratio:.2f}%)")
+        print(
+            f"\nTurn 1 Prefix Cache Hits:  {len(turn1_hit_ttft)}/{total_turn1} ({hit_ratio:.2f}%)"
+        )
         if turn1_miss_ttft:
             miss_avg = sum(turn1_miss_ttft) / len(turn1_miss_ttft)
-            hit_avg = sum(turn1_hit_ttft) / len(turn1_hit_ttft) if turn1_hit_ttft else 0
+            hit_avg = sum(turn1_hit_ttft) / len(
+                turn1_hit_ttft) if turn1_hit_ttft else 0
             speedup = miss_avg / hit_avg if hit_avg > 0 else 1.0
-            print(f"Prefix Cache Speedup:      {speedup:.2f}x faster TTFT on hits!")
+            print(
+                f"Prefix Cache Speedup:      {speedup:.2f}x faster TTFT on hits!"
+            )
     print("=" * 80 + "\n")
 
 
@@ -405,9 +401,8 @@ async def main_async(args: argparse.Namespace):
     random.seed(args.seed)
 
     print(f"Loading tokenizer from: {args.model_path_or_id}")
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_path_or_id, trust_remote_code=True
-    )
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path_or_id,
+                                              trust_remote_code=True)
 
     url = f"http://{args.host}:{args.port}/v1/chat/completions"
     print(f"Connecting to vLLM server at {url}...")
@@ -415,8 +410,7 @@ async def main_async(args: argparse.Namespace):
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(
-                f"http://{args.host}:{args.port}/health"
-            ) as resp:
+                    f"http://{args.host}:{args.port}/health") as resp:
                 if resp.status != 200:
                     print(
                         f"Warning: Server health check returned status {resp.status}"
@@ -432,9 +426,8 @@ async def main_async(args: argparse.Namespace):
 
     async def worker(group_idx: int, session: aiohttp.ClientSession):
         async with semaphore:
-            return await run_group(
-                session, url, args.model, tokenizer, group_idx, args
-            )
+            return await run_group(session, url, args.model, tokenizer,
+                                   group_idx, args)
 
     start_time = time.perf_counter()
 
@@ -457,8 +450,7 @@ async def main_async(args: argparse.Namespace):
 def main():
     """Main parsing entry point for the script."""
     parser = argparse.ArgumentParser(
-        description="Benchmark vLLM for GRPO RL multi-turn streams."
-    )
+        description="Benchmark vLLM for GRPO RL multi-turn streams.")
     parser.add_argument(
         "--model-path-or-id",
         type=str,
@@ -471,12 +463,14 @@ def main():
         default="Qwen/Qwen3-1.7B-base",
         help="Model name in OpenAI API requests.",
     )
-    parser.add_argument(
-        "--host", type=str, default="localhost", help="vLLM server host."
-    )
-    parser.add_argument(
-        "--port", type=int, default=8000, help="vLLM server port."
-    )
+    parser.add_argument("--host",
+                        type=str,
+                        default="localhost",
+                        help="vLLM server host.")
+    parser.add_argument("--port",
+                        type=int,
+                        default=8000,
+                        help="vLLM server port.")
     parser.add_argument(
         "--num-groups",
         type=int,
@@ -556,9 +550,10 @@ def main():
         dest="ignore_eos",
         help="Do not ignore EOS tokens during generation.",
     )
-    parser.add_argument(
-        "--seed", type=int, default=42, help="Random seed for generation."
-    )
+    parser.add_argument("--seed",
+                        type=int,
+                        default=42,
+                        help="Random seed for generation.")
 
     args = parser.parse_args()
 

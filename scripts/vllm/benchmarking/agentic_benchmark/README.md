@@ -37,6 +37,7 @@ vllm serve Qwen/Qwen3-4B \
 Run the multi-turn benchmark script against the server. Configure the active concurrency to scale the request rate.
 
 #### Run with 128 Concurrent Streams (8 Groups)
+
 ```bash
 python benchmarks/benchmark_agentic.py \
     --model-path-or-id Qwen/Qwen3-4B \
@@ -55,6 +56,7 @@ python benchmarks/benchmark_agentic.py \
 ```
 
 #### Run with 256 Concurrent Streams (16 Groups)
+
 ```bash
 python benchmarks/benchmark_agentic.py \
     --model-path-or-id Qwen/Qwen3-4B \
@@ -76,7 +78,7 @@ python benchmarks/benchmark_agentic.py \
 
 ## 3. Performance Results Summary (TPU v6e-8, TP=8)
 
-Here are the side-by-side comparative metrics for **Qwen3-1.7B-base** and **Qwen3-4B** run under high-concurrency conditions using explicit `--async-scheduling`. 
+Here are the side-by-side comparative metrics for **Qwen3-1.7B-base** and **Qwen3-4B** run under high-concurrency conditions using explicit `--async-scheduling`.
 
 > [!NOTE]
 > All benchmark metrics below were collected on a **Google Cloud TPU v6e-8 VM (8 TPU Cores)** with Tensor Parallelism size set to **`TP=8`** (`--tensor-parallel-size 8`).
