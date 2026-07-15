@@ -2007,7 +2007,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _select_from_array_fn(array, indices_to_select, mesh):
 
         def select_local_fn(local_array, local_indices):
-            return local_array[local_indices]
+            # XLA keeps the whole row-gather output in scoped VMEM, so one
+            # gather of [n, vocab_shard] logits rows exceeds the 32M scoped
+            # limit once n grows (e.g. spec decode with max_num_seqs=16:
+            # [128, 62080] bf16 = 37.9M -> CompileTimeScopedVmemOom).
+            # Gather in fixed-size row chunks so each gather stays small.
+            chunk = 32
+            n = local_indices.shape[0]
+            if n <= chunk or local_array.ndim < 2:
+                return local_array[local_indices]
+            num_pads = (-n) % chunk
+            idx = jnp.pad(local_indices, (0, num_pads)).reshape(-1, chunk)
+            out = jax.lax.map(lambda ix: local_array[ix], idx)
+            return out.reshape(-1, *local_array.shape[1:])[:n]
 
         ret = jax.shard_map(
             select_local_fn,
