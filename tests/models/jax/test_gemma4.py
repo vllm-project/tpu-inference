@@ -136,6 +136,7 @@ class TestGemma4ForConditionalGeneration:
         "google/gemma-4-26B-A4B-it",
         "RedHatAI/gemma-4-31B-it-FP8-Dynamic",
         "RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic",
+        "RedHatAI/gemma-4-31B-it-FP8-block",
     ])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
