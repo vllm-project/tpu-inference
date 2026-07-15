@@ -490,3 +490,75 @@ def test_mla_attention(monkeypatch, mesh):
     assert kernel_kwargs["num_kv_pages_per_block"] == (3, 1, 1)
     assert kernel_kwargs["num_queries_per_block"] == (1, 16, 16)
     assert kernel_kwargs["sm_scale"] == 0.1
+
+
+# ---- Test for the unified 6D block-major KV cache path ----
+
+
+def test_attention_unified_6d_folds_and_redirects_pages(monkeypatch, mesh):
+    """With a 6D block-major kv_cache and layer_idx/num_layers, `attention`
+    must hand the kernel the pool folded to its 5D layout with page
+    addressing redirected to flat page block*num_layers + layer_idx, and
+    return the updated pool unfolded back to 6D."""
+    head_dim = 128
+    num_layers, layer_idx = 4, 2
+    dtype = jnp.float32
+
+    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim), dtype=dtype)
+    k = jnp.ones((TOTAL_TOKENS, NUM_KV_HEADS, head_dim), dtype=dtype)
+    v = jnp.ones((TOTAL_TOKENS, NUM_KV_HEADS, head_dim), dtype=dtype)
+
+    single_layer_shape = get_kv_cache_shape_with_mesh(mesh, NUM_BLOCKS,
+                                                      BLOCK_SIZE, NUM_KV_HEADS,
+                                                      head_dim, dtype)
+    pool = jnp.zeros(
+        (single_layer_shape[0], num_layers, *single_layer_shape[1:]),
+        dtype=dtype)
+
+    captured = {}
+
+    def fake_kernel(q_in, k_in, v_in, kv_cache_in, kv_lens_in, page_indices_in,
+                    *_args, **_kwargs):
+        captured["kv_cache_shape"] = kv_cache_in.shape
+        captured["page_indices"] = page_indices_in
+        return jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim)), kv_cache_in
+
+    monkeypatch.setattr(
+        "tpu_inference.layers.common.attention_interface.ragged_paged_attention",
+        fake_kernel,
+    )
+    # Passthrough shard_map so the closure executes on concrete arrays.
+    monkeypatch.setattr("jax.shard_map", lambda inner_fn, **_: inner_fn)
+
+    # Distinct nonzero block ids so the flat-page redirection is visible.
+    block_tables = jnp.arange(MAX_NUM_SEQS * MAX_BLOCKS_PER_SEQ,
+                              dtype=jnp.int32)
+    attention_metadata = AttentionMetadata(
+        input_positions=jnp.arange(TOTAL_TOKENS, dtype=jnp.int32),
+        block_tables=block_tables,
+        seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
+    )
+
+    final_kv_cache, output = attention(
+        kv_cache=pool,
+        q=q,
+        k=k,
+        v=v,
+        attention_metadata=attention_metadata,
+        mesh=mesh,
+        head_dim_original=head_dim,
+        layer_idx=layer_idx,
+        num_layers=num_layers,
+    )
+
+    # The kernel saw the folded 5D cache and the redirected flat pages.
+    assert captured["kv_cache_shape"] == (single_layer_shape[0] * num_layers,
+                                          *single_layer_shape[1:])
+    np.testing.assert_array_equal(
+        np.asarray(captured["page_indices"]),
+        np.asarray(block_tables) * num_layers + layer_idx)
+    # The updated pool comes back unfolded to the original 6D shape.
+    assert final_kv_cache.shape == pool.shape
+    assert output.shape == q.shape

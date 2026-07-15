@@ -205,12 +205,41 @@ class TestQwen3ForCausalLM:
             cache_dtype=jnp.float8_e4m3fn
             if mock_vllm_config.cache_config.cache_dtype == "fp8" else
             jnp.bfloat16)
+        # Snapshot the fresh caches as a 6D block-major pool for the unified
+        # path check below (the per-layer forward consumes kv_caches), and
+        # collect aux hidden states so both dispatch branches exercise it.
+        unified_pool = jnp.stack(kv_caches, axis=1)
+        model.model.aux_hidden_state_layers = [0, 2]
+
         # 1 seq with 16 tokens
         input_ids, attention_metadata, indices_do_sample = mock_model_inputs
         kv_caches, hidden_states, aux_hidden_states, _ = model(
             kv_caches, input_ids, attention_metadata)
         assert hidden_states.shape == (8, hidden_size)
-        assert len(aux_hidden_states) == 0
+        assert len(aux_hidden_states) == 2
+
+        # Unified block-major KV cache path: the same forward on the single
+        # 6D pool must match the per-layer path exactly (hidden states, aux
+        # hidden states, and every layer's cache = pool dim1 slice).
+        # Regression: this call raised IndexError while Qwen3Model's
+        # __call__ override lacked the unified branch.
+        if pp_world_size == 1:
+            unified_caches, unified_hidden, unified_aux, _ = model(
+                [unified_pool], input_ids, attention_metadata)
+            assert len(unified_caches) == 1
+            np.testing.assert_array_equal(
+                np.asarray(unified_hidden.astype(jnp.float32)),
+                np.asarray(hidden_states.astype(jnp.float32)))
+            assert len(unified_aux) == 2
+            for unified_x, ref_x in zip(unified_aux, aux_hidden_states):
+                np.testing.assert_array_equal(
+                    np.asarray(unified_x.astype(jnp.float32)),
+                    np.asarray(ref_x.astype(jnp.float32)))
+            for i, layer_cache in enumerate(kv_caches):
+                np.testing.assert_array_equal(
+                    np.asarray(unified_caches[0][:, i].astype(jnp.float32)),
+                    np.asarray(layer_cache.astype(jnp.float32)),
+                    err_msg=f"kv cache mismatch at layer {i}")
 
         hidden_states = hidden_states[indices_do_sample]
         assert hidden_states.shape == (1, hidden_size)

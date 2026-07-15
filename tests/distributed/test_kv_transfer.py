@@ -251,6 +251,106 @@ class KVTransferTest(jtu.JaxTestCase):
                     np.testing.assert_array_equal(
                         np.asarray(y[layer_idx])[p_d_off], 0)
 
+    def test_async_copy_unified_single_pool_donates_in_place(self):
+        """A single-element dest list (the unified pool) is the case that
+        needs the optimization_barrier in _async_copy_jit: the copy must
+        compile (no aliasing-verifier crash), land whole blocks at the right
+        dim0 offsets, and keep the donation in place (same per-shard buffer
+        pointers, i.e. the barrier adds no whole-pool copy)."""
+        num_devices = jax.device_count()
+        axis_shapes = (1, num_devices)
+        axis_names = ('data', 'model')
+        mesh = create_mesh(axis_shapes, axis_names)
+
+        num_blocks, num_layers = 32, 4
+        # kv-heads dim sized to the device count so the 'model' shard always
+        # divides evenly.
+        pool_shape = (num_blocks, num_layers, 16, num_devices, 2, 128)
+        dtype = jnp.bfloat16
+        partition_spec = jax.sharding.PartitionSpec(None, None, None, 'model',
+                                                    None, None)
+        device_sharding = jax.sharding.NamedSharding(mesh,
+                                                     partition_spec,
+                                                     memory_kind='device')
+        replicated_sharding = jax.sharding.NamedSharding(mesh,
+                                                         P(),
+                                                         memory_kind='device')
+
+        src_offsets_list = [0, 1, 3]
+        dest_offsets_list = [5, 9, 20]
+        chunk_sizes_list = [1, 2, 1]
+        num_copy_blocks = sum(chunk_sizes_list)
+
+        src_offsets = jax.device_put(
+            jnp.array(src_offsets_list, dtype=jnp.int32), replicated_sharding)
+        dest_offsets = jax.device_put(
+            jnp.array(dest_offsets_list, dtype=jnp.int32), replicated_sharding)
+        chunk_sizes = jax.device_put(
+            jnp.array(chunk_sizes_list, dtype=jnp.int32), replicated_sharding)
+        num_chunks = jax.device_put(
+            jnp.array([len(chunk_sizes_list)], dtype=jnp.int32),
+            replicated_sharding)
+
+        dest_pool = create_single_layer_kv_cache(
+            pool_shape,
+            dtype,
+            device_sharding,
+            init_zeros=True,
+        )
+        src_blocks = create_single_layer_kv_cache(
+            (num_copy_blocks, ) + pool_shape[1:],
+            dtype,
+            device_sharding,
+            init_zeros=False,
+        )
+        jax.block_until_ready([dest_pool, src_blocks])
+        src_np = np.asarray(src_blocks.astype(jnp.float32))
+
+        # Per-device buffer pointers of the (about to be donated) dest.
+        ptrs_before = {
+            shard.device: shard.data.unsafe_buffer_pointer()
+            for shard in dest_pool.addressable_shards
+        }
+
+        y = multi_layer_copy(
+            src_array=[src_blocks],
+            dest_array=[dest_pool],
+            src_offsets=src_offsets,
+            dest_offsets=dest_offsets,
+            chunk_sizes=chunk_sizes,
+            num_chunks=num_chunks,
+            mesh=mesh,
+            src_sharding_spec=partition_spec,
+            dest_sharding_spec=partition_spec,
+            replicated_sharding_spec=P(),
+        )
+        self.assertEqual(len(y), 1)
+        out = y[0]
+        out.block_until_ready()
+
+        self.assertEqual(out.sharding.memory_kind, 'device')
+        self.assertEqual(out.shape, pool_shape)
+
+        # Donation held: same buffer, no extra whole-pool copy from the
+        # optimization_barrier.
+        ptrs_after = {
+            shard.device: shard.data.unsafe_buffer_pointer()
+            for shard in out.addressable_shards
+        }
+        self.assertEqual(ptrs_before, ptrs_after)
+
+        # Data correctness: each chunk of whole blocks (all layers at once)
+        # landed at its destination block offset; everything else is zero.
+        out_np = np.asarray(out.astype(jnp.float32))
+        copied_rows = set()
+        for s_off, d_off, c_size in zip(src_offsets_list, dest_offsets_list,
+                                        chunk_sizes_list):
+            np.testing.assert_array_equal(out_np[d_off:d_off + c_size],
+                                          src_np[s_off:s_off + c_size])
+            copied_rows.update(range(d_off, d_off + c_size))
+        untouched = [b for b in range(num_blocks) if b not in copied_rows]
+        self.assertFalse(out_np[untouched].any())
+
     def test_hbm_to_host_dma(self):
         self._run_copy_to_host_test('device', 'pinned_host')
 
