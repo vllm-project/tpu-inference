@@ -1007,6 +1007,10 @@ class TestTPUJaxRunnerDPInputsLightweight:
         assert len(call_args[1]) == len(input_ids)
         assert len(call_args[2]) == len(input_ids)
 
+        # Verify padded indices are explicitly int32 to avoid JAX compilation misses
+        assert call_args[1].dtype == np.int32
+        assert call_args[2].dtype == np.int32
+
         # Verify placeholder_num
         assert call_args[4] == 2  # Number of actual substitutions
 

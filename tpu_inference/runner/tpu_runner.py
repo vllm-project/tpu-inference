@@ -2531,7 +2531,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         missing_values = np.setdiff1d(full_range,
                                       token_in_tpu_cur_input_indices)
         padded_token_in_tpu_cur_input_indices = np.concatenate(
-            (token_in_tpu_cur_input_indices, missing_values))
+            (token_in_tpu_cur_input_indices, missing_values)).astype(np.int32)
 
         padded_token_in_tpu_pre_next_tokens_indices = np.pad(
             token_in_tpu_pre_next_tokens_indices, (0, idx_pad_len),
