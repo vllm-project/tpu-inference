@@ -116,6 +116,7 @@ cleanup() {
         tail -n 50 "/tmp/worker_${worker_ip}.log" || true
         rm -f "/tmp/worker_${worker_ip}.log"
       fi
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true; sudo -n rm -rf /tmp/ray/* /tmp/vllm/* >/dev/null 2>&1 || true" || true
     done
   fi
 
@@ -340,10 +341,6 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     echo "--- Distributing and starting Ray Worker on ${worker_ip}"
 
     # Prune Worker Node BEFORE it tries to pull the new giant image
-    echo "   -> Checking Worker VM Mount Directories..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "ls -ld /mnt/disks/checkpoint || echo 'Checkpoint directory /mnt/disks/checkpoint does not exist on Worker VM'" || true
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "ls -la /mnt/disks/checkpoint || echo 'Cannot list /mnt/disks/checkpoint on Worker VM'" || true
-
     echo "   -> Pruning Docker on worker to free disk space..."
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
     
@@ -420,6 +417,9 @@ wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log" "$SERVER
 
 # 5. Run Benchmarks / Validation
 if [ -n "${CLIENT_BENCH_CMD}" ]; then
+  # Two behavioral modes based on CASE_FILE:
+  # - JSON (.json): Delegates to run_bm.sh for advanced benchmark logic.
+  # - Legacy string: Executes CLIENT_BENCH_CMD directly as a raw bash command.
   if [[ "${CASE_FILE:-}" == *.json ]]; then
     echo "--- Invoking run_bm.sh for advanced benchmark logic on Head Node..."
     docker exec \

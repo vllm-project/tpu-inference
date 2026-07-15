@@ -69,6 +69,7 @@ cleanup() {
 
     # Do not kill the server if it was started externally
     if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
+        echo "[INFO] Multi-host server runs externally. Skipping local cleanup."
         return
     fi
 
@@ -83,12 +84,6 @@ cleanup() {
     fi
     
     CLEANUP_DONE="true"
-
-    # If server was started externally, we DON'T kill it here.
-    if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
-        echo "[INFO] Multi-host server runs externally. Skipping local cleanup."
-        return
-    fi
 
     # Only show cleanup info if exiting with an error or interrupted
     if [[ $exit_code -ne 0 ]]; then
