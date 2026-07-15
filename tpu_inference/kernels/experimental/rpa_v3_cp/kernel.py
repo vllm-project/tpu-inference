@@ -2128,6 +2128,9 @@ def ragged_paged_attention(
     # 3D LSE buffer: (actual_num_kv_heads, max_num_tokens * num_q_heads_per_kv_head, 128).
     # The heads dim is flattened with tokens for better DMA alignment.
     # Initialize to -inf so skipped sequences get LSE=-inf, which results in merged output.
+    # Softmax accumulators (running max `m` and running sum `l`) must be
+    # fp32 when we emit the LSE: bf16 accumulators make `m + log(l)`
+    # underflow to -inf.
     lse_hbm = jnp.full(
         (actual_num_kv_heads, max_num_tokens * num_q_heads_per_kv_head, 128),
         -jnp.inf,
@@ -2182,9 +2185,6 @@ def ragged_paged_attention(
 
         bo_double_buf = bq_double_buf
 
-        # Softmax accumulators (running max `m` and running sum `l`) must be
-        # fp32 when we emit the LSE: bf16 accumulators make `m + log(l)`
-        # underflow to -inf.
         lse_acc_dtype = jnp.float32 if return_lse else out_dtype
         l_scratch = pltpu.VMEM(
             (actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128),
