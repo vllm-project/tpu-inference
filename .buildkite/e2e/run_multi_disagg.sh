@@ -30,6 +30,8 @@ NUM_PROMPTS=${NUM_PROMPTS:=100}
 RANDOM_SEED=${RANDOM_SEED:=10}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:=10}
 TEST_MODE=${TEST_MODE:=1} # 1: benchmark, 2: correctness, 3: both
+NODE_CONTAINER_NAME="node"
+PROXY_CONTAINER_NAME="disagg-proxy-benchmark"
 
 
 # Log directory setup
@@ -301,12 +303,12 @@ start_vllm_log_streaming() {
 
   echo "--- Streaming vLLM Prefill and Decode logs while waiting for health..."
 
-  docker exec node bash -c "touch /root/vllm_serve_prefill.log && tail -n +1 -F /root/vllm_serve_prefill.log" \
+  docker exec "$NODE_CONTAINER_NAME" bash -c "touch /root/vllm_serve_prefill.log && tail -n +1 -F /root/vllm_serve_prefill.log" \
     > >(sed -u 's/^/[prefill] /') 2>&1 &
   PREFILL_LOG_TAIL_PID=$!
 
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
-    "docker exec node bash -c 'touch /root/vllm_serve_decode.log && tail -n +1 -F /root/vllm_serve_decode.log'" \
+    "docker exec '$NODE_CONTAINER_NAME' bash -c 'touch /root/vllm_serve_decode.log && tail -n +1 -F /root/vllm_serve_decode.log'" \
     > >(sed -u 's/^/[decode] /') 2>&1 &
   DECODE_LOG_TAIL_PID=$!
 }
@@ -319,38 +321,38 @@ cleanup() {
 
   # Capture server logs before removing containers.
   echo "   -> Capturing server logs..."
-  docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
+  docker cp "$NODE_CONTAINER_NAME:/root/vllm_serve_prefill.log" "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp '$NODE_CONTAINER_NAME:/root/vllm_serve_decode.log' /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
     scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
   fi
 
   # Cleanup Prefill workers
   for ip in "${PREFILL_WORKER_IPS[@]}"; do
     echo "   -> Cleaning Prefill worker: $ip"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true" || true
   done
 
   # Cleanup Decode Head
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
     echo "   -> Cleaning Decode Head: $DECODE_HEAD_IP"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true" || true
   fi
 
   # Cleanup Decode workers
   for ip in "${DECODE_WORKER_IPS[@]}"; do
     echo "   -> Cleaning Decode worker: $ip"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true" || true
   done
 
   # Cleanup Prefill Head (Local Node)
   echo "   -> Cleaning Prefill Head (Local)..."
-  docker stop node >/dev/null 2>&1 || true
-  docker rm -f node >/dev/null 2>&1 || true
+  docker stop "$NODE_CONTAINER_NAME" >/dev/null 2>&1 || true
+  docker rm -f "$NODE_CONTAINER_NAME" >/dev/null 2>&1 || true
 
   # Cleanup Local proxy/benchmark container
-  docker stop disagg-proxy-benchmark >/dev/null 2>&1 || true
-  docker rm -f disagg-proxy-benchmark >/dev/null 2>&1 || true
+  docker stop "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
+  docker rm -f "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
 
   if [ $exit_code -ne 0 ]; then
     echo "--- 🚨 Script failed or timed out (Exit Code: $exit_code). Dumping logs..."
@@ -393,9 +395,9 @@ vllm_server_process_alive() {
   local process_check="pgrep -af '[v]llm serve' | grep -q -- '--port ${port}'"
 
   if [[ "$host" == "localhost" || "$host" == "127.0.0.1" || "$host" == "$HEAD_INTERNAL_IP" ]]; then
-    docker exec node bash -c "$process_check" >/dev/null 2>&1
+    docker exec "$NODE_CONTAINER_NAME" bash -c "$process_check" >/dev/null 2>&1
   else
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec node bash -c \"$process_check\"" >/dev/null 2>&1
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec '$NODE_CONTAINER_NAME' bash -c \"$process_check\"" >/dev/null 2>&1
   fi
 }
 
@@ -406,9 +408,9 @@ dump_vllm_server_log() {
 
   echo "+++ 📄 ${service_name} log (${host}:${log_path})"
   if [[ "$host" == "localhost" || "$host" == "127.0.0.1" || "$host" == "$HEAD_INTERNAL_IP" ]]; then
-    docker exec node cat "$log_path" 2>/dev/null || true
+    docker exec "$NODE_CONTAINER_NAME" cat "$log_path" 2>/dev/null || true
   else
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec node cat '${log_path}' 2>/dev/null || true" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec '$NODE_CONTAINER_NAME' cat '${log_path}' 2>/dev/null || true" || true
   fi
 }
 
@@ -482,16 +484,16 @@ dump_ray_resources() {
 
   echo "--- Ray resources for ${label} cluster (${host})"
   if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
-    docker exec node python3 -c "$ray_dump_cmd" || true
+    docker exec "$NODE_CONTAINER_NAME" python3 -c "$ray_dump_cmd" || true
   else
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec node python3 -c \"${ray_dump_cmd}\"" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec '$NODE_CONTAINER_NAME' python3 -c \"${ray_dump_cmd}\"" || true
   fi
 }
 
 
 PROJECT="$(gcloud config get-value project)"
 GCR_REPO="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference"
-IMAGE_NAME="${GCR_REPO}/vllm-tpu"
+IMAGE_NAME="${GCR_REPO}/vllm-tpu-multi-disagg"
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 TOP_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
@@ -642,7 +644,7 @@ docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
   ${PREFILL_DOCKER_EXEC_ENV_ARGS} \
-  node bash -c "vllm serve ${MODEL} \
+  ${NODE_CONTAINER_NAME} bash -c "vllm serve ${MODEL} \
     --port ${PREFILL_VLLM_PORT} \
     --tensor-parallel-size ${PREFILL_TENSOR_PARALLEL_SIZE} \
     --trust-remote-code \
@@ -666,7 +668,7 @@ docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
   ${DECODE_DOCKER_EXEC_ENV_ARGS} \
-  node bash -c "vllm serve ${MODEL} \
+  ${NODE_CONTAINER_NAME} bash -c "vllm serve ${MODEL} \
     --port ${DECODE_VLLM_PORT} \
     --tensor-parallel-size ${DECODE_TENSOR_PARALLEL_SIZE} \
     --trust-remote-code \
@@ -702,7 +704,7 @@ docker run -d \
     --privileged \
     --network host \
     --shm-size 16G \
-    --name "disagg-proxy-benchmark" \
+    --name "${PROXY_CONTAINER_NAME}" \
     -e HF_HOME="/root/hf" \
     -v "${HOST_HF_HOME}:/root/hf" \
     -v "$LOG_DIR:/root/logs" \
@@ -710,7 +712,7 @@ docker run -d \
     "${DOCKER_IMAGE}" -c "tail -f /dev/null"
 
 echo "--- Starting Toy Proxy Server inside container..."
-docker exec -d disagg-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/toy_proxy_server.py \
+docker exec -d "${PROXY_CONTAINER_NAME}" /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/toy_proxy_server.py \
     --host 0.0.0.0 \
     --port 8000 \
     --prefiller-hosts localhost \
@@ -723,7 +725,7 @@ wait_for_server_remote "127.0.0.1" 8000 "Toy Proxy Server" 600
 if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
     echo "--- Running Benchmark Test inside container..."
     timeout "${BENCHMARK_TIMEOUT_SECONDS:-1800}" \
-    docker exec disagg-proxy-benchmark /bin/bash -c "vllm bench serve \
+    docker exec "${PROXY_CONTAINER_NAME}" /bin/bash -c "vllm bench serve \
         --backend vllm \
         --host 127.0.0.1 \
         --port 8000 \
@@ -738,13 +740,13 @@ if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
         --seed ${RANDOM_SEED} > /root/logs/benchmark.txt 2>&1"
 
     echo "--- Benchmark Results ---"
-    docker exec disagg-proxy-benchmark cat /root/logs/benchmark.txt
+    docker exec "${PROXY_CONTAINER_NAME}" cat /root/logs/benchmark.txt
 fi
 
 if [ "$TEST_MODE" = "2" ] || [ "$TEST_MODE" = "3" ]; then
     echo "--- Running Correctness Test inside container..."
     timeout "${CORRECTNESS_TIMEOUT_SECONDS:-1800}" \
-    docker exec disagg-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py \
+    docker exec "${PROXY_CONTAINER_NAME}" /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py \
         --baseline_url http://${DECODE_HEAD_IP}:${DECODE_VLLM_PORT}/v1/completions \
         --disagg_url http://127.0.0.1:8000/v1/completions \
         --model ${MODEL} \
@@ -753,7 +755,7 @@ if [ "$TEST_MODE" = "2" ] || [ "$TEST_MODE" = "3" ]; then
         --output_length ${OUTPUT_LEN} > /root/logs/correctness.txt 2>&1"
 
     echo "--- Correctness Results ---"
-    docker exec disagg-proxy-benchmark cat /root/logs/correctness.txt
+    docker exec "${PROXY_CONTAINER_NAME}" cat /root/logs/correctness.txt
 fi
 
 echo "--- Tests completed successfully ---"
