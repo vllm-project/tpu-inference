@@ -501,11 +501,11 @@ class CompilationManager:
     def _precompile_substitute_placeholder_token(self) -> None:
         dp_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
-        replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec(None))
+        replicated_sharding = NamedSharding(self.runner.mesh,
+                                            PartitionSpec(None))
         indices_sharding = NamedSharding(self.runner.mesh, PartitionSpec(None))
 
-        placeholder_num = self._create_dummy_tensor(
-            (1, ), jnp.int32, sharding=indices_sharding)
+        placeholder_num = self._create_dummy_tensor((1, ), jnp.int32)
 
         def _compile_one(input_padding: int, input_sharding: NamedSharding,
                          next_tokens_size: int,
@@ -516,11 +516,10 @@ class CompilationManager:
                 (input_padding, ), jnp.int32, sharding=indices_sharding)
 
             input_ids = self._create_dummy_tensor((input_padding, ),
-                                             jnp.int32,
-                                             sharding=input_sharding)
-            next_tokens = self._create_dummy_tensor((next_tokens_size, ),
-                                               jnp.int32,
-                                               sharding=next_tokens_sharding)
+                                                  jnp.int32,
+                                                  sharding=input_sharding)
+            next_tokens = self._create_dummy_tensor(
+                (next_tokens_size, ), jnp.int32, sharding=next_tokens_sharding)
 
             self._run_compilation(
                 "_substitute_placeholder_token_fn",
@@ -918,21 +917,21 @@ class CompilationManager:
             # function.
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-            logits = jax.ShapeDtypeStruct((num_reqs, hsize),
-                                          jnp.float32,
-                                          sharding=logits_sharding)
+            logits = self._create_dummy_tensor((num_reqs, hsize),
+                                               jnp.float32,
+                                               sharding=logits_sharding)
             for do_sampling in (True, False):
                 for logprobs in (True, False):
                     if do_sampling:
-                        temperature = jax.ShapeDtypeStruct(
+                        temperature = self._create_dummy_tensor(
                             (num_reqs, ),
                             jnp.float32,
                             sharding=sampling_metadata_sharding)
-                        top_k = jax.ShapeDtypeStruct(
+                        top_k = self._create_dummy_tensor(
                             (num_reqs, ),
                             jnp.int32,
                             sharding=sampling_metadata_sharding)
-                        top_p = jax.ShapeDtypeStruct(
+                        top_p = self._create_dummy_tensor(
                             (num_reqs, ),
                             jnp.float32,
                             sharding=sampling_metadata_sharding)
@@ -944,7 +943,7 @@ class CompilationManager:
                     # Use a dummy tensor with a unique shape for each logprobs config.
                     # This avoids persistent cache collisions.
                     dummy_shape = (1 if logprobs else 2, )
-                    _cache_collision_dummy = jax.ShapeDtypeStruct(
+                    _cache_collision_dummy = self._create_dummy_tensor(
                         dummy_shape, jnp.int32, sharding=replicated_sharding)
 
                     sampling_metadata = TPUSupportedSamplingMetadata(
@@ -961,7 +960,7 @@ class CompilationManager:
                         self.runner.mesh,
                         logits,
                         sampling_metadata,
-                        compile_only=True,
+                        compile_only=False,
                         num_reqs=num_reqs,
                         do_sampling=do_sampling,
                         logprobs=logprobs,
