@@ -56,6 +56,7 @@ from vllm.sequence import IntermediateTensors
 
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -138,12 +139,35 @@ def _jit_masked_merge(inputs_embeds, is_multimodal, mm_embeds_parts):
     identical shapes. Concatenating `mm_embeds_parts` here too (rather than
     eagerly beforehand) keeps that op inside the same cached program instead
     of it recompiling separately every call.
+
+    Under `enable_dp_attention` (ambient mesh has a real 'data' axis, e.g.
+    size 4), this function had no sharding annotations, so JAX's default
+    GSPMD inference left `inputs_embeds`/`is_multimodal` fully replicated
+    (spec=P()) across the whole mesh -- even though `inputs_embeds`'s
+    leading dim is already the DP-combined size (e.g. 4x max_model_len).
+    Every device held a full copy of that combined array instead of its own
+    1/data_size slice, multiplying this function's memory footprint by the
+    DP degree on top of the shape-diversity cost, and was the dominant
+    reason DP=4 OOMs in ~24-38 requests while plain TP=2 (no data axis to
+    replicate across) runs hundreds cleanly. `with_sharding_constraint`
+    (not shard_map) is used deliberately: it only declares the desired
+    layout, and GSPMD inserts whatever collectives are needed (e.g. a
+    distributed prefix-sum for `cumsum` sharded along 'data') to keep the
+    result correct -- no manual per-shard logic to get wrong.
     """
+    inputs_embeds = jax.lax.with_sharding_constraint(
+        inputs_embeds,
+        jax.sharding.PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+    is_multimodal = jax.lax.with_sharding_constraint(
+        is_multimodal, jax.sharding.PartitionSpec(ShardingAxisName.ATTN_DATA))
+
     mm_embeds_flat = jnp.concatenate(mm_embeds_parts, axis=0)
     idx = jnp.cumsum(is_multimodal.astype(jnp.int32)) - 1
     idx = jnp.clip(idx, 0, mm_embeds_flat.shape[0] - 1)
     gathered = mm_embeds_flat[idx]
-    return jnp.where(is_multimodal[:, None], gathered, inputs_embeds)
+    result = jnp.where(is_multimodal[:, None], gathered, inputs_embeds)
+    return jax.lax.with_sharding_constraint(
+        result, jax.sharding.PartitionSpec(ShardingAxisName.ATTN_DATA, None))
 
 
 def _patched_merge_multimodal_embeddings(inputs_embeds, multimodal_embeddings,
@@ -183,12 +207,20 @@ def _jit_pack_deepstack(inputs_embeds, level_tensors):
     Same rationale as `_jit_masked_merge`: a persistent @jax.jit function so
     repeated shapes hit JAX's compile cache instead of recompiling per call.
     `level_tensors` has a fixed length (deepstack_num_level, a model constant),
-    so its pytree structure is stable across calls.
+    so its pytree structure is stable across calls. Also shards along 'data'
+    like `_jit_masked_merge` -- see that function's docstring for why
+    unsharded (fully-replicated) arrays under `enable_dp_attention` are a
+    major OOM contributor.
     """
+    data_spec = jax.sharding.PartitionSpec(ShardingAxisName.ATTN_DATA, None)
+    inputs_embeds = jax.lax.with_sharding_constraint(inputs_embeds, data_spec)
+    level_tensors = tuple(
+        jax.lax.with_sharding_constraint(t, data_spec) for t in level_tensors)
     stacked = jnp.stack(level_tensors,
                         axis=0)  # [num_levels, cur_tokens, hdim]
     packed = jnp.transpose(stacked, (1, 0, 2)).reshape(stacked.shape[1], -1)
-    return jnp.concatenate([inputs_embeds, packed], axis=-1)
+    result = jnp.concatenate([inputs_embeds, packed], axis=-1)
+    return jax.lax.with_sharding_constraint(result, data_spec)
 
 
 @functools.partial(jax.jit, static_argnames=("num_levels", "visual_dim"))
@@ -206,12 +238,20 @@ def _jit_deepstack_reshape_permute(deepstack_input_embeds, num_levels,
     enough to OOM within ~24 requests under sustained video load rather than
     the ~1500+ requests images needed to trigger the same class of crash.
     `num_levels`/`visual_dim` are static: fixed by model config, never vary
-    across calls, so this specializes to one cached compilation.
+    across calls, so this specializes to one cached compilation. Sharded
+    along 'data' for the same reason as `_jit_masked_merge` -- the token
+    axis moves from dim 0 (input) to dim 1 after the permute (output).
     """
+    deepstack_input_embeds = jax.lax.with_sharding_constraint(
+        deepstack_input_embeds,
+        jax.sharding.PartitionSpec(ShardingAxisName.ATTN_DATA, None))
     cur_tokens = deepstack_input_embeds.shape[0]
     reshaped = deepstack_input_embeds.reshape(cur_tokens, num_levels,
                                               visual_dim)
-    return jnp.transpose(reshaped, (1, 0, 2))
+    result = jnp.transpose(reshaped, (1, 0, 2))
+    return jax.lax.with_sharding_constraint(
+        result,
+        jax.sharding.PartitionSpec(None, ShardingAxisName.ATTN_DATA, None))
 
 
 def _patched_compute_deepstack_embeds(vllm_model,
