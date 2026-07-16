@@ -43,16 +43,16 @@ class ShardingAxisNameBase:
     )
     ATTN_DATA = ('data', 'pcp', 'attn_dp', 'attn_dp_expert')
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
-    MLP_DATA = ('data', 'pcp')
+    MLP_DATA = 'data'
     ATTN_HEAD = ('model', 'expert', 'dcp')  # Q heads
     KV_HEAD = ('model', 'expert')
     ATTN_TENSOR = None
-    MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp')
-    MOE_TENSOR = ('attn_dp', 'model', 'dcp')
+    MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
+    MOE_TENSOR = ('attn_dp', 'model', 'dcp', 'pcp')
     EXPERT = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
     EXPERT_DATA = ('data', 'attn_dp', 'attn_dp_expert', 'expert', 'model',
-                   'dcp')
-    VOCAB = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp')
+                   'dcp', 'pcp')
+    VOCAB = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
     MODEL_1 = 'model'
     MODEL_2 = 'expert'
 
