@@ -88,6 +88,8 @@ steps:
       - label: "${TPU_VERSION:-tpu6e} E2E speculative decoding test"
         key: ${TPU_VERSION:-tpu6e}_test_6
         soft_fail: true
+        # TODO: Look into the latency of precompilation of the e2e spec decoding test
+        timeout_in_minutes: 180
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -444,6 +446,12 @@ steps:
 
       - label: "${TPU_VERSION:-tpu6e} E2E test for Ray-based multi-host"
         key: "${TPU_VERSION:-tpu6e}_test_26"
+        # Temporarily disabled: consistently times out (~2h) and squats the
+        # scarce tpu_v7x_16_queue. Two independent causes -- (1) the multi-host
+        # image tag omitted the vLLM commit so workers could pull a clobbered
+        # image (fixed separately), and (2) a bad multi-host machine whose Runai
+        # weight-streamer stalls at ~50%. Re-enable once both are resolved.
+        skip: "Times out ~2h; re-enable after bad-machine fix"
         soft_fail: true
         agents:
           queue: tpu_v7x_16_queue

@@ -55,6 +55,8 @@ from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
 from tpu_inference.lora.lora_manager import (TPULRUCacheWorkerLoRAManager,
                                              parse_lora_module_path_env)
+from tpu_inference.models.common.compiler_options import \
+    get_step_fn_compiler_options
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -70,27 +72,6 @@ from tpu_inference.runner.mm_encoder_jit_manager import (
     MMEncoderJITManager, maybe_create_mm_encoder_jit_manager)
 
 logger = init_logger(__name__)
-
-
-def _get_sc_allreduce_allgather_offload_min_size_bytes() -> int:
-    """Returns the SparseCore all-reduce/all-gather offload minimum size in bytes.
-
-    Returns 0 if we use default XLA offload threshold.
-    """
-    sc_threshold_val = envs.SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES
-    sc_threshold_bytes = 0
-    if sc_threshold_val == "auto":
-        from tpu_inference.tpu_info import get_tpu_vmem_size_bytes
-        sc_threshold_bytes = get_tpu_vmem_size_bytes()
-    else:
-        try:
-            sc_threshold_bytes = int(sc_threshold_val)
-        except ValueError:
-            logger.warning(
-                f"Invalid value for SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: "
-                f"'{sc_threshold_val}'. Defaulting to 0 (always offload).")
-            sc_threshold_bytes = 0
-    return sc_threshold_bytes
 
 
 class _VllmRunner(torch.nn.Module):
@@ -328,23 +309,6 @@ class VllmModelWrapper:
 
     def jit_step_func(self):
 
-        compiler_options = {
-            "xla_tpu_all_gather_collective_matmul_mode":
-            "post_spmd_conservative",
-            "xla_tpu_reduce_scatter_collective_matmul_mode":
-            "post_spmd_conservative",
-            "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
-        }
-        sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
-        if sc_offload_bytes > 0:
-            threshold_bytes = str(sc_offload_bytes)
-            compiler_options[
-                "xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes"] = (
-                    threshold_bytes)
-            compiler_options[
-                "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
-                    threshold_bytes)
-
         def step_fun_impl(
             params_and_buffers,  # This has been wrapped into torchax TorchValue
             kv_caches: List[jax.Array],
@@ -504,7 +468,7 @@ class VllmModelWrapper:
 
         step_fun_with_options = step_fun_jit(
             step_fun_impl,
-            compiler_options=compiler_options,
+            compiler_options=get_step_fn_compiler_options(),
         )
 
         if self.is_draft_model:
@@ -546,16 +510,17 @@ class VllmModelWrapper:
                 for k, v in kwargs.items()
             }
 
-            output_from_torch = torch.func.functional_call(
-                self.model,
-                torch_view(params_and_buffers),
-                kwargs={
-                    "call_method": "embed_multimodal",
-                    "call_args": (),
-                    "call_kwargs": call_kwargs,
-                },
-                tie_weights=False,
-            )
+            with torchax.default_env():
+                output_from_torch = torch.func.functional_call(
+                    self.model,
+                    torch_view(params_and_buffers),
+                    kwargs={
+                        "call_method": "embed_multimodal",
+                        "call_args": (),
+                        "call_kwargs": call_kwargs,
+                    },
+                    tie_weights=False,
+                )
 
             return jax_view(output_from_torch)
 

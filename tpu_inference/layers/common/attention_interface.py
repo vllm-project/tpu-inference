@@ -605,10 +605,33 @@ def mla_attention(
         )
         batched_decode_tuned_params = get_tuned_params(
             batched_decode_tuning_key)
+        mixed_tuning_key = TuningKey(
+            case="mixed",
+            max_num_tokens=q.shape[1],
+            actual_num_q_heads=q.shape[0],
+            actual_lkv_dim=q.shape[2],
+            actual_r_dim=q_rope.shape[2],
+            kv_dtype=cache.dtype.name,
+            q_dtype=q.dtype.name,
+            page_size_per_kv_packing=cache.shape[1],
+            kv_packing=cache.shape[2],
+            max_num_seqs=md.padded_num_reqs // dp_size,
+            pages_per_seq=args[1].shape[0] // args[0].shape[0],
+        )
+        mixed_tuned_params = get_tuned_params(mixed_tuning_key)
+
+        # Temporally prefill use same params as mixed.
+        prefill_tuned_params = mixed_tuned_params
+
         num_kv_pages_per_block = (
-            batched_decode_tuned_params.num_kv_pages_per_block, 1, 1)
+            batched_decode_tuned_params.num_kv_pages_per_block,
+            prefill_tuned_params.num_kv_pages_per_block,
+            mixed_tuned_params.num_kv_pages_per_block)
         num_queries_per_block = (
-            batched_decode_tuned_params.num_queries_per_block, 16, 16)
+            batched_decode_tuned_params.num_queries_per_block,
+            prefill_tuned_params.num_queries_per_block,
+            mixed_tuned_params.num_queries_per_block)
+        mixed_q_split = mixed_tuned_params.q_split
         decode_batch_size = batched_decode_tuned_params.decode_batch_size
         logger.info(
             f"Using MLA tuned block sizes for batched decode: {batched_decode_tuned_params} for input shapes: {batched_decode_tuning_key}"
@@ -625,6 +648,7 @@ def mla_attention(
             num_kv_pages_per_block=num_kv_pages_per_block,
             num_queries_per_block=num_queries_per_block,
             decode_batch_size=decode_batch_size,
+            mixed_q_split=mixed_q_split,
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
