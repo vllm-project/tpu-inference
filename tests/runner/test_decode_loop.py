@@ -142,7 +142,7 @@ def test_continue_decode_early_exit():
 
     kv_caches = [jnp.zeros((2, 10))]  # dummy kv caches
 
-    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args):
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args, **kwargs):
         # Pass position in hidden_states so compute_logits can use it
         hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
                                                                           None,
@@ -251,7 +251,7 @@ def test_continue_decode_with_experts():
 
     kv_caches = [jnp.zeros((2, 10))]
 
-    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args):
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args, **kwargs):
         hidden_states = current_tokens.astype(jnp.float32)[:, None, None]
         pos = attn_metadata.input_positions
         experts = (jnp.ones(
