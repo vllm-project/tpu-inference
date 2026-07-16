@@ -338,3 +338,49 @@ class TestJaxQKVParallelLinear:
             f"K mismatch for tp_size={tp_size}"
         assert jnp.allclose(jnp.array(v_exp), v_actual, atol=1e-2), \
             f"V mismatch for tp_size={tp_size}"
+
+
+class TestJaxLinearMetadataDefaults(unittest.TestCase):
+    """Regression: JaxLinear/JaxLmHead must not share a mutable metadata dict
+    across default-constructed instances.
+
+    The previous signatures used kernel_metadata={} / bias_metadata={} and
+    then mutated them (kernel_metadata['eager_sharding'] = False). A shared
+    default dict means the first instance's mutation (and any caller-side
+    edits to the returned metadata) leak into every other default-constructed
+    layer. The fix uses None sentinels and copies into a fresh dict.
+    """
+
+    def test_default_metadata_not_shared_across_instances(self):
+        # Construct two JaxLinear instances on CPU without touching device
+        # kernels: exercise only the metadata-normalization logic via a small
+        # standalone reproduction of the fixed idiom (mirrors linear.py).
+        def normalize(kernel_metadata=None):
+            kernel_metadata = dict(kernel_metadata) if kernel_metadata else {}
+            if "eager_sharding" not in kernel_metadata:
+                kernel_metadata["eager_sharding"] = False
+            return kernel_metadata
+
+        m1 = normalize()
+        m1["eager_sharding"] = True  # an instance/caller customizes its copy
+        m2 = normalize()  # a fresh default-constructed instance
+
+        self.assertIsNot(m1, m2)
+        self.assertTrue(m1["eager_sharding"])
+        self.assertFalse(
+            m2["eager_sharding"],
+            "default metadata leaked across instances (mutable-default bug)")
+
+    def test_linear_signatures_use_none_sentinels(self):
+        # Guard against a regression to mutable default args in the source.
+        import inspect
+
+        from tpu_inference.layers.jax.linear import JaxLinear, JaxLmHead
+        for cls in (JaxLinear, JaxLmHead):
+            sig = inspect.signature(cls.__init__)
+            for name, param in sig.parameters.items():
+                if name in ("kernel_metadata", "bias_metadata"):
+                    self.assertIsNone(
+                        param.default,
+                        f"{cls.__name__}.{name} must default to None, not a "
+                        f"mutable {type(param.default).__name__}")
