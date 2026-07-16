@@ -63,7 +63,6 @@ def gdn_attention_core_tpu(
 
     vllm_context = get_vllm_model_wrapper_context()
     shared_attn_metadata = vllm_context.shared_attn_metadata
-    assert shared_attn_metadata is not None, "shared_attn_metadata is None in gdn_attention_core_tpu"
     padded_num_reqs = shared_attn_metadata.padded_num_reqs
     request_distribution = shared_attn_metadata.request_distribution
     query_start_loc = shared_attn_metadata.query_start_loc
