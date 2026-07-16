@@ -119,7 +119,8 @@ if [ -n "$LIMIT" ]; then
     lm_eval_args+=(--limit "$LIMIT")
 fi
 
-output=$(VLLM_XLA_CHECK_RECOMPILATION=0 USE_MOE_EP_KERNEL=${USE_MOE_EP_KERNEL} MODEL_IMPL_TYPE=vllm lm_eval "${lm_eval_args[@]}")
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+output=$(VLLM_XLA_CHECK_RECOMPILATION=0 USE_MOE_EP_KERNEL=${USE_MOE_EP_KERNEL} MODEL_IMPL_TYPE=vllm python "${script_dir}/../../scripts/vllm/integration/lm_eval_accuracy.py" "${lm_eval_args[@]}")
 
 echo "Evaluation output:"
 echo "$output"
