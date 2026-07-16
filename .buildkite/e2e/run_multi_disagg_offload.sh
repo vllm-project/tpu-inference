@@ -296,13 +296,18 @@ cleanup() {
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp '$NODE_CONTAINER_NAME:/root/vllm_serve_decode.log' /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
     scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log" || true
   fi
 
   # Cleanup remote hosts
   for ip in "${ALL_IPS_ARRAY[@]}"; do
     if [[ "$ip" != "$HEAD_INTERNAL_IP" ]]; then
       echo "   -> Cleaning remote host: $ip"
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true" || true
+      if [[ "$ip" == "$DECODE_HEAD_IP" ]]; then
+        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; rm -f ~/tpu-inference/scripts/start_decode.sh ~/tpu-inference/scripts/multihost/run_cluster.sh; rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
+      else
+        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; rm -f ~/tpu-inference/scripts/multihost/run_cluster.sh; rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
+      fi
     fi
   done
 
@@ -314,6 +319,8 @@ cleanup() {
   # Cleanup local proxy/benchmark container
   docker stop "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
   docker rm -f "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
+
+  rm -f /tmp/start_prefill.sh /tmp/start_decode.sh
 
   if [ $exit_code -ne 0 ]; then
     echo "--- 🚨 Script failed or timed out (Exit Code: $exit_code). Dumping logs..."

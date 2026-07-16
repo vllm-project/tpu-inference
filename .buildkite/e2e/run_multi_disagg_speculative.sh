@@ -195,20 +195,109 @@ IMAGE_NAME="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference/vllm-tpu-multi-d
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TOP_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 echo "--- Building and pushing speculative decoding Docker image ---"
+PREFILL_LOG_TAIL_PID=""
+DECODE_LOG_TAIL_PID=""
+
+stop_vllm_log_streaming() {
+  for pid_var in PREFILL_LOG_TAIL_PID DECODE_LOG_TAIL_PID; do
+    local pid="${!pid_var:-}"
+    if [[ -n "$pid" ]]; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+      printf -v "$pid_var" ''
+    fi
+  done
+}
+
+start_vllm_log_streaming() {
+  stop_vllm_log_streaming
+  echo "--- Streaming vLLM Prefill and Decode logs while waiting for health..."
+
+  docker exec "$NODE_CONTAINER_NAME" bash -c \
+    "touch /root/vllm_serve_prefill.log && tail -n +1 -F /root/vllm_serve_prefill.log" \
+    > >(sed -u 's/^/[prefill] /') 2>&1 &
+  PREFILL_LOG_TAIL_PID=$!
+
+  ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" \
+    "docker exec '$NODE_CONTAINER_NAME' bash -c 'touch /root/vllm_serve_decode.log && tail -n +1 -F /root/vllm_serve_decode.log'" \
+    > >(sed -u 's/^/[decode] /') 2>&1 &
+  DECODE_LOG_TAIL_PID=$!
+}
+
 cleanup() {
   local code=$?
+  local cleanup_failed=0
   echo "🧹 Cleaning up speculative disaggregation containers..."
+  stop_vllm_log_streaming
+
+  if ! docker cp "$NODE_CONTAINER_NAME:/root/vllm_serve_prefill.log" "$LOG_DIR/prefill.txt" >/dev/null 2>&1; then
+    echo "WARNING: Failed to capture the Prefill server log." >&2
+    cleanup_failed=1
+  fi
+  if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
+    local capture_status
+    if ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" \
+      "rm -f /tmp/vllm_serve_decode.log || exit 1; if docker container inspect '$NODE_CONTAINER_NAME' >/dev/null 2>&1 && docker exec '$NODE_CONTAINER_NAME' test -f /root/vllm_serve_decode.log; then docker cp '$NODE_CONTAINER_NAME:/root/vllm_serve_decode.log' /tmp/vllm_serve_decode.log >/dev/null; else exit 2; fi"; then
+      capture_status=0
+    else
+      capture_status=$?
+    fi
+    if (( capture_status == 0 )); then
+      if ! scp "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1; then
+        echo "WARNING: Failed to copy the Decode server log from ${DECODE_HEAD_IP}." >&2
+        cleanup_failed=1
+      fi
+    elif (( capture_status == 2 )); then
+      echo "INFO: Decode server log was not available from ${DECODE_HEAD_IP}." >&2
+    else
+      echo "WARNING: Failed to capture the Decode server log from ${DECODE_HEAD_IP}." >&2
+      cleanup_failed=1
+    fi
+    if ! ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" "rm -f /tmp/vllm_serve_decode.log"; then
+      echo "WARNING: Failed to remove /tmp/vllm_serve_decode.log on ${DECODE_HEAD_IP}." >&2
+      cleanup_failed=1
+    fi
+  fi
+
   for ip in "${ALL_IPS_ARRAY[@]}"; do
-    [[ "$ip" == "$HEAD_INTERNAL_IP" ]] || ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" \
-      "docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true" || true
+    if [[ "$ip" != "$HEAD_INTERNAL_IP" ]]; then
+      echo "   -> Cleaning remote host: $ip"
+      local remote_files="~/tpu-inference/scripts/multihost/run_cluster.sh"
+      [[ "$ip" == "$DECODE_HEAD_IP" ]] && remote_files="~/tpu-inference/scripts/start_decode.sh $remote_files"
+      if ! ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" \
+        "status=0; docker info >/dev/null 2>&1 || status=1; if [ \$status -eq 0 ] && docker container inspect '$NODE_CONTAINER_NAME' >/dev/null 2>&1; then docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || status=1; fi; rm -f $remote_files || status=1; if [ -d ~/tpu-inference/scripts/multihost ] && [ -z \"\$(find ~/tpu-inference/scripts/multihost -mindepth 1 -maxdepth 1 -print -quit)\" ]; then rmdir ~/tpu-inference/scripts/multihost || status=1; fi; if [ -d ~/tpu-inference/scripts ] && [ -z \"\$(find ~/tpu-inference/scripts -mindepth 1 -maxdepth 1 -print -quit)\" ]; then rmdir ~/tpu-inference/scripts || status=1; fi; exit \$status"; then
+        echo "WARNING: Cleanup failed on remote host ${ip} (SSH, Docker, container, or temporary-file cleanup)." >&2
+        cleanup_failed=1
+      fi
+    fi
   done
-  docker rm -f "$NODE_CONTAINER_NAME" "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
-  if (( code != 0 )); then
+  if ! docker info >/dev/null 2>&1; then
+    echo "WARNING: Local Docker daemon is unavailable during cleanup." >&2
+    cleanup_failed=1
+  else
+    for container in "$NODE_CONTAINER_NAME" "$PROXY_CONTAINER_NAME"; do
+      if docker container inspect "$container" >/dev/null 2>&1 && ! docker rm -f "$container" >/dev/null 2>&1; then
+        echo "WARNING: Failed to remove local container ${container}." >&2
+        cleanup_failed=1
+      fi
+    done
+  fi
+  if ! rm -f /tmp/start_prefill.sh /tmp/start_decode.sh; then
+    echo "WARNING: Failed to remove local temporary launchers." >&2
+    cleanup_failed=1
+  fi
+  if (( code != 0 || cleanup_failed )); then
+    echo "--- Diagnostic logs (job or cleanup failure) ---" >&2
     for log in prefill decode proxy benchmark correctness; do
       [[ -s "$LOG_DIR/$log.txt" ]] && { echo "+++ $log.txt"; cat "$LOG_DIR/$log.txt"; }
     done
   fi
+  if (( cleanup_failed )); then
+    echo "WARNING: Cleanup completed with failures." >&2
+    (( code == 0 )) && exit 1
+  fi
   echo "✅ Cleanup complete."
+  return "$code"
 }
 trap cleanup EXIT
 
@@ -249,29 +338,52 @@ launch_cluster() {
   done
 }
 
-wait_ray() {
-  local host=$1
-  echo "Waiting for Ray head on ${host}:6379..."
-  for _ in {1..60}; do nc -z -w2 "$host" 6379 >/dev/null 2>&1 && return 0; sleep 5; done
-  echo "Ray head did not start on $host" >&2
+dump_ray_resources() {
+  local host=$1 label=$2
+  local ray_dump_cmd="import json, ray; ray.init(address='auto', ignore_reinit_error=True); print(json.dumps(ray.nodes(), indent=2, sort_keys=True))"
+  echo "--- Ray node resources for ${label} cluster (${host}) ---" >&2
+  if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
+    docker exec "$NODE_CONTAINER_NAME" python3 -c "$ray_dump_cmd" >&2 || true
+  else
+    ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" "docker exec '$NODE_CONTAINER_NAME' python3 -c \"${ray_dump_cmd}\"" >&2 || true
+  fi
+}
+
+wait_for_ray_cluster_members() {
+  local host=$1 expected_nodes=$2 label=$3 timeout=${4:-600}
+  local ray_ready_cmd="import ray; ray.init(address='auto', ignore_reinit_error=True); alive=sum(node.get('Alive', False) for node in ray.nodes()); raise SystemExit(0 if alive >= ${expected_nodes} else 1)"
+  local end_time=$((SECONDS + timeout))
+  echo "Waiting for ${label} Ray cluster to register ${expected_nodes} alive node(s)..."
+  while (( SECONDS < end_time )); do
+    if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
+      if docker exec "$NODE_CONTAINER_NAME" python3 -c "$ray_ready_cmd" >/dev/null 2>&1; then
+        echo "${label} Ray cluster has registered ${expected_nodes} alive node(s)."
+        return 0
+      fi
+    elif ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" "docker exec '$NODE_CONTAINER_NAME' python3 -c \"${ray_ready_cmd}\"" >/dev/null 2>&1; then
+      echo "${label} Ray cluster has registered ${expected_nodes} alive node(s)."
+      return 0
+    fi
+    sleep 5
+  done
+  echo "ERROR: ${label} Ray cluster did not register ${expected_nodes} alive node(s) within ${timeout}s." >&2
+  dump_ray_resources "$host" "$label"
   return 1
 }
 
 echo "--- 1. Starting Prefill Ray Cluster ---"
 launch_cluster "$PREFILL_HEAD_IP" --head "$PREFILL_ENV" "${PREFILL_WORKERS[*]:-}"
-wait_ray "$PREFILL_HEAD_IP"
+wait_for_ray_cluster_members "$PREFILL_HEAD_IP" "$PREFILL_HOSTS_COUNT" "Prefill"
 
 echo "--- 2. Starting Decode Ray Cluster ---"
 launch_cluster "$DECODE_HEAD_IP" --head "$DECODE_ENV" "${DECODE_WORKERS[*]:-}"
-wait_ray "$DECODE_HEAD_IP"
-echo "--- Waiting for Ray clusters to fully form ---"
-sleep 90
+wait_for_ray_cluster_members "$DECODE_HEAD_IP" "$DECODE_HOSTS_COUNT" "Decode"
 
 echo "--- 3. Starting vLLM Prefill and Decode Servers ---"
 PREFILL_PORT=8400
 DECODE_PORT=9400
 echo "Starting vLLM Prefill server on ${PREFILL_HEAD_IP}:${PREFILL_PORT}..."
-cat << EOF > /tmp/start_prefill_speculative.sh
+cat << EOF > /tmp/start_prefill.sh
 #!/bin/bash
 set -x
 docker exec \
@@ -286,32 +398,34 @@ docker exec \
     --max-model-len 1024 > /root/vllm_serve_prefill.log 2>&1"
 set +x
 EOF
-chmod +x /tmp/start_prefill_speculative.sh
-bash /tmp/start_prefill_speculative.sh
+chmod +x /tmp/start_prefill.sh
+bash /tmp/start_prefill.sh
 
 echo "Starting vLLM Decode server with speculative decoding on ${DECODE_HEAD_IP}:${DECODE_PORT}..."
-cat << EOF > /tmp/start_decode_speculative.sh
+cat << EOF > /tmp/start_decode.sh
 #!/bin/bash
 set -x
 docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
-  ${NODE_CONTAINER_NAME} bash -c "vllm serve ${MODEL} \
+  -e "SPECULATIVE_CONFIG=${SPECULATIVE_CONFIG}" \
+  -e 'KV_TRANSFER_CONFIG={"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_connector","kv_role":"kv_consumer"}' \
+  ${NODE_CONTAINER_NAME} bash -c 'vllm serve ${MODEL} \
     --port ${DECODE_PORT} \
     --tensor-parallel-size ${DECODE_TP} \
     --trust-remote-code \
     --no-enable-prefix-caching \
-    --speculative-config '${SPECULATIVE_CONFIG}' \
-    --kv-transfer-config '{\"kv_connector\": \"TPUConnector\", \"kv_connector_module_path\": \"tpu_inference.distributed.tpu_connector\", \"kv_role\": \"kv_consumer\"}' \
-    --max-model-len 1024 > /root/vllm_serve_decode.log 2>&1"
+    --speculative-config "\$SPECULATIVE_CONFIG" \
+    --kv-transfer-config "\$KV_TRANSFER_CONFIG" \
+    --max-model-len 1024 > /root/vllm_serve_decode.log 2>&1'
 set +x
 EOF
-chmod +x /tmp/start_decode_speculative.sh
+chmod +x /tmp/start_decode.sh
 ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" "mkdir -p ~/tpu-inference/scripts"
-cat /tmp/start_decode_speculative.sh | base64 | ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" \
-  "base64 -d > ~/tpu-inference/scripts/start_decode_speculative.sh"
+base64 < /tmp/start_decode.sh | ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" \
+  "base64 -d > ~/tpu-inference/scripts/start_decode.sh"
 ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" \
-  "chmod +x ~/tpu-inference/scripts/start_decode_speculative.sh && bash ~/tpu-inference/scripts/start_decode_speculative.sh"
+  "chmod +x ~/tpu-inference/scripts/start_decode.sh && bash ~/tpu-inference/scripts/start_decode.sh"
 
 wait_server() {
   local host=$1 port=$2
@@ -363,10 +477,12 @@ wait_vllm_server() {
 }
 
 echo "--- 4. Checking vLLM health and speculative decoding process ---"
+start_vllm_log_streaming
 wait_vllm_server 127.0.0.1 "$PREFILL_PORT" "$PREFILL_HEAD_IP" /root/vllm_serve_prefill.log
 wait_vllm_server "$DECODE_HEAD_IP" "$DECODE_PORT" "$DECODE_HEAD_IP" /root/vllm_serve_decode.log
 ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" \
   "docker exec '$NODE_CONTAINER_NAME' pgrep -af '[v]llm serve' | grep -F -- '--speculative-config'"
+stop_vllm_log_streaming
 
 echo "--- 5. Starting Proxy and Benchmark Container ---"
 docker run -d --privileged --network host --shm-size 16G --name "$PROXY_CONTAINER_NAME" \
