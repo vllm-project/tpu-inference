@@ -484,6 +484,7 @@ class TestTPUJaxRunner:
         runner.dp_size = 1
         runner.vllm_config.parallel_config.data_parallel_size = 1
         runner.vllm_config.parallel_config.is_moe_model = False
+        runner.scheduler_config.async_scheduling = False
         runner.vllm_config.additional_config = {
             "enable_continue_decode": True,
             "continue_decode_eos_check_interval": 5,
@@ -516,9 +517,12 @@ class TestTPUJaxRunner:
         mock_tokens_cpu = np.zeros((5, 8), dtype=np.int32)
         mock_tokens_cpu[:, 0] = [101, 999, 0, 0, 0]
 
-        mock_device_get.side_effect = lambda arg: (mock_tokens_cpu, None,
-                                                   np.int32(5)) if isinstance(
-                                                       arg, tuple) else arg
+        def device_get_side_effect(arg):
+            if isinstance(arg, tuple) and len(arg) == 2:
+                return mock_tokens_cpu, np.int32(5)
+            return arg
+
+        mock_device_get.side_effect = device_get_side_effect
 
         mock_seq_lens_cpu = np.array([10, 0, 0, 0, 0, 0, 0, 0])
         runner.input_batch.num_tokens = mock_seq_lens_cpu.copy()
@@ -726,6 +730,7 @@ class TestTPUJaxRunner:
         runner._get_min_remaining_slots.return_value = 5
         runner.vllm_config.additional_config = {"max_decode_steps": 5}
         runner.static_max_decode_steps = 5
+        runner.continue_decode_eos_check_interval = 5
         runner.model_config.get_vocab_size.return_value = 1000
         runner.model_config.hf_config = MagicMock(eos_token_id=999,
                                                   pad_token_id=0)
@@ -776,6 +781,8 @@ class TestTPUJaxRunner:
         assert runner._pre_async_results.is_continue_decode is True
         assert runner._continue_decode_output is not None
 
+        assert mock_continue_decode.call_args.kwargs[
+            "continue_decode_eos_check_interval"] == runner.continue_decode_eos_check_interval
         # Verify output resolution via get_output()
         async_out = runner._continue_decode_output
         model_runner_output = async_out.get_output()

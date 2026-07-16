@@ -470,6 +470,7 @@ def test_continue_decode_exit_on_eos_interval():
         final_state,
         current_rng,
         all_expert_indices,
+        logprobs_tensors,
     ) = continue_decode(
         state={},
         model_fn=mock_model_fn,
