@@ -17,6 +17,8 @@ import os
 
 from absl import app, flags
 
+from tools.kernel.tuner.v1.batched_rpa_kernel_tuner import \
+    BatchedRpaKernelTuner
 from tools.kernel.tuner.v1.common.kernel_tuner_base import RunConfig
 from tools.kernel.tuner.v1.example_kernel_tuner import ExampleKernelTuner
 from tools.kernel.tuner.v1.mla_kernel_tuner import MlaKernelTuner
@@ -96,6 +98,15 @@ _MAX_EXECUTION_MINUTES = flags.DEFINE_integer(
     'Only used when the kernel tuning job is scheduled through Buildkite. The maximum execution time in minutes for each kernel tuning job. If the job exceeds this time, it will save the job progresss, generate a new job to be scheduled by Buildkite and exit.'
 )
 
+_BAYESIAN_OPTIMIZATION = flags.DEFINE_boolean(
+    'bayesian_optimization', None,
+    'Override whether to use Bayesian optimization (optuna) instead of sweeping '
+    'all tuning cases.  When True, the kernel tuner uses optuna to intelligently '
+    'select which tunable-parameter combinations to evaluate.  When False, every '
+    'case is evaluated (full sweep).  When not specified (None), the default set '
+    'by each kernel tuner\'s TunerConfig.support_bayesian_optimization is used.'
+)
+
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system
 # if we have more kernel tuners. For example, we can define an interface for
@@ -107,6 +118,7 @@ KERNEL_TUNER_REGISTRY = {
     'example_kernel_tuner': ExampleKernelTuner,
     'rpa_v3_kernel_tuner': RpaV3KernelTuner,
     'mla_kernel_tuner': MlaKernelTuner,
+    'batched_rpa_kernel_tuner': BatchedRpaKernelTuner
 }
 
 
@@ -152,6 +164,16 @@ def main(argv):
                            debug=_DEBUG.value)
     kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
     kernel_tuner = kernel_tuner_cls(run_config=run_config)
+
+    # Allow the caller to override the tuner's default optimization strategy
+    # via --bayesian_optimization.  None means "use the tuner's own default".
+    if _BAYESIAN_OPTIMIZATION.value is not None:
+        kernel_tuner.tuner_config.support_bayesian_optimization = (
+            _BAYESIAN_OPTIMIZATION.value)
+        logger.info(
+            f'Overriding support_bayesian_optimization to '
+            f'{_BAYESIAN_OPTIMIZATION.value} via --bayesian_optimization flag.'
+        )
 
     if kernel_tuner.run_config.run_locally:
         logger.info(
