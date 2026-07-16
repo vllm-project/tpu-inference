@@ -869,23 +869,20 @@ def _ragged_paged_attention_kernel_loop(
             # dst_u32 shape: [bkv_sz, num_kv_heads_x2_per_kv_packing, head_dim] in uint32
 
             # Mosaic strided loads require the (base memref's) lane dim to be
-            # exactly 128. After the uint32 bitcast the lane dim is head_dim, so
-            # for head_dim > 128 (e.g. 256) reshape head_dim -> (head_dim//128,
-            # 128) so the strided load's base memref has a 128-wide lane dim.
+            # exactly 128. After the uint32 bitcast the lane dim is head_dim,
+            # which is always align_to(.., 128), so split it into
+            # (head_dim // 128, 128) unconditionally: the strided load then
+            # always sees a 128-wide lane dim, and head_dim == 128 just gets a
+            # degenerate leading 1.
             lane = 128
-            hd_u32 = src_u32.shape[-1]
-            if hd_u32 > lane:
-                src_r = src_u32.reshape(*src_u32.shape[:-1], hd_u32 // lane, lane)
-                dst_r = dst_u32.reshape(*dst_u32.shape[:-1], hd_u32 // lane, lane)
-                dst_r[pl.ds(0, n_strided)] = src_r[
-                    pl.ds(src_start, n_strided, cp_group_size),
-                    :num_kv_heads_x2_per_kv_packing,
-                ]
-            else:
-                dst_u32[pl.ds(0, n_strided)] = src_u32[
-                    pl.ds(src_start, n_strided, cp_group_size),
-                    :num_kv_heads_x2_per_kv_packing,
-                ]
+            src_r = src_u32.reshape(*src_u32.shape[:-1],
+                                    src_u32.shape[-1] // lane, lane)
+            dst_r = dst_u32.reshape(*dst_u32.shape[:-1],
+                                    dst_u32.shape[-1] // lane, lane)
+            dst_r[pl.ds(0, n_strided)] = src_r[
+                pl.ds(src_start, n_strided, cp_group_size),
+                :num_kv_heads_x2_per_kv_packing,
+            ]
 
             def loop_body(i, states):
                 remaining_sz, ignore = states
