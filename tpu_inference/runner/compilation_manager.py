@@ -504,21 +504,21 @@ class CompilationManager:
         replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec(None))
         indices_sharding = NamedSharding(self.runner.mesh, PartitionSpec(None))
 
-        placeholder_num = jax.ShapeDtypeStruct(
+        placeholder_num = self._create_dummy_tensor(
             (1, ), jnp.int32, sharding=indices_sharding)
 
         def _compile_one(input_padding: int, input_sharding: NamedSharding,
                          next_tokens_size: int,
                          next_tokens_sharding: NamedSharding) -> None:
-            padded_token_in_tpu_cur_input_indices = jax.ShapeDtypeStruct(
+            padded_token_in_tpu_cur_input_indices = self._create_dummy_tensor(
                 (input_padding, ), jnp.int32, sharding=indices_sharding)
-            padded_token_in_tpu_pre_next_tokens_indices = jax.ShapeDtypeStruct(
+            padded_token_in_tpu_pre_next_tokens_indices = self._create_dummy_tensor(
                 (input_padding, ), jnp.int32, sharding=indices_sharding)
 
-            input_ids = jax.ShapeDtypeStruct((input_padding, ),
+            input_ids = self._create_dummy_tensor((input_padding, ),
                                              jnp.int32,
                                              sharding=input_sharding)
-            next_tokens = jax.ShapeDtypeStruct((next_tokens_size, ),
+            next_tokens = self._create_dummy_tensor((next_tokens_size, ),
                                                jnp.int32,
                                                sharding=next_tokens_sharding)
 
@@ -530,7 +530,7 @@ class CompilationManager:
                 padded_token_in_tpu_pre_next_tokens_indices,
                 next_tokens,
                 placeholder_num,
-                compile_only=True,
+                compile_only=False,
                 num_tokens=input_padding,
                 next_tokens_size=next_tokens_size,
             )
