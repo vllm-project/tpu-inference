@@ -23,8 +23,10 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner.kv_cache import (create_kv_caches,
+                                           create_unified_kv_cache,
                                            get_attention_page_size_bytes,
-                                           get_kv_cache_shape_with_mesh)
+                                           get_kv_cache_shape_with_mesh,
+                                           model_uses_unified_kv_cache)
 from tpu_inference.utils import get_dtype_packing
 
 
@@ -260,3 +262,130 @@ def test_create_kv_caches_batch_equivalence(mesh: Mesh):
             assert b_cache.sharding == i_cache.sharding
             # Note: Content is empty/uninitialized, so we don't compare values,
             # just the metadata and allocation properties.
+
+
+# ---- Tests for the unified block-major KV cache path ----
+
+
+def _make_vllm_config(architectures, speculative_config=None):
+    """Minimal config mock exposing exactly what the gate reads."""
+    config = MagicMock()
+    config.speculative_config = speculative_config
+    config.model_config.architectures = architectures
+    return config
+
+
+@pytest.mark.parametrize("architectures,speculative_config,expected", [
+    (["Qwen2ForCausalLM"], None, True),
+    (["Qwen3ForCausalLM"], None, True),
+    (["SomeVisionEncoder", "Qwen2ForCausalLM"], None, True),
+    (["LlamaForCausalLM"], None, False),
+    (["Qwen2_5_VLForConditionalGeneration"], None, False),
+    (["Qwen3MoeForCausalLM"], None, False),
+    ([], None, False),
+    (["Qwen3ForCausalLM"], "draft", False),
+])
+def test_model_uses_unified_kv_cache(architectures, speculative_config,
+                                     expected):
+    """Allowlisted archs (anywhere in the list) take the unified path;
+    other archs and speculative decoding keep the per-layer path."""
+    config = _make_vllm_config(architectures,
+                               speculative_config=speculative_config)
+    assert model_uses_unified_kv_cache(config) is expected
+
+
+@pytest.mark.parametrize("num_layers", [1, 4])
+@pytest.mark.parametrize("cache_dtype", [jnp.bfloat16, jnp.float8_e4m3fn])
+def test_create_unified_kv_cache(mesh: Mesh, num_layers, cache_dtype):
+    """6D block-major pool: (num_blocks, num_layers, *per_layer_dims),
+    sharded rank-6 with ATTN_HEAD on dim3 (kv heads)."""
+    num_blocks = 16
+    block_size = 16
+    num_kv_heads = 8
+    head_size = 128
+
+    single_layer_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks,
+                                                      block_size, num_kv_heads,
+                                                      head_size, cache_dtype)
+
+    cache = create_unified_kv_cache(
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        mesh=mesh,
+        num_layers=num_layers,
+        cache_dtype=cache_dtype,
+    )
+
+    assert isinstance(cache, jax.Array)
+    assert cache.ndim == 6
+    assert cache.shape == (single_layer_shape[0], num_layers,
+                           *single_layer_shape[1:])
+    assert cache.dtype == cache_dtype
+
+    expected_sharding = NamedSharding(
+        mesh,
+        PartitionSpec(ShardingAxisName.ATTN_DATA, None, None,
+                      ShardingAxisName.ATTN_HEAD, None, None),
+    )
+    assert cache.sharding == expected_sharding
+
+
+def test_create_unified_kv_cache_matches_model_loader_pin(mesh: Mesh):
+    """model_loader's out_shardings pin must be layout-equivalent to the
+    allocated sharding, or every run_model call would reshard the pool."""
+    cache = create_unified_kv_cache(
+        num_blocks=8,
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        mesh=mesh,
+        num_layers=2,
+    )
+    loader_pin = NamedSharding(
+        mesh,
+        PartitionSpec(ShardingAxisName.ATTN_DATA, None, None,
+                      ShardingAxisName.ATTN_HEAD),
+    )
+    assert loader_pin.is_equivalent_to(cache.sharding, cache.ndim)
+
+
+def test_create_unified_kv_cache_tp_shards_kv_head_dim():
+    """At TP>1 the pool is sharded on dim3 (kv heads); the legacy rank-3
+    spec would land ATTN_HEAD on dim2 and must NOT be equivalent."""
+    num_model_devices = 2
+    if jax.device_count() < num_model_devices:
+        pytest.skip(f"requires >= {num_model_devices} devices")
+
+    devices = np.array(jax.devices()[:num_model_devices]).reshape(
+        (1, 1, 1, 1, num_model_devices, 1))
+    mesh = Mesh(devices,
+                axis_names=("data", "attn_dp", "attn_dp_expert", "expert",
+                            "model", "dcp"))
+
+    num_blocks = 8
+    num_layers = 3
+    cache = create_unified_kv_cache(
+        num_blocks=num_blocks,
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        mesh=mesh,
+        num_layers=num_layers,
+    )
+
+    shard_shape = cache.addressable_shards[0].data.shape
+    # dim0 (blocks) and dim1 (layers) are replicated across the model axis;
+    # dim3 (kv heads) is split.
+    assert shard_shape[0] == cache.shape[0]
+    assert shard_shape[1] == num_layers
+    assert shard_shape[2] == cache.shape[2]
+    assert shard_shape[3] == cache.shape[3] // num_model_devices
+
+    legacy_rank3_pin = NamedSharding(
+        mesh,
+        PartitionSpec(ShardingAxisName.ATTN_DATA, None,
+                      ShardingAxisName.ATTN_HEAD),
+    )
+    assert not legacy_rank3_pin.is_equivalent_to(cache.sharding, cache.ndim)

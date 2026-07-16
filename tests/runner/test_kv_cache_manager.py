@@ -579,12 +579,16 @@ class TestKVCacheManager:
         # assert kv cache config with multiple kv cache groups will reinit
         # input batch.
         assert original_input_batch != self.runner.input_batch
-        assert len(self.runner.kv_caches) == 10
+        # Qwen3 is a unified-KV-cache arch: the 10 shared tensors live in one
+        # 6D block-major pool with num_layers as dim1.
+        assert len(self.runner.kv_caches) == 1
+        assert self.runner.kv_caches[0].shape == (num_blocks, 10, block_size,
+                                                  num_kv_heads * 2 //
+                                                  kv_packing, kv_packing,
+                                                  head_size)
+        assert self.runner.kv_cache_manager.attn_flat_indices == tuple(
+            range(10))
         for i in range(10):
-            assert self.runner.kv_caches[i].shape == (num_blocks, block_size,
-                                                      num_kv_heads * 2 //
-                                                      kv_packing, kv_packing,
-                                                      head_size)
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
             assert self.runner.layer_name_to_kvcache_index[
                 f'layer.{i + 10}'] == i
@@ -626,10 +630,11 @@ class TestKVCacheManager:
         self.runner.initialize_kv_cache(kv_cache_config)
 
         # Assert that the allocated KV cache has size equal to override_blocks, not num_blocks!
+        # Unified 6D pool: (num_blocks, num_layers=1, page, heads, packing, hd).
         assert len(self.runner.kv_caches) == 1
-        assert self.runner.kv_caches[0].shape == (override_blocks, block_size,
-                                                  num_kv_heads * 2 //
-                                                  kv_packing, kv_packing,
+        assert self.runner.kv_caches[0].shape == (override_blocks, 1,
+                                                  block_size, num_kv_heads *
+                                                  2 // kv_packing, kv_packing,
                                                   head_size)
 
     def test_get_kv_cache_spec_with_eagle3(self):
@@ -782,7 +787,8 @@ class TestKVCacheManager:
         )
 
         self.runner.initialize_kv_cache(kv_cache_config)
-        assert len(self.runner.kv_caches) == 10
+        # Unified pool: 10 attention layers in one 6D array.
+        assert len(self.runner.kv_caches) == 1
         assert len(self.runner.layer_name_to_kvcache_index) == 10
 
         # Now reset.
@@ -848,19 +854,20 @@ class TestKVCacheManager:
         )
 
         self.runner.initialize_kv_cache(kv_cache_config)
-        assert len(self.runner.kv_caches) == 10
+        # Unified pool: 10 attention layers in one 6D array.
+        assert len(self.runner.kv_caches) == 1
 
         # Reset and then reinitialize.
         self.runner.delete_kv_cache()
         assert len(self.runner.kv_caches) == 0
 
         self.runner.reinitialize_kv_cache()
-        assert len(self.runner.kv_caches) == 10
+        assert len(self.runner.kv_caches) == 1
+        assert self.runner.kv_caches[0].shape == (num_blocks, 10, block_size,
+                                                  num_kv_heads * 2 //
+                                                  kv_packing, kv_packing,
+                                                  head_size)
         for i in range(10):
-            assert self.runner.kv_caches[i].shape == (num_blocks, block_size,
-                                                      num_kv_heads * 2 //
-                                                      kv_packing, kv_packing,
-                                                      head_size)
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
 
     def test_reinitialize_kv_cache_without_init_raises(self):
@@ -970,9 +977,10 @@ class TestKVCacheManager:
         self.runner.initialize_kv_cache(kv_cache_config)
 
         # it should initialize 1 KV cache shared by all 4 layers
+        # (one shared group == one slot in the unified 6D pool).
         assert len(self.runner.kv_caches) == 1
 
-        assert self.runner.kv_caches[0].shape == (num_blocks, block_size,
+        assert self.runner.kv_caches[0].shape == (num_blocks, 1, block_size,
                                                   num_kv_heads * 2 //
                                                   kv_packing, kv_packing,
                                                   head_size)
@@ -1447,3 +1455,434 @@ class TestKVCacheManager:
                 assert cache.shape[0] == num_blocks, (
                     f"layer {name} attn cache has {cache.shape[0]} blocks "
                     f"but vLLM pool has {num_blocks}")
+
+    # ---- Unified block-major KV cache path ----
+    # The setup fixture's arch resolves to Qwen3ForCausalLM (allowlisted),
+    # so initialize_kv_cache takes the unified path unless a test flips a
+    # gate.
+
+    def _make_full_attn_kv_cache_config(self,
+                                        num_layers,
+                                        num_blocks,
+                                        num_kv_heads=8,
+                                        head_size=128):
+        """One full-attention group, one KVCacheTensor per layer."""
+        block_size = self.runner.vllm_config.cache_config.block_size
+        spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+        )
+        kv_cache_groups = [
+            KVCacheGroupSpec(
+                layer_names=[f'layer.{i}' for i in range(num_layers)],
+                kv_cache_spec=spec),
+        ]
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=num_blocks * spec.page_size_bytes,
+                shared_by=[f'layer.{i}'],
+            ) for i in range(num_layers)
+        ]
+        return KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+    def test_initialize_kv_cache_unified_metadata(self):
+        """Unified path: single 6D pool + flat indices + layer mapping."""
+        num_layers, num_blocks = 4, 32
+        kv_cache_config = self._make_full_attn_kv_cache_config(
+            num_layers, num_blocks)
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        manager = self.runner.kv_cache_manager
+        assert len(self.runner.kv_caches) == 1
+        pool = self.runner.kv_caches[0]
+        assert pool.ndim == 6
+        # Block-major: dim0 = blocks, dim1 = layers.
+        assert pool.shape[0] == num_blocks
+        assert pool.shape[1] == num_layers
+        assert manager.attn_flat_indices == tuple(range(num_layers))
+        assert manager.num_total_caches == num_layers
+        assert self.runner.layer_name_to_kvcache_index == {
+            f'layer.{i}': i
+            for i in range(num_layers)
+        }
+
+    def test_initialize_kv_cache_per_layer_for_non_unified_arch(self):
+        """Non-allowlisted arch: per-layer allocation, empty metadata."""
+        self.runner.vllm_config.model_config.model_arch_config.architectures \
+            = ["LlamaForCausalLM"]
+        num_layers, num_blocks = 4, 32
+        kv_cache_config = self._make_full_attn_kv_cache_config(
+            num_layers, num_blocks)
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        manager = self.runner.kv_cache_manager
+        assert len(self.runner.kv_caches) == num_layers
+        for cache in self.runner.kv_caches:
+            assert cache.ndim == 5
+            assert cache.shape[0] == num_blocks
+        assert manager.attn_flat_indices == ()
+        assert manager.num_total_caches == 0
+        assert self.runner.layer_name_to_kvcache_index == {
+            f'layer.{i}': i
+            for i in range(num_layers)
+        }
+
+    def test_initialize_kv_cache_per_layer_with_spec_decode(self):
+        """Speculative decoding keeps the per-layer path."""
+        self.runner.vllm_config.speculative_config = MagicMock(
+            num_speculative_tokens=0)
+        num_layers, num_blocks = 4, 32
+        kv_cache_config = self._make_full_attn_kv_cache_config(
+            num_layers, num_blocks)
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        manager = self.runner.kv_cache_manager
+        assert len(self.runner.kv_caches) == num_layers
+        for cache in self.runner.kv_caches:
+            assert cache.ndim == 5
+        assert manager.attn_flat_indices == ()
+        assert manager.num_total_caches == 0
+
+    def test_initialize_kv_cache_mamba_keeps_per_layer_metadata(self):
+        """Mamba layers force the per-layer path even for an allowlisted
+        arch."""
+        num_blocks = 100
+        page_size_bytes = 16 * 1024
+        layer_names = ['layer.0', 'layer.1']
+        kv_cache_config = self._create_mamba_kv_cache_config(
+            num_blocks, page_size_bytes, layer_names)
+
+        if not hasattr(self.runner.vllm_config, 'sharding_config'
+                       ) or self.runner.vllm_config.sharding_config is None:
+            self.runner.vllm_config.sharding_config = MagicMock()
+            self.runner.vllm_config.sharding_config.total_dp_size = 1
+
+        with patch('dataclasses.replace') as mock_replace:
+            mock_replaced_spec = MagicMock()
+            mock_replaced_spec.page_size_bytes = page_size_bytes
+            mock_replace.return_value = mock_replaced_spec
+            self.runner.initialize_kv_cache(kv_cache_config)
+
+        assert len(self.runner.kv_caches) == 2
+        manager = self.runner.kv_cache_manager
+        assert manager.attn_flat_indices == ()
+        assert manager.num_total_caches == 0
+
+    @pytest.mark.parametrize("mismatch",
+                             ["dtype", "head_size", "num_kv_heads"])
+    def test_initialize_kv_cache_unified_heterogeneous_asserts(self, mismatch):
+        """Per-layer spec divergence must fail the homogeneity check."""
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_blocks = 32
+        base = dict(
+            block_size=block_size,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.bfloat16,
+        )
+        other = dict(base)
+        if mismatch == "dtype":
+            other["dtype"] = torch.float32
+        elif mismatch == "head_size":
+            other["head_size"] = 64
+        else:
+            other["num_kv_heads"] = 16
+
+        spec_a = FullAttentionSpec(**base)
+        spec_b = FullAttentionSpec(**other)
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=['layer.0'], kv_cache_spec=spec_a),
+            KVCacheGroupSpec(layer_names=['layer.1'], kv_cache_spec=spec_b),
+        ]
+        kv_cache_tensors = [
+            KVCacheTensor(size=num_blocks * spec_a.page_size_bytes,
+                          shared_by=['layer.0']),
+            KVCacheTensor(size=num_blocks * spec_b.page_size_bytes,
+                          shared_by=['layer.1']),
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        with pytest.raises(AssertionError):
+            self.runner.initialize_kv_cache(kv_cache_config)
+
+    def test_unpack_kv_caches(self):
+        """Per-layer views are dim1 slices; empty metadata is a no-op."""
+        from tpu_inference.runner.kv_cache_manager import _unpack_kv_caches
+
+        num_blocks, num_layers = 4, 3
+        pool = jnp.arange(num_blocks * num_layers * 2 * 2 * 2 * 2,
+                          dtype=jnp.float32).reshape(num_blocks, num_layers, 2,
+                                                     2, 2, 2)
+
+        unpacked = _unpack_kv_caches([pool], tuple(range(num_layers)),
+                                     num_layers)
+        assert len(unpacked) == num_layers
+        for i in range(num_layers):
+            np.testing.assert_array_equal(np.asarray(unpacked[i]),
+                                          np.asarray(pool[:, i]))
+
+        # No unified metadata -> no-op (same list object, untouched).
+        per_layer_caches = [jnp.zeros((2, 2)), jnp.ones((2, 2))]
+        assert _unpack_kv_caches(per_layer_caches, (), 0) is per_layer_caches
+
+    def test_jitted_insert_continuous_unified_matches_per_layer(self):
+        """The unified insert branch must match the per-layer branch's
+        result for every layer."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+
+        block_size, num_blocks, num_layers = 4, 8, 3
+        tail = (4, 2, 8)  # (num_kv_heads*2 // packing, packing, head_dim)
+        chunk_size, start_block, token_start = 2, 3, 0
+
+        rng = np.random.default_rng(0)
+        per_layer_np = [
+            rng.standard_normal((num_blocks, block_size) + tail).astype(
+                np.float32) for _ in range(num_layers)
+        ]
+        slices_np = [
+            rng.standard_normal((chunk_size * block_size, ) + tail).astype(
+                np.float32) for _ in range(num_layers)
+        ]
+
+        # Legacy per-layer path (kv_caches donated -> rebuild fresh inputs).
+        legacy_out = KVCacheManager._jitted_insert_continuous_kv_cache_from_slice(
+            block_size,
+            chunk_size,
+            [jnp.asarray(a) for a in per_layer_np],
+            [jnp.asarray(s) for s in slices_np],
+            token_start,
+            start_block,
+            (),
+        )
+
+        # Unified path on the equivalent 6D block-major pool.
+        pool = jnp.stack([jnp.asarray(a) for a in per_layer_np], axis=1)
+        unified_out = KVCacheManager._jitted_insert_continuous_kv_cache_from_slice(
+            block_size,
+            chunk_size,
+            [pool],
+            [jnp.asarray(s) for s in slices_np],
+            token_start,
+            start_block,
+            tuple(range(num_layers)),
+        )
+
+        assert len(legacy_out) == num_layers
+        assert len(unified_out) == 1
+        assert unified_out[0].ndim == 6
+        for i in range(num_layers):
+            np.testing.assert_array_equal(np.asarray(unified_out[0][:, i]),
+                                          np.asarray(legacy_out[i]))
+
+    def test_get_kv_cache_for_block_ids_unified(self):
+        """Extraction must unpack the pool into per-layer slices, for both
+        continuous and scattered block ids."""
+        block_size = 4
+        num_blocks, num_layers = 8, 3
+        tail = (4, 2, 8)
+        self.runner.block_size = block_size
+
+        rng = np.random.default_rng(1)
+        pool_np = rng.standard_normal((num_blocks, num_layers, block_size) +
+                                      tail).astype(np.float32)
+        self.runner.kv_caches = [jnp.asarray(pool_np)]
+        manager = self.runner.kv_cache_manager
+        manager.attn_flat_indices = tuple(range(num_layers))
+        manager.num_total_caches = num_layers
+
+        # Continuous block ids.
+        got = self.runner.get_kv_cache_for_block_ids([2, 3])
+        assert len(got) == num_layers
+        for i in range(num_layers):
+            expected = pool_np[2:4, i].reshape((2 * block_size, ) + tail)
+            np.testing.assert_array_equal(np.asarray(got[i]), expected)
+
+        # Scattered block ids.
+        got = self.runner.get_kv_cache_for_block_ids([5, 2])
+        for i in range(num_layers):
+            expected = pool_np[[5, 2], i].reshape((2 * block_size, ) + tail)
+            np.testing.assert_array_equal(np.asarray(got[i]), expected)
+
+    def test_insert_request_with_kv_cache_unified_round_trip(self):
+        """Prefill->decode hand-off: extract a block from a source pool,
+        insert into a zeroed pool, data lands at pool[dest_block, layer]."""
+        block_size = 64
+        num_layers = 2
+        num_kv_heads = 16
+        head_size = 128
+        num_blocks = 20
+        prompt_len = 64  # exactly one block, no padding ambiguity
+
+        self.runner.block_size = block_size
+        self.runner.vllm_config.cache_config.num_gpu_blocks = num_blocks
+
+        pool_shape = (num_blocks, num_layers, block_size,
+                      2 * num_kv_heads // 2, 2, head_size)
+        prod_val = int(np.prod(pool_shape))
+        source_pool = jnp.arange(prod_val,
+                                 dtype=jnp.bfloat16).reshape(pool_shape)
+        self.runner.kv_caches = [source_pool]
+        manager = self.runner.kv_cache_manager
+        manager.attn_flat_indices = tuple(range(num_layers))
+        manager.num_total_caches = num_layers
+
+        src_block = 5
+        extracted = self.runner.get_kv_cache_for_block_ids([src_block])
+        assert len(extracted) == num_layers
+        extracted = [layer_cache[:prompt_len] for layer_cache in extracted]
+
+        # Fresh destination runner state with a zeroed unified pool.
+        self.runner.requests = {}
+        self.runner.kv_caches = [jnp.zeros(pool_shape, dtype=jnp.bfloat16)]
+
+        decode_request = self._make_decode_request_mock(
+            prompt_len, request_id="unified_req")
+
+        dest_block = 10
+        self.runner.insert_request_with_kv_cache(decode_request, extracted,
+                                                 [[dest_block]])
+
+        assert len(self.runner.kv_caches) == 1
+        new_pool = self.runner.kv_caches[0]
+        assert new_pool.shape == pool_shape
+        source_pool_np = np.asarray(source_pool)
+        new_pool_np = np.asarray(new_pool)
+        for layer in range(num_layers):
+            np.testing.assert_array_equal(
+                new_pool_np[dest_block, layer],
+                source_pool_np[src_block, layer],
+            )
+        # Every other block stays zero.
+        untouched = np.delete(new_pool_np, dest_block, axis=0)
+        assert not untouched.any()
+
+    @staticmethod
+    def _make_decode_request_mock(prompt_len, request_id="noncontig_req"):
+        mock_sampling_params = MagicMock()
+        mock_sampling_params.sampling_type = SamplingType.GREEDY
+        mock_sampling_params.temperature = 0.0
+        mock_sampling_params.top_p = 1.0
+        mock_sampling_params.top_k = -1
+        mock_sampling_params.min_tokens = 0
+        mock_sampling_params.logprobs = None
+        mock_sampling_params.logit_bias = None
+        mock_sampling_params.allowed_token_ids = set()
+        mock_sampling_params.bad_words_token_ids = None
+        mock_sampling_params.all_stop_token_ids = set()
+
+        decode_request = MagicMock(spec=Request)
+        decode_request.request_id = request_id
+        decode_request.num_tokens = prompt_len + 1
+        decode_request.num_computed_tokens = prompt_len
+        decode_request.prompt_token_ids = list(range(prompt_len))
+        decode_request.all_token_ids = [123, 232, 908]
+        decode_request.output_token_ids = [100]
+        decode_request.sampling_params = mock_sampling_params
+        decode_request.lora_request = None
+        decode_request.mm_kwargs, decode_request.mm_positions = [], []
+        decode_request.pooling_params, decode_request.generator = None, None
+        return decode_request
+
+    def _run_insert_non_contiguous(self, unified):
+        """Non-contiguous dest block ids go through _jitted_insert_kv_cache
+        (contiguous-run splitting); chunk k must land at dest_blocks[k]."""
+        block_size = 64
+        num_layers = 2
+        num_kv_heads = 16
+        head_size = 128
+        num_blocks = 20
+        src_blocks = [4, 5, 6]
+        # Two contiguous runs: [2, 3] and [7].
+        dest_blocks = [2, 3, 7]
+        prompt_len = len(src_blocks) * block_size  # exact blocks, no padding
+
+        self.runner.block_size = block_size
+        self.runner.vllm_config.cache_config.num_gpu_blocks = num_blocks
+
+        pool_shape = (num_blocks, num_layers, block_size,
+                      2 * num_kv_heads // 2, 2, head_size)
+        prod_val = int(np.prod(pool_shape))
+        source_pool = jnp.arange(prod_val,
+                                 dtype=jnp.bfloat16).reshape(pool_shape)
+        manager = self.runner.kv_cache_manager
+        if unified:
+            self.runner.kv_caches = [source_pool]
+            manager.attn_flat_indices = tuple(range(num_layers))
+            manager.num_total_caches = num_layers
+        else:
+            self.runner.kv_caches = [
+                jnp.asarray(source_pool[:, i]) for i in range(num_layers)
+            ]
+            manager.attn_flat_indices = ()
+            manager.num_total_caches = 0
+
+        extracted = self.runner.get_kv_cache_for_block_ids(src_blocks)
+        assert len(extracted) == num_layers
+        assert extracted[0].shape[0] == prompt_len
+
+        # Fresh destination runner state with zeroed caches.
+        self.runner.requests = {}
+        if unified:
+            self.runner.kv_caches = [jnp.zeros(pool_shape, dtype=jnp.bfloat16)]
+        else:
+            self.runner.kv_caches = [
+                jnp.zeros((num_blocks, ) + pool_shape[2:], dtype=jnp.bfloat16)
+                for _ in range(num_layers)
+            ]
+
+        decode_request = self._make_decode_request_mock(prompt_len)
+        self.runner.insert_request_with_kv_cache(decode_request, extracted,
+                                                 [dest_blocks])
+
+        source_pool_np = np.asarray(source_pool)
+        if unified:
+            assert len(self.runner.kv_caches) == 1
+            new_np = np.asarray(self.runner.kv_caches[0])
+
+            def per_layer_view(blk, layer):
+                return new_np[blk, layer]
+        else:
+            assert len(self.runner.kv_caches) == num_layers
+            new_np = [np.asarray(c) for c in self.runner.kv_caches]
+
+            def per_layer_view(blk, layer):
+                return new_np[layer][blk]
+
+        for k, dest_block in enumerate(dest_blocks):
+            for layer in range(num_layers):
+                np.testing.assert_array_equal(
+                    per_layer_view(dest_block, layer),
+                    source_pool_np[src_blocks[k], layer],
+                    err_msg=(f"chunk {k}: dest block {dest_block} layer "
+                             f"{layer} does not match source block "
+                             f"{src_blocks[k]}"),
+                )
+        untouched_blocks = [
+            b for b in range(num_blocks) if b not in dest_blocks
+        ]
+        for b in untouched_blocks:
+            for layer in range(num_layers):
+                assert not per_layer_view(b, layer).any(), (
+                    f"untouched block {b} layer {layer} was written")
+
+    def test_insert_request_with_kv_cache_unified_non_contiguous_blocks(self):
+        """Regression: this path once dropped the unified metadata and
+        crashed on a pytree arity mismatch against the single 6D pool."""
+        self._run_insert_non_contiguous(unified=True)
+
+    def test_insert_request_with_kv_cache_per_layer_non_contiguous_blocks(
+            self):
+        self._run_insert_non_contiguous(unified=False)

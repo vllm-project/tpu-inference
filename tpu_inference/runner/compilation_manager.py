@@ -936,6 +936,7 @@ class CompilationManager:
                 kv_cache_slices,
                 0,
                 block_numbers[0],
+                self.runner.kv_cache_manager.attn_flat_indices,
             )
             for layer_cache in self.runner.kv_caches:
                 layer_cache.block_until_ready()

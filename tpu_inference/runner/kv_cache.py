@@ -33,6 +33,29 @@ logger = init_logger(__name__)
 
 DEFAULT_KV_CACHE_DTYPE = jnp.bfloat16
 
+# Architectures whose forward pass can consume the unified block-major KV
+# cache (detect the single-element `kv_caches` list and thread `layer_idx`
+# into `attention()`). All other architectures index `kv_caches` per layer
+# and must keep the per-layer allocation path.
+UNIFIED_KV_CACHE_SUPPORTED_ARCHS = (
+    "Qwen2ForCausalLM",
+    "Qwen3ForCausalLM",
+)
+
+
+def model_uses_unified_kv_cache(vllm_config) -> bool:
+    """Whether this config takes the unified block-major KV cache path.
+
+    Shared by the allocation gate (kv_cache_manager) and the model_loader's
+    kv cache out_shardings pin so the pin always matches the allocated
+    layout. Speculative decoding keeps the per-layer path (draft model
+    forwards index `kv_caches` per layer).
+    """
+    if vllm_config.speculative_config is not None:
+        return False
+    return any(arch in UNIFIED_KV_CACHE_SUPPORTED_ARCHS
+               for arch in vllm_config.model_config.architectures)
+
 
 @dataclass
 class KVCacheMetadata:
@@ -157,6 +180,55 @@ def create_kv_caches(
     for _ in layer_names:
         kv_caches.append(sharded_allocate())
     return kv_caches
+
+
+def create_unified_kv_cache(
+    num_blocks: int,
+    block_size: int,
+    num_kv_heads: int,
+    head_size: int,
+    mesh: Mesh,
+    num_layers: int,
+    cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
+) -> jax.Array:
+    """Creates a single unified KV cache array shared by all layers.
+
+    The array is block-major (num_blocks outermost, num_layers second), so a
+    block's all-layer data is contiguous and transfers with a single DMA:
+    dim0-slice b == one whole logical block.
+
+    The RPA kernel still consumes a 5D (num_pages, ...) cache; the fold of
+    (num_blocks, num_layers) into the flat page dim happens per-device inside
+    sharded_ragged_paged_attention's shard_map, where it is a bitcast. Do NOT
+    reshape this array in GSPMD-traced code: that results in an extra
+    all-to-all causing OOM.
+
+    Shape: (num_blocks, num_layers, block_size,
+    cdiv(num_kv_heads * 2, packing), packing, head_dim),
+    where packing = 32 // dtype bits.
+    """
+    single_layer_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks,
+                                                      block_size, num_kv_heads,
+                                                      head_size, cache_dtype)
+    unified_shape = (single_layer_shape[0], num_layers,
+                     *single_layer_shape[1:])
+
+    # PartitionSpec right-pads with None, so spell out enough dims to land
+    # ATTN_HEAD on dim3 (kv heads).
+    sharding = NamedSharding(
+        mesh,
+        PartitionSpec(ShardingAxisName.ATTN_DATA, None, None,
+                      ShardingAxisName.ATTN_HEAD, None, None),
+    )
+
+    def _allocate() -> jax.Array:
+        return jnp.empty(
+            shape=unified_shape,
+            dtype=cache_dtype,
+        )
+
+    sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
+    return sharded_allocate()
 
 
 def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,

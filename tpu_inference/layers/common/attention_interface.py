@@ -403,8 +403,17 @@ def sharded_ragged_paged_attention(
             v = jnp.repeat(v, factor, axis=1)
 
     qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD, None, None)
+    # The unified pool arrives as a 6D block-major array; per-layer caches
+    # stay 5D. The fold to the kernel's 5D layout must happen inside the
+    # shard_map body, where it is a per-device bitcast; folding it in
+    # GSPMD-traced code results in an extra all-to-all causing OOM.
+    unified_6d = kv_cache.ndim == 6
+    if unified_6d:
+        kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None, None,
+                          ShardingAxisName.ATTN_HEAD, None, None)
+    else:
+        kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
+                          ShardingAxisName.ATTN_HEAD, None, None)
     in_specs = (
         qkv_spec,  # q
         qkv_spec,  # k
@@ -452,6 +461,14 @@ def sharded_ragged_paged_attention(
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             kwargs["use_causal_mask"] = use_causal_mask
+        if unified_6d:
+            # Per-device fold (NB, NL, ...) -> (NB*NL, ...), unfold on the way
+            # out: bitcasts. Block b's layer-L page is flat page
+            # b*num_layers + L, matching page_indices from attention().
+            q, k, v, kv6, *rest = args
+            kv5 = kv6.reshape((kv6.shape[0] * kv6.shape[1], ) + kv6.shape[2:])
+            out, kv5_new = func(q, k, v, kv5, *rest, **kwargs)
+            return out, kv5_new.reshape(kv6.shape)
         return func(*args, **kwargs)
 
     return jax.shard_map(
@@ -479,6 +496,9 @@ def attention(
     sinks: jax.Array | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    # Unified-cache path: this layer's slot and the total layer count.
+    layer_idx: int | None = None,
+    num_layers: int | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -500,15 +520,26 @@ def attention(
 
     md = attention_metadata
 
+    if layer_idx is not None:
+        # kv_cache is the unified 6D block-major cache: redirect page
+        # addressing to this layer (block b, layer L -> flat page
+        # b*num_layers + L); the 6D->5D fold happens inside
+        # sharded_ragged_paged_attention's shard_map.
+        assert num_layers is not None, (
+            "num_layers is required for the unified KV cache path")
+        page_indices = md.block_tables * num_layers + layer_idx
+    else:
+        page_indices = md.block_tables
+
     # (T, N, H)
-    output, kv_cache = sharded_ragged_paged_attention(
+    output, new_kv_cache = sharded_ragged_paged_attention(
         mesh,
         q,
         k,
         v,
         kv_cache,
         md.seq_lens,
-        md.block_tables,
+        page_indices,
         md.query_start_loc,
         md.request_distribution,
         sinks,
@@ -521,7 +552,7 @@ def attention(
         use_causal_mask=use_causal_mask,
     )
 
-    return kv_cache, output
+    return new_kv_cache, output
 
 
 def mla_attention(

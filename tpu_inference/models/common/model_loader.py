@@ -43,6 +43,7 @@ from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     update_vllm_config_for_qwix_quantization)
 from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
                                                          LoadableWithIterator)
+from tpu_inference.runner.kv_cache import model_uses_unified_kv_cache
 from tpu_inference.runner.mm_encoder_jit_manager import \
     maybe_create_mm_encoder_jit_manager
 from tpu_inference.utils import to_jax_dtype, to_torch_dtype
@@ -352,10 +353,22 @@ def get_flax_model(
                                pooler=pooler,
                                is_draft_model=is_draft_model)
     vllm_config.model_config.dtype = original_dtype
-    kv_cache_sharding = NamedSharding(
-        mesh,
-        PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD))
+    # The kv cache out_shardings must be pinned: each step feeds the previous
+    # step's cache outputs back in, and with out_shardings=None the inferred
+    # sharding is not stable across compiled entries, causing a serve-time
+    # recompile. The spec is rank-sensitive (right-pads with None), so the
+    # rank-6 unified pool needs its own pin with ATTN_HEAD on dim3 (kv
+    # heads); a mismatched pin results in an extra all-to-all causing OOM.
+    if model_uses_unified_kv_cache(vllm_config):
+        kv_cache_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(ShardingAxisName.ATTN_DATA, None, None,
+                          ShardingAxisName.ATTN_HEAD))
+    else:
+        kv_cache_sharding = NamedSharding(
+            mesh,
+            PartitionSpec(ShardingAxisName.ATTN_DATA, None,
+                          ShardingAxisName.ATTN_HEAD))
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,

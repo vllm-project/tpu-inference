@@ -245,7 +245,21 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
                 kv_cache_index = vllm_model_wrapper_context.layer_name_to_kvcache_index[
                     layer.layer_name]
-                kv_cache = vllm_model_wrapper_context.kv_caches[kv_cache_index]
+
+                # Unified pool: all attention layers share kv_caches[0];
+                # hybrid (attention+Mamba) models keep the per-layer path.
+                attn_flat_indices = vllm_model_wrapper_context.attn_flat_indices
+                is_unified = kv_cache_index in attn_flat_indices
+
+                if is_unified:
+                    kv_cache = vllm_model_wrapper_context.kv_caches[0]
+                    layer_idx = attn_flat_indices.index(kv_cache_index)
+                    num_layers = len(attn_flat_indices)
+                else:
+                    kv_cache = vllm_model_wrapper_context.kv_caches[
+                        kv_cache_index]
+                    layer_idx = None
+                    num_layers = None
 
                 q_scale = k_scale = v_scale = None
                 if self.kv_cache_quantized_dtype:
@@ -275,9 +289,14 @@ class PallasAttentionBackendImpl(AttentionImpl):
                     k_scale,
                     v_scale,
                     self.sliding_window,
+                    layer_idx=layer_idx,
+                    num_layers=num_layers,
                 )
-                vllm_model_wrapper_context.kv_caches[
-                    kv_cache_index] = new_kv_cache
+                if is_unified:
+                    vllm_model_wrapper_context.kv_caches[0] = new_kv_cache
+                else:
+                    vllm_model_wrapper_context.kv_caches[
+                        kv_cache_index] = new_kv_cache
             case _:
                 raise NotImplementedError(
                     f"Unsupported attention type: {self.attn_type}")
@@ -330,6 +349,8 @@ def _format_attention_output(
         "k_scale",
         "v_scale",
         "sliding_window",
+        "layer_idx",
+        "num_layers",
     ),
     donate_argnames=("kv_cache"),
 )
@@ -349,6 +370,8 @@ def _jax_attn_func(
     k_scale: float | None = None,
     v_scale: float | None = None,
     sliding_window: int | None = None,
+    layer_idx: int | None = None,
+    num_layers: int | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     q_len = q.shape[0]
     q, k, v = _prepare_qkv_layout(q, k, v, num_heads, num_kv_heads, head_size)
@@ -366,6 +389,8 @@ def _jax_attn_func(
         v_scale=v_scale,
         sinks=sinks,
         attention_chunk_size=sliding_window,
+        layer_idx=layer_idx,
+        num_layers=num_layers,
     )
 
     formatted_outputs = _format_attention_output(outputs, q_len, num_heads,
