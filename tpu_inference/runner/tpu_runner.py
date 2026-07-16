@@ -18,7 +18,7 @@ import random
 import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -145,6 +145,212 @@ def _compute_active_mask(
     return active_mask
 
 
+def _extract_valid_tokens_host(
+    tokens: np.ndarray,
+    eos_token_id: Union[int, List[int], np.ndarray],
+) -> List[int]:
+    """Trim 1D array of generated token IDs at the first EOS token (inclusive)."""
+    is_eos = np.isin(tokens, eos_token_id)
+    eos_indices = np.where(is_eos)[0]
+    if len(eos_indices) > 0:
+        return tokens[:eos_indices[0] + 1].tolist()
+    return tokens.tolist()
+
+
+REASON_EOS_HIT = "eos_hit"
+REASON_MAX_STEPS = "max_steps"
+REASON_MAX_DECODE_STEPS_LIMIT = "max_decode_steps_limit"
+REASON_KV_CACHE_LIMIT = "kv_cache_limit"
+REASON_UNKNOWN = "unknown"
+
+
+def _log_continue_decode_summary(
+    actual_steps: int,
+    max_decode_steps: int,
+    static_max_decode_steps: int,
+    min_remaining: int,
+    num_reqs: int,
+    num_eos_hits: int,
+) -> None:
+    """Log debug summary for continue_decode completion."""
+    termination_reason = REASON_UNKNOWN
+    if actual_steps < max_decode_steps:
+        termination_reason = REASON_EOS_HIT
+    elif actual_steps == max_decode_steps:
+        reasons = []
+        if max_decode_steps == static_max_decode_steps:
+            reasons.append(REASON_MAX_DECODE_STEPS_LIMIT)
+        if max_decode_steps == min_remaining or min_remaining <= 0:
+            reasons.append(REASON_KV_CACHE_LIMIT)
+        termination_reason = "_".join(reasons) if reasons else REASON_MAX_STEPS
+
+    logger.debug(
+        "continue_decode finished: actual steps: %d, reason: %s, initial_active_reqs: %d (max_steps: %d, EOS hits: %d)",
+        actual_steps, termination_reason, num_reqs, max_decode_steps,
+        num_eos_hits)
+
+
+def _process_continue_decode_outputs(
+    generated_tokens: jax.Array,
+    actual_steps: Union[jax.Array, int],
+    req_ids: List[str],
+    eos_token_id: Union[int, List[int], np.ndarray],
+    indices_selector: Optional[List[int]] = None,
+    logprobs_tensors: Optional[LogprobsTensors] = None,
+    expert_indices: Optional[jax.Array] = None,
+    enable_return_routed_experts: bool = False,
+    requests: Optional[Dict[str, Any]] = None,
+    block_size: int = 0,
+    scheduler_output: Optional["VllmSchedulerOutput"] = None,
+    input_batch: Optional[Any] = None,
+    max_num_reqs: int = 0,
+    max_model_len: int = 0,
+    attn_metadata: Optional[Any] = None,
+    is_async: bool = False,
+) -> Tuple[List[List[int]], Optional[Any], Optional[Any], int, int]:
+    """Process continue_decode TPU outputs into CPU data structures.
+
+    Performs host transfers, realigns physical rows by indices_selector, trims
+    tokens at EOS, and builds LogprobsLists and RoutedExpertsLists. Optionally
+    updates input_batch, scheduler_output, and attn_metadata for synchronous
+    runs.
+    """
+    generated_tokens_cpu, actual_steps_cpu = jax.device_get(
+        (generated_tokens, actual_steps))
+
+    all_expert_indices_cpu = None
+    if expert_indices is not None:
+        all_expert_indices_cpu = jax.device_get(expert_indices)
+
+    lp_token_ids_cpu = None
+    lp_vals_cpu = None
+    lp_ranks_cpu = None
+    if logprobs_tensors is not None:
+        (
+            lp_token_ids_cpu,
+            lp_vals_cpu,
+            lp_ranks_cpu,
+        ) = jax.device_get((
+            logprobs_tensors.logprob_token_ids,
+            logprobs_tensors.logprobs,
+            logprobs_tensors.selected_token_ranks,
+        ))
+
+    actual_steps_int = int(actual_steps_cpu)
+    generated_tokens_cpu = np.asarray(generated_tokens_cpu)[:actual_steps_int]
+    if all_expert_indices_cpu is not None and enable_return_routed_experts:
+        all_expert_indices_cpu = np.asarray(
+            all_expert_indices_cpu)[:actual_steps_int]
+
+    if lp_token_ids_cpu is not None:
+        lp_token_ids_cpu = np.asarray(lp_token_ids_cpu)[:actual_steps_int]
+        lp_vals_cpu = np.asarray(lp_vals_cpu)[:actual_steps_int]
+        lp_ranks_cpu = np.asarray(lp_ranks_cpu)[:actual_steps_int]
+
+    generated_tokens_cpu = generated_tokens_cpu.T
+    if indices_selector is not None:
+        generated_tokens_cpu = generated_tokens_cpu[indices_selector]
+        if all_expert_indices_cpu is not None:
+            all_expert_indices_cpu = all_expert_indices_cpu[:, :,
+                                                            indices_selector, :]
+        if lp_token_ids_cpu is not None:
+            lp_token_ids_cpu = lp_token_ids_cpu[:, indices_selector, :]
+            lp_vals_cpu = lp_vals_cpu[:, indices_selector, :]
+            lp_ranks_cpu = lp_ranks_cpu[:, indices_selector]
+
+    sampled_token_ids: List[List[int]] = []
+    expert_indices_list = []
+    expert_slots_list = []
+    lp_token_ids_list = []
+    lp_vals_list = []
+    lp_ranks_list = []
+    num_eos_hits = 0
+    eos_arr = np.atleast_1d(eos_token_id)
+    requests_dict = requests if requests is not None and hasattr(
+        requests, "get") else None
+
+    for req_idx, req_id in enumerate(req_ids):
+        req_state = requests_dict.get(
+            req_id) if requests_dict is not None else None
+        tokens = generated_tokens_cpu[req_idx]
+
+        valid_tokens = _extract_valid_tokens_host(tokens, eos_token_id)
+        if len(valid_tokens) < len(tokens) or (valid_tokens and
+                                               valid_tokens[-1] in eos_arr):
+            num_eos_hits += 1
+
+        actual_len = len(valid_tokens)
+        sampled_token_ids.append(valid_tokens)
+
+        if scheduler_output is not None:
+            scheduler_output.num_scheduled_tokens[req_id] = actual_len
+
+        if all_expert_indices_cpu is not None:
+            req_experts = all_expert_indices_cpu[:actual_len, :, req_idx, :]
+            expert_indices_list.append(req_experts.transpose(1, 0, 2))
+
+        if lp_token_ids_cpu is not None:
+            lp_token_ids_list.append(lp_token_ids_cpu[:actual_len, req_idx])
+            lp_vals_list.append(lp_vals_cpu[:actual_len, req_idx])
+            lp_ranks_list.append(lp_ranks_cpu[:actual_len, req_idx])
+
+        if req_state is not None:
+            req_state.output_token_ids.extend(valid_tokens)
+
+            if (all_expert_indices_cpu is not None and actual_len > 0):
+                slots_arr = _reconstruct_slots_for_request(
+                    req_state,
+                    actual_len,
+                    block_size,
+                    start_pos=req_state.num_computed_tokens)
+                expert_slots_list.append(slots_arr)
+
+            if input_batch is not None:
+                start_idx = input_batch.num_tokens_no_spec[req_idx]
+                end_idx = start_idx + actual_len
+                if req_idx < max_num_reqs and end_idx <= max_model_len:
+                    input_batch.token_ids_cpu[req_idx,
+                                              start_idx:end_idx] = valid_tokens
+                    input_batch.num_tokens_no_spec[req_idx] = end_idx
+                    input_batch.num_tokens[req_idx] = end_idx
+
+        if (attn_metadata is not None
+                and hasattr(attn_metadata, "seq_lens_cpu")
+                and attn_metadata.seq_lens_cpu is not None):
+            attn_metadata.seq_lens_cpu[req_idx] += actual_len
+
+    expert_indices_cpu = None
+    if expert_indices_list:
+        expert_indices_cpu = np.concatenate(expert_indices_list, axis=1)
+
+    routed_experts = None
+    if expert_indices_cpu is not None and expert_slots_list:
+        routing_data = expert_indices_cpu.transpose(1, 0, 2)
+        slot_mapping = np.concatenate(expert_slots_list, axis=0)
+        routed_experts = RoutedExpertsLists(
+            routing_data=routing_data,
+            slot_mapping=slot_mapping,
+        )
+
+    logprobs_lists = None
+    if lp_token_ids_list:
+        from vllm.v1.outputs import LogprobsLists
+        logprob_token_ids = np.concatenate(lp_token_ids_list, axis=0)
+        logprobs_arr = np.concatenate(lp_vals_list, axis=0)
+        sampled_token_ranks = np.concatenate(lp_ranks_list, axis=0)
+        cu_num_generated_tokens = [0] + list(
+            np.cumsum([len(x) for x in sampled_token_ids]))
+
+        logprobs_lists = LogprobsLists(
+            logprob_token_ids=logprob_token_ids,
+            logprobs=logprobs_arr,
+            sampled_token_ranks=sampled_token_ranks,
+            cu_num_generated_tokens=cu_num_generated_tokens,
+        )
+
+    return sampled_token_ids, logprobs_lists, routed_experts, actual_steps_int, num_eos_hits
+
+
 class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
     """Holds asynchronous model output specifically from a TPU runner.
 
@@ -187,8 +393,58 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._req_ids_dp = req_ids_dp
         self._padded_num_scheduled_tokens_per_dp_rank = padded_num_scheduled_tokens_per_dp_rank
         self._runner = runner
+        self._is_continue_decode = False
+        self._actual_steps_future = None
+
+    def _get_continue_decode_output(self) -> ModelRunnerOutput:
+        if self._model_runner_output.sampled_token_ids:
+            return self._model_runner_output
+
+        (
+            sampled_token_ids,
+            logprobs,
+            routed_experts,
+            actual_steps,
+            num_eos_hits,
+        ) = _process_continue_decode_outputs(
+            generated_tokens=self._next_tokens,
+            actual_steps=self._actual_steps_future,
+            req_ids=self._model_runner_output.req_ids,
+            eos_token_id=self._runner.eos_token_id if self._runner else 0,
+            indices_selector=self.logits_indices_selector,
+            logprobs_tensors=self._logprobs_tensors,
+            expert_indices=self._expert_indices,
+            enable_return_routed_experts=getattr(
+                self._runner.model_config, "enable_return_routed_experts",
+                False) if self._runner else False,
+            requests=getattr(self._runner, "requests", None),
+            block_size=getattr(self._runner, "block_size", 0),
+            is_async=True,
+        )
+
+        _log_continue_decode_summary(
+            actual_steps=actual_steps,
+            max_decode_steps=getattr(self, "_max_decode_steps", 0),
+            static_max_decode_steps=getattr(self._runner,
+                                            "static_max_decode_steps", 0)
+            if self._runner else 0,
+            min_remaining=getattr(self, "_min_remaining", 0),
+            num_reqs=len(self._model_runner_output.req_ids),
+            num_eos_hits=num_eos_hits,
+        )
+
+        self._model_runner_output.sampled_token_ids = sampled_token_ids
+        if logprobs is not None:
+            self._model_runner_output.logprobs = logprobs
+        if routed_experts is not None:
+            self._model_runner_output.routed_experts = routed_experts
+
+        return self._model_runner_output
 
     def get_output(self) -> ModelRunnerOutput:
+        if getattr(self, "_is_continue_decode", False):
+            return self._get_continue_decode_output()
+
         valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
             self._runner, self._spec_decode_metadata, self._next_tokens,
             self.logits_indices_selector,
@@ -246,6 +502,12 @@ class AsyncPreResults:
     spec_decode_num_rejected_tokens: Optional[
         jax.Array] = None  # [max_num_reqs]
     spec_decode_metadata: Optional[SpecDecodeMetadata] = None
+
+    # For continue decode async scheduling
+    is_continue_decode: bool = False
+    continue_decode_actual_steps: Optional[jax.Array] = None
+    continue_decode_max_steps: int = 0
+    next_tokens_in_tpu: Optional[jax.Array] = None
 
 
 @dataclass
@@ -1129,6 +1391,44 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         pre_spec_decode_metadata = self._pre_async_results.spec_decode_metadata
         pre_scheduler_output = self._pre_async_results.scheduler_output
 
+        if getattr(self._pre_async_results, "is_continue_decode", False):
+            generated_tokens_cpu, actual_steps = jax.device_get((
+                pre_next_tokens,
+                self._pre_async_results.continue_decode_actual_steps,
+            ))
+            actual_steps = int(actual_steps)
+            generated_tokens_cpu = np.asarray(
+                generated_tokens_cpu)[:actual_steps].T
+            if pre_logits_indices_selector is not None:
+                generated_tokens_cpu = generated_tokens_cpu[
+                    pre_logits_indices_selector]
+
+            for pre_req_idx, req_state, _ in pre_request_seq_lens:
+                req_id = pre_req_ids[pre_req_idx]
+                if req_id not in self.input_batch.req_id_to_index:
+                    continue
+                req_idx = self.input_batch.req_id_to_index[req_id]
+
+                tokens = generated_tokens_cpu[pre_req_idx]
+                valid_tokens = _extract_valid_tokens_host(
+                    tokens, self.eos_token_id)
+
+                start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+                actual_len = len(valid_tokens)
+
+                self.input_batch.token_ids_cpu[req_idx, start_idx:start_idx +
+                                               actual_len] = valid_tokens
+                self.input_batch.num_tokens_no_spec[
+                    req_idx] = start_idx + actual_len
+                self.input_batch.num_tokens[req_idx] = start_idx + actual_len
+                self.input_batch.num_computed_tokens_cpu[
+                    req_idx] = start_idx + actual_len
+
+                if pre_scheduler_output is not None:
+                    pre_scheduler_output.num_scheduled_tokens[
+                        req_id] = actual_len
+            return
+
         valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
             self, pre_spec_decode_metadata, pre_next_tokens,
             pre_logits_indices_selector,
@@ -1425,7 +1725,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def _execute_continue_decode(
         self,
         scheduler_output: "VllmSchedulerOutput",
-    ) -> ModelRunnerOutput:
+    ) -> ModelRunnerOutput | None:
+        if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
+            self._modify_prev_results()
+
         (
             input_ids,
             input_positions,
@@ -1435,8 +1738,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             spec_decode_metadata,
             logits_indices_selector,
             padded_num_reqs,
-            _,
-            _,
+            req_ids_dp,
+            padded_num_scheduled_tokens_per_dp_rank,
             tokens_indices_selector,
         ) = self._prepare_inputs(scheduler_output)
 
@@ -1506,6 +1809,81 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                  max_logprobs=self.model_config.max_logprobs,
                  logprobs_mode=self.model_config.logprobs_mode,
              )
+
+        if self.scheduler_config.async_scheduling:
+            self.rng_params_for_sampling = final_rng
+            self.kv_caches = final_kv_caches
+
+            last_step_idx = jnp.clip(final_state.step_counter - 1, 0,
+                                     self.static_max_decode_steps - 1)
+            next_tokens_in_tpu = generated_tokens[
+                last_step_idx,
+                jnp.arange(generated_tokens.shape[1])]
+
+            generated_tokens_async = jax.copy_to_host_async(generated_tokens)
+            actual_steps_async = jax.copy_to_host_async(
+                final_state.step_counter)
+
+            num_reqs = self.input_batch.num_reqs
+            request_seq_lens: list[tuple[int, CachedRequestState, int]] = []
+            placeholder_req_id_to_index: dict[str, int] = {}
+            for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                req_state = self.requests[req_id]
+                seq_len = (req_state.num_computed_tokens +
+                           scheduler_output.num_scheduled_tokens[req_id])
+                request_seq_lens.append((i, req_state, seq_len))
+
+                start_idx = self.input_batch.num_tokens_no_spec[i]
+                end_idx = start_idx + max_decode_steps
+                self.input_batch.num_tokens_no_spec[i] = end_idx
+                self.input_batch.num_tokens[i] = end_idx
+                req_state.output_token_ids.extend([0] * max_decode_steps)
+                placeholder_req_id_to_index[req_id] = (
+                    i if tokens_indices_selector is None else
+                    tokens_indices_selector[i])
+
+            self._pre_async_results = AsyncPreResults(
+                req_ids=cast(list[str], self.input_batch.req_ids[:num_reqs]),
+                next_tokens=generated_tokens_async,
+                request_seq_lens=request_seq_lens,
+                discard_sampled_tokens_req_indices=[],
+                placeholder_req_id_to_index=placeholder_req_id_to_index,
+                logits_indices_selector=tokens_indices_selector,
+                scheduler_output=scheduler_output,
+                is_continue_decode=True,
+                continue_decode_actual_steps=actual_steps_async,
+                continue_decode_max_steps=max_decode_steps,
+            )
+            self._pre_async_results.next_tokens_in_tpu = next_tokens_in_tpu
+
+            model_runner_output = ModelRunnerOutput(
+                req_ids=cast(list[str], self.input_batch.req_ids[:num_reqs]),
+                req_id_to_index=self.input_batch.req_id_to_index.copy(),
+                sampled_token_ids=[],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+                kv_connector_output=kv_connector_output,
+            )
+
+            async_output = AsyncTPUModelRunnerOutput(
+                model_runner_output,
+                generated_tokens_async,
+                num_reqs,
+                [],
+                logits_indices_selector=tokens_indices_selector,
+                logprobs_tensors=logprobs_tensors,
+                expert_indices=all_expert_indices,
+                scheduler_output=scheduler_output,
+                runner=self,
+            )
+            async_output._is_continue_decode = True
+            async_output._actual_steps_future = actual_steps_async
+            async_output._max_decode_steps = max_decode_steps
+            async_output._min_remaining = min_remaining
+            self._continue_decode_output = async_output
+            return None
+
         self.rng_params_for_sampling = final_rng
 
         self.kv_caches = final_kv_caches
@@ -1513,179 +1891,41 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # continue_decode now returns fixed-size stacked buffers plus the
         # number of steps actually executed (early EOS exit can stop before
         # the cap). This is the single, end-of-run host transfer.
-        if logprobs_tensors is not None:
-            (
-                generated_tokens_cpu,
-                all_expert_indices_cpu,
-                actual_steps,
-                lp_token_ids_cpu,
-                lp_vals_cpu,
-                lp_ranks_cpu,
-            ) = jax.device_get((
-                generated_tokens,
-                all_expert_indices,
-                final_state.step_counter,
-                logprobs_tensors.logprob_token_ids,
-                logprobs_tensors.logprobs,
-                logprobs_tensors.selected_token_ranks,
-            ))
-        else:
-            generated_tokens_cpu, all_expert_indices_cpu, actual_steps = jax.device_get(
-                (generated_tokens, all_expert_indices,
-                 final_state.step_counter))
-            lp_token_ids_cpu = None
-            lp_vals_cpu = None
-            lp_ranks_cpu = None
-
-        actual_steps = int(actual_steps)
-        generated_tokens_cpu = np.asarray(generated_tokens_cpu)[:actual_steps]
-        if all_expert_indices_cpu is not None:
-            all_expert_indices_cpu = np.asarray(
-                all_expert_indices_cpu)[:actual_steps]
-
-        if lp_token_ids_cpu is not None:
-            lp_token_ids_cpu = np.asarray(lp_token_ids_cpu)[:actual_steps]
-            lp_vals_cpu = np.asarray(lp_vals_cpu)[:actual_steps]
-            lp_ranks_cpu = np.asarray(lp_ranks_cpu)[:actual_steps]
-
-        # Expose request dimension as axis 0 after transpose: shape (batch_size, actual_steps)
-        generated_tokens_cpu = generated_tokens_cpu.T
-        if tokens_indices_selector is not None:
-            # Realign physical rows back to logical input batch order upfront
-            generated_tokens_cpu = generated_tokens_cpu[
-                tokens_indices_selector]
-
-            if all_expert_indices_cpu is not None:
-                # Shape: (steps, layers, batch, top_k) -> realign batch dimension
-                all_expert_indices_cpu = all_expert_indices_cpu[:, :,
-                                                                tokens_indices_selector, :]
-
-            if lp_token_ids_cpu is not None:
-                lp_token_ids_cpu = lp_token_ids_cpu[:,
-                                                    tokens_indices_selector, :]
-                lp_vals_cpu = lp_vals_cpu[:, tokens_indices_selector, :]
-                lp_ranks_cpu = lp_ranks_cpu[:, tokens_indices_selector]
+        (
+            sampled_token_ids,
+            logprobs_lists,
+            routed_experts,
+            actual_steps,
+            num_eos_hits,
+        ) = _process_continue_decode_outputs(
+            generated_tokens=generated_tokens,
+            actual_steps=final_state.step_counter,
+            req_ids=self.input_batch.req_ids[:self.input_batch.num_reqs],
+            eos_token_id=self.eos_token_id,
+            indices_selector=tokens_indices_selector,
+            logprobs_tensors=logprobs_tensors,
+            expert_indices=all_expert_indices,
+            enable_return_routed_experts=getattr(
+                self.vllm_config.model_config, "enable_return_routed_experts",
+                False),
+            requests=self.requests,
+            block_size=self.block_size,
+            scheduler_output=scheduler_output,
+            input_batch=self.input_batch,
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            attn_metadata=attn_metadata,
+        )
 
         num_reqs = self.input_batch.num_reqs
-        sampled_token_ids = []
-        expert_indices_list = []
-        expert_slots_list = []
-        lp_token_ids_list = []
-        lp_vals_list = []
-        lp_ranks_list = []
-        num_eos_hits = 0
-
-        for req_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            req_state = self.requests.get(req_id)
-            tokens = generated_tokens_cpu[req_idx]
-
-            eos_arr = np.atleast_1d(self.eos_token_id)
-            is_eos = np.any(tokens[:, None] == eos_arr[None, :], axis=-1)
-            eos_indices = np.where(is_eos)[0]
-            if len(eos_indices) > 0:
-                num_eos_hits += 1
-                first_eos_idx = eos_indices[0]
-                valid_tokens = tokens[:first_eos_idx + 1].tolist()
-            else:
-                valid_tokens = tokens.tolist()
-
-            actual_len = len(valid_tokens)
-            sampled_token_ids.append(valid_tokens)
-
-            # 2. Update scheduler_output directly to the true trimmed length
-            scheduler_output.num_scheduled_tokens[req_id] = actual_len
-
-            # 3. Extract exact valid expert indices for this request
-            if all_expert_indices_cpu is not None:
-                # Slice to (actual_len, layers, top_k)
-                req_experts = all_expert_indices_cpu[:actual_len, :,
-                                                     req_idx, :]
-                # Transpose to (layers, actual_len, top_k) and collect
-                expert_indices_list.append(req_experts.transpose(1, 0, 2))
-
-                # Reconstruct slots for this request. The on-device decode
-                # burst length (actual_len) is decided on-device via EOS
-                # early-exit and is not reflected in num_computed_tokens, so the
-                # burst's tokens begin at num_computed_tokens.
-                if req_state is not None and actual_len > 0:
-                    slots_arr = _reconstruct_slots_for_request(
-                        req_state,
-                        actual_len,
-                        self.block_size,
-                        start_pos=req_state.num_computed_tokens)
-                    expert_slots_list.append(slots_arr)
-
-            if lp_token_ids_cpu is not None:
-                # Shape: [actual_len, max_logprobs + 1]
-                req_lp_token_ids = lp_token_ids_cpu[:actual_len, req_idx]
-                req_lp_vals = lp_vals_cpu[:actual_len, req_idx]
-                # Shape: [actual_len]
-                req_lp_ranks = lp_ranks_cpu[:actual_len, req_idx]
-
-                lp_token_ids_list.append(req_lp_token_ids)
-                lp_vals_list.append(req_lp_vals)
-                lp_ranks_list.append(req_lp_ranks)
-
-            if req_state is not None:
-                start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-                end_idx = start_idx + len(valid_tokens)
-                if req_idx < self.max_num_reqs and end_idx <= self.max_model_len:
-                    self.input_batch.token_ids_cpu[
-                        req_idx, start_idx:end_idx] = valid_tokens
-                    self.input_batch.num_tokens_no_spec[req_idx] = end_idx
-                    self.input_batch.num_tokens[req_idx] = end_idx
-                    req_state.output_token_ids.extend(valid_tokens)
-
-            if hasattr(
-                    attn_metadata,
-                    "seq_lens_cpu") and attn_metadata.seq_lens_cpu is not None:
-                attn_metadata.seq_lens_cpu[req_idx] += len(valid_tokens)
-
-        # 4. Concatenate along the token dimension (axis 1)
-        expert_indices_cpu = None
-        if expert_indices_list:
-            expert_indices_cpu = np.concatenate(expert_indices_list, axis=1)
-
-        routed_experts = None
-        if expert_indices_cpu is not None and expert_slots_list:
-            routing_data = expert_indices_cpu.transpose(1, 0, 2)
-            slot_mapping = np.concatenate(expert_slots_list, axis=0)
-            routed_experts = RoutedExpertsLists(
-                routing_data=routing_data,
-                slot_mapping=slot_mapping,
-            )
-
-        logprobs_lists = None
-        if lp_token_ids_list:
-            logprob_token_ids = np.concatenate(lp_token_ids_list, axis=0)
-            logprobs_arr = np.concatenate(lp_vals_list, axis=0)
-            sampled_token_ranks = np.concatenate(lp_ranks_list, axis=0)
-            cu_num_generated_tokens = [0] + list(
-                np.cumsum([len(x) for x in sampled_token_ids]))
-
-            from vllm.v1.outputs import LogprobsLists
-            logprobs_lists = LogprobsLists(
-                logprob_token_ids=logprob_token_ids,
-                logprobs=logprobs_arr,
-                sampled_token_ranks=sampled_token_ranks,
-                cu_num_generated_tokens=cu_num_generated_tokens,
-            )
-
-        termination_reason = "unknown"
-        if actual_steps < max_decode_steps:
-            termination_reason = "eos_hit"
-        elif actual_steps == max_decode_steps:
-            reasons = []
-            if max_decode_steps == self.static_max_decode_steps:
-                reasons.append("max_decode_steps_limit")
-            if max_decode_steps == min_remaining or min_remaining <= 0:
-                reasons.append("kv_cache_limit")
-            termination_reason = "_".join(reasons) if reasons else "max_steps"
-
-        logger.debug(
-            "continue_decode finished: actual steps: %d, reason: %s, initial_active_reqs: %d (max_steps: %d, EOS hits: %d)",
-            actual_steps, termination_reason, num_reqs, max_decode_steps,
-            num_eos_hits)
+        _log_continue_decode_summary(
+            actual_steps=actual_steps,
+            max_decode_steps=max_decode_steps,
+            static_max_decode_steps=self.static_max_decode_steps,
+            min_remaining=min_remaining,
+            num_reqs=num_reqs,
+            num_eos_hits=num_eos_hits,
+        )
 
         output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
@@ -2709,19 +2949,21 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 all_token_indices_to_substitute.extend(cur_indices)
                 all_pre_next_tokens_indices.extend(pre_indices)
 
-            if self.scheduler_config.async_scheduling and self._pre_async_results:
-                if self.speculative_config:
-                    next_tokens = self._pre_async_results.spec_decode_next_tokens
-                else:
-                    next_tokens = self._pre_async_results.next_tokens
-                token_in_tpu_cur_input_indices = np.array(
-                    all_token_indices_to_substitute)
-                token_in_tpu_pre_next_tokens_indices = np.array(
-                    all_pre_next_tokens_indices)
+            if self.speculative_config:
+                next_tokens = self._pre_async_results.spec_decode_next_tokens
+            elif getattr(self._pre_async_results, "next_tokens_in_tpu",
+                         None) is not None:
+                next_tokens = self._pre_async_results.next_tokens_in_tpu
+            else:
+                next_tokens = self._pre_async_results.next_tokens
+            token_in_tpu_cur_input_indices = np.array(
+                all_token_indices_to_substitute)
+            token_in_tpu_pre_next_tokens_indices = np.array(
+                all_pre_next_tokens_indices)
 
-                input_ids = self._apply_async_token_substitution(
-                    input_ids, next_tokens, token_in_tpu_cur_input_indices,
-                    token_in_tpu_pre_next_tokens_indices)
+            input_ids = self._apply_async_token_substitution(
+                input_ids, next_tokens, token_in_tpu_cur_input_indices,
+                token_in_tpu_pre_next_tokens_indices)
 
         num_scheduled_tokens_per_req = np.concatenate([
             np.array(scheduled_tokens_per_dp_rank[dp_rank], dtype=np.int32)
