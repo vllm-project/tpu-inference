@@ -24,6 +24,7 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -212,12 +213,19 @@ def build_initial_prompt(
 # A real `file_editor view` returns a bounded line range and truncates beyond
 # it, so views stay roughly this size regardless of how large the file is.
 VIEW_LINES = 120
-MAX_VIEWS_PER_FILE = 4
+# An instance only carries so much real content, so distinct observations are
+# capped by what its files hold. Chunking further up each file raises that
+# ceiling and keeps long conversations from looping over a couple of views.
+MAX_VIEWS_PER_FILE = 16
 
 # Agent harnesses clip long command output before it reaches the model. Without
 # this, a recorded numpy run over 4k tests would feed back a single ~120k-token
 # observation -- far past anything a real rollout sees.
 MAX_BASH_OUTPUT_CHARS = 6000
+
+# Spread of the skewed turn-count draw; tuned so the default 10-100 range gives
+# p50 20, p90 55, mean ~28, with ~3% of instances reaching the cap.
+TURNS_SKEW_SIGMA = 1.174
 
 
 def clip_output(text: str) -> str:
@@ -269,6 +277,35 @@ def chunk_file(content: str) -> List[str]:
     return chunks
 
 
+def sample_turns(rng: random.Random, args: argparse.Namespace) -> int:
+    """Samples a turn count for one task instance.
+
+    R2E-Gym carries no trajectories, so it says nothing about how many turns a
+    real rollout takes -- any distribution here is an assumption, not data. A
+    uniform draw over 10-100 (mean ~53) is the flat default, but real SWE agent
+    rollouts are right-skewed: most resolve in 10-30 turns with a long tail up
+    to the cap. Because history is re-prefilled every turn, the choice moves
+    average prefill per turn a lot, so it is exposed as a flag.
+
+    The skewed draw is an offset log-normal whose median sits one ninth into
+    the range (20 turns for the default 10-100), with p90 ~55.
+
+    Args:
+        rng: Seeded RNG.
+        args: Parsed command line arguments.
+
+    Returns:
+        int: Turn count clamped to [turns_min, turns_max].
+    """
+    if args.turns_dist == "uniform":
+        return rng.randint(args.turns_min, args.turns_max)
+
+    span = max(1.0, (args.turns_max - args.turns_min) / 9.0)
+    value = args.turns_min + rng.lognormvariate(math.log(span),
+                                                TURNS_SKEW_SIGMA)
+    return int(min(args.turns_max, max(args.turns_min, round(value))))
+
+
 def build_env_turns(instance: Dict[str, Any], num_turns: int) -> List[str]:
     """Builds a sequence of environment observations from recorded output.
 
@@ -306,6 +343,9 @@ def build_env_turns(instance: Dict[str, Any], num_turns: int) -> List[str]:
         views = ["(file is empty)"]
 
     observations = []
+    # Walk the view chunks with their own counter. Indexing them by `turn`
+    # would stride by 4 and revisit the same two chunks forever.
+    view_idx = 0
     for turn in range(num_turns):
         # Cycle explore -> view -> edit -> test, the shape of a real rollout.
         kind = turn % 4
@@ -316,14 +356,16 @@ def build_env_turns(instance: Dict[str, Any], num_turns: int) -> List[str]:
                 f"{setup[:600]}")
         elif kind == 1:
             observations.append("Execution output of [file_editor]:\n"
-                                f"{views[turn % len(views)]}")
+                                f"{views[view_idx % len(views)]}")
+            view_idx += 1
         elif kind == 2:
             path = modified[0] if modified else "file.py"
             observations.append(
                 f"Execution output of [file_editor]:\nThe file /testbed/{path} "
                 f"has been edited. Here's the result of running `cat -n` on a "
-                f"snippet:\n{views[(turn + 1) % len(views)][:800]}\n"
+                f"snippet:\n{views[view_idx % len(views)][:800]}\n"
                 f"Review the changes and make sure they are correct.")
+            view_idx += 1
         else:
             # Real pytest output. Failing runs dominate a rollout; the last
             # test turn lands on the recorded passing run.
@@ -392,6 +434,16 @@ def main():
         help="Maximum initial prompt length in tokens.",
     )
     parser.add_argument(
+        "--turns-dist",
+        type=str,
+        default="skewed",
+        choices=["skewed", "uniform"],
+        help="Turn-count distribution. `skewed` (default) is right-skewed "
+        "(p50 20, p90 55) like real SWE rollouts; `uniform` draws flat over "
+        "[turns-min, turns-max] (mean ~53). R2E-Gym has no trajectories, so "
+        "neither is measured from the data.",
+    )
+    parser.add_argument(
         "--turns-min",
         type=int,
         default=10,
@@ -429,6 +481,8 @@ def main():
     skipped = 0
     prompt_lens = []
     env_lens = []
+    turn_counts = []
+    distinct_obs = []
 
     with open(args.output, "w") as out:
         for i, row in enumerate(rows):
@@ -456,7 +510,7 @@ def main():
                 skipped += 1
                 continue
 
-            num_turns = rng.randint(args.turns_min, args.turns_max)
+            num_turns = sample_turns(rng, args)
             env_turns = build_env_turns(instance, num_turns)
 
             if args.env_len_max:
@@ -472,6 +526,11 @@ def main():
             prompt_tokens = len(tokenizer.encode(prompt))
             prompt_lens.append(prompt_tokens)
             env_lens.extend(len(tokenizer.encode(t)) for t in env_turns)
+            turn_counts.append(num_turns)
+            # An instance holds a bounded amount of real content, so a long
+            # conversation necessarily reuses observations. Report it rather
+            # than let it pass as more variety than there is.
+            distinct_obs.append(len(set(env_turns)))
 
             out.write(
                 json.dumps({
@@ -503,6 +562,13 @@ def main():
     print(f"  env observation tokens: min {min(env_lens)} "
           f"p50 {pct(env_lens, 0.5)} p99 {pct(env_lens, 0.99)} "
           f"max {max(env_lens)}")
+    print(f"  turns per instance ({args.turns_dist}): min {min(turn_counts)} "
+          f"p50 {pct(turn_counts, 0.5)} p90 {pct(turn_counts, 0.9)} "
+          f"max {max(turn_counts)} "
+          f"mean {sum(turn_counts) / len(turn_counts):.1f}")
+    print(f"  distinct observations per instance: min {min(distinct_obs)} "
+          f"mean {sum(distinct_obs) / len(distinct_obs):.1f} "
+          f"max {max(distinct_obs)}")
     print(f"  total env observations: {len(env_lens)}")
 
 
