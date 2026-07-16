@@ -626,13 +626,24 @@ def mla_attention(
             mixed_tuned_params.num_kv_pages_per_block)
         num_queries_per_block = (
             batched_decode_tuned_params.num_queries_per_block,
-            prefill_tuned_params.num_queries_per_block,
-            mixed_tuned_params.num_queries_per_block)
-        mixed_q_split = mixed_tuned_params.q_split
+            16,
+            64)
+        mixed_q_split = 16
         decode_batch_size = batched_decode_tuned_params.decode_batch_size
         logger.info(
-            f"Using MLA tuned block sizes for batched decode: {batched_decode_tuned_params} for input shapes: {batched_decode_tuning_key}"
-        )
+            f"Using MLA tuned block sizes for case {q.shape[1]}x{q.shape[0]}x{q.shape[2]}: "
+            f"q_rope={q_rope.shape[2]}, "
+            f"kv_dtype={cache.dtype.name}, "
+            f"q_dtype={q.dtype.name}, "
+            f"page_size_per_kv_packing={cache.shape[1]}, "
+            f"total_num_pages={cache.shape[0]}, "
+            f"kv_packing={cache.shape[2]}, "
+            f"max_num_seqs={md.padded_num_reqs // dp_size}, "
+            f"pages_per_seq={args[1].shape[0] // args[0].shape[0]}, "
+            f"num_kv_pages_per_block={num_kv_pages_per_block}, "
+            f"using, "
+            f"num_queries_per_block={num_queries_per_block}, num_kv_pages_per_block={num_kv_pages_per_block}, decode_batch_size={decode_batch_size}, mixed_q_split={mixed_q_split}"
+         )
 
         out, new_cache = mla_ragged_paged_attention(
             q,
