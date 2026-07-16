@@ -1326,7 +1326,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      self.kv_caches,
                      input_ids,
                      attn_metadata,
-                     shared_attn_metadata,
                      inputs_embeds,
                      input_positions,
                      tuple(self.layer_name_to_kvcache_index.items()),
@@ -1334,6 +1333,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      intermediate_tensors,
                      self.is_first_rank,
                      self.is_last_rank,
+                     shared_attention_metadata=shared_attn_metadata,
                  )
             if not self.is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)

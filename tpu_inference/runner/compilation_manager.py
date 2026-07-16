@@ -443,7 +443,6 @@ class CompilationManager:
                 self.runner.kv_caches,
                 input_ids,
                 attention_metadata,
-                shared_attention_metadata,
                 inputs_embeds,
                 positions,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
@@ -451,6 +450,7 @@ class CompilationManager:
                 intermediate_tensors,
                 is_first_rank,
                 is_last_rank,
+                shared_attention_metadata=shared_attention_metadata,
             )
             self.runner.kv_caches = out[0]
             return out
@@ -466,7 +466,6 @@ class CompilationManager:
                 self.runner.kv_caches,
                 input_ids,
                 attention_metadata,
-                shared_attention_metadata,
                 inputs_embeds,
                 positions,
                 tuple(self.runner.layer_name_to_kvcache_index.items()),
@@ -477,6 +476,7 @@ class CompilationManager:
                 num_tokens=num_tokens,
                 num_reqs=num_reqs,
                 warmup_handler=model_fn_warmup,
+                shared_attention_metadata=shared_attention_metadata,
             )
 
     def _precompile_substitute_placeholder_token(self) -> None:

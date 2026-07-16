@@ -183,7 +183,6 @@ def _decode_core(
             kvc,
             ct,
             attn_metadata,
-            shared_attn_metadata,
             inputs_embeds,
             attn_metadata.input_positions,
             layer_name_to_kvcache_index,
@@ -191,6 +190,7 @@ def _decode_core(
             intermediate_tensors,
             is_first_rank,
             is_last_rank,
+            shared_attention_metadata=shared_attn_metadata,
         )
         logits = compute_logits_fn(state, hidden_states, None)
         logits = logits.astype(jnp.float32)
@@ -429,20 +429,18 @@ def continue_decode(
                 request_distribution=attn.request_distribution,
                 mamba_state_indices=attn.mamba_state_indices,
             )
-            _, _, _, experts = model_fn(
-                state,
-                kv_caches,
-                current_tokens,
-                am,
-                shared_am,
-                inputs_embeds,
-                am.input_positions,
-                layer_name_to_kvcache_index,
-                lora_metadata,
-                intermediate_tensors,
-                is_first_rank,
-                is_last_rank,
-            )
+            _, _, _, experts = model_fn(state,
+                                        kv_caches,
+                                        current_tokens,
+                                        am,
+                                        inputs_embeds,
+                                        am.input_positions,
+                                        layer_name_to_kvcache_index,
+                                        lora_metadata,
+                                        intermediate_tensors,
+                                        is_first_rank,
+                                        is_last_rank,
+                                        shared_attention_metadata=shared_am)
             return experts
 
         expert_struct = jax.eval_shape(

@@ -470,7 +470,6 @@ def attention(
     k: jax.Array,
     v: jax.Array,
     attention_metadata: AttentionMetadata,
-    shared_attn_metadata: SharedAttentionMetadata,
     mesh: Mesh,
     head_dim_original: int | None = None,  # before padding,
     sm_scale: float | None = None,
@@ -481,6 +480,7 @@ def attention(
     sinks: jax.Array | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    shared_attention_metadata: SharedAttentionMetadata | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -501,7 +501,8 @@ def attention(
         sm_scale = head_dim_original**-0.5
 
     md = attention_metadata
-    shared_md = shared_attn_metadata
+    # shared_attention_metadata is None for flax models, and is used for vllm models to share the metadata across layers.
+    shared_md = shared_attention_metadata if shared_attention_metadata is not None else md
 
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(

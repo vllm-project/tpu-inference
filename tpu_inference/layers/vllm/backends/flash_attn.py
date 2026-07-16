@@ -365,7 +365,6 @@ def _jax_attn_func(
         k,
         v,
         attention_metadata,
-        shared_attention_metadata,
         mesh,
         sm_scale=scale,
         q_scale=q_scale,
@@ -373,6 +372,7 @@ def _jax_attn_func(
         v_scale=v_scale,
         sinks=sinks,
         attention_chunk_size=sliding_window,
+        shared_attention_metadata=shared_attention_metadata,
     )
 
     formatted_outputs = _format_attention_output(outputs, q_len, num_heads,

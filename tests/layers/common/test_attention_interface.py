@@ -128,10 +128,10 @@ def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
         k=k,
         v=v,
         attention_metadata=attention_metadata,
-        shared_attn_metadata=shared_attention_metadata,
         mesh=mesh,
         head_dim_original=head_dim,
         sinks=sinks,
+        shared_attention_metadata=shared_attention_metadata,
     )
 
     # 3. Assert

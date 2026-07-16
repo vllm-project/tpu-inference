@@ -398,7 +398,7 @@ def get_flax_model(
             None,  # expert ids
         ),
         donate_argnums=1,  # 0 is state_leaves, 1 is kv_cache
-        static_argnums=(6, ),  # 6 is layer_name_to_kvcache_index
+        static_argnums=(5, ),  # 5 is layer_name_to_kvcache_index
     )
     def run_draft_model(state_leaves, *args):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
@@ -467,6 +467,7 @@ def get_flax_model(
     def wrapped_model_fn(*args, **kwargs):
         if not model_supports_spec_step:
             kwargs.pop("spec_step_idx", None)
+        kwargs.pop("shared_attention_metadata", None)
         return jitted_model_fn(*args, **kwargs)
 
     compute_logits_fn = run_compute_logits

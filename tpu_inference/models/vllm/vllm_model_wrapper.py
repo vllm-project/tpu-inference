@@ -314,7 +314,6 @@ class VllmModelWrapper:
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
             attn_metadata: AttentionMetadata,
-            shared_attn_metadata: SharedAttentionMetadata,
             input_embeds: jax.Array,
             input_positions: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
@@ -322,6 +321,7 @@ class VllmModelWrapper:
             intermediate_tensors: JaxIntermediateTensors = None,
             is_first_rank: bool = True,
             is_last_rank: bool = True,
+            shared_attention_metadata: SharedAttentionMetadata | None = None,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
                 List[jax.Array], jax.Array, List[jax.Array], jax.Array]:
@@ -341,7 +341,7 @@ class VllmModelWrapper:
                     mesh=self.mesh,
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index,
                     vllm_config=self.vllm_config,
-                    shared_attn_metadata=shared_attn_metadata
+                    shared_attn_metadata=shared_attention_metadata
             ), set_forward_context(attn_metadata=attn_metadata,
                                    vllm_config=self.vllm_config,
                                    num_tokens=num_tokens):
