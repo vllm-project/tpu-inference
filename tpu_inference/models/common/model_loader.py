@@ -723,7 +723,7 @@ def _validate_model_interface(model: Any) -> None:
     A valid model must have:
     - An __init__ method that accepts a 'vllm_config' keyword argument.
     - A __call__ method that accepts 'kv_caches', 'input_ids', and
-      'attention_metadata', 'shared_attention_metadata'  keyword arguments.
+      'attention_metadata' keyword arguments.
 
     Args:
         model: The model class to validate.
@@ -758,8 +758,7 @@ def _validate_model_interface(model: Any) -> None:
     if not has_defined_call:
         raise TypeError(f"Model {model.__name__} must have a __call__ method.")
 
-    required_call_args = ("kv_caches", "input_ids", "attention_metadata",
-                          "shared_attention_metadata")
+    required_call_args = ("kv_caches", "input_ids", "attention_metadata")
     missing_args = tuple(arg for arg in required_call_args
                          if not supports_kw(model_call, arg))
 

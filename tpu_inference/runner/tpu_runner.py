@@ -1264,7 +1264,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             input_ids,
             input_positions,
             attn_metadata,
-            shared_attn_metadata,
             sampling_metadata,
             logits_indices,
             spec_decode_metadata,
@@ -1273,6 +1272,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_ids_dp,
             padded_num_scheduled_tokens_per_dp_rank,
             _,
+            shared_attn_metadata,
         ) = self._prepare_inputs(scheduler_output)
 
         # multi-modal support
@@ -1443,6 +1443,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             _,
             _,
             tokens_indices_selector,
+            _,
         ) = self._prepare_inputs(scheduler_output)
 
         init_tokens = input_ids
@@ -2756,7 +2757,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             input_ids,
             positions,
             attention_metadata,
-            shared_attention_metadata,
             sampling_metadata,
             logits_indices,
             spec_decode_metadata,
@@ -2765,6 +2765,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             req_ids_dp,
             padded_num_scheduled_tokens_per_dp_rank,
             tokens_indices_selector,
+            shared_attention_metadata,
         )
 
     def _get_input_ids_embeds(self, input_ids: jax.Array,
