@@ -17,7 +17,9 @@ export SSH_USER="${SSH_USER:-$(whoami)}"
 HOST_HF_HOME="${HOST_HF_HOME:-/mnt/disks/persist/models}"
 
 # Benchmark related defaults
-MODEL="${MODEL:-Qwen/Qwen3-8B}"
+MODEL="${MODEL:-gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39}"
+LOAD_FORMAT="${LOAD_FORMAT:-runai_streamer}"
+SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Qwen/Qwen3-30B-A3B}"
 INPUT_LEN="${INPUT_LEN:-128}"
 OUTPUT_LEN="${OUTPUT_LEN:-128}"
 NUM_PROMPTS="${NUM_PROMPTS:-100}"
@@ -393,6 +395,8 @@ docker exec \
     --port ${PREFILL_PORT} \
     --tensor-parallel-size ${PREFILL_TP} \
     --trust-remote-code \
+    --load-format ${LOAD_FORMAT} \
+    --served-model-name ${SERVED_MODEL_NAME} \
     --no-enable-prefix-caching \
     --kv-transfer-config '{\"kv_connector\": \"TPUConnector\", \"kv_connector_module_path\": \"tpu_inference.distributed.tpu_connector\", \"kv_role\": \"kv_producer\"}' \
     --max-model-len 1024 > /root/vllm_serve_prefill.log 2>&1"
@@ -414,6 +418,8 @@ docker exec \
     --port ${DECODE_PORT} \
     --tensor-parallel-size ${DECODE_TP} \
     --trust-remote-code \
+    --load-format ${LOAD_FORMAT} \
+    --served-model-name ${SERVED_MODEL_NAME} \
     --no-enable-prefix-caching \
     --speculative-config "\$SPECULATIVE_CONFIG" \
     --kv-transfer-config "\$KV_TRANSFER_CONFIG" \
@@ -496,14 +502,14 @@ wait_server 127.0.0.1 8000
 if [[ "$TEST_MODE" == 2 || "$TEST_MODE" == 3 ]]; then
   echo "--- Running correctness test ---"
   docker exec "$PROXY_CONTAINER_NAME" /bin/bash -c \
-    "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py --baseline_url http://$DECODE_HEAD_IP:$DECODE_PORT/v1/completions --disagg_url http://127.0.0.1:8000/v1/completions --model '$MODEL' --num_requests 20 --input_length 32 --output_length 64 > /root/logs/correctness.txt 2>&1"
+    "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py --baseline_url http://$DECODE_HEAD_IP:$DECODE_PORT/v1/completions --disagg_url http://127.0.0.1:8000/v1/completions --model '$SERVED_MODEL_NAME' --num_requests 20 --input_length 32 --output_length 64 > /root/logs/correctness.txt 2>&1"
   docker exec "$PROXY_CONTAINER_NAME" cat /root/logs/correctness.txt
 fi
 
 if [[ "$TEST_MODE" == 1 || "$TEST_MODE" == 3 ]]; then
   echo "--- Running benchmark test ---"
   docker exec "$PROXY_CONTAINER_NAME" /bin/bash -c \
-    "vllm bench serve --backend vllm --host 127.0.0.1 --port 8000 --model '$MODEL' --dataset-name random --random-input-len $INPUT_LEN --random-output-len $OUTPUT_LEN --num-prompts $NUM_PROMPTS --request-rate inf --max-concurrency $MAX_CONCURRENCY --trust-remote-code --seed $RANDOM_SEED > /root/logs/benchmark.txt 2>&1"
+    "vllm bench serve --backend vllm --host 127.0.0.1 --port 8000 --model '$SERVED_MODEL_NAME' --dataset-name random --random-input-len $INPUT_LEN --random-output-len $OUTPUT_LEN --num-prompts $NUM_PROMPTS --request-rate inf --max-concurrency $MAX_CONCURRENCY --trust-remote-code --seed $RANDOM_SEED > /root/logs/benchmark.txt 2>&1"
   docker exec "$PROXY_CONTAINER_NAME" cat /root/logs/benchmark.txt
 fi
 

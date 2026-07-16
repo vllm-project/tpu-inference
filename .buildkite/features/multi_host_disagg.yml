@@ -127,7 +127,9 @@ steps:
       hostname: "tpu7x-16-ci-0-cicd-us-central1-c"
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-      MODEL: "Qwen/Qwen3-8B"
+      MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+      LOAD_FORMAT: "runai_streamer"
+      SERVED_MODEL_NAME: "Qwen/Qwen3-30B-A3B"
       SPECULATIVE_METHOD: "ngram"
       SPECULATIVE_CONFIG: '{"method":"ngram","prompt_lookup_max":5,"prompt_lookup_min":3,"num_speculative_tokens":3}'
       PREFILL_HOSTS_COUNT: "1"
@@ -159,7 +161,9 @@ steps:
       queue: tpu_v7x_16_queue
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-      MODEL: "Qwen/Qwen3-8B"
+      MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+      LOAD_FORMAT: "runai_streamer"
+      SERVED_MODEL_NAME: "Qwen/Qwen3-30B-A3B"
       SPECULATIVE_METHOD: "ngram"
       SPECULATIVE_CONFIG: '{"method":"ngram","prompt_lookup_max":5,"prompt_lookup_min":3,"num_speculative_tokens":3}'
       PREFILL_HOSTS_COUNT: "1"
