@@ -315,6 +315,7 @@ start_vllm_log_streaming() {
 
 cleanup() {
   local exit_code=$?
+  local cleanup_failed=0
   echo "🧹 Cleaning up containers on all hosts..."
 
   stop_vllm_log_streaming
@@ -323,26 +324,44 @@ cleanup() {
   echo "   -> Capturing server logs..."
   docker cp "$NODE_CONTAINER_NAME:/root/vllm_serve_prefill.log" "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp '$NODE_CONTAINER_NAME:/root/vllm_serve_decode.log' /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
-    scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
+    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp '$NODE_CONTAINER_NAME:/root/vllm_serve_decode.log' /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true"; then
+      echo "WARNING: Failed to capture the Decode server log from ${DECODE_HEAD_IP}." >&2
+      cleanup_failed=1
+    fi
+    if ! scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1; then
+      echo "INFO: Decode server log was not available from ${DECODE_HEAD_IP}." >&2
+    fi
+    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log"; then
+      echo "WARNING: Failed to remove /tmp/vllm_serve_decode.log on ${DECODE_HEAD_IP}." >&2
+      cleanup_failed=1
+    fi
   fi
 
   # Cleanup Prefill workers
   for ip in "${PREFILL_WORKER_IPS[@]}"; do
     echo "   -> Cleaning Prefill worker: $ip"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true" || true
+    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker_status=0; docker info >/dev/null || docker_status=\$?; if [ \$docker_status -eq 0 ] && docker container inspect '$NODE_CONTAINER_NAME' >/dev/null 2>&1; then docker rm -f '$NODE_CONTAINER_NAME' >/dev/null || docker_status=\$?; fi; rm -f ~/tpu-inference/scripts/multihost/run_cluster.sh; rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true; exit \$docker_status"; then
+      echo "WARNING: Cleanup failed on Prefill worker ${ip}." >&2
+      cleanup_failed=1
+    fi
   done
 
   # Cleanup Decode Head
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
     echo "   -> Cleaning Decode Head: $DECODE_HEAD_IP"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true" || true
+    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker_status=0; docker info >/dev/null || docker_status=\$?; if [ \$docker_status -eq 0 ] && docker container inspect '$NODE_CONTAINER_NAME' >/dev/null 2>&1; then docker rm -f '$NODE_CONTAINER_NAME' >/dev/null || docker_status=\$?; fi; rm -f ~/tpu-inference/scripts/start_decode.sh ~/tpu-inference/scripts/multihost/run_cluster.sh; rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true; exit \$docker_status"; then
+      echo "WARNING: Cleanup failed on Decode head ${DECODE_HEAD_IP}." >&2
+      cleanup_failed=1
+    fi
   fi
 
   # Cleanup Decode workers
   for ip in "${DECODE_WORKER_IPS[@]}"; do
     echo "   -> Cleaning Decode worker: $ip"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true" || true
+    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker_status=0; docker info >/dev/null || docker_status=\$?; if [ \$docker_status -eq 0 ] && docker container inspect '$NODE_CONTAINER_NAME' >/dev/null 2>&1; then docker rm -f '$NODE_CONTAINER_NAME' >/dev/null || docker_status=\$?; fi; rm -f ~/tpu-inference/scripts/multihost/run_cluster.sh; rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true; exit \$docker_status"; then
+      echo "WARNING: Cleanup failed on Decode worker ${ip}." >&2
+      cleanup_failed=1
+    fi
   done
 
   # Cleanup Prefill Head (Local Node)
@@ -354,6 +373,8 @@ cleanup() {
   docker stop "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
   docker rm -f "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
 
+  rm -f /tmp/start_prefill.sh /tmp/start_decode.sh
+
   if [ $exit_code -ne 0 ]; then
     echo "--- 🚨 Script failed or timed out (Exit Code: $exit_code). Dumping logs..."
     for log_file in "prefill.txt" "decode.txt" "proxy.txt" "correctness.txt" "benchmark.txt"; do
@@ -364,7 +385,16 @@ cleanup() {
     done
   fi
 
+  if (( cleanup_failed )); then
+    echo "⚠️ Cleanup completed with failures." >&2
+    if (( exit_code == 0 )); then
+      exit 1
+    fi
+    return "$exit_code"
+  fi
+
   echo "✅ Cleanup complete."
+  return "$exit_code"
 }
 trap cleanup EXIT
 
@@ -477,6 +507,35 @@ wait_for_ray_head() {
   return 1
 }
 
+wait_for_ray_cluster_members() {
+  local host=$1
+  local expected_nodes=$2
+  local label=$3
+  local timeout=${4:-600}
+  local ray_ready_cmd
+  ray_ready_cmd="import ray; ray.init(address='auto', ignore_reinit_error=True); alive=sum(node.get('Alive', False) for node in ray.nodes()); raise SystemExit(0 if alive >= ${expected_nodes} else 1)"
+
+  echo "Waiting for ${label} Ray cluster to register ${expected_nodes} alive node(s)..."
+  local end_time=$((SECONDS + timeout))
+  while [[ $SECONDS -lt $end_time ]]; do
+    if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
+      if docker exec "$NODE_CONTAINER_NAME" python3 -c "$ray_ready_cmd" >/dev/null 2>&1; then
+        echo "${label} Ray cluster has registered ${expected_nodes} alive node(s)."
+        return 0
+      fi
+    elif ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+      "docker exec '$NODE_CONTAINER_NAME' python3 -c \"${ray_ready_cmd}\"" >/dev/null 2>&1; then
+      echo "${label} Ray cluster has registered ${expected_nodes} alive node(s)."
+      return 0
+    fi
+    sleep 5
+  done
+
+  echo "Error: ${label} Ray cluster did not register ${expected_nodes} alive node(s) within ${timeout}s." >&2
+  dump_ray_resources "$host" "$label"
+  return 1
+}
+
 dump_ray_resources() {
   local host=$1
   local label=$2
@@ -567,6 +626,8 @@ EOF
     sleep 15
 done
 
+wait_for_ray_cluster_members "$PREFILL_HEAD_IP" "$PREFILL_HOSTS_COUNT" "Prefill"
+
 # -----------------------------------------------------------------
 # 2. Start Decode Ray Cluster
 # -----------------------------------------------------------------
@@ -624,8 +685,7 @@ EOF
     sleep 15
 done
 
-echo "--- Waiting for Ray Clusters to fully form..."
-sleep 120
+wait_for_ray_cluster_members "$DECODE_HEAD_IP" "$DECODE_HOSTS_COUNT" "Decode"
 
 dump_ray_resources "$PREFILL_HEAD_IP" "Prefill"
 dump_ray_resources "$DECODE_HEAD_IP" "Decode"
