@@ -62,8 +62,7 @@ def mesh():
 
 
 def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
-    """
-    Tests the main `attention` function.
+    """Tests the main `attention` function.
 
     Verifies that:
     1. It calls the `sharded_ragged_paged_attention` kernel with correct metadata.
@@ -150,12 +149,8 @@ def test_attention_sink(monkeypatch, mesh):
     _test_attention(monkeypatch, mesh, 64, True)
 
 
-def test_attention_sink_no_64_raises_error(monkeypatch, mesh):
-    with pytest.raises(
-            NotImplementedError,
-            match="Attention sink support is only available when head_dim==64"
-    ):
-        _test_attention(monkeypatch, mesh, 128, True)
+def test_attention_sink_hd128(monkeypatch, mesh):
+    _test_attention(monkeypatch, mesh, 128, True)
 
 
 # ---- Tests for `sharded_ragged_paged_attention` ----
@@ -184,8 +179,7 @@ def gqa_mesh():
 
 
 def test_sharded_ragged_paged_attention_gqa_replication(monkeypatch, gqa_mesh):
-    """
-    Tests that K and V heads are correctly replicated for GQA in
+    """Tests that K and V heads are correctly replicated for GQA in
     `sharded_ragged_paged_attention`.
     """
     # 1. Arrange
@@ -262,9 +256,8 @@ def test_sharded_ragged_paged_attention_gqa_replication(monkeypatch, gqa_mesh):
 
 
 def test_sharded_ragged_paged_attention_gqa_incompatible_raises_error(
-    gqa_mesh, ):
-    """
-    Tests that a ValueError is raised for GQA when tp_size is not divisible
+        gqa_mesh):
+    """Tests that a ValueError is raised for GQA when tp_size is not divisible
     by num_kv_heads.
     """
     # 1. Arrange
@@ -363,13 +356,15 @@ def test_sharded_rpa_forwards_update_kv_cache_when_not_hd64(
     """`sharded_ragged_paged_attention` must forward `update_kv_cache`
     to the underlying kernel on the non-hd64 path. Both kernels (v3 and
     batched) accept the kwarg after this fix; the wrapper forwards it
-    unconditionally for non-hd64 head sizes."""
+    unconditionally for non-hd64 head sizes.
+    """
     captured = _run_sharded_rpa_capturing_kwargs(monkeypatch,
                                                  gqa_mesh,
                                                  update_kv_cache=False)
 
-    assert captured.get("update_kv_cache") is False, (
-        f"non-hd64 path must forward update_kv_cache=False; got {captured!r}")
+    assert (
+        captured.get("update_kv_cache") is False
+    ), f"non-hd64 path must forward update_kv_cache=False; got {captured!r}"
 
 
 def test_batched_rpa_wrapper_accepts_update_kv_cache():
@@ -379,16 +374,18 @@ def test_batched_rpa_wrapper_accepts_update_kv_cache():
     always forwards the kwarg on the non-hd64 path; without this
     signature, that forwarding crashed at trace time with
     `TypeError: ragged_paged_attention() got an unexpected keyword
-    argument 'update_kv_cache'`."""
+    argument 'update_kv_cache'`.
+    """
     import inspect
 
     from tpu_inference.kernels.experimental.batched_rpa import wrapper
+
     params = inspect.signature(wrapper.ragged_paged_attention).parameters
     assert "update_kv_cache" in params, (
-        f"batched RPA wrapper must accept update_kv_cache as a kwarg; "
+        "batched RPA wrapper must accept update_kv_cache as a kwarg; "
         f"got params: {list(params.keys())}")
     assert params["update_kv_cache"].default is True, (
-        f"update_kv_cache should default to True (no-op for non-KV-share "
+        "update_kv_cache should default to True (no-op for non-KV-share "
         f"callers); got default={params['update_kv_cache'].default!r}")
 
 
@@ -396,7 +393,8 @@ def test_sharded_rpa_rejects_update_kv_cache_false_on_hd64(gqa_mesh):
     """The hd64 RPA kernel doesn't support KV-share; passing
     update_kv_cache=False must raise rather than silently writing to
     cache. (Currently no model uses head_dim=64 + KV-share, but the
-    guard is cheap insurance.)"""
+    guard is cheap insurance.)
+    """
     head_dim = 64
     num_kv_heads = 4
     q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim))
@@ -427,8 +425,7 @@ def test_sharded_rpa_rejects_update_kv_cache_false_on_hd64(gqa_mesh):
 
 
 def test_mla_attention(monkeypatch, mesh):
-    """
-    Tests the `mla_attention` function.
+    """Tests the `mla_attention` function.
 
     Verifies that:
     1. It correctly calculates block sizes using `get_tuned_block_sizes`
@@ -465,7 +462,8 @@ def test_mla_attention(monkeypatch, mesh):
                                               expected_new_cache))
     monkeypatch.setattr(
         "tpu_inference.layers.common.attention_interface.mla_ragged_paged_attention",
-        mock_mla_kernel)
+        mock_mla_kernel,
+    )
 
     final_kv_cache, output = mla_attention(
         q_NTA=q_NTA,
