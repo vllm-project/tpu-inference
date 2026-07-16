@@ -73,3 +73,52 @@ python benchmarks/benchmark_agentic.py \
     --env-len-max 20 \
     --concurrency 16
 ```
+
+---
+
+## 3. Running on Real SWE Task Content (R2E-Gym)
+
+By default the benchmark builds prompts and environment replies from random token IDs. That is fine for fixing token counts, but the content is meaningless. To drive the same workload from real agentic content, `prepare_r2e_dataset.py` converts [R2E-Gym](https://github.com/R2E-Gym/R2E-Gym) SWE tasks into a scripted multi-turn dataset.
+
+### Why a conversion step is needed
+
+R2E-Gym ships **task definitions, not trajectories** — every row's `input` field is empty, so there is nothing to replay. Each row does carry real content: a GitHub-issue style problem statement, the pre-fix source files, and the recorded stdout of the test suite before and after the fix. The converter assembles those into an agent prompt plus a fixed sequence of environment observations.
+
+Running the real environment instead would mean per-task containers, test execution, and a reward loop (NVIDIA measures ~20 min per training step, ~1 CPU core per task instance). That measures the harness, not the serving stack. Here the model still generates **every assistant turn live against the server**, so the generated token distribution is real; only the environment side is pre-baked.
+
+### Step 1: Build the dataset
+
+```bash
+python prepare_r2e_dataset.py \
+    --dataset hfilaretov/Benchmark-R2E-Gym-Easy \
+    --split val \
+    --model-path-or-id Qwen/Qwen3-4B \
+    --output r2e_easy_val.jsonl
+```
+
+The converter prints the resulting token distribution. For the `val` split with the Qwen3-4B tokenizer:
+
+| Metric | min | p50 | p99 | max |
+| --- | --- | --- | --- | --- |
+| Initial prompt tokens | 4,409 | 8,552 | — | 15,490 |
+| Env observation tokens | 17 | 410 | 2,181 | 2,407 |
+
+Use `--input-jsonl` to convert an already-downloaded file, and `--num-instances` to convert a subset.
+
+### Step 2: Run the benchmark against it
+
+```bash
+python benchmark_agentic.py \
+    --model-path-or-id Qwen/Qwen3-4B \
+    --model Qwen/Qwen3-4B \
+    --dataset r2e_easy_val.jsonl \
+    --num-groups 16 \
+    -g 16 \
+    --concurrency 16
+```
+
+One task instance backs one GRPO group, matching real RL where a group of rollouts shares a single task and therefore a single prefix. In this mode prompt lengths and turn counts come from the dataset, so `--initial-prompt-len-*`, `--turns-*` and `--env-len-*` are ignored. Omit `--dataset` for the original random-token workload.
+
+### What changes versus random tokens
+
+Real environment observations have a **p50 of ~410 tokens**, against the `10-20` the random-mode examples above use. Real observations are pytest output, file views, and traceback text — roughly 20-40x larger. Since every observation is prefilled on the next turn, this materially raises per-turn prefill cost and shifts the prefill/decode balance. Prompts also share a genuine long prefix (system prompt plus repo context) rather than random tokens, which is what prefix caching actually sees in production.
