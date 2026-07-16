@@ -41,6 +41,8 @@ making sure they go through standard function arguments:
    model's cache just-in-time for the execution, and proceed with the original forward pass.
 """
 
+import functools
+
 import jax
 import jax.numpy as jnp
 import torch
@@ -187,6 +189,73 @@ def _jit_pack_deepstack(inputs_embeds, level_tensors):
                         axis=0)  # [num_levels, cur_tokens, hdim]
     packed = jnp.transpose(stacked, (1, 0, 2)).reshape(stacked.shape[1], -1)
     return jnp.concatenate([inputs_embeds, packed], axis=-1)
+
+
+@functools.partial(jax.jit, static_argnames=("num_levels", "visual_dim"))
+def _jit_deepstack_reshape_permute(deepstack_input_embeds, num_levels,
+                                   visual_dim):
+    """Pure-JAX equivalent of vLLM's `.view(...).permute(1, 0, 2)` in
+    `_compute_deepstack_embeds` (qwen3_vl.py).
+
+    This op runs eagerly (outside any persistent jax.jit) in vLLM's own
+    `_compute_deepstack_embeds`, called before our merge-step fix above even
+    gets a chance to run. Same recompile-every-call/no-cache-reuse problem as
+    `_jit_masked_merge`, but on the much larger deepstack tensor (shape
+    (cur_tokens, deepstack_num_level * hidden) -- video requests have far
+    more tokens than image ones), so it accumulates device memory fast
+    enough to OOM within ~24 requests under sustained video load rather than
+    the ~1500+ requests images needed to trigger the same class of crash.
+    `num_levels`/`visual_dim` are static: fixed by model config, never vary
+    across calls, so this specializes to one cached compilation.
+    """
+    cur_tokens = deepstack_input_embeds.shape[0]
+    reshaped = deepstack_input_embeds.reshape(cur_tokens, num_levels,
+                                              visual_dim)
+    return jnp.transpose(reshaped, (1, 0, 2))
+
+
+def _patched_compute_deepstack_embeds(vllm_model,
+                                      orig_compute_deepstack_embeds,
+                                      inputs_embeds, multimodal_embeddings,
+                                      is_multimodal):
+    """Drop-in replacement for vLLM's `_compute_deepstack_embeds`.
+
+    Identical computation, except the boolean-mask merge and the final
+    reshape+permute are routed through persistent jax.jit functions instead
+    of eager torchax dispatch -- see `_jit_deepstack_reshape_permute` for why.
+    """
+    visual_lens = [len(x) for x in multimodal_embeddings]
+    multimodal_embeddings_cat = torch.cat(multimodal_embeddings, dim=0)
+
+    multimodal_embeddings_main, multimodal_embeddings_multiscale = torch.split(
+        multimodal_embeddings_cat,
+        [vllm_model.visual_dim, vllm_model.multiscale_dim],
+        dim=-1,
+    )
+
+    multimodal_embeddings = torch.split(multimodal_embeddings_main,
+                                        visual_lens,
+                                        dim=0)
+    multimodal_embeddings_multiscale = torch.split(
+        multimodal_embeddings_multiscale, visual_lens, dim=0)
+
+    deepstack_input_embeds = inputs_embeds.new_zeros(
+        inputs_embeds.size(0),
+        vllm_model.deepstack_num_level * inputs_embeds.size(1))
+
+    deepstack_input_embeds = _patched_merge_multimodal_embeddings(
+        inputs_embeds=deepstack_input_embeds,
+        multimodal_embeddings=multimodal_embeddings_multiscale,
+        is_multimodal=is_multimodal,
+    )
+    permuted_jax = _jit_deepstack_reshape_permute(
+        jax_view(deepstack_input_embeds),
+        num_levels=vllm_model.deepstack_num_level,
+        visual_dim=vllm_model.visual_dim,
+    )
+    deepstack_input_embeds = torch_view(permuted_jax)
+
+    return deepstack_input_embeds, multimodal_embeddings
 
 
 def _patched_get_deepstack(vllm_model, orig_get_deepstack, num_tokens: int):
@@ -371,30 +440,32 @@ def _patched_flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
     return torch.cat(tuple(_patched_flatten_embeddings(t) for t in embeddings))
 
 
-def apply_qwen3_vl_patches(vllm_model):
+def apply_qwen3_vl_patches(vllm_model: Qwen3VLForConditionalGeneration):
     """Apply Qwen3-VL specific patches for stateless Deepstack support."""
-    if not getattr(vllm_model, "use_deepstack", False):
+    if not vllm_model.use_deepstack:
         return
 
     # 1. Override deepstack setter to avoid stateful updates of native vLLM variables
-    orig_set_deepstack = getattr(vllm_model, "_set_deepstack_input_embeds",
-                                 None)
-    if orig_set_deepstack is not None:
-        vllm_model._set_deepstack_input_embeds = lambda embeds: _patched_set_deepstack(
-            vllm_model, embeds)
+    vllm_model._set_deepstack_input_embeds = lambda embeds: _patched_set_deepstack(
+        vllm_model, embeds)
 
     # 2. Override deepstack getter to prefer JAX-compatible cached tensors
-    orig_get_deepstack = getattr(vllm_model, "_get_deepstack_input_embeds",
-                                 None)
-    if orig_get_deepstack is not None:
-        vllm_model._get_deepstack_input_embeds = lambda num_tokens: _patched_get_deepstack(
-            vllm_model, orig_get_deepstack, num_tokens)
+    orig_get_deepstack = vllm_model._get_deepstack_input_embeds
+    vllm_model._get_deepstack_input_embeds = lambda num_tokens: _patched_get_deepstack(
+        vllm_model, orig_get_deepstack, num_tokens)
 
     # 3. Patch embed_input_ids to pack Deepstack vision features into main text embeddings
-    orig_embed_input_ids = getattr(vllm_model, "embed_input_ids", None)
-    if orig_embed_input_ids is not None:
-        vllm_model.embed_input_ids = lambda *args, **kwargs: _patched_embed_input_ids(
-            vllm_model, orig_embed_input_ids, *args, **kwargs)
+    orig_embed_input_ids = vllm_model.embed_input_ids
+    vllm_model.embed_input_ids = lambda *args, **kwargs: _patched_embed_input_ids(
+        vllm_model, orig_embed_input_ids, *args, **kwargs)
+
+    # 3b. Patch _compute_deepstack_embeds (called from within embed_input_ids,
+    # before our patch above even runs) to route its eager reshape+permute
+    # through a persistent jax.jit -- see _jit_deepstack_reshape_permute for
+    # why this is needed in addition to the embed_input_ids/merge patches.
+    orig_compute_deepstack_embeds = vllm_model._compute_deepstack_embeds
+    vllm_model._compute_deepstack_embeds = lambda *args, **kwargs: _patched_compute_deepstack_embeds(
+        vllm_model, orig_compute_deepstack_embeds, *args, **kwargs)
 
     # 4. Patch forward to unpack vision features and restore them before execution
     orig_forward = vllm_model.forward
