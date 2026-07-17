@@ -44,7 +44,7 @@ class TestSeenTokenIdsMask:
         ib.token_ids_cpu[0, :3] = [5, 6, 7]
         ib.num_tokens_no_spec[0] = 3
         ib.repetition_penalties_cpu[0] = 1.0
-        assert ib.update_seen_token_ids_mask(mesh, 4, None) is None
+        assert ib.update_seen_token_ids_mask(mesh, 4, 16, None) is None
         assert ib.seen_token_ids_mask is None
 
     def test_prefill_scatter(self):
@@ -57,7 +57,7 @@ class TestSeenTokenIdsMask:
         ib.token_ids_cpu[1, :2] = [10, 11]
         ib.num_tokens_no_spec[1] = 2
         ib.repetition_penalties_cpu[1] = 1.0
-        m = np.asarray(ib.update_seen_token_ids_mask(mesh, 4, None))
+        m = np.asarray(ib.update_seen_token_ids_mask(mesh, 4, 16, None))
         assert m.shape == (4, 50)
         assert m[0, 5] and m[0, 6] and m[0, 7] and not m[0, 8]
         assert m[1, 10] and m[1, 11]
@@ -71,11 +71,11 @@ class TestSeenTokenIdsMask:
         ib.token_ids_cpu[0, :3] = [5, 6, 7]
         ib.num_tokens_no_spec[0] = 3
         ib.repetition_penalties_cpu[0] = 1.3
-        ib.update_seen_token_ids_mask(mesh, 4, None)
+        ib.update_seen_token_ids_mask(mesh, 4, 16, None)
         # decode: emit token 20
         ib.token_ids_cpu[0, 3] = 20
         ib.num_tokens_no_spec[0] = 4
-        m = np.asarray(ib.update_seen_token_ids_mask(mesh, 4, None))
+        m = np.asarray(ib.update_seen_token_ids_mask(mesh, 4, 16, None))
         assert m[0, 20] and m[0, 5] and m[0, 6] and m[0, 7]
         assert int(ib.seen_scattered_upto[0]) == 4
 
@@ -89,7 +89,7 @@ class TestSeenTokenIdsMask:
         ib.token_ids_cpu[1, :2] = [10, 11]
         ib.num_tokens_no_spec[1] = 2
         ib.repetition_penalties_cpu[1] = 1.1
-        ib.update_seen_token_ids_mask(mesh, 4, None)
+        ib.update_seen_token_ids_mask(mesh, 4, 16, None)
         # Emulate the row move condense() performs (slot1 -> slot0).
         ib.seen_token_ids_mask = ib.seen_token_ids_mask.at[0].set(
             ib.seen_token_ids_mask[1])
