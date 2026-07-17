@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from enum import Enum
 from typing import Optional
 
 import jax
@@ -39,11 +40,17 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
+class W4A4ActivationType(str, Enum):
+    BF16 = "bf16"
+    NVFP4 = "nvfp4"
+    FP8 = "fp8"
+
+
 class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
 
     def __init__(
         self,
-        use_a16: bool,
+        activation_type: W4A4ActivationType,
         is_static_input_scheme: bool,
         linear_config: VllmQuantLinearConfig,
     ):
@@ -51,10 +58,15 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
             raise NotImplementedError(
                 "Static input scheme is not yet supported for W4A4 NVFP4.")
 
-        # TODO(lxhfirenking): Add native support for nvfp4 activation.
-        if not use_a16:
+        if activation_type == W4A4ActivationType.NVFP4:
             logger.warning(
-                "fp4xfp4 multiplications are not natively supported by TPU hardware, so activations are always kept at bf16 for now."
+                "fp4xfp4 multiplications are not natively supported by TPU hardware. "
+                "The current sharded_quantized_matmul implementation will attempt to fall"
+                "back to fp8xfp8 instead.")
+        if activation_type == W4A4ActivationType.FP8:
+            logger.warning(
+                "Attempting to quantize activation to fp8. The actual quantization strategy "
+                "and block size are dependent on underlying kernel implementation."
             )
 
         # We need to monkeypatch expose_input_quant_key to handle None kernel
@@ -74,8 +86,12 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
 
         vllm_ct_w4a4.expose_input_quant_key = safe_expose_input_quant_key
 
-        super().__init__(use_a16=use_a16)
+        # The base class assumes that if activation is not use_a16, it must use nvfp4 and
+        # will attemp to load activation weight scales, so we have to keep it true for all
+        # cases where activation is not nvfp4.
+        super().__init__(use_a16=(activation_type != W4A4ActivationType.NVFP4))
 
+        self.activation_type = activation_type
         self.linear_config = linear_config
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -87,7 +103,7 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
         weight_global_scale = layer.weight_global_scale.max().to(torch.float32)
         weight_global_scale = 1.0 / weight_global_scale
 
-        if not self.use_a16:
+        if self.activation_type == W4A4ActivationType.NVFP4:
             input_global_scale_inv = layer.input_global_scale.max().to(
                 torch.float32)
             input_global_scale = 1.0 / input_global_scale_inv
@@ -165,7 +181,7 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
             if bias is not None:
                 layer.bias = to_parameter_list(weights.bias)
 
-        if not self.use_a16:
+        if self.activation_type == W4A4ActivationType.NVFP4:
             # Note: input_scale should be jax sharded tensor for split
             input_global_scale_j = jax.device_put(
                 t2j(input_global_scale, use_dlpack=False),
@@ -194,6 +210,7 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
             weight_scale_jax,
             self.linear_config.weight_sharding,
             mesh=self.linear_config.mesh,
+            maybe_quantize_x=(self.activation_type != W4A4ActivationType.BF16),
         )
 
         if bias is not None and not layer.skip_bias_add:
@@ -219,6 +236,8 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
                 weight_scale_jax,
                 self.linear_config.weight_sharding,
                 mesh=self.linear_config.mesh,
+                maybe_quantize_x=(self.activation_type
+                                  != W4A4ActivationType.BF16),
             )
 
             if bias is not None and not layer.skip_bias_add:

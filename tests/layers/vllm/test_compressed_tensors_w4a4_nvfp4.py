@@ -38,8 +38,8 @@ from tests.layers.common import utils as test_utils
 from tests.layers.vllm.nvfp4_utils import (NVFP4_GROUP_SIZE, quantize_to_nvfp4,
                                            ref_dequant_nvfp4)
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
-from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w4a4_nvfp4 import \
-    VllmCompressedTensorsW4A4Fp4
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w4a4_nvfp4 import (
+    VllmCompressedTensorsW4A4Fp4, W4A4ActivationType)
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
 
@@ -80,8 +80,10 @@ def override_activation_quant_config(vllm_config):
     vllm_config.model_config.hf_text_config.quantization_config = vllm_config.model_config.hf_config.quantization_config
 
 
-def initialize_layer_weights(layer: torch.nn.Module,
-                             use_a16: bool = True) -> torch.Tensor:
+def initialize_layer_weights(
+    layer: torch.nn.Module,
+    activation_type: W4A4ActivationType = W4A4ActivationType.BF16
+) -> torch.Tensor:
     assert isinstance(layer, LinearBase)
     scheme = layer.scheme
     assert isinstance(scheme, VllmCompressedTensorsW4A4Fp4)
@@ -123,7 +125,7 @@ def initialize_layer_weights(layer: torch.nn.Module,
     layer.weight_global_scale = torch.nn.Parameter(weight_global_scale,
                                                    requires_grad=False)
 
-    if not use_a16:
+    if activation_type == W4A4ActivationType.NVFP4:
         layer.input_global_scale = torch.nn.Parameter(torch.tensor(
             [1.0], dtype=torch.float32),
                                                       requires_grad=False)
@@ -133,11 +135,13 @@ def initialize_layer_weights(layer: torch.nn.Module,
     return weight_ref
 
 
-def return_ref_and_layer_output(layer: torch.nn.Module,
-                                use_a16: bool = True,
-                                batch_size: int = 16):
+def return_ref_and_layer_output(
+        layer: torch.nn.Module,
+        activation_type: W4A4ActivationType = W4A4ActivationType.BF16,
+        batch_size: int = 16):
 
-    weight_ref = initialize_layer_weights(layer, use_a16=use_a16)
+    weight_ref = initialize_layer_weights(layer,
+                                          activation_type=activation_type)
     assert isinstance(layer, LinearBase)
     scheme = layer.scheme
     assert isinstance(scheme, VllmCompressedTensorsW4A4Fp4)
@@ -151,9 +155,9 @@ def return_ref_and_layer_output(layer: torch.nn.Module,
     input_tensor = input_tensor.to('cpu')
 
     # Run reference implementation
-    if not use_a16:
+    if activation_type == W4A4ActivationType.NVFP4:
         # Quantize activation to FP4
-        # Since use_a16=False tests FP4xFP4, we need to quantize the activation
+        # Since activation_type=NVFP4 tests FP4xFP4, we need to quantize the activation
         # However, TPU does not natively support FP4xFP4 and raises an error
         # So we skip actual activation quantization in reference for now
         pass
@@ -214,9 +218,9 @@ def setup_environment():
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("use_a16", [True])
+@pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
 def test_row_parallel_linear(model, bias, num_devices, enable_sp,
-                             enable_attn_dp, use_a16):
+                             enable_attn_dp, activation_type):
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
 
@@ -245,10 +249,10 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
             return_bias=False,
             quant_config=quant_config,
         )
-        linear_layer.scheme.use_a16 = use_a16
+        linear_layer.scheme.activation_type = activation_type
 
-    ref_output, layer_output = return_ref_and_layer_output(linear_layer,
-                                                           use_a16=use_a16)
+    ref_output, layer_output = return_ref_and_layer_output(
+        linear_layer, activation_type=activation_type)
     torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.35)
 
 
@@ -257,9 +261,9 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("use_a16", [True])
+@pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
 def test_column_parallel_linear(model, bias, num_devices, enable_sp,
-                                enable_attn_dp, use_a16):
+                                enable_attn_dp, activation_type):
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
 
@@ -288,10 +292,10 @@ def test_column_parallel_linear(model, bias, num_devices, enable_sp,
             return_bias=False,
             quant_config=quant_config,
         )
-        linear_layer.scheme.use_a16 = use_a16
+        linear_layer.scheme.activation_type = activation_type
 
-    ref_output, layer_output = return_ref_and_layer_output(linear_layer,
-                                                           use_a16=use_a16)
+    ref_output, layer_output = return_ref_and_layer_output(
+        linear_layer, activation_type=activation_type)
     torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.35)
 
 
@@ -301,9 +305,9 @@ def test_column_parallel_linear(model, bias, num_devices, enable_sp,
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("use_a16", [True])
+@pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
 def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
-                             enable_attn_dp, use_a16):
+                             enable_attn_dp, activation_type):
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
 
@@ -335,10 +339,10 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
             quant_config=quant_config,
         )
         linear_layer.quant_method.fuse_matmuls = fuse_matmuls
-        linear_layer.scheme.use_a16 = use_a16
+        linear_layer.scheme.activation_type = activation_type
 
-    ref_output, layer_output = return_ref_and_layer_output(linear_layer,
-                                                           use_a16=use_a16)
+    ref_output, layer_output = return_ref_and_layer_output(
+        linear_layer, activation_type=activation_type)
     torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.35)
 
 
@@ -348,9 +352,10 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("use_a16", [True])
+@pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
 def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
-                                       enable_sp, enable_attn_dp, use_a16):
+                                       enable_sp, enable_attn_dp,
+                                       activation_type):
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
 
@@ -380,8 +385,8 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
             quant_config=quant_config,
         )
         linear_layer.quant_method.fuse_matmuls = fuse_matmuls
-        linear_layer.scheme.use_a16 = use_a16
+        linear_layer.scheme.activation_type = activation_type
 
-    ref_output, layer_output = return_ref_and_layer_output(linear_layer,
-                                                           use_a16=use_a16)
+    ref_output, layer_output = return_ref_and_layer_output(
+        linear_layer, activation_type=activation_type)
     torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.15)
