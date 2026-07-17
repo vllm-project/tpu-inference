@@ -56,6 +56,8 @@ The framework is driven by JSON configuration files. Each file defines one or mo
   * `EXPECTED_ETEL`: The target goal for End-to-End Latency (P99 in ms). The script adjusts the request rate via binary search to stay within this limit.
   * `EXPECTED_THROUGHPUT`: Target throughput. Evaluated in `report_result.sh` to flag performance regressions.
   * `INPUT_LEN`, `OUTPUT_LEN`, `PREFIX_LEN`: Metadata representing sequence lengths. Used primarily for database tagging.
+  * `IS_MULTI_HOST_BENCH`: (Boolean) Used to distinguish whether the case is a multihost benchmark.
+  * `bk_timeout_in_minutes`: (Integer) Sets a timeout limit in minutes for the generated Buildkite YAML (e.g., 180).
 * `ci_queue`: Array of strings defining which Buildkite agent queues should pick up this case.
 * `server_command_options`: Controls the vLLM backend.
   * `command_type`: Must be `vllm_serve`.
@@ -65,6 +67,9 @@ The framework is driven by JSON configuration files. Each file defines one or mo
   * `command_type`: Typically `vllm_bench_serve`. Can also be `lm_eval` for accuracy evaluations. When it is `lm_eval`, the dataset must be specified in the `args`, a specific shell script will be executed based on the dataset configuration, and `server_command_options` does not need to be set.
   * `args`: Client-side CLI flags (e.g., `num-prompts`, `request-rate`).
   * `env`: Client-command-specific environment variables.
+* `accuracy_command_options`: Used specifically for Accuracy benchmarks.
+  * `command_type`: Should be set to local_benchmark_serving to execute the built-in `vllm/benchmarking/benchmark_serving.py`.
+  * `args`: Key-value pairs for the accuracy benchmark arguments.
 
 ### Critical Considerations & Advanced Features
 
@@ -103,6 +108,17 @@ Additionally, the `case_name` defined in the JSON will be extracted and reported
 > * **For new cases:** You can define and modify the `case_name` freely during initial development. (Please make it similar to current cases name convention as possible)
 > * **For established cases:** If a case has been running for a long time and has historical data in the database, **strongly recommend NOT to modify its `case_name`**.
 > * **Data Migration:** If a name change is strictly necessary for an established case, you must coordinate and execute a data migration in the database to link the old records to the new name. Modifying the name without migration will cause the dashboard to treat it as a brand-new entity, breaking historical performance tracking.
+
+#### E. Multihost Benchmark Configurations
+When configuring a Multihost benchmark, you can use specific parameters to control the execution environment and model loading behavior. Note that current multihost benchmarks are all configured to use the `runai_streamer` format, which streams model weights directly from GCS.
+```json
+"server_command_options": {
+  "args": {
+    "model-path": "gs://tpu-commons-ci/deepseek/r1",
+    "load-format": "runai_streamer"
+  }
+}
+```
 
 ## 4. **Test Case File Hierarchy**
 
