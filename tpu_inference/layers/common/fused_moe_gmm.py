@@ -88,6 +88,45 @@ def all_gather_topk_indices_and_weights(
     return topk_indices, topk_weights
 
 
+def _resolve_topk_backend(backend: str) -> tuple[str, float]:
+    """Parse envs.MOE_TOPK_BACKEND ("topk" / "iterative_topk" /
+    "approx_topk"[":recall_target=<float>"]) into (name, recall_target).
+    recall_target is only meaningful for "approx_topk" and defaults to 0.9.
+    """
+    name, _, suffix = backend.partition(":")
+    recall_target = 0.9
+    if suffix:
+        _, _, value = suffix.partition("=")
+        recall_target = float(value)
+    return name, recall_target
+
+
+def iterative_top_k(x: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
+    """Exact top-k via iterative argmax + mask, matching jax.lax.top_k's
+    output (descending values, lowest-index-first tie-break).
+
+    lax.top_k lowers to an XLA `sort`, which stays an unfused custom-call on
+    TPU. For small k against a lane-sized expert axis (E<=~256, i.e. 1-2
+    VREG rows), k passes of argmax+one_hot-mask are a handful of VPU ops
+    that fuse into the surrounding softmax/routing computation instead -
+    cheaper than one sort as long as k stays small (empirically <=~8-12
+    experts out of 128; the crossover flips for larger k since this scan is
+    O(k) while the sort is not).
+    """
+    num_experts = x.shape[-1]
+    vals = []
+    idxs = []
+    cur = x
+    for _ in range(k):
+        idx = jnp.argmax(cur, axis=-1)
+        val = jnp.max(cur, axis=-1)
+        vals.append(val)
+        idxs.append(idx)
+        cur = jnp.where(jax.nn.one_hot(idx, num_experts, dtype=jnp.bool_),
+                        -jnp.inf, cur)
+    return jnp.stack(vals, axis=-1), jnp.stack(idxs, axis=-1).astype(jnp.int32)
+
+
 def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
     match scoring_fn:
         case "softmax":
@@ -615,24 +654,26 @@ def fused_moe_func(
 
     assert gating_output.shape == (num_tokens, global_num_experts)
 
+    topk_backend, approx_topk_recall_target = _resolve_topk_backend(
+        envs.MOE_TOPK_BACKEND)
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
     if hash_based_topk_indices is not None:
         topk_indices = hash_based_topk_indices
         topk_weights = jnp.take_along_axis(topk_weights, topk_indices, axis=-1)
-    elif envs.MOE_APPROX_TOPK:
+    elif topk_backend == "approx_topk":
         topk_weights, topk_indices = jax.lax.approx_max_k(
-            topk_weights,
-            k=topk,
-            recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
+            topk_weights, k=topk, recall_target=approx_topk_recall_target)
     else:
+        topk_fn = iterative_top_k if topk_backend == "iterative_topk" else jax.lax.top_k
         if expert_score_correction_bias is not None:
-            _, topk_indices = jax.lax.top_k(
-                topk_weights + expert_score_correction_bias[None, :], k=topk)
+            _, topk_indices = topk_fn(topk_weights +
+                                      expert_score_correction_bias[None, :],
+                                      k=topk)
             topk_weights = jnp.take_along_axis(topk_weights,
                                                topk_indices,
                                                axis=-1)
         else:
-            topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+            topk_weights, topk_indices = topk_fn(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
     # Route padding tokens to expert 0 instead of picking a selected expert. This
