@@ -682,13 +682,10 @@ class TestTPUJaxRunner:
 
         attn_metadata = MagicMock()
         attn_metadata.seq_lens_cpu = np.array([10, 20, 0, 0, 0, 0, 0, 0])
-        runner._prepare_inputs.return_value = (np.zeros(8, dtype=np.int32),
-                                               None, attn_metadata, None,
-                                               np.array([
-                                                   0, 1, -1, -1, -1, -1, -1, -1
-                                               ],
-                                                        dtype=np.int32), None,
-                                               None, None, None, None, None)
+        runner._prepare_inputs.return_value = (
+            np.zeros(8, dtype=np.int32), None, attn_metadata, None,
+            np.array([0, 1, -1, -1, -1, -1, -1, -1],
+                     dtype=np.int32), None, None, None, None, None, None, None)
 
         from tpu_inference.runner.tpu_runner import TPUModelRunner
         result = TPUModelRunner._execute_continue_decode(
