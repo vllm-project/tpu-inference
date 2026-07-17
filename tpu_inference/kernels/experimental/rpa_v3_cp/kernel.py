@@ -868,7 +868,18 @@ def _ragged_paged_attention_kernel_loop(
             dst_u32 = kv_shuffle_vmem_ref.bitcast(jnp.uint32)
             # dst_u32 shape: [bkv_sz, num_kv_heads_x2_per_kv_packing, head_dim] in uint32
 
-            dst_u32[pl.ds(0, n_strided)] = src_u32[
+            # Mosaic strided loads require the (base memref's) lane dim to be
+            # exactly 128. After the uint32 bitcast the lane dim is head_dim,
+            # which is always align_to(.., 128), so split it into
+            # (head_dim // 128, 128) unconditionally: the strided load then
+            # always sees a 128-wide lane dim, and head_dim == 128 just gets a
+            # degenerate leading 1.
+            lane = 128
+            src_r = src_u32.reshape(*src_u32.shape[:-1],
+                                    src_u32.shape[-1] // lane, lane)
+            dst_r = dst_u32.reshape(*dst_u32.shape[:-1],
+                                    dst_u32.shape[-1] // lane, lane)
+            dst_r[pl.ds(0, n_strided)] = src_r[
                 pl.ds(src_start, n_strided, cp_group_size),
                 :num_kv_heads_x2_per_kv_packing,
             ]
@@ -1821,6 +1832,12 @@ def get_default_block_sizes(
     max_q = next_power_of_2(max_num_tokens)
     max_kv = pages_per_seq * page_size
 
+    # The KV compute/prefetch buffers scale with head_dim, but the default
+    # bkv_sz below is tuned for head_dim=128. For larger head_dim shrink the
+    # prefetch block proportionally so VMEM scratch stays within budget
+    # (head_dim=128 -> factor 1, so this is a no-op there).
+    hd_blocks = max(1, head_dim // 128)
+
     min_bkv_sz_to_peak = (16 * 1024 * 1024 * kv_packing // 4 // head_dim //
                           num_kv_heads_x2)
 
@@ -1844,7 +1861,7 @@ def get_default_block_sizes(
                 bkv_csz = min(min_bkv_sz_to_peak, max_kv)
             else:
                 bq_sz = min(2048 // num_q_heads_per_kv_head, max_q // 2)
-                bkv_sz = min(2048, max_kv // 2)
+                bkv_sz = min(2048 // hd_blocks, max_kv // 2)
                 bq_csz = min(1024 // num_q_heads_per_kv_head, max_q // 2)
                 bkv_csz = min(512, align_to(max_kv // 2, page_size))
         case _:
