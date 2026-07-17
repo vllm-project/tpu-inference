@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
     TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
     TPU_OFFLOAD_BLOCK_SIZE_BUCKETS: list[int] = []
-    MOE_TOPK_BACKEND: str = "topk"
+    MOE_TOPK_BACKEND: str = "iterative_topk"
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
     ENABLE_RS_KERNEL: bool = False
     NUM_PRECOMPILE_WORKERS: int = 1
@@ -414,13 +414,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #                      unfused sort and fuses into the surrounding
     #                      softmax/routing ops instead; for larger k the O(k)
     #                      scan cost crosses over and "topk" wins.
-    #   "approx_topk"    - jax.lax.approx_max_k (approximate, may lose
+    #   "approx_topk"    - approximate, jax.lax.approx_max_k (may lose
     #                      accuracy); optionally suffix
     #                      ":recall_target=<float>" (default 0.9 - a higher
     #                      rate increases accuracy at the cost of slower
     #                      speed).
     "MOE_TOPK_BACKEND":
-    env_moe_topk_backend("MOE_TOPK_BACKEND", "topk"),
+    env_moe_topk_backend("MOE_TOPK_BACKEND", "iterative_topk"),
     "DISABLE_WEIGHT_REQUANTIZATION":
     env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
     "VLLM_TPU_PATCH_MM_EMBEDDINGS":

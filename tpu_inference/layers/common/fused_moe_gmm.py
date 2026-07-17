@@ -89,8 +89,7 @@ def all_gather_topk_indices_and_weights(
 
 
 def _resolve_topk_backend(backend: str) -> tuple[str, float]:
-    """Parse envs.MOE_TOPK_BACKEND ("topk" / "iterative_topk" /
-    "approx_topk"[":recall_target=<float>"]) into (name, recall_target).
+    """Parse envs.MOE_TOPK_BACKEND into (name, recall_target).
     recall_target is only meaningful for "approx_topk" and defaults to 0.9.
     """
     name, _, suffix = backend.partition(":")
