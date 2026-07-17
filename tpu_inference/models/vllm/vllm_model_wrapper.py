@@ -101,6 +101,15 @@ class _VllmRunner(torch.nn.Module):
         return self.vllm_model.compute_logits(hidden_state)
 
 
+def patch_deepseek_indexer():
+    try:
+        import vllm.model_executor.models.deepseek_v2 as ds2_models
+        from tpu_inference.layers.vllm.custom_ops.deepseek_v2_indexer import VllmIndexer
+        ds2_models.Indexer = VllmIndexer
+    except ImportError:
+        return
+
+
 class VllmModelWrapper:
     """ Wraps a vLLM Pytorch model and let it run on the JAX engine. """
 
@@ -122,6 +131,7 @@ class VllmModelWrapper:
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
+        patch_deepseek_indexer()
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.

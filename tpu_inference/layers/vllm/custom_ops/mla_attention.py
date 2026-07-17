@@ -183,6 +183,8 @@ class VllmMLAAttention(MLAAttention):
         # Get the attention metadata
         attn_metadata, _, _, _ = get_attention_context(self.layer_name)
 
+        topk_indices = getattr(self.indexer, "topk_indices_buffer", None) if self.use_sparse and self.indexer is not None else None
+
         # Run the fundamental MLA forward pass from the impl
         outputs, new_kv_cache = self.impl.forward(q,
                                                   kv_c_normed,
@@ -192,6 +194,7 @@ class VllmMLAAttention(MLAAttention):
                                                   mesh,
                                                   self,
                                                   output=output,
+                                                  topk_indices=topk_indices,
                                                   **kwargs)
 
         # Update KV cache

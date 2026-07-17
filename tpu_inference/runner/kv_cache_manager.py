@@ -61,14 +61,29 @@ DEFAULT_KV_CACHE_LAYOUT = "NHD"
 
 
 def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
-    return isinstance(attn_module, DeepseekV4IndexerCache) or isinstance(
-        attn_module, DeepseekV4SWACache) or isinstance(
-            attn_module, DeepseekV4Attention) or isinstance(
-                attn_module, CompressorStateCache)
+    try:
+        from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+        is_ds_v2 = isinstance(attn_module, DeepseekV32IndexerCache)
+    except ImportError:
+        is_ds_v2 = False
+
+    return is_ds_v2 or isinstance(
+        attn_module, DeepseekV4IndexerCache) or isinstance(
+            attn_module, DeepseekV4SWACache) or isinstance(
+                attn_module, DeepseekV4Attention) or isinstance(
+                    attn_module, CompressorStateCache)
 
 
 def is_ds_v4(vllm_config):
-    return "DeepseekV4ForCausalLM" in (vllm_config.model_config.architectures)
+    architectures = vllm_config.model_config.architectures
+    return any(
+        arch in architectures
+        for arch in (
+            "DeepseekV4ForCausalLM",
+            "DeepseekV2ForCausalLM",
+            "GlmMoeDsaForCausalLM",
+        )
+    )
 
 
 class KVCacheManager:

@@ -188,7 +188,6 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
         if use_sparse:
             num_active_seqs = q_nope.shape[1]
             topk_indices = topk_indices[:num_active_seqs, :topk_tokens]
-            # print(f"DEBUG [flash_attn_mla.py]: topk_indices = {topk_indices.tolist()}", flush=True)
 
         new_kv_cache, outputs = mla_attention(
             q_nope,
