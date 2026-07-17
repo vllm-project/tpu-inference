@@ -134,7 +134,8 @@ def sharded_quantized_matmul(x: jax.Array,
                              weight_sharding: P | NamedSharding,
                              *,
                              mesh: Mesh | None = None,
-                             defer_all_reduce: bool = False) -> jax.Array:
+                             defer_all_reduce: bool = False,
+                             maybe_quantize_x: bool = True) -> jax.Array:
     """
     Wrapper around the quantized matmul kernel.
 
@@ -149,6 +150,8 @@ def sharded_quantized_matmul(x: jax.Array,
             axis is sharded. The output then holds per-shard partial sums; the
             caller is responsible for reducing them later (e.g. to fuse the
             reduction with a subsequent collective).
+        maybe_quantize_x: (Optional) If True, the underlying matmul implementation will try to quantize the activation when appropriate.
+            Whether and how activation is quantized is contingent on the weight quantization.
 
     Returns:
         Output of the quantized matmul.
@@ -200,10 +203,13 @@ def sharded_quantized_matmul(x: jax.Array,
                 group_offset=jnp.array([0], dtype=jnp.int32),
                 zero_initialize=False,
                 preferred_element_type=x.dtype,
-                maybe_quantize_lhs=True,
+                maybe_quantize_lhs=maybe_quantize_x,
             )
         else:
-            output = xla_quantized_matmul(x, w_q, w_s)
+            output = xla_quantized_matmul(x,
+                                          w_q,
+                                          w_s,
+                                          quantize_activation=maybe_quantize_x)
         if in_axis and not defer_all_reduce:
             output = jax.lax.psum(output, axis_name=in_axis)
         return output
