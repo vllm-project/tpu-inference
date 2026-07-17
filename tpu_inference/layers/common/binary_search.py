@@ -366,6 +366,11 @@ def apply_repetition_penalty(logits: jnp.ndarray, seen_mask: jnp.ndarray,
     Returns:
       Penalized logits, same shape as ``logits``.
     """
+    # Fold the penalty into a single per-element multiply. Equivalent to
+    # `where(seen, where(l>0, l/rp, l*rp), l)` but avoids a full (B, vocab)
+    # division (TPU division is compute-slow): reciprocal is taken on the
+    # (B, 1) penalty only, and the (B, vocab) work is two selects + one mul.
     rp = jnp.expand_dims(repetition_penalty, axis=-1).astype(logits.dtype)
-    penalized = jnp.where(logits > 0, logits / rp, logits * rp)
-    return jnp.where(seen_mask, penalized, logits)
+    inv_rp = 1.0 / rp
+    mult = jnp.where(seen_mask, jnp.where(logits > 0, inv_rp, rp), 1.0)
+    return logits * mult
