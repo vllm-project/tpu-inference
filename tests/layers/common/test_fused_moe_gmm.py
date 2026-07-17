@@ -1,0 +1,82 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import functools
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+from absl.testing import parameterized
+
+from tpu_inference.layers.common.fused_moe_gmm import (_resolve_topk_backend,
+                                                       iterative_top_k)
+
+
+class IterativeTopKTest(parameterized.TestCase):
+
+    @parameterized.named_parameters(
+        dict(testcase_name="example_shape_1",
+             num_tokens=16384,
+             num_experts=128,
+             k=8),
+        dict(testcase_name="example_shape_2",
+             num_tokens=4096,
+             num_experts=256,
+             k=10))
+    def test_matches_lax_top_k(self, num_tokens, num_experts, k):
+        rng = np.random.default_rng(0)
+        x = jnp.asarray(rng.standard_normal(
+            (num_tokens, num_experts)).astype(np.float32),
+                        dtype=jnp.bfloat16)
+
+        ref_vals, ref_idxs = jax.jit(functools.partial(jax.lax.top_k, k=k))(x)
+        got_vals, got_idxs = jax.jit(functools.partial(iterative_top_k,
+                                                       k=k))(x)
+
+        # bf16 inputs make exact-value ties common; lax.top_k and
+        # iterative_top_k must therefore also agree on tie-break order
+        # (lowest index wins), not just on the unordered index set.
+        np.testing.assert_array_equal(np.asarray(got_idxs),
+                                      np.asarray(ref_idxs))
+        np.testing.assert_allclose(
+            np.asarray(got_vals).astype(np.float32),
+            np.asarray(ref_vals).astype(np.float32))
+
+    def test_output_shape_and_dtype(self):
+        x = jnp.ones((5, 10), dtype=jnp.bfloat16)
+        vals, idxs = iterative_top_k(x, k=4)
+        self.assertEqual(vals.shape, (5, 4))
+        self.assertEqual(idxs.shape, (5, 4))
+        self.assertEqual(idxs.dtype, jnp.int32)
+
+
+class ResolveTopkBackendTest(parameterized.TestCase):
+
+    @parameterized.named_parameters(
+        ("topk", "topk", "topk", 0.9),
+        ("iterative_topk", "iterative_topk", "iterative_topk", 0.9),
+        ("approx_topk_default", "approx_topk", "approx_topk", 0.9),
+        ("approx_topk_explicit", "approx_topk:recall_target=0.95",
+         "approx_topk", 0.95),
+    )
+    def test_parses(self, backend_str, expected_name, expected_recall):
+        name, recall_target = _resolve_topk_backend(backend_str)
+        self.assertEqual(name, expected_name)
+        self.assertEqual(recall_target, expected_recall)
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(pytest.main([__file__]))
