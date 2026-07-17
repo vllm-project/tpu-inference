@@ -110,6 +110,8 @@ class InputBatch:
 
         self.top_k_cpu = np.empty((max_num_reqs, ), dtype=np.int32)
 
+        self.min_p_cpu = np.empty((max_num_reqs, ), dtype=np.float32)
+
         # IDs of requests which do not support spec decoding
         self.spec_decode_unsupported_reqs: set[str] = set()
 
@@ -383,6 +385,7 @@ class InputBatch:
                 self.random_reqs.add(req_id)
 
             self.top_p_cpu[req_index] = sampling_params.top_p
+            self.min_p_cpu[req_index] = sampling_params.min_p
             top_k = sampling_params.top_k
             # Default to -1 (considering all tokens)
             if top_k >= self.vocab_size:
@@ -535,6 +538,8 @@ class InputBatch:
             self.top_p_cpu[i2], self.top_p_cpu[i1]
         self.top_k_cpu[i1], self.top_k_cpu[i2] =\
             self.top_k_cpu[i2], self.top_k_cpu[i1]
+        self.min_p_cpu[i1], self.min_p_cpu[i2] =\
+            self.min_p_cpu[i2], self.min_p_cpu[i1]
 
         self.token_ids_cpu[[i1, i2], :max_active_token_count] = \
             self.token_ids_cpu[[i2, i1], :max_active_token_count]
@@ -616,6 +621,7 @@ class InputBatch:
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]
             self.top_k_cpu[empty_index] = self.top_k_cpu[last_req_index]
+            self.min_p_cpu[empty_index] = self.min_p_cpu[last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator

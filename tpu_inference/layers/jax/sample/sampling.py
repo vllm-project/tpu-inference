@@ -21,7 +21,8 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.v1.outputs import LogprobsTensors
 
-from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
+from tpu_inference.layers.common.binary_search import (minp_mask, topk_mask,
+                                                       topp_mask)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
@@ -86,6 +87,15 @@ def _apply_sampling_transforms(
     temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
     temperatures = jnp.expand_dims(temperatures, axis=-1)
     logits = logits / temperatures
+
+    # Only apply min-p masking if min_p > 0 for each token. Applied before
+    # top-k/top-p (it is a floor on the full post-temperature distribution).
+    # min_p is cheap (one max reduction, no binary search) so, like top-k/top-p,
+    # the mask is computed unconditionally and selected per-row with `where`.
+    min_p = tpu_sampling_metadata.min_p
+    should_apply_minp = jnp.expand_dims(min_p > 0.0, axis=-1)
+    minp_masked = minp_mask(logits, min_p, replace_val=-1e12)
+    logits = jnp.where(should_apply_minp, minp_masked, logits)
 
     # Only apply top-k masking if k > 0 for each token
     top_k = tpu_sampling_metadata.top_k

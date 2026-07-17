@@ -293,3 +293,44 @@ def topp_mask(logits: jnp.ndarray, p: float,
     threshold = lax.expand_dims(threshold, (threshold.ndim, ))
     return jnp.where(probs >= threshold, logits,
                      jnp.full_like(logits, replace_val))
+
+
+def minp_mask(logits: jnp.ndarray, min_p: jnp.ndarray,
+              replace_val: jnp.ndarray) -> jnp.ndarray:
+    """Applies min-p masking to logits.
+
+    Keeps only tokens whose probability is at least ``min_p`` times the
+    probability of the most likely token; all others are set to ``replace_val``.
+    This matches vLLM's ``min_p`` semantics
+    (``probs < min_p * probs.max()`` -> removed).
+
+    Unlike :func:`topk_mask` / :func:`topp_mask`, this needs **no** binary search
+    and **no** softmax: because softmax is monotonic, the probability test
+    ``prob_i >= min_p * max_prob`` is exactly equivalent, in logit space, to
+    ``logit_i >= max_logit + log(min_p)``. So the whole op is a single max
+    reduction over the vocab axis plus an elementwise compare — strictly cheaper
+    than the ~33-reduction binary searches the top-k/top-p masks run.
+
+    ``min_p == 0`` disables the filter: ``log(0) = -inf`` makes the threshold
+    ``-inf`` so every token is kept. ``min_p == 1`` keeps only the argmax
+    token(s).
+
+    Sharding: the single reduction is over the ``vocab_size`` axis, so keep that
+    axis unsharded (shard the batch axes) as with the other masks.
+
+    Args:
+      logits: Logits before masking. [batch..., vocab_size]
+      min_p: Per-row minimum probability ratio in [0, 1]. [batch...]
+      replace_val: For the masked values of logits, what to overwrite them with.
+
+    Returns:
+      masked version of logits. [batch..., vocab_size]
+    """
+    # max_logit: [batch..., 1]
+    max_logit = jnp.max(logits, axis=-1, keepdims=True)
+    # log(min_p): [batch..., 1]; log(0) -> -inf disables the filter.
+    log_min_p = jnp.log(jnp.expand_dims(min_p, axis=-1).astype(logits.dtype))
+    # threshold: [batch..., 1]
+    threshold = max_logit + log_min_p
+    return jnp.where(logits >= threshold, logits,
+                     jnp.full_like(logits, replace_val))
