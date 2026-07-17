@@ -57,7 +57,7 @@ The framework is driven by JSON configuration files. Each file defines one or mo
   * `EXPECTED_THROUGHPUT`: Target throughput. Evaluated in `report_result.sh` to flag performance regressions.
   * `INPUT_LEN`, `OUTPUT_LEN`, `PREFIX_LEN`: Metadata representing sequence lengths. Used primarily for database tagging.
   * `IS_MULTI_HOST_BENCH`: (Boolean) Used to distinguish whether the case is a multihost benchmark.
-  * `bk_timeout_in_minutes`: (Integer) Sets a timeout limit in minutes for the generated Buildkite YAML (e.g., 180).
+  * `BK_TIMEOUT_IN_MINUTES`: (Integer) Sets a timeout limit in minutes for the generated Buildkite YAML (e.g., 180).
 * `ci_queue`: Array of strings defining which Buildkite agent queues should pick up this case.
 * `server_command_options`: Controls the vLLM backend.
   * `command_type`: Must be `vllm_serve`.
