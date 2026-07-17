@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
-from typing import List
+from functools import cache, partial
+from typing import Callable, List
 
 import jax
 import jax.numpy as jnp
@@ -96,6 +97,21 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
     return tuple(shape)
 
 
+@cache
+def _get_kv_cache_allocator(
+        cache_shape: tuple, cache_dtype: jnp.dtype,
+        sharding: NamedSharding) -> Callable[[], jax.Array]:
+
+    @partial(jax.jit, out_shardings=sharding)
+    def _allocate() -> jax.Array:
+        return jnp.zeros(
+            shape=cache_shape,
+            dtype=cache_dtype,
+        )
+
+    return _allocate
+
+
 def create_kv_caches(
     num_blocks: int,
     block_size: int,
@@ -146,17 +162,9 @@ def create_kv_caches(
             PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT,
                           ShardingAxisName.KV_CACHE_HEAD))
 
-    def _allocate() -> jax.Array:
-        return jnp.zeros(
-            shape=cache_shape,
-            dtype=cache_dtype,
-        )
-
-    sharded_allocate = jax.jit(_allocate, out_shardings=sharding)
-    kv_caches = []
-    for _ in layer_names:
-        kv_caches.append(sharded_allocate())
-    return kv_caches
+    sharded_allocate = _get_kv_cache_allocator(cache_shape, cache_dtype,
+                                               sharding)
+    return [sharded_allocate() for _ in layer_names]
 
 
 def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
