@@ -57,8 +57,6 @@ spec:
               value: "30000"
             - name: RAY_CGRAPH_submit_timeout
               value: "30000"
-            # - name: VLLM_USE_RAY_COMPILED_GRAPH
-            #   value: "0"
             - name: VLLM_TARGET_DEVICE
               value: "tpu"
             - name: TPU_BACKEND_TYPE
@@ -98,12 +96,10 @@ spec:
                   --async-scheduling \
                   --enable-expert-parallel \
                   --max-model-len 51200 \
-                  --kv_cache_dtype=fp8 \
                   --enable-chunked-prefill \
                   --seed 42 \
                   --tensor-parallel-size 16 \
-                  --data-parallel-size=1 \
-                  --gpu-memory-utilization=0.5
+                  --gpu-memory-utilization=0.8
             resources:
               limits:
                 google.com/tpu: "4"

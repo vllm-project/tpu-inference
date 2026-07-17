@@ -86,7 +86,7 @@ spec:
             - name: PROMETHEUS_MULTIPROC_DIR
               value: "/tmp/prometheus_multiproc"
             - name: TPU_OFFLOAD_NUM_CPU_CHUNKS
-              value: "20000"
+              value: "10000"
             - name: TPU_OFFLOAD_NUM_STAGING_BLOCKS
               value: "1024"
             command: ["/bin/sh", "-c"]
@@ -103,9 +103,7 @@ spec:
                   --seed 42 \
                   --enable_prefix_caching \
                   --tensor-parallel-size 16 \
-                  --data-parallel-size=1 \
-                  --gpu-memory-utilization=0.5 \
-                  --kv_cache_dtype=fp8 \
+                  --gpu-memory-utilization=0.8 \
                   --max-model-len=51200 \
                   --kv-transfer-config '{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}'
             resources:
@@ -192,7 +190,7 @@ spec:
             - name: PROMETHEUS_MULTIPROC_DIR
               value: "/tmp/prometheus_multiproc"
             - name: TPU_OFFLOAD_NUM_CPU_CHUNKS
-              value: "20000"
+              value: "10000"
             - name: TPU_OFFLOAD_NUM_STAGING_BLOCKS
               value: "1024"
             volumeMounts:
