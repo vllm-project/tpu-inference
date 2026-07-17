@@ -330,7 +330,8 @@ def test_continue_decode_no_exit_on_eos():
 
     kv_caches = [jnp.zeros((2, 10))]
 
-    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args):
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
         hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
                                                                           None,
                                                                           None]
@@ -433,7 +434,8 @@ def test_continue_decode_exit_on_eos_interval():
 
     kv_caches = [jnp.zeros((2, 10))]
 
-    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args):
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
         hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
                                                                           None,
                                                                           None]
