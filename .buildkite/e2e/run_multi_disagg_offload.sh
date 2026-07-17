@@ -304,9 +304,17 @@ cleanup() {
     if [[ "$ip" != "$HEAD_INTERNAL_IP" ]]; then
       echo "   -> Cleaning remote host: $ip"
       if [[ "$ip" == "$DECODE_HEAD_IP" ]]; then
-        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; rm -f ~/tpu-inference/scripts/start_decode.sh ~/tpu-inference/scripts/multihost/run_cluster.sh; rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
+        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
+          "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
+           docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
+           rm -f ~/tpu-inference/scripts/start_decode.sh ~/tpu-inference/scripts/multihost/run_cluster.sh
+           rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
       else
-        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true; rm -f ~/tpu-inference/scripts/multihost/run_cluster.sh; rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
+        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
+          "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
+           docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
+           rm -f ~/tpu-inference/scripts/multihost/run_cluster.sh
+           rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
       fi
     fi
   done
