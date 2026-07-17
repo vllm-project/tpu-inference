@@ -810,7 +810,7 @@ def attention(
     # shared_attention_metadata is None for flax models, and is used for vllm models to share the metadata across layers.
     shared_md = shared_attention_metadata if shared_attention_metadata is not None else md
 
-    if mesh.shape['dcp'] > 1:
+    if 'dcp' in mesh.shape and mesh.shape['dcp'] > 1:
         return forward_with_dcp(
             kv_cache=kv_cache,
             q=q,
