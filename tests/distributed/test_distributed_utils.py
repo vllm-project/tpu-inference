@@ -16,7 +16,10 @@ from collections import namedtuple
 
 import pytest
 
-from tpu_inference.distributed.utils import get_device_topology_order_id
+from tpu_inference.distributed.utils import (
+    format_ip_address_port,
+    get_device_topology_order_id,
+)
 
 # Mock TpuDevice object to simulate the real one.
 TpuDevice = namedtuple('TpuDevice',
@@ -118,3 +121,23 @@ def test_get_device_topology_order_id_not_in_global():
     ]
     with pytest.raises(ValueError, match="do not exist in the global device:"):
         get_device_topology_order_id(local_devices, global_devices)
+
+
+def test_format_ip_address_port():
+    """
+    Tests the format_ip_address_port function.
+    """
+    # IPv4 tests
+    assert format_ip_address_port("10.0.0.1", 8080) == "10.0.0.1:8080"
+    assert format_ip_address_port("10.0.0.1", "8080") == "10.0.0.1:8080"
+
+    # IPv6 tests (unbracketed)
+    assert format_ip_address_port("fd00::1", 8200) == "[fd00::1]:8200"
+    assert format_ip_address_port("2001:db8:3333:4444:CCCC:DDDD:EEEE:FFFF", 80) == "[2001:db8:3333:4444:CCCC:DDDD:EEEE:FFFF]:80"
+    
+    # IPv6 tests (already bracketed)
+    assert format_ip_address_port("[fd00::1]", 8200) == "[fd00::1]:8200"
+
+    # Hostname tests
+    assert format_ip_address_port("localhost", 5000) == "localhost:5000"
+    assert format_ip_address_port("my-service.namespace.svc.cluster.local", 9000) == "my-service.namespace.svc.cluster.local:9000"
