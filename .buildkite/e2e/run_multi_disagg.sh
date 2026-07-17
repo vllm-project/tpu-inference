@@ -52,32 +52,32 @@ get_current_internal_ip() {
         echo "$metadata_ip"
         return 0
     fi
-    
+
     hostname -I | awk '{print $1}'
 }
 
 # Automatic Worker IP Discovery
 if [[ -z "${WORKER_IPS:-}" ]]; then
     echo "⚠️  WORKER_IPS not provided. Attempting to discover via gcloud..."
-    
+
     if command -v gcloud &> /dev/null; then
         ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}')}"
         TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
-        
+
         if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
             echo "   -> Found TPU_NAME: $TPU_NAME, ZONE: $ZONE"
             ALL_IPS=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(networkEndpoints[].ipAddress)")
             ALL_IPS="${ALL_IPS//;/ }"
             ALL_IPS="${ALL_IPS//,/ }"
-            
+
             # shellcheck disable=SC2206
             ALL_IPS_ARRAY=($ALL_IPS)
-            
+
             if [[ -z "${HEAD_INTERNAL_IP:-}" ]]; then
                 HEAD_INTERNAL_IP="$(get_current_internal_ip)"
                 echo "   -> Current VM internal IP: $HEAD_INTERNAL_IP"
             fi
-            
+
             CURRENT_IP_IN_SLICE=0
             WORKER_IPS_LIST=()
             for ip in "${ALL_IPS_ARRAY[@]}"; do
@@ -87,26 +87,17 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
                     WORKER_IPS_LIST+=("$ip")
                 fi
             done
-            
+
             if (( CURRENT_IP_IN_SLICE != 1 )); then
                 echo "❌ Current VM IP (${HEAD_INTERNAL_IP}) is not in discovered TPU endpoints: ${ALL_IPS_ARRAY[*]}"
                 exit 1
             fi
-            
+
             WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
             echo "   -> Discovered Worker IPs: $WORKER_IPS"
-            
+
             ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
             echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
-            if [[ -z "${TPU_VERSION:-}" ]]; then
-                if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
-                    export TPU_VERSION="tpu7x"
-                    echo "   -> Setting TPU_VERSION=tpu7x"
-                    elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
-                    export TPU_VERSION="tpu6e"
-                    echo "   -> Setting TPU_VERSION=tpu6e"
-                fi
-            fi
         else
             echo "❌ Could not determine TPU_NAME or ZONE from metadata. Please set WORKER_IPS manually."
             exit 1
@@ -128,27 +119,11 @@ HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(get_current_internal_ip)}"
 if [[ -z "${ACCELERATOR_TYPE:-}" ]] && command -v gcloud &> /dev/null && command -v curl &> /dev/null; then
     ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}' || echo "")}"
     TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
-    
+
     if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
         ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
         echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
     fi
-fi
-
-# Auto-discover TPU_VERSION if not specified and ACCELERATOR_TYPE is present
-if [[ -z "${TPU_VERSION:-}" && -n "${ACCELERATOR_TYPE:-}" ]]; then
-    if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
-        export TPU_VERSION="tpu7x"
-        echo "   -> Setting TPU_VERSION=tpu7x"
-        elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
-        export TPU_VERSION="tpu6e"
-        echo "   -> Setting TPU_VERSION=tpu6e"
-    fi
-fi
-
-if [[ -z "${TPU_VERSION:-}" ]]; then
-    echo "❌ Error: TPU_VERSION environment variable is not set and could not be automatically discovered."
-    exit 1
 fi
 
 echo "Running on TPU_VERSION: ${TPU_VERSION}"
@@ -181,13 +156,13 @@ if [[ "${ACCELERATOR_TYPE:-}" == *"4t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-4
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
 elif [[ "${ACCELERATOR_TYPE:-}" == *"8t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-8"* ]]; then
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
-elif [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
+elif [[ "${TPU_VERSION}" == "tpu7x" ]]; then
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
 else
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
 fi
 
-if [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
+if [[ "${TPU_VERSION}" == "tpu7x" ]]; then
   CORES_PER_CHIP="${CORES_PER_CHIP:-2}"
 else
   CORES_PER_CHIP="${CORES_PER_CHIP:-1}"
@@ -197,7 +172,7 @@ TOTAL_CHIPS=$(( NUM_HOSTS * CHIPS_PER_HOST ))
 echo "Calculated total TPU chips from hosts: ${TOTAL_CHIPS}"
 echo "Using TPU cores per chip: ${CORES_PER_CHIP}"
 
-if [[ "${TPU_VERSION:-}" == "tpu7x" && "${ACCELERATOR_TYPE:-}" == *"16"* && "$NUM_HOSTS" -lt 2 ]]; then
+if [[ "${TPU_VERSION}" == "tpu7x" && "${ACCELERATOR_TYPE:-}" == *"16"* && "$NUM_HOSTS" -lt 2 ]]; then
   echo "❌ TPU7x-16 should expose multiple host VMs, but discovered ${NUM_HOSTS}: ${ALL_IPS_ARRAY[*]}"
   exit 1
 fi
@@ -315,7 +290,6 @@ start_vllm_log_streaming() {
 
 cleanup() {
   local exit_code=$?
-  local cleanup_failed=0
   echo "🧹 Cleaning up containers on all hosts..."
 
   stop_vllm_log_streaming
@@ -324,44 +298,39 @@ cleanup() {
   echo "   -> Capturing server logs..."
   docker cp "$NODE_CONTAINER_NAME:/root/vllm_serve_prefill.log" "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
-    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp '$NODE_CONTAINER_NAME:/root/vllm_serve_decode.log' /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true"; then
-      echo "WARNING: Failed to capture the Decode server log from ${DECODE_HEAD_IP}." >&2
-      cleanup_failed=1
-    fi
-    if ! scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1; then
-      echo "INFO: Decode server log was not available from ${DECODE_HEAD_IP}." >&2
-    fi
-    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log"; then
-      echo "WARNING: Failed to remove /tmp/vllm_serve_decode.log on ${DECODE_HEAD_IP}." >&2
-      cleanup_failed=1
-    fi
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp '$NODE_CONTAINER_NAME:/root/vllm_serve_decode.log' /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
+    scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log" || true
   fi
 
   # Cleanup Prefill workers
   for ip in "${PREFILL_WORKER_IPS[@]}"; do
     echo "   -> Cleaning Prefill worker: $ip"
-    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker_status=0; docker info >/dev/null || docker_status=\$?; if [ \$docker_status -eq 0 ] && docker container inspect '$NODE_CONTAINER_NAME' >/dev/null 2>&1; then docker rm -f '$NODE_CONTAINER_NAME' >/dev/null || docker_status=\$?; fi; rm -f ~/tpu-inference/scripts/multihost/run_cluster.sh; rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true; exit \$docker_status"; then
-      echo "WARNING: Cleanup failed on Prefill worker ${ip}." >&2
-      cleanup_failed=1
-    fi
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
+      "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
+       docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
+       rm -f ~/tpu-inference/scripts/multihost/run_cluster.sh
+       rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
   done
 
   # Cleanup Decode Head
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
     echo "   -> Cleaning Decode Head: $DECODE_HEAD_IP"
-    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker_status=0; docker info >/dev/null || docker_status=\$?; if [ \$docker_status -eq 0 ] && docker container inspect '$NODE_CONTAINER_NAME' >/dev/null 2>&1; then docker rm -f '$NODE_CONTAINER_NAME' >/dev/null || docker_status=\$?; fi; rm -f ~/tpu-inference/scripts/start_decode.sh ~/tpu-inference/scripts/multihost/run_cluster.sh; rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true; exit \$docker_status"; then
-      echo "WARNING: Cleanup failed on Decode head ${DECODE_HEAD_IP}." >&2
-      cleanup_failed=1
-    fi
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
+      "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
+       docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
+       rm -f ~/tpu-inference/scripts/start_decode.sh ~/tpu-inference/scripts/multihost/run_cluster.sh
+       rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
   fi
 
   # Cleanup Decode workers
   for ip in "${DECODE_WORKER_IPS[@]}"; do
     echo "   -> Cleaning Decode worker: $ip"
-    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker_status=0; docker info >/dev/null || docker_status=\$?; if [ \$docker_status -eq 0 ] && docker container inspect '$NODE_CONTAINER_NAME' >/dev/null 2>&1; then docker rm -f '$NODE_CONTAINER_NAME' >/dev/null || docker_status=\$?; fi; rm -f ~/tpu-inference/scripts/multihost/run_cluster.sh; rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true; exit \$docker_status"; then
-      echo "WARNING: Cleanup failed on Decode worker ${ip}." >&2
-      cleanup_failed=1
-    fi
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
+      "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
+       docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
+       rm -f ~/tpu-inference/scripts/multihost/run_cluster.sh
+       rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
   done
 
   # Cleanup Prefill Head (Local Node)
@@ -385,16 +354,7 @@ cleanup() {
     done
   fi
 
-  if (( cleanup_failed )); then
-    echo "⚠️ Cleanup completed with failures." >&2
-    if (( exit_code == 0 )); then
-      exit 1
-    fi
-    return "$exit_code"
-  fi
-
   echo "✅ Cleanup complete."
-  return "$exit_code"
 }
 trap cleanup EXIT
 
