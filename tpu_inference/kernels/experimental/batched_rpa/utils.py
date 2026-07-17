@@ -33,7 +33,7 @@ def broadcast_minor(src, shape):
     assert src.shape[-1] % num_lanes == 0
     target_minor = align_to(shape[-1], src.shape[-1])
     # no-op concatenation.
-    broadcasted = jnp.concat([src] * (target_minor // src.shape[-1]), axis=-1)
+    broadcasted = jnp.tile(src, (target_minor // src.shape[-1], ))
     return broadcasted[..., :shape[-1]]
 
 
