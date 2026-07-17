@@ -29,6 +29,7 @@ DEFAULT_SAMPLING_PARAMS = dict(
     temperature=-1.0,
     top_k=0,
     top_p=1.0,
+    min_p=0.0,
 )
 
 
@@ -38,6 +39,7 @@ DEFAULT_SAMPLING_PARAMS = dict(
         "temperature",
         "top_k",
         "top_p",
+        "min_p",
         "_cache_collision_dummy",
     ],
     meta_fields=["do_sampling", "logprobs"],
@@ -47,6 +49,7 @@ class TPUSupportedSamplingMetadata:
     temperature: Optional[jnp.ndarray] = None
     top_k: Optional[jnp.ndarray] = None
     top_p: Optional[jnp.ndarray] = None
+    min_p: Optional[jnp.ndarray] = None
     _cache_collision_dummy: Optional[jnp.ndarray] = None
     do_sampling: bool = False
     logprobs: bool = False
@@ -88,6 +91,8 @@ class TPUSupportedSamplingMetadata:
                                   DEFAULT_SAMPLING_PARAMS["top_k"])
         top_p_tensor = fill_slice(input_batch.top_p_cpu,
                                   DEFAULT_SAMPLING_PARAMS["top_p"])
+        min_p_tensor = fill_slice(input_batch.min_p_cpu,
+                                  DEFAULT_SAMPLING_PARAMS["min_p"])
 
         # Slice persistent device tensors to a fixed pre-compiled padded shape.
         return cls(
@@ -99,6 +104,9 @@ class TPUSupportedSamplingMetadata:
                                sharding=sharding),
             top_k=device_array(mesh,
                                top_k_tensor[:padded_num_reqs],
+                               sharding=sharding),
+            min_p=device_array(mesh,
+                               min_p_tensor[:padded_num_reqs],
                                sharding=sharding),
             _cache_collision_dummy=cache_collision_dummy,
             do_sampling=not input_batch.all_greedy,
