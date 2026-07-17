@@ -422,7 +422,8 @@ class TPUWorker(WorkerBase):
         self.parallel_config.data_parallel_size = 1
         try:
             with set_current_vllm_config(self.vllm_config):
-                temp_file = tempfile.mkstemp()[1]
+                fd, temp_file = tempfile.mkstemp()
+                os.close(fd)
                 init_distributed_environment(
                     world_size=1,
                     rank=0,

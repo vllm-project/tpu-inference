@@ -123,11 +123,15 @@ from vllm.v1.outputs import KVConnectorOutput
 from tpu_inference.offload.metrics import TPUKVCacheMetrics
 
 if TYPE_CHECKING:
+    from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
-    from vllm.forward_context import ForwardContext
 
-import ray
+try:
+    import ray
+except ImportError:
+    ray = None
+
 from vllm.platforms import current_platform
 
 from tpu_inference import envs
@@ -322,28 +326,43 @@ class KVOffloadConnectorStats(KVConnectorStats):
     """Container for transfer performance metrics"""
 
     def __post_init__(self):
+        self._process_index = None
         if not self.data:
             # Empty container init, no data is passed in.
             self.reset()
 
     def reset(self):
         # Must be serializable
-        self.data: dict[str, dict[str, list[int]]] = {
+        self.data: dict[str, dict[str, list[list[int]]]] = {
             "finished_save_chunks": dict(),
             "finished_load_chunks": dict(),
         }
 
+    @property
+    def process_index(self) -> int:
+        if getattr(self, "_process_index", None) is None:
+            try:
+                # Under JAX's multi-process SPMD model, each host node runs its own Python process.
+                # Since Ray launches exactly one worker process (RayWorkerWrapper) per node,
+                # jax.process_index() acts as a unique ID mapping 1:1 to each Ray worker actor.
+                self._process_index = jax.process_index()
+            except Exception:
+                self._process_index = 0
+        return self._process_index
+
     def record_save(self, req: ReqId, saved_chunk_ids: list[int]):
         if req not in self.data["finished_save_chunks"]:
             self.data["finished_save_chunks"][req] = []
+        process_index = self.process_index
         self.data["finished_save_chunks"][req].extend(
-            copy.deepcopy(saved_chunk_ids))
+            [[chunk_id, process_index] for chunk_id in saved_chunk_ids])
 
     def record_load(self, req: ReqId, loaded_chunk_ids: list[int]):
         if req not in self.data["finished_load_chunks"]:
             self.data["finished_load_chunks"][req] = []
+        process_index = self.process_index
         self.data["finished_load_chunks"][req].extend(
-            copy.deepcopy(loaded_chunk_ids))
+            [[chunk_id, process_index] for chunk_id in loaded_chunk_ids])
 
     def clone_and_reset(self) -> "KVOffloadConnectorStats":
         old = copy.copy(self)
@@ -436,6 +455,9 @@ class TPUOffloadConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         logger.info("TPUOffloadConnector: Entering __init__")
+        # TODO(dannawang): Pipeline Parallelism (PP) is not supported/tested for KV cache offloading yet.
+        # Move or remove this note once PP mode is fully supported and verified.
+
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = \
                 TPUOffloadConnectorScheduler(vllm_config)
@@ -522,17 +544,18 @@ class TPUOffloadConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_runner(runner)
 
-    def start_load_kv(self, fwd_ctx: "ForwardContext") -> None:
+    def start_load_kv(self, fwd_ctx: "ForwardContext", **kwargs) -> None:
         """Starts loading the KV cache for the given requests."""
         assert self.connector_worker is not None
-        self.connector_worker.start_load_kv(fwd_ctx)
+        self.connector_worker.start_load_kv(fwd_ctx, **kwargs)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         logger.info("TPUOffloadConnector: Entering wait_for_layer_load")
         """TPU connector doesn't support layer wise load."""
         pass
 
-    def save_kv_layer(self, **kwargs) -> None:
+    def save_kv_layer(self, layer_name: str, kv_layer: Any, attn_metadata: Any,
+                      **kwargs) -> None:
         logger.info("TPUOffloadConnector: Entering save_kv_layer")
         """TPU connector doesn't support layer wise save."""
         pass
@@ -613,11 +636,11 @@ class TPUOffloadConnectorScheduler():
         # The number of TP (Tensor Parallel) worker actors inside the last pipeline parallel stage.
         self.num_tp_workers = self._get_num_tp_workers()
 
-        # Persistent counters tracking how many workers have finished a chunk.
+        # Persistent counters tracking how many unique workers have finished a chunk.
         # Staging slots are only freed when the count reaches `self.num_tp_workers`.
-        # Format: {chunk_id: completed_worker_count}
-        self._save_chunk_completion_counts = defaultdict(int)
-        self._load_chunk_completion_counts = defaultdict(int)
+        # Format: {chunk_id: set(process_index)}
+        self._save_chunk_completion_counts = defaultdict(set)
+        self._load_chunk_completion_counts = defaultdict(set)
 
         model_name = self.vllm_config.model_config.model
 
@@ -680,11 +703,25 @@ class TPUOffloadConnectorScheduler():
                  the number of expected completion stats per chunk).
         """
         num_nodes = 1
-        if ray.is_initialized():
+        if ray is not None and ray.is_initialized():
             device_str = current_platform.ray_device_key
             num_nodes = len([
                 n for n in ray.nodes() if device_str in n.get("Resources", {})
             ])
+        else:
+            try:
+                is_multihost = jax.process_count() > 1
+            except Exception:
+                is_multihost = False
+
+            if is_multihost:
+                raise ValueError(
+                    "Multi-host CPU offloading is currently only supported when running under Ray."
+                )
+            num_nodes = 1
+
+        # TODO(dannawang): Pipeline Parallelism (PP) is not supported/tested for KV cache offloading yet.
+        # Move or remove this note once PP mode is fully supported and verified.
         pp_size = self.vllm_config.parallel_config.pipeline_parallel_size
         num_tp_workers = num_nodes // pp_size
         logger.debug(
@@ -1260,22 +1297,22 @@ class TPUOffloadConnectorScheduler():
             # 1. Process Saves
             save_stats = connector_output.kv_connector_stats.data.get(
                 "finished_save_chunks", {})
-            for req_id, saved_chunk_ids in save_stats.items():
+            for req_id, saved_chunks in save_stats.items():
                 fully_completed_save_chunks = []
 
                 # Accumulate completions for each chunk ID.
-                # Since list aggregation uses .extend(), duplicate entries from separate workers are preserved.
-                for chunk_id in saved_chunk_ids:
-                    self._save_chunk_completion_counts[chunk_id] += 1
+                for chunk_id, process_index in saved_chunks:
+                    self._save_chunk_completion_counts[chunk_id].add(
+                        process_index)
                     logger.debug(
                         f"Save chunk completion update: req_id={req_id}, "
                         f"chunk_id={chunk_id}, "
-                        f"completion_count={self._save_chunk_completion_counts[chunk_id]}"
+                        f"completion_count={len(self._save_chunk_completion_counts[chunk_id])}"
                     )
 
                     # Only mark the chunk complete when all expected last-stage workers have reported it.
-                    if self._save_chunk_completion_counts[
-                            chunk_id] == self.num_tp_workers:
+                    if len(self._save_chunk_completion_counts[chunk_id]
+                           ) == self.num_tp_workers:
                         fully_completed_save_chunks.append(chunk_id)
                         del self._save_chunk_completion_counts[chunk_id]
 
@@ -1308,21 +1345,22 @@ class TPUOffloadConnectorScheduler():
             # 2. Process Loads
             load_stats = connector_output.kv_connector_stats.data.get(
                 "finished_load_chunks", {})
-            for req_id, loaded_chunk_ids in load_stats.items():
+            for req_id, loaded_chunks in load_stats.items():
                 fully_completed_load_chunks = []
 
                 # Accumulate completions for each chunk ID.
-                for chunk_id in loaded_chunk_ids:
-                    self._load_chunk_completion_counts[chunk_id] += 1
+                for chunk_id, process_index in loaded_chunks:
+                    self._load_chunk_completion_counts[chunk_id].add(
+                        process_index)
                     logger.debug(
                         f"Load chunk completion update: req_id={req_id}, "
                         f"chunk_id={chunk_id}, "
-                        f"completion_count={self._load_chunk_completion_counts[chunk_id]}"
+                        f"completion_count={len(self._load_chunk_completion_counts[chunk_id])}"
                     )
 
                     # Only mark the chunk complete when all expected last-stage workers have reported it.
-                    if self._load_chunk_completion_counts[
-                            chunk_id] == self.num_tp_workers:
+                    if len(self._load_chunk_completion_counts[chunk_id]
+                           ) == self.num_tp_workers:
                         fully_completed_load_chunks.append(chunk_id)
                         del self._load_chunk_completion_counts[chunk_id]
 
@@ -2255,7 +2293,7 @@ class TPUOffloadConnectorWorker:
 
         self._pending_save_futures = remaining_futures
 
-    def start_load_kv(self, fwd_ctx: "ForwardContext") -> None:
+    def start_load_kv(self, fwd_ctx: "ForwardContext", **kwargs) -> None:
         """
         This function is the worker-side entry point for loading data from the
         local CPU backend into the TPU's sharded KV cache.
