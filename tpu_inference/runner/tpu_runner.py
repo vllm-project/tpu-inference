@@ -1949,12 +1949,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 ))
             logits_indices_view[:] = spec_decode_metadata.final_logits_indices
 
+        # Repetition-penalty seen-token mask, maintained incrementally on the
+        # input batch. None unless some active request sets
+        # repetition_penalty != 1.0, so the common path stays free. Sharded like
+        # the logits it gates: batch on ATTN_DATA, vocab replicated.
+        seen_token_ids_mask = self.input_batch.update_seen_token_ids_mask(
+            self.mesh,
+            padded_num_reqs,
+            sharding=NamedSharding(
+                self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+        )
+
         # Put to device
         sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
             self.mesh,
             self.input_batch,
             padded_num_reqs,
             sharding=data_parallel_attn_sharding,
+            seen_token_ids_mask=seen_token_ids_mask,
         )
 
         if self.uses_mrope:

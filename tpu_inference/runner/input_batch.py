@@ -16,6 +16,7 @@ from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
 from tpu_inference.runner.block_table import MultiGroupBlockTable
+from tpu_inference.utils import device_array
 
 _SAMPLING_EPS = 1e-5
 
@@ -114,6 +115,17 @@ class InputBatch:
 
         self.repetition_penalties_cpu = np.empty((max_num_reqs, ),
                                                  dtype=np.float32)
+
+        # Incremental "already seen (prompt+output) tokens" mask for
+        # repetition_penalty, indexed by req slot: (max_num_reqs, vocab_size)
+        # bool on device. Lazily allocated the first time any active request
+        # sets repetition_penalty != 1.0 (stays None otherwise -> zero cost).
+        # `seen_scattered_upto[slot]` is the high-water mark of how many of
+        # `token_ids_cpu[slot]`'s *accepted* tokens (num_tokens_no_spec) have
+        # already been OR-ed into the mask, so each step only scatters the new
+        # tokens. Both follow the request through swap_states/condense/add.
+        self.seen_token_ids_mask: Optional[jax.Array] = None
+        self.seen_scattered_upto = np.zeros(max_num_reqs, dtype=np.int32)
 
         # IDs of requests which do not support spec decoding
         self.spec_decode_unsupported_reqs: set[str] = set()
@@ -353,6 +365,14 @@ class InputBatch:
         # Number of tokens without spec decode tokens.
         self.num_tokens_no_spec[req_index] = request.num_tokens
 
+        # Reset the repetition-penalty seen-mask bookkeeping for this (reused)
+        # slot so the next update_seen_token_ids_mask() rescatters this
+        # request's tokens from scratch instead of inheriting a prior tenant's.
+        self.seen_scattered_upto[req_index] = 0
+        if self.seen_token_ids_mask is not None:
+            self.seen_token_ids_mask = self.seen_token_ids_mask.at[
+                req_index].set(False)
+
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
         # Allocate a fresh mamba state slot for this request. The slot stays
@@ -547,6 +567,11 @@ class InputBatch:
             self.min_p_cpu[i2], self.min_p_cpu[i1]
         self.repetition_penalties_cpu[i1], self.repetition_penalties_cpu[i2] =\
             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
+        self.seen_scattered_upto[i1], self.seen_scattered_upto[i2] =\
+            self.seen_scattered_upto[i2], self.seen_scattered_upto[i1]
+        if self.seen_token_ids_mask is not None:
+            self.seen_token_ids_mask = self.seen_token_ids_mask.at[[i1, i2]].set(
+                self.seen_token_ids_mask[[i2, i1]])
 
         self.token_ids_cpu[[i1, i2], :max_active_token_count] = \
             self.token_ids_cpu[[i2, i1], :max_active_token_count]
@@ -631,6 +656,11 @@ class InputBatch:
             self.min_p_cpu[empty_index] = self.min_p_cpu[last_req_index]
             self.repetition_penalties_cpu[empty_index] = (
                 self.repetition_penalties_cpu[last_req_index])
+            self.seen_scattered_upto[empty_index] = self.seen_scattered_upto[
+                last_req_index]
+            if self.seen_token_ids_mask is not None:
+                self.seen_token_ids_mask = self.seen_token_ids_mask.at[
+                    empty_index].set(self.seen_token_ids_mask[last_req_index])
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
@@ -667,6 +697,57 @@ class InputBatch:
     @property
     def all_greedy(self) -> bool:
         return len(self.random_reqs) == 0
+
+    def update_seen_token_ids_mask(
+        self,
+        mesh,
+        padded_num_reqs: int,
+        sharding: Optional[Any] = None,
+    ) -> Optional[jax.Array]:
+        """Incrementally maintain the repetition-penalty seen-token mask.
+
+        Returns the ``(padded_num_reqs, vocab_size)`` bool mask marking, per
+        active request slot, every token id that has appeared in its prompt or
+        accepted output -- or ``None`` when no active request has
+        ``repetition_penalty != 1.0`` (the common case, so the sampler compiles
+        with no penalty work at all).
+
+        Driven by ``token_ids_cpu`` + ``num_tokens_no_spec`` (the accepted-token
+        count, so rejected speculative tokens are never marked) and a per-slot
+        high-water mark, so each call only scatters tokens added since the last
+        call: O(num_reqs) per decode step, O(prompt_len) once at prefill. Slot
+        moves (swap_states/condense/add_request) keep the mask row + high-water
+        aligned, so this never rescans the full sequence.
+        """
+        num_reqs = self.num_reqs
+        if num_reqs == 0 or not bool(
+                np.any(self.repetition_penalties_cpu[:num_reqs] != 1.0)):
+            return None
+
+        if self.seen_token_ids_mask is None:
+            self.seen_token_ids_mask = device_array(
+                mesh,
+                np.zeros((self.max_num_reqs, self.vocab_size), dtype=bool),
+                sharding=sharding,
+            )
+
+        rows_list: list[np.ndarray] = []
+        toks_list: list[np.ndarray] = []
+        for slot in range(num_reqs):
+            lo = int(self.seen_scattered_upto[slot])
+            hi = int(self.num_tokens_no_spec[slot])
+            if hi > lo:
+                rows_list.append(np.full(hi - lo, slot, dtype=np.int32))
+                toks_list.append(
+                    self.token_ids_cpu[slot, lo:hi].astype(np.int32))
+                self.seen_scattered_upto[slot] = hi
+        if rows_list:
+            rows = jnp.asarray(np.concatenate(rows_list))
+            toks = jnp.asarray(np.concatenate(toks_list))
+            self.seen_token_ids_mask = self.seen_token_ids_mask.at[
+                rows, toks].set(True)
+
+        return self.seen_token_ids_mask[:padded_num_reqs]
 
     @property
     def max_num_logprobs(self) -> Optional[int]:
