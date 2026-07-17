@@ -314,9 +314,6 @@ def _scheduler_worker_process(
                         _send_result(0)
                     else:
                         max_cache_hit_length = request.num_tokens - 1
-                        # find_longest_cache_hit returns
-                        # (hit_blocks, hit_length, num_uncached_common_prefix_tokens)
-                        # as of vLLM upstream; only the hit length is needed here.
                         _, num_cached_tokens, *_ = (
                             kv_cache_mgr.coordinator.find_longest_cache_hit(
                                 request.block_hashes, max_cache_hit_length))
