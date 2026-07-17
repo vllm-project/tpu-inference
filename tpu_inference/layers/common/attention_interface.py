@@ -782,8 +782,16 @@ def _lse_all_reduce(o: jax.Array, lse: jax.Array, axis: str):
     m_safe = jnp.where(jnp.isinf(m), 0.0, m)
     w = jnp.exp(lse - m_safe)
     denom = lax.psum(w, axis)
-    o_merged = (lax.psum(o * w[..., None], axis) /
-                jnp.where(denom == 0.0, 1.0, denom)[..., None])
+    # `o` comes back from the kernel in bf16 while `w`/`lse` are f32. Letting the
+    # product promote to f32 costs a bf16->f32 convert of the whole `o` and
+    # doubles the all-reduced payload, purely as a side effect of type
+    # promotion. Weight in `o`'s dtype and widen only after the collective, so
+    # the f32 exp/subtract that build the weights are preserved and only the
+    # final per-rank weight is rounded to bf16.
+    w_o = w[..., None].astype(o.dtype)
+    o_w_sum = lax.psum(o * w_o, axis)
+    denom_safe = jnp.where(denom == 0.0, 1.0, denom)[..., None]
+    o_merged = o_w_sum.astype(denom.dtype) / denom_safe
     lse_merged = jnp.where(denom == 0.0, -jnp.inf, m_safe + jnp.log(denom))
     return o_merged, lse_merged
 
