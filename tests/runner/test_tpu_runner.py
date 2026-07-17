@@ -542,6 +542,7 @@ class TestTPUJaxRunner:
             None,
             None,
             None,
+            None,
         )
 
         from tpu_inference.runner.tpu_runner import TPUModelRunner
