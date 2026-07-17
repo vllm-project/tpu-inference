@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Datastructures defining an input batch
 
+import functools
 from dataclasses import dataclass, field
 from typing import Any, Optional, cast
 
@@ -19,6 +20,21 @@ from tpu_inference.runner.block_table import MultiGroupBlockTable
 from tpu_inference.utils import device_array
 
 _SAMPLING_EPS = 1e-5
+
+
+@functools.partial(jax.jit, donate_argnums=(0, ))
+def _scatter_seen_tokens(seen_mask: jax.Array, rows: jax.Array,
+                         toks: jax.Array) -> jax.Array:
+    """Mark ``(row, token)`` pairs True in the repetition-penalty seen mask.
+
+    Persistent module-level jit so repeated calls with the same fixed shapes
+    hit JAX's compile cache instead of recompiling every decode step. Padding
+    entries carry an out-of-range token id and are dropped by ``mode="drop"``.
+    ``donate_argnums=(0,)`` lets XLA update the (num_reqs, vocab) mask in place
+    rather than allocating a fresh copy each step.
+    """
+    return seen_mask.at[rows, toks].set(True, mode="drop")
+
 
 # TODO(xiang): fix cpu tensor init
 
@@ -702,6 +718,7 @@ class InputBatch:
         self,
         mesh,
         padded_num_reqs: int,
+        padded_num_new_tokens: int,
         sharding: Optional[Any] = None,
     ) -> Optional[jax.Array]:
         """Incrementally maintain the repetition-penalty seen-token mask.
@@ -713,11 +730,18 @@ class InputBatch:
         with no penalty work at all).
 
         Driven by ``token_ids_cpu`` + ``num_tokens_no_spec`` (the accepted-token
-        count, so rejected speculative tokens are never marked) and a per-slot
-        high-water mark, so each call only scatters tokens added since the last
-        call: O(num_reqs) per decode step, O(prompt_len) once at prefill. Slot
-        moves (swap_states/condense/add_request) keep the mask row + high-water
-        aligned, so this never rescans the full sequence.
+        count, so rejected speculative/eagle3 draft tokens are never marked) and
+        a per-slot high-water mark, so each call only scatters tokens added
+        since the last call. The (row, token) pairs for those new tokens are
+        packed into fixed ``padded_num_new_tokens``-length host buffers (the
+        runner's existing scheduled-tokens bucket -- the new accepted tokens
+        this step never exceed the scheduled tokens) and applied via a single
+        persistent ``@jax.jit`` scatter (`_scatter_seen_tokens`). Fixed shapes
+        mean the scatter hits JAX's compile cache instead of recompiling per
+        step; unused padding slots carry an out-of-range token id and are
+        dropped by the scatter. Slot moves (swap_states/condense/add_request)
+        keep the mask row + high-water aligned, so this never rescans the
+        sequence: O(new tokens) host packing + one jitted scatter per step.
         """
         num_reqs = self.num_reqs
         if num_reqs == 0 or not bool(
@@ -731,21 +755,28 @@ class InputBatch:
                 sharding=sharding,
             )
 
-        rows_list: list[np.ndarray] = []
-        toks_list: list[np.ndarray] = []
+        # Pack the new accepted tokens into fixed-length buffers. Padding rows
+        # point at slot 0 with an out-of-range token id (vocab_size), which the
+        # scatter drops (mode="drop") -- so no scratch row / sharding hazard.
+        rows = np.zeros(padded_num_new_tokens, dtype=np.int32)
+        toks = np.full(padded_num_new_tokens, self.vocab_size, dtype=np.int32)
+        pos = 0
         for slot in range(num_reqs):
             lo = int(self.seen_scattered_upto[slot])
             hi = int(self.num_tokens_no_spec[slot])
-            if hi > lo:
-                rows_list.append(np.full(hi - lo, slot, dtype=np.int32))
-                toks_list.append(
-                    self.token_ids_cpu[slot, lo:hi].astype(np.int32))
-                self.seen_scattered_upto[slot] = hi
-        if rows_list:
-            rows = jnp.asarray(np.concatenate(rows_list))
-            toks = jnp.asarray(np.concatenate(toks_list))
-            self.seen_token_ids_mask = self.seen_token_ids_mask.at[
-                rows, toks].set(True)
+            n = hi - lo
+            if n <= 0:
+                continue
+            n = min(n, padded_num_new_tokens - pos)
+            if n <= 0:
+                break  # bucket full (should not happen: new <= scheduled)
+            rows[pos:pos + n] = slot
+            toks[pos:pos + n] = self.token_ids_cpu[slot, lo:lo + n]
+            self.seen_scattered_upto[slot] = lo + n
+            pos += n
+        if pos > 0:
+            self.seen_token_ids_mask = _scatter_seen_tokens(
+                self.seen_token_ids_mask, jnp.asarray(rows), jnp.asarray(toks))
 
         return self.seen_token_ids_mask[:padded_num_reqs]
 

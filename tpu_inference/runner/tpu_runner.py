@@ -1956,6 +1956,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         seen_token_ids_mask = self.input_batch.update_seen_token_ids_mask(
             self.mesh,
             padded_num_reqs,
+            padded_total_num_scheduled_tokens,
             sharding=NamedSharding(
                 self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
         )
