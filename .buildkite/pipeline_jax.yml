@@ -88,6 +88,8 @@ steps:
       - label: "${TPU_VERSION:-tpu6e} E2E speculative decoding test"
         key: ${TPU_VERSION:-tpu6e}_test_6
         soft_fail: true
+        # TODO: Look into the latency of precompilation of the e2e spec decoding test
+        timeout_in_minutes: 180
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"

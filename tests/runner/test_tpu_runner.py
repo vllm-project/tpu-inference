@@ -203,6 +203,7 @@ class TestTPUJaxRunner:
             self, mock_device_get, mock_continue_decode):
         """_execute_continue_decode() should retrieve and format MoE expert indices correctly."""
         runner = MagicMock()
+        runner.scheduler_config.async_scheduling = False
         runner.max_num_reqs = 8
         runner.max_model_len = 512
         runner.dp_size = 1
@@ -250,11 +251,12 @@ class TestTPUJaxRunner:
                                      dtype=np.int32).reshape(5, 3, 8, 2)
 
         def device_get_side_effect(arg):
-            if isinstance(arg, tuple) and len(arg) == 3:
-                tokens_arg, experts_arg, _ = arg
-                if (tokens_arg is mock_generated_tokens
-                        and experts_arg is mock_all_expert_indices):
-                    return mock_tokens_cpu, mock_experts_cpu, np.int32(5)
+            if isinstance(arg, tuple) and len(arg) == 2:
+                tokens_arg, _ = arg
+                if tokens_arg is mock_generated_tokens:
+                    return mock_tokens_cpu, np.int32(5)
+            elif arg is mock_all_expert_indices:
+                return mock_experts_cpu
             return arg
 
         mock_device_get.side_effect = device_get_side_effect
@@ -313,6 +315,7 @@ class TestTPUJaxRunner:
                                               mock_continue_decode):
         """_execute_continue_decode() should compute steps, slice/trim generated tokens, and update cpu state."""
         runner = MagicMock()
+        runner.scheduler_config.async_scheduling = False
         runner.max_num_reqs = 8
         runner.max_model_len = 512
         runner.dp_size = 1
@@ -375,10 +378,10 @@ class TestTPUJaxRunner:
         # (generated_tokens, all_expert_indices, step_counter) and trims to
         # step_counter (= 5 here, so all rows are kept).
         def device_get_side_effect(arg):
-            if isinstance(arg, tuple) and len(arg) == 3:
-                tokens_arg, experts_arg, _ = arg
-                if tokens_arg is mock_generated_tokens and experts_arg is None:
-                    return mock_tokens_cpu, None, np.int32(5)
+            if isinstance(arg, tuple) and len(arg) == 2:
+                tokens_arg, _ = arg
+                if tokens_arg is mock_generated_tokens:
+                    return mock_tokens_cpu, np.int32(5)
             return arg
 
         mock_device_get.side_effect = device_get_side_effect
@@ -469,6 +472,7 @@ class TestTPUJaxRunner:
                                              mock_continue_decode):
         """_execute_continue_decode() should realign generated tokens correctly when dp_size > 1."""
         runner = MagicMock()
+        runner.scheduler_config.async_scheduling = False
         runner.max_num_reqs = 8
         runner.max_model_len = 512
         runner.dp_size = 2
@@ -528,10 +532,10 @@ class TestTPUJaxRunner:
         # (generated_tokens, all_expert_indices, step_counter) and trims to
         # step_counter (= 5 here, so all rows are kept).
         def device_get_side_effect(arg):
-            if isinstance(arg, tuple) and len(arg) == 3:
-                tokens_arg, experts_arg, _ = arg
-                if tokens_arg is mock_generated_tokens and experts_arg is None:
-                    return mock_tokens_cpu, None, np.int32(5)
+            if isinstance(arg, tuple) and len(arg) == 2:
+                tokens_arg, _ = arg
+                if tokens_arg is mock_generated_tokens:
+                    return mock_tokens_cpu, np.int32(5)
             return arg
 
         mock_device_get.side_effect = device_get_side_effect
@@ -603,6 +607,100 @@ class TestTPUJaxRunner:
         assert req_mock1.output_token_ids == [1, 2, 3, 101, 102, 999]
         assert req_mock2.output_token_ids == [4, 201, 202, 203, 204, 999]
         assert req_mock3.output_token_ids == [5, 6, 301, 302, 303, 304, 305]
+
+    @patch('tpu_inference.runner.tpu_runner.continue_decode')
+    @patch('jax.device_get')
+    def test_execute_continue_decode_async(self, mock_device_get,
+                                           mock_continue_decode):
+        """_execute_continue_decode() under async scheduling should handle pre_async_results, extract next_tokens_in_tpu, and return AsyncTPUModelRunnerOutput."""
+        runner = MagicMock()
+        runner.max_num_reqs = 8
+        runner.max_model_len = 512
+        runner.dp_size = 1
+        runner.vllm_config.parallel_config.data_parallel_size = 1
+        runner.vllm_config.parallel_config.is_moe_model = False
+        runner.scheduler_config.async_scheduling = True
+        runner.input_batch.num_reqs = 2
+        runner.input_batch.req_ids = ["req1", "req2"]
+        runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1}
+
+        runner.input_batch.token_ids_cpu = np.zeros((8, 512), dtype=np.int32)
+        runner.input_batch.num_tokens = np.array([10, 20, 0, 0, 0, 0, 0, 0],
+                                                 dtype=np.int32)
+        runner.input_batch.num_tokens_no_spec = np.array(
+            [10, 20, 0, 0, 0, 0, 0, 0], dtype=np.int32)
+        runner.input_batch.num_computed_tokens_cpu = np.array(
+            [10, 20, 0, 0, 0, 0, 0, 0], dtype=np.int32)
+
+        req_mock1 = MagicMock(output_token_ids=[1, 2, 3],
+                              num_computed_tokens=10)
+        req_mock2 = MagicMock(output_token_ids=[4], num_computed_tokens=20)
+        runner.requests = {
+            "req1": req_mock1,
+            "req2": req_mock2,
+        }
+
+        runner._get_min_remaining_slots.return_value = 5
+        runner.vllm_config.additional_config = {"max_decode_steps": 5}
+        runner.static_max_decode_steps = 5
+        runner.model_config.get_vocab_size.return_value = 1000
+        runner.model_config.hf_config = MagicMock(eos_token_id=999,
+                                                  pad_token_id=0)
+        runner.eos_token_id = 999
+        runner.pad_token_id = 0
+        runner.layer_name_to_kvcache_index = {}
+
+        mock_generated_tokens = MagicMock()
+        mock_generated_tokens.shape = (5, 2)
+        mock_final_state = MagicMock()
+        mock_final_state.step_counter = jnp.array(5, dtype=jnp.int32)
+        mock_continue_decode.return_value = (
+            mock_generated_tokens,
+            MagicMock(),  # kv_caches
+            mock_final_state,
+            MagicMock(),  # final_rng
+            None,
+            None,
+        )
+
+        mock_tokens_cpu = np.zeros((5, 2), dtype=np.int32)
+        mock_tokens_cpu[:, 0] = [101, 102, 999, 0, 0]
+        mock_tokens_cpu[:, 1] = [201, 202, 203, 204, 205]
+
+        def device_get_side_effect(arg):
+            if isinstance(arg, tuple) and len(arg) == 2:
+                return mock_tokens_cpu, np.int32(3)
+            return arg
+
+        mock_device_get.side_effect = device_get_side_effect
+
+        scheduler_output = MagicMock()
+        scheduler_output.num_scheduled_tokens = {"req1": 1, "req2": 1}
+
+        attn_metadata = MagicMock()
+        attn_metadata.seq_lens_cpu = np.array([10, 20, 0, 0, 0, 0, 0, 0])
+        runner._prepare_inputs.return_value = (np.zeros(8, dtype=np.int32),
+                                               None, attn_metadata, None,
+                                               np.array([
+                                                   0, 1, -1, -1, -1, -1, -1, -1
+                                               ],
+                                                        dtype=np.int32), None,
+                                               None, None, None, None, None)
+
+        from tpu_inference.runner.tpu_runner import TPUModelRunner
+        result = TPUModelRunner._execute_continue_decode(
+            runner, scheduler_output)
+
+        assert result is None
+        assert runner._pre_async_results is not None
+        assert runner._pre_async_results.is_continue_decode is True
+        assert runner._continue_decode_output is not None
+
+        # Verify output resolution via get_output()
+        async_out = runner._continue_decode_output
+        model_runner_output = async_out.get_output()
+        assert model_runner_output.sampled_token_ids[0] == [101, 102, 999]
+        assert model_runner_output.sampled_token_ids[1] == [201, 202, 203]
 
 
 class TestTPUJaxRunnerMultimodalModelLoadedForTextOnly:

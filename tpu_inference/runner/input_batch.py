@@ -158,6 +158,16 @@ class InputBatch:
         # physical slot. Indexing the cache by the moving `req_idx` would
         # read stale state; indexing by `mamba_state_indices_cpu[req_idx]`
         # reads the slot that actually holds this request's state.
+        #
+        # With speculative decoding, each request owns a *group* of
+        # `num_speculative_tokens + 1` consecutive slots; the tracked slot id
+        # is the group's base. During a verify step the GDN kernel writes one
+        # state checkpoint per window position into `base + t`, and the next
+        # step reads its initial state from `base + (num_accepted - 1)`.
+        # Rejected drafts are thus rolled back by *selection*, never by
+        # copying. Without spec decode the stride is 1 (one slot per
+        # request), matching the original layout.
+        #
         # Initial pool size is based on max_num_reqs rounded up to dp_size;
         # init_mamba_pools() resizes after KV cache allocation is known.
         self.mamba_state_indices_cpu = np.zeros(max_num_reqs, dtype=np.int32)
@@ -165,18 +175,33 @@ class InputBatch:
         # get slots within that rank's shard of the device-side state array.
         # Matches the sharding in kv_cache_manager: mamba_num_blocks is
         # rounded up to dp_size, then split evenly across ranks.
-        mamba_num_blocks = ((max_num_reqs + dp_size) // dp_size) * dp_size
-        self._mamba_local_slots = mamba_num_blocks // dp_size
+        self.mamba_slot_stride = num_speculative_tokens + 1
+        max_num_reqs_per_rank = (max_num_reqs + dp_size - 1) // dp_size
+        self._mamba_local_slots = (
+            max_num_reqs_per_rank * self.mamba_slot_stride + 1)
         self._free_mamba_slots_per_rank: list[list[int]] = []
-        for k in range(dp_size):
-            base = k * self._mamba_local_slots
-            self._free_mamba_slots_per_rank.append(
-                list(range(base + self._mamba_local_slots - 1, base, -1)))
+        self._build_mamba_pools()
 
         # for pooling models
         self.pooling_params: dict[str, PoolingParams] = {}
         self.pooling_states: dict[str, PoolingStates] = {}
         self.has_mamba_layers = False
+
+    def _build_mamba_pools(self) -> None:
+        """Build the per-rank free pools of slot-group base ids.
+
+        Within each rank's `_mamba_local_slots` shard, slot 0 is the null
+        block and groups of `mamba_slot_stride` consecutive slots follow.
+        The pool holds group *bases*; `.pop()` returns the lowest free base
+        first (matching the original ascending hand-out order).
+        """
+        stride = self.mamba_slot_stride
+        num_groups = (self._mamba_local_slots - 1) // stride
+        self._free_mamba_slots_per_rank = []
+        for k in range(self.dp_size):
+            base = k * self._mamba_local_slots
+            self._free_mamba_slots_per_rank.append(
+                [base + 1 + g * stride for g in reversed(range(num_groups))])
 
     def init_mamba_pools(self, mamba_num_blocks: int) -> None:
         """Reinitialize mamba slot pools with the actual device block count.
@@ -186,11 +211,12 @@ class InputBatch:
         default estimate based on max_num_reqs).
         """
         self._mamba_local_slots = mamba_num_blocks // self.dp_size
-        self._free_mamba_slots_per_rank = []
-        for k in range(self.dp_size):
-            base = k * self._mamba_local_slots
-            self._free_mamba_slots_per_rank.append(
-                list(range(base + self._mamba_local_slots - 1, base, -1)))
+        self._build_mamba_pools()
+
+    def is_valid_mamba_slot_base(self, slot: int) -> bool:
+        """True iff `slot` is a valid group base (not a null block)."""
+        local = slot % self._mamba_local_slots
+        return local != 0 and (local - 1) % self.mamba_slot_stride == 0
 
     def release_mamba_slot(self, slot: Optional[int]) -> None:
         if slot is None:
@@ -198,6 +224,10 @@ class InputBatch:
         slot = int(slot)
         if slot == 0 or slot % self._mamba_local_slots == 0:
             return
+        assert self.is_valid_mamba_slot_base(slot), (
+            f"Released mamba slot {slot} is not a group base "
+            f"(local_slots={self._mamba_local_slots}, "
+            f"stride={self.mamba_slot_stride})")
         rank = slot // self._mamba_local_slots
         pool = self._free_mamba_slots_per_rank[rank]
         if slot not in pool:
@@ -226,9 +256,11 @@ class InputBatch:
                     f"Active mamba batch has a hole at index {req_index}")
             slot = int(self.mamba_state_indices_cpu[req_index])
             active_slots.append(slot)
-            if slot <= 0 or slot % self._mamba_local_slots == 0:
+            if slot <= 0 or not self.is_valid_mamba_slot_base(slot):
                 raise AssertionError(
-                    f"Request {req_id} has invalid mamba slot {slot}")
+                    f"Request {req_id} has invalid mamba slot {slot} "
+                    f"(local_slots={self._mamba_local_slots}, "
+                    f"stride={self.mamba_slot_stride})")
             if slot in free_slots:
                 raise AssertionError(
                     f"Active request {req_id} uses free mamba slot {slot}")
