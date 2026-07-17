@@ -286,11 +286,11 @@ cleanup() {
       echo "   -> Cleaning remote host: $ip"
       local remote_files="~/tpu-inference/scripts/multihost/run_cluster.sh"
       [[ "$ip" == "$DECODE_HEAD_IP" ]] && remote_files="~/tpu-inference/scripts/start_decode.sh $remote_files"
-      if ! ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" \
-        "status=0; docker info >/dev/null 2>&1 || status=1; if [ \$status -eq 0 ] && docker container inspect '$NODE_CONTAINER_NAME' >/dev/null 2>&1; then docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || status=1; fi; rm -f $remote_files || status=1; if [ -d ~/tpu-inference/scripts/multihost ] && [ -z \"\$(find ~/tpu-inference/scripts/multihost -mindepth 1 -maxdepth 1 -print -quit)\" ]; then rmdir ~/tpu-inference/scripts/multihost || status=1; fi; if [ -d ~/tpu-inference/scripts ] && [ -z \"\$(find ~/tpu-inference/scripts -mindepth 1 -maxdepth 1 -print -quit)\" ]; then rmdir ~/tpu-inference/scripts || status=1; fi; exit \$status"; then
-        echo "WARNING: Cleanup failed on remote host ${ip} (SSH, Docker, container, or temporary-file cleanup)." >&2
-        cleanup_failed=1
-      fi
+      ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" \
+        "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
+         docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
+         rm -f $remote_files
+         rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
     fi
   done
   if ! docker info >/dev/null 2>&1; then
