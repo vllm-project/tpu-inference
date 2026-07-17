@@ -748,13 +748,20 @@ class CompilationManager:
                                               dtype=np.float32)
                         top_k = np.full((num_reqs, ), 20, dtype=np.int32)
                         top_p = np.full((num_reqs, ), 0.8, dtype=np.float32)
-                        (temperature, top_k, top_p) = device_array(
-                            self.runner.mesh, (temperature, top_k, top_p),
+                        # min_p must be primed: from_input_batch always sets it
+                        # when do_sampling, and _apply_sampling_transforms reads
+                        # it (min_p > 0), so leaving it None both mismatches the
+                        # runtime program and crashes tracing here.
+                        min_p = np.zeros((num_reqs, ), dtype=np.float32)
+                        (temperature, top_k, top_p, min_p) = device_array(
+                            self.runner.mesh,
+                            (temperature, top_k, top_p, min_p),
                             sharding=sampling_metadata_sharding)
                     else:
                         temperature = None
                         top_k = None
                         top_p = None
+                        min_p = None
 
                     # Use a dummy tensor with a unique shape for each logprobs config.
                     # This avoids persistent cache collisions.
@@ -768,6 +775,7 @@ class CompilationManager:
                         temperature=temperature,
                         top_k=top_k,
                         top_p=top_p,
+                        min_p=min_p,
                         _cache_collision_dummy=_cache_collision_dummy,
                         do_sampling=do_sampling,
                         logprobs=logprobs)
