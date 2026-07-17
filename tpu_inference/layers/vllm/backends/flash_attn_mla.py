@@ -17,7 +17,6 @@ import jax.numpy as jnp
 import torch
 from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
-from tpu_inference.utils import t2j
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.v1.attention.backend import (AttentionBackend, AttentionLayer,
@@ -27,10 +26,10 @@ from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
 
 import tpu_inference.envs as envs
 from tpu_inference.layers.common.attention_interface import mla_attention
-from tpu_inference.utils import t2j
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import (
     quantize_kv, static_per_tensor_quantize_tensor)
+from tpu_inference.utils import t2j
 
 
 @register_backend(AttentionBackendEnum.FLASH_ATTN_MLA)
@@ -183,12 +182,12 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
                                   value=None,
                                   k_scale=k_scale)
         k_pe = k_pe.squeeze(1)
-        use_sparse = getattr(layer, "use_sparse", False) and topk_indices is not None
+        use_sparse = (getattr(layer, "use_sparse", False) or getattr(
+            layer, "is_sparse", False)) and topk_indices is not None
         topk_tokens = getattr(layer, "topk_tokens", 1)
         if use_sparse:
             num_active_seqs = q_nope.shape[1]
             topk_indices = topk_indices[:num_active_seqs, :topk_tokens]
-            # print(f"DEBUG [flash_attn_mla.py]: topk_indices = {topk_indices.tolist()}", flush=True)
 
         new_kv_cache, outputs = mla_attention(
             q_nope,

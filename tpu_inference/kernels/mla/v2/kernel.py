@@ -466,6 +466,14 @@ def _mla_ragged_paged_attention_kernel(
             mask = q_span < k_span
             if sliding_window is not None:
                 mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
+            if is_sparse:
+                seq_topk = topk_indices_vmem_ref[seq_idx, :]
+                k_span_1d = bkv_idx * bkv_sz + jnp.arange(bkv_sz,
+                                                          dtype=jnp.int32)
+                sparse_valid = jnp.any(k_span_1d[:, None] == seq_topk[None, :],
+                                       axis=-1)
+                mask = jnp.logical_or(mask,
+                                      jnp.logical_not(sparse_valid)[None, :])
             mask_list.append(mask)
         mask = jnp.stack(mask_list, axis=0)
 
@@ -505,6 +513,7 @@ def _mla_ragged_paged_attention_kernel(
         kv_c,  # [bkv_sz, lkv_dim] if not transpose_kv_cache else [lkv_dim, bkv_sz] <- Correspond to data from bkvc_x2_ref
         k_pe,  # [bkv_sz, r_dim] if not transpose_kv_cache else [r_dim, bkv_sz] <- Correspond to data from bpe_x2_ref
         *,
+        seq_idx: int = 0,
         kv_len,
         q_len,
         bq_idx,
@@ -605,6 +614,16 @@ def _mla_ragged_paged_attention_kernel(
                         mask_part = jnp.logical_or(
                             mask_part, threshold_per_sq - sliding_window
                             >= iota1)
+                    if is_sparse:
+                        seq_topk = topk_indices_vmem_ref[seq_idx, :]
+                        k_span_chunk = bkv_idx * bkv_sz + s_idx * 128 + jnp.arange(
+                            128, dtype=jnp.int32)
+                        chunk_valid = jnp.any(
+                            k_span_chunk[:, None] == seq_topk[None, :],
+                            axis=-1)
+                        mask_part = jnp.logical_or(
+                            mask_part,
+                            jnp.logical_not(chunk_valid)[None, :])
                     s_1d_list.append(
                         jnp.where(
                             mask_part, mask_value,
@@ -624,6 +643,14 @@ def _mla_ragged_paged_attention_kernel(
 
             if sliding_window is not None:
                 mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
+            if is_sparse:
+                seq_topk = topk_indices_vmem_ref[seq_idx, :]
+                k_span_1d = bkv_idx * bkv_sz + jnp.arange(bkv_sz,
+                                                          dtype=jnp.int32)
+                sparse_valid = jnp.any(k_span_1d[:, None] == seq_topk[None, :],
+                                       axis=-1)
+                mask = jnp.logical_or(mask,
+                                      jnp.logical_not(sparse_valid)[None, :])
             s = jnp.where(mask, mask_value, s)
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
         m_prev = load_with_init(head_m_ref, -jnp.inf)
@@ -903,10 +930,7 @@ def _mla_ragged_paged_attention_kernel(
             )
 
             seq_idx = batch_start_seq_idx + b
-            if is_sparse:
-                kv_len = topk_tokens
-            else:
-                kv_len = kv_lens_ref[seq_idx]
+            kv_len = kv_lens_ref[seq_idx]
             kv_len_start = bkv_idx * bkv_sz
             kv_p_start = bkv_idx * bkv_p
 
@@ -982,11 +1006,7 @@ def _mla_ragged_paged_attention_kernel(
                         0,
                         page_size_per_kv_packing,
                     )
-                    if is_sparse:
-                        logical_page_idx = topk_indices_vmem_ref[seq_idx, kv_p_start + i]
-                        page_idx = seq_idx * pages_per_seq + logical_page_idx
-                    else:
-                        page_idx = page_indices_offset + i
+                    page_idx = page_indices_offset + i
                     page_idx = jnp.minimum(page_idx, num_page_indices - 1)
                     _async_copy(
                         reshaped_cache_hbm_ref.at[
@@ -1719,14 +1739,11 @@ def _mla_ragged_paged_attention_kernel(
             [src for _ in range(target_minor // src.shape[-1])],
             axis=-1)[..., :shape[-1]]
 
-    if is_sparse:
-        kv_len_max = topk_tokens
-    else:
-        kv_len_max = kv_lens_ref[batch_start_seq_idx]
-        for b in range(1, batch_size):
-            kv_len_max = jnp.where(
-                kv_lens_ref[batch_start_seq_idx + b] > kv_len_max,
-                kv_lens_ref[batch_start_seq_idx + b], kv_len_max)
+    kv_len_max = kv_lens_ref[batch_start_seq_idx]
+    for b in range(1, batch_size):
+        kv_len_max = jnp.where(
+            kv_lens_ref[batch_start_seq_idx + b] > kv_len_max,
+            kv_lens_ref[batch_start_seq_idx + b], kv_len_max)
 
     q_len_max = (cu_q_lens_ref[batch_start_seq_idx + 1] -
                  cu_q_lens_ref[batch_start_seq_idx])
@@ -1894,6 +1911,7 @@ def _mla_ragged_paged_attention_kernel(
                                 bq_pe_vec[bq_start:bq_end],
                                 bkvc,
                                 bkpe,
+                                seq_idx=batch_start_seq_idx + b,
                                 kv_len=kv_lens_ref[batch_start_seq_idx + b],
                                 q_len=cu_q_len,
                                 bq_idx=bq_idx,
@@ -2010,7 +2028,6 @@ def _mla_ragged_paged_attention_kernel(
 
     @pl.when(batch_start_seq_idx == start_seq_idx)
     def prologue():
-
 
         start_fetch_bq(start_seq_idx, 0, 0)
 
@@ -2616,7 +2633,8 @@ def mla_ragged_paged_attention(
         s_dtype=s_dtype,
         p_same_dtype_as_v=p_same_dtype_as_v,
         topk_indices=topk_indices,
-        is_sparse=False,
+        is_sparse=use_sparse,
+        topk_tokens=topk_tokens,
         case=MlaCase.DECODE,
     )
 
@@ -2640,7 +2658,8 @@ def mla_ragged_paged_attention(
             s_dtype=s_dtype,
             p_same_dtype_as_v=p_same_dtype_as_v,
             topk_indices=topk_indices,
-            is_sparse=False,
+            is_sparse=use_sparse,
+            topk_tokens=topk_tokens,
             case=MlaCase.PREFILL,
         )
 
@@ -2664,7 +2683,8 @@ def mla_ragged_paged_attention(
         s_dtype=s_dtype,
         p_same_dtype_as_v=p_same_dtype_as_v,
         topk_indices=topk_indices,
-        is_sparse=False,
+        is_sparse=use_sparse,
+        topk_tokens=topk_tokens,
         case=MlaCase.MIXED,
     )
     output = prepare_outputs(

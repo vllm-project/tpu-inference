@@ -25,6 +25,7 @@ import numpy as np
 import torch
 import torch.nn
 import torchax
+import torchax.tensor as torchax_tensor
 import vllm.envs as vllm_envs
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -71,6 +72,8 @@ from tpu_inference.runner.lora_utils import replace_lora_metadata
 from tpu_inference.runner.mm_encoder_jit_manager import (
     MMEncoderJITManager, maybe_create_mm_encoder_jit_manager)
 
+torchax_tensor.Tensor.type_as = lambda self, other: self.to(dtype=other.dtype)
+
 logger = init_logger(__name__)
 
 
@@ -104,7 +107,9 @@ class _VllmRunner(torch.nn.Module):
 def patch_deepseek_indexer():
     try:
         import vllm.model_executor.models.deepseek_v2 as ds2_models
-        from tpu_inference.layers.vllm.custom_ops.deepseek_v2_indexer import VllmIndexer
+
+        from tpu_inference.layers.vllm.custom_ops.deepseek_v2_indexer import \
+            VllmIndexer
         ds2_models.Indexer = VllmIndexer
     except ImportError:
         return
@@ -218,8 +223,10 @@ class VllmModelWrapper:
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
 
-        with load_context, jax_context, set_current_vllm_config(
-                self.vllm_config):
+        from vllm.platforms import current_platform
+        with load_context, jax_context, patch.object(
+                current_platform, "device_type",
+                "cpu"), set_current_vllm_config(self.vllm_config):
             model_config_for_load = vllm_config_for_load.speculative_config.draft_model_config if self.is_draft_model else vllm_config_for_load.model_config
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
                                         model_config=model_config_for_load)
