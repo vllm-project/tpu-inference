@@ -2151,8 +2151,8 @@ def ragged_paged_attention(
             bkv_double_buf,  # (bkv_x2_ref) Double buffering for kv block.
             bq_double_buf,  # (bq_x2_ref) Double buffering for q block.
             bo_double_buf,  # (bo_x2_ref) Double buffering for output block.
-            # Semaphores for double buffering of bkv, bq, bo and bkv_update.
-            pltpu.SemaphoreType.DMA((4, 2)),
+            # Semaphores for double buffering of bkv, bq, bo, bkv_update and lse.
+            pltpu.SemaphoreType.DMA((5, 2)),
             # Intermediate buffers per kv head for flash attention.
             l_scratch,
             m_scratch,
