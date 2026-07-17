@@ -168,13 +168,44 @@ def general_device_put(tensor: jax.Array,
     return jax.tree_util.tree_map(_put, tensor)
 
 
-def cpu_mesh() -> Mesh:
+_cpu_backend_available = None
+
+
+def _has_cpu_backend() -> bool:
+    """Check whether a CPU backend is registered in JAX (cached)."""
+    global _cpu_backend_available
+    if _cpu_backend_available is None:
+        try:
+            jax.local_devices(backend="cpu")
+            _cpu_backend_available = True
+        except RuntimeError:
+            _cpu_backend_available = False
+    return _cpu_backend_available
+
+
+def cpu_mesh():
+    """Return a single-device CPU mesh, or None if no CPU backend exists.
+
+    On backends like Pathways where only remote accelerators are registered,
+    there is no local CPU backend, so this returns None. Callers should use
+    cpu_mesh_context() which handles None gracefully.
+    """
     global _cpu_mesh
     if _cpu_mesh is None:
-        _cpu_mesh = Mesh(jax.devices("cpu")[:1], ("cpu", ))
+        if not _has_cpu_backend():
+            return None
+        _cpu_mesh = Mesh(jax.local_devices(backend="cpu")[:1], ("cpu", ))
     return _cpu_mesh
 
 
 def cpu_mesh_context():
-    """A context to enforce using CPU mesh, used for loading weights on CPU."""
-    return jax.set_mesh(cpu_mesh())
+    """A context to enforce using CPU mesh, used for loading weights on CPU.
+
+    On backends without a CPU device (e.g., Pathways), returns a nullcontext.
+    Weight conversion via t2j with use_dlpack=False still works because it
+    goes through numpy on the host.
+    """
+    mesh = cpu_mesh()
+    if mesh is None:
+        return nullcontext()
+    return jax.set_mesh(mesh)
