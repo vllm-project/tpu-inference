@@ -234,6 +234,12 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
+      <td>Speculative Decoding: DFlash</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
       <td>Speculative Decoding: Ngram</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
@@ -633,6 +639,12 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>Speculative Decoding: Eagle3</td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>Speculative Decoding: DFlash</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>

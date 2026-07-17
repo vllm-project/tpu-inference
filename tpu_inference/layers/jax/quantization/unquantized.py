@@ -22,7 +22,8 @@ from flax import nnx
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.layers.common.moe import MoEBackend, moe_apply
+from tpu_inference.layers.common.moe import (FusedMoEMethodBase, MoEBackend,
+                                             moe_apply)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, UnfusedMoEWeights, process_unquantized_moe_weights,
     shard_moe_weights)
@@ -166,11 +167,15 @@ class UnquantizedMergedLinearMethod(UnquantizedLinearMethod):
         assign_and_shard_param(param, fused, param_name=param_name)
 
 
-class UnquantizedFusedMoEMethod(QuantizeMethodBase,
-                                jax_common.UnquantizedFusedMoEMethod):
+class UnquantizedFusedMoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
     """
     Unquantized method for JaxRoutedExperts layers.
     """
+
+    def __init__(self,
+                 layer: JaxRoutedExperts | JaxMoE,
+                 ep_axis_name: str = "model"):
+        FusedMoEMethodBase.__init__(self, layer.moe_backend, ep_axis_name)
 
     def process_weights_after_loading(self, layer: JaxRoutedExperts, *args,
                                       **kwargs) -> bool:
@@ -370,5 +375,5 @@ class UnquantizedConfig(QuantizationConfig):
                                               output_sizes=[out_size])
             return UnquantizedLinearMethod(linear_config)
         if isinstance(layer, (JaxRoutedExperts, JaxMoE)):
-            return UnquantizedFusedMoEMethod()
+            return UnquantizedFusedMoEMethod(layer)
         return None
