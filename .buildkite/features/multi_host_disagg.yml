@@ -13,17 +13,17 @@
 # limitations under the License.
 
 steps:
-  # - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host P/D disaggregation"
-  #   key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_CorrectnessTest"
-  #   soft_fail: true
-  #   agents:
-  #     queue: tpu_v7x_16_queue
-  #   env:
-  #     TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-  #     TEST_MODE: 2 # only run correctness test
-  #   commands:
-  #     - |
-  #       .buildkite/e2e/run_multi_disagg.sh
+  - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host P/D disaggregation"
+    key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: default
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+      TEST_MODE: 2 # only run correctness test
+    commands:
+      - |
+        .buildkite/e2e/run_multi_disagg.sh
 
   # - label: "${TPU_VERSION:-tpu7x} Record correctness test result for Multi-host P/D disaggregation"
   #   key: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_CorrectnessTest"
@@ -66,17 +66,17 @@ steps:
   #     - |
   #       .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi_host_disagg_PerformanceTest
 
-  # - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host P/D disaggregation with Prefill Offloading"
-  #   key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_offload_CorrectnessTest"
-  #   soft_fail: true
-  #   agents:
-  #     queue: tpu_v7x_16_queue
-  #   env:
-  #     TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-  #     TEST_MODE: 2 # only run correctness test
-  #   commands:
-  #     - |
-  #       .buildkite/e2e/run_multi_disagg_offload.sh
+  - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host P/D disaggregation with Prefill Offloading"
+    key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_offload_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: default
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+      TEST_MODE: 2 # only run correctness test
+    commands:
+      - |
+        .buildkite/e2e/run_multi_disagg_offload.sh
 
   # - label: "${TPU_VERSION:-tpu7x} Record correctness test result for Multi-host P/D disaggregation with Prefill Offloading"
   #   key: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_offload_CorrectnessTest"
@@ -119,79 +119,76 @@ steps:
   #     - |
   #       .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi_host_disagg_offload_PerformanceTest
 
-  - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host P/D disaggregation with Speculative Decoding"
-    key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_CorrectnessTest"
-    soft_fail: true
-    agents:
-      queue: tpu_v7x_16_queue
-      hostname: "tpu7x-16-ci-0-cicd-us-central1-c"
-    env:
-      TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-      MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-      LOAD_FORMAT: "runai_streamer"
-      SERVED_MODEL_NAME: "Qwen/Qwen3-30B-A3B"
-      SPECULATIVE_METHOD: "ngram"
-      SPECULATIVE_CONFIG: '{"method":"ngram","prompt_lookup_max":5,"prompt_lookup_min":3,"num_speculative_tokens":3}'
-      PREFILL_HOSTS_COUNT: "1"
-      DECODE_HOSTS_COUNT: "1"
-      TEST_MODE: 2 # only run correctness test
-    commands:
-      - |
-        .buildkite/e2e/run_multi_disagg_speculative.sh
+  # - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host P/D disaggregation with Speculative Decoding"
+  #   key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_CorrectnessTest"
+  #   soft_fail: true
+  #   agents:
+  #     queue: default
+  #   env:
+  #     TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+  #     MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+  #     LOAD_FORMAT: "runai_streamer"
+  #     SERVED_MODEL_NAME: "Qwen/Qwen3-30B-A3B"
+  #     SPECULATIVE_CONFIG: '{"method":"ngram","prompt_lookup_max":5,"prompt_lookup_min":3,"num_speculative_tokens":3}'
+  #     PREFILL_HOSTS_COUNT: "1"
+  #     DECODE_HOSTS_COUNT: "1"
+  #     TEST_MODE: 2 # only run correctness test
+  #   commands:
+  #     - |
+  #       .buildkite/e2e/run_multi_disagg_speculative.sh
 
-  - label: "${TPU_VERSION:-tpu7x} Record correctness test result for Multi-host P/D disaggregation with Speculative Decoding"
-    key: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_speculative_CorrectnessTest"
-    depends_on: "${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_CorrectnessTest"
-    env:
-      CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-      CI_TARGET: "Multi-host P/D disaggregation with Speculative Decoding"
-      CI_STAGE: "CorrectnessTest"
-      CI_CATEGORY: "feature support matrix"
-    agents:
-      queue: cpu
-    commands:
-      - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_CorrectnessTest
+  # - label: "${TPU_VERSION:-tpu7x} Record correctness test result for Multi-host P/D disaggregation with Speculative Decoding"
+  #   key: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_speculative_CorrectnessTest"
+  #   depends_on: "${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_CorrectnessTest"
+  #   env:
+  #     CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+  #     CI_TARGET: "Multi-host P/D disaggregation with Speculative Decoding"
+  #     CI_STAGE: "CorrectnessTest"
+  #     CI_CATEGORY: "feature support matrix"
+  #   agents:
+  #     queue: cpu
+  #   commands:
+  #     - |
+  #       .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_CorrectnessTest
 
-  - label: "${TPU_VERSION:-tpu7x} Performance tests for Multi-host P/D disaggregation with Speculative Decoding"
-    key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_speculative_CorrectnessTest"
-    soft_fail: true
-    agents:
-      queue: tpu_v7x_16_queue
-    env:
-      TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-      MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-      LOAD_FORMAT: "runai_streamer"
-      SERVED_MODEL_NAME: "Qwen/Qwen3-30B-A3B"
-      SPECULATIVE_METHOD: "ngram"
-      SPECULATIVE_CONFIG: '{"method":"ngram","prompt_lookup_max":5,"prompt_lookup_min":3,"num_speculative_tokens":3}'
-      PREFILL_HOSTS_COUNT: "1"
-      DECODE_HOSTS_COUNT: "1"
-      TEST_MODE: 1 # only run performance test
-    commands:
-      - |
-        .buildkite/e2e/run_multi_disagg_speculative.sh
+  # - label: "${TPU_VERSION:-tpu7x} Performance tests for Multi-host P/D disaggregation with Speculative Decoding"
+  #   key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_PerformanceTest"
+  #   depends_on: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_speculative_CorrectnessTest"
+  #   soft_fail: true
+  #   agents:
+  #     queue: default
+  #   env:
+  #     TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+  #     MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+  #     LOAD_FORMAT: "runai_streamer"
+  #     SERVED_MODEL_NAME: "Qwen/Qwen3-30B-A3B"
+  #     SPECULATIVE_CONFIG: '{"method":"ngram","prompt_lookup_max":5,"prompt_lookup_min":3,"num_speculative_tokens":3}'
+  #     PREFILL_HOSTS_COUNT: "1"
+  #     DECODE_HOSTS_COUNT: "1"
+  #     TEST_MODE: 1 # only run performance test
+  #   commands:
+  #     - |
+  #       .buildkite/e2e/run_multi_disagg_speculative.sh
 
-  - label: "${TPU_VERSION:-tpu7x} Record performance test result for Multi-host P/D disaggregation with Speculative Decoding"
-    key: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_speculative_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_PerformanceTest"
-    env:
-      CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-      CI_TARGET: "Multi-host P/D disaggregation with Speculative Decoding"
-      CI_STAGE: "PerformanceTest"
-      CI_CATEGORY: "feature support matrix"
-    agents:
-      queue: cpu
-    commands:
-      - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_PerformanceTest
+  # - label: "${TPU_VERSION:-tpu7x} Record performance test result for Multi-host P/D disaggregation with Speculative Decoding"
+  #   key: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_speculative_PerformanceTest"
+  #   depends_on: "${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_PerformanceTest"
+  #   env:
+  #     CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+  #     CI_TARGET: "Multi-host P/D disaggregation with Speculative Decoding"
+  #     CI_STAGE: "PerformanceTest"
+  #     CI_CATEGORY: "feature support matrix"
+  #   agents:
+  #     queue: cpu
+  #   commands:
+  #     - |
+  #       .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_PerformanceTest
+
   - label: "${TPU_VERSION:-tpu7x} Correctness tests for multi-host"
     key: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v7x_16_queue
-      hostname: "tpu7x-16-ci-0-cicd-us-central1-c"
+      queue: default
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       HEAD_SSH_IP: ""
@@ -217,6 +214,7 @@ steps:
             -H 'Content-Type: application/json' \
             -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
           "
+
   - label: "${TPU_VERSION:-tpu7x} Record correctness test result for multi-host"
     key: "${TPU_VERSION:-tpu7x}_record_multi-host_CorrectnessTest"
     depends_on: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
