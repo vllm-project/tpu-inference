@@ -223,7 +223,8 @@ def calculate_block_sizes(
     def find_best_block_sizes(
             max_batch_size: int,
             max_n_buffer: int,
-            fixed_bq_sz: int | None = None) -> configs.BlockSizes:
+            fixed_bq_sz: int | None = None,
+            max_bkv_sz: int | None = None) -> configs.BlockSizes:
         """Loop through different block sizes to find the most optimal one."""
 
         # Even if we loose some potential performance, we want to avoid OOM at all
@@ -262,7 +263,7 @@ def calculate_block_sizes(
 
         # Step 2: Increase block sizes until the kernel is unable to fit into VMEM.
         while (calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz)
-               < capped_vmem_limit_bytes):
+               < capped_vmem_limit_bytes and (max_bkv_sz is None or bkv_sz + bkv_stride <= max_bkv_sz)):
             # Unless bq is a fixed value, we want to ensure bq size is the same as bkv
             # size. When using causal masking, if bq size is larger than bkv size,
             # entire kv tile can be masked out for some query tokens. Similarly, if
@@ -272,8 +273,10 @@ def calculate_block_sizes(
             bq_sz += bq_stride
 
         # Rollback one step since the last attempted value triggered OOM.
-        bkv_sz -= bkv_stride
-        bq_sz -= bq_stride
+        # Note: only rollback if we actually exceeded capped_vmem_limit_bytes.
+        if calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz) > capped_vmem_limit_bytes:
+            bkv_sz -= bkv_stride
+            bq_sz -= bq_stride
 
         # Indicates OOM was triggered from the starting bkv size.
         if bkv_sz == 0:
@@ -310,11 +313,13 @@ def calculate_block_sizes(
     # Fixed value based on experimental results.
     decode_batch_size = 8
     prefill_batch_size = 2
+    spec_decode_batch_size = 8
 
-    decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, 1)
-    prefill_block_sizes = find_best_block_sizes(prefill_batch_size, n_buffer)
+    decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, fixed_bq_sz=1)
+    prefill_block_sizes = find_best_block_sizes(prefill_batch_size, n_buffer, fixed_bq_sz=None)
+    spec_decode_block_sizes = find_best_block_sizes(spec_decode_batch_size, n_buffer, fixed_bq_sz=4, max_bkv_sz=1536)
 
-    return decode_block_sizes, prefill_block_sizes
+    return decode_block_sizes, prefill_block_sizes, spec_decode_block_sizes
 
 
 @jax.jit(
@@ -329,6 +334,7 @@ def calculate_block_sizes(
         "chunk_prefill_size",
         "decode_block_sizes",
         "prefill_block_sizes",
+        "spec_decode_block_sizes",
         "vmem_limit_bytes",
         "debug_mode",
         "out_dtype",
@@ -357,6 +363,7 @@ def ragged_paged_attention(
     chunk_prefill_size: int | None = None,
     decode_block_sizes: configs.BlockSizes | None = None,
     prefill_block_sizes: configs.BlockSizes | None = None,
+    spec_decode_block_sizes: configs.BlockSizes | None = None,
     vmem_limit_bytes: int | None = None,
     debug_mode: bool = False,
     out_dtype: jnp.dtype | None = None,
@@ -393,6 +400,7 @@ def ragged_paged_attention(
         chunk_prefill_size: Not used.
         decode_block_sizes: Kernel block size to use during decode.
         prefill_block_sizes: Kernel block size to use during prefill.
+        spec_decode_block_sizes: Kernel block size to use during speculative decode / small mixed.
         vmem_limit_bytes: VMEM size limit of the kernel. Defaults to maximum VMEM
             size of the hardware.
         debug_mode: Not used.
@@ -453,7 +461,7 @@ def ragged_paged_attention(
     q_hbm, new_kv_hbm = prepare_inputs(queries, keys, values, queries.dtype,
                                        kv_cache.dtype)
 
-    default_decode, default_prefill = calculate_block_sizes(
+    default_decode, default_prefill, default_spec_decode = calculate_block_sizes(
         model_cfgs, serve_cfgs, vmem_limit_bytes)
 
     def run_rpa_kernel(
@@ -464,7 +472,12 @@ def ragged_paged_attention(
         if mode == configs.RpaCase.DECODE:
             effective_blocks = decode_block_sizes or default_decode
         else:
-            effective_blocks = prefill_block_sizes or default_prefill
+            if spec_decode_block_sizes is not None:
+                effective_blocks = spec_decode_block_sizes
+            elif queries.shape[0] <= 512:
+                effective_blocks = default_spec_decode
+            else:
+                effective_blocks = prefill_block_sizes or default_prefill
 
         cfgs = configs.RpaConfigs(
             block=effective_blocks,
