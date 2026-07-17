@@ -160,19 +160,25 @@ class TestCompressedTensorsConfig:
         assert hasattr(mlp.proj1, "weight_scale")
         assert not hasattr(mlp.proj1, "weight_scale_inv")
 
+    @staticmethod
+    def _build_merged_layer(config, rngs):
+        """Fused gate_up-style layer (two 16-wide projections) under
+        ``config``. Same erf-free ``uniform`` init as ``_MLP``."""
+        return JaxMergedColumnParallelLinear(
+            32, [16, 16],
+            rngs,
+            use_bias=False,
+            quant_config=config,
+            kernel_init=nnx.initializers.uniform(),
+            prefix="mlp.gate_up_proj")
+
     def test_fp8_block_merged_routes_to_merged_method(self, rngs, mesh):
         """A merged (fused gate_up-style) layer under an fp8-block group ->
         Fp8BlockwiseMergedLinearMethod, with per-projection shard slots ready.
         """
         config = CompressedTensorsConfig(_fp8_block_config())
         with jax.set_mesh(mesh):
-            layer = JaxMergedColumnParallelLinear(
-                32, [16, 16],
-                rngs,
-                use_bias=False,
-                quant_config=config,
-                kernel_init=nnx.initializers.uniform(),
-                prefix="mlp.gate_up_proj")
+            layer = self._build_merged_layer(config, rngs)
         assert isinstance(layer.quant_method, Fp8BlockwiseMergedLinearMethod)
         assert layer.weight.get_metadata("_merged_shards") == [None, None]
 
@@ -186,13 +192,7 @@ class TestCompressedTensorsConfig:
         """
         config = CompressedTensorsConfig(_fp8_block_config())
         with jax.set_mesh(mesh):
-            layer = JaxMergedColumnParallelLinear(
-                32, [16, 16],
-                rngs,
-                use_bias=False,
-                quant_config=config,
-                kernel_init=nnx.initializers.uniform(),
-                prefix="mlp.gate_up_proj")
+            layer = self._build_merged_layer(config, rngs)
         assert hasattr(layer, "weight_scale")
         assert not hasattr(layer, "weight_scale_inv")
         assert layer.weight_scale.get_metadata("_merged_shards") == [
