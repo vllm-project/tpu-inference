@@ -334,3 +334,38 @@ def minp_mask(logits: jnp.ndarray, min_p: jnp.ndarray,
     threshold = max_logit + log_min_p
     return jnp.where(logits >= threshold, logits,
                      jnp.full_like(logits, replace_val))
+
+
+def apply_repetition_penalty(logits: jnp.ndarray, seen_mask: jnp.ndarray,
+                             repetition_penalty: jnp.ndarray) -> jnp.ndarray:
+    """Apply vLLM's repetition penalty to logits.
+
+    Matches ``vllm._custom_ops.apply_repetition_penalties`` /
+    ``vllm.model_executor.layers.utils.apply_penalties``: for every token that
+    has already appeared in the request's prompt **or** generated output,
+    positive logits are divided by the penalty and non-positive logits are
+    multiplied by it (pushing repeated tokens toward lower probability). Tokens
+    that have not appeared are left unchanged.
+
+        l' = where(seen, where(l > 0, l / rp, l * rp), l)
+
+    Applied on raw logits *before* temperature scaling, matching vLLM's order
+    (penalties -> temperature -> top_k/top_p/min_p). ``rp == 1.0`` is a no-op
+    (the engine default), so requests that do not set ``repetition_penalty`` are
+    unaffected. This is a single elementwise pass over the logits -- the same
+    magnitude as one top-k/top-p mask application; the cost of *tracking* which
+    tokens were seen lives in the incrementally maintained ``seen_mask`` (see
+    the runner), not here.
+
+    Args:
+      logits: [batch..., vocab_size] raw logits (float32, pre-temperature).
+      seen_mask: [batch..., vocab_size] bool; True where the token has appeared
+        in the prompt or output for that request.
+      repetition_penalty: [batch...] per-request penalty (> 0; 1.0 == disabled).
+
+    Returns:
+      Penalized logits, same shape as ``logits``.
+    """
+    rp = jnp.expand_dims(repetition_penalty, axis=-1).astype(logits.dtype)
+    penalized = jnp.where(logits > 0, logits / rp, logits * rp)
+    return jnp.where(seen_mask, penalized, logits)
