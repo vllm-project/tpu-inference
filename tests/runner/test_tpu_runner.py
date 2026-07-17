@@ -176,8 +176,8 @@ class TestTPUJaxRunner:
         mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
 
         output = self.runner._prepare_inputs(scheduler_output)
-        assert len(output) == 11
-        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank, tokens_indices_selector = output
+        assert len(output) == 12
+        input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank, tokens_indices_selector, shared_attention_metadata = output
         # assert it will create attention metadata for each layer.
         assert isinstance(attention_metadata, dict)
         assert len(attention_metadata) == 20
@@ -271,6 +271,7 @@ class TestTPUJaxRunner:
             None,
             None,
             np.array([0, 1, -1, -1, -1, -1, -1, -1], dtype=np.int32),
+            None,
             None,
             None,
             None,
@@ -407,6 +408,7 @@ class TestTPUJaxRunner:
             attn_metadata,
             None,
             np.array([0, 1, 2, -1, -1, -1, -1, -1], dtype=np.int32),
+            None,
             None,
             None,
             None,
@@ -572,7 +574,8 @@ class TestTPUJaxRunner:
             None,
             None,
             None,
-            [0, 1, 4])
+            [0, 1, 4],
+            None)
 
         # Execute target method
         from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -679,13 +682,10 @@ class TestTPUJaxRunner:
 
         attn_metadata = MagicMock()
         attn_metadata.seq_lens_cpu = np.array([10, 20, 0, 0, 0, 0, 0, 0])
-        runner._prepare_inputs.return_value = (np.zeros(8, dtype=np.int32),
-                                               None, attn_metadata, None,
-                                               np.array([
-                                                   0, 1, -1, -1, -1, -1, -1, -1
-                                               ],
-                                                        dtype=np.int32), None,
-                                               None, None, None, None, None)
+        runner._prepare_inputs.return_value = (
+            np.zeros(8, dtype=np.int32), None, attn_metadata, None,
+            np.array([0, 1, -1, -1, -1, -1, -1, -1],
+                     dtype=np.int32), None, None, None, None, None, None, None)
 
         from tpu_inference.runner.tpu_runner import TPUModelRunner
         result = TPUModelRunner._execute_continue_decode(

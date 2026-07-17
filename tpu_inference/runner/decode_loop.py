@@ -20,7 +20,8 @@ import jax
 import jax.numpy as jnp
 from vllm.v1.outputs import LogprobsTensors
 
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 
 
 @functools.partial(
@@ -170,6 +171,13 @@ def _decode_core(
             request_distribution=request_distribution,
             mamba_state_indices=mamba_state_indices,
         )
+        shared_attn_metadata = SharedAttentionMetadata(
+            input_positions=pos,
+            seq_lens=sl,
+            query_start_loc=query_start_loc,
+            request_distribution=request_distribution,
+            mamba_state_indices=mamba_state_indices,
+        )
         kvc, hidden_states, _, expert_indices_step = model_fn(
             state,
             kvc,
@@ -182,6 +190,7 @@ def _decode_core(
             intermediate_tensors,
             is_first_rank,
             is_last_rank,
+            shared_attention_metadata=shared_attn_metadata,
         )
         logits = compute_logits_fn(state, hidden_states, None)
         logits = logits.astype(jnp.float32)
@@ -413,19 +422,25 @@ def continue_decode(
                 request_distribution=attn.request_distribution,
                 mamba_state_indices=attn.mamba_state_indices,
             )
-            _, _, _, experts = model_fn(
-                state,
-                kv_caches,
-                current_tokens,
-                am,
-                inputs_embeds,
-                am.input_positions,
-                layer_name_to_kvcache_index,
-                lora_metadata,
-                intermediate_tensors,
-                is_first_rank,
-                is_last_rank,
+            shared_am = SharedAttentionMetadata(
+                input_positions=input_positions,
+                seq_lens=seq_lens,
+                query_start_loc=attn.query_start_loc,
+                request_distribution=attn.request_distribution,
+                mamba_state_indices=attn.mamba_state_indices,
             )
+            _, _, _, experts = model_fn(state,
+                                        kv_caches,
+                                        current_tokens,
+                                        am,
+                                        inputs_embeds,
+                                        am.input_positions,
+                                        layer_name_to_kvcache_index,
+                                        lora_metadata,
+                                        intermediate_tensors,
+                                        is_first_rank,
+                                        is_last_rank,
+                                        shared_attention_metadata=shared_am)
             return experts
 
         expert_struct = jax.eval_shape(

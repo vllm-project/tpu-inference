@@ -34,7 +34,8 @@ from tpu_inference.kernels.flash_attention.kernel import (
 from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore, get_mesh_shape_product
@@ -479,6 +480,7 @@ def attention(
     sinks: jax.Array | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    shared_attention_metadata: SharedAttentionMetadata | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -499,6 +501,8 @@ def attention(
         sm_scale = head_dim_original**-0.5
 
     md = attention_metadata
+    # shared_attention_metadata is None for flax models, and is used for vllm models to share the metadata across layers.
+    shared_md = shared_attention_metadata if shared_attention_metadata is not None else md
 
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
@@ -507,10 +511,10 @@ def attention(
         k,
         v,
         kv_cache,
-        md.seq_lens,
+        shared_md.seq_lens,
         md.block_tables,
-        md.query_start_loc,
-        md.request_distribution,
+        shared_md.query_start_loc,
+        shared_md.request_distribution,
         sinks,
         sm_scale=sm_scale,
         attention_chunk_size=attention_chunk_size,

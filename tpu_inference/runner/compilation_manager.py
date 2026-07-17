@@ -27,7 +27,8 @@ from jax.sharding import NamedSharding, PartitionSpec
 import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)
@@ -406,14 +407,27 @@ class CompilationManager:
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
             )
+
             return attention_metadata_gid
 
+        def build_shared_attn() -> SharedAttentionMetadata:
+            return SharedAttentionMetadata(
+                input_positions=positions,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                request_distribution=request_distribution,
+                mamba_state_indices=mamba_state_indices,
+                padded_num_reqs=num_reqs,
+            )
+
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
+        shared_attention_metadata: SharedAttentionMetadata
         if len(self.runner.kv_cache_config.kv_cache_groups) <= 1:
             # Pooling model will not using kv cache
             no_kv_cache = len(self.runner.kv_cache_config.kv_cache_groups) == 0
             block_tables = build_block_table(0) if not no_kv_cache else None
             attention_metadata = build_attn(block_tables)
+            shared_attention_metadata = build_shared_attn()
         else:
             attention_metadata = {
                 name: build_attn(build_block_table(gid))
@@ -421,6 +435,7 @@ class CompilationManager:
                     self.runner.kv_cache_config.kv_cache_groups)
                 for name in kv_cache_group.layer_names
             }
+            shared_attention_metadata = build_shared_attn()
 
         def model_fn_warmup(_fn, _args, _call_kwargs):
             out = self.runner.model_fn(
@@ -435,6 +450,7 @@ class CompilationManager:
                 intermediate_tensors,
                 is_first_rank,
                 is_last_rank,
+                shared_attention_metadata=shared_attention_metadata,
             )
             self.runner.kv_caches = out[0]
             return out
@@ -460,6 +476,7 @@ class CompilationManager:
                 num_tokens=num_tokens,
                 num_reqs=num_reqs,
                 warmup_handler=model_fn_warmup,
+                shared_attention_metadata=shared_attention_metadata,
             )
 
     def _precompile_substitute_placeholder_token(self) -> None:
