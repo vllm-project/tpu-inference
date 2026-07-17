@@ -33,7 +33,6 @@ import numpy as np
 import tpu_inference  # noqa: F401
 from tpu_inference.kernels.mris_attention.kernel import (
     N_FUSED,
-    mris_fused_attention_v3c,
     mris_fused_paged_attention_v3,
     ref_mris_fused_attention,
 )
@@ -489,29 +488,6 @@ class MrisBenchmarkTest(parameterized.TestCase):
         log_trace("Starting sub-benchmark: RPA sequential")
         rpa_ms = _benchmark_fn(lambda: sequential_rpa_jit_fn(*rpa_flat_args))
 
-        # --- MRIS V3c (2D Pallas Grid Fused, JITted) ---
-        @jax.jit
-        def mris_v3c_jit_fn(*args):
-            queries_arg = list(args[0:batch_size])
-            k_pages_arg = list(args[batch_size : 2 * batch_size])
-            v_pages_arg = list(args[2 * batch_size : 3 * batch_size])
-            return mris_fused_attention_v3c(
-                queries_arg,
-                k_pages_arg,
-                v_pages_arg,
-                kv_lens,
-                sm_scale=sm_scale,
-                bkv_sz=128,
-            )
-
-        mris_flat_args = []
-        mris_flat_args.extend(mris_queries)
-        mris_flat_args.extend(mris_k_pages)
-        mris_flat_args.extend(mris_v_pages)
-
-        log_trace("Starting sub-benchmark: MRIS V3c")
-        mris_v3c_ms = _benchmark_fn(lambda: mris_v3c_jit_fn(*mris_flat_args))
-
         # --- In-Kernel Paged MRIS V3 (Pallas DMA Paged Prefetching) ---
         paged_kv_cache0 = rpa_inputs[0][3]
         pages_per_seq = cdiv(kv_len, page_size)
@@ -607,7 +583,7 @@ class MrisBenchmarkTest(parameterized.TestCase):
             log_trace(f"Hybrid Paged MRIS error: {e}")
             hybrid_paged_ms = -1.0
 
-        mris_ms = mris_v3c_ms
+        mris_ms = in_kernel_paged_ms
 
         # Report — detailed breakdown
         report = _format_report(
@@ -619,7 +595,6 @@ class MrisBenchmarkTest(parameterized.TestCase):
             rpa_ms,
             mris_ms,
         )
-        v3c_speedup = rpa_ms / mris_v3c_ms if mris_v3c_ms > 0 else float("inf")
         paged_speedup = (
             rpa_ms / in_kernel_paged_ms
             if in_kernel_paged_ms > 0
@@ -630,10 +605,6 @@ class MrisBenchmarkTest(parameterized.TestCase):
         )
         report += f"\n  --- Detailed JITted Breakdown ---"
         report += f"\n  Production Paged RPA V3 (JIT):     {rpa_ms:10.3f} ms"
-        report += (
-            f"\n  MRIS Kernel Contiguous (JIT):       {mris_v3c_ms:10.3f} ms "
-            f" (vs Prod RPA: {v3c_speedup:.2f}x)"
-        )
         report += (
             "\n  In-Kernel Paged MRIS V3 (JIT):     "
             f" {in_kernel_paged_ms:10.3f} ms  (vs Prod RPA:"

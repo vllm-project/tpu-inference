@@ -15,7 +15,6 @@
 
 from tpu_inference.kernels.mris_attention.kernel import (
     N_FUSED,
-    mris_fused_attention_v3c,
     mris_fused_paged_attention_v3,
     ref_mris_fused_attention,
 )
