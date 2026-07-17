@@ -16,7 +16,8 @@ set -euo pipefail
 export SSH_USER="${SSH_USER:-$(whoami)}"
 HOST_HF_HOME="${HOST_HF_HOME:-/mnt/disks/persist/models}"
 
-# Benchmark related defaults
+# Test inputs and load defaults. These are environment-overridable so the same
+# script can serve both the CI workload and targeted debugging runs.
 MODEL="${MODEL:-gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39}"
 LOAD_FORMAT="${LOAD_FORMAT:-runai_streamer}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Qwen/Qwen3-30B-A3B}"
@@ -30,9 +31,17 @@ NODE_CONTAINER_NAME="node"
 PROXY_CONTAINER_NAME="disagg-proxy-benchmark"
 PREFILL_HOSTS_COUNT="${PREFILL_HOSTS_COUNT:-1}"
 DECODE_HOSTS_COUNT="${DECODE_HOSTS_COUNT:-1}"
-SPECULATIVE_METHOD="${SPECULATIVE_METHOD:-ngram}"
 SPECULATIVE_CONFIG="${SPECULATIVE_CONFIG:-{\"method\":\"ngram\",\"prompt_lookup_max\":5,\"prompt_lookup_min\":3,\"num_speculative_tokens\":3}}"
 DRAFT_MODEL_IMPL_TYPE="${DRAFT_MODEL_IMPL_TYPE:-auto}"
+
+# Reject malformed configuration before creating containers or contacting peers.
+if ! python3 -c 'import json, sys; json.loads(sys.argv[1])' "$SPECULATIVE_CONFIG"; then
+  echo "ERROR: SPECULATIVE_CONFIG must be valid JSON: $SPECULATIVE_CONFIG" >&2
+  exit 1
+fi
+# Keep this value out of generated shell source.  JSON strings may legally
+# contain single quotes, which would otherwise break the remote launcher.
+SPECULATIVE_CONFIG_B64="$(printf '%s' "$SPECULATIVE_CONFIG" | base64 | tr -d '\n')"
 
 # Log directory setup
 LOG_DIR="$HOME/logs"
@@ -56,7 +65,8 @@ get_current_internal_ip() {
     hostname -I | awk '{print $1}'
 }
 
-# Automatic Worker IP Discovery
+# Prefer an explicit worker list, but discover the full TPU slice when CI has
+# not provided one. The current VM is kept separate as the local head host.
 if [[ -z "${WORKER_IPS:-}" ]]; then
     echo "⚠️  WORKER_IPS not provided. Attempting to discover via gcloud..."
 
@@ -124,7 +134,7 @@ fi
 
 HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(get_current_internal_ip)}"
 
-# Always ensure ACCELERATOR_TYPE is populated if not specified in the environment
+# Accelerator type determines the number of addressable TPU chips per host.
 if [[ -z "${ACCELERATOR_TYPE:-}" ]] && command -v gcloud &> /dev/null && command -v curl &> /dev/null; then
     ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}' || echo "")}"
     TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
@@ -154,6 +164,9 @@ fi
 echo "Running on TPU_VERSION: ${TPU_VERSION}"
 
 IFS=',' read -r -a worker_array <<< "$WORKER_IPS"
+# Host order defines the partition: prefill consumes the first N hosts and
+# decode consumes the following N hosts. This keeps the two Ray clusters
+# disjoint while allowing the local head to run prefill.
 ALL_IPS_ARRAY=("$HEAD_INTERNAL_IP")
 for ip in "${worker_array[@]}"; do
   [[ -n "$ip" && "$ip" != "$HEAD_INTERNAL_IP" ]] && ALL_IPS_ARRAY+=("$ip")
@@ -175,6 +188,8 @@ DECODE_WORKERS=("${DECODE_HOSTS[@]:1}")
 echo "Prefill hosts: ${PREFILL_HOSTS[*]}"
 echo "Decode hosts: ${DECODE_HOSTS[*]}"
 
+# Tensor parallel size is the total number of TPU cores assigned to each
+# service, rather than simply its VM count.
 if [[ "$ACCELERATOR_TYPE" == *4t* || "$ACCELERATOR_TYPE" == *-4* || "$TPU_VERSION" == tpu7x ]]; then
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
 else
@@ -212,6 +227,8 @@ stop_vllm_log_streaming() {
 }
 
 start_vllm_log_streaming() {
+  # Stream both detached server logs into Buildkite while health checks wait;
+  # otherwise a slow model-load failure is difficult to diagnose.
   stop_vllm_log_streaming
   echo "--- Streaming vLLM Prefill and Decode logs while waiting for health..."
 
@@ -261,6 +278,9 @@ cleanup() {
     fi
   fi
 
+  # Every remote cluster member owns a node container. Remove it even after a
+  # failed launch so later jobs reusing this TPU slice do not inherit Ray or
+  # vLLM processes. Cleanup continues after individual-host failures.
   for ip in "${ALL_IPS_ARRAY[@]}"; do
     if [[ "$ip" != "$HEAD_INTERNAL_IP" ]]; then
       echo "   -> Cleaning remote host: $ip"
@@ -301,6 +321,7 @@ cleanup() {
   echo "✅ Cleanup complete."
   return "$code"
 }
+# From this point onward, any error must collect logs and remove containers.
 trap cleanup EXIT
 
 source "$SCRIPT_DIR/../scripts/setup_docker_env.sh"
@@ -310,6 +331,8 @@ echo "Using Docker image: ${DOCKER_IMAGE}"
 
 common_env="-e HF_TOKEN=${HF_TOKEN:-} -e TPU_MULTIHOST_BACKEND=ray -e JAX_PLATFORMS= -e TPU_BACKEND_TYPE=jax -e MODEL_IMPL_TYPE=vllm"
 visible_chips="$(seq -s, 0 $((CHIPS_PER_HOST - 1)))"
+# Single-host Ray clusters need explicit JAX process bounds; multi-host
+# clusters obtain their process topology from the Ray launch helper.
 single_host_env="-e TPU_PROCESS_BOUNDS=1,1,1 -e TPU_CHIPS_PER_PROCESS_BOUNDS=1,${CHIPS_PER_HOST},1 -e TPU_VISIBLE_CHIPS=${visible_chips} -e CLOUD_TPU_TASK_ID=0 -e JAX_PROCESS_ID=0 -e JAX_NUM_PROCESSES=1"
 PREFILL_SINGLE_ENV=""
 DECODE_SINGLE_ENV=""
@@ -320,6 +343,8 @@ DECODE_ENV="$DECODE_SINGLE_ENV $common_env -e DRAFT_MODEL_IMPL_TYPE=${DRAFT_MODE
 
 launch_cluster() {
   local head=$1 role=$2 env_args=$3 workers=$4
+  # Remote VMs may not have this checkout at the same path. Transfer the
+  # launcher itself and start it asynchronously so all Ray members can join.
   if [[ "$head" == "$HEAD_INTERNAL_IP" ]]; then
     bash "$TOP_DIR/scripts/multihost/run_cluster.sh" "$DOCKER_IMAGE" "$head" "$role" "$HOST_HF_HOME" $env_args &
   else
@@ -354,6 +379,8 @@ dump_ray_resources() {
 wait_for_ray_cluster_members() {
   local host=$1 expected_nodes=$2 label=$3 timeout=${4:-600}
   local ray_ready_cmd="import ray; ray.init(address='auto', ignore_reinit_error=True); alive=sum(node.get('Alive', False) for node in ray.nodes()); raise SystemExit(0 if alive >= ${expected_nodes} else 1)"
+  # A reachable head is insufficient: vLLM must see every expected Ray node
+  # before tensor-parallel initialization can succeed.
   local end_time=$((SECONDS + timeout))
   echo "Waiting for ${label} Ray cluster to register ${expected_nodes} alive node(s)..."
   while (( SECONDS < end_time )); do
@@ -385,6 +412,8 @@ echo "--- 3. Starting vLLM Prefill and Decode Servers ---"
 PREFILL_PORT=8400
 DECODE_PORT=9400
 echo "Starting vLLM Prefill server on ${PREFILL_HEAD_IP}:${PREFILL_PORT}..."
+# Keep the vLLM process detached from the CI shell, but redirect its output to
+# a container file that can be streamed during startup and captured on failure.
 cat << EOF > /tmp/start_prefill.sh
 #!/bin/bash
 set -x
@@ -406,13 +435,16 @@ chmod +x /tmp/start_prefill.sh
 bash /tmp/start_prefill.sh
 
 echo "Starting vLLM Decode server with speculative decoding on ${DECODE_HEAD_IP}:${DECODE_PORT}..."
+# The launcher is copied to the decode host because it is not necessarily the
+# local VM. Base64 makes SPECULATIVE_CONFIG safe to embed in generated source;
+# it is then passed as bash's positional argument, not parsed as shell syntax.
 cat << EOF > /tmp/start_decode.sh
 #!/bin/bash
 set -x
+SPECULATIVE_CONFIG="\$(python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.argv[1]))' '${SPECULATIVE_CONFIG_B64}')"
 docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
-  -e "SPECULATIVE_CONFIG=${SPECULATIVE_CONFIG}" \
   -e 'KV_TRANSFER_CONFIG={"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_connector","kv_role":"kv_consumer"}' \
   ${NODE_CONTAINER_NAME} bash -c 'vllm serve ${MODEL} \
     --port ${DECODE_PORT} \
@@ -421,9 +453,9 @@ docker exec \
     --load-format ${LOAD_FORMAT} \
     --served-model-name ${SERVED_MODEL_NAME} \
     --no-enable-prefix-caching \
-    --speculative-config "\$SPECULATIVE_CONFIG" \
+    --speculative-config "\$1" \
     --kv-transfer-config "\$KV_TRANSFER_CONFIG" \
-    --max-model-len 1024 > /root/vllm_serve_decode.log 2>&1'
+    --max-model-len 1024 > /root/vllm_serve_decode.log 2>&1' _ "\$SPECULATIVE_CONFIG"
 set +x
 EOF
 chmod +x /tmp/start_decode.sh
@@ -491,6 +523,8 @@ ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" \
 stop_vllm_log_streaming
 
 echo "--- 5. Starting Proxy and Benchmark Container ---"
+# The proxy is the disaggregated path under test. Correctness compares it with
+# requests sent directly to decode; benchmark traffic is sent only through it.
 docker run -d --privileged --network host --shm-size 16G --name "$PROXY_CONTAINER_NAME" \
   -e HF_HOME=/root/hf -v "$HOST_HF_HOME:/root/hf" -v "$LOG_DIR:/root/logs" \
   --entrypoint /bin/bash "$DOCKER_IMAGE" -c 'tail -f /dev/null'
@@ -514,4 +548,4 @@ if [[ "$TEST_MODE" == 1 || "$TEST_MODE" == 3 ]]; then
 fi
 
 echo "--- Tests completed successfully ---"
-echo "Multi-host P/D speculative test completed: method=$SPECULATIVE_METHOD model=$MODEL"
+echo "Multi-host P/D speculative test completed: config=$SPECULATIVE_CONFIG model=$MODEL"
