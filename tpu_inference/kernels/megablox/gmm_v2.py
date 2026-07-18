@@ -195,6 +195,7 @@ class TileSizes:
     tile_m: int
     tile_k: int
     tile_n: int
+    bucket_base: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -216,11 +217,6 @@ class InputConfigs:
     has_scale: bool = False
 
     @property
-    def should_bitcast(self) -> bool:
-        bits = jax.dtypes.itemsize_bits(self.dtype)
-        return bits < 8
-
-    @property
     def should_dequantize_before_matmul(self) -> bool:
         """Dequantize rhs before matmul if block size limits MXU utilization."""
         if not self.has_scale:
@@ -232,6 +228,12 @@ class InputConfigs:
     @property
     def should_dequantize_after_matmul(self) -> bool:
         return self.has_scale and not self.should_dequantize_before_matmul
+
+    @property
+    def should_quantize(self) -> bool:
+        if self.quant_dtype is None:
+            return False
+        return self.quant_dtype != self.dtype
 
 
 @dataclasses.dataclass(frozen=True)
@@ -326,13 +328,8 @@ def generate_block_specs(
         index_map.lhs_index_map,
     )
 
-    tile_k_rhs = cfgs.tiles.tile_k
-    if cfgs.rhs_cfgs.should_bitcast:
-        packing = pl.cdiv(32, jax.dtypes.itemsize_bits(cfgs.rhs_cfgs.dtype))
-        tile_k_rhs //= packing
-
     rhs_weight_spec = pl.BlockSpec(
-        (None, tile_k_rhs, cfgs.tiles.tile_n),
+        (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
         index_map.rhs_weight_index_map,
         pipeline_mode=pl.Buffered(buffer_count=3),
     )
@@ -400,23 +397,26 @@ def inner_kernel(
         cfgs: GmmConfigs.
     """
 
-    def _matmul(is_first_k_step: bool, is_last_k_step: bool):
+    gm_id = pl.program_id(1)
+    m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+    m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+    m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
+
+    m_start_local = m_start - m_offset
+    m_end_local = m_end - m_offset
+
+    def _matmul(is_first_k_step: bool, is_last_k_step: bool, bucket_m: int):
         tpu_info = pltpu.get_tpu_info()
         mxu_size = tpu_info.mxu_column_size
 
         # Step 1: Input pre-processing.
-        tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[...]
+        tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[:bucket_m]
         tiled_rhs = tiled_rhs_ref.get_weight()
-        # When rhs is packed (quantized dtype packed into uint32), unpack it
-        # back to the original dtype using pltpu.bitcast which operates on K
-        # axis. This expands the K dimension back to tile_k.
-        if cfgs.rhs_cfgs.should_bitcast:
-            tiled_rhs = pltpu.bitcast(tiled_rhs, cfgs.rhs_cfgs.dtype)
-        rhs_tile_n = tiled_rhs.shape[1]
 
         # This should only be taken in the case where we don't requantize
         # the scales and thus we need to dequantize inside VMEM to avoid small
         # contracting dimmensions
+        rhs_tile_n = tiled_rhs.shape[1]
         rhs_qbs = cfgs.rhs_cfgs.quant_block_size
         if cfgs.rhs_cfgs.should_dequantize_before_matmul:
             tiled_rhs_scale = tiled_rhs_ref.get_scale(
@@ -437,14 +437,13 @@ def inner_kernel(
 
         # Step 2: Matmul.
         acc_list = []
-        if cfgs.lhs_cfgs.quant_dtype is None:
+        if not cfgs.lhs_cfgs.should_quantize:
             # Unquantized matmul path.
             for start_n in range(0, rhs_tile_n, mxu_size):
                 end_n = min(rhs_tile_n, start_n + mxu_size)
                 col_size = end_n - start_n
 
-                acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
-                                  dtype=acc_ref.dtype)
+                acc_n = jnp.zeros((bucket_m, col_size), dtype=acc_ref.dtype)
                 for start_k in range(0, cfgs.tiles.tile_k, rhs_qbs):
                     end_k = min(cfgs.tiles.tile_k, start_k + rhs_qbs)
 
@@ -457,9 +456,8 @@ def inner_kernel(
                     if cfgs.rhs_cfgs.should_dequantize_after_matmul:
                         b_id = start_k // rhs_qbs
                         rhs_scale_replicated = tiled_rhs_ref.get_scale(
-                            replicate_size=cfgs.tiles.tile_m)[b_id, :,
-                                                              start_n:start_n +
-                                                              col_size]
+                            replicate_size=bucket_m)[b_id, :, start_n:start_n +
+                                                     col_size]
                         block_acc *= rhs_scale_replicated.astype(acc_ref.dtype)
 
                     acc_n += block_acc
@@ -486,8 +484,7 @@ def inner_kernel(
                 end_n = min(rhs_tile_n, start_n + mxu_size)
                 col_size = end_n - start_n
 
-                acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size),
-                                  dtype=acc_ref.dtype)
+                acc_n = jnp.zeros((bucket_m, col_size), dtype=acc_ref.dtype)
                 for start_k in range(0, cfgs.tiles.tile_k, q_block_size):
                     end_k = min(cfgs.tiles.tile_k, start_k + q_block_size)
 
@@ -530,9 +527,8 @@ def inner_kernel(
                     if cfgs.rhs_cfgs.should_dequantize_after_matmul:
                         b_id = start_k // rhs_qbs
                         rhs_scale_replicated = tiled_rhs_ref.get_scale(
-                            replicate_size=cfgs.tiles.tile_m)[b_id, :,
-                                                              start_n:start_n +
-                                                              col_size]
+                            replicate_size=bucket_m)[b_id, :, start_n:start_n +
+                                                     col_size]
                         block_acc *= rhs_scale_replicated.astype(acc_ref.dtype)
 
                     acc_n += block_acc
@@ -541,7 +537,9 @@ def inner_kernel(
 
         # Step 3: Output post-processing.
         if not is_first_k_step:
+            acc = jnp.pad(acc, ((cfgs.tiles.tile_m - bucket_m, 0), (0, 0)))
             acc += acc_ref[...]
+        acc_m = acc.shape[0]
 
         if is_last_k_step:
             if cfgs.rhs_cfgs.has_bias:
@@ -550,22 +548,14 @@ def inner_kernel(
 
             acc = apply_act_fn(acc, cfgs.fuse_act)
 
-            gm_id = pl.program_id(1)
-
             # Mask out rows that does not belong to the current group.
-            m_start = metadata_ref.gm_id_to_m_offset[gm_id]
-            m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
-            m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
-
-            m_start_local = m_start - m_offset
-            m_end_local = m_end - m_offset
-
             iota = lax.broadcasted_iota(jnp.int32, acc.shape, 0)
             mask = jnp.logical_and(m_start_local <= iota, iota < m_end_local)
-            acc_masked = jnp.where(mask, acc, 0).reshape(tiled_out_ref.shape)
+            acc_masked = jnp.where(mask, acc, 0)
 
             # Write the final output to the output ref.
-            tiled_out_ref[...] = acc_masked.astype(tiled_out_ref.dtype)
+            tiled_out_2d_ref = tiled_out_ref.reshape(-1, cfgs.tiles.tile_n)
+            tiled_out_2d_ref[:acc_m] = acc_masked.astype(tiled_out_ref.dtype)
 
             # If this is the first tile for grid[n_id, :, :], we initialize the
             # partial out to zeros. Otherwise, partial out from last tile of
@@ -593,45 +583,57 @@ def inner_kernel(
                 tiled_out_ref[last_row],
             )
         else:
-            acc_ref[...] = acc
+            acc_ref[:acc_m] = acc
 
-    # Define matmul wrapper functions.
-    @jax.named_scope("matmul_first_last")
-    def matmul_first_last():
-        _matmul(is_first_k_step=True, is_last_k_step=True)
+    def run_matmul_step(bucket_idx: int):
+        bucket_m = cfgs.tiles.bucket_base * (bucket_idx + 1)
 
-    @jax.named_scope("matmul_first")
-    def matmul_first():
-        _matmul(is_first_k_step=True, is_last_k_step=False)
+        @jax.named_scope(f"bm{bucket_m}_first_last")
+        def matmul_first_last():
+            _matmul(is_first_k_step=True,
+                    is_last_k_step=True,
+                    bucket_m=bucket_m)
 
-    @jax.named_scope("matmul")
-    def matmul():
-        _matmul(is_first_k_step=False, is_last_k_step=False)
+        @jax.named_scope(f"bm{bucket_m}_first")
+        def matmul_first():
+            _matmul(is_first_k_step=True,
+                    is_last_k_step=False,
+                    bucket_m=bucket_m)
 
-    @jax.named_scope("matmul_last")
-    def matmul_last():
-        _matmul(is_first_k_step=False, is_last_k_step=True)
+        @jax.named_scope(f"bm{bucket_m}_mid")
+        def matmul_mid():
+            _matmul(is_first_k_step=False,
+                    is_last_k_step=False,
+                    bucket_m=bucket_m)
 
-    # Select and execute matmul function based on the current step.
-    num_k = pl.num_programs(2)
-    k_id = pl.program_id(2)
+        @jax.named_scope(f"bm{bucket_m}_last")
+        def matmul_last():
+            _matmul(is_first_k_step=False,
+                    is_last_k_step=True,
+                    bucket_m=bucket_m)
 
-    is_first_k_step = k_id == 0
-    is_last_k_step = k_id == (num_k - 1)
+        num_k = pl.num_programs(2)
+        k_id = pl.program_id(2)
+        is_first_k_step = k_id == 0
+        is_last_k_step = k_id == (num_k - 1)
 
-    lax.cond(
-        is_first_k_step,
-        lambda: lax.cond(
-            is_last_k_step,
-            matmul_first_last,
-            matmul_first,
-        ),
-        lambda: lax.cond(
-            is_last_k_step,
-            matmul_last,
-            matmul,
-        ),
-    )
+        if bucket_m == cfgs.tiles.tile_m:
+            lax.cond(
+                is_first_k_step,
+                lambda: lax.cond(is_last_k_step, matmul_first_last,
+                                 matmul_first),
+                lambda: lax.cond(is_last_k_step, matmul_last, matmul_mid),
+            )
+        else:
+            # partial m is only invoked at last matmul.
+            lax.cond(is_first_k_step, matmul_first_last, matmul_last)
+
+    branches = []
+    for bucket_idx in range(cfgs.tiles.tile_m // cfgs.tiles.bucket_base):
+        branches.append(
+            functools.partial(run_matmul_step, bucket_idx=bucket_idx))
+    bucket_idx = m_end_local // cfgs.tiles.bucket_base
+    lax.switch(bucket_idx, branches)
 
 
 def fill_metadata(
@@ -854,13 +856,6 @@ def kernel_main(
     num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
     num_n = pl.cdiv(cfgs.out_size_n, cfgs.tiles.tile_n)
 
-    # Pack along K (2nd minor dim) so that pltpu.bitcast can unpack inside the
-    # kernel.
-    # [G, K, N] -> [G, K//packing, N] uint32
-    if cfgs.rhs_cfgs.should_bitcast:
-        rhs_weight = rhs_ref.weight.bitcast(jnp.uint32)
-        rhs_ref = dataclasses.replace(rhs_ref, weight=rhs_weight)
-
     # Fill metadata buffer and return number of group & m interations.
     num_gm = fill_metadata(
         lhs_group_sizes_ref,
@@ -919,7 +914,7 @@ def calculate_tiling(
 ) -> TileSizes:
     """Calculate optimal tile sizes for GMM kernel."""
 
-    lhs_dtype = lhs_cfgs.quant_dtype or lhs_cfgs.dtype
+    lhs_dtype = lhs_cfgs.dtype
     rhs_dtype = rhs_cfgs.dtype
 
     lhs_bits = jax.dtypes.itemsize_bits(lhs_dtype)
@@ -930,9 +925,10 @@ def calculate_tiling(
     # to tweak tile_m to account for using faster hardware unit.
     # TODO(kyuyeunk): Account for different TPU hardware specs.
     bf16_bf16_tile_m = 128
-    lhs_mod = min(pl.cdiv(16, lhs_bits), 2)
     rhs_mod = min(pl.cdiv(16, rhs_bits), 2)
-    tile_m = bf16_bf16_tile_m * lhs_mod // rhs_mod
+    tile_m = bf16_bf16_tile_m // rhs_mod
+    if lhs_cfgs.should_quantize:
+        tile_m *= 2
     tile_m = min(tile_m, dims.size_m)
 
     # To avoid stalling MXU, we add some buffer room where tile_n cannot go
@@ -960,10 +956,15 @@ def calculate_tiling(
     tile_k = align_to(dims.size_k, num_lanes)
     tile_n = align_to(size_n_per_rhs, num_lanes)
 
-    def _gmm_vmem_estimate(tn: int, tk: int) -> int:
-        # 1. LHS tile (double-buffered)
+    def _gmm_vmem_estimate(tm: int, tn: int, tk: int) -> int:
+        # 1. LHS tile (double-buffered HBM load)
         lhs_tile_bytes = lhs_bits // 8
-        lhs_vmem = 2 * tile_m * tk * lhs_tile_bytes
+        lhs_vmem = 2 * tm * tk * lhs_tile_bytes
+        # If LHS is quantized on-the-fly, we need an extra single-buffered cast
+        # buffer in VMEM.
+        if lhs_cfgs.should_quantize:
+            lhs_quant_bits = jax.dtypes.itemsize_bits(lhs_cfgs.quant_dtype)
+            lhs_vmem += tm * tk * (lhs_quant_bits // 8)
 
         # 2. RHS tile (triple-buffered, includes scale and bias if present)
         # If fuse_act is enabled, we have both gate and up weights,
@@ -983,11 +984,11 @@ def calculate_tiling(
         # 3. Accumulator
         acc_cols = fuse_act_factor * tn
         acc_dtype_bytes = 2 if lhs_cfgs.quant_dtype is not None else 4
-        acc_vmem = tile_m * acc_cols * acc_dtype_bytes
+        acc_vmem = tm * acc_cols * acc_dtype_bytes
 
         # 4. Output tile (double-buffered)
         out_dtype_bytes = jax.dtypes.itemsize_bits(lhs_cfgs.dtype) // 8
-        out_vmem = 2 * tile_m * tn * out_dtype_bytes
+        out_vmem = 2 * tm * tn * out_dtype_bytes
 
         return lhs_vmem + rhs_vmem + acc_vmem + out_vmem
 
@@ -995,7 +996,7 @@ def calculate_tiling(
     # to fit the tensors into vmem by only adjusting tile_n.
 
     # Decrease tile_n until total memory fits in vmem limit.
-    while (_gmm_vmem_estimate(tile_n, tile_k) > vmem_limit_bytes
+    while (_gmm_vmem_estimate(tile_m, tile_n, tile_k) > vmem_limit_bytes
            and tile_n > tile_n_limit):
         num_n_tiles += 1
         tile_n = align_to(size_n_per_rhs,
@@ -1008,19 +1009,34 @@ def calculate_tiling(
                           num_n_tiles * num_lanes) // num_n_tiles
 
         # Decrease tile_k until total memory fits in vmem limit and tile_k is valid.
-        while _gmm_vmem_estimate(
-                tile_n, tile_k
-        ) > vmem_limit_bytes or not _is_tile_k_quant_block_compatible(tile_k):
+        while (_gmm_vmem_estimate(tile_m, tile_n, tile_k) > vmem_limit_bytes
+               or not _is_tile_k_quant_block_compatible(tile_k)
+               ) and tile_k > num_lanes:
             num_k_tiles += 1
             tile_k = align_to(dims.size_k,
                               num_k_tiles * num_lanes) // num_k_tiles
 
     if tile_n == 0 or tile_k == 0:
-        final_estimate = _gmm_vmem_estimate(tile_n, tile_k)
+        final_estimate = _gmm_vmem_estimate(tile_m, tile_n, tile_k)
         raise ValueError(f"Could not find valid tile sizes for {dims=} and"
                          f" {final_estimate=} (limit: {vmem_limit_bytes}).")
 
-    return TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
+    # TODO(alynie, kyuyeunk): max number of bucket was choosen empiirically.
+    # Revisit the value to be based on number of instruction memory size.
+    max_num_buckets = 4
+    bucket_base = tile_m
+    for _ in range(1, max_num_buckets):
+        new_tile_m = tile_m + bucket_base
+        if new_tile_m > dims.size_m:
+            break
+        if _gmm_vmem_estimate(new_tile_m, tile_n, tile_k) > vmem_limit_bytes:
+            break
+        tile_m = new_tile_m
+
+    return TileSizes(tile_m=tile_m,
+                     tile_k=tile_k,
+                     tile_n=tile_n,
+                     bucket_base=bucket_base)
 
 
 def validate_inputs(
