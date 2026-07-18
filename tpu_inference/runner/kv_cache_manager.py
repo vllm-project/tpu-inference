@@ -624,7 +624,7 @@ class KVCacheManager:
                         kv_cache_spec[layer_name] = spec
                     continue
 
-                if is_cache_for_ds_v4(attn_module):
+                if hasattr(attn_module, "get_kv_cache_spec"):
                     spec = attn_module.get_kv_cache_spec(
                         self.runner.vllm_config)
                     if spec is not None:

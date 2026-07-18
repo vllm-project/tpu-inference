@@ -208,7 +208,10 @@ class VllmModelWrapper:
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
 
-        with load_context, jax_context, set_current_vllm_config(
+        from vllm.platforms import current_platform
+        platform_context = patch.object(current_platform, "device_type", "cpu")
+
+        with load_context, platform_context, jax_context, set_current_vllm_config(
                 self.vllm_config):
             model_config_for_load = vllm_config_for_load.speculative_config.draft_model_config if self.is_draft_model else vllm_config_for_load.model_config
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,

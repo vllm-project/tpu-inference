@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import jax
 import jax.numpy as jnp
 import torch
 import torchax
@@ -87,7 +88,6 @@ class VllmMLAAttention(MLAAttention):
             indexer=indexer,
             **extra_impl_args,
         )
-
         # For compatibility reasons.
         self.kv_sharing_target_layer_name = None
         self.attn_type = AttentionType.DECODER
@@ -135,31 +135,46 @@ class VllmMLAAttention(MLAAttention):
                     "'.scheme.linear_config.mesh' on the kv_b_proj layer.")
 
             sharding = NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))
-            self.W_UK_T, self.W_UK_T_scale = quantize_tensor(
+            # Upstream MLA registers W_UK_T/W_UV as nn.Parameters, so the
+            # intermediate JAX values cannot be assigned to the attributes
+            # directly; stage them in locals and assign Parameters at the end.
+            w_uk_t, w_uk_t_scale = quantize_tensor(
                 self.kv_cache_quantized_dtype, jax_view(self.W_UK_T), axis=1)
-            self.W_UK_T = torch_view(general_device_put(self.W_UK_T, sharding))
-            self.W_UK_T_scale = torch_view(
-                general_device_put(jnp.expand_dims(self.W_UK_T_scale, 1),
-                                   sharding))
+            w_uk_t = torch_view(general_device_put(w_uk_t, sharding))
+            w_uk_t_scale = torch_view(
+                general_device_put(jnp.expand_dims(w_uk_t_scale, 1), sharding))
 
-            self.W_UV, self.W_UV_scale = quantize_tensor(
-                self.kv_cache_quantized_dtype, jax_view(self.W_UV), axis=1)
-            self.W_UV = torch_view(general_device_put(self.W_UV, sharding))
-            self.W_UV_scale = torch_view(
-                general_device_put(jnp.expand_dims(self.W_UV_scale, 0),
-                                   sharding))
+            w_uv, w_uv_scale = quantize_tensor(self.kv_cache_quantized_dtype,
+                                               jax_view(self.W_UV),
+                                               axis=1)
+            w_uv = torch_view(general_device_put(w_uv, sharding))
+            w_uv_scale = torch_view(
+                general_device_put(jnp.expand_dims(w_uv_scale, 0), sharding))
 
-            self.W_UK_T = Parameter(self.W_UK_T, requires_grad=False)
-            self.W_UK_T_scale = Parameter(self.W_UK_T_scale,
-                                          requires_grad=False)
-            self.W_UV = Parameter(self.W_UV, requires_grad=False)
-            self.W_UV_scale = Parameter(self.W_UV_scale, requires_grad=False)
+            self.W_UK_T = Parameter(w_uk_t, requires_grad=False)
+            self.W_UK_T_scale = Parameter(w_uk_t_scale, requires_grad=False)
+            self.W_UV = Parameter(w_uv, requires_grad=False)
+            self.W_UV_scale = Parameter(w_uv_scale, requires_grad=False)
 
             # Delete kv_b_proj_params as the dequantized weights are now stored
             # in self.W_UK_T and self.W_UV.
             kv_b_proj_params = dict(self.kv_b_proj.named_parameters())
             for key in kv_b_proj_params.keys():
                 delattr(self.kv_b_proj, key)
+
+    def get_kv_cache_spec(self, vllm_config) -> "KVCacheSpec":
+        from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+        from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+        kv_cache_dtype = torch.float8_e4m3fn if self.kv_cache_dtype == "fp8" else kv_cache_dtype_str_to_dtype(
+            self.kv_cache_dtype, vllm_config.model_config)
+        return MLAAttentionSpec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=self.head_size,
+            dtype=kv_cache_dtype,
+            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+        )
 
     def forward(self,
                 q: tuple[torch.Tensor, torch.Tensor],
@@ -182,6 +197,41 @@ class VllmMLAAttention(MLAAttention):
 
         # Get the attention metadata
         attn_metadata, _, _, _ = get_attention_context(self.layer_name)
+        topk_indices = kwargs.pop("topk_indices", None)
+        if topk_indices is not None and hasattr(attn_metadata, "block_tables"):
+            if isinstance(topk_indices, jax.Array):
+                pass
+            elif hasattr(topk_indices, "value"):
+                topk_indices = topk_indices.value
+            elif hasattr(topk_indices, "_elem"):
+                topk_indices = topk_indices._elem
+            elif hasattr(topk_indices, "jax") and callable(
+                    getattr(topk_indices, "jax")):
+                topk_indices = topk_indices.jax()
+            elif isinstance(topk_indices, torch.Tensor):
+                topk_indices = jnp.asarray(topk_indices.detach().cpu().numpy())
+            if len(topk_indices.shape) > 1:
+                num_seqs = (attn_metadata.seq_lens.shape[0] if hasattr(
+                    attn_metadata, "seq_lens") else topk_indices.shape[0])
+                topk_indices = topk_indices[:num_seqs].reshape(-1)
+
+            orig_block_tables = getattr(attn_metadata, "block_tables", None)
+            if (orig_block_tables is not None
+                    and hasattr(attn_metadata, "query_start_loc")
+                    and attn_metadata.query_start_loc is not None
+                    and hasattr(attn_metadata, "seq_lens")
+                    and attn_metadata.seq_lens is not None):
+                num_tokens = attn_metadata.query_start_loc[-1]
+                num_seqs = attn_metadata.seq_lens.shape[0]
+                is_prefill = num_tokens > num_seqs
+                if (isinstance(orig_block_tables, jax.Array)
+                        and orig_block_tables.shape == topk_indices.shape):
+                    attn_metadata.block_tables = jnp.where(
+                        is_prefill, orig_block_tables, topk_indices)
+                else:
+                    attn_metadata.block_tables = topk_indices
+            else:
+                attn_metadata.block_tables = topk_indices
 
         # Run the fundamental MLA forward pass from the impl
         outputs, new_kv_cache = self.impl.forward(q,
@@ -315,6 +365,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         if self.rotary_emb is not None:
             q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
 
+        _topk_indices = None
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(hidden_states, q_c, positions,
                                          self.indexer_rope_emb)
@@ -329,6 +380,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             k_pe,
             output_shape=(hidden_states.shape[0],
                           self.num_heads * self.v_head_dim),
+            topk_indices=_topk_indices,
         )
 
         return self.o_proj(attn_out)[0]

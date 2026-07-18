@@ -82,3 +82,24 @@ else:
         logger.error(
             f"Error occurred while logging TPU info: {e}. Are you running on CPU?"
         )
+
+# Monkey patch torchax Tensor.type_as to support View or other tensors without _elem attribute
+try:
+    import torchax
+    from torchax.tensor import Tensor
+
+    def _patched_type_as(self, other):
+        if hasattr(other, "_elem"):
+            dtype = other._elem.dtype
+        elif hasattr(other, "jax"):
+            dtype = other.jax().dtype
+        else:
+            from torchax.ops.mappings import TORCH_DTYPE_TO_JAX
+            dtype = TORCH_DTYPE_TO_JAX[other.dtype]
+        self._elem = self._elem.astype(dtype)
+        return self
+
+    Tensor.type_as = _patched_type_as
+    logger.info("Successfully monkey-patched torchax.tensor.Tensor.type_as")
+except Exception as e:
+    logger.warning(f"Failed to monkey-patch torchax Tensor.type_as: {e}")
