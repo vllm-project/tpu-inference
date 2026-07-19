@@ -9,7 +9,7 @@ Feature,CorrectnessTest,PerformanceTest
 "Single Program Multi Data",✅ Passing,✅ Passing
 "Speculative Decoding: DFlash",✅ Passing,✅ Passing
 "Speculative Decoding: Eagle3",❌ Failing,❓ Untested
-"Speculative Decoding: Ngram",❌ Failing,❓ Untested
+"Speculative Decoding: Ngram",✅ Passing,✅ Passing
 "Step Pooling (Embedding)",❌ Failing,❓ Untested
 "async scheduler",✅ Passing,✅ Passing
 "hybrid kv cache",✅ Passing,❓ Untested
