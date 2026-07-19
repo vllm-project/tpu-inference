@@ -124,9 +124,9 @@ class KVCacheManager:
             page_size_bytes = get_attention_page_size_bytes(
                 self.runner.mesh, block_size, num_kv_heads, head_size,
                 self.runner.kv_cache_dtype, False)
-            page_size_padded = (self._hybrid_uniform_page_size_bytes
-                                if self._hybrid_uniform_page_size_bytes
-                                is not None else int(page_size_bytes))
+            # Let unify_kv_cache_spec_page_size scale block_size so the sliding
+            # and global groups share a uniform page size (both 32768 elem/chip).
+            page_size_padded = self._hybrid_uniform_page_size_bytes
             if sliding_window is not None:
                 return SlidingWindowSpec(block_size=block_size,
                                          num_kv_heads=num_kv_heads,
@@ -534,8 +534,10 @@ class KVCacheManager:
                     num_kv_heads = common_utils.get_padded_num_heads(
                         num_kv_heads, model_cnt)
                     head_size = common_utils.get_padded_head_dim(head_size)
-                    # TODO(kwang3939): Re-enable sliding_window once mixed dims with sliding_window is supported.
-                    sliding_window = None
+                    # Enable windowing for sliding layers; the mixed-dim layers
+                    # are handled by the shared pool in initialize_kv_cache.
+                    sliding_window = (getattr(text_config, "sliding_window",
+                                              None) if is_sliding else None)
                     kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
                         block_size,
                         num_kv_heads,
@@ -784,6 +786,22 @@ class KVCacheManager:
                             ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
                     break
 
+        # Gemma-4 shares each period-tensor across 5 sliding (16,256) + 1 global
+        # (4,512) layer. They can't back one typed array, so they share one 5D
+        # pool (below) and reshape per-layer in attention; log the count here.
+        if not duplicate_shared_layers:
+            _n_hetero = sum(
+                1 for _kct in kv_cache_config.kv_cache_tensors
+                if len({(layer_name_to_spec[_ln].num_kv_heads,
+                         layer_name_to_spec[_ln].head_size)
+                        for _ln in _kct.shared_by
+                        if not isinstance(layer_name_to_spec[_ln], MambaSpec)
+                        }) > 1)
+            if _n_hetero:
+                logger.info(
+                    "[SWA] shared-pool KV for %d heterogeneous tensors",
+                    _n_hetero)
+
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             if duplicate_shared_layers:
                 total_group_page_size = 0
@@ -947,6 +965,9 @@ class KVCacheManager:
                                 block_size = (kv_caches[-1].shape[1] *
                                               kv_caches[-1].shape[2])
 
+                        # Heterogeneous shared_by layers share one 5D pool in the
+                        # first layer's shape (num_blocks == config.num_blocks, no
+                        # blowup); other shapes reshape it in attention.
                         kv_cache = create_kv_caches(
                             num_blocks=num_blocks,
                             block_size=block_size,
