@@ -346,7 +346,8 @@ def _ragged_paged_attention_kernel_loop(
     # Static kwargs
     cp_group_size: int | None = None,
     use_causal_mask: bool = True,
-    update_kv_cache: bool = True,  # KV-share: False = skip cache writes
+    update_kv_cache: bool = True,
+    write_last_seq_only: bool = False,
     skip_kv_mask: bool = False,
     skip_cache_attn: bool = False,
     skip_current_attn: bool = False,
@@ -1284,9 +1285,17 @@ def _ragged_paged_attention_kernel_loop(
                 # KV-share: skip the cache write when update_kv_cache=False
                 # so shared layers don't overwrite the source layer's slot.
                 if update_kv_cache:
+                    _do_write = jnp.logical_and(update_sz > 0,
+                                                bq_idx == num_bq - 1)
+                    # PCP fuses a request's head+tail chunks into ONE launch as
+                    # two "sequences" that share the same request (same
+                    # kv_lens/kv_cache_lens), so each would write the SAME
+                    # strided current KV. Write on exactly one of them.
+                    if write_last_seq_only:
+                        _do_write = jnp.logical_and(_do_write,
+                                                    seq_idx == end_seq_idx - 1)
 
-                    @pl.when(
-                        jnp.logical_and(update_sz > 0, bq_idx == num_bq - 1))
+                    @pl.when(_do_write)
                     def update_cur_bkv_to_cache():
                         start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
                                               update_sz, src_start_base)
@@ -1703,10 +1712,6 @@ def static_validate_inputs(
             f"Expected 3D array for {q.shape=}, {k.shape=}, {v.shape=}")
     if k.shape != v.shape:
         raise ValueError(f"Expected {k.shape=} to be equal to {v.shape=}")
-    if not (q.shape[0] == k.shape[0] == v.shape[0]):
-        raise ValueError(
-            f"Expected {q.shape[0]=} to be equal to {k.shape[0]=} and {v.shape[0]=}"
-        )
     if not (q.shape[2] == k.shape[2] == v.shape[2]):
         raise ValueError(
             f"Expected {q.shape[2]=} to be equal to {k.shape[2]=} and {v.shape[2]=}"
@@ -1960,6 +1965,7 @@ def get_default_block_sizes(
         "disable_bounds_checks",
         "disable_semaphore_checks",
         "update_kv_cache",
+        "write_last_seq_only",
         "cp_group_size",
     ),
     donate_argnames="kv_cache",
@@ -1984,6 +1990,7 @@ def ragged_paged_attention(
     q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs] 
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
+    write_last_seq_only: bool = False,
     skip_kv_mask: bool = False,
     skip_cache_attn: bool = False,
     skip_current_attn: bool = False,
@@ -2032,6 +2039,11 @@ def ragged_paged_attention(
     cp_group_size: the size of the context parallelism group.
     q_pos_offsets: the position of the query tokens in the global sequence, only needed for PCP. 
     use_causal_mask: if true, use causal mask.
+    write_last_seq_only: PCP only. PCP fuses a request's head and tail chunk
+      into one launch as two "sequences" that are really the same request (same
+      kv_lens/kv_cache_lens), so each of them would redundantly write the same
+      strided current KV to the cache. When true, the write is performed by the
+      tail seq only.
     skip_kv_mask: only set to true if use_causal_mask=False and each dynamic
       kv_len % bkv_csz == 0. Set to true can improve performance.
     sm_scale: the softmax scale which will be applied to the Q@K^T.
@@ -2185,6 +2197,9 @@ def ragged_paged_attention(
 
         bo_double_buf = bq_double_buf
 
+        # Softmax accumulators (running max `m` and running sum `l`) must be
+        # fp32 when we emit the LSE: bf16 accumulators make `m + log(l)`
+        # underflow to -inf.
         lse_acc_dtype = jnp.float32 if return_lse else out_dtype
         l_scratch = pltpu.VMEM(
             (actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128),
@@ -2271,6 +2286,7 @@ def ragged_paged_attention(
             functools.partial(
                 _ragged_paged_attention_kernel,
                 cp_group_size=cp_group_size,
+                write_last_seq_only=write_last_seq_only,
                 use_causal_mask=use_causal_mask,
                 skip_kv_mask=skip_kv_mask,
                 skip_cache_attn=skip_cache_attn,
