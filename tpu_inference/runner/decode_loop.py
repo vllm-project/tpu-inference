@@ -122,7 +122,7 @@ def _split_rngs(rng, static_size, dynamic_size):
         "xla_tpu_reduce_scatter_collective_matmul_mode":
         "post_spmd_conservative",
         "xla_tpu_use_minor_sharding_for_major_trivial_input": "true"
-    } if jax.default_backend() == "tpu" else None,
+    },
 )
 def _decode_core(
     *,
