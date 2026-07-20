@@ -50,6 +50,29 @@ def silu_and_mul_with_clamp(gate: jax.Array,
     return jax.nn.silu(gate) * up
 
 
+def interleave_lane(lhs: jax.Array, rhs: jax.Array) -> jax.Array:
+    """Interleaves two arrays along lane dim at zero-cost."""
+    assert lhs.shape == rhs.shape
+    chunk_size = pltpu.get_tpu_info().num_lanes
+    num_chunks = lhs.shape[-1] // chunk_size
+    lhs_chunks = jnp.split(lhs, num_chunks, axis=-1)
+    rhs_chunks = jnp.split(rhs, num_chunks, axis=-1)
+    interleaved = []
+    for i in range(num_chunks):
+        interleaved += [lhs_chunks[i], rhs_chunks[i]]
+    return jnp.concat(interleaved, axis=-1)
+
+
+def deinterleave_lane(val: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Deinterleaves an array along lane dim at zero-cost."""
+    chunk_size = pltpu.get_tpu_info().num_lanes
+    num_chunks = val.shape[-1] // chunk_size
+    chunks = jnp.split(val, num_chunks, axis=-1)
+    lhs = jnp.concat(chunks[0::2], axis=-1)
+    rhs = jnp.concat(chunks[1::2], axis=-1)
+    return lhs, rhs
+
+
 def apply_act_fn(acc: jax.Array, fuse_act: str | None):
     """Applies a fused activation function to the accumulator.
 
@@ -71,7 +94,7 @@ def apply_act_fn(acc: jax.Array, fuse_act: str | None):
     if fuse_act is None:
         return acc
 
-    acc_gate, acc_up = jnp.split(acc, 2, -1)
+    acc_gate, acc_up = deinterleave_lane(acc)
     match fuse_act:
         case "silu":
             return jax.nn.silu(acc_gate) * acc_up
@@ -147,17 +170,17 @@ class FusedWeightsRef(RhsRef):
     def get_weight(self) -> jax.Array:
         w_gate = self.gate.get_weight()
         w_up = self.up.get_weight()
-        return jnp.concatenate([w_gate, w_up], axis=-1)
+        return interleave_lane(w_gate, w_up)
 
     def get_scale(self, replicate_size: int | None = None) -> jax.Array:
         s_gate = self.gate.get_scale(replicate_size)
         s_up = self.up.get_scale(replicate_size)
-        return jnp.concatenate([s_gate, s_up], axis=-1)
+        return interleave_lane(s_gate, s_up)
 
     def get_bias(self) -> jax.Array:
         b_gate = self.gate.get_bias()
         b_up = self.up.get_bias()
-        return jnp.concatenate([b_gate, b_up], axis=-1)
+        return interleave_lane(b_gate, b_up)
 
 
 @jax.tree_util.register_dataclass
