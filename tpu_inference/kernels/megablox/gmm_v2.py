@@ -217,6 +217,7 @@ class GmmConfigs:
     acc_dtype: jnp.dtype
     zero_init: bool
     fuse_act: str | None
+    use_fp8_for_requantization_before_matmul: bool = False
 
     @property
     def num_quant_blocks_per_tile_k(self) -> int:
@@ -398,6 +399,10 @@ def inner_kernel(
             tiled_rhs_dequant = tiled_rhs.astype(cfgs.lhs_cfgs.dtype).reshape(
                 num_blocks, rhs_qbs, rhs_tile_n)
             tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
+
+            if cfgs.use_fp8_for_requantization_before_matmul and cfgs.lhs_cfgs.quant_dtype == jnp.float8_e4m3fn.dtype:
+                tiled_rhs_dequant = tiled_rhs_dequant.astype(jnp.float8_e4m3fn)
+
             tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
                                                   rhs_tile_n)
             rhs_qbs = cfgs.tiles.tile_k
@@ -1099,6 +1104,7 @@ def make_gmm_configs(
     maybe_quantize_lhs: bool,
     zero_initialize: bool,
     fuse_act: str | None = None,
+    use_fp8_for_requantization_before_matmul: bool = False,
 ):
     """Fills the GMM config for the GMM kernel."""
 
@@ -1124,7 +1130,8 @@ def make_gmm_configs(
     )
 
     lhs_q_dtype = None
-    if maybe_quantize_lhs and rhs_cfgs.should_dequantize_after_matmul:
+    if maybe_quantize_lhs and (rhs_cfgs.should_dequantize_after_matmul
+                               or use_fp8_for_requantization_before_matmul):
         # Choose lhs quantization dtype based on TPU hardware support.
         is_rhs_float = jnp.issubdtype(rhs_quant_dtype, jnp.floating)
         tpu_info = pltpu.get_tpu_info()
@@ -1176,6 +1183,8 @@ def make_gmm_configs(
         acc_dtype=jnp.dtype(acc_dtype),
         zero_init=zero_initialize,
         fuse_act=fuse_act,
+        use_fp8_for_requantization_before_matmul=
+        use_fp8_for_requantization_before_matmul,
     )
 
 
@@ -1199,6 +1208,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
     "maybe_quantize_lhs",
     "zero_initialize",
     "fuse_act",
+    "use_fp8_for_requantization_before_matmul",
 ])
 def gmm_v2(
     lhs: jax.Array,  # [size_m, size_k]
@@ -1217,6 +1227,7 @@ def gmm_v2(
     maybe_quantize_lhs: bool = True,
     zero_initialize: bool = True,
     fuse_act: str | None = None,
+    use_fp8_for_requantization_before_matmul: bool = False,
 ) -> jax.Array:
     """GMM kernel implemented with emit_pipeline.
 
@@ -1269,6 +1280,8 @@ def gmm_v2(
         maybe_quantize_lhs=maybe_quantize_lhs,
         zero_initialize=zero_initialize,
         fuse_act=fuse_act,
+        use_fp8_for_requantization_before_matmul=
+        use_fp8_for_requantization_before_matmul,
     )
     dims = cfgs.dims
     tiles = cfgs.tiles

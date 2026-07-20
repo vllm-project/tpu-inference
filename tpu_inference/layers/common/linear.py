@@ -17,6 +17,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+import tpu_inference.envs as envs
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.quantized_matmul.util import (
     quantize_tensor, xla_quantized_batched_matmul)
@@ -204,6 +205,8 @@ def sharded_quantized_matmul(x: jax.Array,
                 zero_initialize=False,
                 preferred_element_type=x.dtype,
                 maybe_quantize_lhs=maybe_quantize_x,
+                use_fp8_for_requantization_before_matmul=envs.
+                GMM_V2_FP8_REQUANTIZATION,
             )
         else:
             output = xla_quantized_matmul(x,

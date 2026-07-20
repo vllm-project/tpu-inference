@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
     MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
+    GMM_V2_FP8_REQUANTIZATION: bool = False
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
     LAYOUT_Q_PROJ_AS_NDH: bool = False
@@ -298,6 +299,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MOE_REQUANTIZE_CLIP_PERCENTILE":
     lambda: float(pct)
     if (pct := os.getenv("MOE_REQUANTIZE_CLIP_PERCENTILE")) else None,
+    # Enable requantization to fp8 when gmm v2 tries to perform pre matmul dequantization.
+    "GMM_V2_FP8_REQUANTIZATION":
+    env_bool("GMM_V2_FP8_REQUANTIZATION"),
     # By default, it only use max_reqs for attentions. But if set true, it
     # will precompile max_reqs to power-of-twos between min and max reqs,
     # and attention will have the num_reqs closer to actual num_reqs. This

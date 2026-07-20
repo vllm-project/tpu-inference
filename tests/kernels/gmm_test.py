@@ -238,6 +238,78 @@ class GmmTest(jtu.JaxTestCase):
 
     @parameterized.product(
         batch_size=[128],
+        in_size=[512, 1024],
+        out_size=[512],
+        num_groups=[8],
+        has_bias=[True, False],
+        weight_dtype=[jnp.float4_e2m1fn],
+        block_size=[64],
+        group_offset=[0],
+        use_fp8=[True, False],
+    )
+    def test_gmm_weight_quantized_use_fp8_requantization(
+        self,
+        batch_size,
+        in_size,
+        out_size,
+        num_groups,
+        has_bias,
+        weight_dtype,
+        block_size,
+        group_offset,
+        use_fp8,
+    ):
+        if not jtu.is_device_tpu_at_least(version=7):
+            self.skipTest("Expect TPUv7+")
+
+        num_local_groups = num_groups - group_offset
+        key = jax.random.key(0)
+
+        lhs = jax.random.uniform(key, (batch_size, in_size), jnp.bfloat16, -1,
+                                 1)
+        rhs = jax.random.uniform(key, (num_local_groups, in_size, out_size),
+                                 jnp.bfloat16, -1, 1)
+        rhs_q, rhs_scale = quantize_tensor(rhs,
+                                           weight_dtype,
+                                           axis=1,
+                                           block_size=block_size)
+        rhs_scale = jnp.expand_dims(rhs_scale, axis=2)
+
+        rhs_bias = None
+        if has_bias:
+            rhs_bias = jax.random.normal(key, (num_local_groups, 1, out_size),
+                                         dtype=jnp.bfloat16)
+
+        group_sizes = get_group_sizes(batch_size, num_groups)
+        group_offset = jnp.array(group_offset, dtype=jnp.int32)
+
+        expected = reference_gmm(
+            lhs,
+            rhs_q,
+            group_sizes,
+            rhs_scale=rhs_scale,
+            rhs_bias=rhs_bias,
+            group_offset=group_offset,
+        )
+
+        actual = gmm_v2(
+            lhs,
+            rhs_q,
+            group_sizes,
+            rhs_scale=rhs_scale,
+            group_offset=group_offset,
+            rhs_bias=rhs_bias,
+            maybe_quantize_lhs=True,
+            use_fp8_for_requantization_before_matmul=use_fp8,
+        ).astype(lhs.dtype)
+
+        if use_fp8:
+            self.assertArraysAllClose(actual, expected, atol=2.5, rtol=30000.0)
+        else:
+            self.assertArraysAllClose(actual, expected, atol=3e-1, rtol=3e-1)
+
+    @parameterized.product(
+        batch_size=[128],
         in_size=[1024],
         out_size=[512],
         num_groups=[8],
