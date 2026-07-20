@@ -147,6 +147,72 @@ def sample(
     return next_tokens, ret_logits
 
 
+def diffusion_commit(
+    logits: jax.Array,
+    mask: jax.Array,
+    threshold: float,
+    temperature: float = 0.0,
+) -> tuple[jax.Array, jax.Array]:
+    """Per-position, threshold-based commit step for block-diffusion decode.
+
+    Given per-position vocab logits and a boolean mask marking the positions
+    that are still "masked" (i.e. not yet committed), greedily commit the
+    positions whose top-1 probability exceeds ``threshold``. To guarantee
+    forward progress, the single highest-confidence still-masked position in
+    each row is always committed even if it is below ``threshold`` (unless the
+    row has no masked positions left).
+
+    Args:
+        logits: (..., L, V) float logits, where ``L`` is the number of
+            positions per row and ``V`` is the vocab size. Any number of
+            leading batch/row dims is supported (e.g. (B, L, V) or (L, V)).
+        mask: (..., L) boolean array; ``True`` marks positions that are still
+            masked and therefore eligible to be committed this step.
+        threshold: scalar confidence threshold in [0, 1]. A masked position
+            commits when its top-1 softmax probability is strictly greater than
+            this value.
+        temperature: optional softmax temperature. When ``> 0`` the logits are
+            divided by it before the softmax (sharpening for ``< 1``, flattening
+            for ``> 1``); when ``0`` (default) the raw logits are used.
+
+    Returns:
+        A tuple ``(committed_token_ids, new_mask)`` where:
+            - ``committed_token_ids``: (..., L) int32 array holding the argmax
+              (top-1) token id for every position. Values at positions that
+              commit this step (``mask & ~new_mask``) are the tokens to write;
+              values at still-masked positions should be ignored by the caller.
+            - ``new_mask``: (..., L) boolean array equal to ``mask`` with the
+              newly-committed positions cleared (a strictly shrinking mask).
+    """
+    if temperature > 0.0:
+        logits = logits / temperature
+    probs = jax.nn.softmax(logits.astype(jnp.float32), axis=-1)
+
+    # Top-1 probability and token id per position -> (..., L).
+    top_prob = jnp.max(probs, axis=-1)
+    top_tok = jnp.argmax(probs, axis=-1).astype(jnp.int32)
+
+    mask_bool = mask.astype(bool)
+
+    # Threshold commit: only masked positions confident enough are committed.
+    commit = (top_prob > threshold) & mask_bool
+
+    # Progress guarantee: force the single highest-confidence still-masked
+    # position in each row to commit. Non-masked positions are excluded from
+    # the argmax so an already-committed position can never be re-selected, and
+    # rows with no masked positions left force nothing.
+    neg_inf = jnp.array(-jnp.inf, dtype=top_prob.dtype)
+    masked_conf = jnp.where(mask_bool, top_prob, neg_inf)
+    forced_idx = jnp.argmax(masked_conf, axis=-1)
+    row_has_mask = jnp.any(mask_bool, axis=-1)
+    forced_onehot = jax.nn.one_hot(forced_idx, mask_bool.shape[-1], dtype=bool)
+    forced_onehot = forced_onehot & jnp.expand_dims(row_has_mask, axis=-1)
+    commit = commit | forced_onehot
+
+    new_mask = mask_bool & (~commit)
+    return top_tok, new_mask
+
+
 def compute_logprobs(logits: jax.Array) -> jax.Array:
     return jax.nn.log_softmax(logits, axis=-1)
 

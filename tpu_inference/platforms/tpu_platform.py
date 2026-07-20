@@ -368,6 +368,14 @@ class TpuPlatform(Platform):
 
         enable_continue_decode = vllm_config.additional_config.get(
             "enable_continue_decode", False)
+        # Block-diffusion decode ALSO emits multiple tokens (a whole denoised
+        # block) per decode step, so it needs the SAME multi-step scheduler
+        # handling as continue_decode: the async scheduler's num_output_
+        # placeholders bookkeeping assumes 1 token/step and asserts otherwise,
+        # and the sync scheduler needs num_computed_tokens bumped by the block.
+        enable_diffusion_decode = vllm_config.additional_config.get(
+            "enable_diffusion_decode", False)
+        multi_step_decode = enable_continue_decode or enable_diffusion_decode
         is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         # Late initialization to avoid circular import.
@@ -375,14 +383,21 @@ class TpuPlatform(Platform):
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
 
-        if enable_continue_decode:
+        if multi_step_decode:
+            mode = ("continue_decode"
+                    if enable_continue_decode else "diffusion_decode")
             if parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
-                    "continue_decode is not supported with pipeline parallelism"
-                )
+                    f"{mode} is not supported with pipeline parallelism")
             if is_pooling_model:
+                raise ValueError(f"{mode} is not supported for pooling models")
+            if enable_diffusion_decode and \
+                    vllm_config.scheduler_config.async_scheduling:
+                # Block-diffusion emits a whole block per decode step; async
+                # multi-step scheduling for it is untested, so require it OFF
+                # (the serving entrypoint sets async_scheduling=False).
                 raise ValueError(
-                    "continue_decode is not supported for pooling models")
+                    "diffusion_decode is not supported with async scheduling")
 
             from tpu_inference.core.sched.utils import \
                 patch_vllm_scheduler_for_continue_decode

@@ -28,7 +28,7 @@ import jax
         "request_distribution",
         "mamba_state_indices",
     ],
-    meta_fields=["padded_num_reqs"],
+    meta_fields=["padded_num_reqs", "use_causal_mask"],
 )
 @dataclass
 class AttentionMetadata(object):
@@ -58,6 +58,12 @@ class AttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
+
+    # Static (meta) flag: when False the attention kernel runs FULLY bidirectional
+    # instead of causal, so block-diffusion decode attends over the whole canvas.
+    # A meta_field (not a data leaf) so True/False compile as separate programs and
+    # the default True leaves every existing (autoregressive) call path unchanged.
+    use_causal_mask: bool = True
 
 
 @functools.partial(

@@ -57,12 +57,23 @@ def patch_vllm_scheduler_for_continue_decode():
             original_init(scheduler_self, vllm_config, *args, **kwargs)
 
             additional_config = getattr(vllm_config, "additional_config", {})
-            max_decode_steps = additional_config.get("max_decode_steps",
-                                                     DEFAULT_MAX_DECODE_STEPS)
-            # Reserve max_decode_steps - 1 lookahead tokens so KVCacheManager allocates
-            # sufficient blocks for up to max_decode_steps tokens before execution on TPU.
-            scheduler_self.num_lookahead_tokens = max(
-                scheduler_self.num_lookahead_tokens, max_decode_steps - 1)
+            if additional_config.get("enable_continue_decode", False):
+                max_decode_steps = additional_config.get(
+                    "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
+                # Reserve max_decode_steps - 1 lookahead tokens so KVCacheManager
+                # allocates sufficient blocks for up to max_decode_steps tokens
+                # before execution on TPU.
+                scheduler_self.num_lookahead_tokens = max(
+                    scheduler_self.num_lookahead_tokens, max_decode_steps - 1)
+            if additional_config.get("enable_diffusion_decode", False):
+                # Block-diffusion generates the WHOLE completion in ONE decode step
+                # (up to diffusion_max_new_tokens), so the scheduler must reserve
+                # that many KV pages ahead -- not just one block -- or the one-shot
+                # block chain overflows the request's allocated slots.
+                diffusion_budget = additional_config.get(
+                    "diffusion_max_new_tokens", 256)
+                scheduler_self.num_lookahead_tokens = max(
+                    scheduler_self.num_lookahead_tokens, diffusion_budget)
 
         Scheduler.__init__ = patched_init
 

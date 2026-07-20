@@ -17,7 +17,7 @@ import logging
 import random
 import sys
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 import jax
@@ -75,6 +75,7 @@ from tpu_inference.models.jax.utils.weight_utils import (
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
+from tpu_inference.runner.diffusion_decode import diffusion_decode
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.lora_utils import LoraUtils
@@ -860,6 +861,29 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             "continue_decode_eos_check_interval", 1)
         self.static_max_decode_steps = self.vllm_config.additional_config.get(
             "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
+        # Block-diffusion decode knobs. Fully gated behind
+        # enable_diffusion_decode (default False) so AR decode is unchanged.
+        self.enable_diffusion_decode = self.vllm_config.additional_config.get(
+            "enable_diffusion_decode", False)
+        self.diffusion_block_size = self.vllm_config.additional_config.get(
+            "diffusion_block_size", 32)
+        self.diffusion_commit_threshold = (
+            self.vllm_config.additional_config.get(
+                "diffusion_commit_threshold", 0.9))
+        self.diffusion_max_denoise_steps = (
+            self.vllm_config.additional_config.get(
+                "diffusion_max_denoise_steps", 0))
+        # Explicit override for the diffusion MASK token id; None means resolve
+        # from the model's hf_config (see _get_diffusion_mask_id, which raises if
+        # no id can be resolved -- no hardcoded model-specific default).
+        self.diffusion_mask_id = self.vllm_config.additional_config.get(
+            "diffusion_mask_id", None)
+        # Completion budget: ONE _execute_diffusion_decode call generates the whole
+        # completion (up to this many new tokens) so diffusion_decode's internal
+        # next_seed block chain runs. A per-step budget < block_size truncates to a
+        # partial block and never chains (-> incoherent output).
+        self.diffusion_max_new_tokens = self.vllm_config.additional_config.get(
+            "diffusion_max_new_tokens", 256)
         self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
         self.pad_token_id = runner_utils.get_pad_token_id(self.model_config)
 
@@ -1559,6 +1583,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             0] == self.input_batch.num_reqs
         if is_decode_only and self.enable_continue_decode:
             return self._execute_continue_decode(scheduler_output)
+        if is_decode_only and self.enable_diffusion_decode:
+            return self._execute_diffusion_decode(scheduler_output)
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
         (
@@ -1949,6 +1975,231 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if routed_experts is not None:
             output.routed_experts = routed_experts
 
+        self._continue_decode_output = output
+        return None
+
+    def _get_diffusion_mask_id(self) -> int:
+        """Resolve the block-diffusion MASK token id from model/additional config.
+
+        Precedence: an explicit ``additional_config['diffusion_mask_id']``
+        override, then the model's ``hf_config`` (``mask_token_id`` /
+        ``diffusion_mask_token_id`` / ``dflash_config['mask_token_id']``). If none
+        is set, RAISES -- no hardcoded model-specific guess (keeps decode
+        model-agnostic).
+        """
+        if self.diffusion_mask_id is not None:
+            return int(self.diffusion_mask_id)
+        hf_config = getattr(self.model_config, "hf_config", None)
+        for attr in ("mask_token_id", "diffusion_mask_token_id"):
+            val = getattr(hf_config, attr, None)
+            if val is not None:
+                return int(val)
+        dflash_cfg = getattr(hf_config, "dflash_config", None) or {}
+        if isinstance(dflash_cfg,
+                      dict) and dflash_cfg.get("mask_token_id") is not None:
+            return int(dflash_cfg["mask_token_id"])
+        raise ValueError(
+            "block-diffusion decode requires a MASK token id but none was found: "
+            "set additional_config['diffusion_mask_id'], or provide the model's "
+            "hf_config mask_token_id / diffusion_mask_token_id / "
+            "dflash_config['mask_token_id'].")
+
+    def _build_diffusion_forward_fn(
+        self,
+        attn_metadata: AttentionMetadata,
+        lora_metadata,
+        prefix_len: int,
+        block_size: int,
+    ):
+        """Build the on-device forward callable for block-diffusion denoise.
+
+        Returns ``forward_fn(canvas, positions, kv_caches) -> (full_logits,
+        kv_caches)``: it runs the model over the ``block_size`` canvas positions
+        attending to the cached prompt prefix + canvas, then computes the
+        unshifted per-position logits.
+
+        TPU-ONLY. Two pieces are validated only on TPU (the Pallas RPA kernel and
+        paged KV cache do not run on CPU):
+
+          1. Bidirectional attention over ``[prefix + canvas]``: the model is
+             invoked with ``use_causal_mask=False``, carried as a static
+             ``AttentionMetadata`` meta_field from this ``replace()`` through
+             ``model.__call__`` down to ``attention()``. Correct while exactly one
+             block is on the canvas (fully bidirectional == the block-causal mask
+             for a single block); multi-block canvases would need a custom mask.
+          2. The merge_state-free simplification: the canvas K/V is appended to
+             the paged-cache tail and OVERWRITTEN each denoise iteration (so
+             ``seq_lens == prefix_len + block_size`` every call).
+        """
+        layer_index = tuple(self.layer_name_to_kvcache_index.items())
+        # Single active request: req 0 holds the block_size-token canvas attending
+        # to prefix + canvas; the other (padded) request slots are empty. BOTH arrays
+        # keep attn_metadata's BUCKETED shape -- the RPA kernel is compiled for
+        # padded_num_reqs, so a bare 2-element query_start_loc fails its cu_q_lens
+        # shape check ("Expected cu_q_lens.shape=(2,) to be (padded_num_reqs+1,)").
+        # cu_q_lens: req 0 has block_size query tokens, all other reqs have 0 ->
+        # [0, block_size, block_size, ..., block_size] over (padded_num_reqs+1,).
+        query_start_loc = jnp.full_like(attn_metadata.query_start_loc,
+                                        block_size).at[0].set(0)
+
+        def forward_fn(canvas, positions, kv_caches):
+            # seq_lens is PREFIX-AWARE: diffusion_decode advances the block across
+            # the whole completion, so positions[0] is the CURRENT block's start.
+            # Only req 0 is active; its K/V spans [0, positions[0] + block_size)
+            # (the prompt prefix + the current trailing block). A closure-hoisted
+            # seq_lens would pin the window to block 0 and corrupt every later
+            # block; the other (padded) request slots stay 0 (inactive).
+            seq_lens = jnp.zeros_like(
+                attn_metadata.seq_lens).at[0].set(positions[0] + block_size)
+            canvas_md = replace(
+                attn_metadata,
+                input_positions=positions,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                use_causal_mask=False,
+                # Route the block_size-token canvas through the RPA kernel's MIXED
+                # case (dynamic q_len>1), NOT DECODE. The DECODE case is compiled
+                # with static_q_len=1 -> num_bq=1, so it attends+writes ONLY query
+                # position 0 and leaves canvas positions 1..block_size-1 as aliased
+                # raw-query garbage (the gibberish). request_distribution is
+                # [decode_end, prefill_end, mixed_end]; zeroing the first two empties
+                # DECODE/PREFILL so slot 0 falls in MIXED [prefill_end, mixed_end) --
+                # the same proven multi-token path AR prefill uses. Traced data_field
+                # -> runtime-only value change, no recompile.
+                request_distribution=attn_metadata.request_distribution.at[0].
+                set(0).at[1].set(0),
+            )
+            # use_causal_mask=False -> the canvas attends bidirectionally over
+            # [prefix + block]. Threaded via AttentionMetadata (a static meta_field)
+            # through model.__call__ down to attention() in the attention layer.
+            kv_caches, hidden_states, _, _ = self.model_fn(
+                self.state_leaves,
+                kv_caches,
+                canvas,
+                canvas_md,
+                None,
+                positions,
+                layer_index,
+                lora_metadata,
+                None,
+                self.is_first_rank,
+                self.is_last_rank,
+            )
+            full_logits = self.compute_logits_fn(
+                self.state_leaves,
+                hidden_states,
+                lora_metadata,
+            )
+            return full_logits.astype(jnp.float32), kv_caches
+
+        return forward_fn
+
+    def _execute_diffusion_decode(
+        self,
+        scheduler_output: "VllmSchedulerOutput",
+    ) -> None:
+        """Block-diffusion denoising decode (Fast_dLLM / Diffusion-GR2).
+
+        Gated behind ``enable_diffusion_decode`` (default False); mirrors
+        ``_execute_continue_decode``'s input prep and output bookkeeping. Runs
+        :func:`tpu_inference.runner.diffusion_decode.diffusion_decode` per
+        active request (a host-side loop over blocks whose per-block denoise
+        iterations run on-device). The on-device forward is TPU-only (see
+        ``_build_diffusion_forward_fn``).
+        """
+        (
+            input_ids,
+            input_positions,
+            attn_metadata,
+            _sampling_metadata,
+            _logits_indices,
+            _spec_decode_metadata,
+            _logits_indices_selector,
+            _padded_num_reqs,
+            _,
+            _,
+        ) = self._prepare_inputs(scheduler_output)
+
+        mask_id = self._get_diffusion_mask_id()
+        block_size = int(self.diffusion_block_size)
+        threshold = float(self.diffusion_commit_threshold)
+        max_denoise_steps = int(self.diffusion_max_denoise_steps)
+
+        # Per-request seed token + prefix length (host-side control).
+        input_ids_cpu = np.asarray(jax.device_get(input_ids))
+        input_positions_cpu = np.asarray(jax.device_get(input_positions))
+
+        lora_metadata = self.lora_utils.extract_lora_metadata()
+        min_remaining = self._get_min_remaining_slots()
+        max_new = min(self.static_max_decode_steps, min_remaining)
+        if max_new <= 0:
+            max_new = 1
+
+        num_reqs = self.input_batch.num_reqs
+        sampled_token_ids: list[list[int]] = []
+
+        with self.maybe_forbid_compile, \
+             set_forward_context(None, self.vllm_config), \
+             self.maybe_get_kv_connector_output(
+                 scheduler_output) as kv_connector_output:
+            for req_idx, req_id in enumerate(
+                    self.input_batch.req_ids[:num_reqs]):
+                first_token = int(input_ids_cpu[req_idx])
+                prefix_len = int(input_positions_cpu[req_idx])
+                forward_fn = self._build_diffusion_forward_fn(
+                    attn_metadata, lora_metadata, prefix_len, block_size)
+                # Generate the WHOLE completion in ONE call (up to
+                # diffusion_max_new_tokens, capped by remaining KV) so
+                # diffusion_decode's internal next_seed chain advances each block
+                # on the block_size grid. A per-step budget < block_size truncates
+                # to a partial block and never chains -> incoherent output. +1
+                # accounts for the seed at index 0, which is dropped below.
+                result = diffusion_decode(
+                    forward_fn,
+                    first_token=first_token,
+                    prefix_len=prefix_len,
+                    kv_caches=self.kv_caches,
+                    block_size=block_size,
+                    mask_id=mask_id,
+                    max_tokens=min(self.diffusion_max_new_tokens + 1,
+                                   int(min_remaining)),
+                    threshold=threshold,
+                    temperature=0.0,
+                    max_denoise_steps=max_denoise_steps,
+                    eos_token_id=self.eos_token_id,
+                )
+                self.kv_caches = result.kv_caches
+                # Drop the seed (already emitted last step); keep the new tokens.
+                new_tokens = result.tokens[1:]
+                logger.info(
+                    "block-diffusion decode FIRED req=%s: num_blocks=%d "
+                    "steps_per_block=%s hit_eos=%s n_new_tokens=%d", req_id,
+                    result.num_blocks, result.steps_per_block, result.hit_eos,
+                    len(new_tokens))
+                sampled_token_ids.append(new_tokens)
+
+                req_state = self.requests.get(req_id)
+                if req_state is not None:
+                    start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+                    end_idx = start_idx + len(new_tokens)
+                    if (req_idx < self.max_num_reqs
+                            and end_idx <= self.max_model_len):
+                        self.input_batch.token_ids_cpu[
+                            req_idx, start_idx:end_idx] = new_tokens
+                        self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+                        self.input_batch.num_tokens[req_idx] = end_idx
+                        req_state.output_token_ids.extend(new_tokens)
+                scheduler_output.num_scheduled_tokens[req_id] = len(new_tokens)
+
+        output = ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids[:num_reqs],
+            req_id_to_index=self.input_batch.req_id_to_index.copy(),
+            sampled_token_ids=sampled_token_ids,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            kv_connector_output=kv_connector_output,
+        )
         self._continue_decode_output = output
         return None
 

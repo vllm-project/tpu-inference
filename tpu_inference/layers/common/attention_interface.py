@@ -440,6 +440,14 @@ def sharded_ragged_paged_attention(
             "update_kv_cache=False (KV-share) is not supported on the "
             "head_dim==64 RPA kernel.")
 
+    # use_causal_mask=False (bidirectional attention, used by block-diffusion
+    # denoising) is accepted by the v3 default and batched RPA kernels but not
+    # by the hd64 path; fail loud rather than silently attending causally.
+    if use_hd64 and not use_causal_mask:
+        raise NotImplementedError(
+            "use_causal_mask=False (bidirectional attention) is not supported "
+            "on the head_dim==64 RPA kernel.")
+
     def _ragged_paged_attention(*args):
         kwargs = dict(
             sm_scale=sm_scale,
@@ -448,9 +456,10 @@ def sharded_ragged_paged_attention(
             k_scale=k_scale,
             v_scale=v_scale,
         )
-        # update_kv_cache is supported by both the v3 default and batched
-        # RPA kernels; only the hd64 path doesn't accept it. Default True
-        # is a no-op so we don't forward it to the hd64 signature.
+        # update_kv_cache and use_causal_mask are supported by both the v3
+        # default and batched RPA kernels; only the hd64 path doesn't accept
+        # them. Their defaults (True) are a no-op so we don't forward them to
+        # the hd64 signature.
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             kwargs["use_causal_mask"] = use_causal_mask

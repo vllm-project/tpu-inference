@@ -203,6 +203,7 @@ class Qwen3Attention(JaxModule):
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            use_causal_mask=attention_metadata.use_causal_mask,
         )
         # (T, D)
         o = self.o_proj(outputs)

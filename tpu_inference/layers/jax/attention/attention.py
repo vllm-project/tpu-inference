@@ -198,6 +198,7 @@ class Attention(nnx.Module):
         q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
+        use_causal_mask: bool = True,
     ) -> Tuple[KVCache, jax.Array]:
         """Performs scaled dot-product attention and updates the KV cache.
 
@@ -218,6 +219,9 @@ class Attention(nnx.Module):
             q_scale: Quantization scale for q.
             k_scale: Quantization scale for k.
             v_scale: Quantization scale for v.
+            use_causal_mask: If True (default), apply a causal mask. Set to
+                False to request bidirectional attention (e.g. for
+                block-diffusion denoising).
 
         Returns:
             A tuple containing:
@@ -247,6 +251,7 @@ class Attention(nnx.Module):
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                use_causal_mask=use_causal_mask,
             )
 
         output_TNH, kv_cache = jax.jit(
