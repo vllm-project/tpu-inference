@@ -25,7 +25,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax.sharding import PartitionSpec
 
-from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
+from tpu_inference.layers.common.binary_search import minp_mask, topk_mask, \
+    topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
@@ -123,13 +124,14 @@ class RejectionSampler:
 
         def _forward(draft_token_ids, num_draft_tokens, draft_probs,
                      target_logits, bonus_token_ids, temperature, top_k, top_p,
-                     cache_collision_dummy, key):
+                     min_p, cache_collision_dummy, key):
             # Reassemble the metadata from its sharded array fields. Each shard
             # sees only its DP rank's slice of the per-request params.
             metadata = TPUSupportedSamplingMetadata(
                 temperature=temperature,
                 top_k=top_k,
                 top_p=top_p,
+                min_p=min_p,
                 _cache_collision_dummy=cache_collision_dummy,
                 do_sampling=do_sampling,
                 logprobs=logprobs,
@@ -178,6 +180,7 @@ class RejectionSampler:
                 _spec(sampling_metadata.temperature, data),
                 _spec(sampling_metadata.top_k, data),
                 _spec(sampling_metadata.top_p, data),
+                _spec(sampling_metadata.min_p, data),
                 # _cache_collision_dummy: small, replicated across shards.
                 _spec(sampling_metadata._cache_collision_dummy,
                       PartitionSpec()),
@@ -193,6 +196,7 @@ class RejectionSampler:
             sampling_metadata.temperature,
             sampling_metadata.top_k,
             sampling_metadata.top_p,
+            sampling_metadata.min_p,
             sampling_metadata._cache_collision_dummy,
             key,
         )
@@ -287,7 +291,8 @@ def _compute_probs(
     sampling_metadata: TPUSupportedSamplingMetadata,
 ) -> jnp.ndarray:
     """
-    Apply top-k, top-p, and temperature to logits and compute probabilities.
+    Apply top-k, top-p, min-p, and temperature to logits and compute
+    probabilities.
     """
     total_tokens = logits.shape[0]
     segment_ids, _ = _get_segment_info(num_draft_tokens, total_tokens)
@@ -313,6 +318,16 @@ def _compute_probs(
     temperatures = jnp.expand_dims(temperatures, axis=-1)
     # Add epsilon to avoid division by zero
     logits /= (temperatures + 1e-9)
+
+    # Apply min-p on the temperature-scaled logits (vLLM applies min_p to the
+    # final per-token probabilities), before softmax so masked tokens -> 0.
+    # min_p == 0 (or an unset field) keeps every token -> exact no-op.
+    min_p = getattr(sampling_metadata, "min_p", None)
+    if min_p is not None:
+        min_p = min_p[segment_ids]
+        should_apply_minp = jnp.expand_dims(min_p > 0.0, axis=-1)
+        minp_masked = minp_mask(logits, min_p, replace_val=-jnp.inf)
+        logits = jnp.where(should_apply_minp, minp_masked, logits)
 
     return jax.nn.softmax(logits, axis=-1)
 
