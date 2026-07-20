@@ -41,3 +41,36 @@ except ImportError:
 # upstream vLLM (e.g. DeepSeek V4 ops), but only actually invoked on NVIDIA GPUs.
 if "cutlass" not in sys.modules:
     sys.modules["cutlass"] = types.ModuleType("cutlass")
+
+# Provide PyTorch/TorchAX implementation for per_token_group_quant_fp8 on TPU
+# to avoid GPU Triton kernel invocation from vLLM's fp8_utils.
+import torch
+
+
+def _tpu_per_token_group_quant_fp8(
+    x: torch.Tensor,
+    group_size: int,
+    eps: float = 1e-10,
+    dtype: torch.dtype = torch.float8_e4m3fn,
+    column_major_scales: bool = False,
+    scale_ub: torch.Tensor | None = None,
+    use_ue8m0: bool = False,
+):
+    fp8_max = torch.finfo(dtype).max
+    x_reshaped = x.view(-1, group_size)
+    amax = torch.amax(torch.abs(x_reshaped), dim=-1,
+                      keepdim=True).clamp(min=eps)
+    x_s = amax / fp8_max
+    x_q = (x_reshaped / x_s).to(dtype).view_as(x)
+    if not column_major_scales:
+        x_s = x_s.view(x.shape[:-1] + (x.shape[-1] // group_size, ))
+    else:
+        x_s = x_s.view(x.shape[0], x.shape[1] // group_size)
+    return x_q, x_s
+
+
+try:
+    import vllm.model_executor.layers.quantization.utils.fp8_utils as _vllm_fp8_utils
+    _vllm_fp8_utils.per_token_group_quant_fp8 = _tpu_per_token_group_quant_fp8
+except (ImportError, AttributeError):
+    pass

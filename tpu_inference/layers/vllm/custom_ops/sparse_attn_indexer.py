@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
+
 import jax
 import torch
 from jax.sharding import PartitionSpec as P
@@ -26,6 +28,40 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 
 
+def _tpu_per_token_group_quant_fp8(
+    x: torch.Tensor,
+    group_size: int,
+    eps: float = 1e-10,
+    dtype: torch.dtype = torch.float8_e4m3fn,
+    column_major_scales: bool = False,
+    scale_ub: torch.Tensor | None = None,
+    use_ue8m0: bool = False,
+):
+    fp8_max = torch.finfo(dtype).max
+    x_reshaped = x.view(-1, group_size)
+    amax = torch.amax(torch.abs(x_reshaped), dim=-1,
+                      keepdim=True).clamp(min=eps)
+    x_s = amax / fp8_max
+    x_q = (x_reshaped / x_s).to(dtype).view_as(x)
+    if not column_major_scales:
+        x_s = x_s.view(x.shape[:-1] + (x.shape[-1] // group_size, ))
+    else:
+        x_s = x_s.view(x.shape[0], x.shape[1] // group_size)
+    return x_q, x_s
+
+
+def _apply_fp8_utils_patch():
+    if "vllm.model_executor.layers.quantization.utils.fp8_utils" in sys.modules:
+        sys.modules[
+            "vllm.model_executor.layers.quantization.utils.fp8_utils"].per_token_group_quant_fp8 = _tpu_per_token_group_quant_fp8
+    if "vllm.model_executor.models.deepseek_v2" in sys.modules:
+        sys.modules[
+            "vllm.model_executor.models.deepseek_v2"].per_token_group_quant_fp8 = _tpu_per_token_group_quant_fp8
+
+
+_apply_fp8_utils_patch()
+
+
 @SparseAttnIndexer.register_oot
 class VllmSparseAttnIndexer(SparseAttnIndexer):
     """TPU-compatible SparseAttnIndexer custom op using streamindex_topk."""
@@ -37,6 +73,7 @@ class VllmSparseAttnIndexer(SparseAttnIndexer):
         k: torch.Tensor,
         weights: torch.Tensor,
     ) -> torch.Tensor:
+        _apply_fp8_utils_patch()
         num_tokens = hidden_states.shape[0]
 
         if isinstance(q_quant, tuple):

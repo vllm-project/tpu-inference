@@ -200,7 +200,24 @@ class VllmMLAAttention(MLAAttention):
                 num_seqs = (attn_metadata.seq_lens.shape[0] if hasattr(
                     attn_metadata, "seq_lens") else topk_indices.shape[0])
                 topk_indices = topk_indices[:num_seqs].reshape(-1)
-            attn_metadata.block_tables = topk_indices
+
+            orig_block_tables = getattr(attn_metadata, "block_tables", None)
+            if (orig_block_tables is not None
+                    and hasattr(attn_metadata, "query_start_loc")
+                    and attn_metadata.query_start_loc is not None
+                    and hasattr(attn_metadata, "seq_lens")
+                    and attn_metadata.seq_lens is not None):
+                num_tokens = attn_metadata.query_start_loc[-1]
+                num_seqs = attn_metadata.seq_lens.shape[0]
+                is_prefill = num_tokens > num_seqs
+                if (isinstance(orig_block_tables, jax.Array)
+                        and orig_block_tables.shape == topk_indices.shape):
+                    attn_metadata.block_tables = jnp.where(
+                        is_prefill, orig_block_tables, topk_indices)
+                else:
+                    attn_metadata.block_tables = topk_indices
+            else:
+                attn_metadata.block_tables = topk_indices
 
         # Run the fundamental MLA forward pass from the impl
         outputs, new_kv_cache = self.impl.forward(q,
