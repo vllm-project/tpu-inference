@@ -144,8 +144,9 @@ class VllmMLAAttention(MLAAttention):
             w_uk_t_scale = torch_view(
                 general_device_put(jnp.expand_dims(w_uk_t_scale, 1), sharding))
 
-            w_uv, w_uv_scale = quantize_tensor(
-                self.kv_cache_quantized_dtype, jax_view(self.W_UV), axis=1)
+            w_uv, w_uv_scale = quantize_tensor(self.kv_cache_quantized_dtype,
+                                               jax_view(self.W_UV),
+                                               axis=1)
             w_uv = torch_view(general_device_put(w_uv, sharding))
             w_uv_scale = torch_view(
                 general_device_put(jnp.expand_dims(w_uv_scale, 0), sharding))
