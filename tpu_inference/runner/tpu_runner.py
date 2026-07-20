@@ -53,7 +53,7 @@ import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, PCPMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -2836,9 +2836,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Prefill context parallelism (single request, prefill only): head-tail
         # arrange this request's current tokens into rank order
-        pcp_kv_cache_lens = None
-        pcp_query_start_loc = None
-        pcp_q_pos_offsets = None
+        pcp_metadata = None
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         if pcp_size > 1:
             counts = scheduled_tokens_per_dp_rank[0]
@@ -2901,13 +2899,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh, PartitionSpec(ShardingAxisName.PREFILL_CONTEXT,
                                          None))
             repl = NamedSharding(self.mesh, PartitionSpec())
-            pcp_kv_cache_lens = device_array(self.mesh,
-                                             kv_cache_lens_np,
-                                             sharding=repl)
             (pcp_query_start_loc,
              pcp_q_pos_offsets) = device_array(self.mesh,
                                                (pcp_cu_np, pcp_qpos_np),
                                                sharding=pcp_spec)
+            pcp_metadata = PCPMetadata(
+                query_start_loc=pcp_query_start_loc,
+                kv_cache_lens=device_array(self.mesh,
+                                           kv_cache_lens_np,
+                                           sharding=repl),
+                q_pos_offsets=pcp_q_pos_offsets,
+            )
         spec_decode_metadata = None
         if self.speculative_config:
             spec_decode_metadata = (
@@ -3027,8 +3029,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
         input_ids = metadata["input_ids"]
-        query_start_loc = (pcp_query_start_loc
-                           if pcp_size > 1 else metadata["query_start_loc"])
+        query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
         logits_indices = metadata["logits_indices"]
 
@@ -3048,8 +3049,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
-                pcp_kv_cache_lens=pcp_kv_cache_lens,
-                pcp_q_pos_offsets=pcp_q_pos_offsets,
+                pcp=pcp_metadata,
             )
 
             return attention_metadata_gid
