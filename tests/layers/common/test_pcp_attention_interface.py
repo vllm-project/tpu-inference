@@ -200,8 +200,9 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         npages = max(pps, 1)
         cache = self._strided_cache(k_prev, v_prev, L, pcp, npages)
 
-        pad1 = lambda xs: jnp.pad(jnp.array(xs, jnp.int32),
-                                  (0, MAX_SEQ - len(xs)))
+        def pad1(xs):
+            return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
+
         # Both fused seqs are the SAME request -> [T, T] / [P, P].
         kv_lens = pad1([kv_total, kv_total])
         kv_cache_lens = pad1([L, L])
