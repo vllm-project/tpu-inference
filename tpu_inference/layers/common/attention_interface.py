@@ -36,7 +36,8 @@ from tpu_inference.kernels.flash_attention.kernel import (
 from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore, get_mesh_shape_product
@@ -943,6 +944,7 @@ def attention(
     sinks: jax.Array | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    shared_attention_metadata: SharedAttentionMetadata | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
