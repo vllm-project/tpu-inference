@@ -130,8 +130,11 @@ class CompilationManager:
                          warmup_handler: Optional[Callable] = None,
                          aot: bool = True,
                          **kwargs) -> None:
-        log_name = f"{name} --> {kwargs}"
+        log_kwargs = kwargs.copy()
+        log_kwargs.pop("shared_attention_metadata", None)
+        log_name = f"{name} --> {log_kwargs}"
         logger.info(f"Precompile {log_name}")
+
         # Unwrap functools.partial so the underlying jit's static_argnums are
         # respected.
         while isinstance(fn, functools.partial):
