@@ -25,7 +25,6 @@ import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 import torch
-import vllm.envs as vllm_envs
 import vllm.lora.utils as lora_utils_mod
 from flax import nnx
 from jax._src.pallas.utils import next_power_of_2
@@ -1043,7 +1042,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                next_power_of_2(self.dp_size * kv_packing)),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
-            padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
+            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
         self.num_tokens_paddings = sorted(self.num_tokens_paddings +
                                           additional_sizes)
         self.num_tokens_paddings_per_dp = [

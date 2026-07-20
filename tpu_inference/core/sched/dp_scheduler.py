@@ -314,7 +314,7 @@ def _scheduler_worker_process(
                         _send_result(0)
                     else:
                         max_cache_hit_length = request.num_tokens - 1
-                        _, num_cached_tokens = (
+                        _, num_cached_tokens, *_ = (
                             kv_cache_mgr.coordinator.find_longest_cache_hit(
                                 request.block_hashes, max_cache_hit_length))
                         _send_result(num_cached_tokens)
