@@ -721,7 +721,7 @@ def fused_moe_func(
             topk_indices, topk_weights, dtype, mesh)
     topk_weights = topk_weights.astype(dtype)
     topk_weights = jax.lax.with_sharding_constraint(
-        topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+        topk_weights, NamedSharding(mesh, data_p_spec))
 
     # Only enable Reduce-Scatter if flag is on and Attention is pure DP
     total_num_devices = mesh.devices.size
