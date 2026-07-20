@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import jax
 import jax.numpy as jnp
 import torch
 import torchax
@@ -182,6 +183,24 @@ class VllmMLAAttention(MLAAttention):
 
         # Get the attention metadata
         attn_metadata, _, _, _ = get_attention_context(self.layer_name)
+        topk_indices = kwargs.pop("topk_indices", None)
+        if topk_indices is not None and hasattr(attn_metadata, "block_tables"):
+            if isinstance(topk_indices, jax.Array):
+                pass
+            elif hasattr(topk_indices, "value"):
+                topk_indices = topk_indices.value
+            elif hasattr(topk_indices, "_elem"):
+                topk_indices = topk_indices._elem
+            elif hasattr(topk_indices, "jax") and callable(
+                    getattr(topk_indices, "jax")):
+                topk_indices = topk_indices.jax()
+            elif isinstance(topk_indices, torch.Tensor):
+                topk_indices = jnp.asarray(topk_indices.detach().cpu().numpy())
+            if len(topk_indices.shape) > 1:
+                num_seqs = (attn_metadata.seq_lens.shape[0] if hasattr(
+                    attn_metadata, "seq_lens") else topk_indices.shape[0])
+                topk_indices = topk_indices[:num_seqs].reshape(-1)
+            attn_metadata.block_tables = topk_indices
 
         # Run the fundamental MLA forward pass from the impl
         outputs, new_kv_cache = self.impl.forward(q,
@@ -315,6 +334,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         if self.rotary_emb is not None:
             q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
 
+        _topk_indices = None
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(hidden_states, q_c, positions,
                                          self.indexer_rope_emb)
@@ -329,6 +349,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             k_pe,
             output_shape=(hidden_states.shape[0],
                           self.num_heads * self.v_head_dim),
+            topk_indices=_topk_indices,
         )
 
         return self.o_proj(attn_out)[0]
