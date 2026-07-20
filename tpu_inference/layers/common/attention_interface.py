@@ -37,7 +37,7 @@ from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore, get_mesh_shape_product
@@ -773,19 +773,24 @@ def forward_with_dcp(
     return updated_kv_cache, final_output
 
 
-def _lse_all_reduce(o: jax.Array, lse: jax.Array, axis: str):
-    """Merge per-rank partial attention (o, lse) across a mesh axis via LSE.
-
-    Each rank holds a partial softmax `o` (normalised over its KV shard) and its
-    `lse = m + log(l)`. Returns the fully-merged `(o, lse)` on every rank.
+def _lse_reduce_scatter(o: jax.Array, lse: jax.Array, axis: str,
+                        axis_size: int):
     """
+    o:   [axis_size*blk, nq, hd]  ->  [blk, nq, hd]
+    lse: [axis_size*blk, nq]      ->  [blk, nq]
+    """
+    n = o.shape[0] // axis_size  # this rank's query count (= 2C)
     m = lax.pmax(lse, axis)
     m_safe = jnp.where(jnp.isinf(m), 0.0, m)
     w = jnp.exp(lse - m_safe)
-    denom = lax.psum(w, axis)
-    o_merged = (lax.psum(o * w[..., None], axis) /
-                jnp.where(denom == 0.0, 1.0, denom)[..., None])
-    lse_merged = jnp.where(denom == 0.0, -jnp.inf, m_safe + jnp.log(denom))
+    # `o` comes back from the kernel in bf16 while `w`/`lse` are f32
+    w_o = w[..., None].astype(o.dtype)
+    o_w_sum = lax.psum_scatter(o * w_o, axis, scatter_dimension=0, tiled=True)
+    denom = lax.psum_scatter(w, axis, scatter_dimension=0, tiled=True)
+    m_own = lax.dynamic_slice_in_dim(m_safe, lax.axis_index(axis) * n, n, 0)
+    denom_safe = jnp.where(denom == 0.0, 1.0, denom)[..., None]
+    o_merged = o_w_sum.astype(denom.dtype) / denom_safe
+    lse_merged = jnp.where(denom == 0.0, -jnp.inf, m_own + jnp.log(denom))
     return o_merged, lse_merged
 
 
@@ -880,16 +885,16 @@ def pcp_ragged_paged_attention(
             use_causal_mask=False,
             update_kv_cache=False,
             **common)
-        o1, l1 = _lse_all_reduce(o1, l1, pcp_axis)
-        o1 = lax.dynamic_slice_in_dim(o1, r * 2 * C, 2 * C, 0)
-        l1 = lax.dynamic_slice_in_dim(l1, r * 2 * C, 2 * C, 0)
+        o1, l1 = _lse_reduce_scatter(o1, l1, pcp_axis, pcp_size)
 
         # ---- current phase -----
         # `cu_q_lens[0]` = [0, C, C+tail_real] and `pcp_qpos` = [head_offset, tail_offset]
-        # Both seqs are the same request
-        # and would each write the whole strided current KV, so
-        # `write_last_seq_only` writes it once, on the tail seq
-        k_cur, v_cur = to_token_order(k_l), to_token_order(v_l)
+        page_size_local = kvc.shape[1]
+        remap_kv = (C >= page_size_local) and (C % page_size_local == 0)
+        if remap_kv:
+            k_cur, v_cur = ag(k_l), ag(v_l)
+        else:
+            k_cur, v_cur = to_token_order(k_l), to_token_order(v_l)
         o2, kvc2, l2 = pcp_ragged_paged_attention_kernel(
             q_l,
             k_cur,
@@ -901,6 +906,7 @@ def pcp_ragged_paged_attention(
             dist2,
             kv_cache_lens=kvcl,
             q_pos_offsets=pcp_qpos[0],
+            pcp_chunk_size=(C if remap_kv else None),
             skip_cache_attn=True,
             use_causal_mask=use_causal_mask,
             update_kv_cache=update_kv_cache,
@@ -938,7 +944,6 @@ def attention(
     sinks: jax.Array | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
-    shared_attention_metadata: SharedAttentionMetadata | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -978,8 +983,6 @@ def attention(
             k_scale=k_scale,
             v_scale=v_scale,
         )
-    # Prefill context parallelism: when the `pcp` mesh axis is active, route to
-    # the head-tail PCP attention (all-gather + LSE-merged cache/new terms).
     if 'pcp' in mesh.shape and mesh.shape['pcp'] > 1:
         output, kv_cache = pcp_ragged_paged_attention(
             mesh,

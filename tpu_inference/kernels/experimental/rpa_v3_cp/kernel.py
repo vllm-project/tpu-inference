@@ -359,6 +359,7 @@ def _ragged_paged_attention_kernel_loop(
     k_scale: float | None = None,
     v_scale: float | None = None,
     static_q_len: int | None = None,
+    pcp_chunk_size: int | None = None,
     bq_sz,  # bq fetch size
     bkv_sz,  # bkv prefetch size
     bq_csz,  # bq compute size
@@ -733,6 +734,14 @@ def _ragged_paged_attention_kernel_loop(
             # Fetch new kvs.
             if not skip_current_attn:
                 new_kv_len_start = _seq_kv_new_end - kv_left_frm_new
+                if pcp_chunk_size is not None:
+                    C = pcp_chunk_size
+                    two_p = 2 * cp_group_size
+                    c = new_kv_len_start // C
+                    within = new_kv_len_start - c * C
+                    inv_row_c = jnp.where(c < cp_group_size, 2 * c,
+                                          2 * (two_p - 1 - c) + 1)
+                    new_kv_len_start = inv_row_c * C + within
                 debug_print("[RPA debug] new_kv_len_start={}",
                             new_kv_len_start)
                 _async_copy(
@@ -1967,6 +1976,7 @@ def get_default_block_sizes(
         "update_kv_cache",
         "write_last_seq_only",
         "cp_group_size",
+        "pcp_chunk_size",
     ),
     donate_argnames="kv_cache",
 )
@@ -1987,7 +1997,8 @@ def ragged_paged_attention(
     cp_rank: jax.Array
     | None = None,  # i32[1] - per-device rank, sharded along the DCP axis
     cp_group_size: int | None = None,
-    q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs] 
+    q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs]
+    pcp_chunk_size: int | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
     write_last_seq_only: bool = False,
@@ -2140,9 +2151,6 @@ def ragged_paged_attention(
     # 3D LSE buffer: (actual_num_kv_heads, max_num_tokens * num_q_heads_per_kv_head, 128).
     # The heads dim is flattened with tokens for better DMA alignment.
     # Initialize to -inf so skipped sequences get LSE=-inf, which results in merged output.
-    # Softmax accumulators (running max `m` and running sum `l`) must be
-    # fp32 when we emit the LSE: bf16 accumulators make `m + log(l)`
-    # underflow to -inf.
     lse_hbm = jnp.full(
         (actual_num_kv_heads, max_num_tokens * num_q_heads_per_kv_head, 128),
         -jnp.inf,
@@ -2199,7 +2207,7 @@ def ragged_paged_attention(
 
         # Softmax accumulators (running max `m` and running sum `l`) must be
         # fp32 when we emit the LSE: bf16 accumulators make `m + log(l)`
-        # underflow to -inf.
+        # underflow
         lse_acc_dtype = jnp.float32 if return_lse else out_dtype
         l_scratch = pltpu.VMEM(
             (actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128),
@@ -2299,6 +2307,7 @@ def ragged_paged_attention(
                 k_scale=k_scale,
                 v_scale=v_scale,
                 static_q_len=static_q_len,
+                pcp_chunk_size=pcp_chunk_size,
                 bq_sz=bq_sz,
                 bkv_sz=bkv_sz,
                 bq_csz=bq_csz,
@@ -2356,7 +2365,7 @@ def ragged_paged_attention(
 
     def _prepare_block_sizes(block_sizes, case):
         if block_sizes is None:
-            return get_default_block_sizes(
+            bs = get_default_block_sizes(
                 q.dtype,
                 kv_cache.dtype,
                 actual_num_q_heads,
@@ -2368,12 +2377,25 @@ def ragged_paged_attention(
                 pages_per_seq,
                 case=case,
             )
-        return {
-            "bq_sz": block_sizes[0],
-            "bkv_sz": block_sizes[1],
-            "bq_csz": block_sizes[2],
-            "bkv_csz": block_sizes[3],
-        }
+        else:
+            bs = {
+                "bq_sz": block_sizes[0],
+                "bkv_sz": block_sizes[1],
+                "bq_csz": block_sizes[2],
+                "bkv_csz": block_sizes[3],
+            }
+        # PCP current phase (rank-ordered KV remap) needs the prefetch block to
+        # stay within one head-tail chunk of size C, i.e. bkv_sz <= C.
+        if pcp_chunk_size is not None and case == RpaCase.MIXED:
+            C = pcp_chunk_size
+            bkv_sz = min(bs["bkv_sz"], C)
+            while bkv_sz > page_size and C % bkv_sz != 0:
+                bkv_sz -= page_size
+            bkv_csz = min(bs["bkv_csz"], bkv_sz)
+            while bkv_csz > page_size and bkv_sz % bkv_csz != 0:
+                bkv_csz -= page_size
+            bs = {**bs, "bkv_sz": bkv_sz, "bkv_csz": bkv_csz}
+        return bs
 
     # Decode-only
     q, kv_cache, lse_hbm = run_rpa_kernel(
