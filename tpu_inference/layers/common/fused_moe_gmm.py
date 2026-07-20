@@ -17,6 +17,7 @@ from typing import Literal
 
 import jax
 from jax import numpy as jnp
+from jax.experimental import pallas as pl
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
@@ -100,30 +101,51 @@ def _resolve_topk_backend(backend: str) -> tuple[str, float]:
     return name, recall_target
 
 
-def iterative_top_k(x: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
-    """Exact top-k via iterative argmax + mask, matching jax.lax.top_k's
-    output (descending values, lowest-index-first tie-break).
-
-    lax.top_k lowers to an XLA `sort`, which stays an unfused custom-call on
-    TPU. For small k against a lane-sized expert axis (E<=~256, i.e. 1-2
-    VREG rows), k passes of argmax+one_hot-mask are a handful of VPU ops
-    that fuse into the surrounding softmax/routing computation instead -
-    cheaper than one sort as long as k stays small (empirically <=~8-12
-    experts out of 128; the crossover flips for larger k since this scan is
-    O(k) while the sort is not).
+def _topk_kernel(x_ref, vals_ref, idxs_ref, *, k):
+    """Pallas kernel body: k iterations of argmax + mask-out, entirely
+    within one VMEM-resident block so the whole top-k computation is a
+    single kernel launch instead of k separate XLA ops. On an exact-value
+    tie, Mosaic's argmax picks the highest index (jax.lax.top_k picks the
+    lowest) - assumed rare/inconsequential for real router logits.
     """
-    num_experts = x.shape[-1]
-    vals = []
-    idxs = []
-    cur = x
-    for _ in range(k):
-        idx = jnp.argmax(cur, axis=-1)
-        val = jnp.max(cur, axis=-1)
-        vals.append(val)
-        idxs.append(idx)
-        cur = jnp.where(jax.nn.one_hot(idx, num_experts, dtype=jnp.bool_),
-                        -jnp.inf, cur)
-    return jnp.stack(vals, axis=-1), jnp.stack(idxs, axis=-1).astype(jnp.int32)
+    out_dtype = vals_ref.dtype
+    x = x_ref[...].astype(jnp.float32)  # Mosaic argmax/max reduce needs f32
+    neg_inf = jnp.finfo(jnp.float32).min
+    lane_iota = jax.lax.broadcasted_iota(jnp.int32, x.shape, 1)
+    for i in range(k):
+        idx = jnp.argmax(x, axis=-1)
+        val = jnp.max(x, axis=-1)
+        vals_ref[:, i] = val.astype(out_dtype)
+        idxs_ref[:, i] = idx.astype(jnp.int32)
+        mask = lane_iota == idx[:, None]
+        x = jnp.where(mask, neg_inf, x)
+
+
+def iterative_top_k_kernel(x: jax.Array,
+                           k: int) -> tuple[jax.Array, jax.Array]:
+    """Top-k via a single Pallas kernel: values match jax.lax.top_k exactly,
+    values and indices always correspond to each other.
+
+    Processes the whole [T, E] input in one VMEM-resident block (no grid) -
+    comfortably fits for MoE routing shapes (e.g. bf16[16384,128] is 4MiB).
+
+    Args:
+        x: [T, E] input.
+        k: number of top values/indices to select.
+    """
+    num_tokens, num_experts = x.shape
+    block_spec_in = pl.BlockSpec((num_tokens, num_experts), lambda: (0, 0))
+    block_spec_out = pl.BlockSpec((num_tokens, k), lambda: (0, 0))
+
+    return pl.pallas_call(
+        functools.partial(_topk_kernel, k=k),
+        in_specs=[block_spec_in],
+        out_specs=[block_spec_out, block_spec_out],
+        out_shape=[
+            jax.ShapeDtypeStruct((num_tokens, k), x.dtype),
+            jax.ShapeDtypeStruct((num_tokens, k), jnp.int32),
+        ],
+    )(x)
 
 
 def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
@@ -656,6 +678,7 @@ def fused_moe_func(
     topk_backend, approx_topk_recall_target = _resolve_topk_backend(
         envs.MOE_TOPK_BACKEND)
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
+    data_p_spec = P(ShardingAxisName.MLP_DATA, None)
     if hash_based_topk_indices is not None:
         topk_indices = hash_based_topk_indices
         topk_weights = jnp.take_along_axis(topk_weights, topk_indices, axis=-1)
@@ -663,7 +686,16 @@ def fused_moe_func(
         topk_weights, topk_indices = jax.lax.approx_max_k(
             topk_weights, k=topk, recall_target=approx_topk_recall_target)
     else:
-        topk_fn = iterative_top_k if topk_backend == "iterative_topk" else jax.lax.top_k
+        if topk_backend == "pallas_topk":
+            topk_fn = jax.shard_map(
+                functools.partial(iterative_top_k_kernel),
+                mesh=mesh,
+                in_specs=(data_p_spec, ),
+                out_specs=(data_p_spec, data_p_spec),
+                check_vma=False,
+            )
+        else:
+            topk_fn = jax.lax.top_k
         if expert_score_correction_bias is not None:
             _, topk_indices = topk_fn(topk_weights +
                                       expert_score_correction_bias[None, :],

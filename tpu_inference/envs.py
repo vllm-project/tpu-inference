@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
     TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
     TPU_OFFLOAD_BLOCK_SIZE_BUCKETS: list[int] = []
-    MOE_TOPK_BACKEND: str = "iterative_topk"
+    MOE_TOPK_BACKEND: str = "pallas_topk"
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
     ENABLE_RS_KERNEL: bool = False
     NUM_PRECOMPILE_WORKERS: int = 1
@@ -123,7 +123,7 @@ def env_moe_topk_backend(env_name: str, default: str) -> Callable[[], str]:
     """
     Validates the MOE_TOPK_BACKEND-style value:
         "topk"            - exact, jax.lax.top_k
-        "iterative_topk"  - exact, iterative argmax+mask
+        "pallas_topk"     - exact, iterative argmax+mask
         "approx_topk"     - jax.lax.approx_max_k, default recall_target=0.9
         "approx_topk:recall_target=<float>" - approx_topk with an explicit
             recall_target; the ":recall_target=<float>" suffix is only valid
@@ -136,10 +136,10 @@ def env_moe_topk_backend(env_name: str, default: str) -> Callable[[], str]:
             return default
 
         base, sep, suffix = value.partition(":")
-        if base not in ("topk", "iterative_topk", "approx_topk"):
+        if base not in ("topk", "pallas_topk", "approx_topk"):
             raise ValueError(
                 f"Invalid value '{value}' for {env_name}. Valid options: "
-                "'topk', 'iterative_topk', 'approx_topk', "
+                "'topk', 'pallas_topk', 'approx_topk', "
                 "'approx_topk:recall_target=<float>'.")
         if sep:
             if base != "approx_topk":
@@ -407,20 +407,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: env_int_list("TPU_OFFLOAD_BLOCK_SIZE_BUCKETS")
     () or [1, 2, 4, 8, 16, 32, 64],
     # MoE: which top-k backend to use for expert selection.
-    #   "topk"           - exact, jax.lax.top_k (default; lowers to a sort
+    #   "pallas_topk"    - exact, iterative argmax+mask fused into a single
+    #                      Pallas kernel.
+    #   "topk"           - exact, jax.lax.top_k (lowers to a sort
     #                      custom-call).
-    #   "iterative_topk" - exact, iterative argmax+mask. For small k (roughly
-    #                      k<=8-12 against E~128/256 experts) this avoids the
-    #                      unfused sort and fuses into the surrounding
-    #                      softmax/routing ops instead; for larger k the O(k)
-    #                      scan cost crosses over and "topk" wins.
     #   "approx_topk"    - approximate, jax.lax.approx_max_k (may lose
     #                      accuracy); optionally suffix
     #                      ":recall_target=<float>" (default 0.9 - a higher
     #                      rate increases accuracy at the cost of slower
     #                      speed).
     "MOE_TOPK_BACKEND":
-    env_moe_topk_backend("MOE_TOPK_BACKEND", "iterative_topk"),
+    env_moe_topk_backend("MOE_TOPK_BACKEND", "pallas_topk"),
     "DISABLE_WEIGHT_REQUANTIZATION":
     env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
     "VLLM_TPU_PATCH_MM_EMBEDDINGS":
