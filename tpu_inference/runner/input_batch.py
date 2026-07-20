@@ -586,8 +586,16 @@ class InputBatch:
         self.seen_scattered_upto[i1], self.seen_scattered_upto[i2] =\
             self.seen_scattered_upto[i2], self.seen_scattered_upto[i1]
         if self.seen_token_ids_mask is not None:
-            self.seen_token_ids_mask = self.seen_token_ids_mask.at[[i1, i2]].set(
-                self.seen_token_ids_mask[[i2, i1]])
+            # Swap rows i1 and i2. Use scalar .at[].set() rather than
+            # list/fancy indexing (self.seen_token_ids_mask[[i2, i1]]), which
+            # jax rejects on device arrays ("Using a non-tuple sequence for
+            # multidimensional indexing is not allowed"). Capture both rows
+            # first to avoid aliasing.
+            row_i1 = self.seen_token_ids_mask[i1]
+            row_i2 = self.seen_token_ids_mask[i2]
+            self.seen_token_ids_mask = (
+                self.seen_token_ids_mask.at[i1].set(row_i2).at[i2].set(row_i1)
+            )
 
         self.token_ids_cpu[[i1, i2], :max_active_token_count] = \
             self.token_ids_cpu[[i2, i1], :max_active_token_count]
