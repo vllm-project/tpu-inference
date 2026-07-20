@@ -112,6 +112,7 @@ def _split_rngs(rng, static_size, dynamic_size):
         "is_last_rank",
         "max_logprobs",
         "logprobs_mode",
+        "continue_decode_eos_check_interval",
     ),
     donate_argnames=("kv_caches", ),
     # Hoisted here from the model's step_fun: JAX forbids compiler_options on
@@ -158,6 +159,7 @@ def _decode_core(
     is_last_rank,
     max_logprobs,
     logprobs_mode,
+    continue_decode_eos_check_interval: int = 1,
 ):
     has_logprobs = False if sampling_metadata is None else sampling_metadata.logprobs
 
@@ -281,7 +283,13 @@ def _decode_core(
         i = carry[0]
         eos_flag = carry[-1]
         not_done = i < max_decode_steps
-        return jnp.logical_and(not_done, jnp.logical_not(eos_flag))
+        if continue_decode_eos_check_interval <= 0:
+            return not_done
+        should_check_eos = (i % continue_decode_eos_check_interval == 0)
+        return jnp.logical_and(
+            not_done,
+            jnp.logical_not(jnp.logical_and(eos_flag, should_check_eos)),
+        )
 
     def body_fn(carry):
         (i, ct, am, pos, sl, kvc, tb, eb, lp_ids_buf, lp_val_buf, lp_ranks_buf,
@@ -349,6 +357,7 @@ def continue_decode(
     collect_expert_indices: bool = False,
     max_logprobs: int = 0,
     logprobs_mode: str = "raw",
+    continue_decode_eos_check_interval: int = 1,
 ) -> tuple[jax.Array, Any, TpuSamplingState, jax.Array, jax.Array | None,
            Optional["LogprobsTensors"]]:
     """Run the TPU decode loop as one fused, kv-cache-donating program.
@@ -491,6 +500,7 @@ def continue_decode(
          is_last_rank=is_last_rank,
          max_logprobs=max_logprobs,
          logprobs_mode=logprobs_mode,
+         continue_decode_eos_check_interval=continue_decode_eos_check_interval,
      )
 
     final_state = TpuSamplingState(

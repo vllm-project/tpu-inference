@@ -351,6 +351,7 @@ class TestTPUJaxRunner:
         runner.eos_token_id = 999
         runner.pad_token_id = 0
         runner.layer_name_to_kvcache_index = {}
+        runner.continue_decode_eos_check_interval = 1
 
         # Mock continue_decode output
         mock_generated_tokens = MagicMock()
@@ -467,6 +468,90 @@ class TestTPUJaxRunner:
         assert attn_metadata.seq_lens_cpu[1] == 25
         # req3: 30 -> 35
         assert attn_metadata.seq_lens_cpu[2] == 35
+
+        # 6. Verify default continue_decode_eos_check_interval parameter passed to continue_decode
+        assert mock_continue_decode.call_args.kwargs[
+            "continue_decode_eos_check_interval"] == 1
+
+    @patch('tpu_inference.runner.tpu_runner.continue_decode')
+    @patch('jax.device_get')
+    def test_execute_continue_decode_eos_check_interval_config(
+            self, mock_device_get, mock_continue_decode):
+        """_execute_continue_decode() should pass continue_decode_eos_check_interval when configured in additional_config."""
+        runner = MagicMock()
+        runner.max_num_reqs = 8
+        runner.max_model_len = 512
+        runner.dp_size = 1
+        runner.vllm_config.parallel_config.data_parallel_size = 1
+        runner.vllm_config.parallel_config.is_moe_model = False
+        runner.scheduler_config.async_scheduling = False
+        runner.vllm_config.additional_config = {
+            "enable_continue_decode": True,
+            "continue_decode_eos_check_interval": 5,
+            "max_decode_steps": 5,
+        }
+        runner.continue_decode_eos_check_interval = 5
+        runner.static_max_decode_steps = 5
+        runner.input_batch.num_reqs = 1
+        runner.input_batch.req_ids = ["req1"]
+        runner.input_batch.req_id_to_index = {"req1": 0}
+        runner.input_batch.token_ids_cpu = np.zeros((8, 512), dtype=np.int32)
+        runner.requests = {"req1": MagicMock(output_token_ids=[])}
+        runner._get_min_remaining_slots.return_value = 5
+        runner.model_config.get_vocab_size.return_value = 1000
+        runner.eos_token_id = 999
+        runner.pad_token_id = 0
+        runner.layer_name_to_kvcache_index = {}
+
+        mock_generated_tokens = MagicMock()
+        mock_final_state = MagicMock()
+        mock_continue_decode.return_value = (
+            mock_generated_tokens,
+            MagicMock(),
+            mock_final_state,
+            MagicMock(),
+            None,
+            None,
+        )
+
+        mock_tokens_cpu = np.zeros((5, 8), dtype=np.int32)
+        mock_tokens_cpu[:, 0] = [101, 999, 0, 0, 0]
+
+        def device_get_side_effect(arg):
+            if isinstance(arg, tuple) and len(arg) == 2:
+                return mock_tokens_cpu, np.int32(5)
+            return arg
+
+        mock_device_get.side_effect = device_get_side_effect
+
+        mock_seq_lens_cpu = np.array([10, 0, 0, 0, 0, 0, 0, 0])
+        runner.input_batch.num_tokens = mock_seq_lens_cpu.copy()
+        runner.input_batch.num_tokens_no_spec = mock_seq_lens_cpu.copy()
+
+        attn_metadata = MagicMock()
+        attn_metadata.seq_lens_cpu = mock_seq_lens_cpu
+        runner._prepare_inputs.return_value = (
+            np.zeros(8, dtype=np.int32),
+            None,
+            attn_metadata,
+            None,
+            np.array([0, -1, -1, -1, -1, -1, -1, -1], dtype=np.int32),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+        from tpu_inference.runner.tpu_runner import TPUModelRunner
+        TPUModelRunner._execute_continue_decode(
+            runner, MagicMock(num_scheduled_tokens={"req1": 1}))
+
+        mock_continue_decode.assert_called_once()
+        assert mock_continue_decode.call_args.kwargs[
+            "continue_decode_eos_check_interval"] == 5
 
     @patch('tpu_inference.runner.tpu_runner.continue_decode')
     @patch('jax.device_get')
@@ -646,6 +731,7 @@ class TestTPUJaxRunner:
         runner._get_min_remaining_slots.return_value = 5
         runner.vllm_config.additional_config = {"max_decode_steps": 5}
         runner.static_max_decode_steps = 5
+        runner.continue_decode_eos_check_interval = 5
         runner.model_config.get_vocab_size.return_value = 1000
         runner.model_config.hf_config = MagicMock(eos_token_id=999,
                                                   pad_token_id=0)
@@ -696,6 +782,8 @@ class TestTPUJaxRunner:
         assert runner._pre_async_results.is_continue_decode is True
         assert runner._continue_decode_output is not None
 
+        assert mock_continue_decode.call_args.kwargs[
+            "continue_decode_eos_check_interval"] == runner.continue_decode_eos_check_interval
         # Verify output resolution via get_output()
         async_out = runner._continue_decode_output
         model_runner_output = async_out.get_output()
