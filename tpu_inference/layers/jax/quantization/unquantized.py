@@ -357,7 +357,7 @@ class UnquantizedConfig(QuantizationConfig):
         if isinstance(layer, JaxMergedColumnParallelLinear):
             # Read the weight's partition spec so n_shards = get_mesh_shape_product
             # picks up the TP degree from the active mesh automatically.
-            sharding = layer.weight.get_metadata().get("sharding", None)
+            sharding = layer.weight.get_metadata().get("out_sharding", None)
             weight_sharding = P(*sharding) if sharding is not None else None
             linear_config = QuantLinearConfig(enable_sp=False,
                                               output_sizes=list(
