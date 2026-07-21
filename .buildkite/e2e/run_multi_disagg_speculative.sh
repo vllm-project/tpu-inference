@@ -27,6 +27,13 @@ NUM_PROMPTS="${NUM_PROMPTS:-100}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-20}"
 RANDOM_SEED="${RANDOM_SEED:-10}"
 TEST_MODE="${TEST_MODE:-3}" # 1: benchmark, 2: correctness, 3: both
+# A tpu7x-8 P/D run assigns one host to each independent engine. Reserve HBM
+# for compilation/runtime buffers instead of letting the KV cache consume the
+# default share, which can make KV-cache initialization fail.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-1024}"
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1024}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
 NODE_CONTAINER_NAME="node"
 PROXY_CONTAINER_NAME="disagg-proxy-benchmark"
 PREFILL_HOSTS_COUNT="${PREFILL_HOSTS_COUNT:-1}"
@@ -427,8 +434,11 @@ docker exec \
     --load-format ${LOAD_FORMAT} \
     --served-model-name ${SERVED_MODEL_NAME} \
     --no-enable-prefix-caching \
+    --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
+    --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
+    --max-num-seqs ${MAX_NUM_SEQS} \
     --kv-transfer-config '{\"kv_connector\": \"TPUConnector\", \"kv_connector_module_path\": \"tpu_inference.distributed.tpu_connector\", \"kv_role\": \"kv_producer\"}' \
-    --max-model-len 1024 > /root/vllm_serve_prefill.log 2>&1"
+    --max-model-len ${MAX_MODEL_LEN} > /root/vllm_serve_prefill.log 2>&1"
 set +x
 EOF
 chmod +x /tmp/start_prefill.sh
@@ -453,9 +463,12 @@ docker exec \
     --load-format ${LOAD_FORMAT} \
     --served-model-name ${SERVED_MODEL_NAME} \
     --no-enable-prefix-caching \
+    --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
+    --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
+    --max-num-seqs ${MAX_NUM_SEQS} \
     --speculative-config "\$1" \
     --kv-transfer-config "\$KV_TRANSFER_CONFIG" \
-    --max-model-len 1024 > /root/vllm_serve_decode.log 2>&1' _ "\$SPECULATIVE_CONFIG"
+    --max-model-len ${MAX_MODEL_LEN} > /root/vllm_serve_decode.log 2>&1' _ "\$SPECULATIVE_CONFIG"
 set +x
 EOF
 chmod +x /tmp/start_decode.sh
