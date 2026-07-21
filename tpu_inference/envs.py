@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
     MOE_ALL_GATHER_ACTIVATION_DTYPE: str = ""
+    MOE_RAGGED_GATHER_FP8: bool = False
     TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
     TPU_OFFLOAD_DECODE_SAVE: bool = False
     TPU_OFFLOAD_NUM_CPU_CHUNKS: int = 1024
@@ -333,6 +334,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
+    # Keep MoE activations in fp8 across the ragged gather (EP permute) instead
+    # of dequantizing right after the fp8 all-gather. Halves the bytes the
+    # SparseCore gather moves; the per-token scale is carried alongside and the
+    # dequant happens after the gather. Requires MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8.
+    "MOE_RAGGED_GATHER_FP8":
+    lambda: bool(int(os.getenv("MOE_RAGGED_GATHER_FP8", "0"))),
     # kv offload to dram: skip pre-compiling swap-related jax functions
     "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_SKIP_JAX_PRECOMPILE", "0"))),
