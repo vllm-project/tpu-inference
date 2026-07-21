@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Exit on error, exit on unset variable, fail on pipe errors.
-set -euo pipefail 
+set -euo pipefail
 set -x
 
 # We are running ON the head node.
@@ -23,39 +23,70 @@ export SSH_USER="${SSH_USER:-$(whoami)}"
 # We need a valid path for run_cluster.sh's HF_HOME bind mount
 HOST_HF_HOME="${HOST_HF_HOME:-/tmp/hf_home}"
 
+get_metadata_value() {
+  local path=$1
+  curl -fs -H "Metadata-Flavor: Google" \
+    "http://metadata.google.internal/computeMetadata/v1/${path}" 2>/dev/null || true
+}
+
+get_current_internal_ip() {
+  local metadata_ip
+  metadata_ip="$(get_metadata_value "instance/network-interfaces/0/ip")"
+  if [[ -n "$metadata_ip" ]]; then
+    echo "$metadata_ip"
+    return 0
+  fi
+
+  hostname -I | awk '{print $1}'
+}
+
+# The Ray head must be the VM executing this script, not whichever endpoint
+# happens to be listed first by gcloud.
+HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(get_current_internal_ip)}"
+
 # Automatic Worker IP Discovery
 if [[ -z "${WORKER_IPS:-}" ]]; then
   echo "⚠️  WORKER_IPS not provided. Attempting to discover via gcloud..."
-  
+
   # Check if gcloud is available and authorized
   if command -v gcloud &> /dev/null; then
     # Try to grab the zone from metadata if not set
     ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}')}"
     TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
-    
+
     if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
       echo "   -> Found TPU_NAME: $TPU_NAME, ZONE: $ZONE"
       # Get all IPs in the slice
       ALL_IPS=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(networkEndpoints[].ipAddress)")
-      
+
       # Normalize separators to spaces and convert to array
       ALL_IPS="${ALL_IPS//;/ }"
       ALL_IPS="${ALL_IPS//,/ }"
 
       # shellcheck disable=SC2206
       ALL_IPS_ARRAY=($ALL_IPS)
-      
-      # The first IP from gcloud is ALWAYS the head node
-      if [[ -z "${HEAD_INTERNAL_IP:-}" ]]; then
-        HEAD_INTERNAL_IP="${ALL_IPS_ARRAY[0]}"
-        echo "   -> Discovered Head IP: $HEAD_INTERNAL_IP"
+
+      # The endpoint order is not a reliable indication of which VM is running
+      # this job. Find the local head in the slice and use every other endpoint
+      # as a worker.
+      CURRENT_IP_IN_SLICE=0
+      WORKER_IPS_LIST=()
+      for ip in "${ALL_IPS_ARRAY[@]}"; do
+        if [[ "$ip" == "$HEAD_INTERNAL_IP" ]]; then
+          CURRENT_IP_IN_SLICE=1
+        elif [[ -n "$ip" ]]; then
+          WORKER_IPS_LIST+=("$ip")
+        fi
+      done
+
+      if (( CURRENT_IP_IN_SLICE != 1 )); then
+        echo "❌ Current VM IP (${HEAD_INTERNAL_IP}) is not in discovered TPU endpoints: ${ALL_IPS_ARRAY[*]}" >&2
+        exit 1
       fi
-      
-      # The rest are Worker IPs
-      WORKER_IPS_LIST=("${ALL_IPS_ARRAY[@]:1}")
-      
+
       # Join with commas
       WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
+      echo "   -> Current/local head IP: $HEAD_INTERNAL_IP"
       echo "   -> Discovered Worker IPs: $WORKER_IPS"
 
       # Detect TPU Version for Docker Build
@@ -77,13 +108,24 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
   fi
 fi
 
+# Reject a manually supplied worker list that includes this head. Starting a
+# second `node` container over SSH on the local VM would replace the Ray head.
+IFS=',' read -r -a REQUESTED_WORKER_IPS <<< "${WORKER_IPS:-}"
+WORKER_IPS_LIST=()
+for worker_ip in "${REQUESTED_WORKER_IPS[@]}"; do
+  [[ -z "$worker_ip" ]] && continue
+  if [[ "$worker_ip" == "$HEAD_INTERNAL_IP" ]]; then
+    echo "ERROR: WORKER_IPS must not include the local head IP (${HEAD_INTERNAL_IP})." >&2
+    exit 1
+  fi
+  WORKER_IPS_LIST+=("$worker_ip")
+done
+WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
+
 if [[ -z "${WORKER_IPS:-}" ]]; then
   echo "ERROR: Failed to discover WORKER_IPS. Please provide it manually."
   exit 1
 fi
-
-# Fallback to hostname -I if HEAD_INTERNAL_IP is still strictly unset.
-HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(hostname -I | awk '{print $1}')}"
 
 # Enforce TPUv7 requirement
 if [[ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]]; then
@@ -100,6 +142,23 @@ fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o IPQoS=none -i ~/.ssh/id_rsa)
 
+dump_container_logs() {
+  local host=$1
+  local role=$2
+
+  echo "+++ 📄 ${role} host logs (${host})"
+  if [[ "$host" == "localhost" || "$host" == "127.0.0.1" || "$host" == "$HEAD_INTERNAL_IP" ]]; then
+    echo "--- docker logs node (${role}) ---"
+    docker logs node 2>&1 || true
+    echo "--- /root/vllm_serve.log (${role}) ---"
+    docker exec node cat /root/vllm_serve.log 2>&1 || true
+  else
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+      "echo '--- docker logs node (${role}) ---'; docker logs node 2>&1 || true; \
+       echo '--- /root/vllm_serve.log (${role}) ---'; docker exec node cat /root/vllm_serve.log 2>&1 || true" || true
+  fi
+}
+
 # Cleanup function that runs on exit to tear down the Ray cluster
 cleanup() {
   if [[ "${CLEANUP_DONE:-}" == "true" ]]; then return; fi
@@ -107,7 +166,18 @@ cleanup() {
   set +e
   echo "🧹 Cleaning up containers on head and workers..."
   IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS:-}"
-  
+
+  # Print diagnostics before removing containers. The generic multi-host runner
+  # has one vLLM head and Ray workers, so dump the equivalent of the
+  # prefill/decode host logs from every participating host.
+  if (( exit_code != 0 )); then
+    echo "--- 🚨 Script failed (exit code: ${exit_code}). Dumping host logs..."
+    dump_container_logs "localhost" "head"
+    for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
+      [[ -n "$worker_ip" ]] && dump_container_logs "$worker_ip" "worker"
+    done
+  fi
+
   echo "   -> Cleaning workers..."
   if [[ ${#WORKER_IPS_ARRAY[@]} -gt 0 && -n "${WORKER_IPS_ARRAY[0]}" ]]; then
     for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
@@ -170,7 +240,7 @@ wait_for_server() {
   local loop_count=0
   while [[ $SECONDS -lt $end_time ]]; do
     # 2. Check health
-    # max-time 10 is crucial to prevent curl from hanging indefinitely if the server 
+    # max-time 10 is crucial to prevent curl from hanging indefinitely if the server
     # accepts the TCP connection but is deadlocked or blocked from sending an HTTP response.
     if curl -fs --max-time 10 "localhost:${port}/health" > /dev/null; then
       echo "===== $service_name is healthy on port: $port. ==="
@@ -252,7 +322,7 @@ if [ "$#" -ge 1 ]; then
         CASE_FILE="$1"
         TARGET_CASE_NAME="$2"
         echo "--- Multi-host JSON case configuration detected: $CASE_FILE ($TARGET_CASE_NAME)"
-        
+
         TEMP_EXPORT_FILE="/tmp/temp_env_exports.sh"
         rm -f "$TEMP_EXPORT_FILE"
 
@@ -272,11 +342,11 @@ if [ "$#" -ge 1 ]; then
               fi
               exit 1
           }
-          
+
         # shellcheck source=/dev/null
         source "$TEMP_EXPORT_FILE"
         rm -f "$TEMP_EXPORT_FILE"
-        
+
         # Write GCS upload metadata variables to a temp file for run_job.sh
         METADATA_FILE="/tmp/multihost_run_metadata.sh"
         rm -f "$METADATA_FILE"
@@ -300,7 +370,7 @@ if [ "$#" -ge 1 ]; then
         for cmd_item in "${SERVER_CMD[@]}"; do
             VLLM_SERVE_CMD+="$(printf '%q ' "$cmd_item")"
         done
-        
+
         # Set client benchmark command from CLIENT_CMD resolved by parser
         CLIENT_BENCH_CMD=""
         for env_item in "${CLIENT_CMD_ENVS[@]}"; do
@@ -309,10 +379,10 @@ if [ "$#" -ge 1 ]; then
         for cmd_item in "${CLIENT_CMD[@]}"; do
             CLIENT_BENCH_CMD+="$(printf '%q ' "$cmd_item")"
         done
-        
+
     else
         # Direct CLI configuration mode
-        # If the first argument is not a .json file, the script directly assigns 
+        # If the first argument is not a .json file, the script directly assigns
         # $1 as the server command and the remaining arguments ($*) as the client command.
         if [ "$#" -gt 0 ]; then
             VLLM_SERVE_CMD="$1"
@@ -377,7 +447,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   ${EXTRA_DOCKER_ARGS_ARRAY[@]:+"${EXTRA_DOCKER_ARGS_ARRAY[@]}"} &
 set -x
 
-sleep 60
+wait_for_ray_head
 
 # 2. Distribute run_cluster.sh to workers and start them
 IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
@@ -387,11 +457,11 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     # Prune Worker Node BEFORE it tries to pull the new giant image
     echo "   -> Pruning Docker on worker to free disk space..."
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
-    
+
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
     # shellcheck disable=SC2002
     cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
-    
+
     # shellcheck disable=SC2087
     # shellcheck disable=SC2029
     # Redirect output to a temp file so it doesn't flood the Buildkite console with mixed logs.
@@ -411,12 +481,13 @@ IS_MULTI_HOST_BENCH="${IS_MULTI_HOST_BENCH:-false}" bash ~/tpu-inference/scripts
   -e IS_MULTI_HOST_BENCH='${IS_MULTI_HOST_BENCH:-}' \
   ${DOCKER_ENV_STR}
 EOF
+    WORKER_LAUNCHER_PIDS+=("$!")
+    WORKER_LAUNCHER_HOSTS+=("$worker_ip")
 done
 
 
 echo "--- Waiting for all worker nodes to connect"
-# Wait a few seconds for all worker nodes to connect
-sleep 120
+wait_for_ray_cluster_members "$(( ${#WORKER_IPS_ARRAY[@]} + 1 ))" "${RAY_CLUSTER_TIMEOUT:-900}"
 
 # 3. Start vLLM server on the head node
 echo "--- Starting vLLM server on head node"
@@ -437,7 +508,7 @@ if [[ "${VLLM_SERVE_CMD}" =~ --generation-config[=\ ]+gs://([^ ]+) ]]; then
     echo "--- Pre-downloading config to workspace inside container..."
 
     download_cmd="mkdir -p /workspace && gsutil -m cp -r ${config_url} /workspace/ && "
-    
+
     VLLM_SERVE_CMD=$(echo "${VLLM_SERVE_CMD}" | sed -E "s|--generation-config[=\ ]+gs://[^ ]+|--generation-config /workspace/${config_dir_name}/${config_file_name}|g")
     VLLM_SERVE_CMD="${download_cmd}${VLLM_SERVE_CMD}"
     echo "Rewritten VLLM_SERVE_CMD: $VLLM_SERVE_CMD"
