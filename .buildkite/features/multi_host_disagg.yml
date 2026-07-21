@@ -158,8 +158,8 @@ steps:
       queue: default
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-      MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-      LOAD_FORMAT: "runai_streamer"
+      MODEL: "Qwen/Qwen3-0.6B"
+      LOAD_FORMAT: "auto"
       SPECULATIVE_CONFIG: '{"method":"ngram","prompt_lookup_max":5,"prompt_lookup_min":3,"num_speculative_tokens":3}'
       PREFILL_HOSTS_COUNT: "1"
       DECODE_HOSTS_COUNT: "1"
@@ -182,47 +182,47 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi_host_disagg_speculative_PerformanceTest
 
-  # - label: "${TPU_VERSION:-tpu7x} Correctness tests for multi-host"
-  #   key: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
-  #   soft_fail: true
-  #   agents:
-  #     queue: default
-  #   env:
-  #     TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-  #     HEAD_SSH_IP: ""
-  #     HEAD_INTERNAL_IP: ""
-  #     WORKER_SSH_IPS: ""
-  #   commands:
-  #     # Correctness Test Example:
-  #     # 1. Start vLLM with specific model and tensor parallel size
-  #     # 2. Run curl commands against it
-  #     - |
-  #       MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-  #       .buildkite/scripts/run_multihost.sh \
-  #         "vllm serve \${MODEL} \
-  #           --port 8000 \
-  #           --tensor-parallel-size 16 \
-  #           --trust-remote-code \
-  #           --max-model-len 1024 \
-  #           --async-scheduling \
-  #           --load-format=runai_streamer \
-  #           --no-enable-prefix-caching" \
-  #         "curl http://localhost:8000/v1/completions \
-  #           -X POST \
-  #           -H 'Content-Type: application/json' \
-  #           -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
-  #         "
+  - label: "${TPU_VERSION:-tpu7x} Correctness tests for multi-host"
+    key: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: default
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      HEAD_SSH_IP: ""
+      HEAD_INTERNAL_IP: ""
+      WORKER_SSH_IPS: ""
+    commands:
+      # Correctness Test Example:
+      # 1. Start vLLM with specific model and tensor parallel size
+      # 2. Run curl commands against it
+      - |
+        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+        .buildkite/scripts/run_multihost.sh \
+          "vllm serve \${MODEL} \
+            --port 8000 \
+            --tensor-parallel-size 16 \
+            --trust-remote-code \
+            --max-model-len 1024 \
+            --async-scheduling \
+            --load-format=runai_streamer \
+            --no-enable-prefix-caching" \
+          "curl http://localhost:8000/v1/completions \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
+          "
 
-  # - label: "${TPU_VERSION:-tpu7x} Record correctness test result for multi-host"
-  #   key: "${TPU_VERSION:-tpu7x}_record_multi-host_CorrectnessTest"
-  #   depends_on: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
-  #   env:
-  #     CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-  #     CI_TARGET: "multi-host"
-  #     CI_STAGE: "CorrectnessTest"
-  #     CI_CATEGORY: "feature support matrix"
-  #   agents:
-  #     queue: cpu
-  #   commands:
-  #     - |
-  #       .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest
+  - label: "${TPU_VERSION:-tpu7x} Record correctness test result for multi-host"
+    key: "${TPU_VERSION:-tpu7x}_record_multi-host_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+      CI_TARGET: "multi-host"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest
