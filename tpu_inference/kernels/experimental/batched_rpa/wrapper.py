@@ -313,8 +313,9 @@ def calculate_block_sizes(
 
     decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, fixed_bq_sz=1)
     prefill_block_sizes = find_best_block_sizes(prefill_batch_size, n_buffer, fixed_bq_sz=None)
-    # Speculative decode: query tile fixed to 4 for minimal padding with decode batch parallelism (8)
-    spec_decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, fixed_bq_sz=4)
+    # Speculative decode: fixed query tile of 8 covers all 1-7 draft token setups
+    # in a single tile pass with maximum decode batch parallelism (8).
+    spec_decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, fixed_bq_sz=8)
 
     return decode_block_sizes, prefill_block_sizes, spec_decode_block_sizes
 
