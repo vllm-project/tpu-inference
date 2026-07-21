@@ -564,7 +564,7 @@ print(json.dumps({
     "temperature": 0.0,
     "ignore_eos": True,
 }))
-' "$SERVED_MODEL_NAME")"
+' "$MODEL")"
   curl -fsS http://127.0.0.1:8000/v1/completions \
     -H 'Content-Type: application/json' \
     --data "$request_body" >/dev/null
