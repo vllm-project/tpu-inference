@@ -8,8 +8,8 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 
 # Multi-host P/D disaggregation plus speculative decoding.
-# The default model is the larger MoE model used by repository multi-host CI.
-# Speculative decoding is intentionally enabled only on the Decode server.
+# Keep the default model aligned with run_multi_disagg.sh so this correctness
+# test fits a tpu7x-8 P/D split. Speculative decoding is enabled only on Decode.
 
 set -euo pipefail
 
@@ -18,9 +18,8 @@ HOST_HF_HOME="${HOST_HF_HOME:-/mnt/disks/persist/models}"
 
 # Test inputs and load defaults. These are environment-overridable so the same
 # script can serve both the CI workload and targeted debugging runs.
-MODEL="${MODEL:-gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39}"
-LOAD_FORMAT="${LOAD_FORMAT:-runai_streamer}"
-SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Qwen/Qwen3-30B-A3B}"
+MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
+LOAD_FORMAT="${LOAD_FORMAT:-auto}"
 INPUT_LEN="${INPUT_LEN:-128}"
 OUTPUT_LEN="${OUTPUT_LEN:-128}"
 NUM_PROMPTS="${NUM_PROMPTS:-100}"
@@ -432,7 +431,6 @@ docker exec \
     --tensor-parallel-size ${PREFILL_TP} \
     --trust-remote-code \
     --load-format ${LOAD_FORMAT} \
-    --served-model-name ${SERVED_MODEL_NAME} \
     --no-enable-prefix-caching \
     --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
     --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
@@ -461,7 +459,6 @@ docker exec \
     --tensor-parallel-size ${DECODE_TP} \
     --trust-remote-code \
     --load-format ${LOAD_FORMAT} \
-    --served-model-name ${SERVED_MODEL_NAME} \
     --no-enable-prefix-caching \
     --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
     --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
@@ -559,9 +556,13 @@ import json
 import sys
 print(json.dumps({
     "model": sys.argv[1],
-    "prompt": "speculative decoding uses repeated ngrams " * 8,
-    "max_tokens": 8,
+    # Match the n-gram E2E workload: the generated suffix is likely to
+    # continue this repeated token sequence, which lets the proposer find a
+    # suffix match instead of merely seeing repetition elsewhere in the prompt.
+    "prompt": "Keep repeating: " + "a " * 20,
+    "max_tokens": 32,
     "temperature": 0.0,
+    "ignore_eos": True,
 }))
 ' "$SERVED_MODEL_NAME")"
   curl -fsS http://127.0.0.1:8000/v1/completions \
@@ -593,14 +594,14 @@ run_ngram_disagg_probe
 if [[ "$TEST_MODE" == 2 || "$TEST_MODE" == 3 ]]; then
   echo "--- Running correctness test ---"
   docker exec "$PROXY_CONTAINER_NAME" /bin/bash -c \
-    "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py --baseline_url http://$DECODE_HEAD_IP:$DECODE_PORT/v1/completions --disagg_url http://127.0.0.1:8000/v1/completions --model '$SERVED_MODEL_NAME' --num_requests 20 --input_length 32 --output_length 64 --prompt-mode repeated-ngram > /root/logs/correctness.txt 2>&1"
+    "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py --baseline_url http://$DECODE_HEAD_IP:$DECODE_PORT/v1/completions --disagg_url http://127.0.0.1:8000/v1/completions --model '$MODEL' --num_requests 20 --input_length 32 --output_length 64 --prompt-mode repeated-ngram > /root/logs/correctness.txt 2>&1"
   docker exec "$PROXY_CONTAINER_NAME" cat /root/logs/correctness.txt
 fi
 
 if [[ "$TEST_MODE" == 1 || "$TEST_MODE" == 3 ]]; then
   echo "--- Running benchmark test ---"
   docker exec "$PROXY_CONTAINER_NAME" /bin/bash -c \
-    "vllm bench serve --backend vllm --host 127.0.0.1 --port 8000 --model '$SERVED_MODEL_NAME' --dataset-name random --random-input-len $INPUT_LEN --random-output-len $OUTPUT_LEN --num-prompts $NUM_PROMPTS --request-rate inf --max-concurrency $MAX_CONCURRENCY --trust-remote-code --seed $RANDOM_SEED > /root/logs/benchmark.txt 2>&1"
+    "vllm bench serve --backend vllm --host 127.0.0.1 --port 8000 --model '$MODEL' --dataset-name random --random-input-len $INPUT_LEN --random-output-len $OUTPUT_LEN --num-prompts $NUM_PROMPTS --request-rate inf --max-concurrency $MAX_CONCURRENCY --trust-remote-code --seed $RANDOM_SEED > /root/logs/benchmark.txt 2>&1"
   docker exec "$PROXY_CONTAINER_NAME" cat /root/logs/benchmark.txt
 fi
 
