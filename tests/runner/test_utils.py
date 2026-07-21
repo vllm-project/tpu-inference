@@ -501,6 +501,7 @@ def profiler_fixture(tmp_path):
         mock_datetime.datetime.now.return_value = mock_now
 
         profiler = PhasedBasedProfiler(profile_dir=str(tmp_path))
+        profiler.track_concurrency = True
         profiler.num_steps_to_profile_for = PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR
 
         yield {
@@ -719,6 +720,22 @@ def test_phased_profiler_skips_decode_only_steps_based_on_kv_len(
         profiler.step(stats)
     mock_stop.assert_called_once()
     assert profiler.current_phase == ""
+
+
+def test_phased_profiler_track_concurrency_disabled(profiler_fixture):
+    """Tests that when track_concurrency is False, phase names omit concurrency suffix."""
+    profiler = profiler_fixture["profiler"]
+    profiler.track_concurrency = False
+    mock_start = profiler_fixture["mock_start"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
+
+    stats = {"num_reqs": 2, "total_num_scheduled_tokens": 100}
+    mock_determine_phase.return_value = InferencePhase.PREFILL_HEAVY
+
+    profiler.step(stats)
+    mock_start.assert_called_once()
+    assert profiler.current_phase == "prefill_heavy"
+    assert InferencePhase.PREFILL_HEAVY in profiler.inference_phases_profiled
 
 
 def _stage_dp_rank_capture(rank_dir, ts_name, filename, content):

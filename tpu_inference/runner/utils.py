@@ -114,6 +114,7 @@ PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP = 0
 # For decode only batches, start capturing traces after all requests in the
 # batch has KV caches that have reached this length threshold
 PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD = -1
+PHASED_PROFILER_TRACK_CONCURRENCY = False
 
 logger = init_logger(__name__)
 
@@ -572,6 +573,9 @@ class PhasedBasedProfiler:
         self.decode_kv_len_threshold: int = int(
             os.getenv("PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD",
                       PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD))
+        self.track_concurrency: bool = os.getenv(
+            "PHASED_PROFILER_TRACK_CONCURRENCY",
+            str(PHASED_PROFILER_TRACK_CONCURRENCY)).lower() in ("1", "true")
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phases_profiled: set = set()
@@ -638,7 +642,8 @@ class PhasedBasedProfiler:
         """
         current_determined_phase = determine_phase_from_batch_composition_stats(
             batch_composition_stats)
-        concurrency = batch_composition_stats.get("num_reqs", 0)
+        concurrency = (batch_composition_stats.get("num_reqs", 0)
+                       if self.track_concurrency else 0)
         for phase in InferencePhase:
             profile_key = (phase, concurrency) if concurrency > 0 else phase
             if (profile_key in self.inference_phases_profiled
@@ -851,7 +856,8 @@ class PhasedBasedProfiler:
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
             "total_num_scheduled_tokens"] > 1
-        concurrency = batch_composition_stats.get("num_reqs", 0)
+        concurrency = (batch_composition_stats.get("num_reqs", 0)
+                       if self.track_concurrency else 0)
         if concurrency > 0:
             should_profile = is_past_initial_request
         else:
