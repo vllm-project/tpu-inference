@@ -320,16 +320,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_JAX_PROFILER_SERVER"),
     "JAX_PROFILER_SERVER_PORT":
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
-    # continue_decode: how often the fused multi-step decode loop checks the
-    # any-sequence-hit-EOS early-exit condition. The stock loop tests it every
-    # step (=1), which is a per-step host<->device dispatch for the whole burst.
-    # A larger interval N tests it only on steps that are multiples of N; every
-    # sequence still stops at its own EOS (within <=N-1 tokens of slack, which is
-    # masked in the loss exactly as a normal stop), so the sampled distribution
-    # is unchanged. Trades a few extra decoded-then-masked tokens for far fewer
-    # early-exit dispatches. Measured on TPU v7x DAPO rollout: interval 8 is a
-    # clear win; the benefit saturates by 8 (interval 32 regresses). Default 1
-    # preserves stock behavior exactly.
+    # continue_decode: check the any-sequence-hit-EOS early exit every N steps
+    # instead of every step, amortizing the per-step dispatch. Sequences still
+    # stop at their own EOS (the <=N-1 extra tokens are masked like a normal
+    # stop), so the sampled distribution is unchanged. Default 1 = stock.
     "CONTINUE_DECODE_EOS_CHECK_INTERVAL":
     lambda: int(os.getenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL") or "1"),
     "USE_BATCHED_RPA_KERNEL":
@@ -461,6 +455,16 @@ def __getattr__(name: str) -> Any:
     if name in environment_variables:
         return environment_variables[name]()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def is_set(name: str) -> bool:
+    """Return True if the environment variable ``name`` is explicitly set.
+
+    Lets callers distinguish "user set this to the default value" from "unset",
+    which a plain value read cannot (both return the default). Used to give an
+    explicitly-set env var precedence over other config sources.
+    """
+    return name in os.environ
 
 
 def enable_envs_cache() -> None:
