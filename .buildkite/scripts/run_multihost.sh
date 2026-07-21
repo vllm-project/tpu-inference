@@ -23,6 +23,27 @@ export SSH_USER="${SSH_USER:-$(whoami)}"
 # We need a valid path for run_cluster.sh's HF_HOME bind mount
 HOST_HF_HOME="${HOST_HF_HOME:-/tmp/hf_home}"
 
+get_metadata_value() {
+  local path=$1
+  curl -fs -H "Metadata-Flavor: Google" \
+    "http://metadata.google.internal/computeMetadata/v1/${path}" 2>/dev/null || true
+}
+
+get_current_internal_ip() {
+  local metadata_ip
+  metadata_ip="$(get_metadata_value "instance/network-interfaces/0/ip")"
+  if [[ -n "$metadata_ip" ]]; then
+    echo "$metadata_ip"
+    return 0
+  fi
+
+  hostname -I | awk '{print $1}'
+}
+
+# The Ray head must be the VM executing this script, not whichever endpoint
+# happens to be listed first by gcloud.
+HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(get_current_internal_ip)}"
+
 # Automatic Worker IP Discovery
 if [[ -z "${WORKER_IPS:-}" ]]; then
   echo "⚠️  WORKER_IPS not provided. Attempting to discover via gcloud..."
@@ -45,17 +66,27 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
       # shellcheck disable=SC2206
       ALL_IPS_ARRAY=($ALL_IPS)
       
-      # The first IP from gcloud is ALWAYS the head node
-      if [[ -z "${HEAD_INTERNAL_IP:-}" ]]; then
-        HEAD_INTERNAL_IP="${ALL_IPS_ARRAY[0]}"
-        echo "   -> Discovered Head IP: $HEAD_INTERNAL_IP"
+      # The endpoint order is not a reliable indication of which VM is running
+      # this job. Find the local head in the slice and use every other endpoint
+      # as a worker.
+      CURRENT_IP_IN_SLICE=0
+      WORKER_IPS_LIST=()
+      for ip in "${ALL_IPS_ARRAY[@]}"; do
+        if [[ "$ip" == "$HEAD_INTERNAL_IP" ]]; then
+          CURRENT_IP_IN_SLICE=1
+        elif [[ -n "$ip" ]]; then
+          WORKER_IPS_LIST+=("$ip")
+        fi
+      done
+
+      if (( CURRENT_IP_IN_SLICE != 1 )); then
+        echo "❌ Current VM IP (${HEAD_INTERNAL_IP}) is not in discovered TPU endpoints: ${ALL_IPS_ARRAY[*]}" >&2
+        exit 1
       fi
-      
-      # The rest are Worker IPs
-      WORKER_IPS_LIST=("${ALL_IPS_ARRAY[@]:1}")
       
       # Join with commas
       WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
+      echo "   -> Current/local head IP: $HEAD_INTERNAL_IP"
       echo "   -> Discovered Worker IPs: $WORKER_IPS"
 
       # Detect TPU Version for Docker Build
@@ -77,13 +108,24 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
   fi
 fi
 
+# Reject a manually supplied worker list that includes this head. Starting a
+# second `node` container over SSH on the local VM would replace the Ray head.
+IFS=',' read -r -a REQUESTED_WORKER_IPS <<< "${WORKER_IPS:-}"
+WORKER_IPS_LIST=()
+for worker_ip in "${REQUESTED_WORKER_IPS[@]}"; do
+  [[ -z "$worker_ip" ]] && continue
+  if [[ "$worker_ip" == "$HEAD_INTERNAL_IP" ]]; then
+    echo "ERROR: WORKER_IPS must not include the local head IP (${HEAD_INTERNAL_IP})." >&2
+    exit 1
+  fi
+  WORKER_IPS_LIST+=("$worker_ip")
+done
+WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
+
 if [[ -z "${WORKER_IPS:-}" ]]; then
   echo "ERROR: Failed to discover WORKER_IPS. Please provide it manually."
   exit 1
 fi
-
-# Fallback to hostname -I if HEAD_INTERNAL_IP is still strictly unset.
-HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(hostname -I | awk '{print $1}')}"
 
 # Enforce TPUv7 requirement
 if [[ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]]; then
@@ -100,10 +142,39 @@ fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o IPQoS=none -i ~/.ssh/id_rsa)
 
+dump_container_logs() {
+  local host=$1
+  local role=$2
+
+  echo "+++ 📄 ${role} host logs (${host})"
+  if [[ "$host" == "localhost" || "$host" == "127.0.0.1" || "$host" == "$HEAD_INTERNAL_IP" ]]; then
+    echo "--- docker logs node (${role}) ---"
+    docker logs node 2>&1 || true
+    echo "--- /root/vllm_serve.log (${role}) ---"
+    docker exec node cat /root/vllm_serve.log 2>&1 || true
+  else
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+      "echo '--- docker logs node (${role}) ---'; docker logs node 2>&1 || true; \
+       echo '--- /root/vllm_serve.log (${role}) ---'; docker exec node cat /root/vllm_serve.log 2>&1 || true" || true
+  fi
+}
+
 # Cleanup function that runs on exit to tear down the Ray cluster
 cleanup() {
+  local exit_code=${1:-0}
   echo "🧹 Cleaning up containers on head and workers..."
   IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS:-}"
+
+  # Print diagnostics before removing containers. The generic multi-host runner
+  # has one vLLM head and Ray workers, so dump the equivalent of the
+  # prefill/decode host logs from every participating host.
+  if (( exit_code != 0 )); then
+    echo "--- 🚨 Script failed (exit code: ${exit_code}). Dumping host logs..."
+    dump_container_logs "localhost" "head"
+    for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
+      [[ -n "$worker_ip" ]] && dump_container_logs "$worker_ip" "worker"
+    done
+  fi
   
   echo "   -> Cleaning workers..."
   if [[ ${#WORKER_IPS_ARRAY[@]} -gt 0 && -n "${WORKER_IPS_ARRAY[0]}" ]]; then
@@ -125,7 +196,66 @@ cleanup() {
 
   echo "✅ Cleanup complete."
 }
-trap cleanup EXIT
+trap 'exit_code=$?; cleanup "$exit_code"; exit "$exit_code"' EXIT
+
+wait_for_ray_head() {
+  local timeout=${1:-300}
+  echo "Waiting for Ray head on ${HEAD_INTERNAL_IP}:6379 to become available..."
+  local end_time=$((SECONDS + timeout))
+  while [[ $SECONDS -lt $end_time ]]; do
+    if nc -z -w2 "$HEAD_INTERNAL_IP" 6379 &>/dev/null; then
+      echo "Ray head is reachable on ${HEAD_INTERNAL_IP}:6379"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "Error: Ray head failed to start within ${timeout}s." >&2
+  return 1
+}
+
+check_worker_launchers() {
+  local index pid host
+  for index in "${!WORKER_LAUNCHER_PIDS[@]}"; do
+    pid=${WORKER_LAUNCHER_PIDS[$index]}
+    host=${WORKER_LAUNCHER_HOSTS[$index]}
+    if ! kill -0 "$pid" 2>/dev/null; then
+      if wait "$pid"; then
+        echo "Error: worker launcher on ${host} exited before the Ray worker registered." >&2
+      else
+        echo "Error: worker launcher on ${host} failed before the Ray worker registered." >&2
+      fi
+      return 1
+    fi
+  done
+}
+
+dump_ray_nodes() {
+  local ray_dump_cmd="import json, ray; ray.init(address='auto', ignore_reinit_error=True); print(json.dumps(ray.nodes(), indent=2, sort_keys=True))"
+  echo "--- Ray node state (${HEAD_INTERNAL_IP})"
+  docker exec node python3 -c "$ray_dump_cmd" || true
+}
+
+wait_for_ray_cluster_members() {
+  local expected_nodes=$1
+  local timeout=${2:-900}
+  local ray_ready_cmd
+  ray_ready_cmd="import ray; ray.init(address='auto', ignore_reinit_error=True); alive=sum(node.get('Alive', False) for node in ray.nodes()); raise SystemExit(0 if alive >= ${expected_nodes} else 1)"
+
+  echo "Waiting for Ray cluster to register ${expected_nodes} alive node(s)..."
+  local end_time=$((SECONDS + timeout))
+  while [[ $SECONDS -lt $end_time ]]; do
+    check_worker_launchers
+    if docker exec node python3 -c "$ray_ready_cmd" >/dev/null 2>&1; then
+      echo "Ray cluster has registered ${expected_nodes} alive node(s)."
+      return 0
+    fi
+    sleep 5
+  done
+
+  echo "Error: Ray cluster did not register ${expected_nodes} alive node(s) within ${timeout}s." >&2
+  dump_ray_nodes
+  return 1
+}
 
 wait_for_server() {
   local port=$1
@@ -201,10 +331,13 @@ DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 
 # Clean up potential leftovers from previous runs
 echo "--- Cleaning up previous cluster state..."
-cleanup
+cleanup 0
 
 # 1. Start Ray Head Node locally
 echo "--- Starting Ray Head Node Locally"
+WORKER_LAUNCHER_PIDS=()
+WORKER_LAUNCHER_HOSTS=()
+
 bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${DOCKER_IMAGE}" \
   "${HEAD_INTERNAL_IP}" \
@@ -222,7 +355,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
   -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" &
 
-sleep 60
+wait_for_ray_head
 
 # 2. Distribute run_cluster.sh to workers and start them
 IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
@@ -253,12 +386,13 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE='${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}' \
   -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}'
 EOF
+    WORKER_LAUNCHER_PIDS+=("$!")
+    WORKER_LAUNCHER_HOSTS+=("$worker_ip")
 done
 
 
 echo "--- Waiting for all worker nodes to connect"
-# Wait a few seconds for all worker nodes to connect
-sleep 120
+wait_for_ray_cluster_members "$(( ${#WORKER_IPS_ARRAY[@]} + 1 ))" "${RAY_CLUSTER_TIMEOUT:-900}"
 
 # 3. Start vLLM server on the head node
 echo "--- Starting vLLM server on head node"
