@@ -932,6 +932,9 @@ class CompilationManager:
                         self.runner.mesh,
                         logits,
                         sampling_metadata,
+                        # Match the serving-time signature: an int step
+                        # counter when sampling, None otherwise.
+                        0 if do_sampling else None,
                         num_reqs=num_reqs,
                         do_sampling=do_sampling,
                         logprobs=logprobs,

@@ -108,6 +108,7 @@ def sample(
     mesh: Mesh,
     logits: jax.Array,
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
+    step: Optional[jax.Array] = None,
 ) -> jax.Array:
     # (B, vocab_size)
     if tpu_sampling_metadata._cache_collision_dummy is not None:
@@ -116,6 +117,11 @@ def sample(
             tpu_sampling_metadata._cache_collision_dummy)
 
     if tpu_sampling_metadata.do_sampling:
+        if step is not None:
+            # `rng` is a long-lived base key; fold the decode-step counter
+            # into it so each step draws a distinct key. Callers that
+            # already hold a per-step key pass step=None.
+            rng = jax.random.fold_in(rng, step)
         # Unshard the logits explicity to avoid latency increase.
         # TODO(gxd3): revisit if the 2nd dimension of the logits can be sharded
         # instead of being replicated.

@@ -1221,6 +1221,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                                     sharding=NamedSharding(
                                                         self.mesh,
                                                         PartitionSpec()))
+        # Monotonic decode-step counter folded into the sampling key inside
+        # sample() so each step draws a distinct key (see _sample_from_logits).
+        self._sampling_step = 0
         # This allows a multi-modal model to be used as text-only, assuming the user
         # passes the following to vLLM (on the CLI):
         # --limit-mm-per-prompt '{"image": 0, "video": 0}'
@@ -1981,26 +1984,32 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
                 self.input_batch.num_reqs, self.max_num_reqs)
 
-        if tpu_sampling_metadata.do_sampling:
-            self.rng_params_for_sampling, step_rng = jax.random.split(
-                self.rng_params_for_sampling)
-        else:
-            step_rng = self.rng_params_for_sampling
-
         processed_bonus_logits = None
         if spec_decode_metadata is None:
+            # Let sample() derive the per-step key on device from the base
+            # key and a host-side step counter, rather than splitting the
+            # key on the host every step.
+            step = None
+            if tpu_sampling_metadata.do_sampling:
+                # Weak int32 scalar -> new values don't grow the jit cache.
+                step = self._sampling_step % (1 << 31)
+                self._sampling_step += 1
             logits = logits.astype(jnp.float32)
             with self.maybe_forbid_compile:
                 next_tokens, processed_logits = sample(
-                    step_rng,
+                    self.rng_params_for_sampling,
                     self.mesh,
                     logits,
                     tpu_sampling_metadata,
+                    step,
                 )
         else:
             if tpu_sampling_metadata.do_sampling:
+                self.rng_params_for_sampling, step_rng = jax.random.split(
+                    self.rng_params_for_sampling)
                 bonus_rng, rejection_rng = jax.random.split(step_rng)
             else:
+                step_rng = self.rng_params_for_sampling
                 bonus_rng = step_rng
                 rejection_rng = step_rng
             bonus_logits = self._select_from_array_fn(
