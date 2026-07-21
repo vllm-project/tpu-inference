@@ -126,9 +126,8 @@ steps:
       queue: default
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-      MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-      LOAD_FORMAT: "runai_streamer"
-      SERVED_MODEL_NAME: "Qwen/Qwen3-30B-A3B"
+      MODEL: "Qwen/Qwen3-0.6B"
+      LOAD_FORMAT: "auto"
       SPECULATIVE_CONFIG: '{"method":"ngram","prompt_lookup_max":5,"prompt_lookup_min":3,"num_speculative_tokens":3}'
       PREFILL_HOSTS_COUNT: "1"
       DECODE_HOSTS_COUNT: "1"
