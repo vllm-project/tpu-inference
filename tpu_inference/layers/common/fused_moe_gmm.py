@@ -687,13 +687,17 @@ def fused_moe_func(
             topk_weights, k=topk, recall_target=approx_topk_recall_target)
     else:
         if topk_backend == "pallas_topk":
-            topk_fn = jax.shard_map(
-                functools.partial(iterative_top_k_kernel),
-                mesh=mesh,
-                in_specs=(data_p_spec, ),
-                out_specs=(data_p_spec, data_p_spec),
-                check_vma=False,
-            )
+            # k must be bound before shard_map wraps the kernel: the
+            # shard_map wrapper's call signature only accepts the array
+            # args from in_specs, not arbitrary kwargs like k=topk below.
+            def topk_fn(x, k):
+                return jax.shard_map(
+                    functools.partial(iterative_top_k_kernel, k=k),
+                    mesh=mesh,
+                    in_specs=(data_p_spec, ),
+                    out_specs=(data_p_spec, data_p_spec),
+                    check_vma=False,
+                )(x)
         else:
             topk_fn = jax.lax.top_k
         if expert_score_correction_bias is not None:
