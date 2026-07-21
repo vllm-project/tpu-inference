@@ -490,14 +490,13 @@ class TPUWorker(WorkerBase):
                                                  intermediate_tensors)
 
         if self.is_profiling:
-            self.profile_step_counter += 1
-            active_profiler_steps = envs.VLLM_ACTIVE_PROFILER_STEPS
-            if active_profiler_steps > 0 and self.profile_step_counter >= active_profiler_steps:
+            if self.active_profiler_steps > 0 and self.profile_step_counter >= self.active_profiler_steps:
                 logger.info(
                     "Stopping profiler automatically after %d steps.",
                     self.profile_step_counter,
                 )
                 self.profile(is_start=False)
+            self.profile_step_counter += 1
 
         if isinstance(output, JaxIntermediateTensors):
             assert self.parallel_config.pipeline_parallel_size > 1
@@ -549,6 +548,7 @@ class TPUWorker(WorkerBase):
                                      profiler_options=options)
             self.is_profiling = True
             self.profile_step_counter = 0
+            self.active_profiler_steps = envs.VLLM_ACTIVE_PROFILER_STEPS
         else:
             if self.is_profiling:
                 try:
