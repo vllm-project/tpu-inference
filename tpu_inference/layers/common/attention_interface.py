@@ -385,6 +385,7 @@ def sharded_ragged_paged_attention(
     v_scale: float | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    decode_query_size: int = 1,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
@@ -402,6 +403,7 @@ def sharded_ragged_paged_attention(
             k = jnp.repeat(k, factor, axis=1)
             v = jnp.repeat(v, factor, axis=1)
 
+    print("in ragged paged attention, query size reached : ", decode_query_size)
     qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
                       ShardingAxisName.ATTN_HEAD, None, None)
@@ -452,6 +454,7 @@ def sharded_ragged_paged_attention(
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             kwargs["use_causal_mask"] = use_causal_mask
+            kwargs["decode_query_size"] = decode_query_size
         return func(*args, **kwargs)
 
     return jax.shard_map(
@@ -479,6 +482,7 @@ def attention(
     sinks: jax.Array | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    decode_query_size:int = 1,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -499,7 +503,7 @@ def attention(
         sm_scale = head_dim_original**-0.5
 
     md = attention_metadata
-
+    print("in attention pure function, query size reached : ", decode_query_size)
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
         mesh,
@@ -519,6 +523,7 @@ def attention(
         v_scale=v_scale,
         update_kv_cache=update_kv_cache,
         use_causal_mask=use_causal_mask,
+        decode_query_size=decode_query_size
     )
 
     return kv_cache, output

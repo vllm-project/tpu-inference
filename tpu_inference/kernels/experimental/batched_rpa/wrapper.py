@@ -135,9 +135,12 @@ def calculate_block_sizes(
     model_cfgs: configs.ModelConfigs,
     serve_cfgs: configs.ServingConfigs,
     vmem_limit_bytes: int,
+    decode_query_size: int = 1,
 ) -> tuple[configs.BlockSizes, configs.BlockSizes]:
-    """Calculate optimal block size for decode and prefill."""
+    """Calculate the block sizes for the given configs."""
 
+
+    print("inside calculate block size , decode query size : ", decode_query_size)
     tpu_info = pltpu.get_tpu_info()
     num_lanes = tpu_info.num_lanes
     mxu_column_size = tpu_info.mxu_column_size
@@ -223,7 +226,7 @@ def calculate_block_sizes(
     def find_best_block_sizes(
             max_batch_size: int,
             max_n_buffer: int,
-            fixed_bq_sz: int | None = None) -> configs.BlockSizes:
+            fixed_bq_sz: int | None = None,) -> configs.BlockSizes:
         """Loop through different block sizes to find the most optimal one."""
 
         # Even if we loose some potential performance, we want to avoid OOM at all
@@ -311,13 +314,14 @@ def calculate_block_sizes(
     decode_batch_size = 8
     prefill_batch_size = 2
 
-    decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, fixed_bq_sz=1)
-    prefill_block_sizes = find_best_block_sizes(prefill_batch_size, n_buffer, fixed_bq_sz=None)
-    # Speculative decode: fixed query tile of 8 covers all 1-7 draft token setups
-    # in a single tile pass with maximum decode batch parallelism (8).
-    spec_decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, fixed_bq_sz=8)
+    decode_block_sizes = find_best_block_sizes(
+        decode_batch_size, n_buffer, fixed_bq_sz=decode_query_size
+    )
+    prefill_block_sizes = find_best_block_sizes(
+        prefill_batch_size, n_buffer, fixed_bq_sz=None
+    )
 
-    return decode_block_sizes, prefill_block_sizes, spec_decode_block_sizes
+    return decode_block_sizes, prefill_block_sizes
 
 
 @jax.jit(
@@ -332,12 +336,12 @@ def calculate_block_sizes(
         "chunk_prefill_size",
         "decode_block_sizes",
         "prefill_block_sizes",
-        "spec_decode_block_sizes",
         "vmem_limit_bytes",
         "debug_mode",
         "out_dtype",
         "use_causal_mask",
         "update_kv_cache",
+        "decode_query_size"
     ),
     donate_argnames=("queries", "keys", "values", "kv_cache"),
 )
@@ -361,12 +365,12 @@ def ragged_paged_attention(
     chunk_prefill_size: int | None = None,
     decode_block_sizes: configs.BlockSizes | None = None,
     prefill_block_sizes: configs.BlockSizes | None = None,
-    spec_decode_block_sizes: configs.BlockSizes | None = None,
     vmem_limit_bytes: int | None = None,
     debug_mode: bool = False,
     out_dtype: jnp.dtype | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
+    decode_query_size: int = 1,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
 
@@ -395,10 +399,11 @@ def ragged_paged_attention(
         q_scale: Quantization scale value of queries.
         k_scale: Quantization scale value of keys.
         v_scale: Quantization scale value of values.
+        decode_query_size: Number of query tokens in deode (1 by default,
+             can be higher in case of speculative decoding)
         chunk_prefill_size: Not used.
         decode_block_sizes: Kernel block size to use during decode.
         prefill_block_sizes: Kernel block size to use during prefill.
-        spec_decode_block_sizes: Kernel block size to use during speculative decode / small mixed.
         vmem_limit_bytes: VMEM size limit of the kernel. Defaults to maximum VMEM
             size of the hardware.
         debug_mode: Not used.
@@ -459,8 +464,11 @@ def ragged_paged_attention(
     q_hbm, new_kv_hbm = prepare_inputs(queries, keys, values, queries.dtype,
                                        kv_cache.dtype)
 
-    default_decode, default_prefill, default_spec_decode = calculate_block_sizes(
-        model_cfgs, serve_cfgs, vmem_limit_bytes)
+    print("getting the block sizes i think :  ",decode_query_size)
+    default_decode, default_prefill = calculate_block_sizes(
+        model_cfgs, serve_cfgs, vmem_limit_bytes, decode_query_size=decode_query_size)
+    
+    print("got the defult decode as : ", default_decode)
 
     def run_rpa_kernel(
         mode: configs.RpaCase,
@@ -470,13 +478,7 @@ def ragged_paged_attention(
         if mode == configs.RpaCase.DECODE:
             effective_blocks = decode_block_sizes or default_decode
         else:
-            if spec_decode_block_sizes is not None:
-                effective_blocks = spec_decode_block_sizes
-            elif queries.shape[0] <= serve_cfgs.num_seqs * 8:
-                # Target speculative decode / small mixed batches (<= 8 query tokens per sequence)
-                effective_blocks = default_spec_decode
-            else:
-                effective_blocks = prefill_block_sizes or default_prefill
+            effective_blocks = prefill_block_sizes or default_prefill
 
         cfgs = configs.RpaConfigs(
             block=effective_blocks,
