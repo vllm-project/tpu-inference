@@ -403,7 +403,6 @@ def sharded_ragged_paged_attention(
             k = jnp.repeat(k, factor, axis=1)
             v = jnp.repeat(v, factor, axis=1)
 
-    print("in ragged paged attention, query size reached : ", decode_query_size)
     qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
                       ShardingAxisName.ATTN_HEAD, None, None)
@@ -503,7 +502,6 @@ def attention(
         sm_scale = head_dim_original**-0.5
 
     md = attention_metadata
-    print("in attention pure function, query size reached : ", decode_query_size)
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
         mesh,

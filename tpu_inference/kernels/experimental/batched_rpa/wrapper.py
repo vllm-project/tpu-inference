@@ -140,7 +140,6 @@ def calculate_block_sizes(
     """Calculate the block sizes for the given configs."""
 
 
-    print("inside calculate block size , decode query size : ", decode_query_size)
     tpu_info = pltpu.get_tpu_info()
     num_lanes = tpu_info.num_lanes
     mxu_column_size = tpu_info.mxu_column_size
@@ -464,11 +463,9 @@ def ragged_paged_attention(
     q_hbm, new_kv_hbm = prepare_inputs(queries, keys, values, queries.dtype,
                                        kv_cache.dtype)
 
-    print("getting the block sizes i think :  ",decode_query_size)
     default_decode, default_prefill = calculate_block_sizes(
         model_cfgs, serve_cfgs, vmem_limit_bytes, decode_query_size=decode_query_size)
     
-    print("got the defult decode as : ", default_decode)
 
     def run_rpa_kernel(
         mode: configs.RpaCase,

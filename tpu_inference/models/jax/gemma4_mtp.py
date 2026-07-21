@@ -323,7 +323,6 @@ class Gemma4MTPDecoderLayer(JaxModule):
         self.is_sliding = self.layer_type == "sliding_attention"
         self.layer_scalar = nnx.Param(jnp.ones((1, ), dtype=dtype))
         mtp_decode_query_size= num_speculative_tokens+1
-        print("in decode layer : ", mtp_decode_query_size)
 
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
@@ -427,11 +426,7 @@ class Gemma4MultiTokenPredictor(JaxModule):
         text_config = draft_config.text_config
         self.config = text_config
         dtype = vllm_config.model_config.dtype
-
         spec_config = getattr(vllm_config, "speculative_config", None)
-        print("spec_config : ", spec_config)
-        mtp_decode_query_size = (spec_config.num_speculative_tokens + 1) if spec_config else 1
-        print("mtp thing : ", mtp_decode_query_size)
 
         self.hidden_size = text_config.hidden_size
         self.backbone_hidden_size = getattr(draft_config,
