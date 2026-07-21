@@ -37,24 +37,17 @@ from tools.kernel.tuner.v1.autotune.kernel_autotune_config import \
     kernel_autotune_mapping
 
 # The docker workspace prefix used in kernel_autotune_mapping paths.
-_DOCKER_PREFIX = "/workspace/tpu_inference/"
+_DOCKER_PREFIX = "/tpu-inference/workspace/tpu_inference/"
 
 # Resolve the repository root (the directory that contains 'tpu_inference/' and 'tools/').
 _REPO_ROOT = Path(__file__).resolve().parents[5]
 
 
 def _resolve_local_path(docker_path: str) -> Path:
-    """Convert a docker-internal path to a local repo-relative path.
-
-    The kernel_autotune_mapping stores paths like
-    ``/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py``
-    which map to ``<repo_root>/tpu_inference/kernels/mla/v2/tuned_params.py``.
-    """
+    """Convert a docker-internal path to a local repo-relative path."""
     if docker_path.startswith(_DOCKER_PREFIX):
-        relative = docker_path[len(_DOCKER_PREFIX):]
-    else:
-        relative = docker_path
-    return _REPO_ROOT / relative
+        return _REPO_ROOT / docker_path[len(_DOCKER_PREFIX):]
+    return _REPO_ROOT / docker_path
 
 
 class TunedParamsStructureTest(absltest.TestCase):

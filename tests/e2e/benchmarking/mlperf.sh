@@ -54,7 +54,7 @@ else
     echo "QUANTIZATION is False. Running without quantization."
 fi
 
-root_dir=/workspace
+root_dir=/tpu-inference/workspace
 dataset_name=mlperf
 dataset_path=""
 num_prompts=1000
@@ -131,6 +131,10 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
+if [ "$root_dir" = "/workspace" ] && [ ! -w "/workspace" ]; then
+    root_dir="$(pwd)"
+fi
+
 echo "Using the root directory at $root_dir"
 echo "Using $num_prompts prompts"
 echo "Using server timeout of $TIMEOUT_SECONDS seconds"
@@ -201,13 +205,21 @@ echo extra_serve_args: "${extra_serve_args[@]}"
 
 echo "Using the dataset at $dataset_path"
 
-cd "$root_dir"/vllm || exit
+vllm_dir="${root_dir}/vllm"
+if [[ ! -d "$vllm_dir" && -d "/vllm" ]]; then
+    vllm_dir="/vllm"
+fi
+
+cd "$vllm_dir" || exit
 echo "Current working directory: $(pwd)"
-echo "Using vLLM hash: $(git rev-parse HEAD)"
+
+tpu_inf_dir="${root_dir}/tpu_inference"
+if [[ ! -d "$tpu_inf_dir" ]]; then
+    tpu_inf_dir="$(pwd)"
+fi
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Inference ones
-cp -r "$root_dir"/tpu_inference/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
-echo "Using TPU Inference hash: $(git -C "$root_dir"/tpu_inference rev-parse HEAD)"
+cp -r "$tpu_inf_dir"/scripts/vllm/benchmarking/*.py "$vllm_dir"/benchmarks/
 
 checkThroughputAndRouge() {
     # This function checks whether the ROUGE1 score and total token throughput

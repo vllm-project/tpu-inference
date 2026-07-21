@@ -27,7 +27,7 @@ spec:
     imagePullPolicy: Always # Uncomment to always pull the latest image for any dev work
     command:
     - python
-    - /workspace/tpu_inference/examples/offload/offline_inference_kv_cache.py
+    - /tpu_inference/examples/offload/offline_inference_kv_cache.py
     - --model=meta-llama/Llama-3.1-8B
     - --tensor_parallel_size=8
     - --max_model_len=1024

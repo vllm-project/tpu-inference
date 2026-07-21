@@ -52,7 +52,7 @@ RUN if [ "$BM_INFRA" = "true" ]; then \
     fi
 
 # Build vLLM
-WORKDIR /workspace/vllm
+WORKDIR /tpu-inference/workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_COMMIT_HASH
 
@@ -75,7 +75,7 @@ RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
     tblib
 
 # Install tpu_inference
-WORKDIR /workspace/tpu_inference
+WORKDIR /tpu-inference/workspace/tpu_inference
 # Install requirements first and cache so we don't need to re-install on code change.
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --retries 3

@@ -136,9 +136,9 @@ if [[ -n "${GENERATION_CONFIG}" ]]; then
   CONFIG_DIR_NAME=$(basename "${CONFIG_URL}") # generation_configs
   CONFIG_FILE_NAME=$(basename "${GENERATION_CONFIG}") # DeepSeek-R1
   
-  # Download to /workspace/ so it creates /workspace/generation_configs/ inside the docker container
-  PRE_SERVER_CMD="if ! command -v gsutil &> /dev/null; then curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null; export PATH=\"\$PATH:/root/google-cloud-sdk/bin\"; fi && mkdir -p /workspace && gsutil -m cp -r ${CONFIG_URL} /workspace/ && "
-  EXTRA_SERVER_ARGS="--generation-config /workspace/${CONFIG_DIR_NAME}/${CONFIG_FILE_NAME}"
+  # Download to /tpu-inference-workspace/ so it creates /tpu-inference-workspace/generation_configs/ inside the docker container
+  PRE_SERVER_CMD="if ! command -v gsutil &> /dev/null; then curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null; export PATH=\"\$PATH:/root/google-cloud-sdk/bin\"; fi && mkdir -p /tpu-inference-workspace && gsutil -m cp -r ${CONFIG_URL} /tpu-inference-workspace/ && "
+  EXTRA_SERVER_ARGS="--generation-config /tpu-inference-workspace/${CONFIG_DIR_NAME}/${CONFIG_FILE_NAME}"
 fi
 
 if [[ -n "${HF_CONFIG}" ]]; then
@@ -194,14 +194,15 @@ BENCHMARK_CMD="vllm bench serve \
 if [[ "${RUN_ACCURACY}" == "mmlu" ]]; then
   echo "--- Accuracy benchmark requested: appending MMLU accuracy commands..."
   BENCHMARK_CMD="${BENCHMARK_CMD} && \
-    mkdir -p /workspace/mmlu && \
-    cd /workspace/mmlu && \
+    mkdir -p /tpu-inference-workspace/mmlu && \
+    cd /tpu-inference-workspace/mmlu && \
     if [ ! -f data.tar ]; then wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .; tar -xvf data.tar; fi && \
-    python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py \
+    TPU_INF_PATH=\$(if [ -d /tpu_inference ]; then echo /tpu_inference; else echo /workspace/tpu_inference; fi) && \
+    python3 \${TPU_INF_PATH}/scripts/vllm/benchmarking/benchmark_serving.py \
       --backend vllm \
       --model ${TARGET_TOKENIZER} \
       --dataset-name mmlu \
-      --dataset-path /workspace/mmlu/data/test \
+      --dataset-path /tpu-inference-workspace/mmlu/data/test \
       --num-prompts 14000 \
       --run_eval \
       --temperature 0"

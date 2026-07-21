@@ -45,6 +45,13 @@ print_logs_on_exit() {
     else
       echo "File not found."
     fi
+
+    echo "--- Contents of $LOG_DIR/proxy_0.txt ---"
+    if [ -f "$LOG_DIR/proxy_0.txt" ]; then
+      cat "$LOG_DIR/proxy_0.txt"
+    else
+      echo "File not found."
+    fi
   else
     echo "Log directory '$LOG_DIR' not found."
   fi
@@ -84,7 +91,7 @@ wait_for_server() {
   local port=$1
   local pid=$2
   timeout 1200 bash -c "
-    until curl -s localhost:${port}/health > /dev/null; do
+    until curl -s 127.0.0.1:${port}/health > /dev/null; do
       if ! kill -0 $pid 2>/dev/null; then
         echo \"Error: vLLM server on port $port (PID $pid) crashed or failed to start!\" >&2
         exit 1
@@ -233,14 +240,18 @@ done
 echo "starting proxy server"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Start proxy server
-python $SCRIPT_DIR/toy_proxy_server.py \
---host localhost \
+python3 $SCRIPT_DIR/toy_proxy_server.py \
+--host 127.0.0.1 \
 --port 8000 \
 --prefiller-hosts ${PREFILL_HOSTS[@]} \
 --prefiller-ports ${PREFILL_PORTS[@]} \
 --decoder-hosts ${DECODE_HOSTS[@]} \
 --decoder-ports ${DECODE_PORTS[@]} \
 > $LOG_DIR/proxy_0.txt 2>&1 &
+PROXY_PID=$!
+
+echo "Waiting for proxy on port 8000 to start..."
+wait_for_server 8000 $PROXY_PID
 
 # run benchmark for both disagg and non-disagg
 LOG_FILE="$LOG_DIR/benchmark_0.txt"

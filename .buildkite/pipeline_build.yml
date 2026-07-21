@@ -14,7 +14,7 @@
 
 .docker_build_template: &docker_build_template
   agents:
-    queue: cpu_64_core
+    queue: ${CPU_QUEUE:-cpu}
   commands:
     - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 

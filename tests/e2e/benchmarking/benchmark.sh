@@ -27,7 +27,7 @@ if [ "$USE_V6E8_QUEUE" == "True" ]; then
     test_model="meta-llama/Llama-3.1-70B-Instruct"
 fi
 
-root_dir=/workspace
+root_dir=/tpu-inference/workspace
 dataset_name=sonnet
 dataset_path="benchmarks/sonnet.txt"
 vllm_download_dir=/tmp/hf_home
@@ -135,13 +135,21 @@ echo "Using tensor parallel size $tensor_parallel_size"
 echo "Using the dataset name $dataset_name"
 echo "Using the dataset at $dataset_path"
 
-cd "$root_dir"/vllm || exit
+vllm_dir="${root_dir}/vllm"
+if [[ ! -d "$vllm_dir" && -d "/vllm" ]]; then
+    vllm_dir="/vllm"
+fi
+
+cd "$vllm_dir" || exit
 echo "Current working directory: $(pwd)"
-echo "Using vLLM hash: $(git rev-parse HEAD)"
+
+tpu_inf_dir="${root_dir}/tpu_inference"
+if [[ ! -d "$tpu_inf_dir" ]]; then
+    tpu_inf_dir="$(pwd)"
+fi
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Commons ones
-cp -r "$root_dir"/tpu_inference/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
-echo "Using TPU Inference hash: $(git -C "$root_dir"/tpu_inference rev-parse HEAD)"
+cp -r "$tpu_inf_dir"/scripts/vllm/benchmarking/*.py "$vllm_dir"/benchmarks/
 
 checkThroughput() {
     # This function checks whether the Request throughput from a benchmark

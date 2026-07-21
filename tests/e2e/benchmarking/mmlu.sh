@@ -52,7 +52,7 @@ else
     echo "QUANTIZATION is False. Running without quantization."
 fi
 
-root_dir=/workspace
+root_dir=/tpu-inference/workspace
 dataset_name=mmlu
 dataset_path=""
 num_prompts=1000
@@ -117,6 +117,10 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
+if [ "$root_dir" = "/workspace" ] && [ ! -w "/workspace" ]; then
+    root_dir="$(pwd)"
+fi
+
 echo "Using the root directory at $root_dir"
 echo "Using $num_prompts prompts"
 
@@ -144,7 +148,11 @@ echo extra_serve_args: "${extra_serve_args[@]}"
 
 echo "Using the dataset at $dataset_path"
 
-cd "$root_dir"/tpu_inference || exit
+tpu_inf_dir="${root_dir}/tpu_inference"
+if [[ ! -d "$tpu_inf_dir" ]]; then
+    tpu_inf_dir="$(pwd)"
+fi
+cd "$tpu_inf_dir" || exit
 echo "Current working directory: $(pwd)"
 echo "Using vLLM hash: $(git rev-parse HEAD)"
 

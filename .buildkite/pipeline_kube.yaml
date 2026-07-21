@@ -1,0 +1,355 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ==============================================================================
+# Common Reusable Anchors
+# ==============================================================================
+
+.kube_common_env: &kube_common_env
+  PYTHONUNBUFFERED: "1"
+  MODEL_IMPL_TYPE: "vllm"
+  TPU_VERSION: "tpu6e"
+  HF_HOME: "/cache/hf_home"
+  VLLM_XLA_CACHE_PATH: "/cache/tpu_jax_cache"
+  JAX_COMPILATION_CACHE_DIR: "/cache/tpu_jax_cache"
+  VLLM_XLA_CHECK_RECOMPILATION: "1"
+
+.kube_common_tolerations: &kube_common_tolerations
+  - key: "google.com/tpu"
+    operator: "Equal"
+    value: "present"
+    effect: "NoSchedule"
+
+.kube_common_affinity: &kube_common_affinity
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchExpressions:
+            - key: "app"
+              operator: "In"
+              values:
+                - "vllm-tpu-runner"
+        topologyKey: "kubernetes.io/hostname"
+
+.kube_common_volume_mounts: &kube_common_volume_mounts
+  - name: dshm
+    mountPath: /dev/shm
+  - name: cache-volume
+    mountPath: /cache
+
+.kube_common_volumes: &kube_common_volumes
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 16Gi
+  - name: cache-volume
+    ephemeral:
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ "ReadWriteOnce" ]
+          storageClassName: "premium-rwo"
+          dataSource:
+            name: tpu-cache-golden-pvc
+            kind: PersistentVolumeClaim
+          resources:
+            requests:
+              storage: 500Gi
+
+# ==============================================================================
+# Topology Specific Anchors
+# ==============================================================================
+
+.kube_tpu_v6e_1chip_plugin: &kube_tpu_v6e_1chip_plugin
+  kubernetes:
+    pendingTimeout: 0  # Disables pending timeout (indefinite waiting for TPU node)
+    podSpec:
+      terminationGracePeriodSeconds: 5  # Immediately releases TPU resources when pod exits
+      affinity: *kube_common_affinity
+      metadata:
+        labels:
+          app: "vllm-tpu-runner"
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: "tpu-v6e-slice"
+        cloud.google.com/gke-tpu-topology: "1x1"
+      tolerations: *kube_common_tolerations
+      containers:
+        - name: vllm-tpu-runner
+          image: "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu:3bb20c8fb96d5a9c91ab461e4b1d81570ee17014-05781e21dd4af5ed042d4cc19e833a3ee333e92f-tpu6e"
+          resources:
+            limits:
+              google.com/tpu: "1"
+            requests:
+              google.com/tpu: "1"
+          volumeMounts: *kube_common_volume_mounts
+      volumes: *kube_common_volumes
+
+.kube_tpu_v6e_8chip_plugin: &kube_tpu_v6e_8chip_plugin
+  kubernetes:
+    pendingTimeout: 0  # Disables pending timeout (indefinite waiting for TPU node)
+    podSpec:
+      terminationGracePeriodSeconds: 5  # Immediately releases TPU resources when pod exits
+      affinity: *kube_common_affinity
+      metadata:
+        labels:
+          app: "vllm-tpu-runner"
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: "tpu-v6e-slice"
+        cloud.google.com/gke-tpu-topology: "2x4"
+      tolerations: *kube_common_tolerations
+      containers:
+        - name: vllm-tpu-runner
+          image: "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu:3bb20c8fb96d5a9c91ab461e4b1d81570ee17014-05781e21dd4af5ed042d4cc19e833a3ee333e92f-tpu6e"
+          resources:
+            limits:
+              google.com/tpu: "8"
+            requests:
+              google.com/tpu: "8"
+          volumeMounts: *kube_common_volume_mounts
+      volumes: *kube_common_volumes
+
+# ==============================================================================
+# Pipeline Steps
+# ==============================================================================
+
+steps:
+  - label: ":kubernetes: E2E MLPerf tests for JAX models"
+    key: "kube_e2e_mlperf_jax"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+    commands:
+      - bash tests/e2e/benchmarking/mlperf.sh
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  - label: ":kubernetes: E2E MLPerf tests for JAX + vLLM models on single chip"
+    key: "kube_e2e_mlperf_jax_vllm"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+    commands:
+      - bash tests/e2e/benchmarking/mlperf.sh -m "Qwen/Qwen2.5-0.5B-Instruct Qwen/Qwen2.5-1.5B-Instruct"
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  - label: ":kubernetes: E2E speculative decoding test"
+    key: "kube_e2e_speculative_decoding"
+    soft_fail: true
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+      BVT_ONLY: "1"
+    commands:
+      - python3 -m pytest -s -v -x tests/e2e/test_speculative_decoding.py
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  - label: ":kubernetes: JAX unit tests part1"
+    key: "kube_jax_unit_tests_part1"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+    commands:
+      - python3 -m pytest -s -v -x tests/layers/vllm/backends/test_flash_attn.py tests/layers/vllm/test_awq.py tests/layers/vllm/test_compressed_tensors_moe.py tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py tests/layers/vllm/test_compressed_tensors_w8a8_int8.py
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  - label: ":kubernetes: JAX unit tests part2"
+    key: "kube_jax_unit_tests_part2"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+    commands:
+      - python3 -m pytest -s -v -x tests/ --ignore=tests/layers/vllm/backends/test_flash_attn.py --ignore=tests/layers/vllm/test_awq.py --ignore=tests/layers/vllm/test_compressed_tensors_moe.py --ignore=tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py --ignore=tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --ignore=tests/kernels --ignore=tests/lora --ignore=tests/e2e --ignore=tpu_inference/mock --ignore=tests/models/jax/test_deepseek_v3.py --ignore=tests/offload/tpu_offload_multi_request_accuracy_test.py --ignore=tests/offload/tpu_offload_accuracy_test.py --ignore=tests/offload/tpu_offload_performance_test.py --ignore=tests/core/test_dp_group_sampling_prefix_cache.py --ignore=tests/runner/test_async_logprobs.py --ignore=tests/runner/test_processed_logprobs.py --ignore=tests/runner/test_moe_expert_ids.py
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  - label: ":kubernetes: JAX unit tests - kernels"
+    key: "kube_jax_unit_tests_kernels"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+    commands:
+      - python3 -m pytest -s -v -x tests/kernels --ignore=tests/kernels/ragged_paged_attention_kernel_v2_test.py --ignore=tests/kernels/ragged_kv_cache_update_v2_test.py
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  - label: ":kubernetes: LoRA unit tests on single chip"
+    key: "kube_lora_unit_tests"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+      TPU_BACKEND_TYPE: "jax"
+    commands:
+      - python3 -m pytest -s -v -x tests/lora/test_lora.py
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  - label: ":kubernetes: Correctness Test | Runai Model Streamer JAX UniProcExecutor"
+    key: "kube_runai_streamer_jax"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+    commands:
+      - python3 -m pytest -s -v tests/e2e/test_runai_model_streamer_loader.py::test_correctness_jax_uni_proc_executor
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  - label: ":kubernetes: Correctness Test | Runai Model Streamer Torchax UniProcExecutor"
+    key: "kube_runai_streamer_torchax"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+    commands:
+      - python3 -m pytest -s -v tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_uni_proc_executor
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  - label: ":kubernetes: Accuracy for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "kube_qwen2_5_vl_7b_accuracy"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+      TEST_MODEL: "Qwen/Qwen2.5-VL-7B-Instruct"
+      TENSOR_PARALLEL_SIZE: "1"
+      MINIMUM_ACCURACY_THRESHOLD: "0.72"
+    commands:
+      - bash tests/e2e/benchmarking/test_accuracy.sh
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  - label: ":kubernetes: LoRA E2E tests for JAX + vLLM models multi chips"
+    key: "kube_lora_e2e_multi_chip"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+      TEST_LORA_TP: "True"
+      VLLM_LOG_LEVEL: "INFO"
+      TPU_BACKEND_TYPE: "jax"
+    commands:
+      - python3 -m pytest -s -v -x tests/lora/test_lora.py
+    plugins:
+      - <<: *kube_tpu_v6e_8chip_plugin
+
+  - label: ":kubernetes: LoRA unit tests on multi chips"
+    key: "kube_lora_unit_tests_multi_chip"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+      VLLM_LOG_LEVEL: "INFO"
+    commands:
+      - python3 -m pytest -s -v -x tests/lora/test_layers.py
+    plugins:
+      - <<: *kube_tpu_v6e_8chip_plugin
+
+  - label: ":kubernetes: Correctness Test | Runai Model Streamer Torchax RayDistributedExecutor"
+    key: "kube_runai_streamer_torchax_ray"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+    commands:
+      - python3 -m pytest -s -v tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_ray_distributed_executor
+    plugins:
+      - <<: *kube_tpu_v6e_8chip_plugin
+
+  - label: ":kubernetes: E2E test for Single Host DCN-based P/D disaggregation"
+    key: "kube_disagg_single_host"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+      MODEL: "Qwen/Qwen3-0.6B"
+      INPUT_LEN: "512"
+      OUTPUT_LEN: "128"
+      NUM_PROMPTS: "200"
+      REQUEST_RATE: "4"
+    commands:
+      - bash examples/disagg/run_disagg_single_host.sh
+    plugins:
+      - <<: *kube_tpu_v6e_8chip_plugin
+
+  - label: ":kubernetes: E2E test for MPMD data parallelism"
+    key: "kube_mpmd_data_parallelism"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+      NEW_MODEL_DESIGN: "1"
+    commands:
+      - |
+        set -eu
+        MODEL=meta-llama/Llama-3.1-8B-Instruct
+        TPU_MULTIPROCESS_DP=1 \
+          VLLM_ENGINE_READY_TIMEOUT_S=60000 \
+          MODEL_IMPL_TYPE=flax_nnx \
+          vllm serve $MODEL \
+            --port 8000 \
+            --data-parallel-size 4 \
+            --tensor-parallel-size 1 \
+            --max-model-len 1024 \
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization 0.9 &
+        trap "kill %1 2>/dev/null || true" EXIT
+        for _ in $(seq 1 180); do
+          curl -fs localhost:8000/health > /dev/null && break || sleep 10
+        done
+        curl -fsS http://localhost:8000/v1/completions \
+          -X POST \
+          -H "Content-Type: application/json" \
+          -d "{\"model\": \"$MODEL\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}"
+    plugins:
+      - <<: *kube_tpu_v6e_8chip_plugin
