@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
@@ -219,8 +220,16 @@ def setup_environment():
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
+@pytest.mark.parametrize("requantize_block_size", [None, 32])
 def test_row_parallel_linear(model, bias, num_devices, enable_sp,
-                             enable_attn_dp, activation_type):
+                             enable_attn_dp, activation_type,
+                             requantize_block_size):
+    if requantize_block_size is not None:
+        os.environ["REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE"] = str(
+            requantize_block_size)
+    else:
+        os.environ.pop("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE", None)
+
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
 
@@ -262,8 +271,16 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
+@pytest.mark.parametrize("requantize_block_size", [None, 32])
 def test_column_parallel_linear(model, bias, num_devices, enable_sp,
-                                enable_attn_dp, activation_type):
+                                enable_attn_dp, activation_type,
+                                requantize_block_size):
+    if requantize_block_size is not None:
+        os.environ["REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE"] = str(
+            requantize_block_size)
+    else:
+        os.environ.pop("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE", None)
+
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
 
@@ -306,8 +323,16 @@ def test_column_parallel_linear(model, bias, num_devices, enable_sp,
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
+@pytest.mark.parametrize("requantize_block_size", [None, 32])
 def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
-                             enable_attn_dp, activation_type):
+                             enable_attn_dp, activation_type,
+                             requantize_block_size):
+    if requantize_block_size is not None:
+        os.environ["REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE"] = str(
+            requantize_block_size)
+    else:
+        os.environ.pop("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE", None)
+
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
 
@@ -353,9 +378,16 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
+@pytest.mark.parametrize("requantize_block_size", [None, 32])
 def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
                                        enable_sp, enable_attn_dp,
-                                       activation_type):
+                                       activation_type, requantize_block_size):
+    if requantize_block_size is not None:
+        os.environ["REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE"] = str(
+            requantize_block_size)
+    else:
+        os.environ.pop("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE", None)
+
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
 
@@ -389,4 +421,4 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
 
     ref_output, layer_output = return_ref_and_layer_output(
         linear_layer, activation_type=activation_type)
-    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.15)
+    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.35)

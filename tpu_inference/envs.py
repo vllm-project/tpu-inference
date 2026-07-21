@@ -282,6 +282,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "REQUANTIZE_BLOCK_SIZE":
     lambda: int(block_size) if
     (block_size := os.getenv("REQUANTIZE_BLOCK_SIZE")) is not None else None,
+    # Specify requantization block size for compressed tensor NVFP4 weights
+    "REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE":
+    lambda: int(block_size)
+    if (block_size := os.getenv("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE"
+                                )) is not None else None,
     # Specify dtype for quantized linear weights
     "REQUANTIZE_WEIGHT_DTYPE":
     lambda: os.getenv("REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
