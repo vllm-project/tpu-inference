@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 
 import pytest
+
 from vllm import LLM, SamplingParams
 
 
@@ -74,25 +75,28 @@ def _run_inference(
     sampling_params: SamplingParams,
 ) -> tuple[list, float]:
     """Run inference with the given configuration."""
-    llm = LLM(
-        model=config.model_name,
-        max_model_len=config.max_model_len,
-        tensor_parallel_size=config.tensor_parallel_size,
-        pipeline_parallel_size=config.pipeline_parallel_size,
-        gpu_memory_utilization=config.gpu_memory_utilization,
-        max_num_batched_tokens=config.max_num_batched_tokens,
-        max_num_seqs=config.max_num_seqs,
-        additional_config=config.additional_config,
-        kv_cache_dtype=config.kv_cache_dtype,
-        enable_prefix_caching=config.enable_prefix_caching,
-    )
+    llm = None
+    try:
+        llm = LLM(
+            model=config.model_name,
+            max_model_len=config.max_model_len,
+            tensor_parallel_size=config.tensor_parallel_size,
+            pipeline_parallel_size=config.pipeline_parallel_size,
+            gpu_memory_utilization=config.gpu_memory_utilization,
+            max_num_batched_tokens=config.max_num_batched_tokens,
+            max_num_seqs=config.max_num_seqs,
+            additional_config=config.additional_config,
+            kv_cache_dtype=config.kv_cache_dtype,
+            enable_prefix_caching=config.enable_prefix_caching,
+        )
 
-    start_time = time.time()
-    outputs = llm.generate(test_prompts, sampling_params)
-    elapsed_time = time.time() - start_time
-
-    llm.llm_engine.engine_core.shutdown()
-    return outputs, elapsed_time
+        start_time = time.time()
+        outputs = llm.generate(test_prompts, sampling_params)
+        elapsed_time = time.time() - start_time
+        return outputs, elapsed_time
+    finally:
+        if llm:
+            llm.llm_engine.engine_core.shutdown()
 
 
 def _check_performance(

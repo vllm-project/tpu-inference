@@ -25,22 +25,28 @@
 
 from __future__ import annotations
 
-from vllm import LLM, SamplingParams
 from vllm.sampling_params import StructuredOutputsParams
+
+from vllm import LLM, SamplingParams
 
 
 def test_structured_decoding():
-    llm = LLM(model='meta-llama/Llama-3.2-1B-Instruct',
-              max_model_len=1024,
-              max_num_seqs=1,
-              enable_prefix_caching=False)
+    llm = None
+    try:
+        llm = LLM(model='meta-llama/Llama-3.2-1B-Instruct',
+                  max_model_len=1024,
+                  max_num_seqs=1,
+                  enable_prefix_caching=False)
 
-    choices = ['Positive', 'Negative']
-    structured_outputs_params = StructuredOutputsParams(choice=choices)
-    sampling_params = SamplingParams(
-        structured_outputs=structured_outputs_params)
-    outputs = llm.generate(
-        prompts="Classify this sentiment: tpu-inference is wonderful!",
-        sampling_params=sampling_params,
-    )
-    assert outputs[0].outputs[0].text in choices
+        choices = ['Positive', 'Negative']
+        structured_outputs_params = StructuredOutputsParams(choice=choices)
+        sampling_params = SamplingParams(
+            structured_outputs=structured_outputs_params)
+        outputs = llm.generate(
+            prompts="Classify this sentiment: tpu-inference is wonderful!",
+            sampling_params=sampling_params,
+        )
+        assert outputs[0].outputs[0].text in choices
+    finally:
+        if llm:
+            llm.llm_engine.engine_core.shutdown()

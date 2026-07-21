@@ -27,18 +27,21 @@
 from __future__ import annotations
 
 import pytest
+
 from vllm import LLM, SamplingParams
 
 
 @pytest.fixture(scope="module")
 def llm():
     """Create a shared LLM instance for all tests in this module."""
-    return LLM(
+    llm_instance = LLM(
         model='meta-llama/Llama-3.2-1B-Instruct',
         max_model_len=1024,
         max_num_seqs=4,
         enable_prefix_caching=False,
     )
+    yield llm_instance
+    llm_instance.llm_engine.engine_core.shutdown()
 
 
 class TestTemperature:
