@@ -31,7 +31,8 @@ NODE_CONTAINER_NAME="node"
 PROXY_CONTAINER_NAME="disagg-proxy-benchmark"
 PREFILL_HOSTS_COUNT="${PREFILL_HOSTS_COUNT:-1}"
 DECODE_HOSTS_COUNT="${DECODE_HOSTS_COUNT:-1}"
-SPECULATIVE_CONFIG="${SPECULATIVE_CONFIG:-{\"method\":\"ngram\",\"prompt_lookup_max\":5,\"prompt_lookup_min\":3,\"num_speculative_tokens\":3}}"
+DEFAULT_SPECULATIVE_CONFIG='{"method":"ngram","prompt_lookup_max":5,"prompt_lookup_min":3,"num_speculative_tokens":3}'
+SPECULATIVE_CONFIG="${SPECULATIVE_CONFIG:-$DEFAULT_SPECULATIVE_CONFIG}"
 DRAFT_MODEL_IMPL_TYPE="${DRAFT_MODEL_IMPL_TYPE:-auto}"
 
 # Reject malformed configuration before creating containers or contacting peers.
@@ -42,6 +43,7 @@ fi
 # Keep this value out of generated shell source.  JSON strings may legally
 # contain single quotes, which would otherwise break the remote launcher.
 SPECULATIVE_CONFIG_B64="$(printf '%s' "$SPECULATIVE_CONFIG" | base64 | tr -d '\n')"
+SPECULATIVE_METHOD="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["method"])' "$SPECULATIVE_CONFIG")"
 
 # Log directory setup
 LOG_DIR="$HOME/logs"
@@ -156,11 +158,6 @@ if [[ -z "${TPU_VERSION:-}" && -n "${ACCELERATOR_TYPE:-}" ]]; then
     fi
 fi
 
-if [[ -z "${TPU_VERSION:-}" ]]; then
-    echo "❌ Error: TPU_VERSION environment variable is not set and could not be automatically discovered."
-    exit 1
-fi
-
 echo "Running on TPU_VERSION: ${TPU_VERSION}"
 
 IFS=',' read -r -a worker_array <<< "$WORKER_IPS"
@@ -208,9 +205,12 @@ fi
 SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o IPQoS=none -i "$HOME/.ssh/id_rsa")
 
 PROJECT="$(gcloud config get-value project 2>/dev/null)"
-IMAGE_NAME="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference/vllm-tpu-multi-disagg-speculative"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-TOP_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
+GCR_REPO="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference"
+IMAGE_NAME="${GCR_REPO}/vllm-tpu"
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+TOP_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
+
 echo "--- Building and pushing speculative decoding Docker image ---"
 PREFILL_LOG_TAIL_PID=""
 DECODE_LOG_TAIL_PID=""
@@ -514,6 +514,49 @@ wait_vllm_server() {
   return 1
 }
 
+assert_ngram_draft_tokens() {
+  # Starting a server with --speculative-config only checks configuration. For
+  # n-gram decoding, prove the workload actually reached the speculative path.
+  [[ "$SPECULATIVE_METHOD" == "ngram" ]] || return 0
+
+  local metrics
+  metrics="$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$DECODE_HEAD_IP" \
+    "curl -fsS http://127.0.0.1:${DECODE_PORT}/metrics")"
+  echo "--- Decode speculative-decoding metrics ---"
+  printf '%s\n' "$metrics" | grep -E '^vllm:spec_decode_num_(draft|accepted)_tokens(_total)?(\{| )' || true
+
+  if ! printf '%s\n' "$metrics" | awk '
+    $1 ~ /^vllm:spec_decode_num_draft_tokens(_total)?(\{|$)/ { total += $NF }
+    END { exit !(total > 0) }
+  '; then
+    echo "ERROR: n-gram speculative decoding produced no draft tokens." >&2
+    return 1
+  fi
+}
+
+run_ngram_disagg_probe() {
+  # Send a request through the P/D proxy before the comparison workload. This
+  # makes the metrics assertion below evidence for the composed path, rather
+  # than merely for a direct request to the decode server.
+  [[ "$SPECULATIVE_METHOD" == "ngram" ]] || return 0
+
+  local request_body
+  request_body="$(python3 -c '
+import json
+import sys
+print(json.dumps({
+    "model": sys.argv[1],
+    "prompt": "speculative decoding uses repeated ngrams " * 8,
+    "max_tokens": 8,
+    "temperature": 0.0,
+}))
+' "$SERVED_MODEL_NAME")"
+  curl -fsS http://127.0.0.1:8000/v1/completions \
+    -H 'Content-Type: application/json' \
+    --data "$request_body" >/dev/null
+  assert_ngram_draft_tokens
+}
+
 echo "--- 4. Checking vLLM health and speculative decoding process ---"
 start_vllm_log_streaming
 wait_vllm_server 127.0.0.1 "$PREFILL_PORT" "$PREFILL_HEAD_IP" /root/vllm_serve_prefill.log
@@ -532,11 +575,12 @@ docker exec -d "$PROXY_CONTAINER_NAME" /bin/bash -c \
   "python3 /workspace/tpu_inference/examples/disagg/toy_proxy_server.py --host 0.0.0.0 --port 8000 --prefiller-hosts 127.0.0.1 --prefiller-ports $PREFILL_PORT --decoder-hosts $DECODE_HEAD_IP --decoder-ports $DECODE_PORT > /root/logs/proxy.txt 2>&1"
 echo "Waiting for Toy Proxy Server on 127.0.0.1:8000..."
 wait_server 127.0.0.1 8000
+run_ngram_disagg_probe
 
 if [[ "$TEST_MODE" == 2 || "$TEST_MODE" == 3 ]]; then
   echo "--- Running correctness test ---"
   docker exec "$PROXY_CONTAINER_NAME" /bin/bash -c \
-    "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py --baseline_url http://$DECODE_HEAD_IP:$DECODE_PORT/v1/completions --disagg_url http://127.0.0.1:8000/v1/completions --model '$SERVED_MODEL_NAME' --num_requests 20 --input_length 32 --output_length 64 > /root/logs/correctness.txt 2>&1"
+    "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py --baseline_url http://$DECODE_HEAD_IP:$DECODE_PORT/v1/completions --disagg_url http://127.0.0.1:8000/v1/completions --model '$SERVED_MODEL_NAME' --num_requests 20 --input_length 32 --output_length 64 --prompt-mode repeated-ngram > /root/logs/correctness.txt 2>&1"
   docker exec "$PROXY_CONTAINER_NAME" cat /root/logs/correctness.txt
 fi
 

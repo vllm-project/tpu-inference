@@ -21,9 +21,17 @@ import string
 import requests
 
 
-def generate_prompt(num_words):
-    """Generates a random prompt with a specified number of words."""
-    words = [random.choice(string.ascii_lowercase) for _ in range(num_words)]
+def generate_prompt(num_words, prompt_mode):
+    """Generates a prompt with a specified number of words.
+
+    ``repeated-ngram`` is intentionally deterministic: it supplies repeated
+    token sequences that allow n-gram speculative decoding to make proposals.
+    """
+    if prompt_mode == "repeated-ngram":
+        pattern = ("speculative", "decoding", "uses", "repeated", "ngrams")
+        words = [pattern[index % len(pattern)] for index in range(num_words)]
+    else:
+        words = [random.choice(string.ascii_lowercase) for _ in range(num_words)]
     return " ".join(words)
 
 
@@ -52,7 +60,7 @@ def main(args):
     mismatches = 0
     for i in range(args.num_requests):
         logging.info(f"Sending request {i+1}/{args.num_requests}...")
-        prompt = generate_prompt(args.input_length)
+        prompt = generate_prompt(args.input_length, args.prompt_mode)
 
         baseline_response = send_request(args.baseline_url, prompt, args.model,
                                          args.output_length)
@@ -93,6 +101,10 @@ if __name__ == "__main__":
                         type=int,
                         default=100,
                         help="Length of each input prompt in words.")
+    parser.add_argument("--prompt-mode",
+                        choices=("random", "repeated-ngram"),
+                        default="random",
+                        help="Prompt shape used for the correctness requests.")
     parser.add_argument("--output_length",
                         type=int,
                         default=20,
