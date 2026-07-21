@@ -892,7 +892,9 @@ class CompilationManager:
             # function.
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
-            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.float32,
+            # bf16 to match the model-dtype logits sample() receives at
+            # serving time; sample() upcasts to fp32 internally.
+            logits = self._create_dummy_tensor((num_reqs, hsize), jnp.bfloat16,
                                                logits_sharding)
             for do_sampling in (True, False):
                 for logprobs in (True, False):

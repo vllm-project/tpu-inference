@@ -1994,7 +1994,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # Weak int32 scalar -> new values don't grow the jit cache.
                 step = self._sampling_step % (1 << 31)
                 self._sampling_step += 1
-            logits = logits.astype(jnp.float32)
             with self.maybe_forbid_compile:
                 next_tokens, processed_logits = sample(
                     self.rng_params_for_sampling,
