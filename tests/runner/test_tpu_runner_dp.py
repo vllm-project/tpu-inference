@@ -31,6 +31,9 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Basic DP configuration
         self.runner.dp_size = 2
+        # PCP is off in these DP tests; without this the MagicMock auto-attr
+        # fails the `prefill_cp_size > 1` comparison in _prepare_inputs.
+        self.runner.vllm_config.sharding_config.prefill_cp_size = 1
         self.runner.max_num_tokens = 64
         self.runner.max_num_reqs = 8
         self.runner.max_num_blocks_per_req = 8
@@ -1285,6 +1288,7 @@ class TestSamplingMetadataPassthrough:
 
         runner = MagicMock()
         runner.dp_size = 2
+        runner.vllm_config.sharding_config.prefill_cp_size = 1
         runner.max_num_reqs = 8
         runner.max_num_blocks_per_req = 8
         runner.speculative_config = None
