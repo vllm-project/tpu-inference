@@ -223,8 +223,7 @@ def calculate_block_sizes(
     def find_best_block_sizes(
             max_batch_size: int,
             max_n_buffer: int,
-            fixed_bq_sz: int | None = None,
-            max_bkv_sz: int | None = None) -> configs.BlockSizes:
+            fixed_bq_sz: int | None = None) -> configs.BlockSizes:
         """Loop through different block sizes to find the most optimal one."""
 
         # Even if we loose some potential performance, we want to avoid OOM at all
@@ -263,7 +262,7 @@ def calculate_block_sizes(
 
         # Step 2: Increase block sizes until the kernel is unable to fit into VMEM.
         while (calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz)
-               < capped_vmem_limit_bytes and (max_bkv_sz is None or bkv_sz + bkv_stride <= max_bkv_sz)):
+               < capped_vmem_limit_bytes):
             # Unless bq is a fixed value, we want to ensure bq size is the same as bkv
             # size. When using causal masking, if bq size is larger than bkv size,
             # entire kv tile can be masked out for some query tokens. Similarly, if
@@ -273,10 +272,8 @@ def calculate_block_sizes(
             bq_sz += bq_stride
 
         # Rollback one step since the last attempted value triggered OOM.
-        # Note: only rollback if we actually exceeded capped_vmem_limit_bytes.
-        if calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz) > capped_vmem_limit_bytes:
-            bkv_sz -= bkv_stride
-            bq_sz -= bq_stride
+        bkv_sz -= bkv_stride
+        bq_sz -= bq_stride
 
         # Indicates OOM was triggered from the starting bkv size.
         if bkv_sz == 0:
@@ -313,11 +310,11 @@ def calculate_block_sizes(
     # Fixed value based on experimental results.
     decode_batch_size = 8
     prefill_batch_size = 2
-    spec_decode_batch_size = 8
 
     decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, fixed_bq_sz=1)
     prefill_block_sizes = find_best_block_sizes(prefill_batch_size, n_buffer, fixed_bq_sz=None)
-    spec_decode_block_sizes = find_best_block_sizes(spec_decode_batch_size, n_buffer, fixed_bq_sz=4, max_bkv_sz=1536)
+    # Speculative decode: query tile fixed to 4 for minimal padding with decode batch parallelism (8)
+    spec_decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, fixed_bq_sz=4)
 
     return decode_block_sizes, prefill_block_sizes, spec_decode_block_sizes
 
@@ -474,7 +471,8 @@ def ragged_paged_attention(
         else:
             if spec_decode_block_sizes is not None:
                 effective_blocks = spec_decode_block_sizes
-            elif queries.shape[0] <= 512:
+            elif queries.shape[0] <= serve_cfgs.num_seqs * 8:
+                # Target speculative decode / small mixed batches (<= 8 query tokens per sequence)
                 effective_blocks = default_spec_decode
             else:
                 effective_blocks = prefill_block_sizes or default_prefill
@@ -526,16 +524,12 @@ def ragged_paged_attention(
     def skip_kernel(carry):
         return carry
 
-    # distribution = [num_decode, num_prefill_end, num_total]
-    # Only launch DECODE kernel if there are decode sequences (distribution[0] > 0)
     o_hbm_alias_q_hbm, kv_cache = jax.lax.cond(
         distribution[0] > 0,
         do_decode,
         skip_kernel,
         (q_hbm, kv_cache),
     )
-
-    # Only launch MIXED kernel if there are mixed/prefill sequences (distribution[2] > distribution[1])
     o_hbm_alias_q_hbm, kv_cache = jax.lax.cond(
         distribution[2] > distribution[1],
         do_mixed,
