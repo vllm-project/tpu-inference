@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
@@ -114,6 +115,7 @@ PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP = 0
 # For decode only batches, start capturing traces after all requests in the
 # batch has KV caches that have reached this length threshold
 PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD = -1
+PHASED_PROFILER_MAX_WORKERS = 1
 
 logger = init_logger(__name__)
 
@@ -125,6 +127,7 @@ class InferencePhase(Enum):
     AMBIGUOUS = 3
     PREFILL_ONLY = 4
     DECODE_ONLY = 5
+    MANUAL = 6
 
 
 def _inject_dp_rank_into_filename(fname: str, dp_rank: int) -> str:
@@ -362,13 +365,14 @@ def get_batch_composition_stats(
                 num_decode_tokens += 1
 
     stats = {
-        "batch_id": batch_id,
-        "total_num_scheduled_tokens": total_num_scheduled_tokens,
-        "num_prefill_tokens": num_prefill_tokens,
-        "num_decode_tokens": num_decode_tokens,
-        "padded_total_num_scheduled_tokens": padded_total_num_scheduled_tokens,
-        "num_reqs": num_reqs,
-        "min_kv_len": min_kv_len if min_kv_len != float('inf') else 0
+        "batch_id": int(batch_id),
+        "total_num_scheduled_tokens": int(total_num_scheduled_tokens),
+        "num_prefill_tokens": int(num_prefill_tokens),
+        "num_decode_tokens": int(num_decode_tokens),
+        "padded_total_num_scheduled_tokens":
+        int(padded_total_num_scheduled_tokens),
+        "num_reqs": int(num_reqs),
+        "min_kv_len": int(min_kv_len) if min_kv_len != float("inf") else 0,
     }
     stats["phase"] = determine_phase_from_batch_composition_stats(stats).name
     return stats
@@ -579,7 +583,8 @@ class PhasedBasedProfiler:
             InferencePhase.PREFILL_HEAVY: False,
             InferencePhase.DECODE_ONLY: False,
             InferencePhase.DECODE_HEAVY: False,
-            InferencePhase.BALANCED: False
+            InferencePhase.BALANCED: False,
+            InferencePhase.MANUAL: False
         }
         self.default_profiling_options = jax.profiler.ProfileOptions()
         self.default_profiling_options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
@@ -610,6 +615,8 @@ class PhasedBasedProfiler:
         if self.decode_kv_len_threshold >= 0:
             logger.info("Will skip decode-only steps until min KV len >= %d.",
                         self.decode_kv_len_threshold)
+        self._executor = ThreadPoolExecutor(
+            max_workers=PHASED_PROFILER_MAX_WORKERS)
 
     def _write_batch_composition_stats_to_file_helper(
             self, batch_composition_stats: dict) -> None:
@@ -619,13 +626,24 @@ class PhasedBasedProfiler:
         """
         now = datetime.datetime.now()
         date_string_in_profiler_format = now.strftime("%Y_%m_%d_%H_%M_%S_%f")
+        target_dir = self.profile_dir_with_phase_suffix
+        stats_copy = dict(batch_composition_stats)
 
-        with open(
-                os.path.join(
-                    self.profile_dir_with_phase_suffix,
-                    f"batch_composition_stats_{date_string_in_profiler_format}.json"
-                ), "w") as f:
-            f.write(json.dumps(batch_composition_stats) + "\n")
+        def _write():
+            try:
+                logger.info("Writing batch composition stats to %s",
+                            target_dir)
+                with open(
+                        os.path.join(
+                            target_dir,
+                            f"batch_composition_stats_{date_string_in_profiler_format}.json"
+                        ), "w") as f:
+                    f.write(json.dumps(stats_copy) + "\n")
+            except Exception as e:
+                logger.warning("Failed to write batch composition stats: %s",
+                               e)
+
+        self._executor.submit(_write)
 
     def _start_profiling(self, batch_composition_stats: dict) -> None:
         """
@@ -642,10 +660,15 @@ class PhasedBasedProfiler:
                     num_reqs: The number of requests in the batch.
                     phase: The phase of the inference the batch is in.
         """
-        current_determined_phase = determine_phase_from_batch_composition_stats(
-            batch_composition_stats)
+        if self.current_phase == "manual":
+            current_determined_phase = InferencePhase.MANUAL
+        else:
+            current_determined_phase = determine_phase_from_batch_composition_stats(
+                batch_composition_stats)
+
         for phase, has_been_seen in self.inference_phase_seen.items():
-            if has_been_seen or phase != current_determined_phase:
+            if (has_been_seen and phase != InferencePhase.MANUAL
+                ) or phase != current_determined_phase:
                 continue
 
             # Skip a configurable number of decode-heavy steps before profiling
@@ -670,6 +693,7 @@ class PhasedBasedProfiler:
             self.inference_phase_seen[phase] = True
             self.profiling_n_steps_left = self.num_steps_to_profile_for
 
+            # Manual phase will keep reset itself to manual.
             self.current_phase = phase.name.lower()
 
             logger.info(f"Starting profiling for {self.current_phase} phase")
@@ -832,6 +856,37 @@ class PhasedBasedProfiler:
         except Exception as e:
             logger.warning("Failed to merge profile directories: %s", e)
 
+    def start_manual_profile(self) -> None:
+        """Manually requests starting profiling."""
+        if self.current_phase != "":
+            logger.warning(
+                "Profiler is already running in phase %s. Skipping.",
+                self.current_phase)
+            return
+        self.current_phase = InferencePhase.MANUAL.name.lower()
+        logger.info("Manual profiling requested. Will start on next step.")
+
+    def stop_manual_profile(self) -> None:
+        """Manually stops profiling by setting steps left to 0."""
+        if self.current_phase != InferencePhase.MANUAL.name.lower():
+            logger.warning("Current phase is not MANUAL. It is %s. Skipping.",
+                           self.current_phase)
+            return
+        logger.info("Stopping current %s phase profile", self.current_phase)
+        self.profiling_n_steps_left = 1
+
+    def _should_profile(self, batch_composition_stats: dict) -> bool:
+        """Checks if we should start profiling."""
+        if self.current_phase == "manual":
+            return True
+        have_seen_all_phases = all(self.inference_phase_seen.values())
+        # We want to start profiling only after the first trial request
+        is_past_initial_request = batch_composition_stats[
+            "num_reqs"] > 1 and batch_composition_stats[
+                "total_num_scheduled_tokens"] > 1
+        return is_past_initial_request and (not have_seen_all_phases
+                                            or self.current_phase != "")
+
     def step(self, batch_composition_stats: dict) -> None:
         """
         Steps the profiler and logs batch composition stats.
@@ -847,19 +902,19 @@ class PhasedBasedProfiler:
                     num_reqs: The number of requests in the batch.
                     phase: The phase of the inference the batch is in.
         """
+        if self.aggregated_stats_logger is not None and batch_composition_stats[
+                "total_num_scheduled_tokens"] > 1:
+            self.aggregated_stats_logger.log(batch_composition_stats)
 
-        have_seen_all_phases = all(self.inference_phase_seen.values())
-        # We want to start profiling only after the first trial request
-        is_past_initial_request = batch_composition_stats[
-            "total_num_scheduled_tokens"] > 1
-        if is_past_initial_request and (not have_seen_all_phases
-                                        or self.current_phase != ""):
-            # We haven't started profiling yet
-            if self.profiling_n_steps_left <= 0:
-                self._start_profiling(batch_composition_stats)
-            # We are in the middle of profiling a given phase
-            else:
-                self._step_or_stop_profiling(batch_composition_stats)
+        if not self._should_profile(batch_composition_stats):
+            return
+
+        # We haven't started profiling yet
+        if self.profiling_n_steps_left <= 0:
+            self._start_profiling(batch_composition_stats)
+        # We are in the middle of profiling a given phase
+        else:
+            self._step_or_stop_profiling(batch_composition_stats)
 
 
 @functools.partial(
