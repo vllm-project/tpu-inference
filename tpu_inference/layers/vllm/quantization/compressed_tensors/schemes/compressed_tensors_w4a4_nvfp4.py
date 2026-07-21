@@ -24,11 +24,14 @@ from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a4_nvfp4 import \
     CompressedTensorsW4A4Fp4
 
+from tpu_inference import envs
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
-from tpu_inference.layers.common.quantization import u8_unpack_e2m1
+from tpu_inference.layers.common.quantization import (dequantize_tensor,
+                                                      quantize_tensor,
+                                                      u8_unpack_e2m1)
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.quantization.configs import \
@@ -136,12 +139,30 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
         ) -> LinearWeights:
             # Unpack uint8 to FP4
             fp4 = u8_unpack_e2m1(weight_packed)  # [out, in]
-            fp4 = jnp.transpose(fp4)  # [in, out]
 
             # Combine FP8 block scale & FP32 global scale
             # weight_scale is [out, in // group_size]
             block_scale = weight_scale.astype(
                 jnp.float32) * weight_global_scale
+
+            requantize_block_size = envs.REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE
+            if requantize_block_size is not None:
+                # 1. dequantize the nvfp4 weights
+                dequantized_fp32 = dequantize_tensor(
+                    fp4,
+                    block_scale,
+                    axis=1,
+                    out_dtype=jnp.float32,
+                )
+                # 2. requantize it to a new group size, still keeping the weights in fp4
+                fp4, block_scale = quantize_tensor(
+                    jnp.float4_e2m1fn,
+                    dequantized_fp32,
+                    axis=1,
+                    block_size=requantize_block_size,
+                )
+
+            fp4 = jnp.transpose(fp4)  # [in, out]
             block_scale = jnp.transpose(block_scale)  # [in // group_size, out]
 
             return process_linear_weights(
