@@ -305,17 +305,46 @@ class TPUWorker(WorkerBase):
             "TPU_CHIPS_PER_PROCESS_BOUNDS=1,%d,1 | TPU_PROCESS_PORT=%d",
             dp_rank, visible_chips, chips_per_rank, tpu_port)
 
+    def _restore_ray_tpu_process_identity(self) -> None:
+        """Restores the node-local TPU task ID before JAX initialization.
+
+        Ray actors can inherit ``CLOUD_TPU_TASK_ID`` from the head process even
+        when they run on another TPU VM. ``TPU_WORKER_ID`` is injected into each
+        Ray node's container from that VM's metadata, so it remains the
+        authoritative process identity for a native multi-host JAX mesh.
+        """
+        worker_id = os.environ.get("TPU_WORKER_ID")
+        if worker_id is None:
+            return
+
+        previous_task_id = os.environ.get("CLOUD_TPU_TASK_ID")
+        os.environ["CLOUD_TPU_TASK_ID"] = worker_id
+        if previous_task_id != worker_id:
+            logger.info(
+                "Restored node-local TPU process identity for Ray worker %d: "
+                "CLOUD_TPU_TASK_ID=%s (was %s)",
+                self.rank,
+                worker_id,
+                previous_task_id,
+            )
+
     def init_device(self,
                     tpu_process_bounds="",
                     tpu_chips_per_process_bounds="",
                     tpu_visible_chips=""):
+
+        # Restore the VM-local identity before any setup can initialize JAX.
+        # More specialized singleton configurations below may intentionally
+        # replace it with task 0.
+        multihost_backend = envs.TPU_MULTIHOST_BACKEND
+        if multihost_backend == "ray":
+            self._restore_ray_tpu_process_identity()
 
         if (envs.TPU_MULTIPROCESS_DP
                 and self.parallel_config.pipeline_parallel_size == 1):
             self._setup_dp_chip_isolation()
 
         # set tpu visible devices for Jax runtime in PP.
-        multihost_backend = envs.TPU_MULTIHOST_BACKEND
         if self.parallel_config.pipeline_parallel_size > 1:
             # Log environment variables for debugging
             tpu_env_vars = [

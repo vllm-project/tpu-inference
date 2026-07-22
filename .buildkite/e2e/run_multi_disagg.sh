@@ -311,6 +311,110 @@ start_vllm_log_streaming() {
   DECODE_LOG_TAIL_PID=$!
 }
 
+cleanup_local_tpu_runtime() {
+  local grace_seconds="${TPU_CLEANUP_GRACE_SECONDS:-30}"
+  local settle_seconds="${TPU_RUNTIME_SETTLE_SECONDS:-30}"
+  local device
+  local runtime_changed=0
+  local -a fuser_cmd=(fuser)
+
+  [[ "$grace_seconds" =~ ^[0-9]+$ ]] || grace_seconds=30
+  [[ "$settle_seconds" =~ ^[0-9]+$ ]] || settle_seconds=30
+
+  if docker inspect node >/dev/null 2>&1; then
+    runtime_changed=1
+    echo "   -> Gracefully stopping vLLM and Ray in local node container..."
+    docker exec -i node bash -s -- "$grace_seconds" <<'EOF' >/dev/null 2>&1 || true
+grace_seconds=$1
+pkill -TERM -f '[v]llm serve|[A]PIServer' >/dev/null 2>&1 || true
+end_time=$((SECONDS + grace_seconds))
+while (( SECONDS < end_time )); do
+  pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || break
+  sleep 1
+done
+pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
+ray stop --force >/dev/null 2>&1 || true
+EOF
+  fi
+
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    fuser_cmd=(sudo -n fuser)
+  fi
+  for device in /dev/accel* /dev/vfio/[0-9]*; do
+    [[ -e "$device" ]] || continue
+    if "${fuser_cmd[@]}" "$device" >/dev/null 2>&1; then
+      runtime_changed=1
+      echo "   -> Force-releasing lingering TPU user on $device..."
+      "${fuser_cmd[@]}" -k -9 "$device" >/dev/null 2>&1 || true
+    fi
+  done
+
+  if [[ "${fuser_cmd[0]}" == "sudo" ]]; then
+    sudo -n rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
+  else
+    rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
+  fi
+  if (( runtime_changed == 1 )); then
+    echo "   -> Waiting ${settle_seconds}s for the local TPU runtime to settle..."
+    sleep "$settle_seconds"
+  fi
+}
+
+cleanup_remote_tpu_runtime() {
+  local ip=$1
+  local grace_seconds="${TPU_CLEANUP_GRACE_SECONDS:-30}"
+  local settle_seconds="${TPU_RUNTIME_SETTLE_SECONDS:-30}"
+
+  [[ "$grace_seconds" =~ ^[0-9]+$ ]] || grace_seconds=30
+  [[ "$settle_seconds" =~ ^[0-9]+$ ]] || settle_seconds=30
+
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
+    "bash -s -- '$grace_seconds' '$settle_seconds'" <<'EOF' || true
+grace_seconds=$1
+settle_seconds=$2
+runtime_changed=0
+
+if docker inspect node >/dev/null 2>&1; then
+  runtime_changed=1
+  echo "   -> Gracefully stopping vLLM and Ray in node container..."
+  docker exec -i node bash -s -- "$grace_seconds" <<'INNER_EOF' >/dev/null 2>&1 || true
+grace_seconds=$1
+pkill -TERM -f '[v]llm serve|[A]PIServer' >/dev/null 2>&1 || true
+end_time=$((SECONDS + grace_seconds))
+while (( SECONDS < end_time )); do
+  pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || break
+  sleep 1
+done
+pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
+ray stop --force >/dev/null 2>&1 || true
+INNER_EOF
+fi
+
+fuser_cmd=(fuser)
+if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+  fuser_cmd=(sudo -n fuser)
+fi
+for device in /dev/accel* /dev/vfio/[0-9]*; do
+  [[ -e "$device" ]] || continue
+  if "${fuser_cmd[@]}" "$device" >/dev/null 2>&1; then
+    runtime_changed=1
+    echo "   -> Force-releasing lingering TPU user on $device..."
+    "${fuser_cmd[@]}" -k -9 "$device" >/dev/null 2>&1 || true
+  fi
+done
+
+if [[ "${fuser_cmd[0]}" == "sudo" ]]; then
+  sudo -n rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
+else
+  rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
+fi
+if (( runtime_changed == 1 )); then
+  echo "   -> Waiting ${settle_seconds}s for the TPU runtime to settle..."
+  sleep "$settle_seconds"
+fi
+EOF
+}
+
 cleanup() {
   local exit_code=$?
   echo "🧹 Cleaning up containers on all hosts..."
@@ -328,24 +432,34 @@ cleanup() {
   # Cleanup Prefill workers
   for ip in "${PREFILL_WORKER_IPS[@]}"; do
     echo "   -> Cleaning Prefill worker: $ip"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
+    cleanup_remote_tpu_runtime "$ip"
+    echo "   -> Removing Prefill worker node container: $ip"
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
+      "docker rm -f node >/dev/null 2>&1 || true" || true
   done
 
   # Cleanup Decode Head
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
     echo "   -> Cleaning Decode Head: $DECODE_HEAD_IP"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
+    cleanup_remote_tpu_runtime "$DECODE_HEAD_IP"
+    echo "   -> Removing Decode Head node container: $DECODE_HEAD_IP"
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
+      "docker rm -f node >/dev/null 2>&1 || true" || true
   fi
 
   # Cleanup Decode workers
   for ip in "${DECODE_WORKER_IPS[@]}"; do
     echo "   -> Cleaning Decode worker: $ip"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
+    cleanup_remote_tpu_runtime "$ip"
+    echo "   -> Removing Decode worker node container: $ip"
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
+      "docker rm -f node >/dev/null 2>&1 || true" || true
   done
 
   # Cleanup Prefill Head (Local Node)
   echo "   -> Cleaning Prefill Head (Local)..."
-  docker stop node >/dev/null 2>&1 || true
+  cleanup_local_tpu_runtime
+  echo "   -> Removing Prefill Head node container..."
   docker rm -f node >/dev/null 2>&1 || true
 
   # Cleanup Local proxy/benchmark container
@@ -488,6 +602,21 @@ dump_ray_resources() {
   fi
 }
 
+dump_tpu_process_env() {
+  local host=$1
+  local role=$2
+  local dump_cmd
+  dump_cmd='printf "CLOUD_TPU_TASK_ID=%s\nJAX_PROCESS_ID=%s\nTPU_PROCESS_BOUNDS=%s\n" "${CLOUD_TPU_TASK_ID-<unset>}" "${JAX_PROCESS_ID-<unset>}" "${TPU_PROCESS_BOUNDS-<unset>}"'
+
+  echo "--- TPU process environment: ${role} (${host})"
+  if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
+    docker exec node bash -c "$dump_cmd"
+  else
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+      "docker exec node bash -c '$dump_cmd'"
+  fi
+}
+
 
 PROJECT="$(gcloud config get-value project)"
 GCR_REPO="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference"
@@ -627,6 +756,14 @@ sleep 120
 
 dump_ray_resources "$PREFILL_HEAD_IP" "Prefill"
 dump_ray_resources "$DECODE_HEAD_IP" "Decode"
+
+echo "--- TPU process environment on all Prefill and Decode nodes"
+for host in "${PREFILL_HOSTS[@]}"; do
+  dump_tpu_process_env "$host" "prefill"
+done
+for host in "${DECODE_HOSTS[@]}"; do
+  dump_tpu_process_env "$host" "decode"
+done
 
 # -----------------------------------------------------------------
 # 3. Start vLLM Prefill & Decode Servers
