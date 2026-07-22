@@ -149,7 +149,7 @@ class WeightsRef(RhsRef):
 
     def get_scale(self, replicate_size: int | None = None) -> jax.Array:
         assert self.scale is not None
-        if replicate_size is not None:
+        if replicate_size is not None and self.scale.shape[-1] == 128:
             # Perform zero-stride load for efficient broadcasting across sublanes.
             return self.scale[:, pl.ds(0, replicate_size, 0), :]
         return self.scale[...]
