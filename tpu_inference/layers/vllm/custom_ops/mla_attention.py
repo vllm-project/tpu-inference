@@ -20,7 +20,6 @@ from jax.sharding import PartitionSpec as P
 from torch.nn import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.config import CacheConfig, VllmConfig
-from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.model_executor.layers.attention.attention import \
     get_attention_context
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
@@ -29,6 +28,7 @@ from vllm.model_executor.layers.mla import (MLAModules,
                                             MultiHeadLatentAttentionWrapper)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from tpu_inference import utils
 from tpu_inference.layers.common.quantization import quantize_tensor
@@ -100,11 +100,11 @@ class VllmMLAAttention(MLAAttention):
                 self.kv_cache_dtype)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        from vllm.v1.kv_cache_interface import (
-            MLAAttentionSpec,
-            get_kv_quant_mode,
-        )
-        dtype = utils.to_torch_dtype(self.kv_cache_quantized_dtype) if self.kv_cache_quantized_dtype else torch.float8_e4m3fn
+        from vllm.v1.kv_cache_interface import (MLAAttentionSpec,
+                                                get_kv_quant_mode)
+        dtype = utils.to_torch_dtype(
+            self.kv_cache_quantized_dtype
+        ) if self.kv_cache_quantized_dtype else torch.float8_e4m3fn
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
@@ -332,9 +332,10 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         if self.rotary_emb is not None:
             q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
 
+        topk_indices = None
         if self.indexer and self.is_sparse:
-            _topk_indices = self.indexer(hidden_states, q_c, positions,
-                                         self.indexer_rope_emb)
+            topk_indices = self.indexer(hidden_states, q_c, positions,
+                                        self.indexer_rope_emb)
 
         if llama_4_scaling is not None:
             q_nope *= llama_4_scaling
@@ -346,6 +347,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             k_pe,
             output_shape=(hidden_states.shape[0],
                           self.num_heads * self.v_head_dim),
+            topk_indices=topk_indices,
         )
 
         return self.o_proj(attn_out)[0]

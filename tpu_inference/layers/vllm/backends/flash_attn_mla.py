@@ -180,6 +180,10 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
                                   value=None,
                                   k_scale=k_scale)
         k_pe = k_pe.squeeze(1)
+        topk_indices = kwargs.get("topk_indices", None)
+        topk_indices_jax = jax_view(
+            topk_indices) if topk_indices is not None else None
+
         new_kv_cache, outputs = mla_attention(
             q_nope,
             q_pe,
@@ -198,6 +202,7 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             k_scale=k_scale,
             v_scale=v_scale,
             sm_scale=self.scale,
+            topk_indices=topk_indices_jax,
         )
 
         # einsum selects 'n' as the major-most physical dimension again.
