@@ -14,8 +14,35 @@
 
 import functools
 from dataclasses import dataclass
+from enum import Enum
 
 import jax
+
+
+class AttentionMaskKind(str, Enum):
+    CAUSAL = "causal"
+    BIDIRECTIONAL = "bidirectional"
+
+
+@dataclass(frozen=True)
+class AttentionMaskSpec:
+    kind: AttentionMaskKind = AttentionMaskKind.CAUSAL
+
+    @property
+    def use_causal_mask(self) -> bool:
+        return self.kind is AttentionMaskKind.CAUSAL
+
+
+CAUSAL_ATTENTION_MASK = AttentionMaskSpec()
+
+
+def resolve_use_causal_mask(
+    attention_metadata: "AttentionMetadata",
+    override: bool | None = None,
+) -> bool:
+    if override is not None:
+        return override
+    return attention_metadata.attention_mask_spec.use_causal_mask
 
 
 @functools.partial(
@@ -28,7 +55,7 @@ import jax
         "request_distribution",
         "mamba_state_indices",
     ],
-    meta_fields=["padded_num_reqs"],
+    meta_fields=["padded_num_reqs", "attention_mask_spec"],
 )
 @dataclass
 class AttentionMetadata(object):
@@ -58,6 +85,8 @@ class AttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
+
+    attention_mask_spec: AttentionMaskSpec = CAUSAL_ATTENTION_MASK
 
 
 @functools.partial(

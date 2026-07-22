@@ -26,7 +26,8 @@ from jax.sharding import PartitionSpec as P
 from tpu_inference import utils
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, resolve_use_causal_mask)
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.base import create_param
@@ -247,6 +248,7 @@ class Attention(nnx.Module):
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                use_causal_mask=resolve_use_causal_mask(attention_metadata),
             )
 
         output_TNH, kv_cache = jax.jit(
