@@ -262,6 +262,12 @@ class TPUWorker(WorkerBase):
         # step_counter is used to calculate uuid to transfer intermediate tensors.
         self.step_counter = 0
 
+        import multiprocessing
+
+        from vllm.multimodal import MULTIMODAL_REGISTRY
+        self.mm_receiver_cache = MULTIMODAL_REGISTRY.worker_receiver_cache_from_config(
+            self.vllm_config, multiprocessing.Lock())
+
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -567,6 +573,18 @@ class TPUWorker(WorkerBase):
         self,
         scheduler_output: SchedulerOutput,
     ) -> Optional[ModelRunnerOutput]:
+        if getattr(self, "_apply_mm_cache", None) is not None:
+            self._apply_mm_cache(scheduler_output)
+        elif self.mm_receiver_cache is not None:
+            for req in scheduler_output.scheduled_new_reqs:
+                if getattr(req, "mm_inputs", None):
+                    req.mm_inputs = self.mm_receiver_cache.get_and_update_features(
+                        req.mm_inputs)
+                elif getattr(req, "mm_positions", None) and hasattr(
+                        req, "mm_features") and req.mm_features:
+                    req.mm_features = self.mm_receiver_cache.get_and_update_features(
+                        req.mm_features)
+
         # NOTE: This method intentionally returns a concrete vLLM type, which
         # violates the pure abstract contract of the base class. This is a
         # deliberate, temporary compromise for the same reasons outlined in

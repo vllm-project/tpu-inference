@@ -45,8 +45,10 @@ import jax
 import jax.numpy as jnp
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
 import vllm.model_executor.models.utils as vllm_utils
+from jax.experimental.pallas import tpu as pltpu
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from vllm.multimodal import NestedTensors
@@ -54,9 +56,66 @@ from vllm.sequence import IntermediateTensors
 
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
+from tpu_inference.kernels.flash_attention.kernel import \
+    encoder_only_flash_attention
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import align_to
 
 logger = init_logger(__name__)
+
+_orig_sdpa = F.scaled_dot_product_attention
+
+
+def _chunked_sdpa(query,
+                  key,
+                  value,
+                  attn_mask=None,
+                  dropout_p=0.0,
+                  is_causal=False,
+                  scale=None):
+    if query.ndim == 4:
+        B, H, S, D = query.shape
+
+        # 1. Fallback for GQA (our custom kernel requires num_heads == num_kv_heads)
+        if query.shape != key.shape:
+            return _orig_sdpa(query, key, value, attn_mask, dropout_p,
+                              is_causal, scale)
+
+        # 2. Heuristic for native SDPA memory usage: B * H * S * S * element_size bytes
+        # We account for hardware alignment (e.g. 128 lanes) to prevent VMEM OOM.
+        lane_count = pltpu.get_tpu_info().num_lanes
+        S_padded = align_to(S, lane_count)
+        estimated_vmem_native = B * H * S_padded * S_padded * query.element_size(
+        )
+
+        # 3. Only use chunked flash attention if we will OOM native SDPA (>40MB)
+        if attn_mask is None and dropout_p == 0.0 and estimated_vmem_native > 40 * 1024 * 1024:
+            q_jax = jax_view(query)
+            k_jax = jax_view(key)
+            v_jax = jax_view(value)
+
+            # [B, H, S, D] -> [B, S, H, D] -> [B*S, H, D]
+            q_jax = jnp.reshape(jnp.swapaxes(q_jax, 1, 2), (B * S, H, D))
+            k_jax = jnp.reshape(jnp.swapaxes(k_jax, 1, 2), (B * S, H, D))
+            v_jax = jnp.reshape(jnp.swapaxes(v_jax, 1, 2), (B * S, H, D))
+
+            seq_lens = jnp.full((B, ), S, dtype=jnp.int32)
+            if scale is None:
+                scale = 1.0 / (D**0.5)
+
+            out_jax = encoder_only_flash_attention(q_jax,
+                                                   k_jax,
+                                                   v_jax,
+                                                   seq_lens,
+                                                   causal=is_causal,
+                                                   sm_scale=scale)
+
+            # [B*S, H, D] -> [B, S, H, D] -> [B, H, S, D]
+            out_jax = jnp.swapaxes(jnp.reshape(out_jax, (B, S, H, D)), 1, 2)
+            return torch_view(out_jax)
+
+    return _orig_sdpa(query, key, value, attn_mask, dropout_p, is_causal,
+                      scale)
 
 
 def _patched_set_deepstack(vllm_model, deepstack_input_embeds):
@@ -222,6 +281,12 @@ def _patched_embed_input_ids(vllm_model, orig_embed_input_ids, *args,
     """
     # 1. Get the base text embeddings from the native model.
     inputs_embeds = orig_embed_input_ids(*args, **kwargs)
+
+    # 1.5. Bypass deepstack packing during autoregressive decode or text-only prefill.
+    # In vllm_model_wrapper, mm_embeds is passed as args[1] during prefill. If len(args) == 1,
+    # it means mm_embeds is None (decode phase or text-only). We also check size(0) == 1 just in case.
+    if len(args) == 1 or inputs_embeds.size(0) == 1:
+        return inputs_embeds
 
     # 2. Check if there are any deepstack features to pack.
     # Read from _deepstack_tensors (our JAX-compatible cache) rather than
@@ -427,6 +492,9 @@ def apply_qwen3_vl_patches(vllm_model):
         logger.info(
             "Disabled dynamo for Qwen3LLMModel; JAX JIT handles outer compilation"
         )
+
+    # 8. Patch PyTorch SDPA globally to catch Qwen Vision Tower calls and prevent VMEM OOM
+    F.scaled_dot_product_attention = _chunked_sdpa
 
 
 def is_qwen3_vl(vllm_model) -> bool:
