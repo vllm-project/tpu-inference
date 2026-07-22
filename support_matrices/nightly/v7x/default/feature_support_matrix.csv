@@ -8,12 +8,12 @@ Feature,CorrectnessTest,PerformanceTest
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
 "Speculative Decoding: DFlash",✅ Passing,✅ Passing
-"Speculative Decoding: Eagle3",✅ Passing,✅ Passing
+"Speculative Decoding: Eagle3",❌ Failing,❓ Untested
 "Speculative Decoding: Ngram",✅ Passing,✅ Passing
-"Step Pooling (Embedding)",❌ Failing,❓ Untested
+"Step Pooling (Embedding)",✅ Passing,❓ Untested
 "async scheduler",✅ Passing,✅ Passing
 "hybrid kv cache",✅ Passing,❓ Untested
 "multi-host",✅ Passing,❓ Untested
 "runai_model_streamer_loader",✅ Passing,❓ Untested
-"sampling_params",❌ Failing,❓ Untested
-"structured_decoding",❌ Failing,❓ Untested
+"sampling_params",✅ Passing,❓ Untested
+"structured_decoding",✅ Passing,❓ Untested
