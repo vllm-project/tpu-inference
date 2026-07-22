@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     LAYOUT_Q_PROJ_AS_NDH: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
+    KV_CACHE_PERSIST_ACROSS_WEIGHT_SYNC: bool = False
     USE_BATCHED_RPA_KERNEL: bool = False
     USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
     FORCE_MOE_RANDOM_ROUTING: bool = False
@@ -324,6 +325,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_BATCHED_RPA_KERNEL"),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
+    # RL weight-sync optimization: persist the KV-cache allocation across a
+    # weight update instead of freeing + reallocating it. The caller
+    # (e.g. an RL sampler's update_params) invalidates every prefix->block
+    # mapping via reset_prefix_cache() BEFORE delete_kv_cache(), so no block
+    # computed under the old weights is reachable under the new weights -- the
+    # next request re-prefills from scratch and overwrites its blocks before any
+    # decode read. delete/reinitialize therefore only free+reallocate HBM whose
+    # CONTENTS are already logically invalid, which is a no-op for correctness
+    # but costs a (dispatch-bound) realloc per sync. With this flag the two
+    # calls become no-ops, keeping the allocation alive. Only enable when the
+    # caller resets the prefix cache on every weight sync AND HBM headroom does
+    # not require the free (resharding fits without it). Default off preserves
+    # the stock free+reallocate behavior exactly.
+    "KV_CACHE_PERSIST_ACROSS_WEIGHT_SYNC":
+    env_bool("KV_CACHE_PERSIST_ACROSS_WEIGHT_SYNC"),
     # Force random expert routing in MoE layers (for testing purposes only)
     "FORCE_MOE_RANDOM_ROUTING":
     env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),

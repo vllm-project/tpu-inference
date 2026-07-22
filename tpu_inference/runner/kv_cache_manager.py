@@ -1026,6 +1026,18 @@ class KVCacheManager:
         After calling this method, ``reinitialize_kv_cache`` must be called
         to reallocate the KV cache before the next inference step.
         """
+        if tpu_envs.KV_CACHE_PERSIST_ACROSS_WEIGHT_SYNC and self.runner.kv_caches:
+            # Persist the allocation across weight sync. The caller invalidates
+            # every prefix->block mapping (reset_prefix_cache) before this, so
+            # no block from the previous weights is reachable under the new
+            # weights; the next request re-prefills and overwrites its blocks
+            # before any read. Skipping the free avoids a dispatch-bound realloc
+            # per sync. reinitialize_kv_cache is a matching no-op (see below).
+            logger.info(
+                "delete_kv_cache: KV_CACHE_PERSIST_ACROSS_WEIGHT_SYNC=1, "
+                "persisting allocation (prefix cache already reset -> contents "
+                "logically invalid).")
+            return
         kv_caches = self.runner.kv_caches
         if not kv_caches:
             logger.info("delete_kv_cache: No KV cache to delete.")
@@ -1060,6 +1072,13 @@ class KVCacheManager:
             RuntimeError: If ``initialize_kv_cache`` was never called (i.e.
                 there is no stored ``kv_cache_config``).
         """
+        if tpu_envs.KV_CACHE_PERSIST_ACROSS_WEIGHT_SYNC and self.runner.kv_caches:
+            # Matching no-op for the persisted-allocation path: delete_kv_cache
+            # kept the arrays alive, so there is nothing to reallocate.
+            logger.info(
+                "reinitialize_kv_cache: KV_CACHE_PERSIST_ACROSS_WEIGHT_SYNC=1, "
+                "reusing persisted allocation.")
+            return
         kv_cache_config = getattr(self.runner, 'kv_cache_config', None)
         if kv_cache_config is None:
             raise RuntimeError(
