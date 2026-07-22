@@ -330,6 +330,14 @@ cleanup() {
 # From this point onward, any error must collect logs and remove containers.
 trap cleanup EXIT
 
+# Remove containers from an interrupted prior run before pruning so their
+# images are no longer considered in use. `docker system prune -a` deliberately
+# removes every unused image, including images published under the other E2E
+# IMAGE_NAME values.
+echo "--- Pruning Docker on the local head before building the new image..."
+docker rm -f "$NODE_CONTAINER_NAME" "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
+docker system prune -a --volumes -f
+
 source "$SCRIPT_DIR/../scripts/setup_docker_env.sh"
 setup_environment "$IMAGE_NAME" "true"
 DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
@@ -347,6 +355,15 @@ DECODE_SINGLE_ENV=""
 PREFILL_ENV="$PREFILL_SINGLE_ENV $common_env"
 DECODE_ENV="$DECODE_SINGLE_ENV $common_env -e DRAFT_MODEL_IMPL_TYPE=${DRAFT_MODEL_IMPL_TYPE}"
 
+prepare_remote_docker() {
+  local host=$1
+
+  echo "--- Pruning Docker on remote host ${host} before pulling the new image..."
+  ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" \
+    "docker rm -f '$NODE_CONTAINER_NAME' '$PROXY_CONTAINER_NAME' >/dev/null 2>&1 || true
+     docker system prune -a --volumes -f"
+}
+
 launch_cluster() {
   local head=$1 role=$2 env_args=$3 workers=$4
   # Remote VMs may not have this checkout at the same path. Transfer the
@@ -354,6 +371,7 @@ launch_cluster() {
   if [[ "$head" == "$HEAD_INTERNAL_IP" ]]; then
     bash "$TOP_DIR/scripts/multihost/run_cluster.sh" "$DOCKER_IMAGE" "$head" "$role" "$HOST_HF_HOME" $env_args &
   else
+    prepare_remote_docker "$head"
     ssh "${SSH_OPTS[@]}" "$SSH_USER@$head" "mkdir -p ~/tpu-inference/scripts/multihost"
     base64 < "$TOP_DIR/scripts/multihost/run_cluster.sh" | ssh "${SSH_OPTS[@]}" "$SSH_USER@$head" \
       "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
@@ -362,6 +380,7 @@ launch_cluster() {
   fi
   sleep 20
   for worker in $workers; do
+    prepare_remote_docker "$worker"
     ssh "${SSH_OPTS[@]}" "$SSH_USER@$worker" "mkdir -p ~/tpu-inference/scripts/multihost"
     base64 < "$TOP_DIR/scripts/multihost/run_cluster.sh" | ssh "${SSH_OPTS[@]}" "$SSH_USER@$worker" \
       "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
