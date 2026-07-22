@@ -46,20 +46,21 @@ def _event_dur_ps(event):
     return 0.0
 
 
-def _median_dur_ps(plane, line_name, event_name=None):
-    durs = [
-        _event_dur_ps(e) for line in plane.lines if line.name == line_name
-        for e in line.events if event_name is None or e.name == event_name
-    ]
-    return statistics.median(durs) if durs else 0.0
+def _call_durs_ps(plane, line_name, event_name=None):
+    """Per-call durations (ps) in call order (sorted by event start time)."""
+    evs = [(e.start_ns, _event_dur_ps(e)) for line in plane.lines
+           if line.name == line_name for e in line.events
+           if event_name is None or e.name == event_name]
+    return [d for _, d in sorted(evs)]
 
 
 def device_time(fn, inputs, *, reps, warmup, save_dir=None):
-    """Median per-call device time (ms) from the JAX profiler, minus the
-    `barrier-cores` span — the collective's cross-core wait for peers, not kernel
-    work. Traces `reps` calls into save_dir if given (kept for inspection), else
-    a temp dir; the per-call XLA-module time and barrier span are read back from
-    the /device:TPU:0 plane."""
+    """Median per-call kernel latency (ms) from the JAX profiler: `barrier-cores`
+    (the collective's cross-core wait) is a sub-span of each call's module, so
+    subtract it from that same call's module device time before taking the median
+    — this cancels the sync jitter the wait absorbs. Traces `reps` calls into
+    save_dir if given (kept for inspection), else a temp dir; module time and
+    barrier span are read from the /device:TPU:0 plane."""
     for _ in range(warmup):
         fn(*inputs)
     jax.block_until_ready(fn(*inputs))
@@ -80,14 +81,22 @@ def device_time(fn, inputs, *, reps, warmup, save_dir=None):
             newest).find_plane_with_name("/device:TPU:0")
         if plane is None:
             raise RuntimeError("no /device:TPU:0 plane in the trace")
-        module = _median_dur_ps(plane, "XLA Modules")
+        module = _call_durs_ps(plane, "XLA Modules")
         if not module:
             raise RuntimeError("no XLA-module device time in the profile")
-        barrier = _median_dur_ps(plane, "XLA TraceMe", "barrier-cores")
-        if barrier >= module:
-            raise RuntimeError("barrier-cores span >= module time: "
-                               "unexpected trace shape")
-        return (module - barrier) / 1e9  # ps -> ms
+        barrier = _call_durs_ps(plane, "XLA TraceMe", "barrier-cores")
+        if not barrier:  # no cross-core sync (e.g. a barrier-free kernel)
+            per_call = module
+        elif len(barrier) == len(module):
+            per_call = [m - b for m, b in zip(module, barrier)]
+        else:
+            raise RuntimeError("module/barrier call-count mismatch "
+                               f"({len(module)} vs {len(barrier)})")
+        latency = statistics.median(per_call)
+        if latency <= 0:
+            raise RuntimeError("non-positive per-call latency (barrier span "
+                               ">= module, or empty module time)")
+        return latency / 1e9  # ps -> ms
     finally:
         if save_dir is None:
             shutil.rmtree(trace_dir, ignore_errors=True)
