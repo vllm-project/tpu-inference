@@ -1,9 +1,5 @@
 # Copyright 2026 Google LLC
-"""Fused single-kernel C=N MoE gemv kernel — grid-based, Option B.
-
-Grid-based: outer loop is grid=(TOPK_TOTAL,). Three scalar-prefetched
-metadata arrays: expert IDs, token offsets (pre-multiplied by M_PAD),
-and routing weights. All dynamic offsets wrapped with pl.multiple_of.
+"""Generalized C=N MoE gemv kernels (N = num real tokens, e.g. 3 or 4).
 """
 from __future__ import annotations
 import functools
@@ -85,18 +81,6 @@ def _cn_w1w2_fused_grid_kernel_fp8(
 
     for k in range(NUM_K):
         buf = k % NBUF_
-        pltpu.make_async_copy(
-            w1_ref.at[pl.ds(gj, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
-            w1_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-            sem_ref.at[0 * NBUF_ + buf]
-        ).wait()
-        k_block_start = (k * K_TILE) // QB
-        pltpu.make_async_copy(
-            w1_scale_ref.at[pl.ds(gj, 1), pl.ds(k_block_start, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-            w1_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-            sem_ref.at[1 * NBUF_ + buf]
-        ).wait()
-
         nxt_k = k + 1
         if nxt_k < NUM_K:
             nxt_buf = nxt_k % NBUF_
@@ -111,6 +95,18 @@ def _cn_w1w2_fused_grid_kernel_fp8(
                 w1_s_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
                 sem_ref.at[1 * NBUF_ + nxt_buf]
             ).start()
+
+        pltpu.make_async_copy(
+            w1_ref.at[pl.ds(gj, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
+            w1_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
+            sem_ref.at[0 * NBUF_ + buf]
+        ).wait()
+        k_block_start = (k * K_TILE) // QB
+        pltpu.make_async_copy(
+            w1_scale_ref.at[pl.ds(gj, 1), pl.ds(k_block_start, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
+            w1_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
+            sem_ref.at[1 * NBUF_ + buf]
+        ).wait()
 
         w1_fp8 = w1_bufs_ref[buf]
         s1 = w1_s_bufs_ref[buf]
@@ -143,17 +139,6 @@ def _cn_w1w2_fused_grid_kernel_fp8(
 
     for m in range(NUM_I):
         buf = m % NBUF_
-        pltpu.make_async_copy(
-            w2_ref.at[pl.ds(gj, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
-            w2_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
-            sem_ref.at[2 * NBUF_ + buf]
-        ).wait()
-        pltpu.make_async_copy(
-            w2_scale_ref.at[pl.ds(gj, 1), pl.ds(m * IB_TILE, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-            w2_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-            sem_ref.at[3 * NBUF_ + buf]
-        ).wait()
-
         nxt_m = m + 1
         if nxt_m < NUM_I:
             nxt_buf = nxt_m % NBUF_
@@ -168,6 +153,20 @@ def _cn_w1w2_fused_grid_kernel_fp8(
                 sem_ref.at[3 * NBUF_ + nxt_buf]
             ).start()
 
+        # Wait for current tile
+        pltpu.make_async_copy(
+            w2_ref.at[pl.ds(gj, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
+            w2_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
+            sem_ref.at[2 * NBUF_ + buf]
+        ).wait()
+        pltpu.make_async_copy(
+            w2_scale_ref.at[pl.ds(gj, 1), pl.ds(m * IB_TILE, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+            w2_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+            sem_ref.at[3 * NBUF_ + buf]
+        ).wait()
+
+
+        # Start next tile DMA first (overlaps with wait + compute)
         w2_fp8 = w2_bufs_ref[buf]
         s2 = w2_s_bufs_ref[buf]
         w2_fp32 = w2_fp8.astype(jnp.float32).reshape(IB_TILE, IB, H)
@@ -191,7 +190,10 @@ def _cn_w1w2_fused_grid_kernel_fp8(
 def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
                               active_ids, topk_weights, *,
                               n_tokens, interpret=False):
-    """Grid-based fused gate+up+SwiGLU+down for the C=N MoE block."""
+    """Fused gate+up+SwiGLU+down for the C=N MoE block, multi-buffered at
+    depth ``_FUSE_NBUF``. lhs [N*M_PAD, K]; active_ids/topk_weights
+    [N*TOP_K] flattened. Returns bf16[TOPK_TOTAL*M_PAD, H] with each
+    slot's weighted output at row slot*M_PAD."""
     G, K, N1 = w1.shape
     assert N1 % 2 == 0, f"w1 last dim must be 2*I; got {N1}"
     I = N1 // 2
@@ -234,7 +236,7 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
     compiler_params = None if interpret else pltpu.CompilerParams(
         vmem_limit_bytes=int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9))
 
-    per_slot_out = pl.pallas_call(
+    return pl.pallas_call(
         functools.partial(_cn_w1w2_fused_grid_kernel_fp8,
                           K=K, I=I, H=H,
                           K_BLOCKS=K_BLOCKS, QB=QB,
@@ -246,8 +248,6 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
         interpret=interpret, name="cn_gemv_w1w2_fused_grid_fp8",
     )(active_ids, token_offsets, topk_weights,  # scalar prefetch (3)
       lhs, w1, w1_scale, w2, w2_scale)          # inputs (5)
-
-    return per_slot_out
 
 
 def cn_moe_full(hidden_state, w1, w1_scale, w2, w2_scale,
@@ -264,11 +264,11 @@ def cn_moe_full(hidden_state, w1, w1_scale, w2, w2_scale,
     ids_flat = active_ids.reshape(C * TOP_K)
     weights_flat = topk_weights.reshape(C * TOP_K)
 
-    per_slot_out = cn_gemv_w1w2_fused_mb_fp8(
+    fused_out = cn_gemv_w1w2_fused_mb_fp8(
         lhs, w1, w1_scale, w2, w2_scale, ids_flat, weights_flat,
         n_tokens=C, interpret=interpret)
 
     # Sum across TOP_K experts per token (weighting applied in kernel)
-    slot_outputs = per_slot_out[::M_PAD][:C * TOP_K]
+    slot_outputs = fused_out[::M_PAD][:C * TOP_K]
     token_outputs = slot_outputs.reshape(C, TOP_K, H).sum(axis=1)
     return token_outputs.astype(jnp.bfloat16)
