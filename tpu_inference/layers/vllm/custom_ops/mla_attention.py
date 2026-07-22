@@ -19,7 +19,8 @@ from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from torch.nn import Parameter
 from torchax.interop import jax_view, torch_view
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
+from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.model_executor.layers.attention.attention import \
     get_attention_context
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
@@ -97,6 +98,21 @@ class VllmMLAAttention(MLAAttention):
         if self.kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.to_jax_dtype(
                 self.kv_cache_dtype)
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        from vllm.v1.kv_cache_interface import (
+            MLAAttentionSpec,
+            get_kv_quant_mode,
+        )
+        dtype = utils.to_torch_dtype(self.kv_cache_quantized_dtype) if self.kv_cache_quantized_dtype else torch.float8_e4m3fn
+        return MLAAttentionSpec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=self.head_size,
+            dtype=dtype,
+            cache_dtype_str=self.kv_cache_dtype,
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+        )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         with torchax.default_env():

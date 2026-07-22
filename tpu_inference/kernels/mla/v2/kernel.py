@@ -305,6 +305,7 @@ def _mla_ragged_paged_attention_kernel(
     new_kv_c_hbm_ref,  # [max_num_tokens_per_kv_packing, kv_packing, lkv_dim] if not transpose_kv_cache else [lkv_dim, max_num_tokens]
     new_k_pe_hbm_ref,  # [max_num_tokens_per_kv_packing, kv_packing, r_dim] if not transpose_kv_cache else [r_dim, max_num_tokens]
     cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)] if not transpose_kv_cache else [total_num_pages, align_to(lkv_dim + r_dim, 128), page_size]
+    topk_indices_ref,  # [max_num_tokens, topk] or None
     # Output
     o_hbm_ref,  # [max_num_tokens, num_q_heads, lkv_dim]
     updated_cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)] if not transpose_kv_cache else [total_num_pages, align_to(lkv_dim + r_dim, 128), page_size]
@@ -314,7 +315,8 @@ def _mla_ragged_paged_attention_kernel(
     bq_nope_x2_ref,  # [2, batch_size, bq_sz, num_q_heads, lkv_dim]
     bq_rope_x2_ref,  # [2, batch_size, bq_sz, num_q_heads, r_dim]
     bo_x2_ref,  # [2, batch_size, bq_sz, num_q_heads, lkv_dim]
-    sems,  # [4, batch_size, 2]
+    topk_indices_x2_ref,  # [2, batch_size, bq_sz, topk] or None
+    sems,  # [5, batch_size, 2]
     l_ref,  # [batch_size, bq_sz * num_q_heads, 128],
     m_ref,  # [batch_size, bq_sz * num_q_heads, 128],
     acc_ref,  # [batch_size, bq_sz * num_q_heads, lkv_dim],
@@ -407,6 +409,7 @@ def _mla_ragged_paged_attention_kernel(
         *,
         bq_idx,
         bkv_idx,
+        bq_sem_idx,
     ):
         assert len(ql_nope.shape) == 3
         assert len(q_pe.shape) == 3
@@ -462,6 +465,12 @@ def _mla_ragged_paged_attention_kernel(
             mask = q_span < k_span
             if sliding_window is not None:
                 mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
+            if topk_indices_x2_ref is not None:
+                bq_topk_indices_b = topk_indices_x2_ref[bq_sem_idx, b]
+                bq_topk_indices_b = jnp.broadcast_to(bq_topk_indices_b[:, None, :], (bq_sz, num_q_heads, bq_topk_indices_b.shape[-1]))
+                bq_topk_indices_b = bq_topk_indices_b.reshape(mask.shape[0], 1, bq_topk_indices_b.shape[-1])
+                valid_mask = jnp.any(bq_topk_indices_b == k_span[:, :, None], axis=-1)
+                mask = jnp.logical_or(mask, jnp.logical_not(valid_mask))
             mask_list.append(mask)
         mask = jnp.stack(mask_list, axis=0)
 
@@ -508,6 +517,8 @@ def _mla_ragged_paged_attention_kernel(
         bkv_idx,
         head_l_ref,
         head_m_ref,
+        bq_sem_idx=None,
+        b=None,
     ):
         assert len(ql_nope.shape) == 2
         assert len(q_pe.shape) == 2
@@ -585,7 +596,7 @@ def _mla_ragged_paged_attention_kernel(
             s = soft_cap * jnp.tanh(s / soft_cap)
         s = s.astype(s_dtype)
 
-        if s.shape[0] % num_q_heads == 0 and s.shape[1] % 128 == 0:
+        if s.shape[0] % num_q_heads == 0 and s.shape[1] % 128 == 0 and topk_indices_x2_ref is None:
             # Optimized mask logic.
             threshold = (kv_len - q_len + (bq_idx * bq_sz + bq_offset) -
                          bkv_idx * bkv_sz)
@@ -620,6 +631,15 @@ def _mla_ragged_paged_attention_kernel(
 
             if sliding_window is not None:
                 mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
+            if topk_indices_x2_ref is not None:
+                assert bq_sem_idx is not None and b is not None
+                bq_topk_indices_b = topk_indices_x2_ref[bq_sem_idx, b]
+                q_split_len = s.shape[0] // num_q_heads
+                sliced_topk = bq_topk_indices_b[bq_offset : bq_offset + q_split_len]
+                sliced_topk = jnp.broadcast_to(sliced_topk[:, None, :], (q_split_len, num_q_heads, sliced_topk.shape[-1]))
+                sliced_topk = sliced_topk.reshape(s.shape[0], 1, sliced_topk.shape[-1])
+                valid_mask = jnp.any(sliced_topk == k_span[:, :, None], axis=-1)
+                mask = jnp.logical_or(mask, jnp.logical_not(valid_mask))
             s = jnp.where(mask, mask_value, s)
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
         m_prev = load_with_init(head_m_ref, -jnp.inf)
@@ -1556,6 +1576,30 @@ def _mla_ragged_paged_attention_kernel(
                     wait,
                 )
 
+    def _fetch_topk_indices(batch_start_seq_idx, bq_idx, bq_sem_idx, *, wait=False):
+        if topk_indices_ref is not None:
+            for b in range(batch_size):
+                sem = sems.at[4, b, bq_sem_idx]
+                vmem_ref = topk_indices_x2_ref.at[bq_sem_idx, b]
+
+                seq_idx = batch_start_seq_idx + b
+                q_len_start = cu_q_lens_ref[seq_idx] + bq_idx * bq_sz
+                q_end = cu_q_lens_ref[seq_idx + 1]
+                sz = jnp.minimum(bq_sz, q_end - q_len_start)
+
+                @pl.when(sz > 0)
+                def _copy(q_len_start=q_len_start, sz=sz, vmem_ref=vmem_ref, sem=sem):
+                    if not wait:
+                        _async_copy(
+                            topk_indices_ref.at[pl.ds(q_len_start, sz)],
+                            vmem_ref.at[pl.ds(0, sz)],
+                            sem,
+                            wait=False,
+                        )
+                    else:
+                        dst = vmem_ref.at[pl.ds(0, sz)]
+                        _async_copy(src=dst, dst=dst, sem=sem, wait=True)
+
     # TODO(b/506245022): Split out the KV handling functions into separate files.
     if not transpose_kv_cache:
         _fetch_bkv_fn = _fetch_bkv
@@ -1576,6 +1620,12 @@ def _mla_ragged_paged_attention_kernel(
 
     def wait_fetch_bq(batch_start_seq_idx, bq_idx, bq_sem_idx):
         return _fetch_bq(batch_start_seq_idx, bq_idx, bq_sem_idx, wait=True)
+
+    def start_fetch_topk_indices(batch_start_seq_idx, bq_idx, bq_sem_idx):
+        return _fetch_topk_indices(batch_start_seq_idx, bq_idx, bq_sem_idx)
+
+    def wait_fetch_topk_indices(batch_start_seq_idx, bq_idx, bq_sem_idx):
+        return _fetch_topk_indices(batch_start_seq_idx, bq_idx, bq_sem_idx, wait=True)
 
     def start_send_bo(batch_start_seq_idx, bo_idx, bo_sem_idx):
         bo_ids_ref[bo_sem_idx] = batch_start_seq_idx
@@ -1770,6 +1820,7 @@ def _mla_ragged_paged_attention_kernel(
             def prefetch_next_bq():
                 sem_ids_ref[0] = next_bq_sem_idx
                 start_fetch_bq(next_seq_idx, next_bq_idx, next_bq_sem_idx)
+                start_fetch_topk_indices(next_seq_idx, next_bq_idx, next_bq_sem_idx)
 
             def compute_with_bkv(bkv_idx, _):
 
@@ -1789,6 +1840,7 @@ def _mla_ragged_paged_attention_kernel(
                 @pl.when(bkv_idx == 0)
                 def wait_cur_bq():
                     wait_fetch_bq(batch_start_seq_idx, bq_idx, bq_sem_idx)
+                    wait_fetch_topk_indices(batch_start_seq_idx, bq_idx, bq_sem_idx)
 
                 # Wait for cur bkv
                 offsets, update_szs = wait_fetch_bkv(batch_start_seq_idx,
@@ -1874,6 +1926,8 @@ def _mla_ragged_paged_attention_kernel(
                                 bkv_idx=bkv_idx,
                                 head_l_ref=l_ref.at[b, bq_start:bq_end],
                                 head_m_ref=m_ref.at[b, bq_start:bq_end],
+                                bq_sem_idx=bq_sem_idx,
+                                b=b,
                             )
 
                             if prev_p is not None:
@@ -1952,6 +2006,7 @@ def _mla_ragged_paged_attention_kernel(
                         bkpe,
                         bq_idx=bq_idx,
                         bkv_idx=bkv_idx,
+                        bq_sem_idx=bq_sem_idx,
                     )
 
             lax.fori_loop(0, num_bkv, compute_with_bkv, None, unroll=False)
@@ -1984,6 +2039,7 @@ def _mla_ragged_paged_attention_kernel(
     @pl.when(batch_start_seq_idx == start_seq_idx)
     def prologue():
         start_fetch_bq(start_seq_idx, 0, 0)
+        start_fetch_topk_indices(start_seq_idx, 0, 0)
 
         if not transpose_kv_cache:
             # Initialize bkvc_x2_ref and bkpe_x2_ref to zeros to avoid NaN issues from accessing
@@ -2177,6 +2233,7 @@ def mla_ragged_paged_attention(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    topk_indices: jax.Array | None = None,  # [max_num_tokens, topk]
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -2351,6 +2408,7 @@ def mla_ragged_paged_attention(
         batch_size: int = 1,
         q_split: int = 1,
         case: MlaCase = MlaCase.MIXED,
+        topk_indices: jax.Array | None = None,
     ):
 
         bkv_p = num_kv_pages_per_block
@@ -2439,14 +2497,24 @@ def mla_ragged_paged_attention(
             jnp.float32,
         )
 
+        if topk_indices is None:
+            topk_indices = jnp.zeros((ql_nope.shape[0], 128), dtype=jnp.int32)
+
+        in_specs.append(pl.BlockSpec(memory_space=pltpu.HBM))
+        topk_scratch = pltpu.VMEM(
+            (2, batch_size, bq_sz, topk_indices.shape[-1]),
+            topk_indices.dtype,
+        )
+
         scratch_shapes = [
             bkvc_double_buf,
             bkpe_double_buf,
             bq_nope_double_buf,
             bq_rope_double_buf,
             bo_double_buf,  # Double buffering for output block.
-            # Semaphores for double buffering of bkv, bq, bo and bkv_update.
-            pltpu.SemaphoreType.DMA((4, batch_size, 2)),
+            topk_scratch,
+            # Semaphores for double buffering of bkv, bq, bo, topk, and bkv_update.
+            pltpu.SemaphoreType.DMA((5, batch_size, 2)),
             # Intermediate buffers per kv head for flash attention.
             l_scratch,
             m_scratch,
@@ -2513,14 +2581,16 @@ def mla_ragged_paged_attention(
                 },
                 name=scope_name,
             ))
-        return kernel(
+        kernel_args = [
             *scalar_prefetches,
             ql_nope,
             q_pe,
             new_kv_c,
             new_k_pe,
             cache_kv,
-        )
+            topk_indices,
+        ]
+        return kernel(*kernel_args)
 
     batch_distribution = (distribution[0] //
                           decode_batch_size) * decode_batch_size
@@ -2543,6 +2613,7 @@ def mla_ragged_paged_attention(
         s_dtype=s_dtype,
         p_same_dtype_as_v=p_same_dtype_as_v,
         case=MlaCase.BATCHED_DECODE,
+        topk_indices=topk_indices,
     )
     # Decode-only
     ql_nope, updated_kv = run_mla_kernel(
@@ -2563,6 +2634,7 @@ def mla_ragged_paged_attention(
         s_dtype=s_dtype,
         p_same_dtype_as_v=p_same_dtype_as_v,
         case=MlaCase.DECODE,
+        topk_indices=topk_indices,
     )
 
     if chunk_prefill_size is not None:
@@ -2585,6 +2657,7 @@ def mla_ragged_paged_attention(
             s_dtype=s_dtype,
             p_same_dtype_as_v=p_same_dtype_as_v,
             case=MlaCase.PREFILL,
+            topk_indices=topk_indices,
         )
 
     # Handle mixed case where the query length per sequence is variable.
@@ -2607,6 +2680,7 @@ def mla_ragged_paged_attention(
         s_dtype=s_dtype,
         p_same_dtype_as_v=p_same_dtype_as_v,
         case=MlaCase.MIXED,
+        topk_indices=topk_indices,
     )
     output = prepare_outputs(
         ql_nope,

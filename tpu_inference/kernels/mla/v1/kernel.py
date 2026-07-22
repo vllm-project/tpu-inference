@@ -112,6 +112,7 @@ def ref_mla_ragged_paged_attention(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    topk_indices: jax.Array | None = None,
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -238,6 +239,11 @@ def ref_mla_ragged_paged_attention(
         mask = q_span < kv_span
         if sliding_window is not None:
             mask = jnp.logical_or(mask, q_span - sliding_window >= kv_span)
+        if topk_indices is not None:
+            topk_indices_i = topk_indices[q_start:q_end]
+            valid_mask = jnp.any(topk_indices_i[:, None, :] == jnp.arange(kv_len)[None, :, None], axis=-1)
+            valid_mask = jnp.broadcast_to(valid_mask[None, :, :], attn.shape)
+            mask = jnp.logical_or(mask, jnp.logical_not(valid_mask))
         if soft_cap is not None:
             attn = soft_cap * jnp.tanh(attn / soft_cap)
         attn = jnp.where(mask, mask_value, attn)
