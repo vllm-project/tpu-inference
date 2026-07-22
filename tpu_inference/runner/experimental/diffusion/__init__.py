@@ -25,6 +25,12 @@ from .config import (AttentionPolicy, CanvasPolicy, DiffusionAlgorithm,
                      resolve_generation_strategy)
 from .program import BlockForwardFn, DenoiseBlockOutput, denoise_block
 
+from .batch import (  # isort: skip
+    PendingBlockOutput, PromptBlockPlan, complete_seeded_decode_block,
+    flush_partial_block_output, plan_seeded_prompt, required_cache_end,
+    start_partial_block_output,
+)
+
 __all__ = [
     "AttentionPolicy",
     "BlockForwardFn",
@@ -39,10 +45,17 @@ __all__ = [
     "GenerationStrategyConfig",
     "LogitAlignment",
     "NextBlockPolicy",
+    "PendingBlockOutput",
+    "PromptBlockPlan",
     "PromptRemainderPolicy",
+    "complete_seeded_decode_block",
     "denoise_block",
+    "flush_partial_block_output",
     "get_commit_algorithm",
     "low_confidence_commit",
+    "plan_seeded_prompt",
+    "required_cache_end",
     "register_diffusion_model_adapter",
     "resolve_generation_strategy",
+    "start_partial_block_output",
 ]
