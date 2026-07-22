@@ -266,6 +266,8 @@ class TpuPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
 
+        requested_data_parallel_size = \
+            vllm_config.parallel_config.data_parallel_size
         cls._resolve_multiprocess_dp(vllm_config)
 
         if vllm_envs.VLLM_TPU_USING_PATHWAYS:
@@ -368,6 +370,37 @@ class TpuPlatform(Platform):
 
         enable_continue_decode = vllm_config.additional_config.get(
             "enable_continue_decode", False)
+        from tpu_inference.runner.diffusion.config import (
+            GenerationStrategy, resolve_generation_strategy)
+        generation_strategy = resolve_generation_strategy(vllm_config)
+        enable_block_diffusion = (generation_strategy.strategy
+                                  is GenerationStrategy.BLOCK_DIFFUSION)
+        if enable_continue_decode and enable_block_diffusion:
+            raise ValueError(
+                "continue_decode and block_diffusion are mutually exclusive")
+        if enable_block_diffusion:
+            assert generation_strategy.diffusion is not None
+            diffusion = generation_strategy.diffusion
+            from tpu_inference.runner.diffusion.request_validation import \
+                patch_vllm_input_processor_for_block_diffusion
+            patch_vllm_input_processor_for_block_diffusion()
+            from tpu_inference.runner.utils import MIN_NUM_SEQS
+            diffusion_batch_capacity = (
+                scheduler_config.max_num_batched_tokens //
+                diffusion.model.block_size)
+            if diffusion_batch_capacity < MIN_NUM_SEQS:
+                raise ValueError(
+                    "block_diffusion requires max_num_batched_tokens to fit "
+                    f"the minimum padded batch of {MIN_NUM_SEQS} diffusion "
+                    "blocks")
+            scheduler_config.max_num_seqs = min(
+                scheduler_config.max_num_seqs,
+                diffusion_batch_capacity,
+            )
+            from tpu_inference.core.sched.utils import \
+                MULTI_TOKEN_LOOKAHEAD_CONFIG
+            vllm_config.additional_config[
+                MULTI_TOKEN_LOOKAHEAD_CONFIG] = diffusion.model.block_size - 1
         is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         # Late initialization to avoid circular import.
@@ -375,18 +408,73 @@ class TpuPlatform(Platform):
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
 
-        if enable_continue_decode:
+        if enable_continue_decode or enable_block_diffusion:
+            mode = ("continue_decode"
+                    if enable_continue_decode else "block_diffusion")
             if parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
-                    "continue_decode is not supported with pipeline parallelism"
-                )
+                    f"{mode} is not supported with pipeline parallelism")
             if is_pooling_model:
-                raise ValueError(
-                    "continue_decode is not supported for pooling models")
+                raise ValueError(f"{mode} is not supported for pooling models")
 
-            from tpu_inference.core.sched.utils import \
-                patch_vllm_scheduler_for_continue_decode
-            patch_vllm_scheduler_for_continue_decode()
+            if enable_block_diffusion:
+                if kv_transfer_config is not None:
+                    raise ValueError(
+                        "block_diffusion does not support KV transfer")
+                if scheduler_config.async_scheduling:
+                    raise ValueError(
+                        "block_diffusion is not supported with async scheduling"
+                    )
+                if vllm_config.speculative_config is not None:
+                    raise ValueError(
+                        "block_diffusion is not supported with speculative decoding"
+                    )
+                if vllm_config.lora_config is not None:
+                    raise ValueError(
+                        "block_diffusion is not supported with LoRA")
+                if vllm_config.model_config.is_multimodal_model:
+                    raise ValueError(
+                        "block_diffusion is not supported for multimodal models"
+                    )
+                total_dp_size = getattr(vllm_config.sharding_config,
+                                        "total_dp_size", 1)
+                if (requested_data_parallel_size > 1 or
+                    (isinstance(total_dp_size, int) and total_dp_size > 1)):
+                    raise ValueError(
+                        "block_diffusion currently requires data_parallel_size=1"
+                    )
+                if getattr(scheduler_config, "enable_chunked_prefill", False):
+                    raise ValueError(
+                        "block_diffusion currently requires chunked prefill "
+                        "to be disabled")
+                if envs.USE_BATCHED_RPA_KERNEL:
+                    raise ValueError(
+                        "block_diffusion requires the default RPA kernel")
+                hf_config = vllm_config.model_config.hf_config
+                text_config = getattr(hf_config, "text_config", hf_config)
+                head_dim = getattr(text_config, "head_dim", None)
+                if head_dim is None:
+                    hidden_size = getattr(text_config, "hidden_size", None)
+                    num_heads = getattr(text_config, "num_attention_heads",
+                                        None)
+                    if hidden_size is not None and num_heads:
+                        head_dim = hidden_size // num_heads
+                if head_dim == 64:
+                    raise ValueError(
+                        "block_diffusion is not supported with head_dim=64")
+                if getattr(vllm_config.cache_config, "enable_prefix_caching",
+                           False):
+                    raise ValueError(
+                        "block_diffusion is not supported with prefix caching")
+
+            if enable_continue_decode:
+                from tpu_inference.core.sched.utils import \
+                    patch_vllm_scheduler_for_continue_decode
+                patch_vllm_scheduler_for_continue_decode()
+            else:
+                from tpu_inference.core.sched.utils import \
+                    patch_vllm_scheduler_for_multi_token_decode
+                patch_vllm_scheduler_for_multi_token_decode()
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:

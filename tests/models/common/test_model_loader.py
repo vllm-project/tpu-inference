@@ -276,6 +276,8 @@ def test_get_flax_model(vllm_config, mesh, tie_word_embeddings):
         model = model_loader.get_flax_model(vllm_config, rng, mesh)
 
     assert callable(model.model_fn)
+    assert callable(model.model_fn_no_options)
+    assert model.model_fn_no_options is not model.model_fn
     assert callable(model.compute_logits_fn)
 
     # Verify that JAX model instance possesses the named_modules attribute
@@ -337,6 +339,8 @@ def test_get_vllm_model(mock_get_pp_group, mesh):
     model = model_loader.get_vllm_model(vllm_config, rng, mesh)
 
     assert callable(model.model_fn)
+    assert callable(model.model_fn_no_options)
+    assert model.model_fn_no_options is not model.model_fn
     assert callable(model.compute_logits_fn)
 
 

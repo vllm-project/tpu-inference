@@ -75,6 +75,9 @@ from tpu_inference.models.jax.utils.weight_utils import (
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
+from tpu_inference.runner.diffusion.config import (GenerationStrategy,
+                                                   resolve_generation_strategy)
+from tpu_inference.runner.diffusion.strategy import BlockDiffusionStrategy
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.lora_utils import LoraUtils
@@ -126,7 +129,7 @@ logging.getLogger("torchax.tensor").setLevel(logging.ERROR)
 
 INVALID_TOKEN_ID = -1
 # Smallest output size
-MIN_NUM_SEQS = 8
+MIN_NUM_SEQS = runner_utils.MIN_NUM_SEQS
 
 
 @functools.partial(jax.jit, static_argnames=["dp_size", "tokens_per_dp"])
@@ -807,6 +810,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
+        self.generation_strategy_config = resolve_generation_strategy(
+            vllm_config)
 
         self.devices = devices
         self.dtype = self.model_config.dtype
@@ -847,6 +852,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._substitute_placeholder_token_fn = _substitute_placeholder_token
         self.execute_model_state: ExecuteModelState | None = None
         self._continue_decode_output = None
+        self._generation_strategy_output = None
         self.batch_counter = 0
 
         self.kv_caches: list[jax.Array] = []
@@ -862,6 +868,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
         self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
         self.pad_token_id = runner_utils.get_pad_token_id(self.model_config)
+        self.block_diffusion_strategy = (
+            BlockDiffusionStrategy(self,
+                                   self.generation_strategy_config.diffusion)
+            if self.generation_strategy_config.strategy
+            is GenerationStrategy.BLOCK_DIFFUSION else None)
 
     def _init_random(self):
         if self.model_config.seed is None:
@@ -1195,6 +1206,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.drafter.load_model(self.state)
 
         self.model_fn = model.model_fn
+        self.model_fn_no_options = (model.model_fn_no_options
+                                    or model.model_fn)
         self.compute_logits_fn = model.compute_logits_fn
         self.pooler_fn = model.pooler_fn
         self.combine_hidden_states_fn = model.combine_hidden_states_fn
@@ -1301,6 +1314,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def capture_model(self) -> None:
         self.compilation_manager.capture_model()
+        if self.block_diffusion_strategy is not None:
+            with jax.set_mesh(self.mesh):
+                self.block_diffusion_strategy.precompile()
 
     @time_function
     def execute_model(
@@ -1332,6 +1348,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self._continue_decode_output is not None:
             output = self._continue_decode_output
             self._continue_decode_output = None
+            return output
+
+        if self._generation_strategy_output is not None:
+            output = self._generation_strategy_output
+            self._generation_strategy_output = None
             return output
 
         if self.execute_model_state is None:
@@ -1532,6 +1553,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     ) -> JaxIntermediateTensors | ModelRunnerOutput | None:
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
+        if self.block_diffusion_strategy is not None:
+            self.block_diffusion_strategy.on_scheduler_update(
+                scheduler_output.finished_req_ids)
         if not scheduler_output.total_num_scheduled_tokens:
             if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
                 self._modify_prev_results()
@@ -1552,6 +1576,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # raise Exception(
                 #     "Should not schedule a request that does nothing!")
             return EMPTY_MODEL_RUNNER_OUTPUT
+
+        if self.block_diffusion_strategy is not None:
+            return self.block_diffusion_strategy.execute(scheduler_output)
 
         # Check if the entire batch is in the decode phase.
         # request_distribution[0] tracks the number of decode requests.

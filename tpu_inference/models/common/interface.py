@@ -55,3 +55,6 @@ class ModelInterface:
     state_leaves: Any
     lora_manager: Callable
     model: Any
+    # Model forward callable safe to invoke from an enclosing JAX program. It
+    # omits compiler options that JAX only permits on a top-level jit.
+    model_fn_no_options: Callable | None = None

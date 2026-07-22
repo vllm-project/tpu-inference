@@ -133,6 +133,16 @@ class TestJaxModule(unittest.TestCase):
         # 'a' and 'b' point to the same module; only the first is yielded.
         self.assertEqual(names.count("a") + names.count("b"), 1)
 
+    def test_modules_matches_named_modules_without_names(self):
+        """vLLM cleanup can traverse JAX models through the torch-compatible API."""
+
+        module = NestedModule()
+
+        self.assertEqual(
+            list(module.modules()),
+            [child for _, child in module.named_modules()],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import jax.numpy as jnp
@@ -53,7 +54,33 @@ class TestTpuPlatform:
         vllm_config.kv_transfer_config = None
         vllm_config.additional_config = {}
         vllm_config.scheduler_config.async_scheduling = False
+        vllm_config.scheduler_config.enable_chunked_prefill = False
         return vllm_config
+
+    @staticmethod
+    def _enable_block_diffusion(vllm_config):
+        vllm_config.additional_config = {
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "dgr2",
+                "block_size": 32,
+                "mask_token_id": 151669,
+                "sub_block_size": 8,
+            },
+        }
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.model_config.runner_type = "generate"
+        vllm_config.model_config.is_multimodal_model = False
+        vllm_config.model_config.hf_config.head_dim = 128
+        vllm_config.scheduler_config.async_scheduling = False
+        vllm_config.scheduler_config.enable_chunked_prefill = False
+        vllm_config.scheduler_config.max_num_batched_tokens = 2048
+        vllm_config.scheduler_config.max_num_seqs = 128
+        vllm_config.speculative_config = None
+        vllm_config.lora_config = None
+        vllm_config.kv_transfer_config = None
+        vllm_config.cache_config = None
 
     @pytest.mark.parametrize("chip_name,expected_dtype", [
         ("v6e", torch.float8_e5m2),
@@ -610,3 +637,83 @@ class TestTpuPlatform:
         with pytest.raises(ValueError, match=expected_error):
             TpuPlatform.check_and_update_config(vllm_config)
         mock_patch.assert_not_called()
+
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_multi_token_decode"
+    )
+    def test_check_and_update_config_block_diffusion_success(
+            self, mock_patch, mock_dp_update, mock_sharding, vllm_config):
+        self._enable_block_diffusion(vllm_config)
+
+        TpuPlatform.check_and_update_config(vllm_config)
+
+        assert vllm_config.additional_config[
+            "multi_token_decode_lookahead"] == 31
+        assert vllm_config.scheduler_config.max_num_seqs == 64
+        mock_patch.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "unsupported,expected_error",
+        [
+            ("kv_transfer", "does not support KV transfer"),
+            ("requested_dp", "requires data_parallel_size=1"),
+            ("sharding_dp", "requires data_parallel_size=1"),
+            ("chunked_prefill", "requires chunked prefill to be disabled"),
+            ("token_budget", "minimum padded batch"),
+        ],
+    )
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_multi_token_decode"
+    )
+    def test_check_and_update_config_block_diffusion_rejects_unsupported_modes(
+        self,
+        mock_patch,
+        mock_dp_update,
+        mock_sharding,
+        vllm_config,
+        unsupported,
+        expected_error,
+    ):
+        self._enable_block_diffusion(vllm_config)
+        mock_sharding.from_vllm_config.return_value.total_dp_size = 1
+        if unsupported == "kv_transfer":
+            vllm_config.kv_transfer_config = SimpleNamespace(
+                kv_connector="TPUConnector")
+        elif unsupported == "requested_dp":
+            vllm_config.parallel_config.data_parallel_size = 2
+        elif unsupported == "sharding_dp":
+            mock_sharding.from_vllm_config.return_value.total_dp_size = 2
+        elif unsupported == "chunked_prefill":
+            vllm_config.scheduler_config.enable_chunked_prefill = True
+        elif unsupported == "token_budget":
+            vllm_config.scheduler_config.max_num_batched_tokens = 255
+
+        with pytest.raises(ValueError, match=expected_error):
+            TpuPlatform.check_and_update_config(vllm_config)
+
+        mock_patch.assert_not_called()
+
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    def test_check_and_update_config_rejects_two_multi_token_modes(
+            self, mock_sharding, vllm_config):
+        vllm_config.additional_config = {
+            "enable_continue_decode": True,
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "dgr2",
+                "block_size": 32,
+                "mask_token_id": 151669,
+            },
+        }
+        vllm_config.cache_config = None
+
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            TpuPlatform.check_and_update_config(vllm_config)
