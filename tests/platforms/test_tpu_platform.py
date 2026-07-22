@@ -82,16 +82,14 @@ class TestTpuPlatform:
         vllm_config.kv_transfer_config = None
         vllm_config.cache_config = None
 
-    @pytest.mark.parametrize("chip_name,expected_dtype", [
-        ("v6e", torch.float8_e5m2),
-        ("v5e", torch.float8_e4m3fn),
+    @pytest.mark.parametrize("accelerator_type,expected_dtype", [
+        ("v6e-8", torch.float8_e5m2),
+        ("v5litepod-4", torch.float8_e4m3fn),
+        ("tpu7x-128", torch.float8_e4m3fn),
     ])
-    def test_fp8_dtype(self, chip_name, expected_dtype):
-        mock_chip_type = MagicMock()
-        mock_chip_type.name = chip_name
-
+    def test_fp8_dtype(self, accelerator_type, expected_dtype):
         with patch('tpu_inference.platforms.tpu_platform.init_logger'), \
-             patch('tpu_info.device.get_local_chips', return_value=(mock_chip_type, None)), \
+             patch('tpu_inference.tpu_info.get_tpu_type', return_value=accelerator_type), \
              patch('vllm.envs.VLLM_TPU_USING_PATHWAYS', False):
             assert TpuPlatform.fp8_dtype() == expected_dtype
 
@@ -148,16 +146,24 @@ class TestTpuPlatform:
         mock_envs.VLLM_TPU_USING_PATHWAYS = True
         assert TpuPlatform.get_device_name() == "TPU v6 lite"
 
+    @pytest.mark.parametrize("accelerator_type,expected_name", [
+        ("v6e-8", "TPU v6e"),
+        ("v5litepod-16", "TPU v5e"),
+        ("tpu7x-128", "TPU v7x"),
+        ("v5p-32", "TPU v5p"),
+    ])
+    @patch('tpu_inference.platforms.tpu_platform.vllm_envs')
+    def test_get_device_name(self, mock_envs, accelerator_type, expected_name):
+        mock_envs.VLLM_TPU_USING_PATHWAYS = False
+        with patch('tpu_inference.tpu_info.get_tpu_type',
+                   return_value=accelerator_type):
+            assert TpuPlatform.get_device_name() == expected_name
+
     @patch('tpu_inference.platforms.tpu_platform.vllm_envs')
     def test_get_device_name_exception(self, mock_envs):
         mock_envs.VLLM_TPU_USING_PATHWAYS = False
-        mock_device = MagicMock()
-        mock_device.get_local_chips.side_effect = Exception("TPU Error")
-
-        with patch.dict('sys.modules', {
-                'tpu_info': MagicMock(),
-                'tpu_info.device': mock_device
-        }):
+        with patch('tpu_inference.tpu_info.get_tpu_type',
+                   side_effect=Exception("TPU Error")):
             assert TpuPlatform.get_device_name() == "TPU"
 
     def test_validate_request_random_seed(self):
