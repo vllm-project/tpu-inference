@@ -130,14 +130,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
                 lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD), pl.ds(k * K_TILE, K_TILE)]
                 gate_up_acc = gate_up_acc + jnp.matmul(lhs_tile, w1_dequant, preferred_element_type=jnp.float32)
 
-            # ---- SwiGLU ----
-            gate_up_bf16 = gate_up_acc.astype(DTYPE_OUT)
-            gate = gate_up_bf16[:, :I].astype(jnp.float32)
-            up = gate_up_bf16[:, I:].astype(jnp.float32)
-            silu_gate = gate * jax.nn.sigmoid(gate)
-            intermediate = (silu_gate * up).astype(DTYPE_LHS)
-
-            # ---- Phase 2: I-tiled down matmul ----
+            # ---- Prefetch first w2 tile early (overlaps with SwiGLU compute) ----
             pltpu.make_async_copy(
                 w2_ref.at[pl.ds(gj, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
                 w2_bufs_ref.at[pl.ds(0, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
@@ -148,6 +141,15 @@ def _cn_w1w2_fused_token_kernel_fp8(
                 w2_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
                 sem_ref.at[3 * NBUF_ + 0]
             ).start()
+
+            # ---- SwiGLU (w2 DMA runs in parallel) ----
+            gate_up_bf16 = gate_up_acc.astype(DTYPE_OUT)
+            gate = gate_up_bf16[:, :I].astype(jnp.float32)
+            up = gate_up_bf16[:, I:].astype(jnp.float32)
+            silu_gate = gate * jax.nn.sigmoid(gate)
+            intermediate = (silu_gate * up).astype(DTYPE_LHS)
+
+            # ---- Phase 2: I-tiled down matmul (tile 0 already in flight) ----
 
             down_acc = jnp.zeros((M_PAD, H), dtype=jnp.float32)
 
