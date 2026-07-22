@@ -245,15 +245,14 @@ class TpuPlatform(Platform):
             if vllm_envs.VLLM_TPU_USING_PATHWAYS:
                 # Causes mutliprocess accessing IFRT when calling jax.devices()
                 return "TPU v6 lite"
-            else:
-                # The tpu_info package, upon being imported, executes
-                # _initialize_libtpu_safely(), which attempts to start a new
-                # process (process.start()). Python's multiprocessing module
-                # forbids starting new processes, resulting in error.
-                # So import tpu_info here instead.
-                from tpu_info import device
-                chip_type, _ = device.get_local_chips()
-                return f"TPU {chip_type.name}"
+            from tpu_inference import tpu_info
+            accelerator_type = tpu_info.get_tpu_type()
+            chip_type = accelerator_type.split("-", maxsplit=1)[0].lower()
+            chip_type = {
+                "tpu7x": "v7x",
+                "v5litepod": "v5e",
+            }.get(chip_type, chip_type)
+            return f"TPU {chip_type}"
         except Exception as e:
             logger.warning(f"Error getting device name: {e}")
             return 'TPU'
