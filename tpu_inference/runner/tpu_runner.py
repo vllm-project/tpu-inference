@@ -54,7 +54,7 @@ import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, PCPMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -2793,6 +2793,77 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         request_distribution = np.array(_request_distribution,
                                         dtype=np.int32).ravel()
 
+        # Prefill context parallelism (single request, prefill only): head-tail
+        # arrange this request's current tokens into rank order
+        pcp_metadata = None
+        pcp_size = self.vllm_config.sharding_config.prefill_cp_size
+        if pcp_size > 1:
+            counts = scheduled_tokens_per_dp_rank[0]
+            assert len(
+                counts
+            ) == 1, "PCP currently only supports a single request at a time."
+            num_current = int(counts[0])
+            two_p = 2 * pcp_size
+            C = padded_num_scheduled_tokens_per_dp_rank // two_p
+            # Head-tail row order: rank r owns chunk r (head) and chunk 2P-1-r (tail)
+            row_perm = np.array(
+                [c for r in range(pcp_size) for c in (r, two_p - 1 - r)])
+
+            def _rearrange(buf):  # natural token order -> rank order
+                buf[num_current:] = 0
+                buf[:] = buf.reshape(two_p, C)[row_perm].reshape(-1)
+
+            _rearrange(positions)
+            _rearrange(input_ids_view)
+
+            # seq_lens
+            req_idx = int(req_indices_dp[0][0])
+            num_computed = int(
+                self.input_batch.num_computed_tokens_cpu[req_idx])
+            seq_lens_view[:2] = num_computed + num_current  # [T, T]
+            seq_lens_view[2:] = 0
+
+            # distribution. The fused current phase presents head+tail as two prefill seqs.
+            request_distribution[:] = (0, 0, 2)
+
+            # kv_cache_lens
+            kv_cache_lens_np = np.zeros_like(np.asarray(seq_lens_view))
+            kv_cache_lens_np[:2] = num_computed  # [P, P]
+
+            # cu_q_lens and q_pos_offsets.
+            n_off = np.asarray(seq_lens_view).shape[0]  # max_num_reqs
+            pcp_cu_np = np.zeros((pcp_size, n_off + 1), np.int32)
+            pcp_qpos_np = np.zeros((pcp_size, n_off), np.int32)
+            for rank in range(pcp_size):
+                tail_off = (two_p - 1 - rank) * C
+                tail_real = int(np.clip(num_current - tail_off, 0, C))
+                pcp_cu_np[rank, 1] = C  # seq 0 (head) end
+                pcp_cu_np[rank, 2:] = C + tail_real  # seq 1 (tail) end
+                pcp_qpos_np[rank, 0] = rank * C
+                pcp_qpos_np[rank, 1] = tail_off
+
+            # logits_indices
+            inv_row = np.empty(two_p, np.int64)
+            inv_row[row_perm] = np.arange(two_p)
+            last = num_current - 1
+            logits_indices_view[0] = inv_row[last // C] * C + (last % C)
+            logits_indices_view[1:] = -1
+
+            pcp_spec = NamedSharding(
+                self.mesh, PartitionSpec(ShardingAxisName.PREFILL_CONTEXT,
+                                         None))
+            repl = NamedSharding(self.mesh, PartitionSpec())
+            (pcp_query_start_loc,
+             pcp_q_pos_offsets) = device_array(self.mesh,
+                                               (pcp_cu_np, pcp_qpos_np),
+                                               sharding=pcp_spec)
+            pcp_metadata = PCPMetadata(
+                query_start_loc=pcp_query_start_loc,
+                kv_cache_lens=device_array(self.mesh,
+                                           kv_cache_lens_np,
+                                           sharding=repl),
+                q_pos_offsets=pcp_q_pos_offsets,
+            )
         spec_decode_metadata = None
         if self.speculative_config:
             spec_decode_metadata = (
@@ -2923,6 +2994,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
+                pcp=pcp_metadata,
             )
 
             return attention_metadata_gid

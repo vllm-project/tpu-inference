@@ -28,7 +28,7 @@ import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, PCPMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)
@@ -372,7 +372,27 @@ class CompilationManager:
         request_distribution = np.array([0, 0, 0] * dp_size, dtype=np.int32)
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution,
-                                            sharding=dp_sharding)
+                                            sharding=metadata_attn_sharding)
+        pcp = None
+        if pcp_size > 1:
+            n_reqs = self.runner.max_num_reqs
+            pcp_spec = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
+            repl = NamedSharding(self.runner.mesh, PartitionSpec())
+            pcp = PCPMetadata(
+                query_start_loc=device_array(
+                    self.runner.mesh,
+                    np.zeros((pcp_size, n_reqs + 1), dtype=np.int32),
+                    sharding=pcp_spec),
+                kv_cache_lens=device_array(self.runner.mesh,
+                                           np.zeros(n_reqs, dtype=np.int32),
+                                           sharding=repl),
+                q_pos_offsets=device_array(
+                    self.runner.mesh,
+                    np.zeros((pcp_size, n_reqs), dtype=np.int32),
+                    sharding=pcp_spec),
+            )
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
         # populate for hybrid attn+mamba models — for pure-attention models we
         # pass None at runtime (see `_prepare_inputs`), and the precompile
@@ -406,6 +426,7 @@ class CompilationManager:
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
+                pcp=pcp,
             )
 
             return attention_metadata_gid

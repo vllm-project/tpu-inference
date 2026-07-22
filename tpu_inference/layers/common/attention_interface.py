@@ -27,7 +27,6 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from jax.sharding import Sharding
 
-import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_v3_cp
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import envs
 from tpu_inference.kernels.flash_attention.kernel import (
@@ -37,6 +36,8 @@ from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
+from tpu_inference.layers.common.cp_attention import (forward_with_dcp,
+                                                      pcp_ragged_paged_attention)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore, get_mesh_shape_product
@@ -465,309 +466,6 @@ def sharded_ragged_paged_attention(
     )(*args)
 
 
-def sharded_ragged_paged_attention_experimental(
-        mesh: Mesh,
-        q: jax.Array,
-        k: jax.Array,
-        v: jax.Array,
-        kv_cache: jax.Array,
-        kv_lens: jax.Array,
-        paged_indices: jax.Array,
-        cu_q_lens: jax.Array,
-        distribution: jax.Array,
-        attention_sink: jax.Array | None,
-        sm_scale: float,
-        attention_chunk_size: int | None = None,
-        q_scale: float | None = None,
-        k_scale: float | None = None,
-        v_scale: float | None = None,
-        # kv_cache_lens: jax.Array | None = None,
-        # Flags for CP
-        update_kv_cache: bool = True,
-        return_lse: bool = False,
-        skip_cache_attn: bool = False,
-        skip_current_attn: bool = False,
-        is_context_phase: bool = False,
-        use_causal_mask: bool = True):
-    # Determine the Pallas kernel block sizes.
-    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
-    if tp_size > 1:
-        num_kv_heads = k.shape[1]
-        if num_kv_heads < tp_size:
-            if tp_size % num_kv_heads != 0:
-                raise ValueError(
-                    f"For GQA/MQA, tp_size {tp_size} must be divisible by num_kv_heads {num_kv_heads}"
-                )
-            factor = tp_size // num_kv_heads
-            k = jnp.repeat(k, factor, axis=1)
-            v = jnp.repeat(v, factor, axis=1)
-
-    if is_context_phase:
-        q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_CACHE_HEAD,
-                   None)
-        o_spec = P(('data', 'attn_dp', 'dcp'), ShardingAxisName.KV_CACHE_HEAD,
-                   None)
-    else:
-        q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD,
-                   None)
-        o_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD,
-                   None)
-    # Define the sharding specs.
-    kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
-    # KV cache is sharded across DCP and TP.
-    # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
-    kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT,
-                      ShardingAxisName.KV_CACHE_HEAD, None, None)
-    print(f"page_size={kv_cache.shape[1]}")
-
-    # Build a global cp_rank array of shape (dcp_size,) sharded along 'dcp'.
-    # Inside shard_map each device receives a (1,) slice containing its rank.
-    dcp_size = mesh.shape['dcp']
-    cp_rank_global = jnp.arange(dcp_size, dtype=jnp.int32)
-
-    in_specs = [
-        q_spec,  # q
-        kv_spec,  # k
-        kv_spec,  # v
-        kv_cache_spec,  # kv cache
-        P(ShardingAxisName.ATTN_DATA),  # kv_lens
-        P(ShardingAxisName.ATTN_DATA),  # page_indices
-        P(ShardingAxisName.ATTN_DATA),  # cu_q_lens
-        P(ShardingAxisName.ATTN_DATA),  # distribution
-        P(ShardingAxisName.CONTEXT),  # cp_rank
-    ]
-
-    args = [
-        q, k, v, kv_cache, kv_lens, paged_indices, cu_q_lens, distribution,
-        cp_rank_global
-    ]
-
-    lse_spec = (P(
-        ('data', 'attn_dp',
-         'dcp'), ShardingAxisName.KV_CACHE_HEAD) if is_context_phase else P(
-             ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD))
-    out_specs = [o_spec, kv_cache_spec]
-    if return_lse:
-        out_specs.append(lse_spec)
-
-    def _ragged_paged_attention_wrapper(*args):
-        *kernel_args, cp_rank = args  # cp_rank is (1,) for this device
-        cp_group_size = mesh.shape['dcp']
-
-        kwargs = dict(sm_scale=sm_scale,
-                      sliding_window=attention_chunk_size,
-                      q_scale=q_scale,
-                      k_scale=k_scale,
-                      v_scale=v_scale,
-                      cp_rank=cp_rank,
-                      cp_group_size=cp_group_size,
-                      update_kv_cache=update_kv_cache,
-                      skip_cache_attn=skip_cache_attn,
-                      skip_current_attn=skip_current_attn,
-                      return_lse=return_lse,
-                      use_causal_mask=use_causal_mask)
-        return rpa_v3_cp.ragged_paged_attention(*kernel_args, **kwargs)
-
-    return jax.shard_map(
-        _ragged_paged_attention_wrapper,
-        mesh=mesh,
-        in_specs=tuple(in_specs),
-        out_specs=tuple(out_specs),
-        check_vma=False,
-    )(*args)
-
-
-def dcp_alltoall(
-    attn_out: jax.
-    Array,  # P('dcp', 'model'): local_shape=(max_num_tokens, heads/model, head_dim)
-    lse: jax.
-    Array,  # P('dcp', 'model'): local_shape=(max_num_tokens, heads/model)
-    mesh: Mesh,
-    dcp_axis: str = 'dcp',
-    model_axis: str = 'model',
-) -> tuple[jax.Array, jax.Array]:
-
-    def _inner(attn_out, lse):
-        dcp_size = jax.lax.psum(1, axis_name=dcp_axis)
-        max_num_tokens = attn_out.shape[0]
-        local_heads = attn_out.shape[1]
-        head_dim = attn_out.shape[2]
-
-        # Step 1: all-to-all across dcp
-        attn_gathered = jax.lax.all_to_all(
-            attn_out,
-            axis_name=dcp_axis,
-            split_axis=1,  # split heads
-            concat_axis=0,  # concat tokens
-            tiled=True,
-        )  # -> (max_num_tokens*dcp, heads/(model*dcp), head_dim)
-
-        lse_gathered = jax.lax.all_to_all(
-            lse,
-            axis_name=dcp_axis,
-            split_axis=1,  # split heads
-            concat_axis=0,  # concat tokens
-            tiled=True,
-        )  # -> (max_num_tokens*dcp, heads/(model*dcp))
-
-        # Step 2: Reshape and make shape[0]=dcp_size
-        new_local_heads = local_heads // dcp_size
-        attn_chunks = attn_gathered.reshape(dcp_size, max_num_tokens,
-                                            new_local_heads, head_dim)
-        lse_chunks = lse_gathered.reshape(dcp_size, max_num_tokens,
-                                          new_local_heads)
-
-        # Step 3: Local lse correction
-        combined_lse = jax.nn.logsumexp(lse_chunks, axis=0)
-
-        weights = jnp.exp(lse_chunks - combined_lse[None])
-        # NOTE(weiyulin): When all ranks have -inf LSE (e.g. prefill seqs with no cached tokens),
-        # combined_lse=-inf and weights=exp(-inf-(-inf))=NaN.  Zero them out so
-        # combined_out stays 0 and combined_lse stays -inf for those tokens,
-        # letting merge_attn_states fall back to the query-phase result.
-        weights = jnp.where(jnp.isneginf(combined_lse[None, ...]), 0.0,
-                            weights)
-
-        combined_out = jnp.einsum('d t h, d t h f -> t h f', weights,
-                                  attn_chunks)
-        # (max_num_tokens, new_local_heads, head_dim)
-
-        return combined_out, combined_lse
-
-    return jax.shard_map(
-        _inner,
-        mesh=mesh,
-        in_specs=(
-            P(dcp_axis, ShardingAxisName.KV_CACHE_HEAD, None),
-            P(dcp_axis, ShardingAxisName.KV_CACHE_HEAD),
-        ),
-        out_specs=(
-            P(None, ShardingAxisName.ATTN_HEAD, None),
-            P(None, ShardingAxisName.ATTN_HEAD),
-        ),
-        check_vma=False,
-    )(attn_out, lse)
-
-
-def merge_attn_states(context_out: jax.Array, context_lse: jax.Array,
-                      query_out: jax.Array,
-                      query_lse: jax.Array) -> tuple[jax.Array, jax.Array]:
-    """
-    Merged attn results based on Context (Cache) Query (Current)'s LSE
-        context_out = [seq, local_heads, head_dim]
-        context_lse = [seq, local_heads]
-        query_out = [seq, local_heads, head_dim]
-        query_lse = [seq, local_heads]
-    """
-    max_lse = jnp.maximum(context_lse, query_lse)
-    exp_context = jnp.exp(context_lse - max_lse)
-    exp_query = jnp.exp(query_lse - max_lse)
-
-    sum_exp = exp_context + exp_query
-
-    merged_out = (context_out * exp_context[..., None] +
-                  query_out * exp_query[..., None]) / sum_exp[..., None]
-    merged_lse = max_lse + jnp.log(sum_exp)
-
-    return merged_out, merged_lse
-
-
-def forward_with_dcp(
-    kv_cache: jax.Array,
-    q: jax.Array,
-    k: jax.Array,
-    v: jax.Array,
-    attention_metadata: AttentionMetadata,
-    mesh: Mesh,
-    head_dim_original: int | None = None,
-    sm_scale: float | None = None,
-    sinks: jax.Array | None = None,
-    attention_chunk_size: int | None = None,
-    q_scale: float | None = None,
-    k_scale: float | None = None,
-    v_scale: float | None = None,
-):
-    """
-    DCP Attention forward pass.
-
-    Phase 1: Context Attention (Attending to KV caches)
-    Phase 2: Query Attention (Attending to current tokens K, V)
-    Phase 3: Combine and Sharding
-    """
-    if head_dim_original is None:
-        head_dim_original = q.shape[-1]
-
-    if sm_scale is None:
-        sm_scale = head_dim_original**-0.5
-
-    md = attention_metadata
-
-    # ==========================================================================
-    # Phase 1: Context Attention (Attending to KV caches)
-    # `kv_caches` is not modified in the phase.
-    # ==========================================================================
-
-    context_attn_out, kv_cache, context_lse = sharded_ragged_paged_attention_experimental(
-        mesh=mesh,
-        q=q,
-        k=k,
-        v=v,
-        kv_cache=kv_cache,
-        kv_lens=md.seq_lens,
-        paged_indices=md.block_tables,
-        cu_q_lens=md.query_start_loc,
-        distribution=md.request_distribution,
-        attention_sink=sinks,
-        sm_scale=sm_scale,
-        attention_chunk_size=attention_chunk_size,
-        q_scale=q_scale,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        update_kv_cache=False,
-        is_context_phase=True,
-        return_lse=True,
-        skip_current_attn=True,
-        use_causal_mask=False)
-
-    context_attn_out_cor, context_lse_cor = dcp_alltoall(context_attn_out,
-                                                         context_lse,
-                                                         mesh=mesh)
-
-    # ==========================================================================
-    # Phase 2: Query Attention (Attending to current tokens K, V)
-    # ==========================================================================
-    query_attn_out, updated_kv_cache, query_lse = sharded_ragged_paged_attention_experimental(
-        mesh=mesh,
-        q=q,
-        k=k,
-        v=v,
-        kv_cache=kv_cache,
-        kv_lens=md.seq_lens,
-        paged_indices=md.block_tables,
-        cu_q_lens=md.query_start_loc,
-        distribution=md.request_distribution,
-        attention_sink=sinks,
-        sm_scale=sm_scale,
-        attention_chunk_size=attention_chunk_size,
-        q_scale=q_scale,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        update_kv_cache=True,
-        skip_cache_attn=True,
-        return_lse=True,
-    )
-
-    # ==========================================================================
-    # Phase 3: Combine Context and Query results
-    # ==========================================================================
-    final_output, _ = merge_attn_states(
-        context_attn_out_cor,
-        context_lse_cor,
-        query_attn_out,
-        query_lse,
-    )
-
-    return updated_kv_cache, final_output
 
 
 def attention(
@@ -826,6 +524,25 @@ def attention(
             k_scale=k_scale,
             v_scale=v_scale,
         )
+    if 'pcp' in mesh.shape and mesh.shape['pcp'] > 1:
+        output, kv_cache = pcp_ragged_paged_attention(
+            mesh,
+            q,
+            k,
+            v,
+            kv_cache,
+            md.seq_lens,
+            md.block_tables,
+            md.request_distribution,
+            md.pcp,
+            sm_scale=sm_scale,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            update_kv_cache=update_kv_cache,
+            use_causal_mask=use_causal_mask,
+        )
+        return kv_cache, output
 
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(

@@ -20,6 +20,26 @@ import jax
 
 @functools.partial(
     jax.tree_util.register_dataclass,
+    data_fields=["query_start_loc", "kv_cache_lens", "q_pos_offsets"],
+    meta_fields=[],
+)
+@dataclass
+class PCPMetadata:
+    """Prefill Context Parallelism metadata, passed via AttentionMetadata.pcp."""
+    # (pcp_size, max_num_reqs+1) int32 — per-rank cumulative query lengths.
+    # Sharded as P('pcp', None); each rank slice is its own cu_q_lens.
+    query_start_loc: jax.Array
+    # (max_num_reqs,) int32 — num_computed tokens per virtual seq (cache
+    # boundary). Replicated (P()). The kernel derives new KV length as
+    # seq_lens - kv_cache_lens so only real tokens are attended/written.
+    kv_cache_lens: jax.Array
+    # (pcp_size, max_num_reqs) int32 — per-rank, per-seq Q position offsets.
+    # Sharded as P('pcp', None).
+    q_pos_offsets: jax.Array
+
+
+@functools.partial(
+    jax.tree_util.register_dataclass,
     data_fields=[
         "input_positions",
         "block_tables",
@@ -27,6 +47,7 @@ import jax
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "pcp",
     ],
     meta_fields=["padded_num_reqs"],
 )
@@ -51,6 +72,9 @@ class AttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+
+    # PCP-specific metadata. None when not running prefill context parallelism.
+    pcp: PCPMetadata | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket
     # contains only max_reqs by default to reduce model precompilation time.
