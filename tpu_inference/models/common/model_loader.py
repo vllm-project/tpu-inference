@@ -372,7 +372,27 @@ def get_flax_model(
     # costs ~17 ms/step on Gemma-4-31B decode at TP=2.
     _state_treedef = jax.tree_util.tree_structure(state)
 
-    @jax.jit(
+    def run_model_impl(state_leaves, *args):
+        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
+        model = nnx.merge(graphdef, state)
+        return model(*args)
+
+    run_model_no_options = jax.jit(
+        run_model_impl,
+        out_shardings=(
+            kv_cache_sharding,
+            hidden_states_sharding,
+            hidden_states_sharding,  # aux hidden states
+            None,  # expert ids
+        ),
+        donate_argnums=1,  # 0 is state_leaves, 1 is kv_cache
+        static_argnums=(
+            6, 9, 10
+        ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
+    )
+
+    run_model = jax.jit(
+        run_model_impl,
         out_shardings=(
             kv_cache_sharding,
             hidden_states_sharding,
@@ -385,10 +405,6 @@ def get_flax_model(
         ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
         compiler_options=get_step_fn_compiler_options(),
     )
-    def run_model(state_leaves, *args):
-        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
-        model = nnx.merge(graphdef, state)
-        return model(*args)
 
     @jax.jit(
         out_shardings=(
@@ -460,6 +476,8 @@ def get_flax_model(
     # `graphdef` and the state treedef are captured in each closure; the
     # runner passes pre-flattened `state_leaves` as the first positional arg.
     jitted_model_fn = run_draft_model if is_draft_model else run_model
+    model_fn_no_options = (run_draft_model
+                           if is_draft_model else run_model_no_options)
 
     model_supports_spec_step = supports_kw(model_class.__call__,
                                            "spec_step_idx")
@@ -469,6 +487,12 @@ def get_flax_model(
             kwargs.pop("spec_step_idx", None)
         kwargs.pop("shared_attention_metadata", None)
         return jitted_model_fn(*args, **kwargs)
+
+    def wrapped_model_fn_no_options(*args, **kwargs):
+        if not model_supports_spec_step:
+            kwargs.pop("spec_step_idx", None)
+        kwargs.pop("shared_attention_metadata", None)
+        return model_fn_no_options(*args, **kwargs)
 
     compute_logits_fn = run_compute_logits
     embed_input_ids_fn = run_embed_input_ids
@@ -553,6 +577,7 @@ def get_flax_model(
         state_leaves=state_leaves,
         lora_manager=lora_manager,
         model=jit_model,
+        model_fn_no_options=wrapped_model_fn_no_options,
     )
 
 
@@ -608,6 +633,7 @@ def get_vllm_model(
         state_leaves=params,
         lora_manager=lora_manager,
         model=model,
+        model_fn_no_options=getattr(model, "step_fn_no_options", jit_model),
     )
 
 
