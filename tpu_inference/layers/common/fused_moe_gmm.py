@@ -668,7 +668,8 @@ def fused_moe_func(
                 local_weights = topk_weights_local
 
             local_out = cn_moe_full(hs, w1_local, w1_scale_local, w2_local,
-                                    w2_scale_local, local_ids, local_weights)
+                                    w2_scale_local, local_ids, local_weights,
+                                    use_ep=use_ep)
             reduction_axes = (ShardingAxisName.EXPERT
                               if use_ep else ShardingAxisName.MLP_TENSOR)
             return jax.lax.psum(
