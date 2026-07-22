@@ -187,6 +187,7 @@ class InputConfigs:
     dtype: jnp.dtype
     has_bias: bool = False
     has_scale: bool = False
+    use_fp8_for_requantization_before_matmul: bool = False
 
     @property
     def should_bitcast(self) -> bool:
@@ -217,7 +218,6 @@ class GmmConfigs:
     acc_dtype: jnp.dtype
     zero_init: bool
     fuse_act: str | None
-    use_fp8_for_requantization_before_matmul: bool = False
 
     @property
     def num_quant_blocks_per_tile_k(self) -> int:
@@ -396,15 +396,18 @@ def inner_kernel(
             tiled_rhs_scale = tiled_rhs_ref.get_scale().astype(
                 cfgs.lhs_cfgs.dtype)
             num_blocks = cfgs.num_quant_blocks_per_tile_k
-            tiled_rhs_dequant = tiled_rhs.astype(cfgs.lhs_cfgs.dtype).reshape(
-                num_blocks, rhs_qbs, rhs_tile_n)
-            tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
-
-            if cfgs.use_fp8_for_requantization_before_matmul and cfgs.lhs_cfgs.quant_dtype == jnp.float8_e4m3fn.dtype:
-                tiled_rhs_dequant = tiled_rhs_dequant.astype(jnp.float8_e4m3fn)
-
-            tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
-                                                  rhs_tile_n)
+            if cfgs.rhs_cfgs.use_fp8_for_requantization_before_matmul and cfgs.lhs_cfgs.quant_dtype == jnp.float8_e4m3fn.dtype:
+                tiled_rhs = (tiled_rhs.astype(cfgs.lhs_cfgs.dtype).reshape(
+                    num_blocks, rhs_qbs, rhs_tile_n) * tiled_rhs_scale).astype(
+                        jnp.float8_e4m3fn).reshape(cfgs.tiles.tile_k,
+                                                   rhs_tile_n)
+            else:
+                tiled_rhs_dequant = tiled_rhs.astype(
+                    cfgs.lhs_cfgs.dtype).reshape(num_blocks, rhs_qbs,
+                                                 rhs_tile_n)
+                tiled_rhs_dequant = tiled_rhs_dequant * tiled_rhs_scale
+                tiled_rhs = tiled_rhs_dequant.reshape(cfgs.tiles.tile_k,
+                                                      rhs_tile_n)
             rhs_qbs = cfgs.tiles.tile_k
 
         valid_k = cfgs.dims.size_k % cfgs.tiles.tile_k
@@ -938,7 +941,8 @@ def calculate_tiling(
 
     def _gmm_vmem_estimate(tn: int, tk: int) -> int:
         # 1. LHS tile (double-buffered)
-        lhs_tile_bytes = lhs_bits // 8
+        # LHS is fetched from HBM in its original dtype, not the quantized dtype.
+        lhs_tile_bytes = jax.dtypes.itemsize_bits(lhs_cfgs.dtype) // 8
         lhs_vmem = 2 * tile_m * tk * lhs_tile_bytes
 
         # 2. RHS tile (triple-buffered, includes scale and bias if present)
@@ -955,6 +959,18 @@ def calculate_tiling(
             rhs_bias_vmem = tn * 4
         rhs_vmem = fuse_act_factor * (3 * rhs_weight_vmem +
                                       2 * rhs_scale_vmem + 2 * rhs_bias_vmem)
+
+        # If we dequantize the entire tile before matmul, it creates a massive
+        # buffer for the dequantized weights (tiled_rhs_dequant) in bf16/fp32.
+        if rhs_cfgs.should_dequantize_before_matmul:
+            # Add the FP8 buffer estimate if we are requantizing to fp8 after dequantization
+            if rhs_cfgs.use_fp8_for_requantization_before_matmul and lhs_cfgs.quant_dtype is not None:
+                rhs_dequant_vmem = fuse_act_factor * (
+                    tk * tn)  # 1 byte per element for FP8
+            else:
+                rhs_dequant_vmem = fuse_act_factor * (
+                    tk * tn * jax.dtypes.itemsize_bits(lhs_cfgs.dtype) // 8)
+            rhs_vmem += rhs_dequant_vmem
 
         # 3. Accumulator
         acc_cols = fuse_act_factor * tn
@@ -1127,6 +1143,8 @@ def make_gmm_configs(
         dtype=rhs.dtype,
         has_bias=rhs_bias is not None,
         has_scale=has_scale,
+        use_fp8_for_requantization_before_matmul=
+        use_fp8_for_requantization_before_matmul,
     )
 
     lhs_q_dtype = None
@@ -1183,8 +1201,6 @@ def make_gmm_configs(
         acc_dtype=jnp.dtype(acc_dtype),
         zero_init=zero_initialize,
         fuse_act=fuse_act,
-        use_fp8_for_requantization_before_matmul=
-        use_fp8_for_requantization_before_matmul,
     )
 
 
