@@ -135,9 +135,6 @@ def _test_tensor_parallelism_performance(
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         max_model_len=cfg.max_model_len,
-        # These are global scheduler limits, not per-device ones, so they must
-        # match the baseline. Dividing them by the TP size gave the TP run half
-        # the decode batch and handed back the throughput TP had won.
         max_num_batched_tokens=cfg.max_num_batched_tokens,
         max_num_seqs=cfg.max_num_seqs,
         additional_config=additional_config or {},
