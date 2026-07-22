@@ -142,6 +142,28 @@ fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o IPQoS=none -i ~/.ssh/id_rsa)
 
+VLLM_LOG_TAIL_PID=""
+
+stop_vllm_log_streaming() {
+  if [[ -n "${VLLM_LOG_TAIL_PID:-}" ]]; then
+    kill "$VLLM_LOG_TAIL_PID" >/dev/null 2>&1 || true
+    wait "$VLLM_LOG_TAIL_PID" >/dev/null 2>&1 || true
+    VLLM_LOG_TAIL_PID=""
+  fi
+}
+
+start_vllm_log_streaming() {
+  local container_name=$1
+  local log_path=$2
+
+  stop_vllm_log_streaming
+  echo "--- Streaming ${container_name}:${log_path} while waiting for health..."
+  docker exec "$container_name" bash -c \
+    'touch "$1" && exec tail -n +1 -F "$1"' _ "$log_path" \
+    > >(sed -u 's/^/[vllm] /') 2>&1 &
+  VLLM_LOG_TAIL_PID=$!
+}
+
 dump_container_logs() {
   local host=$1
   local role=$2
@@ -164,6 +186,8 @@ cleanup() {
   local exit_code=${1:-0}
   echo "🧹 Cleaning up containers on head and workers..."
   IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS:-}"
+
+  stop_vllm_log_streaming
 
   # Print diagnostics before removing containers. The generic multi-host runner
   # has one vLLM head and Ray workers, so dump the equivalent of the
@@ -265,6 +289,7 @@ wait_for_server() {
   local timeout=${5:-7200} # Default 2 hours
 
   echo "Waiting for $service_name on port $port to become healthy (Timeout: ${timeout}s)..."
+  start_vllm_log_streaming "$container_name" "$log_path"
 
   # 1. Get the PID inside the container
   # We might need to wait a few seconds for the process to actually start
@@ -279,6 +304,7 @@ wait_for_server() {
 
   if [[ -z "$pid" ]]; then
       echo "Error: Could not find PID for $service_name immediately after start."
+      stop_vllm_log_streaming
       docker exec "$container_name" cat "$log_path" || true
       return 1
   fi
@@ -289,6 +315,7 @@ wait_for_server() {
   while [[ $SECONDS -lt $end_time ]]; do
     # 2. Check health
     if curl -fs "localhost:${port}/health" > /dev/null; then
+      stop_vllm_log_streaming
       echo "===== $service_name is healthy on port: $port. ==="
       return 0
     fi
@@ -297,6 +324,7 @@ wait_for_server() {
     if ! docker exec "$container_name" kill -0 "$pid" 2>/dev/null; then
       echo "Error: $service_name on $port (PID $pid) died inside container."
       echo "Displaying logs from $container_name:$log_path"
+      stop_vllm_log_streaming
       docker exec "$container_name" cat "$log_path" || true
       return 1
     fi
@@ -306,6 +334,7 @@ wait_for_server() {
 
   echo "Error: $service_name on $port failed to become healthy within ${timeout}s."
   echo "Displaying logs from $container_name:$log_path"
+  stop_vllm_log_streaming
   docker exec "$container_name" cat "$log_path" || true
   return 1
 }
@@ -365,6 +394,9 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     # Prune Worker Node BEFORE it tries to pull the new giant image
     echo "   -> Pruning Docker on worker to free disk space..."
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
+
+    echo "   -> Disk usage on worker ${worker_ip} after Docker prune:"
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "df -h"
     
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
     # shellcheck disable=SC2002
