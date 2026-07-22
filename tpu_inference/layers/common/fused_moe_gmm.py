@@ -617,6 +617,76 @@ def fused_moe_func(
             topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
+
+    # Fast path for low-concurrency decode: a specialized C=N Pallas MoE kernel
+    # that skips the gather/scatter permutation of the general gmm path. Only
+    # engaged for small decode batches with topk == 10.
+    low_conc_threshold = getattr(envs, "MOE_LOW_CONC_THRESHOLD", 64)
+    if 1 < num_tokens <= low_conc_threshold and topk == 10:
+        from tpu_inference.kernels.cn_moe_kernels import cn_moe_full
+        logger.info(
+            "Taking fast low-concurrency C=N Pallas MoE path for "
+            f"BS={num_tokens} decode (use_ep={use_ep}, "
+            f"threshold={low_conc_threshold}).")
+
+        pad_t = ((num_tokens + 7) // 8) * 8 - num_tokens
+        padded_hs = jnp.pad(hidden_states, ((0, pad_t), (0, 0)))
+        padded_topk_indices = jnp.pad(topk_indices, ((0, pad_t), (0, 0)))
+        padded_topk_weights = jnp.pad(topk_weights, ((0, pad_t), (0, 0)))
+
+        def _local_low_conc_moe(hs, w1_local, w1_scale_local, w2_local,
+                                w2_scale_local, topk_ids_local,
+                                topk_weights_local):
+            local_num_experts = w1_local.shape[0]
+            if use_ep:
+                ep_shard = jax.lax.axis_index(ShardingAxisName.EXPERT)
+                is_my_expert = (topk_ids_local // local_num_experts) == ep_shard
+                local_ids = jnp.where(
+                    is_my_expert, topk_ids_local % local_num_experts, 0)
+                local_weights = jnp.where(is_my_expert, topk_weights_local, 0.0)
+            else:
+                local_ids = topk_ids_local
+                local_weights = topk_weights_local
+
+            local_out = cn_moe_full(hs, w1_local, w1_scale_local, w2_local,
+                                    w2_scale_local, local_ids, local_weights)
+            reduction_axes = (ShardingAxisName.EXPERT
+                              if use_ep else ShardingAxisName.MLP_TENSOR)
+            return jax.lax.psum(
+                local_out, axis_name=reduction_axes).astype(hs.dtype)
+
+        # TP vs EP weight/scale sharding. EP shards the expert axis; TP shards
+        # the intermediate dim (N for w1, I for w2), matching
+        # tensor_parallel_gmm.
+        if use_ep:
+            lc_w1_spec = P(ShardingAxisName.EXPERT, None, None)
+            lc_w1_scale_spec = P(ShardingAxisName.EXPERT, None, None, None)
+            lc_w2_spec = P(ShardingAxisName.EXPERT, None, None)
+            lc_w2_scale_spec = P(ShardingAxisName.EXPERT, None, None, None)
+        else:
+            lc_w1_spec = P(None, None, ShardingAxisName.MLP_TENSOR)
+            lc_w1_scale_spec = P(None, None, None, ShardingAxisName.MLP_TENSOR)
+            lc_w2_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
+            lc_w2_scale_spec = P(None, ShardingAxisName.MLP_TENSOR, None, None)
+
+        out = jax.shard_map(
+            _local_low_conc_moe,
+            mesh=mesh,
+            in_specs=(
+                P(None, None),  # hs
+                lc_w1_spec,  # w1
+                lc_w1_scale_spec,  # w1_scale
+                lc_w2_spec,  # w2
+                lc_w2_scale_spec,  # w2_scale
+                P(None, None),  # topk_ids
+                P(None, None),  # topk_weights
+            ),
+            out_specs=P(None, None),
+            check_vma=False,
+        )(padded_hs, w1, w1_scale, w2, w2_scale, padded_topk_indices,
+          padded_topk_weights)
+
+        return out[:num_tokens, :hidden_size]
     # Route padding tokens to expert 0 instead of picking a selected expert. This
     # is especially useful when we have a low number of tokens (e.g. low
     # concurrency), where padding tokens may activate unnecessary expert weights

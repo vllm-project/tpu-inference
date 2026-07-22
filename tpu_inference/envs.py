@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
     VLLM_MOE_CHUNK_SIZE: int = 0
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
+    MOE_LOW_CONC_THRESHOLD: int = 8
     PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
@@ -395,6 +396,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),
     "VLLM_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_MOE_CHUNK_SIZE", "0")),
+    "MOE_LOW_CONC_THRESHOLD":
+    lambda: int(os.getenv("MOE_LOW_CONC_THRESHOLD", "64")),
     # Use Onehot+Matmul for permute and unpermute before and after moe
     # when the batch size <= this threshold. When set to 0, this feature
     # is effectively disabled.
