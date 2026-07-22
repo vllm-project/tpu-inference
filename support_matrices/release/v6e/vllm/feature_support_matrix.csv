@@ -3,12 +3,11 @@ Feature,CorrectnessTest,PerformanceTest
 "DCN-based P/D disaggregation",✅ Passing,✅ Passing
 "KV Cache Offload",✅ Passing,✅ Passing
 "LoRA_Torch",✅ Passing,✅ Passing
-"Multimodal Inputs",✅ Passing,✅ Passing
+"Multimodal Inputs",✅ Passing,❌ Failing
 "Out-of-tree model support",✅ Passing,✅ Passing
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
 "Speculative Decoding: Eagle3",✅ Passing,✅ Passing
-"Speculative Decoding: DFlash",✅ Passing,✅ Passing
 "Speculative Decoding: Ngram",✅ Passing,✅ Passing
 "Step Pooling (Embedding)",✅ Passing,❓ Untested
 "async scheduler",✅ Passing,✅ Passing
