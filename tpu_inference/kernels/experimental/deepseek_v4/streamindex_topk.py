@@ -109,7 +109,8 @@ def _streamindex_topk_kernel(
 
     # Validate against the KV dtype.
     kv_dtype = cache_kv_hbm_ref.dtype
-    assert get_dtype_packing(kv_dtype) == kv_packing
+    if kv_dtype != jnp.uint8:
+        assert get_dtype_packing(kv_dtype) == kv_packing
     assert head_dim % 128 == 0
 
     bkv_sz_per_kv_packing = bkv_p * page_size_per_kv_packing
