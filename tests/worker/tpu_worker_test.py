@@ -15,6 +15,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+import vllm.envs as vllm_envs
 from vllm.config import ModelConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds
@@ -667,3 +668,55 @@ class TestTPUWorker:
             assert os.environ["TPU_PROCESS_ADDRESSES"] == "localhost:9999"
             assert os.environ["TPU_PROCESS_PORT"] == "9999"
             assert os.environ["CLOUD_TPU_TASK_ID"] == "0"
+
+    #
+    # --- Weight Update Tests ---
+    #
+
+    def _weight_update_worker(self, mock_vllm_config, monkeypatch):
+        """A worker with a stub model runner, on the Pathways transport."""
+        monkeypatch.setattr(vllm_envs, "VLLM_TPU_USING_PATHWAYS", True)
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method",
+                           devices=['tpu:0'])
+        worker.model_runner = MagicMock()
+        worker.model_runner.state_leaves = ()
+        return worker
+
+    def test_full_update_cycle(self, mock_vllm_config, monkeypatch):
+        """Tests a weight update applying weights and cycling the KV cache."""
+        worker = self._weight_update_worker(mock_vllm_config, monkeypatch)
+        runner = worker.model_runner
+
+        worker.start_weight_update()
+        worker.update_weights({"weights": "STATE"})
+        worker.finish_weight_update()
+
+        runner._sync_weights.assert_called_once_with(updated_weights="STATE",
+                                                     mappings={},
+                                                     transpose_keys={},
+                                                     reshard_fn=None)
+        runner.delete_kv_cache.assert_called_once()
+        runner.reinitialize_kv_cache.assert_called_once()
+        assert worker._weight_update_active is False
+
+    def test_failed_sync_ends_session_and_finish_restores_kv(
+            self, mock_vllm_config, monkeypatch):
+        """Tests that a failed update ends the session and restores HBM."""
+        worker = self._weight_update_worker(mock_vllm_config, monkeypatch)
+        runner = worker.model_runner
+        runner._sync_weights.side_effect = RuntimeError("sync boom")
+
+        worker.start_weight_update()
+        with pytest.raises(RuntimeError, match="sync boom"):
+            worker.update_weights({"weights": "STATE"})
+        assert worker._weight_update_active is False
+
+        # Further chunks are refused rather than silently applied.
+        with pytest.raises(RuntimeError, match="start_weight_update must be"):
+            worker.update_weights({"weights": "STATE"})
+
+        worker.finish_weight_update()
+        runner.reinitialize_kv_cache.assert_called_once()

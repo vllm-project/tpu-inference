@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import jax
 import jaxlib
 import jaxtyping
+import vllm.envs as vllm_envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
@@ -177,6 +178,9 @@ def _parse_profile_options(
 
 
 class TPUWorker(WorkerBase):
+
+    _weight_update_active: bool = False
+    _kv_cache_freed: bool = False
 
     def __init__(
         self,
@@ -732,6 +736,64 @@ class TPUWorker(WorkerBase):
                                                mappings=mappings,
                                                transpose_keys=transpose_keys,
                                                reshard_fn=reshard_fn)
+
+    def init_weight_transfer_engine(self, init_info: Dict[str, Any]) -> None:
+        """Prepare the transport.
+
+        No setup is needed today; Raiden will build its `WeightSynchronizer`
+        here.
+        """
+        logger.info("init_weight_transfer_engine: %s", sorted(init_info or {}))
+
+    def start_weight_update(self, free_kv_cache: bool = True) -> None:
+        """Open a weight update session.
+
+        Freeing the KV cache is on by default: an incoming set of weights
+        roughly doubles peak HBM, and decoding from KV computed under the old
+        weights is incorrect. `finish_weight_update` reallocates it.
+
+        The prefix cache is scheduler-side and cannot be dropped here, so
+        callers must `reset_prefix_cache()` first -- otherwise the scheduler
+        serves hits from blocks this frees.
+        """
+        if self._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update called while an update is already "
+                "active. Call finish_weight_update first.")
+        if free_kv_cache:
+            self.model_runner.delete_kv_cache()
+            self._kv_cache_freed = True
+        self._weight_update_active = True
+
+    def update_weights(self, update_info: Dict[str, Any]) -> None:
+        """Under Pathways the trainer shares a JAX client and hands over a live
+        pytree. Otherwise it pushed into HBM over Raiden, whose receiver
+        already H2D'd, and this is a no-op.
+        """
+        if not self._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update must be called before update_weights.")
+
+        if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
+            return
+
+        try:
+            self.model_runner._sync_weights(
+                updated_weights=update_info["weights"],
+                mappings=update_info.get("mappings") or {},
+                transpose_keys=update_info.get("transpose_keys") or {},
+                reshard_fn=update_info.get("reshard_fn"))
+            jax.block_until_ready(self.model_runner.state_leaves)
+        except BaseException:
+            self._weight_update_active = False
+            raise
+
+    def finish_weight_update(self) -> None:
+        """Close the session and restore serving state."""
+        self._weight_update_active = False
+        if self._kv_cache_freed:
+            self.model_runner.reinitialize_kv_cache()
+            self._kv_cache_freed = False
 
     def delete_kv_cache(self) -> None:
         self.model_runner.delete_kv_cache()
