@@ -38,6 +38,8 @@ from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.kernels.ragged_paged_attention.v3.util import (
+    align_to, get_dtype_packing)
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore, get_mesh_shape_product
 
@@ -405,6 +407,13 @@ def sharded_ragged_paged_attention(
             v = jnp.repeat(v, factor, axis=1)
 
     qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
+    # Shared-pool KV cache for Gemma-4 mixed sliding/global dims: heterogeneous
+    # layers share ONE native 5D pool allocated in the first shared layer's shape
+    # (see docs/architecture/tpu-swa-flat-buffer.md). Layers whose shape differs
+    # from that canonical buffer reshape it to their own kernel layout LOCALLY
+    # inside the shard_map (free per-chip reshape; same 32768 elem/page), run the
+    # kernel, then reshape the updated cache back. The buffer stays native 5D so
+    # its sharding/rank match the rest of the runner (no padding, no rank clash).
     kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
                       ShardingAxisName.ATTN_HEAD, None, None)
     in_specs = (
@@ -454,6 +463,32 @@ def sharded_ragged_paged_attention(
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             kwargs["use_causal_mask"] = use_causal_mask
+        if not use_hd64:
+            # Shared-pool reshape: the KV buffer may be a canonical 5D shape
+            # shared by heterogeneous layers (Gemma-4 sliding vs global). Compute
+            # THIS layer's target 5D layout from its local k, and if it differs
+            # from the buffer's shape, reshape the buffer to it (both are the same
+            # 32768 elem/page, so this is a free per-chip reshape), run the kernel,
+            # and reshape the updated buffer back to the canonical shape so the
+            # shard_map out_spec still matches. For homogeneous models the target
+            # equals the buffer shape and this is a no-op.
+            largs = list(args)
+            k_local, kv = largs[1], largs[3]
+            buf_shape = kv.shape
+            nb = kv.shape[0]
+            per_chip = math.prod(kv.shape[1:])
+            kvh_local = k_local.shape[1]
+            hd = k_local.shape[-1]
+            packing = get_dtype_packing(kv.dtype)
+            kvhp = align_to(kvh_local * 2, packing) // packing
+            hd_pad = align_to(hd, 128)
+            block_size = per_chip // (kvhp * packing * hd_pad)
+            target = (nb, block_size, kvhp, packing, hd_pad)
+            if target != buf_shape:
+                largs[3] = kv.reshape(target)
+                output, new_kv = func(*largs, **kwargs)
+                return output, new_kv.reshape(buf_shape)
+            return func(*largs, **kwargs)
         return func(*args, **kwargs)
 
     return jax.shard_map(

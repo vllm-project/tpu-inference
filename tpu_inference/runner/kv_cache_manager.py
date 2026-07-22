@@ -13,10 +13,12 @@
 # limitations under the License.
 import dataclasses
 import os
+from functools import partial
 from typing import TYPE_CHECKING, List
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import vllm.envs as envs
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
@@ -46,7 +48,8 @@ from tpu_inference.offload.utils import get_kv_connector_cache_layout
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache import (KVCacheMetadata, create_kv_caches,
-                                           get_attention_page_size_bytes)
+                                           get_attention_page_size_bytes,
+                                           get_kv_cache_shape_with_mesh)
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
@@ -124,8 +127,10 @@ class KVCacheManager:
             page_size_bytes = get_attention_page_size_bytes(
                 self.runner.mesh, block_size, num_kv_heads, head_size,
                 self.runner.kv_cache_dtype, False)
-            # Let unify_kv_cache_spec_page_size scale block_size so the sliding
-            # and global groups share a uniform page size (both 32768 elem/chip).
+            # PATCH(swa): don't pin page_size_padded to the per-spec real size;
+            # let vLLM's unify_kv_cache_spec_page_size scale block_size so the
+            # sliding/global groups share a uniform page (block_size 16 vs 32,
+            # both 32768 elem/chip) -> one flat shared pool downstream.
             page_size_padded = self._hybrid_uniform_page_size_bytes
             if sliding_window is not None:
                 return SlidingWindowSpec(block_size=block_size,
@@ -534,10 +539,11 @@ class KVCacheManager:
                     num_kv_heads = common_utils.get_padded_num_heads(
                         num_kv_heads, model_cnt)
                     head_size = common_utils.get_padded_head_dim(head_size)
-                    # Enable windowing for sliding layers; the mixed-dim layers
-                    # are handled by the shared pool in initialize_kv_cache.
-                    sliding_window = (getattr(text_config, "sliding_window",
-                                              None) if is_sliding else None)
+                    # PATCH(swa): honor Gemma sliding layers -> windowed KV. The
+                    # heterogeneous mixed-dim limitation is handled downstream by
+                    # the flat shared-pool allocation (see initialize_kv_cache).
+                    sliding_window = (getattr(text_config, "sliding_window", None)
+                                      if is_sliding else None)
                     kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
                         block_size,
                         num_kv_heads,
@@ -786,21 +792,32 @@ class KVCacheManager:
                             ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
                     break
 
-        # Gemma-4 shares each period-tensor across 5 sliding (16,256) + 1 global
-        # (4,512) layer. They can't back one typed array, so they share one 5D
-        # pool (below) and reshape per-layer in attention; log the count here.
+        # GLOBAL-SEPARATE (tier 2): a Gemma-4 period-tensor is shared by 5 sliding
+        # (num_kv_heads,head)=(16,256) + 1 global (4,512) layer. Sharing one typed
+        # pool forces the minority (global) layers to reshape it every decode step
+        # (a TPU relayout -> bad ITL). Instead the MAJORITY (sliding) layers share
+        # one pool; each MINORITY (global) layer gets its OWN native-shaped tensor.
+        # No reshape anywhere -> baseline ITL. Costs ~2x KV tensors, so run with
+        # num_gpu_blocks_override ~ half the auto num_blocks.
+        _hetero_maj = {}       # tensor idx -> majority (num_kv_heads, head_size)
+        _hetero_majspec = {}   # tensor idx -> a spec with the majority shape
+        _pool_idx_by_i = {}    # tensor idx -> kv_caches index of its shared pool
         if not duplicate_shared_layers:
-            _n_hetero = sum(
-                1 for _kct in kv_cache_config.kv_cache_tensors
-                if len({(layer_name_to_spec[_ln].num_kv_heads,
-                         layer_name_to_spec[_ln].head_size)
-                        for _ln in _kct.shared_by
-                        if not isinstance(layer_name_to_spec[_ln], MambaSpec)
-                        }) > 1)
-            if _n_hetero:
+            for _ti, _kct in enumerate(kv_cache_config.kv_cache_tensors):
+                _by = [(_ln, layer_name_to_spec[_ln]) for _ln in _kct.shared_by
+                       if not isinstance(layer_name_to_spec[_ln], MambaSpec)]
+                _shapes = [(_s.num_kv_heads, _s.head_size) for _, _s in _by]
+                if len(set(_shapes)) > 1:
+                    _maj = max(set(_shapes), key=_shapes.count)
+                    _hetero_maj[_ti] = _maj
+                    for _ln, _s in _by:
+                        if (_s.num_kv_heads, _s.head_size) == _maj:
+                            _hetero_majspec[_ti] = _s
+                            break
+            if _hetero_maj:
                 logger.info(
-                    "[SWA] shared-pool KV for %d heterogeneous tensors",
-                    _n_hetero)
+                    "[SWA] global-separate KV for %d heterogeneous tensors",
+                    len(_hetero_maj))
 
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             if duplicate_shared_layers:
@@ -915,10 +932,65 @@ class KVCacheManager:
 
                     kv_caches.append(tuple(mamba_states))
                 else:
+                    # tier-2 global-separate: for a heterogeneous tensor the
+                    # majority (sliding) layers share one pool; each minority
+                    # (global) layer gets its OWN native-shaped tensor. No reshape
+                    # anywhere -> baseline ITL (costs ~2x tensors; use
+                    # num_gpu_blocks_override ~ half).
+                    if i in _hetero_maj:
+                        _tspec = layer_name_to_spec[layer_name]
+                        _is_min = (_tspec.num_kv_heads,
+                                   _tspec.head_size) != _hetero_maj[i]
+                        _spec = _tspec if _is_min else _hetero_majspec[i]
+                        if _is_min or i not in _pool_idx_by_i:
+                            _c = create_kv_caches(
+                                num_blocks=num_blocks,
+                                block_size=_spec.storage_block_size,
+                                num_kv_heads=_spec.num_kv_heads,
+                                head_size=_spec.head_size,
+                                mesh=self.runner.mesh,
+                                layer_names=[f'kv_cache_tensor.{i}.{j}'],
+                                cache_dtype=t2j_dtype(_spec.dtype),
+                                use_mla=self.use_mla)[0]
+                            kv_caches.append(_c)
+                            _cidx = len(kv_caches) - 1
+                            num_blocks_list.append(num_blocks)
+                            metadata["regular_attn"].count += 1
+                            if metadata["regular_attn"].shape is None:
+                                metadata["regular_attn"].shape = _c.shape
+                                metadata["regular_attn"].dtype = _c.dtype
+                                metadata["regular_attn"].sharding = _c.sharding
+                            if not _is_min:
+                                _pool_idx_by_i[i] = _cidx
+                        self.runner.layer_name_to_kvcache_index[layer_name] = (
+                            _cidx if _is_min else _pool_idx_by_i[i])
+                        continue
                     # We should only init a new kv cache for the first layer in shared_by
                     # if duplicate_shared_layers is False.  Otherwise, if duplicate_shared_layers
                     # is True, we should init a new kv cache for each layer in shared_by
                     if j == 0 or duplicate_shared_layers:
+                        # For a heterogeneous shared pool, allocate it in the
+                        # MAJORITY layer shape so only the minority layers reshape
+                        # per step in attention (Gemma-4: 5 sliding vs 1 global ->
+                        # only globals reshape). Reshape is a TPU relayout, so
+                        # minimizing the count keeps decode ITL low. Page size is
+                        # identical across shapes, so num_blocks is unchanged.
+                        if not duplicate_shared_layers:
+                            _shapes = [
+                                (layer_name_to_spec[_ln].num_kv_heads,
+                                 layer_name_to_spec[_ln].head_size)
+                                for _ln in kv_cache_tensor.shared_by
+                                if not isinstance(layer_name_to_spec[_ln],
+                                                  MambaSpec)]
+                            if len(set(_shapes)) > 1:
+                                _maj = max(set(_shapes), key=_shapes.count)
+                                for _ln in kv_cache_tensor.shared_by:
+                                    _s = layer_name_to_spec[_ln]
+                                    if not isinstance(_s, MambaSpec) and (
+                                            _s.num_kv_heads,
+                                            _s.head_size) == _maj:
+                                        layer_spec = _s
+                                        break
                         # NOTE: we'll multiply the num_kv_heads by 2 in the function
                         block_size = layer_spec.storage_block_size
 
@@ -965,9 +1037,12 @@ class KVCacheManager:
                                 block_size = (kv_caches[-1].shape[1] *
                                               kv_caches[-1].shape[2])
 
-                        # Heterogeneous shared_by layers share one 5D pool in the
-                        # first layer's shape (num_blocks == config.num_blocks, no
-                        # blowup); other shapes reshape it in attention.
+                        # PATCH(swa): heterogeneous shared_by layers (Gemma-4
+                        # sliding+global) share ONE canonical 5D pool created here
+                        # in the FIRST layer's shape; layers with a different shape
+                        # reshape it to their own kernel layout inside the
+                        # shard_map (attention_interface). num_blocks is the native
+                        # single-page value (== vLLM config.num_blocks), NO blowup.
                         kv_cache = create_kv_caches(
                             num_blocks=num_blocks,
                             block_size=block_size,
