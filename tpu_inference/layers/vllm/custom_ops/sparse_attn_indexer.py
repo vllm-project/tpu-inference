@@ -122,9 +122,4 @@ class VllmSparseAttnIndexer(SparseAttnIndexer):
             attn_metadata.request_distribution,
         )
 
-        out_tensor = torch_view(topk_indices)
-        if self.topk_indices_buffer is not None:
-            self.topk_indices_buffer[:out_tensor.shape[0], :out_tensor.
-                                     shape[1]] = out_tensor
-            return self.topk_indices_buffer
-        return out_tensor
+        return torch_view(topk_indices)
