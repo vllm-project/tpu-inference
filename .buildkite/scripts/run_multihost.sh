@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Exit on error, exit on unset variable, fail on pipe errors.
-set -euo pipefail 
+set -euo pipefail
 set -x
 
 # We are running ON the head node.
@@ -47,25 +47,25 @@ HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(get_current_internal_ip)}"
 # Automatic Worker IP Discovery
 if [[ -z "${WORKER_IPS:-}" ]]; then
   echo "⚠️  WORKER_IPS not provided. Attempting to discover via gcloud..."
-  
+
   # Check if gcloud is available and authorized
   if command -v gcloud &> /dev/null; then
     # Try to grab the zone from metadata if not set
     ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}')}"
     TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
-    
+
     if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
       echo "   -> Found TPU_NAME: $TPU_NAME, ZONE: $ZONE"
       # Get all IPs in the slice
       ALL_IPS=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(networkEndpoints[].ipAddress)")
-      
+
       # Normalize separators to spaces and convert to array
       ALL_IPS="${ALL_IPS//;/ }"
       ALL_IPS="${ALL_IPS//,/ }"
 
       # shellcheck disable=SC2206
       ALL_IPS_ARRAY=($ALL_IPS)
-      
+
       # The endpoint order is not a reliable indication of which VM is running
       # this job. Find the local head in the slice and use every other endpoint
       # as a worker.
@@ -83,7 +83,7 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
         echo "❌ Current VM IP (${HEAD_INTERNAL_IP}) is not in discovered TPU endpoints: ${ALL_IPS_ARRAY[*]}" >&2
         exit 1
       fi
-      
+
       # Join with commas
       WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
       echo "   -> Current/local head IP: $HEAD_INTERNAL_IP"
@@ -199,7 +199,7 @@ cleanup() {
       [[ -n "$worker_ip" ]] && dump_container_logs "$worker_ip" "worker"
     done
   fi
-  
+
   echo "   -> Cleaning workers..."
   if [[ ${#WORKER_IPS_ARRAY[@]} -gt 0 && -n "${WORKER_IPS_ARRAY[0]}" ]]; then
     for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
@@ -397,11 +397,11 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
 
     echo "   -> Disk usage on worker ${worker_ip} after Docker prune:"
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "df -h"
-    
+
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
     # shellcheck disable=SC2002
     cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
-    
+
     # shellcheck disable=SC2087
     # shellcheck disable=SC2029
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
@@ -462,7 +462,7 @@ wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log"
 if [ "$#" -gt 0 ]; then
   echo "--- Running provided Benchmark Command on Head Node"
   COMMAND_ARGS=("$@")
-  
+
   docker exec \
     -e HF_HOME=/root/.cache/huggingface \
     node bash -c "${COMMAND_ARGS[*]}"
