@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+    VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
 
 
@@ -440,6 +441,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Currently, it only supports a single host set up.
     "TPU_MESH_SORT_BY_COORDS":
     env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
+    # Controls whether FP8 layers perform incremental weight loading and sharding.
+    "VLLM_INCREMENTAL_FP8_LOADING":
+    env_bool("VLLM_INCREMENTAL_FP8_LOADING", default=False),
 }
 
 
