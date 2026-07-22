@@ -59,10 +59,15 @@ class VllmSparseAttnIndexer(SparseAttnIndexer):
         kv_cache = wrapper_ctx.kv_caches[kv_cache_index]
         mesh = wrapper_ctx.mesh
 
-        attn_metadata_dict = get_forward_context().attn_metadata
-        if prefix not in attn_metadata_dict:
+        attn_meta = get_forward_context().attn_metadata
+        if attn_meta is None:
             return self.topk_indices_buffer
-        attn_metadata = attn_metadata_dict[prefix]
+        if isinstance(attn_meta, dict):
+            if prefix not in attn_meta:
+                return self.topk_indices_buffer
+            attn_metadata = attn_meta[prefix]
+        else:
+            attn_metadata = attn_meta
 
         if isinstance(q_quant, tuple):
             q_values = q_quant[0]
