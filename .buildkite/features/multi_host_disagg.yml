@@ -206,6 +206,7 @@ steps:
             --max-model-len 1024 \
             --async-scheduling \
             --load-format=runai_streamer \
+            --model-loader-extra-config '{\"concurrency\":1}' \
             --no-enable-prefix-caching" \
           "curl http://localhost:8000/v1/completions \
             -X POST \
