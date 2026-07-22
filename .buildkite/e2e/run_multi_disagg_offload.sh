@@ -31,8 +31,6 @@ NUM_PROMPTS=${NUM_PROMPTS:=100}
 RANDOM_SEED=${RANDOM_SEED:=10}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:=10}
 TEST_MODE=${TEST_MODE:=1} # 1: benchmark, 2: correctness, 3: both
-NODE_CONTAINER_NAME="node"
-PROXY_CONTAINER_NAME="disagg-proxy-benchmark"
 
 
 # Prefill Node Host Offloading (D2H) settings
@@ -48,115 +46,115 @@ mkdir -p "$LOG_DIR"
 rm -f "$LOG_DIR"/prefill.txt "$LOG_DIR"/decode.txt "$LOG_DIR"/benchmark.txt "$LOG_DIR"/proxy.txt "$LOG_DIR"/correctness.txt
 
 get_metadata_value() {
-    local path=$1
-    curl -fs -H "Metadata-Flavor: Google" \
+  local path=$1
+  curl -fs -H "Metadata-Flavor: Google" \
     "http://metadata.google.internal/computeMetadata/v1/${path}" 2>/dev/null || true
 }
 
 get_current_internal_ip() {
-    local metadata_ip
-    metadata_ip="$(get_metadata_value "instance/network-interfaces/0/ip")"
-    if [[ -n "$metadata_ip" ]]; then
-        echo "$metadata_ip"
-        return 0
-    fi
-    
-    hostname -I | awk '{print $1}'
+  local metadata_ip
+  metadata_ip="$(get_metadata_value "instance/network-interfaces/0/ip")"
+  if [[ -n "$metadata_ip" ]]; then
+    echo "$metadata_ip"
+    return 0
+  fi
+
+  hostname -I | awk '{print $1}'
 }
 
 # Automatic Worker IP Discovery
 if [[ -z "${WORKER_IPS:-}" ]]; then
-    echo "⚠️  WORKER_IPS not provided. Attempting to discover via gcloud..."
-    
-    if command -v gcloud &> /dev/null; then
-        ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}')}"
-        TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
-        
-        if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
-            echo "   -> Found TPU_NAME: $TPU_NAME, ZONE: $ZONE"
-            ALL_IPS=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(networkEndpoints[].ipAddress)")
-            ALL_IPS="${ALL_IPS//;/ }"
-            ALL_IPS="${ALL_IPS//,/ }"
-            
-            # shellcheck disable=SC2206
-            ALL_IPS_ARRAY=($ALL_IPS)
-            
-            if [[ -z "${HEAD_INTERNAL_IP:-}" ]]; then
-                HEAD_INTERNAL_IP="$(get_current_internal_ip)"
-                echo "   -> Current VM internal IP: $HEAD_INTERNAL_IP"
-            fi
-            
-            CURRENT_IP_IN_SLICE=0
-            WORKER_IPS_LIST=()
-            for ip in "${ALL_IPS_ARRAY[@]}"; do
-                if [[ "$ip" == "$HEAD_INTERNAL_IP" ]]; then
-                    CURRENT_IP_IN_SLICE=1
-                    elif [[ -n "$ip" ]]; then
-                    WORKER_IPS_LIST+=("$ip")
-                fi
-            done
-            
-            if (( CURRENT_IP_IN_SLICE != 1 )); then
-                echo "❌ Current VM IP (${HEAD_INTERNAL_IP}) is not in discovered TPU endpoints: ${ALL_IPS_ARRAY[*]}"
-                exit 1
-            fi
-            
-            WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
-            echo "   -> Discovered Worker IPs: $WORKER_IPS"
-            
-            ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
-            echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
-            if [[ -z "${TPU_VERSION:-}" ]]; then
-                if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
-                    export TPU_VERSION="tpu7x"
-                    echo "   -> Setting TPU_VERSION=tpu7x"
-                    elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
-                    export TPU_VERSION="tpu6e"
-                    echo "   -> Setting TPU_VERSION=tpu6e"
-                fi
-            fi
-        else
-            echo "❌ Could not determine TPU_NAME or ZONE from metadata. Please set WORKER_IPS manually."
-            exit 1
+  echo "⚠️  WORKER_IPS not provided. Attempting to discover via gcloud..."
+
+  if command -v gcloud &> /dev/null; then
+    ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}')}"
+    TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
+
+    if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
+      echo "   -> Found TPU_NAME: $TPU_NAME, ZONE: $ZONE"
+      ALL_IPS=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(networkEndpoints[].ipAddress)")
+      ALL_IPS="${ALL_IPS//;/ }"
+      ALL_IPS="${ALL_IPS//,/ }"
+
+      # shellcheck disable=SC2206
+      ALL_IPS_ARRAY=($ALL_IPS)
+
+      if [[ -z "${HEAD_INTERNAL_IP:-}" ]]; then
+        HEAD_INTERNAL_IP="$(get_current_internal_ip)"
+        echo "   -> Current VM internal IP: $HEAD_INTERNAL_IP"
+      fi
+
+      CURRENT_IP_IN_SLICE=0
+      WORKER_IPS_LIST=()
+      for ip in "${ALL_IPS_ARRAY[@]}"; do
+        if [[ "$ip" == "$HEAD_INTERNAL_IP" ]]; then
+          CURRENT_IP_IN_SLICE=1
+        elif [[ -n "$ip" ]]; then
+          WORKER_IPS_LIST+=("$ip")
         fi
-    else
-        echo "❌ gcloud not found. Please set WORKER_IPS environment variable manually."
+      done
+
+      if (( CURRENT_IP_IN_SLICE != 1 )); then
+        echo "❌ Current VM IP (${HEAD_INTERNAL_IP}) is not in discovered TPU endpoints: ${ALL_IPS_ARRAY[*]}"
         exit 1
+      fi
+
+      WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
+      echo "   -> Discovered Worker IPs: $WORKER_IPS"
+
+      ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
+      echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
+      if [[ -z "${TPU_VERSION:-}" ]]; then
+        if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
+          export TPU_VERSION="tpu7x"
+          echo "   -> Setting TPU_VERSION=tpu7x"
+        elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
+          export TPU_VERSION="tpu6e"
+          echo "   -> Setting TPU_VERSION=tpu6e"
+        fi
+      fi
+    else
+       echo "❌ Could not determine TPU_NAME or ZONE from metadata. Please set WORKER_IPS manually."
+       exit 1
     fi
+  else
+    echo "❌ gcloud not found. Please set WORKER_IPS environment variable manually."
+    exit 1
+  fi
 fi
 
 if [[ -z "${WORKER_IPS:-}" ]]; then
-    echo "ERROR: Failed to discover WORKER_IPS. Please provide it manually."
-    exit 1
+  echo "ERROR: Failed to discover WORKER_IPS. Please provide it manually."
+  exit 1
 fi
 
 HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(get_current_internal_ip)}"
 
 # Always ensure ACCELERATOR_TYPE is populated if not specified in the environment
 if [[ -z "${ACCELERATOR_TYPE:-}" ]] && command -v gcloud &> /dev/null && command -v curl &> /dev/null; then
-    ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}' || echo "")}"
-    TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
-    
-    if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
-        ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
-        echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
-    fi
+  ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}' || echo "")}"
+  TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
+
+  if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
+    ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
+    echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
+  fi
 fi
 
 # Auto-discover TPU_VERSION if not specified and ACCELERATOR_TYPE is present
 if [[ -z "${TPU_VERSION:-}" && -n "${ACCELERATOR_TYPE:-}" ]]; then
-    if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
-        export TPU_VERSION="tpu7x"
-        echo "   -> Setting TPU_VERSION=tpu7x"
-        elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
-        export TPU_VERSION="tpu6e"
-        echo "   -> Setting TPU_VERSION=tpu6e"
-    fi
+  if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
+    export TPU_VERSION="tpu7x"
+    echo "   -> Setting TPU_VERSION=tpu7x"
+  elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
+    export TPU_VERSION="tpu6e"
+    echo "   -> Setting TPU_VERSION=tpu6e"
+  fi
 fi
 
 if [[ -z "${TPU_VERSION:-}" ]]; then
-    echo "❌ Error: TPU_VERSION environment variable is not set and could not be automatically discovered."
-    exit 1
+  echo "❌ Error: TPU_VERSION environment variable is not set and could not be automatically discovered."
+  exit 1
 fi
 
 echo "Running on TPU_VERSION: ${TPU_VERSION}"
@@ -292,43 +290,28 @@ cleanup() {
 
   # Capture server logs before removing containers.
   echo "   -> Capturing server logs..."
-  docker cp "$NODE_CONTAINER_NAME:/root/vllm_serve_prefill.log" "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
+  docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp '$NODE_CONTAINER_NAME:/root/vllm_serve_decode.log' /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
     scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log" || true
   fi
 
   # Cleanup remote hosts
   for ip in "${ALL_IPS_ARRAY[@]}"; do
     if [[ "$ip" != "$HEAD_INTERNAL_IP" ]]; then
       echo "   -> Cleaning remote host: $ip"
-      if [[ "$ip" == "$DECODE_HEAD_IP" ]]; then
-        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
-          "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
-           docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
-           rm -f ~/tpu-inference/scripts/start_decode.sh ~/tpu-inference/scripts/multihost/run_cluster.sh
-           rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
-      else
-        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
-          "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
-           docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
-           rm -f ~/tpu-inference/scripts/multihost/run_cluster.sh
-           rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
-      fi
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
     fi
   done
 
   # Cleanup local head node
   echo "   -> Cleaning local head node..."
-  docker stop "$NODE_CONTAINER_NAME" >/dev/null 2>&1 || true
-  docker rm -f "$NODE_CONTAINER_NAME" >/dev/null 2>&1 || true
+  docker stop node >/dev/null 2>&1 || true
+  docker rm -f node >/dev/null 2>&1 || true
 
   # Cleanup local proxy/benchmark container
-  docker stop "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
-  docker rm -f "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
-
-  rm -f /tmp/start_prefill.sh /tmp/start_decode.sh
+  docker stop disagg-proxy-benchmark >/dev/null 2>&1 || true
+  docker rm -f disagg-proxy-benchmark >/dev/null 2>&1 || true
 
   if [ $exit_code -ne 0 ]; then
     echo "--- 🚨 Script failed or timed out (Exit Code: $exit_code). Dumping logs..."
@@ -383,7 +366,7 @@ wait_for_ray_head() {
 
 PROJECT="$(gcloud config get-value project)"
 GCR_REPO="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference"
-IMAGE_NAME="${GCR_REPO}/vllm-tpu-multi-disagg-offload"
+IMAGE_NAME="${GCR_REPO}/vllm-tpu"
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 TOP_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
@@ -526,7 +509,7 @@ docker exec \
   -e TPU_ENABLE_D2H_TRANSFER="true" \
   -e TPU_MAX_HOST_KV_BUFFER_SIZE="${TPU_MAX_HOST_KV_BUFFER_SIZE}" \
   ${PREFILL_DOCKER_EXEC_ENV_ARGS} \
-  ${NODE_CONTAINER_NAME} bash -c "vllm serve ${MODEL} \
+  node bash -c "vllm serve ${MODEL} \
     --port ${PREFILL_VLLM_PORT} \
     --tensor-parallel-size ${PREFILL_TENSOR_PARALLEL_SIZE} \
     --trust-remote-code \
@@ -550,7 +533,7 @@ docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
   ${DECODE_DOCKER_EXEC_ENV_ARGS} \
-  ${NODE_CONTAINER_NAME} bash -c "vllm serve ${MODEL} \
+  node bash -c "vllm serve ${MODEL} \
     --port ${DECODE_VLLM_PORT} \
     --tensor-parallel-size ${DECODE_TENSOR_PARALLEL_SIZE} \
     --trust-remote-code \
@@ -582,7 +565,7 @@ docker run -d \
     --privileged \
     --network host \
     --shm-size 16G \
-    --name "${PROXY_CONTAINER_NAME}" \
+    --name "disagg-proxy-benchmark" \
     -e HF_HOME="/root/hf" \
     -v "${HOST_HF_HOME}:/root/hf" \
     -v "$LOG_DIR:/root/logs" \
@@ -590,7 +573,7 @@ docker run -d \
     "${DOCKER_IMAGE}" -c "tail -f /dev/null"
 
 echo "--- Starting Toy Proxy Server inside container..."
-docker exec -d "${PROXY_CONTAINER_NAME}" /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/toy_proxy_server.py \
+docker exec -d disagg-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/toy_proxy_server.py \
     --host localhost \
     --port 8000 \
     --prefiller-hosts localhost \
@@ -602,7 +585,7 @@ wait_for_server_remote "localhost" 8000 "Toy Proxy Server" 600
 
 if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
     echo "--- Running Benchmark Test inside container..."
-    docker exec "${PROXY_CONTAINER_NAME}" /bin/bash -c "vllm bench serve \
+    docker exec disagg-proxy-benchmark /bin/bash -c "vllm bench serve \
         --backend vllm \
         --host localhost \
         --port 8000 \
@@ -617,12 +600,12 @@ if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
         --seed ${RANDOM_SEED} > /root/logs/benchmark.txt 2>&1"
 
     echo "--- Benchmark Results ---"
-    docker exec "${PROXY_CONTAINER_NAME}" cat /root/logs/benchmark.txt
+    docker exec disagg-proxy-benchmark cat /root/logs/benchmark.txt
 fi
 
 if [ "$TEST_MODE" = "2" ] || [ "$TEST_MODE" = "3" ]; then
     echo "--- Running Correctness Test inside container..."
-    docker exec "${PROXY_CONTAINER_NAME}" /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py \
+    docker exec disagg-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py \
         --baseline_url http://${DECODE_HEAD_IP}:${DECODE_VLLM_PORT}/v1/completions \
         --disagg_url http://localhost:8000/v1/completions \
         --model ${MODEL} \
@@ -631,7 +614,7 @@ if [ "$TEST_MODE" = "2" ] || [ "$TEST_MODE" = "3" ]; then
         --output_length ${OUTPUT_LEN} > /root/logs/correctness.txt 2>&1"
 
     echo "--- Correctness Results ---"
-    docker exec "${PROXY_CONTAINER_NAME}" cat /root/logs/correctness.txt
+    docker exec disagg-proxy-benchmark cat /root/logs/correctness.txt
 fi
 
 echo "--- Tests completed successfully ---"
