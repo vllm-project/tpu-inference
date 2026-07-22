@@ -17,11 +17,10 @@ _GEMV_NBUF = max(2, int(_os.getenv("MOE_GEMV_NBUF", "2")))
 _FUSE_NBUF = max(2, int(_os.getenv("MOE_FUSE_NBUF", str(_GEMV_NBUF))))
 
 
-def _cn_w1w2_fused_grid_kernel_fp8(
-    # ---- Scalar prefetch (SMEM) — 3 arrays ----
-    ids_ref,              # [TOPK_TOTAL] int32 — expert IDs
-    token_offsets_ref,    # [TOPK_TOTAL] int32 — pre-computed t * M_PAD
-    topk_weights_ref,     # [TOPK_TOTAL] fp32  — routing weights
+def _cn_w1w2_fused_token_kernel_fp8(
+    # ---- Scalar prefetch (SMEM) — 2 arrays ----
+    ids_ref,              # [C*TOP_K] int32 — expert IDs
+    topk_weights_ref,     # [C*TOP_K] fp32  — routing weights
     # ---- Inputs (HBM) ----
     lhs_ref,              # [C*M_PAD, K] bf16
     w1_ref,               # [G, K, 2*I] fp8
@@ -29,158 +28,169 @@ def _cn_w1w2_fused_grid_kernel_fp8(
     w2_ref,               # [G, I, H] fp8
     w2_scale_ref,         # [G, I_BLOCKS, 1, H] fp32
     # ---- Output (HBM) ----
-    o_ref,                # [TOPK_TOTAL * M_PAD, H] bf16
+    o_ref,                # [C*M_PAD, H] bf16
     # ---- Scratch (VMEM) ----
     lhs_scratch_ref,      # [M_PAD, K] bf16
     w1_bufs_ref,          # [NBUF, K_TILE, 2*I] fp8
     w1_s_bufs_ref,        # [NBUF, KB_TILE, 1, 2*I] fp32
     w2_bufs_ref,          # [NBUF, I_TILE, H] fp8
     w2_s_bufs_ref,        # [NBUF, IB_TILE, 1, H] fp32
-    o_scratch_ref,        # [M_PAD, H] bf16
+    o_scratch_ref,        # [M_PAD, H] bf16 — output staging for DMA
     sem_ref,              # DMA semaphores
     *,
     K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, TOP_K_, NBUF_,
     DTYPE_LHS, DTYPE_OUT,
 ):
+    token = pl.program_id(0)
+    token_offset = pl.multiple_of(token * M_PAD, M_PAD)
+
     K_TILE = w1_bufs_ref.shape[1]
-    KB_TILE = w1_s_bufs_ref.shape[1]
     NUM_K = K // K_TILE
     QB_eff = min(K_TILE, QB)
+    KB_TILE = K_TILE // QB_eff
     I_TILE = w2_bufs_ref.shape[1]
-    IB_TILE = w2_s_bufs_ref.shape[1]
     NUM_I = I // I_TILE
+    IB_TILE = I_BLOCKS // NUM_I
 
-    slot = pl.program_id(0)
-    gj = ids_ref[slot]                        # SMEM — expert id
-    t_offset = token_offsets_ref[slot]         # SMEM — pre-computed t * M_PAD
-    t_offset = pl.multiple_of(t_offset, M_PAD)  # compiler hint
-
-    # ---- DMA token's LHS row: HBM → VMEM scratch ----
+    # ---- DMA token LHS row: HBM -> VMEM (once for all experts) ----
     lhs_copy = pltpu.make_async_copy(
-        lhs_ref.at[pl.ds(t_offset, M_PAD), pl.ds(0, K)],
+        lhs_ref.at[pl.ds(token_offset, M_PAD), pl.ds(0, K)],
         lhs_scratch_ref,
         sem_ref.at[4 * NBUF_]
     )
     lhs_copy.start()
-
-    # ---- Phase 1: K-tiled gate+up matmul ----
-    pltpu.make_async_copy(
-        w1_ref.at[pl.ds(gj, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-        w1_bufs_ref.at[pl.ds(0, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-        sem_ref.at[0 * NBUF_ + 0]
-    ).start()
-    pltpu.make_async_copy(
-        w1_scale_ref.at[pl.ds(gj, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-        w1_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-        sem_ref.at[1 * NBUF_ + 0]
-    ).start()
-
-    gate_up_acc = jnp.zeros((M_PAD, 2 * I), dtype=jnp.float32)
-
     lhs_copy.wait()
 
-    for k in range(NUM_K):
-        buf = k % NBUF_
-        nxt_k = k + 1
-        if nxt_k < NUM_K:
-            nxt_buf = nxt_k % NBUF_
-            pltpu.make_async_copy(
-                w1_ref.at[pl.ds(gj, 1), pl.ds(nxt_k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
-                w1_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-                sem_ref.at[0 * NBUF_ + nxt_buf]
-            ).start()
-            nxt_k_block_start = (nxt_k * K_TILE) // QB
-            pltpu.make_async_copy(
-                w1_scale_ref.at[pl.ds(gj, 1), pl.ds(nxt_k_block_start, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-                w1_s_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-                sem_ref.at[1 * NBUF_ + nxt_buf]
-            ).start()
+    # Accumulate across all TOP_K experts in fp32
+    token_acc = jnp.zeros((M_PAD, H), dtype=jnp.float32)
 
+    for e in range(TOP_K_):
+        idx = token * TOP_K_ + e
+        gj = ids_ref[idx]
+        gj = pl.multiple_of(gj, 1)
+        weight = topk_weights_ref[idx]
+
+        # ---- Phase 1: K-tiled gate+up matmul ----
         pltpu.make_async_copy(
-            w1_ref.at[pl.ds(gj, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
-            w1_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-            sem_ref.at[0 * NBUF_ + buf]
-        ).wait()
-        k_block_start = (k * K_TILE) // QB
+            w1_ref.at[pl.ds(gj, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
+            w1_bufs_ref.at[pl.ds(0, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
+            sem_ref.at[0 * NBUF_ + 0]
+        ).start()
         pltpu.make_async_copy(
-            w1_scale_ref.at[pl.ds(gj, 1), pl.ds(k_block_start, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-            w1_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-            sem_ref.at[1 * NBUF_ + buf]
-        ).wait()
+            w1_scale_ref.at[pl.ds(gj, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
+            w1_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
+            sem_ref.at[1 * NBUF_ + 0]
+        ).start()
 
-        w1_fp8 = w1_bufs_ref[buf]
-        s1 = w1_s_bufs_ref[buf]
-        w1_fp32 = w1_fp8.astype(jnp.float32).reshape(KB_TILE, QB_eff, 2 * I)
-        w1_dequant = (w1_fp32 * s1).reshape(K_TILE, 2 * I).astype(DTYPE_LHS)
+        gate_up_acc = jnp.zeros((M_PAD, 2 * I), dtype=jnp.float32)
 
-        lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD), pl.ds(k * K_TILE, K_TILE)]
-        gate_up_acc = gate_up_acc + jnp.matmul(lhs_tile, w1_dequant, preferred_element_type=jnp.float32)
+        for k in range(NUM_K):
+            buf = k % NBUF_
+            k_block_start = (k * K_TILE) // QB
 
-    # ---- SwiGLU ----
-    gate_up_bf16 = gate_up_acc.astype(DTYPE_OUT)
-    gate = gate_up_bf16[:, :I].astype(jnp.float32)
-    up = gate_up_bf16[:, I:].astype(jnp.float32)
-    silu_gate = gate * jax.nn.sigmoid(gate)
-    intermediate = (silu_gate * up).astype(DTYPE_LHS)
+            # Start next tile DMA first (overlaps with wait + compute)
+            nxt_k = k + 1
+            if nxt_k < NUM_K:
+                nxt_buf = nxt_k % NBUF_
+                pltpu.make_async_copy(
+                    w1_ref.at[pl.ds(gj, 1), pl.ds(nxt_k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
+                    w1_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
+                    sem_ref.at[0 * NBUF_ + nxt_buf]
+                ).start()
+                nxt_k_block_start = (nxt_k * K_TILE) // QB
+                pltpu.make_async_copy(
+                    w1_scale_ref.at[pl.ds(gj, 1), pl.ds(nxt_k_block_start, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
+                    w1_s_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
+                    sem_ref.at[1 * NBUF_ + nxt_buf]
+                ).start()
 
-    # ---- Phase 2: I-tiled down matmul ----
-    pltpu.make_async_copy(
-        w2_ref.at[pl.ds(gj, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
-        w2_bufs_ref.at[pl.ds(0, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
-        sem_ref.at[2 * NBUF_ + 0]
-    ).start()
-    pltpu.make_async_copy(
-        w2_scale_ref.at[pl.ds(gj, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-        w2_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-        sem_ref.at[3 * NBUF_ + 0]
-    ).start()
-
-    down_acc = jnp.zeros((M_PAD, H), dtype=jnp.float32)
-
-    for m in range(NUM_I):
-        buf = m % NBUF_
-        nxt_m = m + 1
-        if nxt_m < NUM_I:
-            nxt_buf = nxt_m % NBUF_
+            # Wait for current tile
             pltpu.make_async_copy(
-                w2_ref.at[pl.ds(gj, 1), pl.ds(nxt_m * I_TILE, I_TILE), pl.ds(0, H)],
-                w2_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
-                sem_ref.at[2 * NBUF_ + nxt_buf]
-            ).start()
+                w1_ref.at[pl.ds(gj, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
+                w1_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
+                sem_ref.at[0 * NBUF_ + buf]
+            ).wait()
             pltpu.make_async_copy(
-                w2_scale_ref.at[pl.ds(gj, 1), pl.ds(nxt_m * IB_TILE, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-                w2_s_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-                sem_ref.at[3 * NBUF_ + nxt_buf]
-            ).start()
+                w1_scale_ref.at[pl.ds(gj, 1), pl.ds(k_block_start, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
+                w1_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
+                sem_ref.at[1 * NBUF_ + buf]
+            ).wait()
 
-        # Wait for current tile
+            w1_fp8 = w1_bufs_ref[buf]
+            s1 = w1_s_bufs_ref[buf]
+            w1_fp32 = w1_fp8.astype(jnp.float32).reshape(KB_TILE, QB_eff, 2 * I)
+            w1_dequant = (w1_fp32 * s1).reshape(K_TILE, 2 * I).astype(DTYPE_LHS)
+
+            lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD), pl.ds(k * K_TILE, K_TILE)]
+            gate_up_acc = gate_up_acc + jnp.matmul(lhs_tile, w1_dequant, preferred_element_type=jnp.float32)
+
+        # ---- SwiGLU ----
+        gate_up_bf16 = gate_up_acc.astype(DTYPE_OUT)
+        gate = gate_up_bf16[:, :I].astype(jnp.float32)
+        up = gate_up_bf16[:, I:].astype(jnp.float32)
+        silu_gate = gate * jax.nn.sigmoid(gate)
+        intermediate = (silu_gate * up).astype(DTYPE_LHS)
+
+        # ---- Phase 2: I-tiled down matmul ----
         pltpu.make_async_copy(
-            w2_ref.at[pl.ds(gj, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
-            w2_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
-            sem_ref.at[2 * NBUF_ + buf]
-        ).wait()
+            w2_ref.at[pl.ds(gj, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
+            w2_bufs_ref.at[pl.ds(0, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
+            sem_ref.at[2 * NBUF_ + 0]
+        ).start()
         pltpu.make_async_copy(
-            w2_scale_ref.at[pl.ds(gj, 1), pl.ds(m * IB_TILE, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-            w2_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-            sem_ref.at[3 * NBUF_ + buf]
-        ).wait()
+            w2_scale_ref.at[pl.ds(gj, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+            w2_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+            sem_ref.at[3 * NBUF_ + 0]
+        ).start()
 
+        down_acc = jnp.zeros((M_PAD, H), dtype=jnp.float32)
 
-        # Start next tile DMA first (overlaps with wait + compute)
-        w2_fp8 = w2_bufs_ref[buf]
-        s2 = w2_s_bufs_ref[buf]
-        w2_fp32 = w2_fp8.astype(jnp.float32).reshape(IB_TILE, IB, H)
-        w2_dequant = (w2_fp32 * s2).reshape(I_TILE, H).astype(DTYPE_LHS)
+        for m in range(NUM_I):
+            buf = m % NBUF_
 
-        inter_tile = intermediate[:, m * I_TILE : (m + 1) * I_TILE]
-        down_acc = down_acc + jnp.matmul(inter_tile, w2_dequant, preferred_element_type=jnp.float32)
+            # Start next tile DMA first
+            nxt_m = m + 1
+            if nxt_m < NUM_I:
+                nxt_buf = nxt_m % NBUF_
+                pltpu.make_async_copy(
+                    w2_ref.at[pl.ds(gj, 1), pl.ds(nxt_m * I_TILE, I_TILE), pl.ds(0, H)],
+                    w2_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
+                    sem_ref.at[2 * NBUF_ + nxt_buf]
+                ).start()
+                pltpu.make_async_copy(
+                    w2_scale_ref.at[pl.ds(gj, 1), pl.ds(nxt_m * IB_TILE, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+                    w2_s_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+                    sem_ref.at[3 * NBUF_ + nxt_buf]
+                ).start()
 
-    # ---- Output: weighted, per-slot ----
-    slot_offset = pl.multiple_of(slot * M_PAD, M_PAD)
-    o_scratch_ref[...] = (down_acc * topk_weights_ref[slot]).astype(DTYPE_OUT)
+            # Wait for current tile
+            pltpu.make_async_copy(
+                w2_ref.at[pl.ds(gj, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
+                w2_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
+                sem_ref.at[2 * NBUF_ + buf]
+            ).wait()
+            pltpu.make_async_copy(
+                w2_scale_ref.at[pl.ds(gj, 1), pl.ds(m * IB_TILE, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+                w2_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+                sem_ref.at[3 * NBUF_ + buf]
+            ).wait()
+
+            w2_fp8 = w2_bufs_ref[buf]
+            s2 = w2_s_bufs_ref[buf]
+            w2_fp32 = w2_fp8.astype(jnp.float32).reshape(IB_TILE, IB, H)
+            w2_dequant = (w2_fp32 * s2).reshape(I_TILE, H).astype(DTYPE_LHS)
+
+            inter_tile = intermediate[:, m * I_TILE : (m + 1) * I_TILE]
+            down_acc = down_acc + jnp.matmul(inter_tile, w2_dequant, preferred_element_type=jnp.float32)
+
+        # Accumulate weighted expert contribution
+        token_acc = token_acc + down_acc * weight
+
+    # ---- Write accumulated output for this token ----
+    o_scratch_ref[...] = token_acc.astype(DTYPE_OUT)
     out_copy = pltpu.make_async_copy(
         o_scratch_ref,
-        o_ref.at[pl.ds(slot_offset, M_PAD), pl.ds(0, H)],
+        o_ref.at[pl.ds(token_offset, M_PAD), pl.ds(0, H)],
         sem_ref.at[4 * NBUF_ + 1]
     )
     out_copy.start()
@@ -192,8 +202,8 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
                               n_tokens, interpret=False):
     """Fused gate+up+SwiGLU+down for the C=N MoE block, multi-buffered at
     depth ``_FUSE_NBUF``. lhs [N*M_PAD, K]; active_ids/topk_weights
-    [N*TOP_K] flattened. Returns bf16[TOPK_TOTAL*M_PAD, H] with each
-    slot's weighted output at row slot*M_PAD."""
+    [N*TOP_K] flattened. Returns bf16[N*M_PAD, H] with token t's
+    accumulated MoE output at row t*M_PAD."""
     G, K, N1 = w1.shape
     assert N1 % 2 == 0, f"w1 last dim must be 2*I; got {N1}"
     I = N1 // 2
@@ -207,9 +217,6 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
     NBUF = min(_FUSE_NBUF, TOPK_TOTAL)
     topk_weights = topk_weights.astype(jnp.float32)
 
-    # Pre-compute token offsets (Option B)
-    token_offsets = (jnp.arange(TOPK_TOTAL, dtype=jnp.int32) // TOP_K) * M_PAD
-
     any_spec = pl.BlockSpec(memory_space=pl.ANY)
     K_TILE = min(256, K)
     assert K % K_TILE == 0, f"K={K} not divisible by K_TILE={K_TILE}"
@@ -220,10 +227,10 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
     IB_TILE = I_BLOCKS // (I // I_TILE)
 
     grid_spec = pltpu.PrefetchScalarGridSpec(
-        num_scalar_prefetch=3,          # ids, token_offsets, weights → SMEM
+        num_scalar_prefetch=2,          # ids, weights -> SMEM
         in_specs=[any_spec] * 5,        # lhs, w1, w1_scale, w2, w2_scale
         out_specs=any_spec,
-        grid=(TOPK_TOTAL,),
+        grid=(n_tokens,),               # one iteration per TOKEN
         scratch_shapes=[
             pltpu.VMEM((M_PAD, K), lhs.dtype),                    # lhs_scratch
             pltpu.VMEM((NBUF, K_TILE, N1), w1.dtype),             # w1_bufs
@@ -237,27 +244,31 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
         vmem_limit_bytes=int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9))
 
     return pl.pallas_call(
-        functools.partial(_cn_w1w2_fused_grid_kernel_fp8,
+        functools.partial(_cn_w1w2_fused_token_kernel_fp8,
                           K=K, I=I, H=H,
                           K_BLOCKS=K_BLOCKS, QB=QB,
                           I_BLOCKS=I_BLOCKS, IB=IB,
                           TOP_K_=TOP_K, NBUF_=NBUF,
                           DTYPE_LHS=lhs.dtype, DTYPE_OUT=jnp.bfloat16),
-        out_shape=jax.ShapeDtypeStruct((TOPK_TOTAL * M_PAD, H), jnp.bfloat16),
+        out_shape=jax.ShapeDtypeStruct((n_tokens * M_PAD, H), jnp.bfloat16),
         grid_spec=grid_spec, compiler_params=compiler_params,
-        interpret=interpret, name="cn_gemv_w1w2_fused_grid_fp8",
-    )(active_ids, token_offsets, topk_weights,  # scalar prefetch (3)
-      lhs, w1, w1_scale, w2, w2_scale)          # inputs (5)
+        interpret=interpret, name="cn_gemv_w1w2_fused_token_fp8",
+    )(active_ids, topk_weights,                   # scalar prefetch (2)
+      lhs, w1, w1_scale, w2, w2_scale)            # inputs (5)
 
 
 def cn_moe_full(hidden_state, w1, w1_scale, w2, w2_scale,
                 active_ids, topk_weights, *, interpret=False):
     """hidden_state [C, K]; active_ids/topk_weights [C, TOP_K].
-    Returns [C, H] — token t's MoE output at row t.
+    Returns [C, K] — token t's MoE output at row t (bit-identical to running
+    each token's experts independently).
+
+    Expert weights are gathered by direct HBM indexing on active_ids with no
+    bounds clamping, so callers must pass a valid expert id for every slot,
+    using id 0 + weight 0.0 for any padded/inactive (token, expert) slot.
     """
     C = hidden_state.shape[0]
     K = hidden_state.shape[1]
-    H = w2.shape[2]
     lhs = jnp.zeros((C * M_PAD, K), dtype=hidden_state.dtype)
     for t in range(C):
         lhs = lhs.at[t * M_PAD].set(hidden_state[t])
@@ -268,7 +279,5 @@ def cn_moe_full(hidden_state, w1, w1_scale, w2, w2_scale,
         lhs, w1, w1_scale, w2, w2_scale, ids_flat, weights_flat,
         n_tokens=C, interpret=interpret)
 
-    # Sum across TOP_K experts per token (weighting applied in kernel)
-    slot_outputs = fused_out[::M_PAD][:C * TOP_K]
-    token_outputs = slot_outputs.reshape(C, TOP_K, H).sum(axis=1)
-    return token_outputs.astype(jnp.bfloat16)
+    # Token t's accumulated output sits at row t*M_PAD.
+    return fused_out[::M_PAD][:C].astype(jnp.bfloat16)
