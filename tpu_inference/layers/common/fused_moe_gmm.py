@@ -21,6 +21,8 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
+from tpu_inference.kernels.cn_moe_kernels import TOP_K as CN_MOE_TOP_K
+from tpu_inference.kernels.cn_moe_kernels import cn_moe_full
 from tpu_inference.kernels.collectives import \
     hierarchical_reduce_scatter as hier_rs
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
@@ -638,10 +640,9 @@ def fused_moe_func(
 
     # Fast path for low-concurrency decode: a specialized C=N Pallas MoE kernel
     # that skips the gather/scatter permutation of the general gmm path. Only
-    # engaged for small decode batches with topk == 10.
+    # engaged for small decode batches with topk == CN_MOE_TOP_K.
     low_conc_threshold = getattr(envs, "MOE_LOW_CONC_THRESHOLD", 64)
-    if 1 < num_tokens <= low_conc_threshold and topk == 10:
-        from tpu_inference.kernels.cn_moe_kernels import cn_moe_full
+    if 1 < num_tokens <= low_conc_threshold and topk == CN_MOE_TOP_K:
         logger.info(
             "Taking fast low-concurrency C=N Pallas MoE path for "
             f"BS={num_tokens} decode (use_ep={use_ep}, "
