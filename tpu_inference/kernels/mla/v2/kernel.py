@@ -1601,6 +1601,7 @@ def _mla_ragged_paged_attention_kernel(
                 q_len_start = pl.multiple_of(q_len_start, 8)
                 q_end = cu_q_lens_ref[seq_idx + 1]
                 sz = jnp.minimum(bq_sz, q_end - q_len_start)
+                sz = pl.multiple_of(sz, 8)
 
                 @pl.when(sz > 0)
                 def _copy(q_len_start=q_len_start,
