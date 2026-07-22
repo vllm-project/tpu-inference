@@ -236,6 +236,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Skip JAX precompilation step during initialization
     "SKIP_JAX_PRECOMPILE":
     env_bool("SKIP_JAX_PRECOMPILE", default=False),
+    # Use the replay-exact sharded candidate sampler, which avoids the
+    # full-vocabulary logits all-gather by gathering only the top-k candidate
+    # logits and regenerating the Gumbel noise for those positions via indexed
+    # threefry. Produces bit-for-bit identical tokens to the full-gather
+    # jax.random.categorical path (replay-exact) for top-k sampling. Default
+    # off => identical behavior to the current sampler.
+    "TPU_SAMPLING_REPLAY_EXACT_CANDIDATE":
+    env_bool("TPU_SAMPLING_REPLAY_EXACT_CANDIDATE", default=False),
     # Check for XLA recompilation during execution
     "VLLM_XLA_CHECK_RECOMPILATION":
     env_bool("VLLM_XLA_CHECK_RECOMPILATION", default=False),
