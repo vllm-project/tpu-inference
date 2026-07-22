@@ -114,6 +114,7 @@ PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP = 0
 # For decode only batches, start capturing traces after all requests in the
 # batch has KV caches that have reached this length threshold
 PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD = -1
+PHASED_PROFILER_TRACK_CONCURRENCY = False
 
 logger = init_logger(__name__)
 
@@ -572,15 +573,12 @@ class PhasedBasedProfiler:
         self.decode_kv_len_threshold: int = int(
             os.getenv("PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD",
                       PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD))
+        self.track_concurrency: bool = os.getenv(
+            "PHASED_PROFILER_TRACK_CONCURRENCY",
+            str(PHASED_PROFILER_TRACK_CONCURRENCY)).lower() in ("1", "true")
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
-        self.inference_phase_seen: dict = {
-            InferencePhase.PREFILL_ONLY: False,
-            InferencePhase.PREFILL_HEAVY: False,
-            InferencePhase.DECODE_ONLY: False,
-            InferencePhase.DECODE_HEAVY: False,
-            InferencePhase.BALANCED: False
-        }
+        self.inference_phases_profiled: set = set()
         self.default_profiling_options = jax.profiler.ProfileOptions()
         self.default_profiling_options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
         self.default_profiling_options.advanced_configuration = {
@@ -644,8 +642,12 @@ class PhasedBasedProfiler:
         """
         current_determined_phase = determine_phase_from_batch_composition_stats(
             batch_composition_stats)
-        for phase, has_been_seen in self.inference_phase_seen.items():
-            if has_been_seen or phase != current_determined_phase:
+        concurrency = (batch_composition_stats.get("num_reqs", 0)
+                       if self.track_concurrency else 0)
+        for phase in InferencePhase:
+            profile_key = (phase, concurrency) if concurrency > 0 else phase
+            if (profile_key in self.inference_phases_profiled
+                    or phase != current_determined_phase):
                 continue
 
             # Skip a configurable number of decode-heavy steps before profiling
@@ -667,10 +669,13 @@ class PhasedBasedProfiler:
                         min_kv_len, self.decode_kv_len_threshold)
                     break
 
-            self.inference_phase_seen[phase] = True
+            self.inference_phases_profiled.add(profile_key)
             self.profiling_n_steps_left = self.num_steps_to_profile_for
 
-            self.current_phase = phase.name.lower()
+            if concurrency > 0:
+                self.current_phase = f"{phase.name.lower()}_concur_{concurrency}"
+            else:
+                self.current_phase = phase.name.lower()
 
             logger.info(f"Starting profiling for {self.current_phase} phase")
             logger.info(f"Batch composition stats: {batch_composition_stats}")
@@ -848,12 +853,21 @@ class PhasedBasedProfiler:
                     phase: The phase of the inference the batch is in.
         """
 
-        have_seen_all_phases = all(self.inference_phase_seen.values())
         # We want to start profiling only after the first trial request
         is_past_initial_request = batch_composition_stats[
             "total_num_scheduled_tokens"] > 1
-        if is_past_initial_request and (not have_seen_all_phases
-                                        or self.current_phase != ""):
+        concurrency = (batch_composition_stats.get("num_reqs", 0)
+                       if self.track_concurrency else 0)
+        if concurrency > 0:
+            should_profile = is_past_initial_request
+        else:
+            have_seen_all_phases = all(phase in self.inference_phases_profiled
+                                       for phase in InferencePhase
+                                       if phase != InferencePhase.AMBIGUOUS)
+            should_profile = is_past_initial_request and (
+                not have_seen_all_phases or self.current_phase != "")
+
+        if should_profile:
             # We haven't started profiling yet
             if self.profiling_n_steps_left <= 0:
                 self._start_profiling(batch_composition_stats)

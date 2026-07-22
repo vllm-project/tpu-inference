@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+    TPU_MESH_SORT_BY_COORDS: bool = False
 
 
 def env_with_choices(
@@ -451,6 +452,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # removed it upstream as an orphaned var, so it now lives here.
     "VLLM_TPU_BUCKET_PADDING_GAP":
     lambda: int(os.getenv("VLLM_TPU_BUCKET_PADDING_GAP", "0")),
+    # Sort devices by coords and core_on_chip when constructing a tpu mesh.
+    # Currently, it only supports a single host set up.
+    "TPU_MESH_SORT_BY_COORDS":
+    env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
 }
 
 

@@ -306,8 +306,6 @@ class TpuPlatform(Platform):
                             min_page_size,
                         )
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
-            if envs.USE_BATCHED_RPA_KERNEL and cache_config.block_size < 256:
-                cache_config.block_size = 256
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config

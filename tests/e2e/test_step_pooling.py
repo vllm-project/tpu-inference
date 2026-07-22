@@ -64,3 +64,9 @@ def test_step_pooling_e2e():
 
     except Exception as e:
         pytest.fail(f"Embedding execution failed during chunked prefill: {e}")
+    finally:
+        # vLLM's synchronous LLM client stops EngineCore from a weakref
+        # finalizer, so a reference cycle can defer it indefinitely and leave
+        # the worker subprocess holding the container open until the CI job
+        # times out. Shut the engine down explicitly instead.
+        llm.llm_engine.engine_core.shutdown()
