@@ -28,7 +28,7 @@ class JaxModule(nnx.Module):
                          prefix: str = "",
                          recurse=True) -> Iterator[tuple[str, nnx.Param]]:
         """Yields the named parameters of the module.
-        
+
         Arguments:
             prefix: Prefix to add to the parameter names.
             recurse: If True, then yields parameters of this module and all submodules.
@@ -52,7 +52,7 @@ class JaxModule(nnx.Module):
     def named_children(
             self) -> Iterator[tuple[str, "JaxModule | JaxModuleList"]]:
         """Returns an iterator over immediate children modules.
-        
+
         Yields:
             (string, Module | list): Tuple containing a name and child module
         """
@@ -106,6 +106,15 @@ class JaxModule(nnx.Module):
             child_prefix = f"{prefix}.{name}" if prefix else name
             yield from child.named_modules(memo, child_prefix,
                                            remove_duplicate)
+
+    def modules(self) -> Iterator["JaxModule | JaxModuleList"]:
+        """Yields self and every descendant module.
+
+        Mirrors ``torch.nn.Module.modules`` so vLLM lifecycle code can inspect a
+        JAX model without assuming that it is a PyTorch module.
+        """
+        for _, module in self.named_modules():
+            yield module
 
 
 class JaxModuleList(nnx.List):
@@ -173,3 +182,8 @@ class JaxModuleList(nnx.List):
             module_prefix = f"{prefix}.{idx}" if prefix else str(idx)
             yield from module.named_modules(memo, module_prefix,
                                             remove_duplicate)
+
+    def modules(self) -> Iterator["JaxModule | JaxModuleList"]:
+        """Yields the container and every descendant module."""
+        for _, module in self.named_modules():
+            yield module
