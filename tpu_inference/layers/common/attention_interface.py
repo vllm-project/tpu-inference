@@ -59,7 +59,6 @@ else:
     logger.info_once("Using default RPA kernel")
 
 ragged_paged_attention = rpa.ragged_paged_attention
-pcp_ragged_paged_attention_kernel = rpa_v3_cp.ragged_paged_attention
 get_kv_cache_shape = rpa.get_kv_cache_shape
 
 ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
@@ -779,7 +778,7 @@ def _lse_reduce_scatter(o: jax.Array, lse: jax.Array, axis: str,
     o:   [axis_size*blk, nq, hd]  ->  [blk, nq, hd]
     lse: [axis_size*blk, nq]      ->  [blk, nq]
     """
-    n = o.shape[0] // axis_size  # this rank's query count (= 2C)
+    n = o.shape[0] // axis_size  # this rank's query count (= 2 chunks)
     m = lax.pmax(lse, axis)
     m_safe = jnp.where(jnp.isinf(m), 0.0, m)
     w = jnp.exp(lse - m_safe)
@@ -815,8 +814,9 @@ def pcp_ragged_paged_attention(
 ):
     """Single-request prefill context-parallel (PCP) attention.
 
-    The one request's `S = 2*pcp*C` current tokens are split head-tail into
-    `2*pcp` chunks of size `C`; rank `r` holds chunk `r` (head) and chunk
+    The one request's `S = 2*pcp*pcp_chunk_size` current tokens are split
+    head-tail into `2*pcp` chunks of size `pcp_chunk_size`; rank `r` holds
+    chunk `r` (head) and chunk
     `2*pcp-1-r` (tail), so its local buffer is `[head_chunk | tail_chunk]`.
 
     Two kernel launches per rank and is LSE-combined:
@@ -830,8 +830,8 @@ def pcp_ragged_paged_attention(
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
     two_p = 2 * pcp_size
     padded_q_len = q.shape[
-        0]  # padded current tokens across all pcp ranks = 2*pcp*C
-    C = padded_q_len // two_p  # head-tail chunk size
+        0]  # padded current tokens across all pcp ranks = 2*pcp*chunk
+    pcp_chunk_size = padded_q_len // two_p  # head-tail chunk size
 
     _row = [c for r in range(pcp_size) for c in (r, two_p - 1 - r)]
     _inv = [0] * two_p
@@ -856,7 +856,7 @@ def pcp_ragged_paged_attention(
             return lax.all_gather(x, pcp_axis, axis=0, tiled=True)
 
         def to_token_order(x):  # rank-order chunks -> global token order
-            g = ag(x).reshape(two_p, C, *x.shape[1:])
+            g = ag(x).reshape(two_p, pcp_chunk_size, *x.shape[1:])
             return g[inv_row].reshape(padded_q_len, *x.shape[1:])
 
         common = dict(cp_rank=_rank_i32(r),
@@ -868,34 +868,36 @@ def pcp_ragged_paged_attention(
                       v_scale=v_scale)
 
         # ---- cache phase ----
-        ag_q = ag(q_l)  # [pcp*2C]
+        ag_q = ag(q_l)  # [pcp*2*chunk]
         cu_cache = jnp.zeros_like(cu_q_lens[0]).at[1:].set(padded_q_len)
         dist_cache = jnp.array([0, 0, 1], jnp.int32)
-        o1, kvc1, l1 = pcp_ragged_paged_attention_kernel(
-            ag_q,
-            k_l,
-            v_l,
-            kvc,
-            kvl,
-            pi,
-            cu_cache,
-            dist_cache,
-            kv_cache_lens=kvcl,
-            skip_current_attn=True,
-            use_causal_mask=False,
-            update_kv_cache=False,
-            **common)
+        o1, kvc1, l1 = rpa_v3_cp.ragged_paged_attention(ag_q,
+                                                        k_l,
+                                                        v_l,
+                                                        kvc,
+                                                        kvl,
+                                                        pi,
+                                                        cu_cache,
+                                                        dist_cache,
+                                                        kv_cache_lens=kvcl,
+                                                        skip_current_attn=True,
+                                                        use_causal_mask=False,
+                                                        update_kv_cache=False,
+                                                        **common)
         o1, l1 = _lse_reduce_scatter(o1, l1, pcp_axis, pcp_size)
 
         # ---- current phase -----
-        # `cu_q_lens[0]` = [0, C, C+tail_real] and `pcp_qpos` = [head_offset, tail_offset]
+        # `cu_q_lens[0]` = [0, chunk, chunk+tail_real] and `pcp_qpos` =
+        # [head_offset, tail_offset]
         page_size_local = kvc.shape[1]
-        remap_kv = (C >= page_size_local) and (C % page_size_local == 0)
+        remap_kv = (pcp_chunk_size
+                    >= page_size_local) and (pcp_chunk_size % page_size_local
+                                             == 0)
         if remap_kv:
             k_cur, v_cur = ag(k_l), ag(v_l)
         else:
             k_cur, v_cur = to_token_order(k_l), to_token_order(v_l)
-        o2, kvc2, l2 = pcp_ragged_paged_attention_kernel(
+        o2, kvc2, l2 = rpa_v3_cp.ragged_paged_attention(
             q_l,
             k_cur,
             v_cur,
@@ -906,7 +908,7 @@ def pcp_ragged_paged_attention(
             dist2,
             kv_cache_lens=kvcl,
             q_pos_offsets=pcp_qpos[0],
-            pcp_chunk_size=(C if remap_kv else None),
+            pcp_chunk_size=(pcp_chunk_size if remap_kv else None),
             skip_cache_attn=True,
             use_causal_mask=use_causal_mask,
             update_kv_cache=update_kv_cache,
@@ -914,7 +916,7 @@ def pcp_ragged_paged_attention(
             **common)
 
         # cache term vs. current term: disjoint KV, so LSE-combine.
-        out, _ = merge_attn_states(o1, l1, o2, l2)  # [2C] = [head | tail]
+        out, _ = merge_attn_states(o1, l1, o2, l2)  # [2*chunk] = [head | tail]
         return out.astype(q.dtype), kvc2
 
     return jax.shard_map(

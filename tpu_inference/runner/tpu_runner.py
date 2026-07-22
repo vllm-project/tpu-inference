@@ -2822,14 +2822,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             ) == 1, "PCP currently only supports a single request at a time."
             num_current = int(counts[0])
             two_p = 2 * pcp_size
-            C = padded_num_scheduled_tokens_per_dp_rank // two_p
+            pcp_chunk_size = padded_num_scheduled_tokens_per_dp_rank // two_p
             # Head-tail row order: rank r owns chunk r (head) and chunk 2P-1-r (tail)
             row_perm = np.array(
                 [c for r in range(pcp_size) for c in (r, two_p - 1 - r)])
 
             def _rearrange(buf):  # natural token order -> rank order
                 buf[num_current:] = 0
-                buf[:] = buf.reshape(two_p, C)[row_perm].reshape(-1)
+                buf[:] = buf.reshape(two_p,
+                                     pcp_chunk_size)[row_perm].reshape(-1)
 
             _rearrange(positions)
             _rearrange(input_ids_view)
@@ -2853,18 +2854,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             pcp_cu_np = np.zeros((pcp_size, n_off + 1), np.int32)
             pcp_qpos_np = np.zeros((pcp_size, n_off), np.int32)
             for rank in range(pcp_size):
-                tail_off = (two_p - 1 - rank) * C
-                tail_real = int(np.clip(num_current - tail_off, 0, C))
-                pcp_cu_np[rank, 1] = C  # seq 0 (head) end
-                pcp_cu_np[rank, 2:] = C + tail_real  # seq 1 (tail) end
-                pcp_qpos_np[rank, 0] = rank * C
+                tail_off = (two_p - 1 - rank) * pcp_chunk_size
+                tail_real = int(
+                    np.clip(num_current - tail_off, 0, pcp_chunk_size))
+                pcp_cu_np[rank, 1] = pcp_chunk_size  # seq 0 (head) end
+                pcp_cu_np[rank,
+                          2:] = pcp_chunk_size + tail_real  # seq 1 (tail) end
+                pcp_qpos_np[rank, 0] = rank * pcp_chunk_size
                 pcp_qpos_np[rank, 1] = tail_off
 
             # logits_indices
             inv_row = np.empty(two_p, np.int64)
             inv_row[row_perm] = np.arange(two_p)
             last = num_current - 1
-            logits_indices_view[0] = inv_row[last // C] * C + (last % C)
+            logits_indices_view[0] = (
+                inv_row[last // pcp_chunk_size] * pcp_chunk_size +
+                last % pcp_chunk_size)
             logits_indices_view[1:] = -1
 
             pcp_spec = NamedSharding(

@@ -735,13 +735,15 @@ def _ragged_paged_attention_kernel_loop(
             if not skip_current_attn:
                 new_kv_len_start = _seq_kv_new_end - kv_left_frm_new
                 if pcp_chunk_size is not None:
-                    C = pcp_chunk_size
                     two_p = 2 * cp_group_size
-                    c = new_kv_len_start // C
-                    within = new_kv_len_start - c * C
-                    inv_row_c = jnp.where(c < cp_group_size, 2 * c,
-                                          2 * (two_p - 1 - c) + 1)
-                    new_kv_len_start = inv_row_c * C + within
+                    chunk_idx = new_kv_len_start // pcp_chunk_size
+                    offset_in_chunk = (new_kv_len_start -
+                                       chunk_idx * pcp_chunk_size)
+                    rank_slot = jnp.where(chunk_idx < cp_group_size,
+                                          2 * chunk_idx,
+                                          2 * (two_p - 1 - chunk_idx) + 1)
+                    new_kv_len_start = (rank_slot * pcp_chunk_size +
+                                        offset_in_chunk)
                 debug_print("[RPA debug] new_kv_len_start={}",
                             new_kv_len_start)
                 _async_copy(
@@ -2387,9 +2389,8 @@ def ragged_paged_attention(
         # PCP current phase (rank-ordered KV remap) needs the prefetch block to
         # stay within one head-tail chunk of size C, i.e. bkv_sz <= C.
         if pcp_chunk_size is not None and case == RpaCase.MIXED:
-            C = pcp_chunk_size
-            bkv_sz = min(bs["bkv_sz"], C)
-            while bkv_sz > page_size and C % bkv_sz != 0:
+            bkv_sz = min(bs["bkv_sz"], pcp_chunk_size)
+            while bkv_sz > page_size and pcp_chunk_size % bkv_sz != 0:
                 bkv_sz -= page_size
             bkv_csz = min(bs["bkv_csz"], bkv_sz)
             while bkv_csz > page_size and bkv_sz % bkv_csz != 0:
