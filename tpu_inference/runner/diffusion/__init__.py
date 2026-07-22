@@ -12,15 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from tpu_inference.runner.diffusion.algorithm import (CommitFn,
+                                                      get_commit_algorithm,
+                                                      low_confidence_commit)
 from tpu_inference.runner.diffusion.config import (
     AttentionPolicy, CanvasPolicy, DiffusionAlgorithm, DiffusionConfig,
     DiffusionModelSpec, DiffusionRuntimeConfig, GenerationStrategy,
-    GenerationStrategyConfig, LogitAlignment, PromptRemainderPolicy,
-    register_diffusion_model_adapter, resolve_generation_strategy)
+    GenerationStrategyConfig, LogitAlignment, NextBlockPolicy,
+    PromptRemainderPolicy, register_diffusion_model_adapter,
+    resolve_generation_strategy)
+from tpu_inference.runner.diffusion.program import (BlockForwardFn,
+                                                    DenoiseBlockOutput,
+                                                    denoise_block)
 
 __all__ = [
     "AttentionPolicy",
+    "BlockForwardFn",
     "CanvasPolicy",
+    "CommitFn",
+    "DenoiseBlockOutput",
     "DiffusionAlgorithm",
     "DiffusionConfig",
     "DiffusionModelSpec",
@@ -28,7 +38,11 @@ __all__ = [
     "GenerationStrategy",
     "GenerationStrategyConfig",
     "LogitAlignment",
+    "NextBlockPolicy",
     "PromptRemainderPolicy",
+    "denoise_block",
+    "get_commit_algorithm",
+    "low_confidence_commit",
     "register_diffusion_model_adapter",
     "resolve_generation_strategy",
 ]
