@@ -467,9 +467,13 @@ def _mla_ragged_paged_attention_kernel(
                 mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
             if topk_indices_x2_ref is not None:
                 bq_topk_indices_b = topk_indices_x2_ref[bq_sem_idx, b]
-                bq_topk_indices_b = jnp.broadcast_to(bq_topk_indices_b[:, None, :], (bq_sz, num_q_heads, bq_topk_indices_b.shape[-1]))
-                bq_topk_indices_b = bq_topk_indices_b.reshape(mask.shape[0], 1, bq_topk_indices_b.shape[-1])
-                valid_mask = jnp.any(bq_topk_indices_b == k_span[:, :, None], axis=-1)
+                bq_topk_indices_b = jnp.broadcast_to(
+                    bq_topk_indices_b[:, None, :],
+                    (bq_sz, num_q_heads, bq_topk_indices_b.shape[-1]))
+                bq_topk_indices_b = bq_topk_indices_b.reshape(
+                    mask.shape[0], 1, bq_topk_indices_b.shape[-1])
+                valid_mask = jnp.any(bq_topk_indices_b == k_span[:, :, None],
+                                     axis=-1)
                 mask = jnp.logical_or(mask, jnp.logical_not(valid_mask))
             mask_list.append(mask)
         mask = jnp.stack(mask_list, axis=0)
@@ -596,7 +600,8 @@ def _mla_ragged_paged_attention_kernel(
             s = soft_cap * jnp.tanh(s / soft_cap)
         s = s.astype(s_dtype)
 
-        if s.shape[0] % num_q_heads == 0 and s.shape[1] % 128 == 0 and topk_indices_x2_ref is None:
+        if s.shape[0] % num_q_heads == 0 and s.shape[
+                1] % 128 == 0 and topk_indices_x2_ref is None:
             # Optimized mask logic.
             threshold = (kv_len - q_len + (bq_idx * bq_sz + bq_offset) -
                          bkv_idx * bkv_sz)
@@ -635,10 +640,15 @@ def _mla_ragged_paged_attention_kernel(
                 assert bq_sem_idx is not None and b is not None
                 bq_topk_indices_b = topk_indices_x2_ref[bq_sem_idx, b]
                 q_split_len = s.shape[0] // num_q_heads
-                sliced_topk = bq_topk_indices_b[bq_offset : bq_offset + q_split_len]
-                sliced_topk = jnp.broadcast_to(sliced_topk[:, None, :], (q_split_len, num_q_heads, sliced_topk.shape[-1]))
-                sliced_topk = sliced_topk.reshape(s.shape[0], 1, sliced_topk.shape[-1])
-                valid_mask = jnp.any(sliced_topk == k_span[:, :, None], axis=-1)
+                sliced_topk = bq_topk_indices_b[bq_offset:bq_offset +
+                                                q_split_len]
+                sliced_topk = jnp.broadcast_to(
+                    sliced_topk[:, None, :],
+                    (q_split_len, num_q_heads, sliced_topk.shape[-1]))
+                sliced_topk = sliced_topk.reshape(s.shape[0], 1,
+                                                  sliced_topk.shape[-1])
+                valid_mask = jnp.any(sliced_topk == k_span[:, :, None],
+                                     axis=-1)
                 mask = jnp.logical_or(mask, jnp.logical_not(valid_mask))
             s = jnp.where(mask, mask_value, s)
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
@@ -1576,7 +1586,11 @@ def _mla_ragged_paged_attention_kernel(
                     wait,
                 )
 
-    def _fetch_topk_indices(batch_start_seq_idx, bq_idx, bq_sem_idx, *, wait=False):
+    def _fetch_topk_indices(batch_start_seq_idx,
+                            bq_idx,
+                            bq_sem_idx,
+                            *,
+                            wait=False):
         if topk_indices_ref is not None:
             for b in range(batch_size):
                 sem = sems.at[4, b, bq_sem_idx]
@@ -1584,11 +1598,15 @@ def _mla_ragged_paged_attention_kernel(
 
                 seq_idx = batch_start_seq_idx + b
                 q_len_start = cu_q_lens_ref[seq_idx] + bq_idx * bq_sz
+                q_len_start = pltpu.assume_multiple(q_len_start, 8)
                 q_end = cu_q_lens_ref[seq_idx + 1]
                 sz = jnp.minimum(bq_sz, q_end - q_len_start)
 
                 @pl.when(sz > 0)
-                def _copy(q_len_start=q_len_start, sz=sz, vmem_ref=vmem_ref, sem=sem):
+                def _copy(q_len_start=q_len_start,
+                          sz=sz,
+                          vmem_ref=vmem_ref,
+                          sem=sem):
                     if not wait:
                         _async_copy(
                             topk_indices_ref.at[pl.ds(q_len_start, sz)],
@@ -1625,7 +1643,10 @@ def _mla_ragged_paged_attention_kernel(
         return _fetch_topk_indices(batch_start_seq_idx, bq_idx, bq_sem_idx)
 
     def wait_fetch_topk_indices(batch_start_seq_idx, bq_idx, bq_sem_idx):
-        return _fetch_topk_indices(batch_start_seq_idx, bq_idx, bq_sem_idx, wait=True)
+        return _fetch_topk_indices(batch_start_seq_idx,
+                                   bq_idx,
+                                   bq_sem_idx,
+                                   wait=True)
 
     def start_send_bo(batch_start_seq_idx, bo_idx, bo_sem_idx):
         bo_ids_ref[bo_sem_idx] = batch_start_seq_idx
@@ -1820,7 +1841,8 @@ def _mla_ragged_paged_attention_kernel(
             def prefetch_next_bq():
                 sem_ids_ref[0] = next_bq_sem_idx
                 start_fetch_bq(next_seq_idx, next_bq_idx, next_bq_sem_idx)
-                start_fetch_topk_indices(next_seq_idx, next_bq_idx, next_bq_sem_idx)
+                start_fetch_topk_indices(next_seq_idx, next_bq_idx,
+                                         next_bq_sem_idx)
 
             def compute_with_bkv(bkv_idx, _):
 
@@ -1840,7 +1862,8 @@ def _mla_ragged_paged_attention_kernel(
                 @pl.when(bkv_idx == 0)
                 def wait_cur_bq():
                     wait_fetch_bq(batch_start_seq_idx, bq_idx, bq_sem_idx)
-                    wait_fetch_topk_indices(batch_start_seq_idx, bq_idx, bq_sem_idx)
+                    wait_fetch_topk_indices(batch_start_seq_idx, bq_idx,
+                                            bq_sem_idx)
 
                 # Wait for cur bkv
                 offsets, update_szs = wait_fetch_bkv(batch_start_seq_idx,
