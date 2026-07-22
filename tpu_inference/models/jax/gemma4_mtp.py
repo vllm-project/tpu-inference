@@ -161,7 +161,6 @@ class Gemma4MTPAttention(JaxModule):
         mesh: Mesh,
         kv_cache_dtype: str,
         quant_config: VllmQuantConfig,
-        mtp_decode_query_size: int,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -178,7 +177,6 @@ class Gemma4MTPAttention(JaxModule):
 
         self.is_sliding = self.layer_type == "sliding_attention"
         self.sliding_window = config.sliding_window if self.is_sliding else None
-        self.mtp_decode_query_size = mtp_decode_query_size
 
         rope_parameters = getattr(config, "rope_parameters", {})
         if self.layer_type in rope_parameters:
@@ -291,7 +289,6 @@ class Gemma4MTPAttention(JaxModule):
             sm_scale=self.scaling,
             attention_chunk_size=self.sliding_window,
             update_kv_cache=False,  # Read-only shared cache query
-            decode_query_size=self.mtp_decode_query_size,
         )
         o = self.o_proj(outputs)
         return new_kv_cache, o
@@ -308,7 +305,6 @@ class Gemma4MTPDecoderLayer(JaxModule):
         mesh: Mesh,
         kv_cache_dtype: str,
         quant_config: VllmQuantConfig,
-        num_speculative_tokens: int,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -322,7 +318,6 @@ class Gemma4MTPDecoderLayer(JaxModule):
 
         self.is_sliding = self.layer_type == "sliding_attention"
         self.layer_scalar = nnx.Param(jnp.ones((1, ), dtype=dtype))
-        mtp_decode_query_size= num_speculative_tokens+1
 
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
@@ -342,7 +337,6 @@ class Gemma4MTPDecoderLayer(JaxModule):
             kv_cache_dtype=kv_cache_dtype,
             quant_config=quant_config,
             prefix=prefix + ".self_attn",
-            mtp_decode_query_size=mtp_decode_query_size
         )
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
@@ -476,7 +470,6 @@ class Gemma4MultiTokenPredictor(JaxModule):
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 quant_config=vllm_config.quant_config,
                 prefix=f"{prefix}.layers.{layer_index}",
-                num_speculative_tokens=spec_config.num_speculative_tokens
             ),
         )
 

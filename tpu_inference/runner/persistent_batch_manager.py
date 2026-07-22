@@ -52,7 +52,12 @@ class PersistentBatchManager:
         # Check if spec decoding is active on the input batch and derive the decode token stride.
         # Standard decode uses 1 token; spec decode verification uses (num_speculative_tokens + 1) tokens.
         is_spec_decode = getattr(self.input_batch, "is_spec_decode", False)
-        max_decode_tokens = getattr(self.input_batch, "mamba_slot_stride", 1) if is_spec_decode else 1
+        if not isinstance(is_spec_decode, bool):
+            is_spec_decode = False
+        num_spec_tokens = getattr(self.input_batch, "num_speculative_tokens", 0)
+        if not isinstance(num_spec_tokens, int):
+            num_spec_tokens = 0
+        max_decode_tokens = (num_spec_tokens + 1) if is_spec_decode else 1
 
         # If all scheduled requests match the decode threshold, no reordering is needed.
         all_decode = True
