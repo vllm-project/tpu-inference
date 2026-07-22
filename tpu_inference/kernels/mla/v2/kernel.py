@@ -1598,7 +1598,7 @@ def _mla_ragged_paged_attention_kernel(
 
                 seq_idx = batch_start_seq_idx + b
                 q_len_start = cu_q_lens_ref[seq_idx] + bq_idx * bq_sz
-                q_len_start = pltpu.assume_multiple(q_len_start, 8)
+                q_len_start = pl.multiple_of(q_len_start, 8)
                 q_end = cu_q_lens_ref[seq_idx + 1]
                 sz = jnp.minimum(bq_sz, q_end - q_len_start)
 
