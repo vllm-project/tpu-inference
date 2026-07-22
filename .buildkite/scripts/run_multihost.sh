@@ -142,6 +142,22 @@ fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o IPQoS=none -i ~/.ssh/id_rsa)
 
+get_remote_metadata_value() {
+  local host=$1
+  local path=$2
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+    "curl -fs -H 'Metadata-Flavor: Google' 'http://metadata.google.internal/computeMetadata/v1/${path}' 2>/dev/null || true"
+}
+
+validate_tpu_task_id() {
+  local host=$1
+  local task_id=$2
+  if [[ ! "$task_id" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: TPU host ${host} returned an invalid agent-worker-number: '${task_id}'." >&2
+    return 1
+  fi
+}
+
 VLLM_LOG_TAIL_PID=""
 
 stop_vllm_log_streaming() {
@@ -259,6 +275,21 @@ dump_ray_nodes() {
   docker exec node python3 -c "$ray_dump_cmd" || true
 }
 
+dump_tpu_process_env() {
+  local host=$1
+  local role=$2
+  local dump_cmd
+  dump_cmd='printf "CLOUD_TPU_TASK_ID=%s\nJAX_PROCESS_ID=%s\nTPU_PROCESS_BOUNDS=%s\n" "${CLOUD_TPU_TASK_ID-<unset>}" "${JAX_PROCESS_ID-<unset>}" "${TPU_PROCESS_BOUNDS-<unset>}"'
+
+  echo "--- TPU process environment: ${role} (${host})"
+  if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
+    docker exec node bash -c "$dump_cmd"
+  else
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+      "docker exec node bash -c '$dump_cmd'"
+  fi
+}
+
 wait_for_ray_cluster_members() {
   local expected_nodes=$1
   local timeout=${2:-900}
@@ -362,6 +393,34 @@ DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 echo "--- Cleaning up previous cluster state..."
 cleanup 0
 
+# libtpu uses CLOUD_TPU_TASK_ID to identify the local process in a TPU slice.
+# Do not rely solely on automatic detection from inside Ray actors: if both
+# actors default to task 0, jax.local_devices() reports process_index=0 on both
+# hosts and topology_order_id collides. Read the authoritative per-VM worker
+# number before starting the containers and pass it through explicitly.
+HEAD_TPU_TASK_ID="$(get_metadata_value "instance/attributes/agent-worker-number")"
+validate_tpu_task_id "$HEAD_INTERNAL_IP" "$HEAD_TPU_TASK_ID"
+
+IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
+WORKER_TPU_TASK_IDS=()
+SEEN_TPU_TASK_IDS=",${HEAD_TPU_TASK_ID},"
+for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
+  worker_task_id="$(get_remote_metadata_value "$worker_ip" "instance/attributes/agent-worker-number")"
+  validate_tpu_task_id "$worker_ip" "$worker_task_id"
+  if [[ "$SEEN_TPU_TASK_IDS" == *",${worker_task_id},"* ]]; then
+    echo "ERROR: TPU task ID ${worker_task_id} is reported by more than one host." >&2
+    exit 1
+  fi
+  SEEN_TPU_TASK_IDS+="${worker_task_id},"
+  WORKER_TPU_TASK_IDS+=("$worker_task_id")
+done
+
+echo "--- TPU process identity mapping"
+echo "Head ${HEAD_INTERNAL_IP}: CLOUD_TPU_TASK_ID=${HEAD_TPU_TASK_ID}"
+for worker_index in "${!WORKER_IPS_ARRAY[@]}"; do
+  echo "Worker ${WORKER_IPS_ARRAY[$worker_index]}: CLOUD_TPU_TASK_ID=${WORKER_TPU_TASK_IDS[$worker_index]}"
+done
+
 # 1. Start Ray Head Node locally
 echo "--- Starting Ray Head Node Locally"
 WORKER_LAUNCHER_PIDS=()
@@ -372,6 +431,8 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${HEAD_INTERNAL_IP}" \
   --head \
   "${HOST_HF_HOME}" \
+  -e CLOUD_TPU_TASK_ID="${HEAD_TPU_TASK_ID}" \
+  -e TPU_WORKER_ID="${HEAD_TPU_TASK_ID}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -385,10 +446,12 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" &
 
 wait_for_ray_head
+sleep 60
 
 # 2. Distribute run_cluster.sh to workers and start them
-IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
-for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
+for worker_index in "${!WORKER_IPS_ARRAY[@]}"; do
+    worker_ip="${WORKER_IPS_ARRAY[$worker_index]}"
+    worker_task_id="${WORKER_TPU_TASK_IDS[$worker_index]}"
     echo "--- Distributing and starting Ray Worker on ${worker_ip}"
 
     # Prune Worker Node BEFORE it tries to pull the new giant image
@@ -406,6 +469,8 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
     # shellcheck disable=SC2029
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
+  -e CLOUD_TPU_TASK_ID='${worker_task_id}' \
+  -e TPU_WORKER_ID='${worker_task_id}' \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -425,6 +490,12 @@ done
 
 echo "--- Waiting for all worker nodes to connect"
 wait_for_ray_cluster_members "$(( ${#WORKER_IPS_ARRAY[@]} + 1 ))" "${RAY_CLUSTER_TIMEOUT:-900}"
+
+echo "--- TPU process environment on all Ray nodes"
+dump_tpu_process_env "$HEAD_INTERNAL_IP" "head"
+for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
+  dump_tpu_process_env "$worker_ip" "worker"
+done
 
 # 3. Start vLLM server on the head node
 echo "--- Starting vLLM server on head node"
