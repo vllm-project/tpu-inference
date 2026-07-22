@@ -30,8 +30,6 @@ NUM_PROMPTS=${NUM_PROMPTS:=100}
 RANDOM_SEED=${RANDOM_SEED:=10}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:=10}
 TEST_MODE=${TEST_MODE:=1} # 1: benchmark, 2: correctness, 3: both
-NODE_CONTAINER_NAME="node"
-PROXY_CONTAINER_NAME="disagg-proxy-benchmark"
 
 
 # Log directory setup
@@ -40,20 +38,20 @@ mkdir -p "$LOG_DIR"
 rm -f "$LOG_DIR"/prefill.txt "$LOG_DIR"/decode.txt "$LOG_DIR"/benchmark.txt "$LOG_DIR"/proxy.txt "$LOG_DIR"/correctness.txt
 
 get_metadata_value() {
-    local path=$1
-    curl -fs -H "Metadata-Flavor: Google" \
+  local path=$1
+  curl -fs -H "Metadata-Flavor: Google" \
     "http://metadata.google.internal/computeMetadata/v1/${path}" 2>/dev/null || true
 }
 
 get_current_internal_ip() {
-    local metadata_ip
-    metadata_ip="$(get_metadata_value "instance/network-interfaces/0/ip")"
-    if [[ -n "$metadata_ip" ]]; then
-        echo "$metadata_ip"
-        return 0
-    fi
+  local metadata_ip
+  metadata_ip="$(get_metadata_value "instance/network-interfaces/0/ip")"
+  if [[ -n "$metadata_ip" ]]; then
+    echo "$metadata_ip"
+    return 0
+  fi
 
-    hostname -I | awk '{print $1}'
+  hostname -I | awk '{print $1}'
 }
 
 # Automatic Worker IP Discovery
@@ -83,7 +81,7 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
             for ip in "${ALL_IPS_ARRAY[@]}"; do
                 if [[ "$ip" == "$HEAD_INTERNAL_IP" ]]; then
                     CURRENT_IP_IN_SLICE=1
-                    elif [[ -n "$ip" ]]; then
+                elif [[ -n "$ip" ]]; then
                     WORKER_IPS_LIST+=("$ip")
                 fi
             done
@@ -98,6 +96,15 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
 
             ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
             echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
+            if [[ -z "${TPU_VERSION:-}" ]]; then
+                if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
+                    export TPU_VERSION="tpu7x"
+                    echo "   -> Setting TPU_VERSION=tpu7x"
+                    elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
+                    export TPU_VERSION="tpu6e"
+                    echo "   -> Setting TPU_VERSION=tpu6e"
+                fi
+            fi
         else
             echo "❌ Could not determine TPU_NAME or ZONE from metadata. Please set WORKER_IPS manually."
             exit 1
@@ -124,6 +131,22 @@ if [[ -z "${ACCELERATOR_TYPE:-}" ]] && command -v gcloud &> /dev/null && command
         ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
         echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
     fi
+fi
+
+# Auto-discover TPU_VERSION if not specified and ACCELERATOR_TYPE is present
+if [[ -z "${TPU_VERSION:-}" && -n "${ACCELERATOR_TYPE:-}" ]]; then
+    if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
+        export TPU_VERSION="tpu7x"
+        echo "   -> Setting TPU_VERSION=tpu7x"
+        elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
+        export TPU_VERSION="tpu6e"
+        echo "   -> Setting TPU_VERSION=tpu6e"
+    fi
+fi
+
+if [[ -z "${TPU_VERSION:-}" ]]; then
+    echo "❌ Error: TPU_VERSION environment variable is not set and could not be automatically discovered."
+    exit 1
 fi
 
 echo "Running on TPU_VERSION: ${TPU_VERSION}"
@@ -156,13 +179,13 @@ if [[ "${ACCELERATOR_TYPE:-}" == *"4t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-4
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
 elif [[ "${ACCELERATOR_TYPE:-}" == *"8t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-8"* ]]; then
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
-elif [[ "${TPU_VERSION}" == "tpu7x" ]]; then
+elif [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
 else
   CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
 fi
 
-if [[ "${TPU_VERSION}" == "tpu7x" ]]; then
+if [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
   CORES_PER_CHIP="${CORES_PER_CHIP:-2}"
 else
   CORES_PER_CHIP="${CORES_PER_CHIP:-1}"
@@ -172,7 +195,7 @@ TOTAL_CHIPS=$(( NUM_HOSTS * CHIPS_PER_HOST ))
 echo "Calculated total TPU chips from hosts: ${TOTAL_CHIPS}"
 echo "Using TPU cores per chip: ${CORES_PER_CHIP}"
 
-if [[ "${TPU_VERSION}" == "tpu7x" && "${ACCELERATOR_TYPE:-}" == *"16"* && "$NUM_HOSTS" -lt 2 ]]; then
+if [[ "${TPU_VERSION:-}" == "tpu7x" && "${ACCELERATOR_TYPE:-}" == *"16"* && "$NUM_HOSTS" -lt 2 ]]; then
   echo "❌ TPU7x-16 should expose multiple host VMs, but discovered ${NUM_HOSTS}: ${ALL_IPS_ARRAY[*]}"
   exit 1
 fi
@@ -278,12 +301,12 @@ start_vllm_log_streaming() {
 
   echo "--- Streaming vLLM Prefill and Decode logs while waiting for health..."
 
-  docker exec "$NODE_CONTAINER_NAME" bash -c "touch /root/vllm_serve_prefill.log && tail -n +1 -F /root/vllm_serve_prefill.log" \
+  docker exec node bash -c "touch /root/vllm_serve_prefill.log && tail -n +1 -F /root/vllm_serve_prefill.log" \
     > >(sed -u 's/^/[prefill] /') 2>&1 &
   PREFILL_LOG_TAIL_PID=$!
 
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
-    "docker exec '$NODE_CONTAINER_NAME' bash -c 'touch /root/vllm_serve_decode.log && tail -n +1 -F /root/vllm_serve_decode.log'" \
+    "docker exec node bash -c 'touch /root/vllm_serve_decode.log && tail -n +1 -F /root/vllm_serve_decode.log'" \
     > >(sed -u 's/^/[decode] /') 2>&1 &
   DECODE_LOG_TAIL_PID=$!
 }
@@ -296,53 +319,38 @@ cleanup() {
 
   # Capture server logs before removing containers.
   echo "   -> Capturing server logs..."
-  docker cp "$NODE_CONTAINER_NAME:/root/vllm_serve_prefill.log" "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
+  docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp '$NODE_CONTAINER_NAME:/root/vllm_serve_decode.log' /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
     scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log" || true
   fi
 
   # Cleanup Prefill workers
   for ip in "${PREFILL_WORKER_IPS[@]}"; do
     echo "   -> Cleaning Prefill worker: $ip"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
-      "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
-       docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
-       rm -f ~/tpu-inference/scripts/multihost/run_cluster.sh
-       rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
   done
 
   # Cleanup Decode Head
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
     echo "   -> Cleaning Decode Head: $DECODE_HEAD_IP"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
-      "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
-       docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
-       rm -f ~/tpu-inference/scripts/start_decode.sh ~/tpu-inference/scripts/multihost/run_cluster.sh
-       rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
   fi
 
   # Cleanup Decode workers
   for ip in "${DECODE_WORKER_IPS[@]}"; do
     echo "   -> Cleaning Decode worker: $ip"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
-      "docker stop '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
-       docker rm -f '$NODE_CONTAINER_NAME' >/dev/null 2>&1 || true
-       rm -f ~/tpu-inference/scripts/multihost/run_cluster.sh
-       rmdir ~/tpu-inference/scripts/multihost ~/tpu-inference/scripts 2>/dev/null || true" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
   done
 
   # Cleanup Prefill Head (Local Node)
   echo "   -> Cleaning Prefill Head (Local)..."
-  docker stop "$NODE_CONTAINER_NAME" >/dev/null 2>&1 || true
-  docker rm -f "$NODE_CONTAINER_NAME" >/dev/null 2>&1 || true
+  docker stop node >/dev/null 2>&1 || true
+  docker rm -f node >/dev/null 2>&1 || true
 
   # Cleanup Local proxy/benchmark container
-  docker stop "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
-  docker rm -f "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
-
-  rm -f /tmp/start_prefill.sh /tmp/start_decode.sh
+  docker stop disagg-proxy-benchmark >/dev/null 2>&1 || true
+  docker rm -f disagg-proxy-benchmark >/dev/null 2>&1 || true
 
   if [ $exit_code -ne 0 ]; then
     echo "--- 🚨 Script failed or timed out (Exit Code: $exit_code). Dumping logs..."
@@ -385,9 +393,9 @@ vllm_server_process_alive() {
   local process_check="pgrep -af '[v]llm serve' | grep -q -- '--port ${port}'"
 
   if [[ "$host" == "localhost" || "$host" == "127.0.0.1" || "$host" == "$HEAD_INTERNAL_IP" ]]; then
-    docker exec "$NODE_CONTAINER_NAME" bash -c "$process_check" >/dev/null 2>&1
+    docker exec node bash -c "$process_check" >/dev/null 2>&1
   else
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec '$NODE_CONTAINER_NAME' bash -c \"$process_check\"" >/dev/null 2>&1
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec node bash -c \"$process_check\"" >/dev/null 2>&1
   fi
 }
 
@@ -398,9 +406,9 @@ dump_vllm_server_log() {
 
   echo "+++ 📄 ${service_name} log (${host}:${log_path})"
   if [[ "$host" == "localhost" || "$host" == "127.0.0.1" || "$host" == "$HEAD_INTERNAL_IP" ]]; then
-    docker exec "$NODE_CONTAINER_NAME" cat "$log_path" 2>/dev/null || true
+    docker exec node cat "$log_path" 2>/dev/null || true
   else
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec '$NODE_CONTAINER_NAME' cat '${log_path}' 2>/dev/null || true" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec node cat '${log_path}' 2>/dev/null || true" || true
   fi
 }
 
@@ -467,35 +475,6 @@ wait_for_ray_head() {
   return 1
 }
 
-wait_for_ray_cluster_members() {
-  local host=$1
-  local expected_nodes=$2
-  local label=$3
-  local timeout=${4:-600}
-  local ray_ready_cmd
-  ray_ready_cmd="import ray; ray.init(address='auto', ignore_reinit_error=True); alive=sum(node.get('Alive', False) for node in ray.nodes()); raise SystemExit(0 if alive >= ${expected_nodes} else 1)"
-
-  echo "Waiting for ${label} Ray cluster to register ${expected_nodes} alive node(s)..."
-  local end_time=$((SECONDS + timeout))
-  while [[ $SECONDS -lt $end_time ]]; do
-    if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
-      if docker exec "$NODE_CONTAINER_NAME" python3 -c "$ray_ready_cmd" >/dev/null 2>&1; then
-        echo "${label} Ray cluster has registered ${expected_nodes} alive node(s)."
-        return 0
-      fi
-    elif ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
-      "docker exec '$NODE_CONTAINER_NAME' python3 -c \"${ray_ready_cmd}\"" >/dev/null 2>&1; then
-      echo "${label} Ray cluster has registered ${expected_nodes} alive node(s)."
-      return 0
-    fi
-    sleep 5
-  done
-
-  echo "Error: ${label} Ray cluster did not register ${expected_nodes} alive node(s) within ${timeout}s." >&2
-  dump_ray_resources "$host" "$label"
-  return 1
-}
-
 dump_ray_resources() {
   local host=$1
   local label=$2
@@ -503,16 +482,16 @@ dump_ray_resources() {
 
   echo "--- Ray resources for ${label} cluster (${host})"
   if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
-    docker exec "$NODE_CONTAINER_NAME" python3 -c "$ray_dump_cmd" || true
+    docker exec node python3 -c "$ray_dump_cmd" || true
   else
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec '$NODE_CONTAINER_NAME' python3 -c \"${ray_dump_cmd}\"" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec node python3 -c \"${ray_dump_cmd}\"" || true
   fi
 }
 
 
 PROJECT="$(gcloud config get-value project)"
 GCR_REPO="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference"
-IMAGE_NAME="${GCR_REPO}/vllm-tpu-multi-disagg"
+IMAGE_NAME="${GCR_REPO}/vllm-tpu"
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 TOP_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
@@ -586,8 +565,6 @@ EOF
     sleep 15
 done
 
-wait_for_ray_cluster_members "$PREFILL_HEAD_IP" "$PREFILL_HOSTS_COUNT" "Prefill"
-
 # -----------------------------------------------------------------
 # 2. Start Decode Ray Cluster
 # -----------------------------------------------------------------
@@ -645,7 +622,8 @@ EOF
     sleep 15
 done
 
-wait_for_ray_cluster_members "$DECODE_HEAD_IP" "$DECODE_HOSTS_COUNT" "Decode"
+echo "--- Waiting for Ray Clusters to fully form..."
+sleep 120
 
 dump_ray_resources "$PREFILL_HEAD_IP" "Prefill"
 dump_ray_resources "$DECODE_HEAD_IP" "Decode"
@@ -664,7 +642,7 @@ docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
   ${PREFILL_DOCKER_EXEC_ENV_ARGS} \
-  ${NODE_CONTAINER_NAME} bash -c "vllm serve ${MODEL} \
+  node bash -c "vllm serve ${MODEL} \
     --port ${PREFILL_VLLM_PORT} \
     --tensor-parallel-size ${PREFILL_TENSOR_PARALLEL_SIZE} \
     --trust-remote-code \
@@ -688,7 +666,7 @@ docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
   ${DECODE_DOCKER_EXEC_ENV_ARGS} \
-  ${NODE_CONTAINER_NAME} bash -c "vllm serve ${MODEL} \
+  node bash -c "vllm serve ${MODEL} \
     --port ${DECODE_VLLM_PORT} \
     --tensor-parallel-size ${DECODE_TENSOR_PARALLEL_SIZE} \
     --trust-remote-code \
@@ -724,7 +702,7 @@ docker run -d \
     --privileged \
     --network host \
     --shm-size 16G \
-    --name "${PROXY_CONTAINER_NAME}" \
+    --name "disagg-proxy-benchmark" \
     -e HF_HOME="/root/hf" \
     -v "${HOST_HF_HOME}:/root/hf" \
     -v "$LOG_DIR:/root/logs" \
@@ -732,7 +710,7 @@ docker run -d \
     "${DOCKER_IMAGE}" -c "tail -f /dev/null"
 
 echo "--- Starting Toy Proxy Server inside container..."
-docker exec -d "${PROXY_CONTAINER_NAME}" /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/toy_proxy_server.py \
+docker exec -d disagg-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/toy_proxy_server.py \
     --host 0.0.0.0 \
     --port 8000 \
     --prefiller-hosts localhost \
@@ -745,7 +723,7 @@ wait_for_server_remote "127.0.0.1" 8000 "Toy Proxy Server" 600
 if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
     echo "--- Running Benchmark Test inside container..."
     timeout "${BENCHMARK_TIMEOUT_SECONDS:-1800}" \
-    docker exec "${PROXY_CONTAINER_NAME}" /bin/bash -c "vllm bench serve \
+    docker exec disagg-proxy-benchmark /bin/bash -c "vllm bench serve \
         --backend vllm \
         --host 127.0.0.1 \
         --port 8000 \
@@ -760,13 +738,13 @@ if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
         --seed ${RANDOM_SEED} > /root/logs/benchmark.txt 2>&1"
 
     echo "--- Benchmark Results ---"
-    docker exec "${PROXY_CONTAINER_NAME}" cat /root/logs/benchmark.txt
+    docker exec disagg-proxy-benchmark cat /root/logs/benchmark.txt
 fi
 
 if [ "$TEST_MODE" = "2" ] || [ "$TEST_MODE" = "3" ]; then
     echo "--- Running Correctness Test inside container..."
     timeout "${CORRECTNESS_TIMEOUT_SECONDS:-1800}" \
-    docker exec "${PROXY_CONTAINER_NAME}" /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py \
+    docker exec disagg-proxy-benchmark /bin/bash -c "python3 /workspace/tpu_inference/examples/disagg/test_disagg_correctness.py \
         --baseline_url http://${DECODE_HEAD_IP}:${DECODE_VLLM_PORT}/v1/completions \
         --disagg_url http://127.0.0.1:8000/v1/completions \
         --model ${MODEL} \
@@ -775,7 +753,7 @@ if [ "$TEST_MODE" = "2" ] || [ "$TEST_MODE" = "3" ]; then
         --output_length ${OUTPUT_LEN} > /root/logs/correctness.txt 2>&1"
 
     echo "--- Correctness Results ---"
-    docker exec "${PROXY_CONTAINER_NAME}" cat /root/logs/correctness.txt
+    docker exec disagg-proxy-benchmark cat /root/logs/correctness.txt
 fi
 
 echo "--- Tests completed successfully ---"
