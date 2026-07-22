@@ -1950,6 +1950,7 @@ class CompilationManager:
                 is_last_rank,
                 dp_size,
                 collect_expert_indices,
+                continue_decode_eos_check_interval,
             ):
                 (generated_tokens, final_kv_caches, final_state, final_rng,
                  all_expert_indices, logprobs_tensors) = continue_decode(
@@ -1974,6 +1975,8 @@ class CompilationManager:
                      collect_expert_indices=collect_expert_indices,
                      max_logprobs=self.runner.model_config.max_logprobs,
                      logprobs_mode=self.runner.model_config.logprobs_mode,
+                     continue_decode_eos_check_interval=
+                     continue_decode_eos_check_interval,
                  )
                 self.runner.kv_caches = final_kv_caches
                 return generated_tokens
@@ -2007,5 +2010,6 @@ class CompilationManager:
                 self.runner.dp_size,
                 getattr(self.runner.vllm_config.model_config,
                         "enable_return_routed_experts", False),
+                self.runner.continue_decode_eos_check_interval,
                 warmup_handler=continue_decode_warmup,
             )
