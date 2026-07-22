@@ -20,7 +20,7 @@ from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 
 from tpu_inference.kernels.megablox.gmm_v2 import (TileSizes, apply_act_fn,
-                                                   gmm_v2)
+                                                   gmm_v2, interleave_lane)
 
 jax.config.parse_flags_with_absl()
 
@@ -340,7 +340,10 @@ class GmmTest(jtu.JaxTestCase):
             group_offset=group_offset,
         )
 
-        tile_info = TileSizes(tile_m=128, tile_k=tile_k, tile_n=out_size)
+        tile_info = TileSizes(tile_m=128,
+                              bucket_base=128,
+                              tile_k=tile_k,
+                              tile_n=out_size)
         actual = gmm_v2(
             lhs,
             rhs_q,
@@ -399,7 +402,10 @@ class GmmTest(jtu.JaxTestCase):
             group_offset=group_offset,
         )
 
-        tile_info = TileSizes(tile_m=128, tile_k=tile_k, tile_n=out_size)
+        tile_info = TileSizes(tile_m=128,
+                              bucket_base=128,
+                              tile_k=tile_k,
+                              tile_n=out_size)
         actual = gmm_v2(
             lhs,
             rhs_q,
@@ -710,6 +716,8 @@ class GmmTest(jtu.JaxTestCase):
         )
 
         # Slice the reference and apply the activation function
+        raw_gate, raw_up = jnp.split(raw_expected, 2, axis=-1)
+        raw_expected = interleave_lane(raw_gate, raw_up)
         expected = apply_act_fn(raw_expected.astype(jnp.float32),
                                 fuse_act).astype(lhs.dtype)
 

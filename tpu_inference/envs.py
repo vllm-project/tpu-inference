@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
     USE_BATCHED_RPA_KERNEL: bool = False
+    USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
     FORCE_MOE_RANDOM_ROUTING: bool = False
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
@@ -69,6 +70,8 @@ if TYPE_CHECKING:
     SLICE_ROPE_CACHE: bool = False
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
+    VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+    TPU_MESH_SORT_BY_COORDS: bool = False
 
 
 def env_with_choices(
@@ -319,6 +322,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
+    "USE_BATCHED_RPA_SEQ_ON_LANE":
+    env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
     # Force random expert routing in MoE layers (for testing purposes only)
     "FORCE_MOE_RANDOM_ROUTING":
     env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
@@ -425,6 +430,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # is interleaved per rank and a single valid-token count cannot describe it.
     "MOE_ROUTE_PADDING_TO_EXPERT0":
     env_bool("MOE_ROUTE_PADDING_TO_EXPERT0", default=False),
+    # Gap between token-bucket padding sizes for TPU precompilation. When 0,
+    # buckets grow as powers of two; otherwise buckets increase by this gap
+    # once past the power-of-two ramp. Previously provided by vllm.envs, which
+    # removed it upstream as an orphaned var, so it now lives here.
+    "VLLM_TPU_BUCKET_PADDING_GAP":
+    lambda: int(os.getenv("VLLM_TPU_BUCKET_PADDING_GAP", "0")),
+    # Sort devices by coords and core_on_chip when constructing a tpu mesh.
+    # Currently, it only supports a single host set up.
+    "TPU_MESH_SORT_BY_COORDS":
+    env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
 }
 
 

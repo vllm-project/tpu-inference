@@ -2042,7 +2042,8 @@ def prepare_q_inputs(
 
 
 def prepare_q_nope_inputs(
-        q: jax.Array,  # [actual_num_q_heads, max_num_tokens, actual_head_dim]
+    q: jax.Array,  # [actual_num_q_heads, max_num_tokens, actual_head_dim]
+    vmem_limit_bytes: int | None = None,
 ):
     """Packs and physically transposes q_nope to the layout expected by the MLA kernel.
 
@@ -2070,8 +2071,11 @@ def prepare_q_nope_inputs(
     )
     # Physical transpose: (N, T, D) -> (T, N, D), pipelined over T.
     try:
-        q = xpose_pipeline(q, transpose_axes=(1, 0, 2), n_tile=128,
-                           m_tile=32)[0]
+        q = xpose_pipeline(q,
+                           transpose_axes=(1, 0, 2),
+                           n_tile=128,
+                           m_tile=32,
+                           vmem_limit_bytes=vmem_limit_bytes)[0]
     except ValueError as e:
         logger.warning(
             f"xpose_pipeline failed for shape={q.shape} dtype={q.dtype} "
@@ -2116,6 +2120,7 @@ def prepare_outputs(
     actual_num_q_heads: int,
     actual_max_num_tokens: int,
     actual_head_dim: int,
+    vmem_limit_bytes: int | None = None,
 ):
     # Physical transpose: (T, N, D) -> (N, T, D), pipelined over T.
     try:
@@ -2125,7 +2130,8 @@ def prepare_outputs(
         out = xpose_pipeline(out,
                              transpose_axes=(1, 0, 2),
                              n_tile=_XPOSE_N_TILE_SIZE,
-                             m_tile=64)[0]
+                             m_tile=64,
+                             vmem_limit_bytes=vmem_limit_bytes)[0]
     except ValueError as e:
         sublane_multiple = get_dtype_packing(out.dtype) * 8
         logger.warning(
@@ -2292,7 +2298,9 @@ def mla_ragged_paged_attention(
     actual_num_q_heads, actual_max_num_tokens, actual_lkv_dim = ql_nope.shape
 
     ql_nope = prepare_q_nope_inputs(
-        ql_nope)  # [max_num_tokens, num_q_heads, lkv_dim]
+        ql_nope,
+        vmem_limit_bytes=vmem_limit_bytes,
+    )  # [max_num_tokens, num_q_heads, lkv_dim]
     q_pe = prepare_q_inputs(q_pe)  # [max_num_tokens, num_q_heads, r_dim]
     if not transpose_kv_cache:
         _, _, kv_packing, _ = cache_kv.shape
@@ -2601,7 +2609,11 @@ def mla_ragged_paged_attention(
         case=MlaCase.MIXED,
     )
     output = prepare_outputs(
-        ql_nope, actual_num_q_heads, actual_max_num_tokens,
-        actual_lkv_dim)  # [actual_num_q_heads, max_num_tokens, actual_lkv_dim]
+        ql_nope,
+        actual_num_q_heads,
+        actual_max_num_tokens,
+        actual_lkv_dim,
+        vmem_limit_bytes=vmem_limit_bytes,
+    )  # [actual_num_q_heads, max_num_tokens, actual_lkv_dim]
 
     return output, updated_kv

@@ -44,14 +44,19 @@ class JaxEinsum(nnx.Einsum, JaxModule):
                  bias_shape: Optional[tuple[int, ...]] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "",
-                 kernel_metadata={},
-                 bias_metadata={},
+                 kernel_metadata=None,
+                 bias_metadata=None,
                  **kwargs):
         # nnx.Einsum uses `param_dtype` for parameter initialization dtype.
         # Accept `dtype` as an alias for backward compatibility, but forward it
         # as `param_dtype` so that weights are created with the correct dtype.
         if "dtype" in kwargs and "param_dtype" not in kwargs:
             kwargs["param_dtype"] = kwargs.pop("dtype")
+        # Use None sentinels: a shared mutable {} default would be populated
+        # (eager_sharding) by the first instance and leak that state into every
+        # other default-constructed layer.
+        kernel_metadata = dict(kernel_metadata) if kernel_metadata else {}
+        bias_metadata = dict(bias_metadata) if bias_metadata else {}
         if "eager_sharding" not in kernel_metadata:
             kernel_metadata["eager_sharding"] = False
         if "eager_sharding" not in bias_metadata:
@@ -145,13 +150,16 @@ class JaxLmHead(nnx.Einsum, JaxModule):
                  rngs,
                  *,
                  prefix: str = "lm_head",
-                 kernel_metadata={},
+                 kernel_metadata=None,
                  **kwargs):
         # nnx.Einsum uses `param_dtype` for parameter initialization dtype.
         # Accept `dtype` as an alias for backward compatibility, but forward it
         # as `param_dtype` so that weights are created with the correct dtype.
         if "dtype" in kwargs and "param_dtype" not in kwargs:
             kwargs["param_dtype"] = kwargs.pop("dtype")
+        # None sentinel: a shared mutable {} default would leak eager_sharding
+        # state across default-constructed lm_head instances.
+        kernel_metadata = dict(kernel_metadata) if kernel_metadata else {}
         if "eager_sharding" not in kernel_metadata:
             kernel_metadata["eager_sharding"] = False
         nnx.Einsum.__init__(self,

@@ -380,11 +380,20 @@ class KVCacheManager:
         # defensive against an empty mesh shape that produces 0.
         divisor = max(divisor, 1)
 
-        # Mamba slot budget: one per persistent-batch slot plus the null
-        # block, rounded up to the sharding divisor. `runner.max_num_reqs`
-        # already includes the DP multiplier
+        # Mamba slot budget: one slot *group* per persistent-batch slot plus
+        # the null block, rounded up to the sharding divisor.
+        # `runner.max_num_reqs` already includes the DP multiplier
         # (= `dp_size × scheduler_config.max_num_seqs`).
-        mamba_num_blocks = self.runner.max_num_reqs + 1
+        # With speculative decoding each request owns `num_spec + 1`
+        # consecutive slots so the GDN kernel can checkpoint the state after
+        # every speculative window position (see
+        # `InputBatch.mamba_state_indices_cpu` for the rollback scheme).
+        num_spec = 0
+        if self.runner.vllm_config.speculative_config is not None:
+            num_spec = (self.runner.vllm_config.speculative_config.
+                        num_speculative_tokens)
+        mamba_slot_stride = num_spec + 1
+        mamba_num_blocks = self.runner.max_num_reqs * mamba_slot_stride + 1
         mamba_num_blocks = (
             (mamba_num_blocks + divisor - 1) // divisor) * divisor
 

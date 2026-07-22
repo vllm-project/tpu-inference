@@ -467,6 +467,7 @@ def get_flax_model(
     def wrapped_model_fn(*args, **kwargs):
         if not model_supports_spec_step:
             kwargs.pop("spec_step_idx", None)
+        kwargs.pop("shared_attention_metadata", None)
         return jitted_model_fn(*args, **kwargs)
 
     compute_logits_fn = run_compute_logits
