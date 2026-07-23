@@ -376,25 +376,16 @@ class CompilationManager:
                                             request_distribution,
                                             sharding=metadata_attn_sharding)
         pcp_kv_cache_lens = None
-        pcp_q_pos_offsets = None
         if pcp_size > 1:
+            # PCP: per-lane num_computed lengths, replicated over pcp. The
+            # query_start_loc keeps its normal shape (multi-request PCP derives
+            # per-lane head/tail geometry inside the attention wrapper).
             n_reqs = self.runner.max_num_reqs
             pcp_kv_cache_lens = device_array(self.runner.mesh,
                                              np.zeros(n_reqs, dtype=np.int32),
                                              sharding=NamedSharding(
                                                  self.runner.mesh,
                                                  PartitionSpec()))
-            pcp_spec = NamedSharding(
-                self.runner.mesh,
-                PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
-            query_start_loc = device_array(self.runner.mesh,
-                                           np.zeros((pcp_size, n_reqs + 1),
-                                                    dtype=np.int32),
-                                           sharding=pcp_spec)
-            pcp_q_pos_offsets = device_array(self.runner.mesh,
-                                             np.zeros((pcp_size, n_reqs),
-                                                      dtype=np.int32),
-                                             sharding=pcp_spec)
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
         # populate for hybrid attn+mamba models — for pure-attention models we
         # pass None at runtime (see `_prepare_inputs`), and the precompile
@@ -429,7 +420,6 @@ class CompilationManager:
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
                 pcp_kv_cache_lens=pcp_kv_cache_lens,
-                pcp_q_pos_offsets=pcp_q_pos_offsets,
             )
 
             return attention_metadata_gid
