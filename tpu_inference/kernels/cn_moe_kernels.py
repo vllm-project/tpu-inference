@@ -349,8 +349,8 @@ def cn_moe_full(hidden_state, w1, w1_scale, w2, w2_scale,
     C = hidden_state.shape[0]
     K = hidden_state.shape[1]
     # Pad token count to multiple of 8 for HBM tile alignment
-    C_PAD = ((C + 7) // 8) * 8
-    lhs = jnp.pad(hidden_state, ((0, C_PAD - C), (0, 0))).reshape(C_PAD, 1, K)  # [C_PAD, 1, K]
+    C_PAD = C
+    lhs = hidden_state.reshape(C, 1, K)  # [C, 1, K] -- 3D tiling, no padding needed
     ids_flat = active_ids.reshape(C * TOP_K)
     weights_flat = topk_weights.reshape(C * TOP_K)
 
