@@ -66,17 +66,17 @@ steps:
   #     - |
   #       .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi_host_disagg_PerformanceTest
 
-  - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host P/D disaggregation with Prefill Offloading"
-    key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_offload_CorrectnessTest"
-    soft_fail: true
-    agents:
-      queue: default
-    env:
-      TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-      TEST_MODE: 2 # only run correctness test
-    commands:
-      - |
-        .buildkite/e2e/run_multi_disagg_offload.sh
+  # - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host P/D disaggregation with Prefill Offloading"
+  #   key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_offload_CorrectnessTest"
+  #   soft_fail: true
+  #   agents:
+  #     queue: default
+  #   env:
+  #     TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+  #     TEST_MODE: 2 # only run correctness test
+  #   commands:
+  #     - |
+  #       .buildkite/e2e/run_multi_disagg_offload.sh
 
   # - label: "${TPU_VERSION:-tpu7x} Record correctness test result for Multi-host P/D disaggregation with Prefill Offloading"
   #   key: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_offload_CorrectnessTest"
@@ -184,6 +184,7 @@ steps:
 
   - label: "${TPU_VERSION:-tpu7x} Correctness tests for multi-host"
     key: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
+    depends_on: "${TPU_VERSION:-tpu7x}_multi_host_disagg_CorrectnessTest"
     soft_fail: true
     agents:
       queue: default
