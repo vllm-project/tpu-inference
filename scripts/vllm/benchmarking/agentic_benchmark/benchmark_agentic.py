@@ -17,7 +17,7 @@ import os
 import random
 import sys
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 from transformers import AutoTokenizer
@@ -64,6 +64,47 @@ def generate_initial_prompt(tokenizer: AutoTokenizer,
     return tokenizer.decode(token_ids, skip_special_tokens=True)
 
 
+def load_dataset(path: str) -> List[Dict[str, Any]]:
+    """Loads a prepared multi-turn dataset produced by prepare_r2e_dataset.py.
+
+    Args:
+        path: Path to the prepared JSONL file.
+
+    Returns:
+        List[Dict[str, Any]]: Dataset records.
+    """
+    with open(path) as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    if not records:
+        raise ValueError(f"No records found in {path}")
+    return records
+
+
+def generate_env_response(tokenizer: AutoTokenizer, args: argparse.Namespace,
+                          record: Optional[Dict[str, Any]], turn: int) -> str:
+    """Produces the environment observation appended after an assistant turn.
+
+    Args:
+        tokenizer: Tokenizer to decode tokens.
+        args: Parsed command line arguments.
+        record: Dataset record for this group, or None for random mode.
+        turn: 1-based index of the turn just completed.
+
+    Returns:
+        str: Environment response text.
+    """
+    if record is not None:
+        env_turns = record["env_turns"]
+        # Streams in a group may run past the scripted turn count when
+        # --turns-max exceeds the record's; cycle rather than truncate so the
+        # conversation keeps growing.
+        return env_turns[(turn - 1) % len(env_turns)]
+
+    env_len = random.randint(args.env_len_min, args.env_len_max)
+    env_token_ids = [random.randint(1000, 50000) for _ in range(env_len)]
+    return tokenizer.decode(env_token_ids, skip_special_tokens=True)
+
+
 async def run_grpo_stream(
     session: aiohttp.ClientSession,
     url: str,
@@ -73,6 +114,7 @@ async def run_grpo_stream(
     stream_idx: int,
     group_idx: int,
     args: argparse.Namespace,
+    record: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Runs a single GRPO stream as a multi-turn conversation.
 
@@ -85,15 +127,22 @@ async def run_grpo_stream(
         stream_idx: Index of the stream within the group.
         group_idx: Index of the group/request.
         args: Parsed command line arguments.
+        record: Dataset record backing this group, or None for random mode.
 
     Returns:
         List[Dict[str, Any]]: Statistics of each turn in the stream.
     """
-    num_turns = random.randint(args.turns_min, args.turns_max)
+    if record is not None:
+        num_turns = record["num_turns"]
+        system_prompt = record["system_prompt"]
+    else:
+        num_turns = random.randint(args.turns_min, args.turns_max)
+        system_prompt = "You are a helpful assistant."
+
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful assistant."
+            "content": system_prompt
         },
         {
             "role": "user",
@@ -182,13 +231,9 @@ async def run_grpo_stream(
                 "success": True,
             }
 
-            # Simulate environment response of 10-100 tokens
-            env_len = random.randint(args.env_len_min, args.env_len_max)
-            env_token_ids = [
-                random.randint(1000, 50000) for _ in range(env_len)
-            ]
-            env_text = tokenizer.decode(env_token_ids,
-                                        skip_special_tokens=True)
+            # Simulate the environment's reply: real recorded tool output in
+            # dataset mode, otherwise 10-100 random tokens.
+            env_text = generate_env_response(tokenizer, args, record, turn)
 
             messages.append({"role": "user", "content": env_text})
             turn_stat["env_tokens"] = len(tokenizer.encode(env_text))
@@ -223,6 +268,7 @@ async def run_group(
     tokenizer: AutoTokenizer,
     group_idx: int,
     args: argparse.Namespace,
+    dataset: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Runs a single GRPO group of G parallel streams.
 
@@ -233,13 +279,24 @@ async def run_group(
         tokenizer: Model tokenizer.
         group_idx: Index of this group.
         args: Parsed arguments.
+        dataset: Prepared multi-turn records, or None for random mode.
 
     Returns:
         List[Dict[str, Any]]: Accumulated stats of all streams in the group.
     """
-    initial_prompt = generate_initial_prompt(tokenizer, args)
+    if dataset is not None:
+        # One task instance per group, matching real RL where a group of
+        # rollouts shares a single task and therefore a single prefix.
+        record = dataset[(group_idx - 1) % len(dataset)]
+        initial_prompt = record["initial_prompt"]
+        label = f" [{record['instance_id']}]"
+    else:
+        record = None
+        initial_prompt = generate_initial_prompt(tokenizer, args)
+        label = ""
+
     initial_prompt_len = len(tokenizer.encode(initial_prompt))
-    print(f"Group {group_idx}: Starting {args.group_size} streams with "
+    print(f"Group {group_idx}{label}: Starting {args.group_size} streams with "
           f"shared initial prompt of {initial_prompt_len} tokens...")
 
     tasks = []
@@ -254,6 +311,7 @@ async def run_group(
                 stream_idx,
                 group_idx,
                 args,
+                record,
             ))
 
     results = await asyncio.gather(*tasks)
@@ -404,6 +462,14 @@ async def main_async(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(args.model_path_or_id,
                                               trust_remote_code=True)
 
+    dataset = None
+    if args.dataset:
+        dataset = load_dataset(args.dataset)
+        print(
+            f"Loaded {len(dataset)} task instances from {args.dataset}. "
+            f"Prompt lengths and turn counts come from the dataset; "
+            f"--initial-prompt-len-*, --turns-* and --env-len-* are ignored.")
+
     url = f"http://{args.host}:{args.port}/v1/chat/completions"
     print(f"Connecting to vLLM server at {url}...")
 
@@ -427,7 +493,7 @@ async def main_async(args: argparse.Namespace):
     async def worker(group_idx: int, session: aiohttp.ClientSession):
         async with semaphore:
             return await run_group(session, url, args.model, tokenizer,
-                                   group_idx, args)
+                                   group_idx, args, dataset)
 
     start_time = time.perf_counter()
 
@@ -462,6 +528,14 @@ def main():
         type=str,
         default="Qwen/Qwen3-1.7B-base",
         help="Model name in OpenAI API requests.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help="Prepared multi-turn JSONL from prepare_r2e_dataset.py. Drives "
+        "prompts and environment turns from real SWE task content instead of "
+        "random tokens. Omit for the original random-token workload.",
     )
     parser.add_argument("--host",
                         type=str,
