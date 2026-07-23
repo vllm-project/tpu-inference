@@ -428,7 +428,8 @@ class TestTPUWorker:
         assert result == "concrete_model_output"
 
     @patch('tpu_inference.worker.tpu_worker.TPUModelRunner')
-    def test_execute_model_does_not_stop_profiler_early(self, mock_runner_cls, mock_vllm_config):
+    def test_execute_model_does_not_stop_profiler_early(
+            self, mock_runner_cls, mock_vllm_config):
         """Tests that execute_model does not stop profiler if steps haven't reached threshold."""
         worker = TPUWorker(vllm_config=mock_vllm_config,
                            local_rank=0,
@@ -437,17 +438,17 @@ class TestTPUWorker:
                            is_driver_worker=True)
         worker.model_runner = mock_runner_cls.return_value
         worker.model_runner.execute_model.return_value = "concrete_model_output"
-        
+
         # Set up profiling state where counter < active_steps
         worker.is_profiling = True
         worker.active_profiler_steps = 3
         worker.profile_step_counter = 2
-        
+
         worker.profile = MagicMock()
-        
+
         mock_scheduler_input = MagicMock()
         result = worker.execute_model(mock_scheduler_input)
-        
+
         # Verify profiler was NOT stopped
         worker.profile.assert_not_called()
         # Verify step counter was incremented

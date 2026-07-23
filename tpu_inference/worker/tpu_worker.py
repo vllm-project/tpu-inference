@@ -633,7 +633,8 @@ class TPUWorker(WorkerBase):
                 is_start: bool = True,
                 profile_prefix: str | None = None):
         if is_start:
-            logger.info("Starting JAX profiler trace, saving to %s", self.profile_dir)
+            logger.info("Starting JAX profiler trace, saving to %s",
+                        self.profile_dir)
             standard_opts, advanced_opts = _parse_profile_options(
                 profile_prefix)
             options = jax.profiler.ProfileOptions()
@@ -665,7 +666,7 @@ class TPUWorker(WorkerBase):
 
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
-            
+
             self.is_profiling = True
             self.profile_step_counter = 0
             self.active_profiler_steps = envs.VLLM_ACTIVE_PROFILER_STEPS
@@ -675,7 +676,8 @@ class TPUWorker(WorkerBase):
                 logger.info("Stopping JAX profiler trace.")
                 jax.profiler.stop_trace()
             except Exception as e:
-                logger.warning("Failed to stop JAX profiler trace: %s", e)                
+                logger.warning("Failed to stop JAX profiler trace: %s", 
+                               e)
 
     def load_model(self) -> None:
         self.model_runner.load_model()
