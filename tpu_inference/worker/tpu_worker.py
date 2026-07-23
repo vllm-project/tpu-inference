@@ -5,12 +5,10 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 import jaxlib
-import jaxtyping
-import vllm.envs as vllm_envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
@@ -723,20 +721,6 @@ class TPUWorker(WorkerBase):
         port = get_kv_transfer_port()
         return (int(self.topology_order_id), ip, int(port))
 
-    def sync_weights(
-        self,
-        updated_weights: jaxtyping.PyTree,
-        mappings: Dict[str, Tuple[str, Tuple[str]]],
-        transpose_keys: Dict[str, Tuple[int]],
-        reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
-                             jaxtyping.PyTree] = None
-    ) -> None:
-        """Sync the updated weights to the model runner."""
-        return self.model_runner._sync_weights(updated_weights=updated_weights,
-                                               mappings=mappings,
-                                               transpose_keys=transpose_keys,
-                                               reshard_fn=reshard_fn)
-
     def init_weight_transfer_engine(self, init_info: Dict[str, Any]) -> None:
         """Prepare the transport.
 
@@ -762,31 +746,17 @@ class TPUWorker(WorkerBase):
                 "active. Call finish_weight_update first.")
         if free_kv_cache:
             self.model_runner.delete_kv_cache()
-            self._kv_cache_freed = True
+        self._kv_cache_freed = free_kv_cache
         self._weight_update_active = True
 
     def update_weights(self, update_info: Dict[str, Any]) -> None:
-        """Under Pathways the trainer shares a JAX client and hands over a live
-        pytree. Otherwise it pushed into HBM over Raiden, whose receiver
-        already H2D'd, and this is a no-op.
+        """No-op. Tunix writes into the exposed vLLM model weights directly, and
+        Raiden's receiver auto-H2Ds on receipt. The phase is kept because
+        vLLM's contract has it.
         """
-        if not self._weight_update_active:
-            raise RuntimeError(
-                "start_weight_update must be called before update_weights.")
-
-        if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
-            return
-
-        try:
-            self.model_runner._sync_weights(
-                updated_weights=update_info["weights"],
-                mappings=update_info.get("mappings") or {},
-                transpose_keys=update_info.get("transpose_keys") or {},
-                reshard_fn=update_info.get("reshard_fn"))
-            jax.block_until_ready(self.model_runner.state_leaves)
-        except BaseException:
-            self._weight_update_active = False
-            raise
+        logger.info(
+            "update_weights is a no-op on TPU; weights are applied "
+            "out-of-band (%s).", sorted(update_info or {}))
 
     def finish_weight_update(self) -> None:
         """Close the session and restore serving state."""
