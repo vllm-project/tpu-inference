@@ -452,7 +452,7 @@ class KVCacheManager:
         # TODO(xiang): this hack tricks engine core to init successfully
 
         # NOTE(weiyu0824): Pass raw block_size (size before any parallelization).
-        # vLLM applies dcp_size scaling internally; pre-multiplying block size causes a dcp_size miscalculation.
+        # vLLM applies dcp_size and pcp_size scaling internally; pre-multiplying block size causes a dcp_size * pcp_size miscalculation.
         block_size = self.runner.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
 
@@ -688,9 +688,9 @@ class KVCacheManager:
         # kv_cache_spec.block_size is the raw block size.
         # The block table must use the physical size: one page covers block_size * dcp_size
         # tokens globally.
-        # Read dcp_size from the mesh (CONTEXT axis) to stay consistent with get_kv_cache_shape_with_mesh.
+        # Read dcp_size and pcp_size from the mesh (KV_CONTEXT axis) to stay consistent with get_kv_cache_shape_with_mesh.
         context_cnt = utils.get_mesh_shape_product(self.runner.mesh,
-                                                   ShardingAxisName.CONTEXT)
+                                                   ShardingAxisName.KV_CONTEXT)
         block_sizes = [
             kv_cache_group.kv_cache_spec.block_size * context_cnt
             for kv_cache_group in kv_cache_config.kv_cache_groups
