@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ctypes
 import gc
 from typing import Optional, Union
 
@@ -59,6 +60,39 @@ from tpu_inference.logger import init_logger
 P = PartitionSpec
 
 logger = init_logger(__name__)
+
+
+def _free_torch_storage(tensor: Optional[torch.Tensor]) -> None:
+    """Safely frees the underlying CPU memory storage of a PyTorch tensor.
+
+    Tries `untyped_storage().resize_(0)` first, with fallback to `set_(torch.storage.UntypedStorage())`
+    for 0-dim scalars or float8 dtypes that cannot be resized in-place.
+    """
+    if tensor is None:
+        return
+    try:
+        tensor.untyped_storage().resize_(0)
+    except Exception:
+        tensor.set_(torch.storage.UntypedStorage())
+
+
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+except Exception:
+    _libc = None
+
+
+def _release_host_memory() -> None:
+    """Frees CPU host memory and trims malloc arena if incremental FP8 loading is enabled."""
+    if not envs.VLLM_INCREMENTAL_FP8_LOADING:
+        return
+    gc.collect()
+    jax.effects_barrier()
+    if _libc is not None and hasattr(_libc, "malloc_trim"):
+        try:
+            _libc.malloc_trim(0)
+        except Exception as e:
+            logger.debug(f"[fp8-incremental] malloc_trim failed: {e}")
 
 
 @register_quantization_config(FP8)
@@ -144,27 +178,17 @@ class VllmFp8LinearMethod(
         if not envs.VLLM_INCREMENTAL_FP8_LOADING:
             return
 
-        if isinstance(layer, vllm_linear.QKVParallelLinear):
-            if len(args) == 1:
-                shard_id = args[0]
-                layer._loaded_weights.add((param_name, shard_id))
-            else:
-                layer._loaded_weights.add((param_name, "q"))
-                layer._loaded_weights.add((param_name, "k"))
-                layer._loaded_weights.add((param_name, "v"))
-        elif isinstance(layer, vllm_linear.MergedColumnParallelLinear):
-            if len(args) == 1:
-                shard_id = args[0]
-                layer._loaded_weights.add((param_name, shard_id))
-            else:
-                for i in range(len(layer.output_sizes)):
-                    layer._loaded_weights.add((param_name, i))
-        else:
-            layer._loaded_weights.add(param_name)
+        logger.info_once(
+            "[fp8-incremental] VLLM_INCREMENTAL_FP8_LOADING is enabled")
 
-        if len(layer._loaded_weights) == self.linear_config.num_proj * len(
-                dict(layer.named_parameters(recurse=False))):
-            self.process_weights_after_loading(layer)
+        self.maybe_process_linear_weights(
+            layer,
+            param_name,
+            args,
+            kwargs,
+            self.linear_config.num_proj,
+            log_prefix="fp8-incremental",
+        )
 
     def create_weights(
         self,
@@ -197,13 +221,10 @@ class VllmFp8LinearMethod(
         )
 
         p_weight = layer.weight
-        p_scale = getattr(
-            layer, "weight_scale_inv" if self.block_quant else "weight_scale",
-            None)
 
         weight = _load_weight_for_layer(layer, "weight", loading_sharding)
         weight = jnp.transpose(weight)
-        p_weight.set_(torch.storage.UntypedStorage())
+        _free_torch_storage(p_weight)
         delattr(layer, "weight")
 
         if self.block_quant:
@@ -211,22 +232,24 @@ class VllmFp8LinearMethod(
             # Float8_e8m0fnu (ue8m0) scales cannot be converted via numpy in t2j.
             # TODO: consider get rid of the f32 conversion, to optimize the HBM usage.
             if weight_scale_inv.dtype == torch.float8_e8m0fnu:
-                layer.weight_scale_inv = weight_scale_inv.to(torch.float32)
+                layer.weight_scale_inv = Parameter(
+                    weight_scale_inv.to(torch.float32), requires_grad=False
+                )
             weight_scale = _load_weight_for_layer(layer, "weight_scale_inv",
                                                   loading_sharding)
             weight_scale = jnp.transpose(weight_scale)
-            if p_scale is not None:
-                p_scale.set_(torch.storage.UntypedStorage())
+            _free_torch_storage(layer.weight_scale_inv)
             delattr(layer, "weight_scale_inv")
         else:
             weight_scale_tensor = layer.weight_scale
             if weight_scale_tensor.dtype == torch.float8_e8m0fnu:
-                layer.weight_scale = weight_scale_tensor.to(torch.float32)
+                layer.weight_scale = Parameter(
+                    weight_scale_tensor.to(torch.float32), requires_grad=False
+                )
             scale_sharding = NamedSharding(self.linear_config.mesh, P(None))
             weight_scale = _load_weight_for_layer(layer, "weight_scale",
                                                   scale_sharding)
-            if p_scale is not None:
-                p_scale.set_(torch.storage.UntypedStorage())
+            _free_torch_storage(layer.weight_scale)
             delattr(layer, "weight_scale")
 
         if layer.bias is not None and not layer.skip_bias_add:
@@ -287,59 +310,42 @@ class VllmFp8LinearMethod(
                 per_tensor=not self.block_quant,
             ))
 
-        scale_name = "weight_scale_inv" if self.block_quant else "weight_scale"
         if self.linear_config.fuse_matmuls:
             layer.weight = Parameter(weights.weight, requires_grad=False)
-            setattr(
-                layer,
-                scale_name,
-                Parameter(weights.weight_scale, requires_grad=False),
+            layer.weight_scale = Parameter(
+                weights.weight_scale, requires_grad=False
             )
             if has_bias:
                 layer.bias = Parameter(weights.bias, requires_grad=False)
         else:
             layer.weight = to_parameter_list(weights.weight)
-            setattr(
-                layer,
-                scale_name,
-                to_parameter_list(weights.weight_scale),
-            )
+            layer.weight_scale = to_parameter_list(weights.weight_scale)
             if has_bias:
                 layer.bias = to_parameter_list(weights.bias)
 
-        import ctypes
-
-        gc.collect()
-        jax.effects_barrier()
-        try:
-            ctypes.CDLL("libc.so.6").malloc_trim(0)
-        except Exception:
-            pass
+        _release_host_memory()
 
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        scale_name = "weight_scale_inv" if self.block_quant else "weight_scale"
         with jax.named_scope(layer._get_name()):
             x_jax = jax_view(x)
             bias_jax = jax_view(
                 bias) if bias is not None and not layer.skip_bias_add else None
             if self.linear_config.fuse_matmuls:
                 weight_jax = jax_view(layer.weight)
-                weight_scale_jax = jax_view(getattr(layer, scale_name))
+                weight_scale_jax = jax_view(layer.weight_scale)
                 out = self._apply_fused(x_jax, weight_jax, weight_scale_jax,
                                         bias_jax)
             else:
                 assert isinstance(layer.weight, torch.nn.ParameterList)
-                scale_params = getattr(layer, scale_name)
-                assert isinstance(scale_params, torch.nn.ParameterList)
+                assert isinstance(layer.weight_scale, torch.nn.ParameterList)
                 # jax_view cannot handle ParameterList directly, so we explicitly
                 # convert them to list of jax.Array.
-                weight_and_scale = [
-                    (jax_view(w), jax_view(s))
-                    for w, s in zip(layer.weight, scale_params)
-                ]
+                weight_and_scale = [(jax_view(w), jax_view(s))
+                                    for w, s in zip(layer.weight, layer.weight_scale)
+                                    ]
                 if bias is not None and not layer.skip_bias_add:
                     assert isinstance(bias, torch.nn.ParameterList)
                     bias_jax = [jax_view(b) for b in bias]
@@ -382,21 +388,30 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
         if not envs.VLLM_INCREMENTAL_FP8_LOADING:
             return
 
+        logger.info_once(
+            "[fp8-incremental] VLLM_INCREMENTAL_FP8_LOADING is enabled")
+
+        if not self.block_quant:
+            raise NotImplementedError(
+                "Incremental loading for non-block FP8 MoE is not supported.")
+
         expert_id = kwargs.get("expert_id")
         shard_id = kwargs.get("shard_id")
-        if expert_id is not None and shard_id is not None:
-            layer._loaded_weights.add((param_name, expert_id, shard_id))
-        else:
-            layer._loaded_weights.add(param_name)
+        assert expert_id is not None, "Expecting expert_id argument"
+        assert shard_id is not None, "Expecting shard_id argument"
 
-        num_experts = getattr(layer, "global_num_experts", 0)
-        scale_w13_expected = num_experts * 2 if self.block_quant else 1
-        scale_w2_expected = num_experts * 1 if self.block_quant else 1
-        expected_shards = ((num_experts * 2) + (num_experts * 1) +
-                           scale_w13_expected + scale_w2_expected)
+        layer._loaded_weights.add((param_name, expert_id, shard_id))
+
+        expected_shards = 6 * layer.global_num_experts
 
         if len(layer._loaded_weights) >= expected_shards:
+            logger.debug(
+                f"[fp8-incremental] Start sharding weights for MoE layer {type(layer)}"
+            )
             self.process_weights_after_loading(layer)
+            logger.debug(
+                f"[fp8-incremental] Complete sharding weights for MoE layer {type(layer)}"
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if not hasattr(layer, "w13_weight") or not _tensor_is_in_cpu(
@@ -443,10 +458,10 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
         )
 
         # Free CPU memory now that weights have been safely transferred to TPU
-        layer.w13_weight.untyped_storage().resize_(0)
-        layer.w2_weight.untyped_storage().resize_(0)
-        p_w13_scale.set_(torch.storage.UntypedStorage())
-        p_w2_scale.set_(torch.storage.UntypedStorage())
+        _free_torch_storage(layer.w13_weight)
+        _free_torch_storage(layer.w2_weight)
+        _free_torch_storage(p_w13_scale)
+        _free_torch_storage(p_w2_scale)
         delattr(layer, "w13_weight")
         delattr(layer, "w2_weight")
         delattr(layer, scale_w13_name)
@@ -473,14 +488,7 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
             scale_w2_name,
             Parameter(weights.w2_weight_scale, requires_grad=False),
         )
-        import ctypes
-
-        gc.collect()
-        jax.effects_barrier()
-        try:
-            ctypes.CDLL("libc.so.6").malloc_trim(0)
-        except Exception:
-            pass
+        _release_host_memory()
 
     def apply_monolithic(
         self,
