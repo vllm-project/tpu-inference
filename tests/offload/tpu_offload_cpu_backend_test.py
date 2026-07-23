@@ -19,6 +19,8 @@ import pytest
 from tpu_inference.offload.cpu_backend import LocalCPUBackend
 from tpu_inference.offload.utils import CpuChunkId
 
+pytestmark = pytest.mark.cpu_safe
+
 
 # Helper to create a mock jax array with a specific size in bytes
 def create_mock_jax_array(size_in_bytes: int) -> MagicMock:

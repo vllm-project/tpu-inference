@@ -149,12 +149,36 @@ steps:
       - buildkite-agent meta-data set VLLM_COMMIT_HASH "$$(tr -d '[:space:]' < .buildkite/vllm_lkg.version)"
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
+  # Shadow-run the explicit CPU-safe allowlist in the exact test image. Keep
+  # these tests in their TPU shards until repeated CPU runs establish that the
+  # classification is stable. Disabling networking catches hidden downloads.
+  - label: ":cpu: CPU-safe unit tests (shadow)"
+    key: "kube_cpu_safe_tests"
+    depends_on: "kube_build_image"
+    timeout_in_minutes: 15
+    agents:
+      queue: "cpu"
+    commands:
+      - |
+        docker run --rm \
+          --network none \
+          --user "$$(id -u):$$(id -g)" \
+          -e HOME=/tmp \
+          -e HF_HOME=/tmp/hf_home \
+          -e JAX_PLATFORMS=cpu \
+          -e TPU_NAME=cpu-safe \
+          -v "$$PWD:/workspace/build/buildkite" \
+          -w /workspace/build/buildkite \
+          "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu:kube-${BUILDKITE_COMMIT}" \
+          python3 .buildkite/scripts/run_cpu_safe_tests.py -q
+
   # pipeline_jax.yml test_0.
   - label: ":kubernetes: E2E MLPerf tests for JAX models"
     key: "kube_e2e_mlperf_jax"
     <<: *kube_v6e_1chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -173,7 +197,7 @@ steps:
     <<: *kube_v6e_1chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
-    if: build.env("KUBE_FULL_MATRIX") == "1"
+    if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
       queue: "kube"
     secrets:
@@ -192,7 +216,7 @@ steps:
     <<: *kube_v6e_1chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
-    if: build.env("KUBE_FULL_MATRIX") == "1"
+    if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
       queue: "kube"
     secrets:
@@ -211,6 +235,7 @@ steps:
     <<: *kube_v6e_1chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -229,7 +254,7 @@ steps:
     <<: *kube_v6e_8chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
-    if: build.env("KUBE_FULL_MATRIX") == "1"
+    if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
       queue: "kube"
     secrets:
@@ -249,6 +274,7 @@ steps:
     depends_on: "kube_build_image"
     soft_fail: true
     timeout_in_minutes: 180
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -272,6 +298,7 @@ steps:
     depends_on: "kube_build_image"
     soft_fail: true
     artifact_paths: ".coverage.part1.tpu6e"
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -291,6 +318,7 @@ steps:
     depends_on: "kube_build_image"
     soft_fail: true
     artifact_paths: ".coverage.part2.tpu6e"
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -313,6 +341,7 @@ steps:
       - "kube_jax_unit_tests_part1"
       - "kube_jax_unit_tests_part2"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "cpu"
     commands:
@@ -340,6 +369,7 @@ steps:
     <<: *kube_v6e_1chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -357,7 +387,7 @@ steps:
     <<: *kube_v6e_8chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
-    if: build.env("KUBE_FULL_MATRIX") == "1"
+    if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
       queue: "kube"
     secrets:
@@ -374,6 +404,7 @@ steps:
     <<: *kube_v6e_1chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -392,7 +423,7 @@ steps:
     <<: *kube_v6e_1chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
-    if: build.env("KUBE_FULL_MATRIX") == "1"
+    if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
       queue: "kube"
     secrets:
@@ -411,7 +442,7 @@ steps:
     <<: *kube_v6e_1chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
-    if: build.env("KUBE_FULL_MATRIX") == "1"
+    if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
       queue: "kube"
     secrets:
@@ -433,7 +464,7 @@ steps:
     <<: *kube_v6e_8chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
-    if: build.env("KUBE_FULL_MATRIX") == "1"
+    if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
       queue: "kube"
     secrets:
@@ -452,6 +483,7 @@ steps:
     <<: *kube_v6e_1chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -468,6 +500,7 @@ steps:
     <<: *kube_v6e_1chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -484,6 +517,7 @@ steps:
     <<: *kube_v6e_1chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -503,6 +537,7 @@ steps:
     <<: *kube_v6e_8chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -523,6 +558,7 @@ steps:
     <<: *kube_v6e_8chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -541,6 +577,7 @@ steps:
     <<: *kube_v6e_8chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -557,6 +594,7 @@ steps:
     <<: *kube_v6e_8chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -578,6 +616,7 @@ steps:
     <<: *kube_v6e_8chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
+    if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -615,6 +654,7 @@ steps:
   - label: ":white_check_mark: Validate Kubernetes POC results"
     key: "kube_validate_results"
     depends_on:
+      - "kube_cpu_safe_tests"
       - "kube_e2e_mlperf_jax"
       - "kube_e2e_mlperf_quantized"
       - "kube_e2e_mlperf_new_models"
@@ -645,6 +685,7 @@ steps:
       - |
         .buildkite/scripts/check_results.sh \
           "Kubernetes POC tests failed" \
+          kube_cpu_safe_tests \
           kube_e2e_mlperf_jax \
           kube_e2e_mlperf_quantized \
           kube_e2e_mlperf_new_models \

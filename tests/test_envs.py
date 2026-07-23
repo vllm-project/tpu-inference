@@ -6,8 +6,14 @@ import pytest
 import tpu_inference.envs as envs
 from tpu_inference.envs import enable_envs_cache, environment_variables
 
+pytestmark = pytest.mark.cpu_safe
+
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
+    # The CPU-safe runner forces JAX onto CPU. This test validates the unset
+    # behavior specifically, so make that precondition local and explicit.
+    monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+    monkeypatch.delenv("PHASED_PROFILING_DIR", raising=False)
     assert envs.JAX_PLATFORMS == ""
     assert envs.PHASED_PROFILING_DIR == ""
     monkeypatch.setenv("JAX_PLATFORMS", "tpu")

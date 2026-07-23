@@ -14,8 +14,12 @@
 
 import unittest
 
+import pytest
+
 from tools.kernel.tuner.v1.inspect_result_cli import (FilterResult,
                                                       _matches_filter)
+
+pytestmark = pytest.mark.cpu_safe
 
 
 class TestMatchesFilter(unittest.TestCase):

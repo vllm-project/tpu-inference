@@ -23,6 +23,10 @@ import importlib.util
 import pathlib
 from types import SimpleNamespace
 
+import pytest
+
+pytestmark = pytest.mark.cpu_safe
+
 # Import the real conftest module by path so we exercise the shipped gate logic.
 _CONFTEST_PATH = pathlib.Path(__file__).parent / "conftest.py"
 _spec = importlib.util.spec_from_file_location("_tests_conftest_under_test",

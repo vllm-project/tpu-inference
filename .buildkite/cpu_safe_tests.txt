@@ -1,0 +1,8 @@
+# One test module per line. The CPU runner verifies that every listed module
+# carries the cpu_safe marker before invoking pytest only on these paths. This
+# avoids importing TPU-only modules during collection.
+tests/test_envs.py
+tests/test_nightly_gate.py
+tests/offload/tpu_offload_cpu_backend_test.py
+tools/kernel/tuner/v1/tests/test_tuned_params_structure.py
+tools/kernel/tuner/v1/tests/test_inspect_result_cli.py

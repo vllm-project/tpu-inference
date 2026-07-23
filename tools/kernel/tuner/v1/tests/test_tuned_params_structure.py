@@ -30,11 +30,14 @@ import textwrap
 from pathlib import Path
 
 from absl.testing import absltest
+import pytest
 
 from tools.kernel.tuner.v1.autotune.autotune_result_processing import \
     KernelAutoTuneResultProcessor
 from tools.kernel.tuner.v1.autotune.kernel_autotune_config import \
     kernel_autotune_mapping
+
+pytestmark = pytest.mark.cpu_safe
 
 # The docker workspace prefix used in kernel_autotune_mapping paths.
 _DOCKER_PREFIX = "/workspace/tpu_inference/"
