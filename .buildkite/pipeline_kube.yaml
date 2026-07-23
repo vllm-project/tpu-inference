@@ -21,6 +21,7 @@
   VLLM_NO_USAGE_STATS: "1"
   TPU_VERSION: "tpu6e"
   HF_HOME: "/cache/hf_home"
+  NLTK_DATA: "/cache/nltk_data"
   VLLM_XLA_CACHE_PATH: "/cache/tpu_jax_cache"
   JAX_COMPILATION_CACHE_DIR: "/cache/tpu_jax_cache"
 
@@ -76,6 +77,15 @@
             requests:
               storage: 500Gi
 
+.kube_named_cache_volumes: &kube_named_cache_volumes
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 16Gi
+  - name: cache-volume
+    persistentVolumeClaim:
+      claimName: "bk-${BUILDKITE_BUILD_NUMBER}-resource-poc"
+
 # ==============================================================================
 # Topology Specific Anchors
 # ==============================================================================
@@ -128,6 +138,61 @@
           volumeMounts: *kube_common_volume_mounts
       volumes: *kube_common_volumes
 
+# Opt-in proof that preparation can use an ordinary CPU node while handing the
+# same named, zonal PVC to a later TPU job. The control pod intentionally has no
+# selector; the prep pod is pinned to the TPU/PV zone but requests no TPU.
+.kube_resource_control_plugin: &kube_resource_control_plugin
+  kubernetes:
+    podSpec:
+      terminationGracePeriodSeconds: 5
+      metadata:
+        labels:
+          app: "vllm-resource-control"
+      containers:
+        - name: vllm-tpu-runner
+          image: "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu:kube-${BUILDKITE_COMMIT}"
+
+.kube_resource_cpu_plugin: &kube_resource_cpu_plugin
+  kubernetes:
+    pendingTimeout: 0
+    podSpec:
+      terminationGracePeriodSeconds: 5
+      metadata:
+        labels:
+          app: "vllm-resource-prep"
+      nodeSelector:
+        topology.kubernetes.io/zone: "southamerica-west1-a"
+      containers:
+        - name: vllm-tpu-runner
+          image: "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu:kube-${BUILDKITE_COMMIT}"
+          volumeMounts: *kube_common_volume_mounts
+      volumes: *kube_named_cache_volumes
+
+.kube_resource_tpu_v6e_1chip_plugin: &kube_resource_tpu_v6e_1chip_plugin
+  kubernetes:
+    pendingTimeout: 0
+    podSpec:
+      terminationGracePeriodSeconds: 5
+      affinity: *kube_common_affinity
+      metadata:
+        labels:
+          app: "vllm-tpu-runner"
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: "tpu-v6e-slice"
+        cloud.google.com/gke-tpu-topology: "1x1"
+        topology.kubernetes.io/zone: "southamerica-west1-a"
+      tolerations: *kube_common_tolerations
+      containers:
+        - name: vllm-tpu-runner
+          image: "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu:kube-${BUILDKITE_COMMIT}"
+          resources:
+            limits:
+              google.com/tpu: "1"
+            requests:
+              google.com/tpu: "1"
+          volumeMounts: *kube_common_volume_mounts
+      volumes: *kube_named_cache_volumes
+
 # ==============================================================================
 # Pipeline Steps
 # ==============================================================================
@@ -175,6 +240,107 @@ steps:
           -w /workspace/build/buildkite \
           "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu:kube-${BUILDKITE_COMMIT}" \
           python3 .buildkite/scripts/run_cpu_safe_tests.py -q
+
+  - label: ":floppy_disk: Create resource-prep cache clone"
+    key: "kube_resource_pvc_create"
+    depends_on: "kube_build_image"
+    if: build.env("KUBE_RESOURCE_PREP_POC") == "1"
+    agents:
+      queue: "kube"
+    commands:
+      - |
+        python3 .buildkite/scripts/manage_kube_cache_pvc.py create \
+          --name "bk-${BUILDKITE_BUILD_NUMBER}-resource-poc" \
+          --source-pvc tpu-cache-golden-pvc \
+          --storage-class premium-rwo \
+          --size 500Gi \
+          --zone southamerica-west1-a
+    plugins:
+      - <<: *kube_resource_control_plugin
+
+  - label: ":package: Prepare cache, models, and dataset on CPU"
+    key: "kube_resource_cpu_prepare"
+    depends_on: "kube_resource_pvc_create"
+    if: build.env("KUBE_RESOURCE_PREP_POC") == "1"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+    commands:
+      - |
+        python3 .buildkite/scripts/prepare_kube_resources.py \
+          --model Qwen/Qwen2.5-1.5B-Instruct \
+          --model Qwen/Qwen2.5-0.5B-Instruct \
+          --model meta-llama/Llama-3.1-8B-Instruct \
+          --dataset mlperf
+      - test -s /cache/.buildkite/prepared-resources.json
+    plugins:
+      - <<: *kube_resource_cpu_plugin
+
+  - label: ":kubernetes: Prepared MLPerf JAX + vLLM handoff"
+    key: "kube_e2e_mlperf_jax_vllm_prepared"
+    <<: *kube_v6e_1chip_concurrency
+    depends_on: "kube_resource_cpu_prepare"
+    soft_fail: true
+    if: build.env("KUBE_RESOURCE_PREP_POC") == "1"
+    agents:
+      queue: "kube"
+    secrets:
+      - HF_TOKEN
+    env:
+      <<: *kube_common_env
+      MODEL_IMPL_TYPE: "vllm"
+      MLPERF_DATASET_PATH: "/cache/datasets/open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+    commands:
+      - test -s /cache/.buildkite/prepared-resources.json
+      - bash tests/e2e/benchmarking/mlperf.sh
+    plugins:
+      - <<: *kube_resource_tpu_v6e_1chip_plugin
+
+  - label: ":outbox_tray: Finalize compilation cache on CPU"
+    key: "kube_resource_cpu_finalize"
+    depends_on: "kube_e2e_mlperf_jax_vllm_prepared"
+    allow_dependency_failure: true
+    if: build.env("KUBE_RESOURCE_PREP_POC") == "1"
+    agents:
+      queue: "kube"
+    env:
+      <<: *kube_common_env
+    commands:
+      - |
+        outcome="$$(buildkite-agent step get outcome --step kube_e2e_mlperf_jax_vllm_prepared)"
+        if [ "$$outcome" != "passed" ]; then
+          echo "Skipping cache publication because TPU outcome is $$outcome"
+          exit 0
+        fi
+        if [ -n "$${KUBE_CACHE_WRITE_PREFIX:-}" ]; then
+          python3 .buildkite/scripts/prepare_kube_resources.py \
+            --publish-cache \
+            --cache-write-prefix "$$KUBE_CACHE_WRITE_PREFIX"
+        else
+          echo "KUBE_CACHE_WRITE_PREFIX is unset; reporting the delta without uploading"
+          python3 .buildkite/scripts/prepare_kube_resources.py --publish-cache
+        fi
+    plugins:
+      - <<: *kube_resource_cpu_plugin
+
+  - label: ":wastebasket: Delete resource-prep cache clone"
+    key: "kube_resource_pvc_cleanup"
+    depends_on:
+      - "kube_resource_pvc_create"
+      - "kube_resource_cpu_prepare"
+      - "kube_e2e_mlperf_jax_vllm_prepared"
+      - "kube_resource_cpu_finalize"
+    allow_dependency_failure: true
+    if: build.env("KUBE_RESOURCE_PREP_POC") == "1"
+    agents:
+      queue: "kube"
+    commands:
+      - python3 .buildkite/scripts/manage_kube_cache_pvc.py delete --name "bk-${BUILDKITE_BUILD_NUMBER}-resource-poc"
+    plugins:
+      - <<: *kube_resource_control_plugin
 
   # pipeline_jax.yml test_0.
   - label: ":kubernetes: E2E MLPerf tests for JAX models"
@@ -239,7 +405,7 @@ steps:
     <<: *kube_v6e_1chip_concurrency
     depends_on: "kube_build_image"
     soft_fail: true
-    if: build.env("KUBE_CPU_ONLY") != "1"
+    if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_RESOURCE_PREP_POC") != "1"
     agents:
       queue: "kube"
     secrets:
@@ -659,6 +825,11 @@ steps:
     key: "kube_validate_results"
     depends_on:
       - "kube_cpu_safe_tests"
+      - "kube_resource_pvc_create"
+      - "kube_resource_cpu_prepare"
+      - "kube_e2e_mlperf_jax_vllm_prepared"
+      - "kube_resource_cpu_finalize"
+      - "kube_resource_pvc_cleanup"
       - "kube_e2e_mlperf_jax"
       - "kube_e2e_mlperf_quantized"
       - "kube_e2e_mlperf_new_models"
@@ -690,6 +861,11 @@ steps:
         .buildkite/scripts/check_results.sh \
           "Kubernetes POC tests failed" \
           kube_cpu_safe_tests \
+          kube_resource_pvc_create \
+          kube_resource_cpu_prepare \
+          kube_e2e_mlperf_jax_vllm_prepared \
+          kube_resource_cpu_finalize \
+          kube_resource_pvc_cleanup \
           kube_e2e_mlperf_jax \
           kube_e2e_mlperf_quantized \
           kube_e2e_mlperf_new_models \

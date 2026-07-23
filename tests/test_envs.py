@@ -14,6 +14,8 @@ def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     # behavior specifically, so make that precondition local and explicit.
     monkeypatch.delenv("JAX_PLATFORMS", raising=False)
     monkeypatch.delenv("PHASED_PROFILING_DIR", raising=False)
+    monkeypatch.delenv("TPU_NAME", raising=False)
+    monkeypatch.delenv("TPU_ACCELERATOR_TYPE", raising=False)
     assert envs.JAX_PLATFORMS == ""
     assert envs.PHASED_PROFILING_DIR == ""
     monkeypatch.setenv("JAX_PLATFORMS", "tpu")

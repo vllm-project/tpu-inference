@@ -153,6 +153,18 @@ def snapshot_cache_files(cache_path: Path) -> list[str]:
         if path.is_file() and not path.is_symlink())
 
 
+def validate_compilation_cache_layout(cache_path: Path) -> None:
+    """Reject the common mistake of nesting the bare-metal namespace once more."""
+    nested_namespaces = sorted(
+        path.name for path in cache_path.iterdir()
+        if path.is_dir() and path.name.startswith("jax") and "_tpu" in path.name)
+    if nested_namespaces:
+        raise ValueError(
+            f"compilation cache has an extra namespace directory under {cache_path}: "
+            f"{', '.join(nested_namespaces)}; copy that directory's contents directly "
+            "into the configured cache path")
+
+
 def prepare_resources(
     registry: dict[str, Any],
     models: Iterable[str],
@@ -174,10 +186,63 @@ def prepare_resources(
 
     compilation_cache = cache_root / "tpu_jax_cache"
     compilation_cache.mkdir(parents=True, exist_ok=True)
+    validate_compilation_cache_layout(compilation_cache)
     for prefix in cache_read_prefixes:
         counts = hydrate_gcs_prefix(prefix, compilation_cache)
         result["cache_reads"].append({"prefix": prefix, **counts})
+    validate_compilation_cache_layout(compilation_cache)
     result["baseline_cache_files"] = snapshot_cache_files(compilation_cache)
+    return result
+
+
+def new_cache_files(cache_path: Path, preparation_manifest: dict[str, Any]) -> list[Path]:
+    baseline = preparation_manifest.get("baseline_cache_files")
+    if not isinstance(baseline, list) or not all(
+            isinstance(entry, str) for entry in baseline):
+        raise ValueError("preparation manifest has no valid baseline_cache_files list")
+    baseline_set = set(baseline)
+    return [
+        cache_path / relative for relative in snapshot_cache_files(cache_path)
+        if relative not in baseline_set
+    ]
+
+
+def publish_new_cache_files(
+    cache_path: Path,
+    preparation_manifest: dict[str, Any],
+    write_prefix: str | None,
+    *,
+    storage_client: Any | None = None,
+) -> dict[str, Any]:
+    files = new_cache_files(cache_path, preparation_manifest)
+    result: dict[str, Any] = {
+        "new_files": len(files),
+        "uploaded": 0,
+        "already_exists": 0,
+        "write_prefix": write_prefix,
+    }
+    if not write_prefix:
+        result["dry_run"] = True
+        return result
+    if storage_client is None:
+        from google.cloud import storage
+        storage_client = storage.Client()
+    bucket_name, prefix = parse_gcs_uri(write_prefix)
+    bucket = storage_client.bucket(bucket_name)
+    for path in files:
+        relative = path.relative_to(cache_path).as_posix()
+        blob = bucket.blob(prefix + relative)
+        try:
+            blob.upload_from_filename(path, if_generation_match=0)
+            result["uploaded"] += 1
+        except Exception as error:
+            # A generation-match failure means another successful job already
+            # published the same content-addressed cache entry. Avoid importing
+            # google.api_core in dry-run/unit-test environments.
+            if getattr(error, "code", None) == 412:
+                result["already_exists"] += 1
+            else:
+                raise
     return result
 
 
@@ -189,6 +254,12 @@ def main() -> int:
     parser.add_argument("--dataset", action="append", default=[])
     parser.add_argument("--cache-read-prefix", action="append", default=[])
     parser.add_argument(
+        "--publish-cache",
+        action="store_true",
+        help="publish files created since the preparation manifest instead of preparing",
+    )
+    parser.add_argument("--cache-write-prefix")
+    parser.add_argument(
         "--manifest-out",
         type=Path,
         default=Path("/cache/.buildkite/prepared-resources.json"),
@@ -196,16 +267,25 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        registry = load_registry(args.registry)
-        result = prepare_resources(
-            registry,
-            args.model,
-            args.dataset,
-            args.cache_read_prefix,
-            args.cache_root,
-        )
-        args.manifest_out.parent.mkdir(parents=True, exist_ok=True)
-        args.manifest_out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        if args.publish_cache:
+            preparation_manifest = json.loads(args.manifest_out.read_text())
+            result = publish_new_cache_files(
+                args.cache_root / "tpu_jax_cache",
+                preparation_manifest,
+                args.cache_write_prefix,
+            )
+        else:
+            registry = load_registry(args.registry)
+            result = prepare_resources(
+                registry,
+                args.model,
+                args.dataset,
+                args.cache_read_prefix,
+                args.cache_root,
+            )
+            args.manifest_out.parent.mkdir(parents=True, exist_ok=True)
+            args.manifest_out.write_text(
+                json.dumps(result, indent=2, sort_keys=True) + "\n")
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"resource preparation failed: {error}", file=sys.stderr)
         return 1

@@ -471,6 +471,44 @@ Recommended follow-ups:
 
 ## Recommended cache lifecycle
 
+An opt-in implementation of this flow now lives in `pipeline_kube.yaml`. Launch
+it with `KUBE_CPU_ONLY=1` and `KUBE_RESOURCE_PREP_POC=1`: the first flag skips
+the standard TPU matrix, while the explicit resource-prep flag schedules its
+single prepared TPU counterpart. The graph is:
+
+```text
+CPU control: create named clone
+  -> CPU default-pool pod: hydrate cache + prepare declared models/dataset
+  -> v6e-1 pod: run MLPerf using the same named PVC
+  -> CPU default-pool pod: publish only new cache entries
+  -> CPU control: delete the clone
+```
+
+The feature declaration is limited to model identifiers, dataset aliases,
+topology, and command. `resource_registry.json` owns the download mechanism and
+verified destination; `prepare_kube_resources.py` owns hydration and produces a
+resolved manifest on the PVC. The current proof declares the three default
+MLPerf models and the `mlperf` dataset. `MLPERF_DATASET_PATH` lets the existing
+benchmark consume the staged dataset without knowing how it was downloaded.
+
+Set `KUBE_CACHE_WRITE_PREFIX=gs://...` only when intentionally testing cache
+publication. If it is absent, the CPU finalizer reports the delta without
+uploading. Publication uses create-only object generations, so concurrent jobs
+cannot replace an existing entry. A failed TPU step skips publication but still
+allows the cleanup step to delete the clone.
+
+The job-pod service account needs namespace-scoped `get`, `create`, and
+`delete` permissions on persistent volume claims. The control step will expose
+a clear HTTP 403 if that Role/RoleBinding is missing. Do not wait for the claim
+to become `Bound` in the control step: `premium-rwo` can use
+`WaitForFirstConsumer`, so the zone-pinned CPU preparation pod is what triggers
+binding in `southamerica-west1-a`.
+
+Preparation also rejects a directory such as
+`/cache/tpu_jax_cache/jax0.10.2_tputpu6e`; the namespace contents must be at
+`/cache/tpu_jax_cache` itself. This turns a silent cold-cache layout error into
+an actionable CPU-step failure before a TPU is allocated.
+
 Do not place GCS or GCS FUSE on the live JAX cache path. Keep GCS as the
 authoritative store and use a cloned block volume as the fast local working
 set. An init container in the TPU pod is not sufficient for resource savings:
@@ -557,6 +595,13 @@ refresh caches and pre-pull images periodically while idle instead of doing so
 after a Buildkite job has acquired the TPU.
 
 ## Change-based and tiered test selection
+
+The first CPU tier is implemented as an explicit shadow allowlist in
+`.buildkite/cpu_safe_tests.txt`. `KUBE_CPU_ONLY=1` builds the exact test image,
+runs only those files with `JAX_PLATFORMS=cpu`, no TPU device, and Docker
+networking disabled, then skips every standard TPU step. The same tests remain
+in their TPU shards until repeated CPU-only builds pass; this is deliberate
+shadowing rather than an immediate reduction in TPU coverage.
 
 The existing bootstrap already skips documentation-only builds and gates the
 kernel and collective-kernel shards from changed paths. Extend that mechanism
