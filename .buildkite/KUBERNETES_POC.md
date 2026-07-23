@@ -244,6 +244,12 @@ the canonical baked workspace. Multihost benchmark inputs use the explicitly
 separate `/benchmark-data` scratch root; `/workspace/tpu_inference` remains a
 compatibility path for workflows that bind-mount a live checkout there.
 
+Because Kubernetes runs commands directly in that image instead of through
+`run_in_docker.sh`, the common pod environment explicitly carries
+`VLLM_XLA_CHECK_RECOMPILATION=1`. This preserves the bare-metal guard against
+unexpected compilation during serving; tests that deliberately permit dynamic
+compilation continue to override it locally.
+
 The cache PVC is cloned from `tpu-cache-golden-pvc` for every pod. This is not
 the same cache model as the long-lived bare-metal disk, so results must be
 labelled as cold-clone or warm-cache before using them for performance claims.
@@ -255,6 +261,19 @@ under `/cache/tpu_jax_cache` and reports the baseline cache-file count. This
 checks the refreshed golden and its mount layout without spending TPU time. A
 `KUBE_CPU_ONLY=1` build can therefore validate the cache clone independently of
 the accelerator matrix.
+
+The first live validation was
+[kube-dev build 45](https://buildkite.com/tpu-commons/kube-dev/builds/45) at
+commit `020a920d072d18d3e92925feb864f93e9e63d2b4`. It passed and found 16,507
+files directly under the configured compilation-cache tree, so the refreshed
+golden is neither empty nor nested under an extra bare-metal namespace. The
+inventory step spent 3m 21s in queue/provisioning and 33.2s executing. Its
+execution included a fresh 62.8 MiB Git checkout; the cache walk itself was not
+the dominant cost. The commit-specific image took 1m 13s to rebuild with cached
+dependency layers, and the offline CPU-safe suite took 14.2s. This makes the
+CPU cache preflight observable but adds about 3m 54s after the CPU-safe gate on
+a cold/default node; retain it for the POC and later optimize checkout and
+default-pool warm capacity if it becomes a permanent gate.
 
 ## v6e parity
 

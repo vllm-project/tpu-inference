@@ -28,6 +28,9 @@
   NLTK_DATA: "/cache/nltk_data"
   VLLM_XLA_CACHE_PATH: "/cache/tpu_jax_cache"
   JAX_COMPILATION_CACHE_DIR: "/cache/tpu_jax_cache"
+  # pipeline_jax receives this from run_in_docker.sh. Keep the same guard when
+  # Kubernetes executes commands directly inside the test image.
+  VLLM_XLA_CHECK_RECOMPILATION: "1"
 
 .kube_common_tolerations: &kube_common_tolerations
   - key: "google.com/tpu"
