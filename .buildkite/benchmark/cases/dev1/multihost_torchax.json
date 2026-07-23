@@ -4,11 +4,13 @@
     "GCS_BUCKET": "vllm-cb-storage2",
     "GCP_INSTANCE_ID": "vllm-bm-inst",
     "GCP_DATABASE_ID": "vllm-bm-bk-runs",
-    "RUN_ONCE": "true"
+    "RUN_ONCE": "true",
+    "IS_MULTI_HOST_BENCH": true,
+    "BK_TIMEOUT_IN_MINUTES": 180
   },
   "benchmark_cases": [
     {
-      "case_name": "run_deepseek_v3_1k_8k",
+      "case_name": "run_torchax_deepseek_v3_1k_8k",
       "ci_queue": [
         "tpu_v7x_16_queue"
       ],
@@ -19,7 +21,8 @@
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
         "CREATED_BY": "bm-scheduler",
-        "MODEL_NAME": "DeepSeek-R1"
+        "MODEL_NAME": "DeepSeek-R1",
+        "USER": "for test run"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -36,8 +39,11 @@
           "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
-          "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
+          "model-path": "gs://tpu-commons-ci/deepseek/r1",
+          "model": "deepseek-ai/DeepSeek-R1",
+          "load-format": "runai_streamer",
           "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "tokenizer": "deepseek-ai/DeepSeek-R1",
           "seed": 42,
           "max-num-seqs": 128,
           "max-num-batched-tokens": 512,
@@ -57,21 +63,35 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve_with_accuracy",
+        "command_type": "vllm_bench_serve",
         "args": {
           "model": "deepseek-ai/DeepSeek-R1",
           "dataset-name": "random",
+          "request-rate": "inf",
           "random-input-len": 1024,
           "random-output-len": 8192,
           "num-prompts": 2048,
           "ignore-eos": true,
           "trust-remote-code": true,
+          "percentile-metrics": "ttft,tpot,itl,e2el"
+        }
+      },
+      "accuracy_command_options": {
+        "command_type": "local_benchmark_serving",
+        "args": {
+          "backend": "vllm",
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "mmlu",
+          "dataset-path": "/workspace/mmlu/data/test",
+          "num-prompts": 14000,
+          "run-eval": true,
+          "temperature": 0,
           "mmlu-output-len": 4
         }
       }
     },
     {
-      "case_name": "run_deepseek_v3_1k_8k_random_routing",
+      "case_name": "run_torchax_deepseek_v3_1k_8k_random_routing",
       "ci_queue": [
         "tpu_v7x_16_queue"
       ],
@@ -81,8 +101,8 @@
         "OUTPUT_LEN": 8192,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler",
-        "MODEL_NAME": "DeepSeek-R1"
+        "MODEL_NAME": "DeepSeek-R1",
+        "USER": "for test run"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -100,8 +120,11 @@
           "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
-          "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
+          "model-path": "gs://tpu-commons-ci/deepseek/r1",
+          "model": "deepseek-ai/DeepSeek-R1",
+          "load-format": "runai_streamer",
           "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "tokenizer": "deepseek-ai/DeepSeek-R1",
           "seed": 42,
           "max-num-seqs": 128,
           "max-num-batched-tokens": 512,
@@ -121,21 +144,36 @@
         }
       },
       "client_command_options": {
-        "command_type": "vllm_bench_serve_with_accuracy",
+        "command_type": "vllm_bench_serve",
         "args": {
           "model": "deepseek-ai/DeepSeek-R1",
           "dataset-name": "random",
+          "request-rate": "inf",
           "random-input-len": 1024,
           "random-output-len": 8192,
           "num-prompts": 2048,
           "ignore-eos": true,
           "trust-remote-code": true,
-          "mmlu-output-len": 4
+          "percentile-metrics": "ttft,tpot,itl,e2el"
+        }
+      },
+      "accuracy_command_options": {
+        "command_type": "local_benchmark_serving",
+        "args": {
+          "backend": "vllm",
+          "model": "deepseek-ai/DeepSeek-R1",
+          "dataset-name": "mmlu",
+          "dataset-path": "/workspace/mmlu/data/test",
+          "num-prompts": 14000,
+          "run-eval": true,
+          "temperature": 0,
+          "mmlu-output-len": 4,
+          "trust-remote-code": true
         }
       }
     },
     {
-      "case_name": "run_deepseek_v3_8k_1k",
+      "case_name": "run_torchax_deepseek_v3_8k_1k",
       "ci_queue": [
         "tpu_v7x_16_queue"
       ],
@@ -144,9 +182,9 @@
         "INPUT_LEN": 8192,
         "OUTPUT_LEN": 1024,
         "PREFIX_LEN": 0,
+        "MODEL_NAME": "DeepSeek-R1",
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler",
-        "MODEL_NAME": "DeepSeek-R1"
+        "USER": "for test run"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -163,8 +201,11 @@
           "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
-          "model": "/mnt/disks/checkpoint/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/",
+          "model-path": "gs://tpu-commons-ci/deepseek/r1",
+          "model": "deepseek-ai/DeepSeek-R1",
           "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "tokenizer": "deepseek-ai/DeepSeek-R1",
+          "load-format": "runai_streamer",
           "seed": 42,
           "max-num-seqs": 128,
           "max-num-batched-tokens": 512,
@@ -187,16 +228,18 @@
         "args": {
           "model": "deepseek-ai/DeepSeek-R1",
           "dataset-name": "random",
+          "request-rate": "inf",
           "random-input-len": 8192,
           "random-output-len": 1024,
           "num-prompts": 2048,
           "ignore-eos": true,
-          "trust-remote-code": true
+          "trust-remote-code": true,
+          "percentile-metrics": "ttft,tpot,itl,e2el"
         }
       }
     },
     {
-      "case_name": "run_qwen3_coder_480b_1k_8k",
+      "case_name": "run_torchax_qwen3_coder_480b_1k_8k",
       "ci_queue": [
         "tpu_v7x_16_queue"
       ],
@@ -205,14 +248,25 @@
         "INPUT_LEN": 1024,
         "OUTPUT_LEN": 8192,
         "PREFIX_LEN": 0,
+        "MODEL_NAME": "Qwen3-Coder-480B-A35B-Instruct",
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler",
-        "MODEL_NAME": "Qwen3-Coder-480B-A35B-Instruct"
+        "USER": "for test run"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
+        "env": {
+          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
+          "RAY_LOG_TO_STDERR": "1",
+          "NEW_MODEL_DESIGN": "0",
+          "MODEL_IMPL_TYPE": "vllm",
+          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": 1,
+          "TPU_BACKEND_TYPE": "jax"
+        },
         "args": {
-          "model": "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-Coder-480B-A35B-Instruct/snapshots/9d90cf8fca1bf7b7acca42d3fc9ae694a2194069",
+          "model-path": "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-Coder-480B-A35B-Instruct/snapshots/9d90cf8fca1bf7b7acca42d3fc9ae694a2194069",
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+          "load-format": "runai_streamer",
+          "tokenizer": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
           "served-model-name": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
           "tensor-parallel-size": {
             "v7x-16": 16
@@ -226,14 +280,6 @@
           "trust-remote-code": true,
           "async-scheduling": true,
           "no-enable-prefix-caching": true
-        },
-        "env": {
-          "VLLM_ENGINE_READY_TIMEOUT_S": "10800",
-          "RAY_LOG_TO_STDERR": "1",
-          "NEW_MODEL_DESIGN": "0",
-          "MODEL_IMPL_TYPE": "vllm",
-          "VLLM_DISABLE_SHARED_EXPERTS_STREAM": 1,
-          "TPU_BACKEND_TYPE": "jax"
         }
       },
       "client_command_options": {
@@ -241,29 +287,31 @@
         "args": {
           "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
           "dataset-name": "random",
+          "request-rate": "inf",
           "random-input-len": 1024,
           "random-output-len": 8192,
           "num-prompts": 128,
           "ignore-eos": true,
-          "trust-remote-code": true
+          "trust-remote-code": true,
+          "percentile-metrics": "ttft,tpot,itl,e2el"
         }
       }
     },
     {
-      "case_name": "xprof_deepseek_v3_1k_1k",
+      "case_name": "xprof_torchax_deepseek_v3_1k_1k",
       "ci_queue": [
         "tpu_v7x_16_queue"
       ],
       "env": {
         "RUN_TYPE": "DAILY",
-        "EXPECTED_ETEL": 3600000,
         "INPUT_LEN": 1024,
         "OUTPUT_LEN": 1024,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler",
+        "MODEL_NAME": "DeepSeek-R1",
+        "USER": "for test run",
         "UPLOAD_DB": "false",
-        "MODEL_NAME": "DeepSeek-R1"
+        "TENSOR_PARALLEL_SIZE": 16
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -281,9 +329,11 @@
           "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
-          "model": "gs://tpu-commons-ci/deepseek/r1",
-          "load-format": "runai_streamer",
+          "model-path": "gs://tpu-commons-ci/deepseek/r1",
+          "model": "deepseek-ai/DeepSeek-R1",
           "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "tokenizer": "deepseek-ai/DeepSeek-R1",
+          "load-format": "runai_streamer",
           "seed": 42,
           "max-num-seqs": 640,
           "max-num-batched-tokens": 640,
@@ -298,8 +348,7 @@
           "async-scheduling": true,
           "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
           "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
-          "trust-remote-code": true,
-          "hf-config": "deepseek-ai/DeepSeek-R1"
+          "trust-remote-code": true
         }
       },
       "client_command_options": {
@@ -307,29 +356,31 @@
         "args": {
           "model": "deepseek-ai/DeepSeek-R1",
           "dataset-name": "random",
+          "request-rate": "inf",
           "random-input-len": 1024,
           "random-output-len": 1024,
           "num-prompts": 10240,
           "ignore-eos": true,
-          "trust-remote-code": true
+          "trust-remote-code": true,
+          "percentile-metrics": "ttft,tpot,itl,e2el"
         }
       }
     },
     {
-      "case_name": "xprof_deepseek_v3_1k_8k",
+      "case_name": "xprof_torchax_deepseek_v3_1k_8k",
       "ci_queue": [
         "tpu_v7x_16_queue"
       ],
       "env": {
         "RUN_TYPE": "DAILY",
-        "EXPECTED_ETEL": 3600000,
         "INPUT_LEN": 1024,
         "OUTPUT_LEN": 8192,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler",
+        "MODEL_NAME": "DeepSeek-R1",
+        "USER": "for test run",
         "UPLOAD_DB": "false",
-        "MODEL_NAME": "DeepSeek-R1"
+        "TENSOR_PARALLEL_SIZE": 16
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -347,9 +398,11 @@
           "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
-          "model": "gs://tpu-commons-ci/deepseek/r1",
-          "load-format": "runai_streamer",
+          "model-path": "gs://tpu-commons-ci/deepseek/r1",
+          "model": "deepseek-ai/DeepSeek-R1",
           "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "tokenizer": "deepseek-ai/DeepSeek-R1",
+          "load-format": "runai_streamer",
           "seed": 42,
           "max-num-seqs": 128,
           "max-num-batched-tokens": 512,
@@ -364,8 +417,7 @@
           "async-scheduling": true,
           "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
           "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
-          "trust-remote-code": true,
-          "hf-config": "deepseek-ai/DeepSeek-R1"
+          "trust-remote-code": true
         }
       },
       "client_command_options": {
@@ -373,29 +425,31 @@
         "args": {
           "model": "deepseek-ai/DeepSeek-R1",
           "dataset-name": "random",
+          "request-rate": "inf",
           "random-input-len": 1024,
           "random-output-len": 8192,
           "num-prompts": 2048,
           "ignore-eos": true,
-          "trust-remote-code": true
+          "trust-remote-code": true,
+          "percentile-metrics": "ttft,tpot,itl,e2el"
         }
       }
     },
     {
-      "case_name": "xprof_deepseek_v3_1k_8k_random_routing",
+      "case_name": "xprof_torchax_deepseek_v3_1k_8k_random_routing",
       "ci_queue": [
         "tpu_v7x_16_queue"
       ],
       "env": {
         "RUN_TYPE": "DAILY",
-        "EXPECTED_ETEL": 3600000,
         "INPUT_LEN": 1024,
         "OUTPUT_LEN": 8192,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler",
+        "MODEL_NAME": "DeepSeek-R1",
+        "USER": "for test run",
         "UPLOAD_DB": "false",
-        "MODEL_NAME": "DeepSeek-R1"
+        "TENSOR_PARALLEL_SIZE": 16
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -414,9 +468,11 @@
           "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
-          "model": "gs://tpu-commons-ci/deepseek/r1",
+          "model-path": "gs://tpu-commons-ci/deepseek/r1",
+          "model": "deepseek-ai/DeepSeek-R1",
           "load-format": "runai_streamer",
           "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "tokenizer": "deepseek-ai/DeepSeek-R1",
           "seed": 42,
           "max-num-seqs": 128,
           "max-num-batched-tokens": 512,
@@ -431,8 +487,7 @@
           "async-scheduling": true,
           "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
           "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
-          "trust-remote-code": true,
-          "hf-config": "deepseek-ai/DeepSeek-R1"
+          "trust-remote-code": true
         }
       },
       "client_command_options": {
@@ -440,29 +495,31 @@
         "args": {
           "model": "deepseek-ai/DeepSeek-R1",
           "dataset-name": "random",
+          "request-rate": "inf",
           "random-input-len": 1024,
           "random-output-len": 8192,
           "num-prompts": 2048,
           "ignore-eos": true,
-          "trust-remote-code": true
+          "trust-remote-code": true,
+          "percentile-metrics": "ttft,tpot,itl,e2el"
         }
       }
     },
     {
-      "case_name": "xprof_deepseek_v3_8k_1k",
+      "case_name": "xprof_torchax_deepseek_v3_8k_1k",
       "ci_queue": [
         "tpu_v7x_16_queue"
       ],
       "env": {
         "RUN_TYPE": "DAILY",
-        "EXPECTED_ETEL": 3600000,
         "INPUT_LEN": 8192,
         "OUTPUT_LEN": 1024,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler",
+        "MODEL_NAME": "DeepSeek-R1",
+        "USER": "for test run",
         "UPLOAD_DB": "false",
-        "MODEL_NAME": "DeepSeek-R1"
+        "TENSOR_PARALLEL_SIZE": 16
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -480,9 +537,11 @@
           "RAY_LOG_TO_STDERR": "1"
         },
         "args": {
-          "model": "gs://tpu-commons-ci/deepseek/r1",
+          "model-path": "gs://tpu-commons-ci/deepseek/r1",
+          "model": "deepseek-ai/DeepSeek-R1",
           "load-format": "runai_streamer",
           "served-model-name": "deepseek-ai/DeepSeek-R1",
+          "tokenizer": "deepseek-ai/DeepSeek-R1",
           "seed": 42,
           "max-num-seqs": 128,
           "max-num-batched-tokens": 512,
@@ -497,8 +556,7 @@
           "async-scheduling": true,
           "additional-config": "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}",
           "generation-config": "gs://gpolovets-inference/deepseek/generation_configs/DeepSeek-R1",
-          "trust-remote-code": true,
-          "hf-config": "deepseek-ai/DeepSeek-R1"
+          "trust-remote-code": true
         }
       },
       "client_command_options": {
@@ -506,11 +564,13 @@
         "args": {
           "model": "deepseek-ai/DeepSeek-R1",
           "dataset-name": "random",
+          "request-rate": "inf",
           "random-input-len": 8192,
           "random-output-len": 1024,
           "num-prompts": 2048,
           "ignore-eos": true,
-          "trust-remote-code": true
+          "trust-remote-code": true,
+          "percentile-metrics": "ttft,tpot,itl,e2el"
         }
       }
     }

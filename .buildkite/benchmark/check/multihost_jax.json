@@ -20,7 +20,8 @@
         "OUTPUT_LEN": 8192,
         "PREFIX_LEN": 0,
         "MODEL_NAME": "DeepSeek-R1",
-        "DEVICE": "tpu7x-16"
+        "DEVICE": "tpu7x-16",
+        "USER": "for test run"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
