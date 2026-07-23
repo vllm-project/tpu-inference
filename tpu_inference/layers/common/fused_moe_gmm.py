@@ -107,7 +107,8 @@ def gmm_wrapper(lhs,
                 group_sizes,
                 group_offset,
                 fuse_act=None,
-                preferred_element_type=None):
+                preferred_element_type=None,
+                gather_indices=None):
     gmm_res = gmm_v2(
         lhs=lhs,
         rhs=rhs,
@@ -115,6 +116,7 @@ def gmm_wrapper(lhs,
         rhs_bias=rhs_bias,
         group_sizes=group_sizes,
         group_offset=group_offset[0],
+        gather_indices=gather_indices,
         zero_initialize=False,
         fuse_act=fuse_act,
         preferred_element_type=preferred_element_type,
@@ -170,11 +172,13 @@ def moe_gmm_local(x: jax.Array,
                   group_offset: jax.Array,
                   topk_argsort_revert_indices: jax.Array,
                   topk_weights: jax.Array,
+                  token_indices_sorted: jax.Array | None = None,
                   *,
                   activation: str,
                   topk: int,
                   parallelism: Literal["tp", "ep"],
                   enable_rs_kernel: bool = False,
+                  fuse_permute: bool = False,
                   onehot_moe_permute_threshold: int = 0,
                   scatter_results: bool = False,
                   moe_chunk_size: int = 0,
@@ -182,21 +186,41 @@ def moe_gmm_local(x: jax.Array,
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
+
+    When ``fuse_permute`` is set, ``x`` is the un-permuted source activations and
+    ``token_indices_sorted`` selects each grouped LHS row -- GMM1 gathers its
+    input per-row (fused permute) instead of reading a pre-grouped buffer.
     """
 
     assert parallelism in ["tp", "ep"]
 
     # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
-    gmm1_res = gmm_wrapper(
-        x,
-        w1,
-        w1_scale,
-        w1_bias,
-        group_sizes,
-        group_offset,
-        fuse_act=activation,
-        preferred_element_type=x.dtype,
-    )
+    if fuse_permute:
+        # Fused permute: GMM1 gathers its LHS rows by index from the fp32 source
+        # activations. preferred_element_type keeps gmm1_res in the activation
+        # dtype so the rest of the pipeline is unchanged.
+        gmm1_res = gmm_wrapper(
+            x.astype(jnp.float32),
+            w1,
+            w1_scale,
+            w1_bias,
+            group_sizes,
+            group_offset,
+            fuse_act=activation,
+            preferred_element_type=x.dtype,
+            gather_indices=token_indices_sorted,
+        )
+    else:
+        gmm1_res = gmm_wrapper(
+            x,
+            w1,
+            w1_scale,
+            w1_bias,
+            group_sizes,
+            group_offset,
+            fuse_act=activation,
+            preferred_element_type=x.dtype,
+        )
 
     # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
     # once, not applying to every shard. So we set w2_bias to 0 to all shards other than
@@ -343,11 +367,13 @@ def tensor_parallel_gmm(
     group_sizes: jax.Array,
     topk_argsort_revert_indices: jax.Array,
     topk_weights: jax.Array,
+    token_indices_sorted: jax.Array,
     *,
     activation: str,
     topk: int,
     mesh: Mesh,
     enable_rs_kernel: bool = False,
+    fuse_permute: bool = False,
     onehot_moe_permute_threshold: int = 0,
     scatter_results: bool = False,
     moe_chunk_size: int = 0,
@@ -382,6 +408,7 @@ def tensor_parallel_gmm(
             topk=topk,
             parallelism="tp",
             enable_rs_kernel=False,
+            fuse_permute=fuse_permute,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
@@ -400,6 +427,7 @@ def tensor_parallel_gmm(
             P(),
             data_p_spec,
             data_p_spec,
+            data_p_spec,
         ),
         out_specs=(final_out_specs),
         check_vma=False,
@@ -415,6 +443,7 @@ def tensor_parallel_gmm(
         group_offset,
         topk_argsort_revert_indices,
         topk_weights,
+        token_indices_sorted,
     )
 
 
@@ -429,11 +458,13 @@ def expert_parallel_gmm(
     group_sizes: jax.Array,
     topk_argsort_revert_indices: jax.Array,
     topk_weights: jax.Array,
+    token_indices_sorted: jax.Array,
     *,
     activation: str,
     topk: int,
     mesh: Mesh,
     enable_rs_kernel: bool = False,
+    fuse_permute: bool = False,
     onehot_moe_permute_threshold: int = 0,
     moe_chunk_size: int = 0,
     scatter_results: bool = False,
@@ -468,6 +499,7 @@ def expert_parallel_gmm(
             parallelism="ep",
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             enable_rs_kernel=enable_rs_kernel,
+            fuse_permute=fuse_permute,
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
@@ -485,6 +517,7 @@ def expert_parallel_gmm(
             ep_p_spec,
             data_p_spec,
             data_p_spec,
+            data_p_spec,
         ),
         out_specs=(final_out_specs),
         check_vma=False,
@@ -500,6 +533,7 @@ def expert_parallel_gmm(
         group_offset,
         topk_argsort_revert_indices,
         topk_weights,
+        token_indices_sorted,
     )
 
 
@@ -591,6 +625,15 @@ def fused_moe_func(
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
 
+    # Fuse the permute (token gather) into GMM1's LHS read. The gather buffer is
+    # fp32, so quantized w1 still composes (gather fp32 rows, then quantize in VMEM).
+    fuse_permute = envs.MOE_FUSE_PERMUTE
+    # Below MOE_FUSE_PERMUTE_MIN_TOKENS the fused gather's fixed per-row overhead
+    # outweighs the win, so MOE_FUSE_BATCH_GATED keeps small (decode) batches on the
+    # unfused path.
+    if envs.MOE_FUSE_BATCH_GATED and num_tokens < envs.MOE_FUSE_PERMUTE_MIN_TOKENS:
+        fuse_permute = False
+
     assert (num_tokens * topk) % 16 == 0, (
         "The kernel requires num_tokens * topk to be a multiple of "
         f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
@@ -662,7 +705,12 @@ def fused_moe_func(
                                            dtype=jnp.int32).sum(axis=0)
         topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
 
-        if use_ep:
+        if fuse_permute:
+            # Fused permute: skip materializing the grouped activations -- GMM1
+            # gathers its LHS rows from this un-permuted source, with the EP-shard
+            # window selected by its group_offset metadata.
+            x = hidden_states_local
+        elif use_ep:
             num_ep_shard = get_mesh_shape_product(mesh,
                                                   ShardingAxisName.EXPERT)
             local_num_experts = global_num_experts // num_ep_shard
@@ -692,25 +740,28 @@ def fused_moe_func(
         else:
             x = hidden_states_local[token_indices_sorted]
 
-        return x, group_sizes_local, topk_argsort_revert_indices
+        return (x, token_indices_sorted, group_sizes_local,
+                topk_argsort_revert_indices)
 
     if all_gather_fp8:
         hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
 
-    x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
-        _process_tokens_locally,
-        mesh=mesh,
-        in_specs=(
-            P(ShardingAxisName.MLP_DATA, None),
-            P(ShardingAxisName.MLP_DATA, None),
-        ),
-        out_specs=(
-            P(ShardingAxisName.MLP_DATA),
-            P(ShardingAxisName.MLP_DATA),
-            P(ShardingAxisName.MLP_DATA),
-        ),
-        check_vma=False,
-    )(hidden_states, topk_indices)
+    (x, token_indices_sorted, group_sizes,
+     topk_argsort_revert_indices) = jax.shard_map(
+         _process_tokens_locally,
+         mesh=mesh,
+         in_specs=(
+             P(ShardingAxisName.MLP_DATA, None),
+             P(ShardingAxisName.MLP_DATA, None),
+         ),
+         out_specs=(
+             P(ShardingAxisName.MLP_DATA),
+             P(ShardingAxisName.MLP_DATA),
+             P(ShardingAxisName.MLP_DATA),
+             P(ShardingAxisName.MLP_DATA),
+         ),
+         check_vma=False,
+     )(hidden_states, topk_indices)
 
     try:
         x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
@@ -731,10 +782,12 @@ def fused_moe_func(
             group_sizes,
             topk_argsort_revert_indices,
             topk_weights,
+            token_indices_sorted,
             activation=activation,
             topk=topk,
             mesh=mesh,
             enable_rs_kernel=actual_enable_rs_kernel,
+            fuse_permute=fuse_permute,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
@@ -752,10 +805,12 @@ def fused_moe_func(
             group_sizes,
             topk_argsort_revert_indices,
             topk_weights,
+            token_indices_sorted,
             activation=activation,
             topk=topk,
             mesh=mesh,
             enable_rs_kernel=actual_enable_rs_kernel,
+            fuse_permute=fuse_permute,
             onehot_moe_permute_threshold=onehot_moe_permute_threshold,
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
