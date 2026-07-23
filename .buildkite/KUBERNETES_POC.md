@@ -283,6 +283,15 @@ fell to 49.6s and execution to 17.3s; the complete build took 2m 42s. This
 confirms that most of build 45's 3m 21s inventory wait was node provisioning,
 not scanning the 16,507 cache files.
 
+The warmed TPU logs prove that the cache is being read, but also show why a
+large file count is not enough. In build 35, one
+`gather_logprobs_spec` shape (`num_reqs=8`) compiled in 0.01s, while adjacent
+`num_reqs=16` and `num_reqs=20` shapes for the same function each took about
+115s. The mounted golden therefore contains usable keys but does not cover the
+complete shape matrix exercised by the branch. Cache publication and
+compaction should track new-entry counts per logical test/topology, not merely
+validate that the golden is non-empty.
+
 ## v6e parity
 
 | `pipeline_jax.yml` | Kubernetes step | Matrix | Notes |
