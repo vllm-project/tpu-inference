@@ -36,8 +36,7 @@ from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
-from tpu_inference.layers.common.cp_attention import (forward_with_dcp,
-                                                      pcp_ragged_paged_attention)
+from tpu_inference.layers.common.cp_attention import dcp_forward, pcp_forward
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore, get_mesh_shape_product
@@ -968,23 +967,22 @@ def attention(
     shared_md = shared_attention_metadata if shared_attention_metadata is not None else md
 
     if 'dcp' in mesh.shape and mesh.shape['dcp'] > 1:
-        return forward_with_dcp(
+        return dcp_forward(
             kv_cache=kv_cache,
             q=q,
             k=k,
             v=v,
-            attention_metadata=md,
+            md=md,
             mesh=mesh,
             head_dim_original=head_dim_original,
             sm_scale=sm_scale,
-            sinks=sinks,
             attention_chunk_size=attention_chunk_size,
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
         )
     if 'pcp' in mesh.shape and mesh.shape['pcp'] > 1:
-        output, kv_cache = pcp_ragged_paged_attention(
+        return pcp_forward(
             mesh,
             q,
             k,
@@ -1001,7 +999,6 @@ def attention(
             update_kv_cache=update_kv_cache,
             use_causal_mask=use_causal_mask,
         )
-        return kv_cache, output
 
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
