@@ -127,23 +127,43 @@ command = ["python3", "-m", "pytest", "tests/"]
 ```
 
 The CPU planner queries or is given each pool's capacity and queued work,
-sorts the new jobs by expected duration, and greedily assigns each job to the
-pool with the lowest predicted completion score:
+represents every usable TPU slot by its estimated next-available time, sorts
+the new jobs by expected duration, and greedily assigns each job to the pool
+whose earliest slot gives the lowest predicted completion score:
 
 ```text
-score = (estimated remaining running work
-         + estimated queued work
-         + new job duration) / max_parallel
+score = earliest slot availability
+        + new job duration
         + cold-node penalty
         + missing-cache/model penalty
 ```
 
-For example, if central has 240 estimated TPU-minutes already assigned across
-four slots and west has 20 minutes across two slots, a new 90-minute unit shard
-scores `(240 + 90) / 4 = 82.5m` in central and `(20 + 90) / 2 = 55m` in west,
-so it goes west. The planner immediately adds those 90 minutes to west's
-in-memory load before placing the next job. This balances a whole uploaded
+For example, suppose central's four slots are next available in
+`[35, 55, 70, 80]` minutes and west's two slots in `[10, 45]` minutes. A new
+90-minute unit shard has an earliest finish of `35 + 90 = 125m` in central and
+`10 + 90 = 100m` in west, so it goes west. West's slot vector becomes
+`[45, 100]` before the next job is placed. This balances the whole uploaded
 matrix and accounts for a 90-minute shard differently from a five-minute test.
+
+Buildkite does not support `agents.queue: A OR B`. Make the routing decision
+before uploading the TPU steps. A small CPU planning step receives the logical
+test declarations and uploads the already-routed graph:
+
+```yaml
+steps:
+  - label: ":traffic_light: Plan regional TPU work"
+    agents:
+      queue: cpu
+    command: |
+      python3 .buildkite/scripts/plan_kube_matrix.py \
+        --topology v6e-1 \
+        --output /tmp/routed-pipeline.yaml
+      buildkite-agent pipeline upload /tmp/routed-pipeline.yaml
+```
+
+`plan_kube_matrix.py` should emit a full regional bundle, not merely set one
+global queue variable: every logical test can be routed independently, while
+each test's CPU-prepare, TPU-run, CPU-finalize, and cleanup steps stay together.
 
 The generated TPU step then contains physical details that were absent from the
 feature declaration:

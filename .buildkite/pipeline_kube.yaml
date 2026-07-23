@@ -293,6 +293,10 @@ steps:
       <<: *kube_common_env
       MODEL_IMPL_TYPE: "vllm"
       MLPERF_DATASET_PATH: "/cache/datasets/open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
+      # Prove that CPU preparation is complete. A missing model must fail here
+      # rather than quietly downloading while a TPU is allocated.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     commands:
       - test -s /cache/.buildkite/prepared-resources.json
       - bash tests/e2e/benchmarking/mlperf.sh

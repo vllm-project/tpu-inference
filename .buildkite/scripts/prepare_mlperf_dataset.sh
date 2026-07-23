@@ -13,6 +13,23 @@ expected_sha=$2
 compressed="${destination}.gz"
 
 mkdir -p "$(dirname "$destination")"
+
+# MLPerf's accuracy calculation tokenizes output for ROUGE. Prepare these
+# dataset-adjacent assets on the CPU pod as well, rather than discovering and
+# downloading them after a TPU has been allocated.
+if [[ -n "${NLTK_DATA:-}" ]]; then
+  mkdir -p "$NLTK_DATA"
+  python3 - <<'PY'
+import os
+
+import nltk
+
+root = os.environ["NLTK_DATA"]
+for resource in ("punkt", "punkt_tab"):
+    nltk.download(resource, download_dir=root, quiet=False, raise_on_error=True)
+PY
+fi
+
 if [[ -f "$destination" ]] && echo "$expected_sha  $destination" | sha256sum -c - >/dev/null; then
   echo "Using verified MLPerf dataset at $destination"
   exit 0
