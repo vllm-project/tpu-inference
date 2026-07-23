@@ -248,6 +248,14 @@ The cache PVC is cloned from `tpu-cache-golden-pvc` for every pod. This is not
 the same cache model as the long-lived bare-metal disk, so results must be
 labelled as cold-clone or warm-cache before using them for performance claims.
 
+Before releasing the standard TPU matrix, `kube_cache_inventory` creates the
+same ephemeral golden-derived PVC on an ordinary CPU node in
+`southamerica-west1-a`. It rejects an extra `jax*_tpu*` namespace directory
+under `/cache/tpu_jax_cache` and reports the baseline cache-file count. This
+checks the refreshed golden and its mount layout without spending TPU time. A
+`KUBE_CPU_ONLY=1` build can therefore validate the cache clone independently of
+the accelerator matrix.
+
 ## v6e parity
 
 | `pipeline_jax.yml` | Kubernetes step | Matrix | Notes |
@@ -348,9 +356,11 @@ the cold-cache measurement.
 All 15 default TPU counterparts passed. The first coverage-report attempt failed on
 the CPU host because its Python 3.14 interpreter was incompatible with the old
 Pex bootstrap, and its path mapping omitted Agent Stack's
-`/workspace/build/buildkite` checkout. The current pipeline runs the pinned
-producer version of coverage.py in Python 3.12 and aliases all source layouts;
-combining build 34's two real artifacts locally passes the 68% threshold.
+`/workspace/build/buildkite` checkout. The current pipeline reuses the
+commit-specific test image, so the consumer has the exact Python and coverage.py
+versions that produced the data without another Docker Hub pull or PyPI install;
+its configuration aliases all source layouts. Combining build 34's two real
+artifacts locally passes the 68% threshold.
 
 Cold compilation, rather than serving throughput, explains the execution gap.
 For example, the first Qwen3.5 MTP speculative case took 50m 44s here versus
