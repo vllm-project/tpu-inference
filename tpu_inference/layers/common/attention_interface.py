@@ -939,10 +939,12 @@ def pcp_ragged_paged_attention(
             dist2 = jnp.array([0, 0, 2], jnp.int32)
 
             # ---- cache phase ----
-            cu_cache = jnp.array([0, per_req_tokens], jnp.int32)
+            # cu_q_lens must be length max_num_seqs+1 (= 3 here, since kvl_i has
+            # 2 fused seqs); the cache phase uses only seq 0, seq 1 is empty.
+            cu_cache = jnp.array([0, per_req_tokens, per_req_tokens], jnp.int32)
             dist_cache = jnp.array([0, 0, 1], jnp.int32)
             if _cache_phase == "gather_kv":
-                cu_kv = jnp.array([0, local_per_req], jnp.int32)
+                cu_kv = jnp.array([0, local_per_req, local_per_req], jnp.int32)
                 page_local = kvc.shape[1]
                 common_kv = {k: v for k, v in common.items() if k != "cp_rank"}
                 o1 = l1 = None
