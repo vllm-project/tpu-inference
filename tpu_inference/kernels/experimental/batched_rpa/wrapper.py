@@ -347,7 +347,8 @@ def ragged_paged_attention(
                 model_cfgs,
                 serve_cfgs,
                 case='decode',
-                vmem_limit_bytes=vmem_limit_bytes)
+                vmem_limit_bytes=vmem_limit_bytes,
+                decode_query_size=decode_query_size)
         else:
             effective_blocks = prefill_block_sizes or get_tuned_params(
                 model_cfgs,
