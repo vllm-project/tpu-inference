@@ -259,6 +259,8 @@ class TPUWorker(WorkerBase):
 
         # step_counter is used to calculate uuid to transfer intermediate tensors.
         self.step_counter = 0
+        self.is_profiling = False
+        self.profile_step_counter = 0
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -586,6 +588,15 @@ class TPUWorker(WorkerBase):
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
 
+        if self.is_profiling:
+            if self.active_profiler_steps > 0 and self.profile_step_counter >= self.active_profiler_steps:
+                logger.info(
+                    "Stopping profiler automatically after %d steps.",
+                    self.profile_step_counter,
+                )
+                self.profile(is_start=False)
+            self.profile_step_counter += 1
+
         if isinstance(output, JaxIntermediateTensors):
             assert self.parallel_config.pipeline_parallel_size > 1
             assert not get_pp_group().is_last_rank
@@ -622,6 +633,7 @@ class TPUWorker(WorkerBase):
                 is_start: bool = True,
                 profile_prefix: str | None = None):
         if is_start:
+            logger.info("Starting JAX profiler trace, saving to %s", self.profile_dir)
             standard_opts, advanced_opts = _parse_profile_options(
                 profile_prefix)
             options = jax.profiler.ProfileOptions()
@@ -653,8 +665,18 @@ class TPUWorker(WorkerBase):
 
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
+            
+            self.is_profiling = True
+            self.profile_step_counter = 0
+            self.active_profiler_steps = envs.VLLM_ACTIVE_PROFILER_STEPS
         else:
-            jax.profiler.stop_trace()
+            try:
+                logger.info("Stopping JAX profiler trace.")
+                jax.profiler.stop_trace()
+            except Exception as e:
+                logger.warning("Failed to stop JAX profiler trace: %s", e)
+            finally:
+                self.is_profiling = False
 
     def load_model(self) -> None:
         self.model_runner.load_model()
