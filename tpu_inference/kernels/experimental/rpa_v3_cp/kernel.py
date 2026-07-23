@@ -360,7 +360,6 @@ def _ragged_paged_attention_kernel_loop(
     v_scale: float | None = None,
     static_q_len: int | None = None,
     pcp_chunk_size: int | None = None,
-    cp_gathered_stripes: int | None = None,
     bq_sz,  # bq fetch size
     bkv_sz,  # bkv prefetch size
     bq_csz,  # bq compute size
@@ -440,27 +439,8 @@ def _ragged_paged_attention_kernel_loop(
             return q_pos_offset_ref[seq_idx]
         return 0
 
-    def get_kv_cache_global_len(seq_idx):
-        return kv_lens_ref[seq_idx] - get_kv_new_len(seq_idx)
-
-    def get_stripe_stride(seq_idx):
-        # Per-stripe walk length: the stripe's valid token count rounded up to
-        # a whole number of pages.  Dynamic (depends on the cache length) so
-        # the walk stays COMPACT -- we never walk a stripe's unused capacity.
-        # The wrapper builds page_indices with this exact same stride.
-        global_len = get_kv_cache_global_len(seq_idx)
-        per_stripe = ((global_len + cp_gathered_stripes - 1) //
-                      cp_gathered_stripes)
-        return ((per_stripe + page_size - 1) // page_size) * page_size
-
     def get_kv_cache_len_local(seq_idx):
-        global_len = get_kv_cache_global_len(seq_idx)
-        if cp_gathered_stripes is not None:
-            # Gathered mode: this rank holds ALL cp_gathered_stripes stripes,
-            # concatenated stripe-major with a compact per-stripe stride.  The
-            # kernel walks every stripe in ONE pass; per-slot validity is
-            # applied by the stripe mask in the attention body.
-            return get_stripe_stride(seq_idx) * cp_gathered_stripes
+        global_len = kv_lens_ref[seq_idx] - get_kv_new_len(seq_idx)
         return get_cp_local_size(global_len)
 
     def get_start_bkv_idx(seq_idx):
@@ -615,26 +595,6 @@ def _ragged_paged_attention_kernel_loop(
             mask = mask_and(mask, k_span < kv_cache_len_local_int)
             v = jnp.where(v_span < kv_cache_len_local_int, v,
                           jnp.array(0.0, dtype=v.dtype))
-            if cp_gathered_stripes is not None:
-                # Stripes are concatenated stripe-major on the page axis, so
-                # walked slot p lies in stripe j = p // L at local slot
-                # s = p % L, where L = pages_per_stripe * page_size is the
-                # per-stripe slot stride.  The cache is round-robin striped
-                # per token, so that slot holds global token g = s*stripes + j,
-                # valid iff g < global cache len.  L is a static power of two
-                # in practice, so the div/mod lower to shifts.
-                gsz = jnp.array(cp_gathered_stripes, int_ty)
-                lsz = get_stripe_stride(seq_idx).astype(int_ty)
-                glob_int = get_kv_cache_global_len(seq_idx).astype(int_ty)
-
-                def _stripe_valid(span):
-                    j = span // lsz
-                    s = span - j * lsz
-                    return s * gsz + j < glob_int
-
-                mask = mask_and(mask, _stripe_valid(k_span))
-                v = jnp.where(_stripe_valid(v_span), v,
-                              jnp.array(0.0, dtype=v.dtype))
 
         if mask is not None:
             s = jnp.where(mask, s, jnp.array(mask_value, dtype=s.dtype))
@@ -2019,7 +1979,6 @@ def get_default_block_sizes(
         "write_last_seq_only",
         "cp_group_size",
         "pcp_chunk_size",
-        "cp_gathered_stripes",
     ),
     donate_argnames="kv_cache",
 )
@@ -2042,7 +2001,6 @@ def ragged_paged_attention(
     cp_group_size: int | None = None,
     q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs]
     pcp_chunk_size: int | None = None,
-    cp_gathered_stripes: int | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
     write_last_seq_only: bool = False,
@@ -2352,7 +2310,6 @@ def ragged_paged_attention(
                 v_scale=v_scale,
                 static_q_len=static_q_len,
                 pcp_chunk_size=pcp_chunk_size,
-                cp_gathered_stripes=cp_gathered_stripes,
                 bq_sz=bq_sz,
                 bkv_sz=bkv_sz,
                 bq_csz=bq_csz,
