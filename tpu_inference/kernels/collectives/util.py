@@ -20,7 +20,7 @@ def local_barrier(left_neighbor, right_neighbor, double_barrier=True):
   """
     barrier_sem = pltpu.get_barrier_semaphore()
     for neighbor in [left_neighbor, right_neighbor]:
-        pltpu.semaphore_signal(
+        pl.semaphore_signal(
             barrier_sem,
             inc=1,
             device_id=(neighbor, ),
@@ -38,7 +38,7 @@ def local_barrier(left_neighbor, right_neighbor, double_barrier=True):
                            second_barrier=pltpu.SemaphoreType.REGULAR)
         def _(second_barrier):
             for neighbor in [left_neighbor, right_neighbor]:
-                pltpu.semaphore_signal(
+                pl.semaphore_signal(
                     second_barrier,
                     inc=1,
                     device_id=(neighbor, ),
