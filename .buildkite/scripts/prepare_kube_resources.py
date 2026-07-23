@@ -73,7 +73,7 @@ def prepare_model(name: str, spec: dict[str, Any], cache_root: Path) -> dict[str
     }
 
 
-def prepare_dataset(name: str, spec: dict[str, Any], cache_root: Path) -> dict[str, str]:
+def prepare_dataset(name: str, spec: dict[str, Any], cache_root: Path) -> dict[str, Any]:
     relative = spec.get("destination")
     expected_sha = spec.get("sha256")
     prepare_script = spec.get("prepare_script")
@@ -97,11 +97,29 @@ def prepare_dataset(name: str, spec: dict[str, Any], cache_root: Path) -> dict[s
         destination.unlink(missing_ok=True)
         raise ValueError(
             f"dataset {name!r} checksum mismatch: expected {expected_sha}, got {actual_sha}")
-    return {
+    result = {
         "name": name,
         "path": str(destination),
         "sha256": actual_sha,
     }
+    nltk_resources = spec.get("nltk_resources", [])
+    if not isinstance(nltk_resources, list) or not all(
+            isinstance(resource, str) and resource for resource in nltk_resources):
+        raise ValueError(f"dataset {name!r} nltk_resources must be a list of names")
+    if nltk_resources:
+        import nltk
+
+        nltk_root = cache_root / "nltk_data"
+        nltk_root.mkdir(parents=True, exist_ok=True)
+        for resource in nltk_resources:
+            nltk.download(
+                resource,
+                download_dir=str(nltk_root),
+                quiet=False,
+                raise_on_error=True,
+            )
+        result["nltk_resources"] = nltk_resources
+    return result
 
 
 def parse_gcs_uri(uri: str) -> tuple[str, str]:
@@ -207,6 +225,15 @@ def new_cache_files(cache_path: Path, preparation_manifest: dict[str, Any]) -> l
     ]
 
 
+def result_for_log(result: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact copy that does not print every baseline cache path."""
+    summary = dict(result)
+    baseline = summary.pop("baseline_cache_files", None)
+    if isinstance(baseline, list):
+        summary["baseline_cache_file_count"] = len(baseline)
+    return summary
+
+
 def publish_new_cache_files(
     cache_path: Path,
     preparation_manifest: dict[str, Any],
@@ -289,7 +316,7 @@ def main() -> int:
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"resource preparation failed: {error}", file=sys.stderr)
         return 1
-    print(json.dumps(result, indent=2, sort_keys=True))
+    print(json.dumps(result_for_log(result), indent=2, sort_keys=True))
     return 0
 
 

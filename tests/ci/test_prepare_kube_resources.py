@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 
 import pytest
@@ -107,6 +108,34 @@ def test_prepare_dataset_reuses_verified_file(tmp_path, monkeypatch):
     assert result["sha256"] == spec["sha256"]
 
 
+def test_prepare_dataset_installs_declared_nltk_assets_when_file_is_cached(
+        tmp_path, monkeypatch):
+    content = b"verified dataset"
+    destination = tmp_path / "datasets" / "sample.bin"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(content)
+    downloads = []
+    monkeypatch.setitem(
+        sys.modules,
+        "nltk",
+        SimpleNamespace(download=lambda name, **kwargs: downloads.append(
+            (name, kwargs))),
+    )
+    spec = {
+        "destination": "datasets/sample.bin",
+        "prepare_script": "unused",
+        "sha256": _MODULE.hashlib.sha256(content).hexdigest(),
+        "nltk_resources": ["punkt", "punkt_tab"],
+    }
+
+    result = _MODULE.prepare_dataset("sample", spec, tmp_path)
+
+    assert result["nltk_resources"] == ["punkt", "punkt_tab"]
+    assert [name for name, _ in downloads] == ["punkt", "punkt_tab"]
+    assert all(call["download_dir"] == str(tmp_path / "nltk_data")
+               for _, call in downloads)
+
+
 class _FakeUploadBlob:
 
     def __init__(self, name, uploads):
@@ -167,3 +196,15 @@ def test_publish_without_prefix_is_a_dry_run(tmp_path):
         "write_prefix": None,
         "dry_run": True,
     }
+
+
+def test_result_for_log_summarizes_baseline_without_mutating_manifest():
+    result = {
+        "models": [],
+        "baseline_cache_files": ["a", "nested/b"],
+    }
+
+    summary = _MODULE.result_for_log(result)
+
+    assert summary == {"models": [], "baseline_cache_file_count": 2}
+    assert result["baseline_cache_files"] == ["a", "nested/b"]

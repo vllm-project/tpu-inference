@@ -510,6 +510,10 @@ verified destination; `prepare_kube_resources.py` owns hydration and produces a
 resolved manifest on the PVC. The current proof declares the three default
 MLPerf models and the `mlperf` dataset. `MLPERF_DATASET_PATH` lets the existing
 benchmark consume the staged dataset without knowing how it was downloaded.
+The dataset preparation also installs NLTK's `punkt` and `punkt_tab` resources
+under the same PVC. The prepared TPU step sets `HF_HUB_OFFLINE=1` and
+`TRANSFORMERS_OFFLINE=1`, turning an incomplete model preparation into a clear
+handoff failure instead of a hidden TPU-time download.
 
 Set `KUBE_CACHE_WRITE_PREFIX=gs://...` only when intentionally testing cache
 publication. If it is absent, the CPU finalizer reports the delta without
@@ -517,10 +521,13 @@ uploading. Publication uses create-only object generations, so concurrent jobs
 cannot replace an existing entry. A failed TPU step skips publication but still
 allows the cleanup step to delete the clone.
 
-The job-pod service account needs namespace-scoped `get`, `create`, and
-`delete` permissions on persistent volume claims. The control step will expose
-a clear HTTP 403 if that Role/RoleBinding is missing. Do not wait for the claim
-to become `Bound` in the control step: `premium-rwo` can use
+Apply `.buildkite/kubernetes/resource-pvc-rbac.yaml` once to the target cluster.
+It creates the dedicated `buildkite-resource-pvc-manager` service account with
+namespace-scoped `get`, `create`, and `delete` permissions on persistent volume
+claims. Only the PVC create/cleanup control pods select that account; TPU and
+ordinary CPU-preparation pods continue to use the unprivileged default. The
+control step exposes a clear HTTP 403 if that Role/RoleBinding is missing. Do
+not wait for the claim to become `Bound` in the control step: `premium-rwo` can use
 `WaitForFirstConsumer`, so the zone-pinned CPU preparation pod is what triggers
 binding in `southamerica-west1-a`.
 
@@ -622,6 +629,13 @@ runs only those files with `JAX_PLATFORMS=cpu`, no TPU device, and Docker
 networking disabled, then skips every standard TPU step. The same tests remain
 in their TPU shards until repeated CPU-only builds pass; this is deliberate
 shadowing rather than an immediate reduction in TPU coverage.
+
+The exact selector commit was validated by kube-dev build 40: 72 tests and 11
+subtests passed in 9.64 seconds with Docker networking disabled. Its enclosing
+Buildkite job took 14.5 seconds and started 0.6 seconds after the image became
+available. The remaining warning is deliberate evidence that
+`BUILDKITE_ANALYTICS_TOKEN` still needs to be provisioned before Test Engine
+history can be used.
 
 `select_kube_tests.py` and `test_ownership.json` implement the corresponding
 change selector in shadow mode. For example:

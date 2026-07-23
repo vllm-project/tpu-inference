@@ -2,6 +2,10 @@
   "datasets": {
     "mlperf": {
       "destination": "datasets/open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl",
+      "nltk_resources": [
+        "punkt",
+        "punkt_tab"
+      ],
       "prepare_script": ".buildkite/scripts/prepare_mlperf_dataset.sh",
       "sha256": "b64e66e54b6267f79eb4f9ccec52d466bab3ac94747ed258c3b0f337ed166fab"
     }

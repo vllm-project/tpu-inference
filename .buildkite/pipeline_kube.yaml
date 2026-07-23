@@ -145,6 +145,7 @@
   kubernetes:
     podSpec:
       terminationGracePeriodSeconds: 5
+      serviceAccountName: "buildkite-resource-pvc-manager"
       metadata:
         labels:
           app: "vllm-resource-control"
@@ -306,7 +307,6 @@ steps:
   - label: ":outbox_tray: Finalize compilation cache on CPU"
     key: "kube_resource_cpu_finalize"
     depends_on: "kube_e2e_mlperf_jax_vllm_prepared"
-    allow_dependency_failure: true
     if: build.env("KUBE_RESOURCE_PREP_POC") == "1"
     agents:
       queue: "kube"
