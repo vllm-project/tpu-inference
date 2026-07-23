@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import os
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -26,6 +27,55 @@ import torch
 import torch.nn
 import torchax
 import torchax.tensor as torchax_tensor
+torchax_tensor.Tensor.type_as = lambda self, other: self.to(dtype=other.dtype)
+
+import triton
+import vllm.triton_utils as triton_utils
+import vllm.triton_utils.importing as triton_importing
+
+_next_power_of_2 = lambda n: 1 if n <= 0 else 1 << (n - 1).bit_length()
+triton_importing.TritonPlaceholder.next_power_of_2 = staticmethod(_next_power_of_2)
+if not hasattr(triton, "next_power_of_2"):
+    setattr(triton, "next_power_of_2", _next_power_of_2)
+if hasattr(triton_utils, "triton") and not hasattr(triton_utils.triton, "next_power_of_2"):
+    setattr(triton_utils.triton, "next_power_of_2", _next_power_of_2)
+
+try:
+    import vllm.model_executor.layers.quantization.utils.fp8_utils as fp8_utils
+    import vllm.model_executor.models.deepseek_v2 as deepseek_v2
+    def _pure_per_token_group_quant_fp8(x, group_size, eps=1e-10, dtype=None, column_major_scales=False, **kwargs):
+        orig_shape = x.shape
+        x_reshaped = x.reshape(-1, group_size)
+        fp8_max = 448.0
+        scale = torch.clamp(x_reshaped.abs().max(dim=-1, keepdim=True).values / fp8_max, min=eps)
+        target_dtype = dtype if dtype is not None else (torch.float8_e4m3fn if hasattr(torch, "float8_e4m3fn") else torch.int8)
+        x_q = (x_reshaped / scale).to(target_dtype)
+        x_q = x_q.reshape(orig_shape)
+        if column_major_scales:
+            scale = scale.reshape(orig_shape[:-1] + (orig_shape[-1] // group_size,)).transpose(-1, -2)
+        else:
+            scale = scale.reshape(orig_shape[:-1] + (orig_shape[-1] // group_size,))
+        return x_q, scale
+    fp8_utils.per_token_group_quant_fp8 = _pure_per_token_group_quant_fp8
+    if hasattr(deepseek_v2, "per_token_group_quant_fp8"):
+        deepseek_v2.per_token_group_quant_fp8 = _pure_per_token_group_quant_fp8
+except Exception:
+    pass
+
+try:
+    import vllm.model_executor.model_loader.weight_utils as weight_utils
+    _orig_init_single = weight_utils.initialize_single_dummy_weight
+    def _safe_init_single_dummy_weight(param, low=0.0, high=1.0, seed=None):
+        if param.dtype in (getattr(torch, "float8_e4m3fn", None), getattr(torch, "float8_e5m2", None)):
+            with torch.no_grad():
+                dummy = (torch.rand(param.shape, device=param.device, dtype=torch.bfloat16) * (high - low) + low).to(param.dtype)
+                param.data.copy_(dummy)
+        else:
+            _orig_init_single(param, low, high, seed)
+    weight_utils.initialize_single_dummy_weight = _safe_init_single_dummy_weight
+except Exception:
+    pass
+
 import vllm.envs as vllm_envs
 from flax.typing import PRNGKey
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -72,8 +122,6 @@ from tpu_inference.runner.lora_utils import replace_lora_metadata
 from tpu_inference.runner.mm_encoder_jit_manager import (
     MMEncoderJITManager, maybe_create_mm_encoder_jit_manager)
 
-torchax_tensor.Tensor.type_as = lambda self, other: self.to(dtype=other.dtype)
-
 logger = init_logger(__name__)
 
 
@@ -104,17 +152,6 @@ class _VllmRunner(torch.nn.Module):
         return self.vllm_model.compute_logits(hidden_state)
 
 
-def patch_deepseek_indexer():
-    try:
-        import vllm.model_executor.models.deepseek_v2 as ds2_models
-
-        from tpu_inference.layers.vllm.custom_ops.deepseek_v2_indexer import \
-            VllmIndexer
-        ds2_models.Indexer = VllmIndexer
-    except ImportError:
-        return
-
-
 class VllmModelWrapper:
     """ Wraps a vLLM Pytorch model and let it run on the JAX engine. """
 
@@ -136,7 +173,6 @@ class VllmModelWrapper:
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
-        patch_deepseek_indexer()
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
@@ -222,6 +258,29 @@ class VllmModelWrapper:
             [0]) if not vllm_envs.VLLM_TPU_USING_PATHWAYS else nullcontext()
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
+
+        num_layers = getattr(self.vllm_config.model_config.hf_config, "num_hidden_layers", None)
+        if num_layers is not None and num_layers < 47:
+            logger.info(f"Model num_hidden_layers is {num_layers}: filtering weight loading for truncated model.")
+            try:
+                from vllm.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM
+                _orig_load_weights = DeepseekV2ForCausalLM.load_weights
+                def _truncated_load_weights(self_model, weights):
+                    filtered_weights = []
+                    for name, loaded_weight in weights:
+                        if "layers." in name:
+                            parts = name.split(".")
+                            try:
+                                idx_pos = parts.index("layers") + 1
+                                if int(parts[idx_pos]) >= num_layers:
+                                    continue
+                            except (ValueError, IndexError):
+                                pass
+                        filtered_weights.append((name, loaded_weight))
+                    return _orig_load_weights(self_model, filtered_weights)
+                DeepseekV2ForCausalLM.load_weights = _truncated_load_weights
+            except Exception as e:
+                logger.warning(f"Could not patch DeepseekV2ForCausalLM.load_weights: {e}")
 
         from vllm.platforms import current_platform
         with load_context, jax_context, patch.object(

@@ -61,29 +61,14 @@ DEFAULT_KV_CACHE_LAYOUT = "NHD"
 
 
 def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
-    try:
-        from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
-        is_ds_v2 = isinstance(attn_module, DeepseekV32IndexerCache)
-    except ImportError:
-        is_ds_v2 = False
-
-    return is_ds_v2 or isinstance(
-        attn_module, DeepseekV4IndexerCache) or isinstance(
-            attn_module, DeepseekV4SWACache) or isinstance(
-                attn_module, DeepseekV4Attention) or isinstance(
-                    attn_module, CompressorStateCache)
+    return isinstance(attn_module, DeepseekV4IndexerCache) or isinstance(
+        attn_module, DeepseekV4SWACache) or isinstance(
+            attn_module, DeepseekV4Attention) or isinstance(
+                attn_module, CompressorStateCache)
 
 
 def is_ds_v4(vllm_config):
-    architectures = vllm_config.model_config.architectures
-    return any(
-        arch in architectures
-        for arch in (
-            "DeepseekV4ForCausalLM",
-            "DeepseekV2ForCausalLM",
-            "GlmMoeDsaForCausalLM",
-        )
-    )
+    return "DeepseekV4ForCausalLM" in (vllm_config.model_config.architectures)
 
 
 class KVCacheManager:
@@ -632,14 +617,7 @@ class KVCacheManager:
             logger.warning(f"Compilation num_layers = {len(layers)}")
 
             for layer_name, attn_module in layers.items():
-                if isinstance(attn_module, MambaBase):
-                    spec = attn_module.get_kv_cache_spec(
-                        self.runner.vllm_config)
-                    if spec is not None:
-                        kv_cache_spec[layer_name] = spec
-                    continue
-
-                if is_cache_for_ds_v4(attn_module):
+                if hasattr(attn_module, "get_kv_cache_spec"):
                     spec = attn_module.get_kv_cache_spec(
                         self.runner.vllm_config)
                     if spec is not None:
@@ -649,8 +627,8 @@ class KVCacheManager:
                 if disable_sliding_window:
                     attn_module.sliding_window = None
 
-                if (kv_tgt_layer :=
-                        attn_module.kv_sharing_target_layer_name) is not None:
+                if (kv_tgt_layer := getattr(
+                        attn_module, "kv_sharing_target_layer_name", None)) is not None:
                     # The layer doesn't need its own KV cache and will use that of
                     # the target layer. We skip creating a KVCacheSpec for it, so
                     # that KV cache management logic will act as this layer does
