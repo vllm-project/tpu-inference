@@ -1608,16 +1608,12 @@ def _mla_ragged_paged_attention_kernel(
                           sz=sz,
                           vmem_ref=vmem_ref,
                           sem=sem):
-                    if not wait:
-                        _async_copy(
-                            topk_indices_ref.at[pl.ds(q_len_start, sz)],
-                            vmem_ref.at[pl.ds(0, sz)],
-                            sem,
-                            wait=False,
-                        )
-                    else:
-                        dst = vmem_ref.at[pl.ds(0, sz)]
-                        _async_copy(src=dst, dst=dst, sem=sem, wait=True)
+                    _async_copy(
+                        topk_indices_ref.at[pl.ds(q_len_start, sz)],
+                        vmem_ref.at[pl.ds(0, sz)],
+                        sem,
+                        wait,
+                    )
 
     # TODO(b/506245022): Split out the KV handling functions into separate files.
     if not transpose_kv_cache:
