@@ -81,7 +81,8 @@ printenv
 
 # Access shared benchmarking functionality
 # shellcheck disable=SC1091
-source "$(dirname "$0")/bench_utils.sh"
+mlperf_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$mlperf_script_dir/bench_utils.sh"
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -150,9 +151,8 @@ if [ -z "$dataset_path" ]; then
     dataset_path="$root_dir/open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
     EXPECTED_SHA256="b64e66e54b6267f79eb4f9ccec52d466bab3ac94747ed258c3b0f337ed166fab"
 
-    mlperf_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     "$mlperf_script_dir/../../../.buildkite/scripts/prepare_mlperf_dataset.sh" \
-        "$dataset_path" "$EXPECTED_SHA256"
+        "$dataset_path" "$EXPECTED_SHA256" || exit 1
 fi
 
 if [ "$use_dummy_weights" = true ]; then

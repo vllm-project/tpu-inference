@@ -36,6 +36,13 @@ commits. The commit-specific image remains immutable; only its construction is
 incremental. Cache-mode cleanup prunes unused BuildKit records older than seven
 days by default so the persistent builder is not an unbounded cache.
 
+The first measured reuse was kube-dev build 43. Its image job took 1m 12.6s,
+down from 7m 45.7s for the immediately preceding no-cache build 42. BuildKit
+reported cache hits for stages 2 through 18, including the vLLM checkout/build
+and dependency installation; only the current source copy and editable install
+reran. The Docker build portion itself completed in about 41 seconds, with the
+remainder covering verification and registry publication.
+
 ## Cluster, queue, and storage topology
 
 A GKE cluster cannot place node pools in two regions. Run one Agent Stack
