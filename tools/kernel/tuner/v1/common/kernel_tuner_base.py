@@ -12,15 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
-from enum import Enum
 
+import jax
 import yaml
+
+# isort: off
+from tools.kernel.tuner.v1.common.tuner_datatypes import (
+    RunConfig, TunableParams, TunerConfig, TuningCase, TuningKey, TuningStatus)
+# isort: on
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -35,83 +38,6 @@ def _literal_representer(dumper, data):
 
 
 yaml.add_representer(LiteralString, _literal_representer)
-
-
-@dataclass
-class TuningKey:
-    # Specify the key for tuning case
-    pass
-
-
-@dataclass
-class TunableParams:
-    # Specify the tiles for tuning case
-    pass
-
-
-class TuningStatus(Enum):
-    SUCCESS = 'SUCCESS'
-    FAILED_OOM = 'FAILED_OOM'
-    UNKNOWN_ERROR = 'UNKNOWN_ERROR'
-    SKIPPED = 'SKIPPED'
-
-
-class TuningCase:
-
-    def __init__(self,
-                 tuning_key: TuningKey,
-                 tunable_params: TunableParams,
-                 is_baseline: bool = False):
-        self.tuning_key = tuning_key
-        self.tunable_params = tunable_params
-        self.is_baseline = is_baseline  # can be used to mark whether this case is the baseline case for the tuning key, which can be used for comparison in the analysis.
-
-    def __str__(self):
-        return json.dumps({
-            'tuning_key': asdict(self.tuning_key),
-            'tunable_params': asdict(self.tunable_params),
-            'is_baseline': self.is_baseline
-        })
-
-    @classmethod
-    def from_string(cls, string, tuning_key_class, tunable_params_class):
-        data = json.loads(string)
-        tuning_key = tuning_key_class(**data['tuning_key'])
-        tunable_params = tunable_params_class(**data['tunable_params'])
-        case = TuningCase(tuning_key, tunable_params)
-        case.is_baseline = data.get('is_baseline', False)
-        return case
-
-
-@dataclass
-class TunerConfig:
-    tuning_key_class: any = None
-    tunable_params_class: any = None
-    kernel_tuner_name: str = None
-    # When support autotune and run_config.autotune_mode is True,
-    # the kernel tuner will read the cases from spanner using the case_set_id and kernel_tuner_name
-    support_autotune: bool = False
-    support_bayesian_optimization: bool = False
-
-
-@dataclass
-class RunConfig:
-    case_set_id: str = None
-    run_id: str = None
-    case_set_desc: str = None
-    tpu_version: str = None
-    tpu_cores: int = None
-    tpu_queue_multi: str = None
-    run_locally: bool = False
-    job_priority: int = -10
-    max_execution_minutes: int = 20
-    job_bucket_size: int = 100
-    gcp_project_id: str = None
-    spanner_instance_id: str = None
-    spanner_database_id: str = None
-    worker_id: str = None
-    autotune_mode: bool = False
-    debug: bool = False
 
 
 class KernelTunerBase(ABC):
@@ -143,7 +69,8 @@ class KernelTunerBase(ABC):
         if run_config.run_locally:
             from tools.kernel.tuner.v1.storage_management.local_db_manager import \
                 LocalDbManager
-            self.storage_manager = LocalDbManager()
+            self.storage_manager = LocalDbManager(
+                db_path=f'/tmp/kernel_tuner_runner_{run_config.case_set_desc}')
         else:
             from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
                 SpannerStorageManager
@@ -156,6 +83,9 @@ class KernelTunerBase(ABC):
         self.tuner_config = tuner_config
         self.run_config = run_config
         self.worker_id = run_config.worker_id or 'unknown_worker'
+        self.xprof_dir = os.path.join("/tmp/kernel_tuning",
+                                      self.tuner_config.kernel_tuner_name,
+                                      "xprof")
 
     def _init_case_set(self) -> bool:
         """Initialize the case set which will be used for tuning. The case set will be written to the storage manager. This will be called when the caseset_id is new.
@@ -301,7 +231,7 @@ class KernelTunerBase(ABC):
                     0,  # invalid case count, doesn't matter here
                     duration_sec * 1.0)
                 logger.info(
-                    f"\nComplete Generate Tuning Cases for {self.run_config.case_set_id}, Valid Cases: {total_cases} | Duration: {duration_sec}s"
+                    f"Complete Generate Tuning Cases for {self.run_config.case_set_id}, Valid Cases: {total_cases} | Duration: {duration_sec}s"
                 )
             # read back all the cases and partition them into buckets for parallel execution
             cases = self.storage_manager.get_all_cases(
@@ -363,10 +293,7 @@ class KernelTunerBase(ABC):
                     'rm -f /tmp/kernel_tuning/generated_pipeline.yml'),
                 LiteralString(
                     '.buildkite/scripts/run_in_docker.sh bash -c \''
-                    'pip install --upgrade google-cloud-spanner && '
-                    'pip install --upgrade google-api-core && '
-                    'pip install --upgrade google-auth && '
-                    'pip install --upgrade absl-py && '
+                    'pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt tensorflow && '
                     'python -m tools.kernel.tuner.v1.kernel_tuner_runner '
                     f'--kernel_tuner_name={self.tuner_config.kernel_tuner_name} '
                     f'  --case_set_id={self.run_config.case_set_id} --run_id={self.run_config.run_id} '
@@ -538,6 +465,25 @@ class KernelTunerBase(ABC):
             "Specific kernel should implement this to call the kernl with the inputs from generate_inputs"
         )
 
+    def _cleanup_xprof_dir(self):
+        """Clean up the xprof directory to avoid interference from previous runs."""
+        if not os.path.isdir(self.xprof_dir):
+            return
+        try:
+            import shutil
+            for name in os.listdir(self.xprof_dir):
+                path = os.path.join(self.xprof_dir, name)
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    try:
+                        os.remove(path)
+                    except FileNotFoundError:
+                        pass
+        except Exception as e:
+            logger.warning(
+                f"Failed to clean up xprof dir {self.xprof_dir}: {e}")
+
     def measure_latency(self, begin_case_id: int, end_case_id: int):
         """Measure the latency of cases in the caseset with case_id in [begin_case_id, end_case_id). The latency of each case will be persisted in local file or database using storage_management module.
 
@@ -563,12 +509,14 @@ class KernelTunerBase(ABC):
         results_buffer = []
         bucket_fully_processed = True
         last_processed_case_id = begin_case_id - 1
+        all_processed_cases_status = []
         for cid in range(begin_case_id, end_case_id):
             time_elapsed_minutes = (time.perf_counter() -
                                     bucket_start_perf) / 60
             logger.info(
                 f"Worker [{worker_id}] Processing CaseId: {cid} in Bucket {bucket_id}, [{begin_case_id}-{end_case_id}) with elapsed time {time_elapsed_minutes:.2f} minutes."
             )
+            self._cleanup_xprof_dir()
             if not self.run_config.run_locally and (
                     time_elapsed_minutes
                     > self.run_config.max_execution_minutes
@@ -591,46 +539,102 @@ class KernelTunerBase(ABC):
                 self.tuner_config.tunable_params_class)
             tuning_key, tunable_params, _ = tuning_case.tuning_key, tuning_case.tunable_params, tuning_case.is_baseline
 
-            begin_case_id_time = time.perf_counter_ns()
-            # status can be SUCCESS, FAILED_OOM, UNKNOWN_ERROR.
-            status, warmup_ns, _ = self.run(tuning_key,
-                                            tunable_params,
-                                            iters=1)
-            if status != TuningStatus.SUCCESS:
+            # check whether tuning_key is same as last one and if last one is OOM, then we can skip
+            if any(tuning_key == k and s == TuningStatus.FAILED_OOM
+                   and p <= tunable_params
+                   for k, p, s in all_processed_cases_status):
+                logger.warning(
+                    f"Skipping CaseId {cid} with tuning key {tuning_key} and tunable params {tunable_params} because it is expected to fail with OOM based on previous cases."
+                )
                 results_buffer.append(
                     (self.run_config.case_set_id, self.run_config.run_id, cid,
-                     status.value, worker_id, 0, 0, 0,
+                     TuningStatus.SKIPPED.value, worker_id, 0, 0, 0,
                      self.storage_manager.get_timestamp_sec(),
                      self.run_config.tpu_queue_multi))
+                all_processed_cases_status.append(
+                    [tuning_key, tunable_params, TuningStatus.FAILED_OOM])
+                continue
+
+            begin_case_id_time = time.perf_counter_ns()
+
+            def run_and_record_failure(tuning_key,
+                                       tunable_params,
+                                       iters,
+                                       warmup_us=0):
+                status, avg_latency_ns, _ = self.run(tuning_key,
+                                                     tunable_params,
+                                                     iters=iters)
+                if status != TuningStatus.SUCCESS:
+                    results_buffer.append(
+                        (self.run_config.case_set_id, self.run_config.run_id,
+                         cid, status.value, worker_id, 0, warmup_us, 0,
+                         self.storage_manager.get_timestamp_sec(),
+                         self.run_config.tpu_queue_multi))
+                    all_processed_cases_status.append(
+                        [tuning_key, tunable_params, status])
+                return status, avg_latency_ns
+
+            # status can be SUCCESS, FAILED_OOM, UNKNOWN_ERROR.
+            status, warmup_ns = run_and_record_failure(tuning_key,
+                                                       tunable_params,
+                                                       iters=1)
+            if status != TuningStatus.SUCCESS:
                 logger.warning(
                     f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
                 )
                 continue
             warmup_us = int(warmup_ns // 1000)
 
-            status, average_latency_ns, _ = self.run(tuning_key,
-                                                     tunable_params,
-                                                     iters=10)
-            end_time = time.perf_counter_ns()
-            total_time = end_time - begin_case_id_time
+            measurement_iters = 100
+            if self.tuner_config.jit_kernel_pattern is not None:
+                with jax.profiler.trace(self.xprof_dir,
+                                        create_perfetto_link=False):
+                    status, average_latency_ns = run_and_record_failure(
+                        tuning_key,
+                        tunable_params,
+                        iters=measurement_iters,
+                        warmup_us=warmup_us)
+            else:
+                status, average_latency_ns = run_and_record_failure(
+                    tuning_key,
+                    tunable_params,
+                    iters=measurement_iters,
+                    warmup_us=warmup_us)
             if status != TuningStatus.SUCCESS:
-                results_buffer.append(
-                    (self.run_config.case_set_id, self.run_config.run_id, cid,
-                     status.value, worker_id, warmup_us, 0, 0,
-                     self.storage_manager.get_timestamp_sec(),
-                     self.run_config.tpu_queue_multi))
                 logger.warning(
-                    f"Case {cid} failed during main run with status: {status}. Total time spent: {total_time/1e9:.2f}s."
+                    f"Case {cid} failed during main run with status: {status}. Total time spent: {(time.perf_counter_ns() - begin_case_id_time)/1e9:.2f}s."
                 )
                 continue
 
-            average_latency_us = int(average_latency_ns // 1000)
-            total_time_us = int(total_time // 1000)
+            if self.tuner_config.jit_kernel_pattern is not None:
+                from tools.kernel.tuner.v1.common.utils import \
+                    find_events_by_pattern
+                matching_events, average_latency_us = find_events_by_pattern(
+                    self.xprof_dir, self.tuner_config.jit_kernel_pattern)
+                if len(matching_events) != measurement_iters:
+                    logger.fatal(
+                        f"Expected {measurement_iters} matching events for pattern {self.tuner_config.jit_kernel_pattern} in xprof, but found {len(matching_events)}. This may indicate an issue with the profiling or the pattern matching."
+                    )
+                    status = TuningStatus.XPROF_MEASUREMENT_ERROR
+                else:
+                    logger.info(
+                        f'Case {cid} average latency is {average_latency_us}us from xprof'
+                    )
+            else:
+                average_latency_us = int(average_latency_ns // 1000)
+                logger.info(
+                    f'Case {cid} average latency is {average_latency_us}us from timer'
+                )
+
+            total_time_us = int(
+                (time.perf_counter_ns() - begin_case_id_time) // 1000)
             results_buffer.append(
                 (self.run_config.case_set_id, self.run_config.run_id, cid,
                  status.value, worker_id, average_latency_us, warmup_us,
                  total_time_us, self.storage_manager.get_timestamp_sec(),
                  self.run_config.tpu_queue_multi))
+            all_processed_cases_status.append(
+                [tuning_key, tunable_params, status])
 
             if self.run_config.debug:
                 logger.info(
@@ -654,3 +658,4 @@ class KernelTunerBase(ABC):
         logger.info(
             f"Worker [{worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
         )
+        self._cleanup_xprof_dir()

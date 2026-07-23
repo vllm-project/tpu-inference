@@ -190,7 +190,7 @@ class QuantLinearConfig(CommonQuantLinearConfig):
         # Update weight_sharding and bias_sharding for 2D matmul compatibility
         if self.batch_features:
             self.weight_sharding = _to_partition_spec(
-                weight.get_metadata().get("sharding", ()))
+                weight.get_metadata().get("out_sharding", ()))
         else:
             self.weight_sharding = jax.sharding.PartitionSpec(
                 *(self.in_features_sharding + self.out_features_sharding))
