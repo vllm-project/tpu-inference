@@ -127,7 +127,11 @@ def calculate_block_sizes(
 
         # Calculate size bq & bkv arrays for a single buffer.
         bq_array_size = bq_sz * aligned_num_q_heads * aligned_head_dim
-        bkv_array_size = bkv_sz * aligned_num_kv_heads_x2 * aligned_head_dim
+        if serve_cfgs.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
+            bkv_array_size = ((bkv_sz + 2 * serve_cfgs.page_size) *
+                              aligned_num_kv_heads_x2 * aligned_head_dim)
+        else:
+            bkv_array_size = bkv_sz * aligned_num_kv_heads_x2 * aligned_head_dim
 
         # Get output buffer size as well - which has same size as query size.
         bo_array_size = bq_array_size
@@ -205,8 +209,9 @@ def calculate_block_sizes(
 
         # If current batch size triggers OOM, decrease batch size until the kernel
         # fits within VMEM limit.
-        while (calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz)
-               > capped_vmem_limit_bytes):
+        while (batch_size > 1
+               and calculate_vmem_usage(batch_size, n_buffer, bq_sz,
+                                        bkv_sz) > capped_vmem_limit_bytes):
             batch_size -= 1
 
         # As a last resort, attempt to decrease number of buffers to avoid OOM.
