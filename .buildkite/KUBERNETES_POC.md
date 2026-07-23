@@ -549,6 +549,26 @@ warm-node runs and compare only identical step commands.
 
 ## Success criteria and next improvements
 
+### Current assessment
+
+The POC is functionally promising but not yet decision-complete. Kubernetes has
+already demonstrated exact-commit images, elastic one-chip placement, correct
+single-host eight-chip topology, CPU-only fail-fast tests, and CPU-only cache
+and coverage work. During the busy comparison window, its pod provisioning was
+usually seconds to a few minutes while the same-time bare-metal nightly queues
+waited as long as an hour. The tradeoff is that model-heavy Kubernetes jobs
+still spend materially longer executing because a point-in-time golden clone
+does not yet have the persistent cache coverage accumulated by the bare-metal
+workers.
+
+The next architecture gate is therefore the cache feedback loop, not basic TPU
+scheduling. Before treating Kubernetes as faster or cheaper, validate the
+named-PVC CPU prepare/TPU run/CPU publish lifecycle, measure the number and size
+of new cache entries per test, and compact successful overlays into regional
+goldens. Also finish the current long-shard timing capture and repeat the
+current exact matrix; targeted repair builds prove individual fixes but do not
+replace a final end-to-end run.
+
 The POC is successful when:
 
 1. The default and expanded feasible-v6e matrices pass against a commit-specific
