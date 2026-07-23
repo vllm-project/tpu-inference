@@ -151,6 +151,30 @@ def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):
     assert envs.USE_MOE_EP_KERNEL is False
 
 
+@pytest.mark.parametrize("env_name", [
+    "TPU_OFFLOAD_SKIP_JAX_PRECOMPILE",
+    "TPU_OFFLOAD_DECODE_SAVE",
+    "TPU_OFFLOAD_BATCHED_SAVE",
+    "TPU_OFFLOAD_USE_UNPINNED_HOST",
+])
+def test_offload_boolean_env_vars_use_bool_parser(
+        monkeypatch: pytest.MonkeyPatch, env_name: str):
+    monkeypatch.setenv(env_name, "true")
+    assert getattr(envs, env_name) is True
+
+    monkeypatch.setenv(env_name, "False")
+    assert getattr(envs, env_name) is False
+
+    monkeypatch.setenv(env_name, "")
+    assert getattr(envs, env_name) is False
+
+    monkeypatch.setenv(env_name, "enabled")
+    with pytest.raises(
+            ValueError,
+            match=f"Invalid boolean value 'enabled' for {env_name}"):
+        getattr(envs, env_name)
+
+
 def test_boolean_env_vars_invalid_values(monkeypatch: pytest.MonkeyPatch):
     """Test that boolean env vars raise errors for invalid values"""
 
