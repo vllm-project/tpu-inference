@@ -281,6 +281,7 @@ fi
 
 PREFILL_LOG_TAIL_PID=""
 DECODE_LOG_TAIL_PID=""
+CLUSTER_LAUNCHER_PIDS=()
 
 stop_vllm_log_streaming() {
   if [[ -n "${PREFILL_LOG_TAIL_PID:-}" ]]; then
@@ -311,75 +312,26 @@ start_vllm_log_streaming() {
   DECODE_LOG_TAIL_PID=$!
 }
 
-cleanup_local_tpu_runtime() {
-  local grace_seconds="${TPU_CLEANUP_GRACE_SECONDS:-30}"
-  local settle_seconds="${TPU_RUNTIME_SETTLE_SECONDS:-30}"
-  local device
-  local runtime_changed=0
-  local -a fuser_cmd=(fuser)
-
-  [[ "$grace_seconds" =~ ^[0-9]+$ ]] || grace_seconds=30
-  [[ "$settle_seconds" =~ ^[0-9]+$ ]] || settle_seconds=30
-
-  if docker inspect node >/dev/null 2>&1; then
-    runtime_changed=1
-    echo "   -> Gracefully stopping vLLM and Ray in local node container..."
-    docker exec -i node bash -s -- "$grace_seconds" <<'EOF' >/dev/null 2>&1 || true
-grace_seconds=$1
-pkill -TERM -f '[v]llm serve|[A]PIServer' >/dev/null 2>&1 || true
-end_time=$((SECONDS + grace_seconds))
-while (( SECONDS < end_time )); do
-  pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || break
-  sleep 1
-done
-pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
-ray stop --force >/dev/null 2>&1 || true
-EOF
-  fi
-
-  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    fuser_cmd=(sudo -n fuser)
-  fi
-  for device in /dev/accel* /dev/vfio/[0-9]*; do
-    [[ -e "$device" ]] || continue
-    if "${fuser_cmd[@]}" "$device" >/dev/null 2>&1; then
-      runtime_changed=1
-      echo "   -> Force-releasing lingering TPU user on $device..."
-      "${fuser_cmd[@]}" -k -9 "$device" >/dev/null 2>&1 || true
-    fi
-  done
-
-  if [[ "${fuser_cmd[0]}" == "sudo" ]]; then
-    sudo -n rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
+run_host_script() {
+  local host=$1
+  shift
+  if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
+    bash -s -- "$@"
   else
-    rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
-  fi
-  if (( runtime_changed == 1 )); then
-    echo "   -> Waiting ${settle_seconds}s for the local TPU runtime to settle..."
-    sleep "$settle_seconds"
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" bash -s -- "$@"
   fi
 }
 
-cleanup_remote_tpu_runtime() {
-  local ip=$1
-  local grace_seconds="${TPU_CLEANUP_GRACE_SECONDS:-30}"
-  local settle_seconds="${TPU_RUNTIME_SETTLE_SECONDS:-30}"
+stop_tpu_runtime() {
+  local host=$1
+  local grace_seconds=$2
 
-  [[ "$grace_seconds" =~ ^[0-9]+$ ]] || grace_seconds=30
-  [[ "$settle_seconds" =~ ^[0-9]+$ ]] || settle_seconds=30
-
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
-    "bash -s -- '$grace_seconds' '$settle_seconds'" <<'EOF' || true
+  run_host_script "$host" "$grace_seconds" <<'EOF' >/dev/null
 grace_seconds=$1
-settle_seconds=$2
-runtime_changed=0
-
 if docker inspect node >/dev/null 2>&1; then
-  runtime_changed=1
-  echo "   -> Gracefully stopping vLLM and Ray in node container..."
   docker exec -i node bash -s -- "$grace_seconds" <<'INNER_EOF' >/dev/null 2>&1 || true
 grace_seconds=$1
-pkill -TERM -f '[v]llm serve|[A]PIServer' >/dev/null 2>&1 || true
+pkill -TERM -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
 end_time=$((SECONDS + grace_seconds))
 while (( SECONDS < end_time )); do
   pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || break
@@ -388,97 +340,169 @@ done
 pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
 ray stop --force >/dev/null 2>&1 || true
 INNER_EOF
+  docker rm -f node >/dev/null 2>&1 || true
 fi
+! docker inspect node >/dev/null 2>&1
+EOF
+}
 
+wait_for_cluster_launchers() {
+  local timeout=$1
+  local deadline=$((SECONDS + timeout))
+  local pid
+  local failed=0
+
+  for pid in "${CLUSTER_LAUNCHER_PIDS[@]}"; do
+    while kill -0 "$pid" >/dev/null 2>&1 && (( SECONDS < deadline )); do
+      sleep 1
+    done
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+      failed=1
+    fi
+    wait "$pid" >/dev/null 2>&1 || true
+  done
+  CLUSTER_LAUNCHER_PIDS=()
+  return "$failed"
+}
+
+verify_tpu_clean() {
+  local host=$1
+  local timeout=$2
+
+  run_host_script "$host" "$timeout" "$host" <<'EOF'
+timeout=$1
+host=$2
+force_after=$((SECONDS + 10))
+deadline=$((SECONDS + timeout))
+forced=0
 fuser_cmd=(fuser)
+rm_cmd=(rm -f)
 if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   fuser_cmd=(sudo -n fuser)
+  rm_cmd=(sudo -n rm -f)
 fi
-for device in /dev/accel* /dev/vfio/[0-9]*; do
-  [[ -e "$device" ]] || continue
-  if "${fuser_cmd[@]}" "$device" >/dev/null 2>&1; then
-    runtime_changed=1
-    echo "   -> Force-releasing lingering TPU user on $device..."
-    "${fuser_cmd[@]}" -k -9 "$device" >/dev/null 2>&1 || true
+
+while (( SECONDS < deadline )); do
+  device_busy=0
+  for device in /dev/accel* /dev/vfio/[0-9]*; do
+    [[ -e "$device" ]] || continue
+    "${fuser_cmd[@]}" "$device" >/dev/null 2>&1 && device_busy=1
+  done
+
+  if (( device_busy == 1 && forced == 0 && SECONDS >= force_after )); then
+    for device in /dev/accel* /dev/vfio/[0-9]*; do
+      [[ -e "$device" ]] || continue
+      "${fuser_cmd[@]}" -k -9 "$device" >/dev/null 2>&1 || true
+    done
+    forced=1
+    sleep 2
+    continue
   fi
+
+  if (( device_busy == 0 )); then
+    "${rm_cmd[@]}" /tmp/libtpu_lockfile >/dev/null 2>&1 || true
+  fi
+
+  if ! docker inspect node >/dev/null 2>&1 \
+    && ! pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 \
+    && (( device_busy == 0 )) \
+    && [[ ! -e /tmp/libtpu_lockfile ]] \
+    && { ! command -v ss >/dev/null 2>&1 || ! ss -ltnH | awk '$4 ~ /:(6379|8400|9400)$/ { found=1 } END { exit !found }'; }; then
+    exit 0
+  fi
+  sleep 2
 done
 
-if [[ "${fuser_cmd[0]}" == "sudo" ]]; then
-  sudo -n rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
-else
-  rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
-fi
-if (( runtime_changed == 1 )); then
-  echo "   -> Waiting ${settle_seconds}s for the TPU runtime to settle..."
-  sleep "$settle_seconds"
-fi
+echo "[cleanup] host ${host} is not clean" >&2
+docker ps --filter name='^/node$' --format 'container={{.Names}} status={{.Status}}' >&2 || true
+pgrep -af '[v]llm serve|[A]PIServer|[E]ngineCore' >&2 || true
+for device in /dev/accel* /dev/vfio/[0-9]*; do
+  [[ -e "$device" ]] || continue
+  "${fuser_cmd[@]}" -v "$device" >&2 || true
+done
+exit 1
 EOF
 }
 
 cleanup() {
-  local exit_code=$?
-  echo "🧹 Cleaning up containers on all hosts..."
+  local exit_code=${1:-0}
+  local grace_seconds="${TPU_CLEANUP_GRACE_SECONDS:-30}"
+  local verify_seconds="${TPU_CLEANUP_VERIFY_SECONDS:-120}"
+  local settle_seconds="${TPU_RUNTIME_SETTLE_SECONDS:-30}"
+  local failed=0
+  local ip
+  local pid
+  local -a cleanup_pids=()
+  local -a remote_hosts=()
 
+  [[ "$grace_seconds" =~ ^[0-9]+$ ]] || grace_seconds=30
+  [[ "$verify_seconds" =~ ^[0-9]+$ ]] || verify_seconds=120
+  [[ "$settle_seconds" =~ ^[0-9]+$ ]] || settle_seconds=30
+
+  echo "[cleanup] stopping disaggregated TPU runtimes"
   stop_vllm_log_streaming
-
-  # Capture server logs before removing containers.
-  echo "   -> Capturing server logs..."
-  docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
-  if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "rm -f /tmp/vllm_serve_decode.log; docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" || true
-    scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
-  fi
-
-  # Cleanup Prefill workers
-  for ip in "${PREFILL_WORKER_IPS[@]}"; do
-    echo "   -> Cleaning Prefill worker: $ip"
-    cleanup_remote_tpu_runtime "$ip"
-    echo "   -> Removing Prefill worker node container: $ip"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
-      "docker rm -f node >/dev/null 2>&1 || true" || true
-  done
-
-  # Cleanup Decode Head
-  if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
-    echo "   -> Cleaning Decode Head: $DECODE_HEAD_IP"
-    cleanup_remote_tpu_runtime "$DECODE_HEAD_IP"
-    echo "   -> Removing Decode Head node container: $DECODE_HEAD_IP"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
-      "docker rm -f node >/dev/null 2>&1 || true" || true
-  fi
-
-  # Cleanup Decode workers
-  for ip in "${DECODE_WORKER_IPS[@]}"; do
-    echo "   -> Cleaning Decode worker: $ip"
-    cleanup_remote_tpu_runtime "$ip"
-    echo "   -> Removing Decode worker node container: $ip"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
-      "docker rm -f node >/dev/null 2>&1 || true" || true
-  done
-
-  # Cleanup Prefill Head (Local Node)
-  echo "   -> Cleaning Prefill Head (Local)..."
-  cleanup_local_tpu_runtime
-  echo "   -> Removing Prefill Head node container..."
-  docker rm -f node >/dev/null 2>&1 || true
-
-  # Cleanup Local proxy/benchmark container
-  docker stop disagg-proxy-benchmark >/dev/null 2>&1 || true
   docker rm -f disagg-proxy-benchmark >/dev/null 2>&1 || true
 
-  if [ $exit_code -ne 0 ]; then
-    echo "--- 🚨 Script failed or timed out (Exit Code: $exit_code). Dumping logs..."
-    for log_file in "prefill.txt" "decode.txt" "proxy.txt" "correctness.txt" "benchmark.txt"; do
-      if [ -f "$LOG_DIR/$log_file" ] && [ -s "$LOG_DIR/$log_file" ]; then
-        echo "+++ 📄 Log: $log_file"
-        cat "$LOG_DIR/$log_file"
+  docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
+  if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
+      "rm -f /tmp/vllm_serve_decode.log; docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+    scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" \
+      "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
+  fi
+
+  for ip in "${PREFILL_WORKER_IPS[@]}" "${DECODE_HEAD_IP:-}" "${DECODE_WORKER_IPS[@]}"; do
+    [[ -n "$ip" && "$ip" != "$HEAD_INTERNAL_IP" ]] || continue
+    if [[ " ${remote_hosts[*]} " != *" ${ip} "* ]]; then
+      remote_hosts+=("$ip")
+    fi
+  done
+
+  stop_tpu_runtime "$HEAD_INTERNAL_IP" "$grace_seconds" &
+  cleanup_pids+=("$!")
+  for ip in "${remote_hosts[@]}"; do
+    stop_tpu_runtime "$ip" "$grace_seconds" &
+    cleanup_pids+=("$!")
+  done
+  for pid in "${cleanup_pids[@]}"; do
+    wait "$pid" || failed=1
+  done
+
+  wait_for_cluster_launchers "$grace_seconds" || failed=1
+
+  cleanup_pids=()
+  verify_tpu_clean "$HEAD_INTERNAL_IP" "$verify_seconds" &
+  cleanup_pids+=("$!")
+  for ip in "${remote_hosts[@]}"; do
+    verify_tpu_clean "$ip" "$verify_seconds" &
+    cleanup_pids+=("$!")
+  done
+  for pid in "${cleanup_pids[@]}"; do
+    wait "$pid" || failed=1
+  done
+
+  if (( failed == 0 && settle_seconds > 0 )); then
+    sleep "$settle_seconds"
+  fi
+
+  if (( exit_code != 0 )); then
+    echo "[cleanup] run failed with exit code ${exit_code}; recent logs follow" >&2
+    for log_file in prefill.txt decode.txt proxy.txt correctness.txt benchmark.txt; do
+      if [[ -s "$LOG_DIR/$log_file" ]]; then
+        echo "--- ${log_file} (last 30 lines)" >&2
+        tail -n 30 "$LOG_DIR/$log_file" >&2
       fi
     done
   fi
 
-  echo "✅ Cleanup complete."
+  if (( failed != 0 )); then
+    echo "[cleanup] failed; native multihost startup is unsafe" >&2
+    return 1
+  fi
+  echo "[cleanup] complete"
 }
-trap cleanup EXIT
+trap 'exit_code=$?; trap - EXIT; cleanup "$exit_code" || exit 1; exit "$exit_code"' EXIT
 
 wait_for_server_remote() {
   local host=$1
@@ -638,7 +662,7 @@ DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 
 # Clean up potential leftovers from previous runs
 echo "--- Cleaning up previous cluster state..."
-cleanup
+cleanup 0
 
 # -----------------------------------------------------------------
 # 1. Start Prefill Ray Cluster
@@ -661,6 +685,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
   -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" &
+CLUSTER_LAUNCHER_PIDS+=("$!")
 
 sleep 30
 
@@ -691,6 +716,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${PREFI
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE='${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}' \
   -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}'
 EOF
+    CLUSTER_LAUNCHER_PIDS+=("$!")
     sleep 15
 done
 
@@ -718,6 +744,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECOD
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
   -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}"
 EOF
+CLUSTER_LAUNCHER_PIDS+=("$!")
 
 sleep 30
 
@@ -748,6 +775,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECOD
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE='${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}' \
   -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}'
 EOF
+    CLUSTER_LAUNCHER_PIDS+=("$!")
     sleep 15
 done
 
