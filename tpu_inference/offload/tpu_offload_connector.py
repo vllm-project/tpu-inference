@@ -123,9 +123,16 @@ from vllm.v1.outputs import KVConnectorOutput
 from tpu_inference.offload.metrics import TPUKVCacheMetrics
 
 if TYPE_CHECKING:
+    from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
-    from vllm.forward_context import ForwardContext
+
+try:
+    import ray
+except ImportError:
+    ray = None
+
+from vllm.platforms import current_platform
 
 from tpu_inference import envs
 from tpu_inference.logger import init_logger
@@ -319,28 +326,43 @@ class KVOffloadConnectorStats(KVConnectorStats):
     """Container for transfer performance metrics"""
 
     def __post_init__(self):
+        self._process_index = None
         if not self.data:
             # Empty container init, no data is passed in.
             self.reset()
 
     def reset(self):
         # Must be serializable
-        self.data: dict[str, dict[str, list[int]]] = {
+        self.data: dict[str, dict[str, list[list[int]]]] = {
             "finished_save_chunks": dict(),
             "finished_load_chunks": dict(),
         }
 
+    @property
+    def process_index(self) -> int:
+        if getattr(self, "_process_index", None) is None:
+            try:
+                # Under JAX's multi-process SPMD model, each host node runs its own Python process.
+                # Since Ray launches exactly one worker process (RayWorkerWrapper) per node,
+                # jax.process_index() acts as a unique ID mapping 1:1 to each Ray worker actor.
+                self._process_index = jax.process_index()
+            except Exception:
+                self._process_index = 0
+        return self._process_index
+
     def record_save(self, req: ReqId, saved_chunk_ids: list[int]):
         if req not in self.data["finished_save_chunks"]:
             self.data["finished_save_chunks"][req] = []
+        process_index = self.process_index
         self.data["finished_save_chunks"][req].extend(
-            copy.deepcopy(saved_chunk_ids))
+            [[chunk_id, process_index] for chunk_id in saved_chunk_ids])
 
     def record_load(self, req: ReqId, loaded_chunk_ids: list[int]):
         if req not in self.data["finished_load_chunks"]:
             self.data["finished_load_chunks"][req] = []
+        process_index = self.process_index
         self.data["finished_load_chunks"][req].extend(
-            copy.deepcopy(loaded_chunk_ids))
+            [[chunk_id, process_index] for chunk_id in loaded_chunk_ids])
 
     def clone_and_reset(self) -> "KVOffloadConnectorStats":
         old = copy.copy(self)
@@ -365,6 +387,9 @@ class KVOffloadConnectorStats(KVConnectorStats):
             KVConnectorStats: The updated instance (self) containing the aggregated stats.
         """
         if isinstance(other, KVOffloadConnectorStats):
+            logger.debug(
+                f"Before Aggregating KVOffloadConnectorStats: self.data={self.data}, other.data={other.data}"
+            )
             other_saves = other.data.get("finished_save_chunks", {})
             for k, v in other_saves.items():
                 if k not in self.data["finished_save_chunks"]:
@@ -376,6 +401,10 @@ class KVOffloadConnectorStats(KVConnectorStats):
                 if k not in self.data["finished_load_chunks"]:
                     self.data["finished_load_chunks"][k] = []
                 self.data["finished_load_chunks"][k].extend(v)
+
+            logger.debug(
+                f"After Aggregating KVOffloadConnectorStats: self.data={self.data}"
+            )
 
         return self
 
@@ -426,6 +455,20 @@ class TPUOffloadConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         logger.info("TPUOffloadConnector: Entering __init__")
+        # Check DP/PP support
+        parallel_config = vllm_config.parallel_config
+        pipeline_parallel_size = getattr(parallel_config,
+                                         "pipeline_parallel_size", 1)
+        data_parallel_size = getattr(parallel_config, "data_parallel_size", 1)
+        if pipeline_parallel_size > 1:
+            raise ValueError(
+                "Pipeline Parallelism (PP) is not supported with KV cache offloading yet. "
+                f"pipeline_parallel_size={pipeline_parallel_size}")
+        if data_parallel_size > 1:
+            raise ValueError(
+                "Data Parallelism (DP) is not supported with KV cache offloading yet. "
+                f"data_parallel_size={data_parallel_size}")
+
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = \
                 TPUOffloadConnectorScheduler(vllm_config)
@@ -512,17 +555,18 @@ class TPUOffloadConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_runner(runner)
 
-    def start_load_kv(self, fwd_ctx: "ForwardContext") -> None:
+    def start_load_kv(self, fwd_ctx: "ForwardContext", **kwargs) -> None:
         """Starts loading the KV cache for the given requests."""
         assert self.connector_worker is not None
-        self.connector_worker.start_load_kv(fwd_ctx)
+        self.connector_worker.start_load_kv(fwd_ctx, **kwargs)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         logger.info("TPUOffloadConnector: Entering wait_for_layer_load")
         """TPU connector doesn't support layer wise load."""
         pass
 
-    def save_kv_layer(self, **kwargs) -> None:
+    def save_kv_layer(self, layer_name: str, kv_layer: Any, attn_metadata: Any,
+                      **kwargs) -> None:
         logger.info("TPUOffloadConnector: Entering save_kv_layer")
         """TPU connector doesn't support layer wise save."""
         pass
@@ -600,6 +644,15 @@ class TPUOffloadConnectorScheduler():
         self._reqs_being_saved = defaultdict[ReqId, set[CpuChunkId]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[CpuChunkId]](set)
 
+        # The number of TP (Tensor Parallel) worker actors inside the last pipeline parallel stage.
+        self.num_tp_workers = self._get_num_tp_workers()
+
+        # Persistent counters tracking how many unique workers have finished a chunk.
+        # Staging slots are only freed when the count reaches `self.num_tp_workers`.
+        # Format: {chunk_id: set(process_index)}
+        self._save_chunk_completion_counts = defaultdict(set)
+        self._load_chunk_completion_counts = defaultdict(set)
+
         model_name = self.vllm_config.model_config.model
 
         self.decode_save = envs.TPU_OFFLOAD_DECODE_SAVE
@@ -630,6 +683,156 @@ class TPUOffloadConnectorScheduler():
             f"decode_save={self.decode_save}, "
             f"partial_block_save_behavior={self.partial_block_save_behavior}, "
             f"num_staging_blocks={self.num_staging_blocks}.")
+
+    def _get_num_tp_workers(self) -> int:
+        r"""Calculates the number of Tensor Parallel (TP) workers (host-level processes) in the last pipeline stage.
+
+        Terminology & Architecture Notes:
+        1. Ray Actor (Worker Actor): In vLLM, distributed workers are instantiated
+           as remote Ray Actors (processes running `RayWorkerWrapper`).
+        2. TPU Worker: In a multi-host TPU environment executing in SPMD mode, there is
+           exactly one worker actor process (Ray Actor) per host node. Thus, the total
+           number of worker actors in the cluster equals `num_nodes`.
+        3. TP (Tensor Parallel) Worker: Under Pipeline Parallelism (PP), the worker actors
+           are divided into `pp_size` stages. Within each stage, they run in a tensor-parallel
+           fashion. Therefore, each stage contains `num_nodes // pp_size` worker actors.
+           Note that this represents the process-level (or host-level) TP size per stage.
+           The physical device-level TP size (the total number of TPU cores/devices partitioning
+           the tensors per stage) is this host count multiplied by the number of TPU devices
+           per host node.
+
+        Illustrative Example: TP, PP, and KV Cache Chunk Layout
+        =======================================================
+        Suppose we are running a large model across a distributed TPU cluster with the
+        following configuration:
+
+        Parameter           | Value | Description
+        -------------------------------------------------------------------------------
+        num_nodes           | 4     | 4 Ray Worker Actors, each mapped 1-to-1 to Host Node 0-3
+        devices_per_node    | 8     | 8 TPU devices per Host (4 TPU v7x chips, 2 cores/chip)
+        pp_size             | 2     | 2 Pipeline Parallel stages (Stage 0 and Stage 1)
+        total_layers        | 32    | Total model layers (Layer 0 to Layer 31)
+
+        Cluster Segmentation:
+        ---------------------
+        Stage 0 (Layers 0 to 15): Handled by Node 0 and Node 1 (Ray Actors 0 & 1).
+        Stage 1 (Layers 16 to 31): Handled by Node 2 and Node 3 (Ray Actors 2 & 3).
+
+        Visual Architecture Layout:
+        ---------------------------
+        Within each pipeline stage, the nodes execute in a Tensor-Parallel (TP) fashion
+        across their combined TPU chips. For each stage, the physical TP size is:
+
+        TP Size per Stage = (num_nodes // pp_size) * devices_per_node = 2 * 8 = 16 TPU Devices
+
+                                  [ vLLM Driver Process ]
+                                             │
+                     ┌───────────────────────┴───────────────────────┐
+                     ▼ (Stage 0: Layers 0-15)                        ▼ (Stage 1: Layers 16-31)
+            ┌─────────────────────────────────┐             ┌─────────────────────────────────┐
+            │          PP STAGE 0             │             │          PP STAGE 1             │
+            ├────────────────├────────────────┤             ├────────────────├────────────────┤
+            │ Node 0 (Actor0)│ Node 1 (Actor1)│             │ Node 2 (Actor2)│ Node 3 (Actor3)│
+            ├────────────────├────────────────┤             ├────────────────├────────────────┤
+            │Devices 0 to 7  │Devices 8 to 15 │             │Devices 0 to 7  │Devices 8 to 15 │
+            └────────────────┴────────────────┘             └────────────────┴────────────────┘
+
+        How a KV Cache Chunk is Sharded:
+        --------------------------------
+        Let's define a KV Cache Chunk that is scheduled to be offloaded from TPU HBM to
+        Host CPU RAM:
+        - Chunk Size: B = 64 blocks.
+        - Model Attention Heads: H = 32 heads.
+        - Sharding Dimension: Tensor Parallelism shards the attention heads dimension.
+
+        Head Distribution across TP Workers:
+        Because the physical TP size per stage is 16 TPU devices, the 32 attention heads are
+        split evenly across those 16 devices (32 / 16 = 2 heads per device).
+
+        Node / Ray Actor | TPU Devices       | Attention Heads Processed | Chunk Slice Handled
+        -----------------------------------------------------------------------------------------
+        Node 0 (Actor 0) | Devices 0 to 7    | Heads 0 to 15             | Slices of Layers 0-15
+        Node 1 (Actor 1) | Devices 8 to 15   | Heads 16 to 31            | Slices of Layers 0-15
+        Node 2 (Actor 2) | Devices 0 to 7    | Heads 0 to 15             | Slices of Layers 16-31
+        Node 3 (Actor 3) | Devices 8 to 15   | Heads 16 to 31            | Slices of Layers 16-31
+
+        Memory Layout of a Worker's Chunk Slice:
+        - Stage 0 Workers (Actor 0 & 1) only process and offload the KV cache chunk for Layers 0 to 15.
+        - Stage 1 Workers (Actor 2 & 3) only process and offload the KV cache chunk for Layers 16 to 31.
+
+        The Save/Load Lifecycle & Driver Tracking:
+        ------------------------------------------
+        When the save command is triggered, all workers (Actors 0, 1, 2, 3) asynchronously
+        gather their sharded slices from TPU HBM into their local host CPU staging buffers:
+
+          Actor 0 (Stage 0) ───► Local Staging Buffer (Heads 0-15, Layers 0-15)
+          Actor 1 (Stage 0) ───► Local Staging Buffer (Heads 16-31, Layers 0-15)
+          Actor 2 (Stage 1) ───► Local Staging Buffer (Heads 0-15, Layers 16-31)
+          Actor 3 (Stage 1) ───► Local Staging Buffer (Heads 16-31, Layers 16-31)
+
+        Why Only Stage 1 Reports to the Driver:
+        During distributed inference execution steps, only the last PP stage (Stage 1) returns
+        model execution outputs and pipeline statistics to the master Driver process. Stage 0
+        workers simply forward their intermediate activations to Stage 1 and do not directly
+        return step-level metadata back to the driver.
+
+        Consequently, when the save/load execution statistics are returned:
+        - Actor 0 and Actor 1 finish their offloading but cannot natively report completion
+          metadata back to the driver's execution loop.
+        - Actor 2 and Actor 3 (Stage 1) append their offloading completion flags directly to
+          the model runner outputs sent to the driver.
+
+        Driver Notification Count:
+        The driver receives completion notifications only from the active processes in the
+        last stage (Stage 1):
+
+        Expected Notifications = num_nodes // pp_size = 4 // 2 = 2 (from Actor 2 and Actor 3)
+
+        Preventing Race Conditions:
+        ---------------------------
+        The staging buffers in CPU RAM are mapped to specific "slots". If the driver
+        prematurely marks a chunk as "Ready" or frees its staging slot before both Actor 2 and
+        Actor 3 have finished, a fast-moving subsequent request might overwrite the staging
+        slot while Actor 3 is still actively reading/writing its slice of the heads.
+
+        To prevent this:
+        - The driver maintains a thread-safe counter for each chunk: completion_map[chunk_id] = 0.
+        - When Actor 2 reports completion, the driver increments the counter to 1. The slot
+          remains locked.
+        - When Actor 3 reports completion, the driver increments the counter to 2.
+        - Since the target of 2 (num_nodes // pp_size) is reached, the driver safely marks the
+          chunk as fully offloaded/loaded and frees the staging buffer slot for future blocks.
+
+        Returns:
+            int: The target number of TP workers (host-level processes) in the last pipeline
+                 stage (representing the number of expected completion stats per chunk).
+        """
+        num_nodes = 1
+        if ray is not None and ray.is_initialized():
+            device_str = current_platform.ray_device_key
+            num_nodes = len([
+                n for n in ray.nodes() if device_str in n.get("Resources", {})
+            ])
+        else:
+            try:
+                is_multihost = jax.process_count() > 1
+            except Exception:
+                is_multihost = False
+
+            if is_multihost:
+                raise ValueError(
+                    "Multi-host CPU offloading is currently only supported when running under Ray."
+                )
+            num_nodes = 1
+
+        # TODO(dannawang): Pipeline Parallelism (PP) is not supported/tested for KV cache offloading yet.
+        # Move or remove this note once PP mode is fully supported and verified.
+        pp_size = self.vllm_config.parallel_config.pipeline_parallel_size
+        num_tp_workers = num_nodes // pp_size
+        logger.debug(
+            f"Calculated num_tp_workers: {num_tp_workers} (num_nodes={num_nodes}, pp_size={pp_size})"
+        )
+        return num_tp_workers
 
     def _get_request_block_hashes(self, req: "Request") -> list[BlockHash]:
         # request's original block_hashes do not include the last partial block
@@ -1196,57 +1399,99 @@ class TPUOffloadConnectorScheduler():
             assert "finished_save_chunks" in connector_output.kv_connector_stats.data
             assert "finished_load_chunks" in connector_output.kv_connector_stats.data
 
-            for req_id, saved_chunk_ids in connector_output.kv_connector_stats.data[
-                    "finished_save_chunks"].items():
-                if req_id not in self._reqs_being_saved:
-                    continue
-                num_saved_chunks = len(saved_chunk_ids)
-                logger.debug(
-                    f"  finished_save_chunks for {req_id}: {saved_chunk_ids}")
-                # free staging blocks
-                self.staging_buffer_manager.free(
-                    req_id, usage="save", num_finished_blocks=num_saved_chunks)
+            # 1. Process Saves
+            save_stats = connector_output.kv_connector_stats.data.get(
+                "finished_save_chunks", {})
+            for req_id, saved_chunks in save_stats.items():
+                fully_completed_save_chunks = []
 
-                # update in-flight save
-                # NOTE(jcgu):  there might be in-flight savings,
-                # even if the requests has been finished.
-                for saved_chunk_id in saved_chunk_ids:
-                    assert saved_chunk_id in self._reqs_being_saved[req_id]
-                    self._reqs_being_saved[req_id].remove(saved_chunk_id)
-                if len(self._reqs_being_saved[req_id]) == 0:
-                    self._reqs_being_saved.pop(req_id, None)
-                else:
+                # Accumulate completions for each chunk ID.
+                for chunk_id, process_index in saved_chunks:
+                    self._save_chunk_completion_counts[chunk_id].add(
+                        process_index)
                     logger.debug(
-                        f"  remaining_saving_blocks:{req_id}, {self._reqs_being_saved[req_id]}."
+                        f"Save chunk completion update: req_id={req_id}, "
+                        f"chunk_id={chunk_id}, "
+                        f"completion_count={len(self._save_chunk_completion_counts[chunk_id])}"
                     )
 
-                # update the status of occupied cpu chunks
-                self.offload_manager.mark_completion(saved_chunk_ids, "save")
+                    # Only mark the chunk complete when all expected last-stage workers have reported it.
+                    if len(self._save_chunk_completion_counts[chunk_id]
+                           ) == self.num_tp_workers:
+                        fully_completed_save_chunks.append(chunk_id)
+                        del self._save_chunk_completion_counts[chunk_id]
 
-            for req_id, loaded_chunk_ids in connector_output.kv_connector_stats.data[
-                    "finished_load_chunks"].items():
-                if req_id not in self._reqs_being_loaded:
-                    continue
-                num_loaded_chunks = len(loaded_chunk_ids)
-                logger.debug(
-                    f"  finished_load_chunks for {req_id}: {num_loaded_chunks}"
-                )
-                self.staging_buffer_manager.free(
-                    req_id,
-                    usage="load",
-                    num_finished_blocks=num_loaded_chunks)
-                # update in-flight save
-                for loaded_chunk_id in loaded_chunk_ids:
-                    assert loaded_chunk_id in self._reqs_being_loaded[req_id]
-                    self._reqs_being_loaded[req_id].remove(loaded_chunk_id)
-                if len(self._reqs_being_loaded[req_id]) == 0:
-                    self._reqs_being_loaded.pop(req_id, None)
-                else:
+                if fully_completed_save_chunks:
+                    num_saved_chunks = len(fully_completed_save_chunks)
                     logger.debug(
-                        f"  remaining_loading_blocks:{req_id}, {self._reqs_being_loaded[req_id]}."
+                        f"  fully_completed_save_chunks for {req_id}: {fully_completed_save_chunks}"
                     )
-                # update the status of occupied cpu chunks
-                self.offload_manager.mark_completion(loaded_chunk_ids, "load")
+                    # free staging blocks
+                    self.staging_buffer_manager.free(
+                        req_id,
+                        usage="save",
+                        num_finished_blocks=num_saved_chunks)
+
+                    # update in-flight save
+                    for saved_chunk_id in fully_completed_save_chunks:
+                        assert saved_chunk_id in self._reqs_being_saved[req_id]
+                        self._reqs_being_saved[req_id].remove(saved_chunk_id)
+                    if len(self._reqs_being_saved[req_id]) == 0:
+                        self._reqs_being_saved.pop(req_id, None)
+                    else:
+                        logger.debug(
+                            f"  remaining_saving_blocks:{req_id}, {self._reqs_being_saved[req_id]}."
+                        )
+
+                    # update the status of occupied cpu chunks to 'ready_to_load' in LRU Cache Manager
+                    self.offload_manager.mark_completion(
+                        fully_completed_save_chunks, "save")
+
+            # 2. Process Loads
+            load_stats = connector_output.kv_connector_stats.data.get(
+                "finished_load_chunks", {})
+            for req_id, loaded_chunks in load_stats.items():
+                fully_completed_load_chunks = []
+
+                # Accumulate completions for each chunk ID.
+                for chunk_id, process_index in loaded_chunks:
+                    self._load_chunk_completion_counts[chunk_id].add(
+                        process_index)
+                    logger.debug(
+                        f"Load chunk completion update: req_id={req_id}, "
+                        f"chunk_id={chunk_id}, "
+                        f"completion_count={len(self._load_chunk_completion_counts[chunk_id])}"
+                    )
+
+                    # Only mark the chunk complete when all expected last-stage workers have reported it.
+                    if len(self._load_chunk_completion_counts[chunk_id]
+                           ) == self.num_tp_workers:
+                        fully_completed_load_chunks.append(chunk_id)
+                        del self._load_chunk_completion_counts[chunk_id]
+
+                if fully_completed_load_chunks:
+                    num_loaded_chunks = len(fully_completed_load_chunks)
+                    logger.debug(
+                        f"  fully_completed_load_chunks for {req_id}: {fully_completed_load_chunks}"
+                    )
+                    self.staging_buffer_manager.free(
+                        req_id,
+                        usage="load",
+                        num_finished_blocks=num_loaded_chunks)
+                    # update in-flight load
+                    for loaded_chunk_id in fully_completed_load_chunks:
+                        assert loaded_chunk_id in self._reqs_being_loaded[
+                            req_id]
+                        self._reqs_being_loaded[req_id].remove(loaded_chunk_id)
+                    if len(self._reqs_being_loaded[req_id]) == 0:
+                        self._reqs_being_loaded.pop(req_id, None)
+                    else:
+                        logger.debug(
+                            f"  remaining_loading_blocks:{req_id}, {self._reqs_being_loaded[req_id]}."
+                        )
+                    # release chunk pins in the LRU Cache Manager (ready for eviction if needed)
+                    self.offload_manager.mark_completion(
+                        fully_completed_load_chunks, "load")
 
     def request_finished(
         self,
@@ -1845,13 +2090,14 @@ class TPUOffloadConnectorWorker:
         return gathered_kv_caches_tpu, manifest, total_num_blocks_to_save
 
     def _transfer_and_register_cpu_chunks(self,
-                                          flat_kv_caches_tpu: Any,
+                                          chunks_on_cpu: Any,
                                           total_num_blocks_to_save: int,
                                           manifest: list[SaveReqInfo],
                                           is_batched: bool = False):
         """
-        Asynchronously transfers KV blocks from TPU to CPU, unstitches them,
-        and registers them with the CPU RAM backend store.
+        Asynchronously waits for KV blocks to finish transfer to CPU,
+        unstitches them, and registers them with the CPU RAM backend store.
+        Note: The transfer (`jax.device_put`) is initiated in the main thread.
 
         Unstitching Mechanism:
         1. Unified Transfer: A single large swap operation moves total_num_blocks_to_save
@@ -1886,22 +2132,7 @@ class TPUOffloadConnectorWorker:
         +---------------------------------------+
         """
         start_time = time.time()
-
         # 1. Swap Out the buffer
-        chunks_on_cpu = None
-        # D2H
-        chunks_on_cpu = []
-        for i in range(total_num_blocks_to_save):
-            tpu_chunk = flat_kv_caches_tpu[i]
-            if isinstance(tpu_chunk, list):
-                cpu_chunk = [
-                    jax.device_put(x, self.expanded_host_sharding)
-                    for x in tpu_chunk
-                ]
-            else:
-                cpu_chunk = jax.device_put(tpu_chunk,
-                                           self.expanded_host_sharding)
-            chunks_on_cpu.append(cpu_chunk)
         jax.block_until_ready(chunks_on_cpu)
         # no split
 
@@ -1979,8 +2210,33 @@ class TPUOffloadConnectorWorker:
         # Note: We use manifest for the pending future tracking.
         # record_save will be handled in the main thread by _process_completed_saves.
 
+        # NOTE: JAX device_put operations MUST be executed on the main thread.
+        # In a multi-host distributed TPU setup, executing JAX transfers (HBM to Host RAM movement)
+        # inside a background thread pool can cause thread scheduling context switch delays. This can
+        # lead to out-of-order TPU driver queues across different worker hosts.
+        #
+        # Example timeline causing mismatch (in the multi-host case):
+        # - Worker 0 background thread runs fast: Model_Step_1 -> Reshard_Transfer -> Model_Step_2
+        # - Worker 1 background thread is delayed: Model_Step_1 -> Model_Step_2 -> Reshard_Transfer
+        #
+        # When execution starts, Worker 0 runs Reshard_Transfer while Worker 1 runs Model_Step_2,
+        # leading to a desync and cluster deadlock. Running all JAX operations on the main thread
+        # ensures the TPU queue sequence remains exactly synchronized across all worker hosts.
+        chunks_on_cpu = []
+        for i in range(total_num_blocks_to_save):
+            tpu_chunk = flat_kv_caches_tpu[i]
+            if isinstance(tpu_chunk, list):
+                cpu_chunk = [
+                    jax.device_put(x, self.expanded_host_sharding)
+                    for x in tpu_chunk
+                ]
+            else:
+                cpu_chunk = jax.device_put(tpu_chunk,
+                                           self.expanded_host_sharding)
+            chunks_on_cpu.append(cpu_chunk)
+
         future = self.save_executor.submit(_async_batch_transfer_task,
-                                           flat_kv_caches_tpu,
+                                           chunks_on_cpu,
                                            total_num_blocks_to_save,
                                            manifest,
                                            is_batched=True)
@@ -2092,9 +2348,21 @@ class TPUOffloadConnectorWorker:
                 # 2. ASYNC NON-BLOCKING: Transfer to CPU and Register
                 logger.debug(
                     f"Submitting transfer task for request {meta.req_id}")
+                chunks_on_cpu = []
+                for i in range(num_blocks_to_save):
+                    tpu_chunk = flat_kv_caches_tpu[i]
+                    if isinstance(tpu_chunk, list):
+                        cpu_chunk = [
+                            jax.device_put(x, self.expanded_host_sharding)
+                            for x in tpu_chunk
+                        ]
+                    else:
+                        cpu_chunk = jax.device_put(tpu_chunk,
+                                                   self.expanded_host_sharding)
+                    chunks_on_cpu.append(cpu_chunk)
+
                 future = self.save_executor.submit(_async_transfer_task,
-                                                   meta.req_id,
-                                                   flat_kv_caches_tpu,
+                                                   meta.req_id, chunks_on_cpu,
                                                    num_blocks_to_save, [info],
                                                    False)
 
@@ -2142,7 +2410,7 @@ class TPUOffloadConnectorWorker:
 
         self._pending_save_futures = remaining_futures
 
-    def start_load_kv(self, fwd_ctx: "ForwardContext") -> None:
+    def start_load_kv(self, fwd_ctx: "ForwardContext", **kwargs) -> None:
         """
         This function is the worker-side entry point for loading data from the
         local CPU backend into the TPU's sharded KV cache.

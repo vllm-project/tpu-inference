@@ -61,6 +61,7 @@ class MockVllmConfig:
         self.model_config = self.Model()
         self.cache_config = self.Cache(block_size)
         self.kv_transfer_config = self.KVTransferConfig()
+        self.parallel_config = self.Parallel()
 
     class Model:
         model = "test-model"
@@ -73,6 +74,11 @@ class MockVllmConfig:
     class KVTransferConfig:
         ip = "ip"
         port = 1234
+
+    class Parallel:
+
+        def __init__(self, pipeline_parallel_size=1):
+            self.pipeline_parallel_size = pipeline_parallel_size
 
 
 class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
@@ -519,8 +525,11 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
                 req_id = f"save_req_{i}"
                 src_blocks = src_block_ids_split[i].tolist()
                 dst_chunks = dst_chunk_ids_split[i].tolist()
+                # Each entry in finished_save_chunks is recorded as [chunk_id, process_index].
+                # The process index is 0 here since this is a local single-host unit test where
+                # jax.process_index() defaults to 0.
                 self.assertListEqual(
-                    dst_chunks,
+                    [[chunk_id, 0] for chunk_id in dst_chunks],
                     worker.offload_stats.data["finished_save_chunks"][req_id])
 
                 for tpu_block_id, cpu_chunk_id in zip(src_blocks, dst_chunks):
@@ -818,8 +827,11 @@ class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):
             for i in range(num_requests):
                 req_id = f"load_req_{i}"
                 dst_chunks = dst_chunk_ids_split[i].tolist()
+                # Each entry in finished_load_chunks is recorded as [chunk_id, process_index].
+                # The process index is 0 here since this is a local single-host unit test where
+                # jax.process_index() defaults to 0.
                 self.assertListEqual(
-                    dst_chunks,
+                    [[chunk_id, 0] for chunk_id in dst_chunks],
                     worker.offload_stats.data["finished_load_chunks"][req_id])
 
     def test_tpu_connector_async_save_integrity(self):

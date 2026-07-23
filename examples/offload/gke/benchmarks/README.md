@@ -18,16 +18,23 @@ kubectl create secret generic hf-token-secret --from-literal=token='<YOUR_HF_TOK
 
 Replace `<YOUR_HF_TOKEN>` with your actual Hugging Face token.
 
-## 2. Deploy vLLM Pod (Choose One)
+## 2. Configure Benchmark Mode and Deploy vLLM Pod (Choose One)
 
-Choose one of the following deployment options for your vLLM pod. Ensure the right container image is used in the pod spec
+Before deployment, set an environment variable to specify whether to run a single-host or multi-host benchmark:
+
+```bash
+# Set to 'single-host' or 'multi-host'
+export BENCHMARK_MODE=single-host
+```
+
+Then, choose one of the following deployment options for your vLLM pod. Ensure the right container image is used in the pod spec.
 
 ### Option A: Baseline vLLM (No Host Offload)
 
 This deployment uses a standard vLLM setup without any specific TPU host offload connector. The KV cache will reside entirely on the TPU HBM.
 
 ```bash
-kubectl apply -f deploy-baseline.yaml
+kubectl apply -f ${BENCHMARK_MODE}/deploy-baseline.yaml
 ```
 
 ### Option B: vLLM with TPU Host Offload
@@ -35,7 +42,7 @@ kubectl apply -f deploy-baseline.yaml
 This deployment configures vLLM to use a `TPUOffloadConnector` for KV cache offload to the host CPU memory. This is specified by the `--kv-transfer-config` argument.
 
 ```bash
-kubectl apply -f deploy-cpu-offload.yaml
+kubectl apply -f ${BENCHMARK_MODE}/deploy-cpu-offload.yaml
 ```
 
 ## 3. Deploy Service
@@ -43,13 +50,16 @@ kubectl apply -f deploy-cpu-offload.yaml
 Deploy a LoadBalancer service to expose your vLLM deployment. This will provide an external IP address to send benchmark requests to.
 
 ```bash
-kubectl apply -f service.yaml
+kubectl apply -f ${BENCHMARK_MODE}/service.yaml
 ```
 
 After deployment, get the external IP of the service:
 
 ```bash
-kubectl get service tpu-offline-inference -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+# Define the service name based on the mode
+export SERVICE_NAME=$( [ "$BENCHMARK_MODE" = "single-host" ] && echo "tpu-offline-inference" || echo "tpu-offline-inference-multihost-lb" )
+
+kubectl get service ${SERVICE_NAME} -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
 ```
 
 This command will directly output the external IP address. It might take a few minutes for the IP to be provisioned.
@@ -60,11 +70,11 @@ Instead of installing SGLang locally, we can run the benchmark from within the K
 
 ### a. Configure the Benchmark Pod
 
-A sample pod specification is provided in `benchmark-pod.yaml`. Before deploying it, you need to configure the environment variables within the file, especially the `IP` of the vLLM service.
+A sample pod specification is provided in `${BENCHMARK_MODE}/benchmark-pod.yaml`. Before deploying it, you need to configure the environment variables within the file, especially the `IP` of the vLLM service.
 
-Open `benchmark-pod.yaml` and replace `<Your service EXTERNAL-IP>` with the actual external IP address of your `tpu-offline-inference` service obtained in step 3.
+Open `${BENCHMARK_MODE}/benchmark-pod.yaml` and replace `<Your service EXTERNAL-IP>` with the actual external IP address of your service obtained in step 3.
 
-You can also adjust the following benchmark parameters via environment variables in the `benchmark-pod.yaml` file:
+You can also adjust the following benchmark parameters via environment variables in the `${BENCHMARK_MODE}/benchmark-pod.yaml` file:
 
 * `GSP_NUM_GROUPS`: The number of unique system prompts.
 * `GSP_PROMPTS_PER_GROUP`: The number of questions per system prompt.
@@ -78,7 +88,7 @@ You can also adjust the following benchmark parameters via environment variables
 Once configured, deploy the benchmark pod:
 
 ```bash
-kubectl apply -f benchmark-pod.yaml
+kubectl apply -f ${BENCHMARK_MODE}/benchmark-pod.yaml
 ```
 
 The pod will start, clone the SGLang repository, install dependencies, and run the benchmark.

@@ -34,6 +34,7 @@ valid. If any output differs, it raises an error, causing the script to fail
 """
 
 import copy
+import gc
 import os
 import time
 from typing import List, Tuple
@@ -46,8 +47,19 @@ def create_parser():
     parser = FlexibleArgumentParser()
     # Add engine args, which includes the --seed parameter
     EngineArgs.add_cli_args(parser)
-    parser.set_defaults(model="meta-llama/Llama-3.1-8B")
-    parser.set_defaults(max_model_len=1024)
+
+    is_multihost = os.environ.get('IS_TPU_MULTIHOST',
+                                  'false').lower() in ('true', '1')
+    default_model = "meta-llama/Llama-3.1-8B"
+    default_tp = 16 if is_multihost else 8
+    default_backend = os.environ.get(
+        'TPU_MULTIHOST_BACKEND') if is_multihost else None
+    parser.set_defaults(
+        model=default_model,
+        tensor_parallel_size=default_tp,
+        distributed_executor_backend=default_backend,
+        max_model_len=1024,
+    )
 
     # Add sampling params
     sampling_group = parser.add_argument_group("Sampling parameters")
@@ -137,7 +149,18 @@ def main(args: dict):
                                            num_invocations=1)
         baseline_output = baseline_outputs[0]
         print(f"Baseline Generated Text: {baseline_output!r}")
+        # Explicitly shut down the background EngineCore process and Ray actors
+        # to release TPU device allocations and placement groups immediately.
+        # Otherwise, they remain locked until garbage collection, which blocks
+        # the subsequent test runs from allocating TPU resources.
+        if hasattr(baseline_llm,
+                   "llm_engine") and baseline_llm.llm_engine is not None:
+            if hasattr(baseline_llm.llm_engine, "engine_core"
+                       ) and baseline_llm.llm_engine.engine_core is not None:
+                baseline_llm.llm_engine.engine_core.shutdown()
         del baseline_llm
+        gc.collect()
+
         # adding this sleep fixes device busy errors for the next test case run with the connector enabled
         time.sleep(10)
 
@@ -149,7 +172,12 @@ def main(args: dict):
                                        test_params,
                                        prompts=prompts,
                                        num_invocations=2)
+        if hasattr(test_llm, "llm_engine") and test_llm.llm_engine is not None:
+            if hasattr(test_llm.llm_engine, "engine_core"
+                       ) and test_llm.llm_engine.engine_core is not None:
+                test_llm.llm_engine.engine_core.shutdown()
         del test_llm
+        gc.collect()
 
         # 3. Compare the outputs and determine the result
         print("\n--- Verification ---")
