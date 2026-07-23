@@ -457,16 +457,6 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def is_set(name: str) -> bool:
-    """Return True if the environment variable ``name`` is explicitly set.
-
-    Lets callers distinguish "user set this to the default value" from "unset",
-    which a plain value read cannot (both return the default). Used to give an
-    explicitly-set env var precedence over other config sources.
-    """
-    return name in os.environ
-
-
 def enable_envs_cache() -> None:
     """
     Enables caching of environment variables by wrapping the module's __getattr__

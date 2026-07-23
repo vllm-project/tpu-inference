@@ -217,11 +217,8 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
 
     # Test CONTINUE_DECODE_EOS_CHECK_INTERVAL (default 1 = stock every-step check)
     assert envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL == 1
-    # is_set distinguishes "unset" from "explicitly set" (used for precedence)
-    assert not envs.is_set("CONTINUE_DECODE_EOS_CHECK_INTERVAL")
     monkeypatch.setenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL", "8")
     assert envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL == 8
-    assert envs.is_set("CONTINUE_DECODE_EOS_CHECK_INTERVAL")
 
 
 def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):
