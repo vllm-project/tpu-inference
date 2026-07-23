@@ -778,12 +778,20 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         self.is_last_rank = get_pp_group().is_last_rank
 
         if self.is_first_rank:
+            # transformers v5 nests language attrs under `text_config`; a plain
+            # config exposes them directly. getattr(config, "rms_norm_eps",
+            # config.text_config.rms_norm_eps) evaluates the default eagerly and
+            # would raise if `text_config` were absent. Resolve without eager eval
+            # while preserving the "prefer top-level, else nested" semantics.
+            _lang_config = getattr(config, 'text_config', config)
+            _norm_eps = getattr(config, "rms_norm_eps", None)
+            if _norm_eps is None:
+                _norm_eps = _lang_config.rms_norm_eps
             self.visual = Qwen2_5_VisionTransformer(
                 vllm_config=vllm_config,
                 rngs=self.rng,
                 mesh=mesh,
-                norm_eps=getattr(config, "rms_norm_eps",
-                                 config.text_config.rms_norm_eps),
+                norm_eps=_norm_eps,
             )
         else:
             self.visual = PPMissingLayer()
@@ -793,9 +801,15 @@ class Qwen2_5_VLForConditionalGeneration(nnx.Module):
         if not model_config.hf_config.tie_word_embeddings:
             if self.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
-                hidden_size = getattr(
-                    model_config.hf_config, 'hidden_size',
-                    model_config.hf_config.text_config.hidden_size)
+                # Resolve the language hidden_size without eagerly touching
+                # `.text_config` (see qwen2.py): prefer the top-level value,
+                # else fall back to the nested language config.
+                _lang_config = getattr(model_config.hf_config, 'text_config',
+                                       model_config.hf_config)
+                hidden_size = getattr(model_config.hf_config, 'hidden_size',
+                                      None)
+                if hidden_size is None:
+                    hidden_size = _lang_config.hidden_size
                 self.lm_head = JaxLmHead(
                     hidden_size=hidden_size,
                     vocab_size=vocab_size,
