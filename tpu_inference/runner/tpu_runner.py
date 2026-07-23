@@ -1054,6 +1054,37 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # padded max value to pre-allocate data structures and pre-compile.
         self.max_num_tokens = self.num_tokens_paddings[-1]
 
+        # Prefill context parallelism (PCP): the token buffer holds a fixed
+        # number of request *lanes* R (= max_num_reqs), each of Lreq =
+        # 2*pcp*chunk tokens, and every request is head-tail split into 2*pcp
+        # chunks across the pcp ranks. So padded token counts must be exactly
+        # `R * (power-of-2 lane length)` — each divisible by R*2*pcp as the
+        # split requires. Override the generic token paddings with these
+        # products so runtime sizing and precompile shapes always agree.
+        # NOTE: buffer = R * max_lane, so PCP is intended for a MODEST
+        # max_num_seqs with long contexts (few large requests), which is its
+        # natural regime; a large max_num_seqs over-allocates the buffer.
+        self._pcp_size = self.vllm_config.sharding_config.prefill_cp_size
+        self._pcp_lane_paddings = None
+        if self._pcp_size > 1:
+            two_p = 2 * self._pcp_size
+            R = self.max_num_reqs
+            max_lane = next_power_of_2(
+                min(self.max_model_len,
+                    scheduler_config.max_num_batched_tokens))
+            max_lane = max(max_lane, two_p)
+            lanes = []
+            lane = two_p
+            while True:
+                lanes.append(lane)
+                if lane >= max_lane:
+                    break
+                lane *= 2
+            self._pcp_lane_paddings = lanes
+            self.num_tokens_paddings = [R * L for L in lanes]
+            self.num_tokens_paddings_per_dp = list(self.num_tokens_paddings)
+            self.max_num_tokens = self.num_tokens_paddings[-1]
+
         self.requests: dict[str, CachedRequestState] = {}
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, jax.Array] = {}
@@ -1104,6 +1135,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padding * self.dp_size
             for padding in self.attn_num_reqs_paddings_per_dp
         ]
+
+        if self._pcp_size > 1:
+            # PCP attention always processes exactly R = max_num_reqs lanes, so
+            # the attention metadata (and the wrapper's static request loop) is
+            # compiled for a single request-count bucket.
+            self.attn_num_reqs_paddings_per_dp = [self.max_num_reqs //
+                                                  self.dp_size]
+            self.attn_num_reqs_paddings = [self.max_num_reqs]
 
         self.num_reqs_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_reqs_paddings
@@ -2403,7 +2442,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
-        if is_decode_only and self.enable_continue_decode:
+        if self._pcp_size > 1:
+            # PCP: R fixed lanes (= max_num_reqs), each padded to a power-of-2
+            # lane length Lreq derived from the LONGEST single request (not the
+            # sum). Buffer = R * Lreq, always one of the PCP token buckets.
+            assert self.dp_size == 1, "PCP is not compatible with DP."
+            max_single_req_tokens = max(
+                (t for toks in scheduled_tokens_per_dp_rank.values()
+                 for t in toks),
+                default=1)
+            two_p = 2 * self._pcp_size
+            lane = runner_utils.get_padded_token_len(
+                self._pcp_lane_paddings, max(two_p, max_single_req_tokens))
+            padded_num_scheduled_tokens_per_dp_rank = (self.max_num_reqs * lane)
+        elif is_decode_only and self.enable_continue_decode:
             padded_num_scheduled_tokens_per_dp_rank = padded_num_reqs_per_dp_rank
         else:
             padded_num_scheduled_tokens_per_dp_rank = runner_utils.get_padded_token_len(
@@ -2809,80 +2861,79 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         request_distribution = np.array(_request_distribution,
                                         dtype=np.int32).ravel()
 
-        # Prefill context parallelism (single request, prefill only): head-tail
-        # arrange this request's current tokens into rank order
+        # Prefill context parallelism (multi-request, prefill only): pack the
+        # scheduled tokens into R = max_num_reqs fixed lanes, each head-tail
+        # split into 2*pcp chunks laid out RANK-MAJOR then LANE then head|tail.
+        # Global buffer position of (request i, source pos p, chunk c=p//C):
+        #   c <  pcp: rank=c,        dest = c*region        + i*2C + (p%C)
+        #   c >= pcp: rank=2P-1-c,   dest = (2P-1-c)*region + i*2C + C + (p%C)
+        # where C = Lreq//2P and region = R*2C = padded_tokens//pcp. Each pcp
+        # rank's contiguous shard is then concat_i [head_r,i | tail_r,i], which
+        # pcp_ragged_paged_attention slices per lane. seq_lens, per-request
+        # block_tables and query_start_loc are already correct in lane order
+        # from the generic path above; only the packing, the per-lane
+        # kv_cache_lens (num_computed) and the packed logits indices are
+        # PCP-specific.
         pcp_kv_cache_lens = None
-        pcp_query_start_loc = None
-        pcp_q_pos_offsets = None
+        pcp_nat_to_packed = None
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         if pcp_size > 1:
+            assert not self.uses_mrope, "PCP does not support M-RoPE yet."
             counts = scheduled_tokens_per_dp_rank[0]
-            assert len(
-                counts
-            ) == 1, "PCP currently only supports a single request at a time."
-            num_current = int(counts[0])
+            req_idxs = req_indices_dp[0]
             two_p = 2 * pcp_size
-            pcp_chunk_size = padded_num_scheduled_tokens_per_dp_rank // two_p
-            # Head-tail row order: rank r owns chunk r (head) and chunk 2P-1-r (tail)
-            row_perm = np.array(
-                [c for r in range(pcp_size) for c in (r, two_p - 1 - r)])
+            R = self.max_num_reqs
+            Lreq = padded_num_scheduled_tokens_per_dp_rank // R
+            C = Lreq // two_p  # head-tail chunk size
+            region = R * 2 * C  # per-pcp-rank contiguous region = tokens//pcp
 
-            def _rearrange(buf):  # natural token order -> rank order
-                buf[num_current:] = 0
-                buf[:] = buf.reshape(two_p,
-                                     pcp_chunk_size)[row_perm].reshape(-1)
+            positions_nat = np.asarray(positions).copy()
+            ids_nat = np.asarray(input_ids_view).copy()
+            packed_pos = np.zeros_like(positions_nat)
+            packed_ids = np.zeros_like(ids_nat)
+            # Natural (contiguous) token index -> packed (lane) index. Needed to
+            # remap async-scheduling token substitution, which is expressed in
+            # natural coordinates, onto the packed buffer.
+            pcp_nat_to_packed = np.zeros(len(ids_nat), np.int64)
 
-            _rearrange(positions)
-            _rearrange(input_ids_view)
+            kv_cache_lens_np = np.zeros(R, np.int32)
+            logits_indices_view[:] = -1
 
-            # seq_lens
-            req_idx = int(req_indices_dp[0][0])
-            num_computed = int(
-                self.input_batch.num_computed_tokens_cpu[req_idx])
-            seq_lens_view[:2] = num_computed + num_current  # [T, T]
-            seq_lens_view[2:] = 0
+            start = 0
+            for i, (nc_i, req_idx) in enumerate(zip(counts, req_idxs)):
+                nc_i = int(nc_i)
+                ncomp = int(
+                    self.input_batch.num_computed_tokens_cpu[req_idx])
+                kv_cache_lens_np[i] = ncomp
+                p = np.arange(nc_i)
+                c = p // C
+                o = p % C
+                is_head = c < pcp_size
+                rank = np.where(is_head, c, two_p - 1 - c)
+                dest = (rank * region + i * (2 * C) +
+                        np.where(is_head, 0, C) + o)
+                packed_ids[dest] = ids_nat[start:start + nc_i]
+                packed_pos[dest] = positions_nat[start:start + nc_i]
+                pcp_nat_to_packed[start:start + nc_i] = dest
+                # logits_indices: packed position of the last real token.
+                last = nc_i - 1
+                lc = last // C
+                lo = last % C
+                if lc < pcp_size:
+                    lrank, head_col = lc, 0
+                else:
+                    lrank, head_col = two_p - 1 - lc, C
+                logits_indices_view[i] = (lrank * region + i * (2 * C) +
+                                          head_col + lo)
+                start += nc_i
 
-            # distribution. The fused current phase presents head+tail as two prefill seqs.
-            request_distribution[:] = (0, 0, 2)
+            input_ids_view[:] = packed_ids
+            positions[:] = packed_pos
 
-            # kv_cache_lens
-            kv_cache_lens_np = np.zeros_like(np.asarray(seq_lens_view))
-            kv_cache_lens_np[:2] = num_computed  # [P, P]
-
-            # cu_q_lens and q_pos_offsets.
-            n_off = np.asarray(seq_lens_view).shape[0]  # max_num_reqs
-            pcp_cu_np = np.zeros((pcp_size, n_off + 1), np.int32)
-            pcp_qpos_np = np.zeros((pcp_size, n_off), np.int32)
-            for rank in range(pcp_size):
-                tail_off = (two_p - 1 - rank) * pcp_chunk_size
-                tail_real = int(
-                    np.clip(num_current - tail_off, 0, pcp_chunk_size))
-                pcp_cu_np[rank, 1] = pcp_chunk_size  # seq 0 (head) end
-                pcp_cu_np[rank,
-                          2:] = pcp_chunk_size + tail_real  # seq 1 (tail) end
-                pcp_qpos_np[rank, 0] = rank * pcp_chunk_size
-                pcp_qpos_np[rank, 1] = tail_off
-
-            # logits_indices
-            inv_row = np.empty(two_p, np.int64)
-            inv_row[row_perm] = np.arange(two_p)
-            last = num_current - 1
-            logits_indices_view[0] = (
-                inv_row[last // pcp_chunk_size] * pcp_chunk_size +
-                last % pcp_chunk_size)
-            logits_indices_view[1:] = -1
-
-            pcp_spec = NamedSharding(
-                self.mesh, PartitionSpec(ShardingAxisName.PREFILL_CONTEXT,
-                                         None))
             repl = NamedSharding(self.mesh, PartitionSpec())
             pcp_kv_cache_lens = device_array(self.mesh,
                                              kv_cache_lens_np,
                                              sharding=repl)
-            (pcp_query_start_loc,
-             pcp_q_pos_offsets) = device_array(self.mesh,
-                                               (pcp_cu_np, pcp_qpos_np),
-                                               sharding=pcp_spec)
         spec_decode_metadata = None
         if self.speculative_config:
             spec_decode_metadata = (
@@ -2947,14 +2998,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         out=block_tables_view[req_offset:req_offset +
                                               _num_reqs])
 
-            if pcp_size > 1:
-                # PCP fuses the request's head+tail chunks into one
-                # launch as two sequences of the same request. The kernel
-                # indexes page_indices as `seq_idx * pages_per_seq`, and the
-                # writing seq is the tail (seq 1) -- so seq 1 must carry a copy
-                # of the request's block table, not the zero padding, or every
-                # strided KV write lands on page 0.
-                block_tables_view[1] = block_tables_view[0]
+            # PCP places one request per lane, so each lane row already carries
+            # its own request's block table from the generic fill above (the
+            # wrapper duplicates it internally for that lane's head/tail seqs).
 
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
@@ -3002,8 +3048,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
         input_ids = metadata["input_ids"]
-        query_start_loc = (pcp_query_start_loc
-                           if pcp_size > 1 else metadata["query_start_loc"])
+        query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
         logits_indices = metadata["logits_indices"]
 
@@ -3024,7 +3069,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp_kv_cache_lens=pcp_kv_cache_lens,
-                pcp_q_pos_offsets=pcp_q_pos_offsets,
             )
 
             return attention_metadata_gid
@@ -3080,6 +3124,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 all_token_indices_to_substitute)
             token_in_tpu_pre_next_tokens_indices = np.array(
                 all_pre_next_tokens_indices)
+
+            # PCP rearranges input_ids into the packed (lane) layout, but the
+            # substitution indices above are in natural (contiguous) token
+            # coordinates. Remap them so the sampled tokens land in each
+            # request's real lane slot (otherwise every request after the first
+            # gets its decode token written to the wrong position).
+            if pcp_nat_to_packed is not None and len(
+                    token_in_tpu_cur_input_indices) > 0:
+                token_in_tpu_cur_input_indices = pcp_nat_to_packed[
+                    token_in_tpu_cur_input_indices]
 
             input_ids = self._apply_async_token_substitution(
                 input_ids, next_tokens, token_in_tpu_cur_input_indices,
