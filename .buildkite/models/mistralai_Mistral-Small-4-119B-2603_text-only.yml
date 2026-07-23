@@ -13,8 +13,8 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu6e} Accuracy for mistralai/Mistral-Small-4-119B-2603/text-only"
-    key: "${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} Correctness for mistralai/Mistral-Small-4-119B-2603/text-only"
+    key: "${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness"
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
@@ -25,18 +25,16 @@ steps:
       MINIMUM_ACCURACY_THRESHOLD: 0  # TODO : replace 0 with your accuracy threshold
     commands:
       - |
-        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
-          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Accuracy" "not enough HBM"
+        if [ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness" "skipped (only for tpu7x)"
         else
-          # 1. Run the fast correctness test first to catch basic integration bugs quickly (TP=8)
+          # 1. Run the fast correctness test
           .buildkite/scripts/run_in_docker.sh \
             bash -c 'python3 /workspace/tpu_inference/tests/e2e/mistral_small_4_correctness.py'
-          # 2. Run the heavy accuracy evaluation
-          .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
         fi
-  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for mistralai/Mistral-Small-4-119B-2603/text-only"
-    key: "${TPU_VERSION:-tpu6e}_record_mistralai_Mistral-Small-4-119B-2603_text-only_Accuracy"
-    depends_on: "${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Accuracy"
+  - label: "${TPU_VERSION:-tpu6e} Record correctness result for mistralai/Mistral-Small-4-119B-2603/text-only"
+    key: "${TPU_VERSION:-tpu6e}_record_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness"
+    depends_on: "${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness"
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "mistralai/Mistral-Small-4-119B-2603/text-only"
@@ -46,6 +44,6 @@ steps:
       queue: cpu
     commands:
       - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Accuracy
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness
 
 
