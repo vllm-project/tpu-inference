@@ -335,6 +335,8 @@ done
 pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
 ray stop --force >/dev/null 2>&1 || true
 EOF
+    docker stop node >/dev/null 2>&1 || true
+    docker rm -f node >/dev/null 2>&1 || true
   fi
 
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
@@ -388,6 +390,8 @@ done
 pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
 ray stop --force >/dev/null 2>&1 || true
 INNER_EOF
+  docker stop node >/dev/null 2>&1 || true
+  docker rm -f node >/dev/null 2>&1 || true
 fi
 
 fuser_cmd=(fuser)
