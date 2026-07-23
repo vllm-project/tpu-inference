@@ -22,6 +22,7 @@ import torch
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
+from torchax.ops.mappings import t2j
 from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
@@ -232,9 +233,9 @@ class VllmFp8LinearMethod(
             # Float8_e8m0fnu (ue8m0) scales cannot be converted via numpy in t2j.
             # TODO: consider get rid of the f32 conversion, to optimize the HBM usage.
             if weight_scale_inv.dtype == torch.float8_e8m0fnu:
-                layer.weight_scale_inv = Parameter(
-                    weight_scale_inv.to(torch.float32), requires_grad=False
-                )
+                layer.weight_scale_inv = Parameter(weight_scale_inv.to(
+                    torch.float32),
+                                                   requires_grad=False)
             weight_scale = _load_weight_for_layer(layer, "weight_scale_inv",
                                                   loading_sharding)
             weight_scale = jnp.transpose(weight_scale)
@@ -243,9 +244,9 @@ class VllmFp8LinearMethod(
         else:
             weight_scale_tensor = layer.weight_scale
             if weight_scale_tensor.dtype == torch.float8_e8m0fnu:
-                layer.weight_scale = Parameter(
-                    weight_scale_tensor.to(torch.float32), requires_grad=False
-                )
+                layer.weight_scale = Parameter(weight_scale_tensor.to(
+                    torch.float32),
+                                               requires_grad=False)
             scale_sharding = NamedSharding(self.linear_config.mesh, P(None))
             weight_scale = _load_weight_for_layer(layer, "weight_scale",
                                                   scale_sharding)
@@ -312,9 +313,8 @@ class VllmFp8LinearMethod(
 
         if self.linear_config.fuse_matmuls:
             layer.weight = Parameter(weights.weight, requires_grad=False)
-            layer.weight_scale = Parameter(
-                weights.weight_scale, requires_grad=False
-            )
+            layer.weight_scale = Parameter(weights.weight_scale,
+                                           requires_grad=False)
             if has_bias:
                 layer.bias = Parameter(weights.bias, requires_grad=False)
         else:
@@ -343,9 +343,10 @@ class VllmFp8LinearMethod(
                 assert isinstance(layer.weight_scale, torch.nn.ParameterList)
                 # jax_view cannot handle ParameterList directly, so we explicitly
                 # convert them to list of jax.Array.
-                weight_and_scale = [(jax_view(w), jax_view(s))
-                                    for w, s in zip(layer.weight, layer.weight_scale)
-                                    ]
+                weight_and_scale = [
+                    (jax_view(w), jax_view(s))
+                    for w, s in zip(layer.weight, layer.weight_scale)
+                ]
                 if bias is not None and not layer.skip_bias_add:
                     assert isinstance(bias, torch.nn.ParameterList)
                     bias_jax = [jax_view(b) for b in bias]

@@ -212,9 +212,8 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
     def maybe_process_weights(self, layer: torch.nn.Module, param_name: str,
                               args, kwargs):
         """Check if all weights are loaded for the layer. If so, process and shard the weights."""
-        self.maybe_process_linear_weights(
-            layer, param_name, args, kwargs, self.linear_config.num_proj
-        )
+        self.maybe_process_linear_weights(layer, param_name, args, kwargs,
+                                          self.linear_config.num_proj)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if not _tensor_is_in_cpu(layer.weight):

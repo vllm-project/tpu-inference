@@ -15,6 +15,10 @@
 from abc import ABC, abstractmethod
 
 import torch
+from vllm.logger import init_logger
+from vllm.model_executor.layers import linear as vllm_linear
+
+logger = init_logger(__name__)
 
 
 class VllmQuantizationMethod(ABC):
