@@ -255,11 +255,20 @@ class PrometheusLogger:
         if PrometheusLogger._instance is not None:
             raise RuntimeError("PrometheusLogger is a singleton")
 
-        # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
-        pmd = os.environ.get("PROMETHEUS_MULTIPROC_DIR",
-                             "/tmp/prometheus_multiproc")
-        os.environ["PROMETHEUS_MULTIPROC_DIR"] = pmd
-        os.makedirs(pmd, exist_ok=True)
+        pmd = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+        if not pmd:
+            import atexit
+            import shutil
+            import tempfile
+            pmd = tempfile.mkdtemp(prefix="prometheus_multiproc_")
+            atexit.register(shutil.rmtree, pmd, ignore_errors=True)
+            os.environ["PROMETHEUS_MULTIPROC_DIR"] = pmd
+        else:
+            if os.path.islink(pmd):
+                raise RuntimeError(
+                    f"PROMETHEUS_MULTIPROC_DIR ({pmd}) is a symlink. "
+                    "Refusing to run for security reasons.")
+            os.makedirs(pmd, exist_ok=True)
 
         labels = {
             "model_name": model_name,
