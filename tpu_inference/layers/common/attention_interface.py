@@ -14,6 +14,7 @@
 
 import functools
 import math
+import os
 from typing import Any, Callable, Optional, Tuple
 
 import jax
@@ -833,6 +834,27 @@ def pcp_ragged_paged_attention(
         0]  # padded current tokens across all pcp ranks = 2*pcp*chunk
     pcp_chunk_size = padded_q_len // two_p  # head-tail chunk size
 
+    # --- cache-phase communication strategy ---------------------------------
+    # "gather_q"  (default): replicate Q across pcp, attend the local KV shard,
+    #             LSE reduce-scatter.  Comm ~ 2 * chunk * NQ (Q gather + O a2a),
+    #             independent of context length.
+    # "gather_kv": all-gather the striped KV cache so every rank holds the full
+    #             cache, attend the LOCAL Q against each shard, LSE-merge
+    #             locally.  No output collective.  Comm ~ ctx * NKV.  Wins at
+    #             short context / low NKV, but materializes the full cache on
+    #             every rank (memory ~ pcp * local cache).
+    # "auto":     pick per-compile by comparing the two static comm estimates.
+    _cache_phase = os.environ.get("PCP_CACHE_PHASE", "gather_q").lower()
+    if _cache_phase == "auto":
+        nq_total, hd = q.shape[1], q.shape[2]
+        nkv_total = k.shape[1]
+        # ctx upper bound from the cache shape: pages_per_seq * global_page.
+        pages_per_seq = page_indices.shape[0] // cu_q_lens.shape[0]
+        ctx_ub = pages_per_seq * kv_cache.shape[1] * pcp_size
+        comm_q = 2 * padded_q_len * nq_total * hd
+        comm_kv = ctx_ub * nkv_total * hd
+        _cache_phase = "gather_kv" if comm_kv < comm_q else "gather_q"
+
     _row = [c for r in range(pcp_size) for c in (r, two_p - 1 - r)]
     _inv = [0] * two_p
     for _i, _c in enumerate(_row):
@@ -868,23 +890,51 @@ def pcp_ragged_paged_attention(
                       v_scale=v_scale)
 
         # ---- cache phase ----
-        ag_q = ag(q_l)  # [pcp*2*chunk]
         cu_cache = jnp.zeros_like(cu_q_lens[0]).at[1:].set(padded_q_len)
         dist_cache = jnp.array([0, 0, 1], jnp.int32)
-        o1, kvc1, l1 = rpa_v3_cp.ragged_paged_attention(ag_q,
-                                                        k_l,
-                                                        v_l,
-                                                        kvc,
-                                                        kvl,
-                                                        pi,
-                                                        cu_cache,
-                                                        dist_cache,
-                                                        kv_cache_lens=kvcl,
-                                                        skip_current_attn=True,
-                                                        use_causal_mask=False,
-                                                        update_kv_cache=False,
-                                                        **common)
-        o1, l1 = _lse_reduce_scatter(o1, l1, pcp_axis, pcp_size)
+        if _cache_phase == "gather_kv":
+            # Move KV, not Q: all-gather the pcp-striped cache (concat on the
+            # KV_CONTEXT / page_size axis), then attend the LOCAL queries q_l
+            # against each rank's shard with cp_rank=j and LSE-merge locally.
+            # The cache phase is non-causal, so shard order is irrelevant; each
+            # shard-j call reuses the exact cp_rank=j valid-length masking, so
+            # this is numerically identical to gather-Q. No reduce-scatter.
+            local_q = q_l.shape[0]  # = padded_q_len // pcp = 2 * pcp_chunk_size
+            cu_kv = jnp.zeros_like(cu_q_lens[0]).at[1:].set(local_q)
+            kv_full = lax.all_gather(kvc, pcp_axis, axis=1, tiled=True)
+            page_local = kvc.shape[1]
+            common_kv = {k: v for k, v in common.items() if k != "cp_rank"}
+            o1 = l1 = None
+            for j in range(pcp_size):
+                kvc_j = lax.dynamic_slice_in_dim(kv_full, j * page_local,
+                                                 page_local, axis=1)
+                oj, _, lj = rpa_v3_cp.ragged_paged_attention(
+                    q_l, k_l, v_l, kvc_j, kvl, pi, cu_kv, dist_cache,
+                    kv_cache_lens=kvcl, cp_rank=_rank_i32(j),
+                    skip_current_attn=True, use_causal_mask=False,
+                    update_kv_cache=False, **common_kv)
+                if j == 0:
+                    o1, l1 = oj, lj
+                else:
+                    o1, l1 = merge_attn_states(o1, l1, oj, lj)
+            kvc1 = kvc  # cache unchanged in this phase; current phase writes it
+        else:
+            ag_q = ag(q_l)  # [pcp*2*chunk]
+            o1, kvc1, l1 = rpa_v3_cp.ragged_paged_attention(
+                ag_q,
+                k_l,
+                v_l,
+                kvc,
+                kvl,
+                pi,
+                cu_cache,
+                dist_cache,
+                kv_cache_lens=kvcl,
+                skip_current_attn=True,
+                use_causal_mask=False,
+                update_kv_cache=False,
+                **common)
+            o1, l1 = _lse_reduce_scatter(o1, l1, pcp_axis, pcp_size)
 
         # ---- current phase -----
         # `cu_q_lens[0]` = [0, chunk, chunk+tail_real] and `pcp_qpos` =
