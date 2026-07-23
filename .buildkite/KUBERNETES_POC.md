@@ -29,6 +29,12 @@ its `cpu_64_core` default for the existing bare-metal pipeline. If kube-dev
 ever reuses that shared file, upload it with `CPU_QUEUE=cpu` rather than changing
 the shared default.
 
+The Kubernetes image step opts into persistent BuildKit cache on that dedicated
+builder. The shared setup script remains no-cache by default for existing
+pipelines, but the POC retains unchanged vLLM and dependency layers between
+commits. The commit-specific image remains immutable; only its construction is
+incremental.
+
 ## Cluster, queue, and storage topology
 
 A GKE cluster cannot place node pools in two regions. Run one Agent Stack

@@ -212,6 +212,7 @@ steps:
       TPU_VERSION: "tpu6e"
       CI_IMAGE_ALIAS_TAG: "kube-${BUILDKITE_COMMIT}"
       KEEP_IMAGE_AFTER_PUSH: "true"
+      USE_DOCKER_BUILD_CACHE: "true"
     commands:
       - buildkite-agent meta-data set VLLM_COMMIT_HASH "$$(tr -d '[:space:]' < .buildkite/vllm_lkg.version)"
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
