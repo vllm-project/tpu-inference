@@ -641,7 +641,7 @@ def fused_moe_func(
     # Fast path for low-concurrency decode: a specialized C=N Pallas MoE kernel
     # that skips the gather/scatter permutation of the general gmm path. Only
     # engaged for small decode batches with topk == CN_MOE_TOP_K.
-    low_conc_threshold = getattr(envs, "MOE_LOW_CONC_THRESHOLD", 64)
+    low_conc_threshold = getattr(envs, "MOE_LOW_CONC_THRESHOLD", 8)
     if 1 < num_tokens <= low_conc_threshold and topk == CN_MOE_TOP_K:
         logger.info(
             "Taking fast low-concurrency C=N Pallas MoE path for "
