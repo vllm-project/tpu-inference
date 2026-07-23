@@ -648,10 +648,9 @@ def fused_moe_func(
             f"BS={num_tokens} decode (use_ep={use_ep}, "
             f"threshold={low_conc_threshold}).")
 
-        pad_t = ((num_tokens + 7) // 8) * 8 - num_tokens
-        padded_hs = jnp.pad(hidden_states, ((0, pad_t), (0, 0)))
-        padded_topk_indices = jnp.pad(topk_indices, ((0, pad_t), (0, 0)))
-        padded_topk_weights = jnp.pad(topk_weights, ((0, pad_t), (0, 0)))
+        padded_hs = hidden_states
+        padded_topk_indices = topk_indices
+        padded_topk_weights = topk_weights
 
         def _local_low_conc_moe(hs, w1_local, w1_scale_local, w2_local,
                                 w2_scale_local, topk_ids_local,
