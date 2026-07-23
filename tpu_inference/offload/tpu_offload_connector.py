@@ -2244,7 +2244,6 @@ class TPUOffloadConnectorWorker:
                 raw_chunked_kv_on_tpu.append(
                     jax.device_put(assembled_kv_on_cpu[i],
                                    self.expanded_device_sharding))
-            jax.block_until_ready(raw_chunked_kv_on_tpu)
 
             update_kv_start = time.time()
             if self.use_bucketed_swap_ops:
