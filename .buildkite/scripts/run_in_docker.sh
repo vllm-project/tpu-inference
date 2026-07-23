@@ -63,6 +63,10 @@ ENV_VARS=(
   -e HOST_NAME="${HOST_NAME:-}"
   -e GCS_BUCKET="${GCS_BUCKET:-}"
   -e GITHUB_CI_BOT_TOKEN="${GITHUB_CI_BOT_TOKEN:-}"
+  -e CPU_ONLY_TASK="${CPU_ONLY_TASK:-}"
+  -e TPU_ACCELERATOR_TYPE="${TPU_ACCELERATOR_TYPE:-}"
+  -e XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-}"
+  -e XLA_PYTHON_CLIENT_ALLOCATOR="${XLA_PYTHON_CLIENT_ALLOCATOR:-}"
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
@@ -107,47 +111,57 @@ DOCKER_HF_HOME="/tmp/hf_home"
 # 1. Cache Setup (HF Models & JAX Compilations)
 # ==========================================
 
-# Try to cache HF models
-persist_cache_dir="/mnt/disks/persist/models"
-
-if ( mkdir -p "$persist_cache_dir" ); then
-  LOCAL_HF_HOME="$persist_cache_dir"
+if [[ "${CPU_ONLY_TASK:-0}" == "1" ]]; then
+  echo "[INFO] Running in CPU-only task mode. Bypassing GCS cache sync & disk persistence."
+  LOCAL_HF_HOME="/tmp/hf_models"
+  mkdir -p "$LOCAL_HF_HOME"
+  KERNEL_TUNING_TMP_DIR="/tmp/kernel_tuning"
+  mkdir -p "$KERNEL_TUNING_TMP_DIR"
+  LOCAL_JAX_CACHE_DIR="/tmp/tpu_jax_cache"
+  mkdir -p "$LOCAL_JAX_CACHE_DIR"
 else
-  echo "Error: Failed to create $persist_cache_dir"
-  exit 1
+  # Try to cache HF models
+  persist_cache_dir="/mnt/disks/persist/models"
+
+  if ( mkdir -p "$persist_cache_dir" 2>/dev/null ); then
+    LOCAL_HF_HOME="$persist_cache_dir"
+  else
+    LOCAL_HF_HOME="/tmp/hf_models"
+    mkdir -p "$LOCAL_HF_HOME"
+  fi
+
+  # Temporary directory for kernel tuning outputs (not persisted)
+  KERNEL_TUNING_TMP_DIR="/tmp/kernel_tuning"
+  mkdir -p "$KERNEL_TUNING_TMP_DIR"
+
+  # Try to cache the JAX compilations.
+  GCS_CACHE_BASE="gs://ullm-ci-cache/jax_cache"
+  echo "[INFO] Probing JAX version from docker image..."
+  JAX_VERSION=$(docker run --rm "$FULL_IMAGE_TAG" python3 -c "import jax; print(jax.__version__)")
+  echo "[INFO] Detected JAX Version: ${JAX_VERSION}"
+
+  # Centralized GCS cache path
+  CACHE_NAMESPACE="jax${JAX_VERSION}_tpu${TPU_VERSION:-tpu6e}"
+  FINAL_CACHE_PATH="${GCS_CACHE_BASE}/${CACHE_NAMESPACE}"
+
+  if ( mkdir -p "/mnt/disks/persist/tpu_jax_cache/${CACHE_NAMESPACE}" 2>/dev/null ); then
+    LOCAL_JAX_CACHE_DIR="/mnt/disks/persist/tpu_jax_cache/${CACHE_NAMESPACE}"
+  else
+    LOCAL_JAX_CACHE_DIR="/tmp/tpu_jax_cache/${CACHE_NAMESPACE}"
+    mkdir -p "$LOCAL_JAX_CACHE_DIR"
+  fi
+  echo "[INFO] Pulling JAX Cache from GCS to local directory..."
+  # Parallel CI builds‘ pushes are safe because JAX's compilation cache 
+  # entries are content-addressed. Concurrent pushes are thus idempotent;
+  gcloud storage rsync \
+    --recursive \
+    --no-clobber \
+    --delete-unmatched-destination-objects \
+    --exclude=".*_.gstmp$" \
+    --no-user-output-enabled \
+    "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" || \
+    echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
 fi
-
-# Temporary directory for kernel tuning outputs (not persisted)
-KERNEL_TUNING_TMP_DIR="/tmp/kernel_tuning"
-mkdir -p "$KERNEL_TUNING_TMP_DIR"
-
-# Try to cache the JAX compilations.
-GCS_CACHE_BASE="gs://ullm-ci-cache/jax_cache"
-echo "[INFO] Probing JAX version from docker image..."
-JAX_VERSION=$(docker run --rm "$FULL_IMAGE_TAG" python3 -c "import jax; print(jax.__version__)")
-echo "[INFO] Detected JAX Version: ${JAX_VERSION}"
-
-# Centralized GCS cache path
-CACHE_NAMESPACE="jax${JAX_VERSION}_tpu${TPU_VERSION:-tpu6e}"
-FINAL_CACHE_PATH="${GCS_CACHE_BASE}/${CACHE_NAMESPACE}"
-
-LOCAL_JAX_CACHE_DIR="/mnt/disks/persist/tpu_jax_cache/${CACHE_NAMESPACE}"
-
-if ! mkdir -p "$LOCAL_JAX_CACHE_DIR"; then
-  echo "[ERROR] Failed to create $LOCAL_JAX_CACHE_DIR on persistent disk."
-  exit 1
-fi
-echo "[INFO] Pulling JAX Cache from GCS to local directory..."
-# Parallel CI builds‘ pushes are safe because JAX's compilation cache 
-# entries are content-addressed. Concurrent pushes are thus idempotent;
-gcloud storage rsync \
-  --recursive \
-  --no-clobber \
-  --delete-unmatched-destination-objects \
-  --exclude=".*_.gstmp$" \
-  --no-user-output-enabled \
-  "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" || \
-  echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
 
 # ==========================================
 # 2. Run Docker Container
@@ -209,17 +223,19 @@ set -e
 # ==========================================
 echo "[INFO] Docker finished with exit code ${DOCKER_EXIT_CODE}."
 
-if [ $DOCKER_EXIT_CODE -eq 0 ]; then
-  echo "[INFO] Syncing local JAX Cache back to GCS..."
-  gcloud storage rsync \
-    --recursive \
-    --no-clobber \
-    --exclude=".*_.gstmp$" \
-    --no-user-output-enabled \
-    "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" || \
-    echo "[WARN] Failed to sync JAX Cache back to GCS."
-else
-  echo "[WARN] Docker exited with non-zero code ${DOCKER_EXIT_CODE}. Skipping syncing local JAX Cache back to GCS to avoid potential cache corruption."
+if [[ "${CPU_ONLY_TASK:-0}" != "1" ]]; then
+  if [ $DOCKER_EXIT_CODE -eq 0 ]; then
+    echo "[INFO] Syncing local JAX Cache back to GCS..."
+    gcloud storage rsync \
+      --recursive \
+      --no-clobber \
+      --exclude=".*_.gstmp$" \
+      --no-user-output-enabled \
+      "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" || \
+      echo "[WARN] Failed to sync JAX Cache back to GCS."
+  else
+    echo "[WARN] Docker exited with non-zero code ${DOCKER_EXIT_CODE}. Skipping syncing local JAX Cache back to GCS to avoid potential cache corruption."
+  fi
 fi
 
 echo "--- Cleaning up Docker resources after run"

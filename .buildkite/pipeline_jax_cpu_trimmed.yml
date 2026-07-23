@@ -1,0 +1,48 @@
+# Trimmed JAX CPU Unit Tests Pipeline for Fast Iteration
+steps:
+  - label: ":docker: Build Base Image for Branch"
+    key: build_docker
+    agents:
+      queue: cpu_64_core
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+  - label: "JAX CPU Unit Tests (Offloaded to queue: cpu_64_core)"
+    key: jax_cpu_unit_tests
+    depends_on: build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      CPU_ONLY_TASK: "1"
+      TPU_ACCELERATOR_TYPE: "v6e-8"
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+      XLA_PYTHON_CLIENT_ALLOCATOR: "platform"
+    agents:
+      queue: cpu_64_core
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v \
+          /workspace/tpu_inference/tests/core \
+          /workspace/tpu_inference/tests/distributed/test_distributed_utils.py \
+          /workspace/tpu_inference/tests/distributed/test_tpu_connector.py \
+          /workspace/tpu_inference/tests/executors \
+          /workspace/tpu_inference/tests/platforms \
+          /workspace/tpu_inference/tests/runner \
+          /workspace/tpu_inference/tests/spec_decode \
+          /workspace/tpu_inference/tests/worker \
+          /workspace/tpu_inference/tests/layers/common \
+          /workspace/tpu_inference/tests/layers/jax \
+          /workspace/tpu_inference/tests/models/common \
+          /workspace/tpu_inference/tests/models/jax/utils \
+          /workspace/tpu_inference/tests/lora/test_env_parsing.py \
+          /workspace/tpu_inference/tests/offload/test_raiden_offload_connector.py \
+          /workspace/tpu_inference/tests/offload/tpu_offload_connector_scheduler_test.py \
+          /workspace/tpu_inference/tests/offload/tpu_offload_connector_worker_test.py \
+          /workspace/tpu_inference/tests/offload/tpu_offload_cpu_backend_test.py \
+          /workspace/tpu_inference/tests/offload/tpu_offload_manager_test.py \
+          /workspace/tpu_inference/tests/offload/tpu_offload_metrics_test.py \
+          /workspace/tpu_inference/tests/offload/tpu_offload_utils_test.py \
+          --ignore=/workspace/tpu_inference/tests/core/test_dp_group_sampling_prefix_cache.py \
+          --ignore=/workspace/tpu_inference/tests/runner/test_async_logprobs.py \
+          --ignore=/workspace/tpu_inference/tests/runner/test_processed_logprobs.py \
+          --ignore=/workspace/tpu_inference/tests/runner/test_moe_expert_ids.py \
+          --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference"
