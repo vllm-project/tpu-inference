@@ -24,6 +24,14 @@ def align_to(a, b):
     return pl.cdiv(a, b) * b
 
 
+def cp_local_cache_len(global_cache_len, cp_group_size, cp_rank):
+    """Number of cache tokens owned by this CP rank.
+
+    Cache is interleaved across ranks: rank r owns global positions r, r+G, r+2G...
+    """
+    return (global_cache_len + cp_group_size - 1 - cp_rank) // cp_group_size
+
+
 def broadcast_minor(src, shape):
     """Broadcasts 'src' to 'shape' in the minor dimension."""
     if src.shape == shape:

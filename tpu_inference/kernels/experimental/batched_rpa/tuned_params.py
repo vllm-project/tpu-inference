@@ -149,6 +149,17 @@ def calculate_block_sizes(
         # Sum up all buffer memory usage.
         buffer_bytes = bq_bytes + bkv_bytes + bo_bytes
 
+        # Account for the CP shuffle staging buffer (lives in VMEM).
+        if serve_cfgs.cp_group_size is not None and serve_cfgs.update_kv_cache:
+            shuffle_bkv = pl.cdiv(bkv_sz, serve_cfgs.cp_group_size)
+            kv_hbm_stride = (utils.align_to(model_cfgs.num_kv_heads * 2,
+                                            serve_cfgs.packing_kv) //
+                             serve_cfgs.packing_kv)
+            kv_shuffle_per_batch = (n_buffer * shuffle_bkv * kv_hbm_stride *
+                                    serve_cfgs.packing_kv *
+                                    model_cfgs.head_dim)
+            buffer_bytes += kv_shuffle_per_batch * kv_bytes
+
         # Step 2: Calculate worst case memory usage during computation.
 
         # Calculate the size of loaded bq and bkv size.
