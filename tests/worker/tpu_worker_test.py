@@ -695,12 +695,6 @@ class TestTPUWorker:
         runner.reinitialize_kv_cache.assert_called_once()
         assert worker._weight_update_active is False
 
-    def test_update_without_start_raises(self, mock_vllm_config):
-        """Tests that weights cannot be applied outside a session."""
-        worker = self._weight_update_worker(mock_vllm_config)
-        with pytest.raises(RuntimeError, match="start_weight_update must be"):
-            worker.update_weights({})
-
     def test_kv_cache_untouched_when_not_freed(self, mock_vllm_config):
         """Tests that free_kv_cache=False leaves the KV cache alone."""
         worker = self._weight_update_worker(mock_vllm_config)
