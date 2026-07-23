@@ -856,8 +856,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         """Generative model or pooling model select different computations."""
         self.enable_continue_decode = self.vllm_config.additional_config.get(
             "enable_continue_decode", False)
-        self.continue_decode_eos_check_interval = self.vllm_config.additional_config.get(
-            "continue_decode_eos_check_interval", 1)
+        # continue_decode EOS-check interval: how often the fused decode loop
+        # observes the any-sequence-hit-EOS early exit (see decode_loop.py). Set
+        # via the CONTINUE_DECODE_EOS_CHECK_INTERVAL env var so it can be retuned
+        # per model family / serving fleet without a rebuild. Default 1 = stock
+        # every-step check.
+        self.continue_decode_eos_check_interval = (
+            envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL)
         self.static_max_decode_steps = self.vllm_config.additional_config.get(
             "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
         self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
