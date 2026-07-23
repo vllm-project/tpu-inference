@@ -229,6 +229,12 @@ setup_environment() {
     echo "Pushing Docker image to CI Image Registry..."
     docker tag "${IMAGE_NAME}:${CACHE_TAG}" "${CI_IMAGE_REPO}:${CACHE_TAG}"
     docker push "${CI_IMAGE_REPO}:${CACHE_TAG}"
+    if [[ -n "${CI_IMAGE_ALIAS_TAG:-}" ]]; then
+      echo "Pushing additional CI image alias ${CI_IMAGE_ALIAS_TAG}..."
+      docker tag "${IMAGE_NAME}:${CACHE_TAG}" \
+        "${CI_IMAGE_REPO}:${CI_IMAGE_ALIAS_TAG}"
+      docker push "${CI_IMAGE_REPO}:${CI_IMAGE_ALIAS_TAG}"
+    fi
   fi
 
   # Push logic if requested

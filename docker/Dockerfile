@@ -90,6 +90,13 @@ RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
 
+# Agent Stack for Kubernetes owns /workspace at runtime, so source is installed
+# outside that tree. Keep the legacy paths available for the bare-metal runner,
+# whose pipeline commands still use /workspace/{vllm,tpu_inference}.
+RUN mkdir -p /workspace && \
+    ln -sfn /tpu-inference/workspace/vllm /workspace/vllm && \
+    ln -sfn /tpu-inference/workspace/tpu_inference /workspace/tpu_inference
+
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

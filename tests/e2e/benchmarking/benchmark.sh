@@ -27,7 +27,7 @@ if [ "$USE_V6E8_QUEUE" == "True" ]; then
     test_model="meta-llama/Llama-3.1-70B-Instruct"
 fi
 
-root_dir=/tpu-inference/workspace
+root_dir="${TPU_INFERENCE_WORKSPACE:-/tpu-inference/workspace}"
 dataset_name=sonnet
 dataset_path="benchmarks/sonnet.txt"
 vllm_download_dir=/tmp/hf_home
@@ -42,7 +42,7 @@ helpFunction()
 {
     echo ""
     echo "Usage: $0 [-r root-dir-path] [-d dataset-name] [-p dataset-path] [-v vllm-download-dir] [-h]"
-    echo -e "\t-r, --root-dir-path\tThe path to your root directory (default: /workspace/, which is used in the Dockerfile)"
+    echo -e "\t-r, --root-dir-path\tThe workspace containing vLLM (auto-detected by default)"
     echo -e "\t-d, --dataset-name\tThe name of the dataset to use (default: sonnet)"
     echo -e "\t-p, --dataset-path\tThe path to the processed dataset. This is required when using a custom model (default: benchmarks/sonnet.txt)"
     echo -e "\t-v, --vllm-download-dir\tThe directory to download vLLM into (default: /tmp/hf_home)"
@@ -95,6 +95,8 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
+resolve_benchmark_workspace "$root_dir"
+
 if [ -n "${TEST_MODEL:-}" ]; then
     test_model="$TEST_MODEL"
 fi
@@ -135,18 +137,8 @@ echo "Using tensor parallel size $tensor_parallel_size"
 echo "Using the dataset name $dataset_name"
 echo "Using the dataset at $dataset_path"
 
-vllm_dir="${root_dir}/vllm"
-if [[ ! -d "$vllm_dir" && -d "/vllm" ]]; then
-    vllm_dir="/vllm"
-fi
-
 cd "$vllm_dir" || exit
 echo "Current working directory: $(pwd)"
-
-tpu_inf_dir="${root_dir}/tpu_inference"
-if [[ ! -d "$tpu_inf_dir" ]]; then
-    tpu_inf_dir="$(pwd)"
-fi
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Commons ones
 cp -r "$tpu_inf_dir"/scripts/vllm/benchmarking/*.py "$vllm_dir"/benchmarks/

@@ -7,6 +7,49 @@
 # llama_guard_perf_recipe.sh) to share common functions.
 # -----------------------------------------------------------------------------
 
+# Resolve the two repositories independently. Agent Stack checks out the build
+# under /workspace while the image keeps vLLM outside that mount; bare-metal
+# images historically keep both repositories under /workspace.
+resolve_benchmark_workspace() {
+    local requested_root="${1:-}"
+    local caller_script="${BASH_SOURCE[1]}"
+    local checkout_root
+    checkout_root=$(cd -- "$(dirname -- "$caller_script")/../../.." &>/dev/null && pwd)
+
+    tpu_inf_dir="${TPU_INFERENCE_DIR:-$checkout_root}"
+    if [[ ! -d "$tpu_inf_dir/tpu_inference" ]]; then
+        echo "ERROR: Could not resolve the tpu-inference checkout from $caller_script" >&2
+        return 1
+    fi
+
+    vllm_dir=""
+    local candidate
+    for candidate in \
+        "${requested_root:+$requested_root/vllm}" \
+        /tpu-inference/workspace/vllm \
+        /workspace/vllm \
+        /vllm; do
+        if [[ -n "$candidate" && -d "$candidate" ]]; then
+            vllm_dir="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$vllm_dir" ]]; then
+        echo "ERROR: Could not find the vLLM checkout" >&2
+        return 1
+    fi
+
+    if [[ -z "$requested_root" || ! -d "$requested_root" ]]; then
+        root_dir=$(dirname -- "$vllm_dir")
+    else
+        root_dir="$requested_root"
+    fi
+
+    echo "Using TPU Inference checkout at $tpu_inf_dir"
+    echo "Using vLLM checkout at $vllm_dir"
+    echo "Using benchmark workspace at $root_dir"
+}
+
 # waitForServerReady: Blocks execution until the server prints the READY_MESSAGE or times out.
 # This logic is shared across all benchmark scripts.
 waitForServerReady() {
