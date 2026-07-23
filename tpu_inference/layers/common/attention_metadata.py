@@ -30,7 +30,7 @@ import jax
         "pcp_q_pos_offsets",
         "pcp_kv_cache_lens",
     ],
-    meta_fields=["padded_num_reqs"],
+    meta_fields=["padded_num_reqs", "pcp_cache_pages"],
 )
 @dataclass
 class AttentionMetadata(object):
@@ -68,6 +68,16 @@ class AttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
+
+    # PCP gather-KV only. STATIC (meta field): an upper bound, rounded up to a
+    # power of two, on the number of KV-cache pages the request's cached
+    # tokens occupy this step. The block table is always sized for
+    # max_model_len (cdiv(max_model_len, block_size)), so without this hint the
+    # gather-KV cache phase would all-gather max_model_len worth of pages even
+    # for a short request. -1 means "unknown" -> fall back to the full block
+    # table width. Being a meta field it participates in the compile key, so
+    # each bucket compiles once.
+    pcp_cache_pages: int = -1
 
 
 @functools.partial(

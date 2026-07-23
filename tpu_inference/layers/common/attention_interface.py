@@ -812,6 +812,7 @@ def pcp_ragged_paged_attention(
     v_scale: float | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    cache_pages: int = -1,
 ):
     """Single-request prefill context-parallel (PCP) attention.
 
@@ -931,13 +932,22 @@ def pcp_ragged_paged_attention(
             # Gated on a STATIC comparison: when pages_per_seq == npages (e.g.
             # microbenchmarks where one request owns the entire cache) the
             # take would be a full-cache copy for zero benefit, so skip it.
+            # `cache_pages` (static, from AttentionMetadata) further bounds the
+            # slice: the block table is always sized for max_model_len, so
+            # without it a short request would still gather max_model_len worth
+            # of pages.  It is a power-of-two upper bound on the request's live
+            # page count, so at most 2x more than needed is moved.  -1 (unknown)
+            # falls back to the full block-table width.
             npages_all = kvc.shape[0]
             max_seqs = kvl.shape[0]
             pages_per_seq = pi.shape[0] // max_seqs
-            if pages_per_seq < npages_all:
-                kv_src = jnp.take(kvc, pi[:pages_per_seq], axis=0)
-                pi_src = jnp.tile(
-                    jnp.arange(pages_per_seq, dtype=pi.dtype), max_seqs)
+            n_gather = pages_per_seq
+            if cache_pages > 0:
+                n_gather = min(n_gather, max(int(cache_pages), 1))
+            if n_gather < npages_all:
+                kv_src = jnp.take(kvc, pi[:n_gather], axis=0)
+                pi_src = jnp.tile(jnp.arange(n_gather, dtype=pi.dtype),
+                                  max_seqs)
             else:
                 kv_src, pi_src = kvc, pi
 
@@ -1102,6 +1112,7 @@ def attention(
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            cache_pages=getattr(md, "pcp_cache_pages", -1),
             update_kv_cache=update_kv_cache,
             use_causal_mask=use_causal_mask,
         )

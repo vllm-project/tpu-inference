@@ -133,8 +133,8 @@ class PcpGatherKvPagesTest(jtu.JaxTestCase):
         return Mesh(
             np.array(jax.devices()[:pcp]).reshape(shape), MESH_AXIS_NAMES)
 
-    @parameterized.parameters(2, 4)
-    def test_scattered_pages_with_slack_cache(self, pcp):
+    @parameterized.parameters((2, False), (4, False), (2, True), (4, True))
+    def test_scattered_pages_with_slack_cache(self, pcp, tight_hint):
         if jax.device_count() < pcp:
             self.skipTest(f"needs {pcp} devices")
         rng = np.random.default_rng(0)
@@ -176,12 +176,24 @@ class PcpGatherKvPagesTest(jtu.JaxTestCase):
         def pad1(xs):
             return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
 
+        # `cache_pages` is the static bound the runner supplies: the number of
+        # pages the CACHED tokens occupy (page P of the token-ordered cache
+        # holds gpage = PAGE*pcp tokens), rounded up to a power of two.  It is
+        # strictly tighter than pages_per_seq here, so it exercises the bound.
+        gpage = PAGE * pcp
+        live = cdiv(L, gpage)
+        hint = (1 << (max(live - 1, 0)).bit_length()) if tight_hint else -1
+        if tight_hint:
+            self.assertLess(hint, pps, "hint must be tighter than pages_per_seq")
+            self.assertGreaterEqual(hint, live, "hint must cover live pages")
+
         cu, qpos = _pcp_meta(pcp, C, num_current)
         out, _ = pcp_ragged_paged_attention(
             self._mesh(pcp), _to_rank_order(q, pcp, C),
             _to_rank_order(k, pcp, C), _to_rank_order(v, pcp, C), cache,
             pad1([kv_total, kv_total]), pi, cu,
-            jnp.array([0, 0, 2], jnp.int32), pad1([L, L]), qpos, SM)
+            jnp.array([0, 0, 2], jnp.int32), pad1([L, L]), qpos, SM,
+            cache_pages=hint)
 
         inv = _inv_row(pcp)
         got = np.asarray(out).reshape(2 * pcp, C, NQ, HD)[inv].reshape(
