@@ -14,7 +14,7 @@
 
 # type: ignore
 
-from tools.kernel.tuner.v1.common.kernel_tuner_base import TuningCase
+from tools.kernel.tuner.v1.common.tuner_datatypes import TuningCase
 from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
     SpannerStorageManager
 
