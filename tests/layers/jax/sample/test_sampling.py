@@ -16,6 +16,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from vllm.v1.outputs import LogprobsTensors
@@ -177,16 +178,19 @@ class TestProcessedLogprobs:
         # The max logprob should be closer to 0 (more confident).
         assert float(jnp.max(processed[0])) > float(jnp.max(raw_logprobs[0]))
 
-    def test_processed_logprobs_matches_manual_temperature(self):
+    @pytest.mark.parametrize("step", [None, 5])
+    def test_processed_logprobs_matches_manual_temperature(self, step):
         """Verify processed_logprobs produces the same result as manually
-        dividing by temperature then computing log_softmax."""
+        dividing by temperature then computing log_softmax. Passing a
+        per-step key counter must not perturb the processed logits, which
+        depend only on the deterministic temperature/top-k/top-p transforms."""
         logits = jnp.array([[1.0, 2.0, 3.0, 0.5]], dtype=jnp.float32)
         temperature = 0.8
 
         metadata = self._make_sampling_metadata(1, temperature=temperature)
         fake_mesh = self._get_fake_mesh()
         _, processed_logits = sample(jax.random.PRNGKey(0), fake_mesh, logits,
-                                     metadata)
+                                     metadata, step)
         processed = compute_logprobs(processed_logits)
 
         expected = jnp.log(
@@ -194,9 +198,12 @@ class TestProcessedLogprobs:
             jnp.sum(jnp.exp(logits / temperature), axis=-1, keepdims=True))
         assert np.allclose(processed, expected, atol=1e-5)
 
-    def test_processed_logprobs_with_topk(self):
-        """After top-k masking, tokens outside top-k should get -inf logprobs."""
-        logits = jnp.array([[1.0, 5.0, 3.0, 2.0, 4.0]], dtype=jnp.float32)
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+    def test_processed_logprobs_with_topk(self, dtype):
+        """After top-k masking, tokens outside top-k should get -inf logprobs.
+        Also runs with model-dtype (bf16) logits, since the runner forwards
+        compute_logits' bf16 output to sample() without an eager fp32 cast."""
+        logits = jnp.array([[1.0, 5.0, 3.0, 2.0, 4.0]], dtype=dtype)
 
         metadata = self._make_sampling_metadata(1, temperature=1.0, top_k=2)
         _, processed_logits = sample(jax.random.PRNGKey(0),

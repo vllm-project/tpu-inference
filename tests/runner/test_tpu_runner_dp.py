@@ -1352,10 +1352,12 @@ class TestSamplingMetadataPassthrough:
     @patch('tpu_inference.runner.tpu_runner.sample')
     @patch('tpu_inference.runner.tpu_runner.runner_utils')
     @patch('jax.device_get', return_value=np.zeros(8, dtype=np.int32))
-    def test_sample_from_logits_does_not_call_from_input_batch(
+    def test_sample_from_logits_uses_metadata_arg_and_skips_logit_cast(
             self, mock_jax_device_get, mock_runner_utils, mock_sample,
             mock_sampling_metadata):
-        """_sample_from_logits() should use its tpu_sampling_metadata argument, not create one internally."""
+        """_sample_from_logits() should use its tpu_sampling_metadata argument
+        (not create one internally), and with logprobs disabled it must not
+        upcast the raw logits to fp32 -- nothing consumes them past sampling."""
         runner = MagicMock()
         runner.input_batch.num_reqs = 0  # empty batch keeps the loop trivial
         runner.speculative_config = None
@@ -1366,8 +1368,10 @@ class TestSamplingMetadataPassthrough:
         mock_tpu_sampling_metadata.logprobs = False
 
         mock_runner_utils.get_padded_num_reqs_with_upper_limit.return_value = 8
-        mock_sample.return_value = np.zeros(8, dtype=np.int32)
+        # sample() returns (next_tokens, processed_logits).
+        mock_sample.return_value = (MagicMock(), MagicMock())
 
+        logits = MagicMock()
         try:
             TPUModelRunner._sample_from_logits(
                 runner,
@@ -1376,16 +1380,17 @@ class TestSamplingMetadataPassthrough:
                 mock_tpu_sampling_metadata,
                 None,  # input_ids
                 MagicMock(),  # hidden_states
-                MagicMock(),  # logits
+                logits,
                 None,  # aux_hidden_states
                 None,  # spec_decode_metadata
                 None,  # kv_connector_output
                 padded_num_reqs=8,
             )
         except Exception:
-            pass  # only care that from_input_batch was never called
+            pass  # only care about the calls asserted below
 
         mock_sampling_metadata.from_input_batch.assert_not_called()
+        logits.astype.assert_not_called()
 
 
 if __name__ == "__main__":
