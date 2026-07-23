@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     LAYOUT_Q_PROJ_AS_NDH: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
-    USE_BATCHED_RPA_KERNEL: bool = False
+    USE_BATCHED_RPA_KERNEL: bool = True
     USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
     # Optional operator override for the RPA v3 kernel block sizes, one per
     # case. Each is a comma-separated 4-tuple (bq_sz, bkv_sz, bq_csz, bkv_csz).
@@ -327,7 +327,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "JAX_PROFILER_SERVER_PORT":
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
     "USE_BATCHED_RPA_KERNEL":
-    env_bool("USE_BATCHED_RPA_KERNEL"),
+    env_bool("USE_BATCHED_RPA_KERNEL", default=True),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
     # Optional operator override for RPA v3 kernel block sizes, per case.
