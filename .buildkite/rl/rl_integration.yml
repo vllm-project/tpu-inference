@@ -91,3 +91,29 @@ steps:
             bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/deepseek/r1" -n 14042 -l 4
         fi
 
+  - label: "${TPU_VERSION:-tpu6e} Accuracy for deepseek-ai/DeepSeek-R1 continue_decode sync"
+    key: "${TPU_VERSION:-tpu6e}_rl_integration_continue_decode_mmlu_sync"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-R1_UnitTest"
+    soft_fail: true
+    agents:
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+    env:
+      NEW_MODEL_DESIGN: "1"
+      USE_V6E8_QUEUE: "False"
+      TPU_VERSION: "tpu7x"
+      SKIP_ACCURACY_TESTS: "False"
+      VLLM_MLA_DISABLE: "0"
+      MOE_REQUANTIZE_BLOCK_SIZE: "512"
+      MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
+      MODEL_IMPL_TYPE: "vllm"
+      MINIMUM_ACCURACY_THRESHOLD: "0.84"  # TODO : replace 0 with your accuracy threshold
+      EXTRA_SERVE_ARGS: "--no-async-scheduling --additional-config='{\"enable_continue_decode\": true}'"
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_Accuracy" "not enough HBM"
+        else
+          .buildkite/scripts/run_in_docker.sh \
+            bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/deepseek/r1" -n 14042 -l 4
+        fi
+
