@@ -21,9 +21,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
-from jax.sharding import Mesh
+from flax import nnx
+from jax.sharding import AxisType, Mesh, PartitionSpec
 from transformers import PretrainedConfig
-from vllm.config import (ModelConfig, ParallelConfig, VllmConfig,
+from vllm.config import (CacheConfig, LoadConfig, ModelConfig, ParallelConfig,
+                         PoolerConfig, SchedulerConfig, VllmConfig,
                          set_current_vllm_config)
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
@@ -32,6 +34,7 @@ from vllm.model_executor.models.registry import ModelRegistry
 
 from tpu_inference.distributed.jax_parallel_state import \
     init_pp_distributed_environment
+from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.models.common import model_loader
 from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
 
@@ -282,10 +285,92 @@ def test_get_flax_model(vllm_config, mesh, tie_word_embeddings):
     assert hasattr(model.model, "named_modules")
 
 
+@pytest.mark.parametrize("enforce_device_order", [True, False])
+def test_get_flax_model_dummy_with_explicit_mesh(vllm_config, rng,
+                                                 mock_get_pp_group,
+                                                 enforce_device_order):
+    """
+    Regression test verifying that get_flax_model correctly handles native models
+    (`LlamaForCausalLM`) initialized with `load_format = "dummy"` (`model_loader.py:232`)
+    when an explicit device mesh (`AxisType.Explicit`) is used (`enforce_device_order = True`).
+
+    When enforce_device_order is True (or explicit `jax.make_mesh` is used without
+    `AxisType.Auto`), all mesh axes have `AxisType.Explicit`. When tensor_parallel_size = 1
+    (where `'model'` axis size is `1`), JAX abstract evaluation inside `@jax.jit`
+    normalizes and drops size-1 axis shardings from uncommitted/replicated state arrays
+    to `P(None, None)` (while `pspecs` expects `P(("data", "model"), None)` or `P("model", None)`).
+    In an Explicit mesh, `jax.lax.with_sharding_constraint(state, pspecs)` inside
+    `create_sharded_model()` then acts as an assertion and raises `AssertionError:
+    with_sharding_constraint acts as an assert when all axes of mesh are of type Explicit...`.
+    When enforce_device_order is False (`AxisType.Auto`), `with_sharding_constraint`
+    does not act as an assert and completes cleanly.
+    """
+    vllm_config.model_config = ModelConfig("meta-llama/Llama-3.1-8B")
+    vllm_config.model_config.dtype = jnp.bfloat16
+    vllm_config.model_config.hf_config.num_hidden_layers = 1
+    vllm_config.load_config.load_format = "dummy"
+    vllm_config.lora_config = None
+    vllm_config.cache_config = CacheConfig(block_size=16,
+                                           gpu_memory_utilization=0.9,
+                                           cache_dtype="auto")
+    devices = jax.devices()
+    tp_size = 1
+    dp_size = len(devices)
+
+    vllm_config.additional_config = {
+        "sharding": {
+            "sharding_strategy": {
+                "expert_parallelism": 1,
+                "device_indexes": list(range(dp_size)),
+                "enable_dp_attention": False,
+            }
+        }
+    }
+    vllm_config.parallel_config = ParallelConfig(pipeline_parallel_size=1,
+                                                 tensor_parallel_size=tp_size,
+                                                 data_parallel_size=dp_size)
+    vllm_config.sharding_config = ShardingConfigManager.from_vllm_config(
+        vllm_config)
+    vllm_config.parallel_config.data_parallel_size = dp_size
+    vllm_config.parallel_config.data_parallel_size_local = dp_size
+
+    # Construct a 2D mesh over ("data", "model") with tp_size=1 ('model' axis size 1)
+    # and data_parallel_size=len(devices).
+    mesh_shape = (dp_size, tp_size)
+    axis_types = (AxisType.Explicit,
+                  AxisType.Explicit) if enforce_device_order else (
+                      AxisType.Auto, AxisType.Auto)
+    device_mesh = jax.make_mesh(
+        mesh_shape,
+        ("data", "model"),
+        devices=devices,
+        axis_types=axis_types,
+    )
+
+    init_pp_distributed_environment(ip="",
+                                    rank=0,
+                                    world_size=1,
+                                    device=devices[0],
+                                    need_pp=False)
+
+    # Match MaxText runtime setting where eager sharding of variables is disabled
+    with jax.set_mesh(device_mesh), set_current_vllm_config(
+            vllm_config), nnx.use_eager_sharding(False):
+        model = model_loader.get_flax_model(vllm_config, rng, device_mesh)
+        for leaf in jax.tree.leaves(model.state):
+            if isinstance(leaf, jax.Array):
+                leaf.block_until_ready()
+
+        assert model is not None
+        assert callable(model.model_fn)
+        assert callable(model.compute_logits_fn)
+        assert model.model is not None
+        assert model.state is not None
+
+
 def test_get_flax_model_with_pooling(vllm_config, mesh, rng):
     """Tests that get_flax_model correctly instantiates a pooler when runner_type is 'pooling'."""
     vllm_config.model_config.runner_type = "pooling"
-    from vllm.config import PoolerConfig
     vllm_config.model_config.pooler_config = PoolerConfig(
         task="embed", tok_pooling_type="STEP", seq_pooling_type="CLS")
 

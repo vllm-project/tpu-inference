@@ -15,8 +15,17 @@
 import os
 from unittest.mock import Mock, patch
 
+import jax
+import jax.numpy as jnp
 import pytest
+from flax import nnx
+from jax.sharding import PartitionSpec
+from vllm.config import (CacheConfig, LoadConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, VllmConfig)
 
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
+from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -202,3 +211,98 @@ class TestTPUModelRunnerMeshInit:
 
             # First dimension of intra_node_shape should be dp_inner
             assert intra_node_shape[0] == expected_dp_inner
+
+
+class TestTPUModelRunnerMeshSharding:
+    """Test suite verifying TPUModelRunner sharding constraint behavior when loading native models."""
+
+    @pytest.mark.parametrize("enforce_device_order", [True, False])
+    @staticmethod
+    def test_load_model_dummy_with_enforced_device_order(enforce_device_order):
+        """
+        Regression test ensuring `TPUModelRunner.load_model()` reproduces the exact sharding
+        problem (`AssertionError: with_sharding_constraint acts as an assert when all axes of mesh
+        are of type Explicit...`) when enforce_device_order=True (`device_indexes` specified,
+        producing `AxisType.Explicit`) AND tensor_parallel_size=1 (`load_format="dummy"`).
+
+        When `device_indexes` is non-empty, `_create_2d_mesh()` calls `jax.make_mesh`
+        without `AxisType.Auto`, producing a Mesh where all axes are of type `Explicit`.
+        When tensor_parallel_size = 1 (where `'model'` axis size is `1`), initializing a
+        native model (e.g. LlamaForCausalLM) with `load_format = "dummy"` triggers
+        `create_sharded_model()` (`model_loader.py:232`). Because `'model'` axis size is 1,
+        JAX abstract evaluation normalizes and drops size-1 axis shardings to `P(None, None)`,
+        causing `with_sharding_constraint` under Explicit axes to raise `AssertionError`.
+        When enforce_device_order is False (`AxisType.Auto`), `with_sharding_constraint`
+        does not act as an assert and completes cleanly.
+        """
+        devices = jax.devices()
+        tp_size = 1
+        dp_size = len(devices)
+
+        model_config = ModelConfig("meta-llama/Llama-3.1-8B",
+                                   seed=0,
+                                   dtype="bfloat16")
+        model_config.hf_config.num_hidden_layers = 1
+        cache_config = CacheConfig(block_size=16,
+                                   gpu_memory_utilization=0.9,
+                                   cache_dtype="auto")
+        scheduler_config = SchedulerConfig(max_num_seqs=4,
+                                           max_model_len=128,
+                                           is_encoder_decoder=False)
+        parallel_config = ParallelConfig(pipeline_parallel_size=1,
+                                         tensor_parallel_size=tp_size,
+                                         data_parallel_size=dp_size)
+        load_config = LoadConfig(load_format="dummy")
+
+        sharding_strategy = {"tensor_parallelism": tp_size}
+        if enforce_device_order:
+            sharding_strategy["device_indexes"] = list(range(dp_size *
+                                                             tp_size))
+
+        vllm_config = VllmConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            scheduler_config=scheduler_config,
+            parallel_config=parallel_config,
+            load_config=load_config,
+            observability_config={},
+            additional_config={
+                "sharding": {
+                    "sharding_strategy": sharding_strategy
+                }
+            },
+        )
+        vllm_config.parallel_config.data_parallel_size = dp_size
+        vllm_config.parallel_config.data_parallel_size_local = dp_size
+
+        init_pp_distributed_environment(ip="",
+                                        rank=0,
+                                        world_size=1,
+                                        device=devices[0],
+                                        need_pp=False)
+
+        mock_pp_group = Mock(is_first_rank=True,
+                             is_last_rank=True,
+                             rank_in_group=0,
+                             world_size=1)
+        from tpu_inference.platforms.tpu_platform import TpuPlatform
+
+        with patch("tpu_inference.distributed.jax_parallel_state.get_pp_group", return_value=mock_pp_group), \
+             patch.object(TpuPlatform, "_initialize_sharding_config"), \
+             nnx.use_eager_sharding(False):
+            runner = TPUModelRunner(vllm_config,
+                                    devices=devices[:dp_size * tp_size])
+            if enforce_device_order:
+                assert runner.mesh.axis_types == (
+                    jax.sharding.AxisType.Explicit,
+                    jax.sharding.AxisType.Explicit)
+            else:
+                assert runner.mesh.axis_types == (jax.sharding.AxisType.Auto,
+                                                  jax.sharding.AxisType.Auto)
+            runner.load_model()
+            for leaf in jax.tree.leaves(runner.state):
+                if isinstance(leaf, jax.Array):
+                    leaf.block_until_ready()
+            assert runner.model is not None
+            assert callable(runner.model_fn)
+            assert callable(runner.compute_logits_fn)
