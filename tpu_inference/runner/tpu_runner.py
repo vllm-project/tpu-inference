@@ -1020,7 +1020,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 raise NotImplementedError(
                     "Unsupported speculative decoding method: "
                     f"{self.speculative_config.method}")
-            self.rejection_sampler = RejectionSampler(self.mesh)
+            self.rejection_sampler = RejectionSampler(self.mesh,
+                                                      self.speculative_config)
 
     def _init_inputs(self) -> None:
         model_config = self.model_config
