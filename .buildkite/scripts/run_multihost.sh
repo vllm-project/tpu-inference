@@ -197,7 +197,13 @@ source "$SCRIPT_DIR/setup_docker_env.sh"
 # Pass "true" to enable pushing to GCR
 setup_environment "${IMAGE_NAME}" "true"
 
-DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
+# Distribute the vLLM-qualified image (CACHE_TAG, set by setup_environment:
+# <tpu_inference_commit>-<vllm_commit>-<tpu_version>) rather than the
+# tpu-inference-commit-only tag. The commit-only tag is shared by every build on
+# the same tpu-inference commit regardless of vLLM, so another build (e.g. a
+# different LKG/HEAD vLLM) can overwrite it in the registry between our push and
+# the workers' pull -- causing the cluster to run a vLLM we never built/verified.
+DOCKER_IMAGE="${IMAGE_NAME}:${CACHE_TAG:-${BUILDKITE_COMMIT:-latest}}"
 
 # Clean up potential leftovers from previous runs
 echo "--- Cleaning up previous cluster state..."
