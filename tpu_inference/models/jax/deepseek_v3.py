@@ -1196,9 +1196,11 @@ class DeepSeekV3(JaxModule):
                 attn_o_nth_spec = P(None, ShardingAxisName.ATTN_DATA, None)
                 anh_sharding = (None, ShardingAxisName.ATTN_HEAD, None)
             else:
+                query_nth_spec = P()
                 query_tnh_spec = P(None, ShardingAxisName.MLP_TENSOR)
                 keyvalue_skh_spec = P(None, ShardingAxisName.MLP_TENSOR)
                 attn_o_nth_spec = P(None, ShardingAxisName.MLP_TENSOR)
+                anh_sharding = P()
             rd_sharding = P(ShardingAxisName.ATTN_HEAD, None)
             ap_sharding = P(None, ShardingAxisName.ATTN_HEAD)
             q_da_sharding = P(None, ShardingAxisName.ATTN_HEAD)
