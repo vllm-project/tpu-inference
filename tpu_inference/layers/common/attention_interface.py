@@ -851,8 +851,11 @@ def pcp_ragged_paged_attention(
         nq_total, hd = q.shape[1], q.shape[2]
         nkv_total = k.shape[1]
         # ctx upper bound from the cache shape: pages_per_seq * global_page.
-        pages_per_seq = page_indices.shape[0] // cu_q_lens.shape[0]
-        ctx_ub = pages_per_seq * kv_cache.shape[1] * pcp_size
+        # NOTE: max_num_seqs comes from kv_lens (cu_q_lens is [pcp, seqs+1]
+        # under PCP), and kv_cache.shape[1] is ALREADY the global page width,
+        # so it must not be multiplied by pcp again.
+        pages_per_seq = page_indices.shape[0] // kv_lens.shape[0]
+        ctx_ub = pages_per_seq * kv_cache.shape[1]
         comm_q = 2 * padded_q_len * nq_total * hd
         comm_kv = ctx_ub * nkv_total * hd
         _cache_phase = "gather_kv" if comm_kv < comm_q else "gather_q"
@@ -892,9 +895,19 @@ def pcp_ragged_paged_attention(
                       v_scale=v_scale)
 
         # ---- cache phase ----
+        # First chunk of a chunked prefill has NO cached tokens, so the cache
+        # phase attends nothing: every key is masked out, the kernel returns
+        # -inf LSE, and merge_attn_states discards it in favour of the current
+        # phase -- a full collective plus a kernel launch for a thrown-away
+        # result.  `cache_pages == 0` is the runner stating statically that
+        # num_computed == 0, so elide the whole phase.  Applies to both
+        # strategies.
         cu_cache = jnp.zeros_like(cu_q_lens[0]).at[1:].set(padded_q_len)
         dist_cache = jnp.array([0, 0, 1], jnp.int32)
-        if _cache_phase == "gather_kv":
+        if cache_pages == 0:
+            o1 = l1 = None
+            kvc1 = kvc
+        elif _cache_phase == "gather_kv":
             # Move KV instead of Q, and hand the kernel a TOKEN-ORDERED cache
             # so the cache phase is just ordinary paged attention.
             #
@@ -1024,8 +1037,12 @@ def pcp_ragged_paged_attention(
             write_last_seq_only=True,
             **common)
 
-        # cache term vs. current term: disjoint KV, so LSE-combine.
-        out, _ = merge_attn_states(o1, l1, o2, l2)  # [2*chunk] = [head | tail]
+        # cache term vs. current term: disjoint KV, so LSE-combine.  With no
+        # cached tokens the current phase already IS the answer.
+        if o1 is None:
+            out = o2
+        else:
+            out, _ = merge_attn_states(o1, l1, o2, l2)  # [2*chunk]=[head|tail]
         return out.astype(q.dtype), kvc2
 
     return jax.shard_map(

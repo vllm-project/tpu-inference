@@ -203,5 +203,57 @@ class PcpGatherKvPagesTest(jtu.JaxTestCase):
         self.assertAllClose(got, np.asarray(exp), atol=2e-2, rtol=2e-2)
 
 
+    @parameterized.parameters(2, 4)
+    def test_first_chunk_skips_cache_phase(self, pcp):
+        """cache_pages=0 elides the cache phase; with no cached tokens the
+        result must still match plain attention over the current chunk."""
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs {pcp} devices")
+        rng = np.random.default_rng(1)
+        C = 32
+        num_current = 2 * pcp * C
+        kv_total = num_current  # L == 0 -> first chunk, empty cache
+
+        q = self._rand(rng, (num_current, NQ, HD))
+        k = self._rand(rng, (num_current, NKV, HD))
+        v = self._rand(rng, (num_current, NKV, HD))
+
+        ref_pps = cdiv(kv_total, PAGE)
+        ref_pi = jnp.pad(jnp.arange(ref_pps, dtype=jnp.int32),
+                         (0, MAX_SEQ * ref_pps - ref_pps))
+        empty = jnp.full((ref_pps, PAGE, *self._dims()), jnp.nan, DTYPE)
+        exp, _ = ref_ragged_paged_attention(
+            q, k, v, empty,
+            jnp.pad(jnp.array([kv_total], jnp.int32), (0, MAX_SEQ - 1)),
+            ref_pi,
+            jnp.pad(jnp.array([0, num_current], jnp.int32), (0, MAX_SEQ - 1)),
+            jnp.array([0, 0, 1], jnp.int32), sm_scale=SM)
+
+        pps = cdiv(cdiv(kv_total, pcp), PAGE)
+        npages = 4 * pps
+        cache = jnp.full((npages, PAGE * pcp, *self._dims()), jnp.nan, DTYPE)
+        pi = np.zeros(MAX_SEQ * pps, np.int32)
+        pi[:pps] = np.arange(pps)
+        pi[pps:2 * pps] = np.arange(pps)
+        pi = jnp.asarray(pi)
+
+        def pad1(xs):
+            return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
+
+        cu, qpos = _pcp_meta(pcp, C, num_current)
+        out, _ = pcp_ragged_paged_attention(
+            self._mesh(pcp), _to_rank_order(q, pcp, C),
+            _to_rank_order(k, pcp, C), _to_rank_order(v, pcp, C), cache,
+            pad1([kv_total, kv_total]), pi, cu,
+            jnp.array([0, 0, 2], jnp.int32), pad1([0, 0]), qpos, SM,
+            cache_pages=0)
+
+        inv = _inv_row(pcp)
+        got = np.asarray(out).reshape(2 * pcp, C, NQ, HD)[inv].reshape(
+            num_current, NQ, HD)
+        self.assertTrue(np.all(np.isfinite(got)))
+        self.assertAllClose(got, np.asarray(exp), atol=2e-2, rtol=2e-2)
+
+
 if __name__ == "__main__":
     absltest.main(testLoader=jtu.JaxTestLoader())

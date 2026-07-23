@@ -2890,9 +2890,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # of two so at most 2x extra is gathered while keeping the number
             # of compiled variants logarithmic (this is a meta/static field, so
             # each distinct value compiles once).
-            _live_pages = cdiv(max(num_computed, 1), self.block_size)
-            pcp_cache_pages = min(1 << (max(_live_pages - 1, 0)).bit_length(),
-                                  self.max_num_blocks_per_req)
+            if num_computed == 0:
+                # First chunk: no cached tokens at all.  0 tells the attention
+                # layer to elide the cache phase entirely rather than run a
+                # collective + kernel launch whose result is masked away.
+                pcp_cache_pages = 0
+            else:
+                _live_pages = cdiv(num_computed, self.block_size)
+                pcp_cache_pages = min(
+                    1 << (max(_live_pages - 1, 0)).bit_length(),
+                    self.max_num_blocks_per_req)
             pcp_kv_cache_lens = device_array(self.mesh,
                                              kv_cache_lens_np,
                                              sharding=repl)
