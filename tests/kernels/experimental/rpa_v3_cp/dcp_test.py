@@ -1,4 +1,4 @@
-from absl.testing import absltest
+from absl.testing import absltest, parameterized
 import jax
 from jax._src import test_util as jtu
 import jax.numpy as jnp
@@ -6,10 +6,11 @@ import numpy as np
 
 import os
 USE_BATCHED_RPA_KERNEL = (
-    os.environ.get("USE_BATCHED_RPA_KERNEL", "false").lower() == "true"
+    os.environ.get("USE_BATCHED_RPA_KERNEL", "0").lower() == "1"
 )
 
 if USE_BATCHED_RPA_KERNEL:
+    print('Use batched RPA kernel')
     from tpu_inference.kernels.experimental.batched_rpa import configs
     from tpu_inference.kernels.experimental.batched_rpa.utils import align_to, get_dtype_packing
     from tpu_inference.kernels.experimental.batched_rpa.wrapper import ragged_paged_attention
@@ -176,7 +177,7 @@ def ref_ragged_paged_attention(
 jax.config.parse_flags_with_absl()
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
 class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
-  def _test_two_phase_attention_mixed_engine(self, seq_lens):
+  def _test_two_phase_attention_mixed_engine(self, seq_lens, cp_group_size):
     print(
         "-------------------- Mixed engine attention"
         " --------------------"
@@ -225,7 +226,7 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
           constant_values=0,
       )
       page_indices_list.append(indices)
-      print(f"page indices for seq: {indices}")
+      # print(f"page indices for seq: {indices}")
       page_cnt += num_pages_for_seq
     num_pages = max(1000, page_cnt)
     kv_cache_shape = (
@@ -251,13 +252,22 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
     q_lens = np.array([q_len for q_len, _ in seq_lens], dtype=np.int32)
     q_lens = np.pad(q_lens, (0, max_num_seq - q_lens.shape[0]))
     # Pre-populate the prefix (context) in the kv_cache.
+    prefixes_kv = []
     for i, (q_len, kv_len) in enumerate(seq_lens):
       prefix_len = kv_len - q_len
       if prefix_len <= 0:
+        prefixes_kv.append(None)
         continue
       prefix_k = gen_random((prefix_len, num_kv_heads, head_dim), kv_dtype)
       prefix_v = gen_random((prefix_len, num_kv_heads, head_dim), kv_dtype)
       prefix_kv = merge_kv(prefix_k, prefix_v)
+      prefixes_kv.append(prefix_kv)
+
+    # Pre-populate the full prefix in the reference kv_cache
+    for i, prefix_kv in enumerate(prefixes_kv):
+      if prefix_kv is None:
+        continue
+      prefix_len = prefix_kv.shape[0]
       indices_start = i * pages_per_seq
       num_prefix_pages = cdiv(prefix_len, page_size)
       indices = page_indices[indices_start : indices_start + num_prefix_pages]
@@ -268,6 +278,28 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
           constant_values=0.0,
       ).reshape(num_prefix_pages, page_size, *prefix_kv.shape[1:])
       kv_cache = kv_cache.at[indices].set(prefix_kv_padded)
+
+    def get_kv_cache_for_rank(rank):
+      kv_cache_rank = jnp.full(kv_cache_shape, 0.0, dtype=kv_dtype)
+      for i, prefix_kv in enumerate(prefixes_kv):
+        if prefix_kv is None:
+          continue
+        prefix_kv_rank = prefix_kv[rank::cp_group_size]
+        prefix_len_rank = prefix_kv_rank.shape[0]
+        if prefix_len_rank == 0:
+          continue
+        indices_start = i * pages_per_seq
+        num_prefix_pages = cdiv(prefix_len_rank, page_size)
+        indices = page_indices[indices_start : indices_start + num_prefix_pages]
+        padded_prefix_len = num_prefix_pages * page_size
+        prefix_kv_padded = jnp.pad(
+            prefix_kv_rank,
+            ((0, padded_prefix_len - prefix_len_rank), (0, 0), (0, 0), (0, 0)),
+            constant_values=0.0,
+        ).reshape(num_prefix_pages, page_size, *prefix_kv_rank.shape[1:])
+        kv_cache_rank = kv_cache_rank.at[indices].set(prefix_kv_padded)
+      return kv_cache_rank
+
     kwargs = {
         "use_causal_mask": True,
     }
@@ -284,14 +316,17 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
         **kwargs,
     )
     print(f"expected_out: {expected_out.shape}")
-    cp_group_size = 1
+    query_outs = []
+    query_lses = []
+    context_outs = []
+    context_lses = []
     for rank in range(cp_group_size):
-      print("Compute attention for current token only")
+      print(f"Compute attention for current token only on rank {rank}")
       query_out, updated_kv_cache, query_lse = ragged_paged_attention(
           q,
           k,
           v,
-          kv_cache,
+          get_kv_cache_for_rank(rank),
           kv_lens,
           page_indices,
           cu_q_lens,
@@ -305,6 +340,8 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
           # debug_mode=True,
           **kwargs,
       )
+      query_outs.append(query_out)
+      query_lses.append(query_lse)
       print("Verifying KV cache for rank after FIRST call...")
       for i, (q_len, kv_len) in enumerate(seq_lens):
         num_pages_seq = cdiv(kv_len, page_size)
@@ -322,7 +359,7 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
             err_msg=f"KV cache after FIRST call for rank {rank}, seq {i} does not match expected.",
         )
         print(f"KV cache for rank {rank}, seq {i} passed!")
-      print("Compute attention for context only")
+      print(f"Compute attention for context only on rank {rank}")
       context_out, final_kv_cache, context_lse = ragged_paged_attention(
           q,
           k,
@@ -341,27 +378,10 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
           skip_current_attn=True,
           # debug_mode=True,
       )
+      context_outs.append(context_out)
+      context_lses.append(context_lse)
       print(f"LSE: current={query_lse[:seq_lens[0][0]]}")
       print(f"LSE: context={context_lse[:seq_lens[0][0]]}")
-      # Merge two attention results
-      max_lse = jnp.maximum(query_lse, context_lse)
-      exp_query = jnp.exp(query_lse - max_lse)
-      exp_context = jnp.exp(context_lse - max_lse)
-      sum_exp = exp_query + exp_context
-      merged_out = (
-          context_out * exp_context[..., None]
-          + query_out * exp_query[..., None]
-      ) / sum_exp[..., None]
-      print(f"merged_out: {merged_out.shape}")
-      print("Verifying Output...")
-      self.assertAllClose(
-          merged_out[:cu_q_lens[distribution[-1]]],
-          expected_out,
-          rtol=1e-6,
-          atol=0.2,
-          err_msg="Attention output does not match the expected baseline",
-      )
-      print("Output test passed!")
       print(f"Verifying KV cache for rank {rank}...")
       for i, (q_len, kv_len) in enumerate(seq_lens):
         num_pages_seq = cdiv(kv_len, page_size)
@@ -382,8 +402,39 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
             atol=1e-6,
             err_msg=f"KV cache for rank {rank}, seq {i} does not match expected KV cache.",
         )
-  def test_two_phase_attention_mixed_engine(self):
-    print("-------------------- Mixed")
+
+    # Merge all attention results from all ranks and phases
+    print("Merging attention results across ranks and phases...")
+    outs_to_merge = []
+    lses_to_merge = []
+    for rank in range(cp_group_size):
+      outs_to_merge.extend([query_outs[rank], context_outs[rank]])
+      lses_to_merge.extend([query_lses[rank], context_lses[rank]])
+
+    stacked_lses = jnp.stack(lses_to_merge, axis=0)
+    max_lse = jnp.max(stacked_lses, axis=0)
+    exp_sums = jnp.zeros_like(max_lse)
+    weighted_outs = jnp.zeros_like(outs_to_merge[0])
+
+    for out, lse in zip(outs_to_merge, lses_to_merge):
+      exp_val = jnp.exp(lse - max_lse)
+      exp_sums += exp_val
+      weighted_outs += out * exp_val[..., None]
+
+    merged_out = weighted_outs / exp_sums[..., None]
+    print(f"merged_out: {merged_out.shape}")
+    print("Verifying Output...")
+    self.assertAllClose(
+        merged_out[:cu_q_lens[distribution[-1]]],
+        expected_out,
+        rtol=1e-6,
+        atol=0.2,
+        err_msg="Attention output does not match the expected baseline",
+    )
+    print("Output test passed!")
+
+  @parameterized.parameters(1, 2)
+  def test_two_phase_attention_mixed_engine(self, cp_group_size):
     seq_lens = []
     q_lens = [
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
@@ -395,6 +446,6 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
     ]
     for q_len, kv_len in zip(q_lens, kv_lens):
       seq_lens.append((q_len, kv_len))
-    self._test_two_phase_attention_mixed_engine(seq_lens=seq_lens)
+    self._test_two_phase_attention_mixed_engine(seq_lens=seq_lens, cp_group_size=cp_group_size)
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())
