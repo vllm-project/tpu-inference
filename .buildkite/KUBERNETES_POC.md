@@ -33,7 +33,8 @@ The Kubernetes image step opts into persistent BuildKit cache on that dedicated
 builder. The shared setup script remains no-cache by default for existing
 pipelines, but the POC retains unchanged vLLM and dependency layers between
 commits. The commit-specific image remains immutable; only its construction is
-incremental.
+incremental. Cache-mode cleanup prunes unused BuildKit records older than seven
+days by default so the persistent builder is not an unbounded cache.
 
 ## Cluster, queue, and storage topology
 

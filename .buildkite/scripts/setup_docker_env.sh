@@ -74,7 +74,9 @@ cleanup_docker_resource() {
   done
 
   if [[ "${PRESERVE_BUILD_CACHE}" == "true" ]]; then
-    echo "Preserving Docker build cache for the next image build."
+    local cache_retention="${DOCKER_BUILD_CACHE_RETENTION:-168h}"
+    echo "Preserving recent Docker build cache (retention: ${cache_retention})."
+    docker builder prune -f --filter "until=${cache_retention}"
   else
     echo "Pruning old Docker build cache..."
     docker builder prune -f
