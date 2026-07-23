@@ -2875,6 +2875,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # kv_cache_lens (num_computed) and the packed logits indices are
         # PCP-specific.
         pcp_kv_cache_lens = None
+        pcp_nat_to_packed = None
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         if pcp_size > 1:
             assert not self.uses_mrope, "PCP does not support M-RoPE yet."
@@ -2890,6 +2891,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             ids_nat = np.asarray(input_ids_view).copy()
             packed_pos = np.zeros_like(positions_nat)
             packed_ids = np.zeros_like(ids_nat)
+            # Natural (contiguous) token index -> packed (lane) index. Needed to
+            # remap async-scheduling token substitution, which is expressed in
+            # natural coordinates, onto the packed buffer.
+            pcp_nat_to_packed = np.zeros(len(ids_nat), np.int64)
 
             kv_cache_lens_np = np.zeros(R, np.int32)
             logits_indices_view[:] = -1
@@ -2909,6 +2914,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         np.where(is_head, 0, C) + o)
                 packed_ids[dest] = ids_nat[start:start + nc_i]
                 packed_pos[dest] = positions_nat[start:start + nc_i]
+                pcp_nat_to_packed[start:start + nc_i] = dest
                 # logits_indices: packed position of the last real token.
                 last = nc_i - 1
                 lc = last // C
@@ -3118,6 +3124,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 all_token_indices_to_substitute)
             token_in_tpu_pre_next_tokens_indices = np.array(
                 all_pre_next_tokens_indices)
+
+            # PCP rearranges input_ids into the packed (lane) layout, but the
+            # substitution indices above are in natural (contiguous) token
+            # coordinates. Remap them so the sampled tokens land in each
+            # request's real lane slot (otherwise every request after the first
+            # gets its decode token written to the wrong position).
+            if pcp_nat_to_packed is not None and len(
+                    token_in_tpu_cur_input_indices) > 0:
+                token_in_tpu_cur_input_indices = pcp_nat_to_packed[
+                    token_in_tpu_cur_input_indices]
 
             input_ids = self._apply_async_token_substitution(
                 input_ids, next_tokens, token_in_tpu_cur_input_indices,
