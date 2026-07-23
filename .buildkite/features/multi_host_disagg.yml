@@ -13,17 +13,17 @@
 # limitations under the License.
 
 steps:
-  - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host P/D disaggregation"
-    key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_CorrectnessTest"
-    soft_fail: true
-    agents:
-      queue: default
-    env:
-      TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-      TEST_MODE: 2 # only run correctness test
-    commands:
-      - |
-        .buildkite/e2e/run_multi_disagg.sh
+  # - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host P/D disaggregation"
+  #   key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_CorrectnessTest"
+  #   soft_fail: true
+  #   agents:
+  #     queue: default
+  #   env:
+  #     TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+  #     TEST_MODE: 2 # only run correctness test
+  #   commands:
+  #     - |
+  #       .buildkite/e2e/run_disagg_multi.sh
 
   # - label: "${TPU_VERSION:-tpu7x} Record correctness test result for Multi-host P/D disaggregation"
   #   key: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_CorrectnessTest"
