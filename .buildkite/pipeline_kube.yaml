@@ -669,14 +669,15 @@ steps:
       - <<: *kube_tpu_v6e_1chip_plugin
 
   # pipeline_jax.yml test_11. That step selects the 8-chip queue but currently
-  # omits USE_V6E8_QUEUE, so this counterpart sets it to exercise the multi-chip
-  # model implied by the label and queue.
+  # omits USE_V6E8_QUEUE, so it uses DEVICE_COUNT=1 despite its label. Keep this
+  # counterpart genuinely 8-chip, but use Llama 3.1 until upstream vLLM's
+  # Llama4 wrapper supports the installed nested Transformers configuration.
   - label: ":kubernetes: E2E MLPerf tests for JAX + vLLM models on multiple chips"
     key: "kube_e2e_mlperf_jax_vllm_multi_chip"
     <<: *kube_v6e_8chip_concurrency
     depends_on: "kube_cache_inventory"
     soft_fail: true
-    if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
+    if: (build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1") || build.env("KUBE_TARGET_STEP") == "kube_e2e_mlperf_jax_vllm_multi_chip"
     agents:
       queue: "kube"
     secrets:
@@ -686,7 +687,7 @@ steps:
       MODEL_IMPL_TYPE: "vllm"
       USE_V6E8_QUEUE: "True"
     commands:
-      - bash tests/e2e/benchmarking/mlperf.sh
+      - bash tests/e2e/benchmarking/mlperf.sh -m "meta-llama/Llama-3.1-8B-Instruct"
     plugins:
       - <<: *kube_tpu_v6e_8chip_plugin
 

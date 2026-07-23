@@ -270,7 +270,7 @@ the accelerator matrix.
 | 8 | `kube_jax_unit_tests_kernels` | Default | Excludes collectives and the same unsupported files as bare metal. |
 | 9 | `kube_jax_unit_tests_collectives` | Full | Uses the 8-chip pool. |
 | 10_1, 10_2 | `kube_lora_e2e_single_chip`, `kube_lora_adapter_e2e_single_chip` | Full | Bare-metal nightly only. |
-| 11 | `kube_e2e_mlperf_jax_vllm_multi_chip` | Full | Sets `USE_V6E8_QUEUE=True`. The bare-metal step selects the 8-chip queue but omits this flag, so it currently selects a one-chip model despite its label. |
+| 11 | `kube_e2e_mlperf_jax_vllm_multi_chip` | Full | Sets `USE_V6E8_QUEUE=True` and explicitly runs the supported Llama 3.1 8B vLLM model across eight chips. The bare-metal step selects the 8-chip queue but omits this flag, so it currently uses `DEVICE_COUNT=1` despite its label. Llama4 through the upstream vLLM wrapper is excluded because the installed Transformers `Llama4Config` no longer exposes `num_local_experts` at the level that wrapper expects; the JAX-native Llama4 counterpart remains covered by step 4. |
 | 13 | `kube_lora_e2e_multi_chip` | Default | 8-chip pool. |
 | 15 | `kube_lora_unit_tests` | Default | Runs `test_bgmv.py` and `test_layers.py`; the initial POC accidentally ran the E2E test. |
 | 16 | `kube_lora_unit_tests_multi_chip` | Default | 8-chip pool. |
