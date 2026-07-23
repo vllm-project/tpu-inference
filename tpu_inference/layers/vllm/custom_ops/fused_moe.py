@@ -19,6 +19,7 @@ from jax.sharding import PartitionSpec as P
 from torchax.interop import jax_view, shard_map, torch_view
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.sharding import ShardingAxisName, is_attn_dp
@@ -71,6 +72,30 @@ def _gmm_and_shared_reduce_over_same_axes(mesh: Mesh,
 @MoERunner.register_oot
 class VllmMoERunner(MoERunner):
 
+    def _shared_experts_defer_all_reduce(self) -> bool:
+        """Whether the shared experts actually skip their own all-reduce.
+
+        True only if every ``RowParallelLinear`` inside ``_shared_experts`` is
+        configured with ``linear_config.defer_all_reduce`` -- i.e. its quant
+        method both supports deferral and was asked to defer. The unquantized
+        method computes a plain einsum under GSPMD, which the partitioner
+        always all-reduces, so it can never defer: for such layers the shared
+        output arrives already reduced, and reducing it again would multiply
+        it by the TP degree.
+        """
+        modules = getattr(self._shared_experts, "modules", None)
+        if modules is None:
+            return False
+
+        found = False
+        for module in modules():
+            if isinstance(module, RowParallelLinear):
+                found = True
+                cfg = getattr(module.quant_method, "linear_config", None)
+                if cfg is None or not getattr(cfg, "defer_all_reduce", False):
+                    return False
+        return found
+
     @property
     def _fused_output_is_reduced(self) -> bool:
         # Returns False -- i.e. the GMM kernel skips its own all-reduce and the
@@ -79,10 +104,13 @@ class VllmMoERunner(MoERunner):
         # holds. Otherwise the fused output is reduced by the kernel itself.
         #
         #   1. a shared expert is present (else there is nothing to fuse with)
-        #   2. attention-DP is disabled (DP resolves the reduction separately)
-        #   3. the backend is GMM_EP / GMM_TP (only those honor defer_all_reduce;
+        #   2. the shared expert's linears actually defer their all-reduce
+        #      (else the shared output is already reduced and cannot take part
+        #      in a merged late reduction)
+        #   3. attention-DP is disabled (DP resolves the reduction separately)
+        #   4. the backend is GMM_EP / GMM_TP (only those honor defer_all_reduce;
         #      e.g. the FUSED_MOE kernel always reduces)
-        #   4. the GMM reduction collapses the same mesh axes as the shared
+        #   5. the GMM reduction collapses the same mesh axes as the shared
         #      expert (MLP_TENSOR) -- else one all-reduce over MLP_TENSOR cannot
         #      stand in for the GMM's reduction
         mesh = _get_mesh()
@@ -90,6 +118,9 @@ class VllmMoERunner(MoERunner):
             return True
 
         if self._shared_experts is None:
+            return True
+
+        if not self._shared_experts_defer_all_reduce():
             return True
 
         if is_attn_dp(mesh) or self.moe_config.is_sequence_parallel:
@@ -127,6 +158,7 @@ class VllmMoERunner(MoERunner):
             return shared_output
 
         if (shared_output is not None and self._fused_output_is_reduced
+                and self._shared_experts_defer_all_reduce()
                 and not self.moe_config.is_sequence_parallel
                 and not is_attn_dp(mesh)):
             shared_output = _all_reduce_over_tp(shared_output, mesh)

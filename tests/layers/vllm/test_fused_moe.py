@@ -17,9 +17,31 @@ from unittest.mock import PropertyMock, patch
 
 import pytest
 import torch
+from vllm.model_executor.layers.linear import RowParallelLinear
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.vllm.custom_ops import fused_moe as fm
+
+
+def _fake_row_parallel_linear(defer_all_reduce: bool) -> RowParallelLinear:
+    """A ``RowParallelLinear`` shell carrying only ``quant_method.linear_config``.
+
+    Built via ``__new__`` + ``torch.nn.Module.__init__`` so no distributed
+    state is needed; ``_shared_experts_defer_all_reduce`` only reads the
+    linear_config off the quant method.
+    """
+    fake = RowParallelLinear.__new__(RowParallelLinear)
+    torch.nn.Module.__init__(fake)
+    fake.quant_method = SimpleNamespace(linear_config=SimpleNamespace(
+        defer_all_reduce=defer_all_reduce))
+    return fake
+
+
+def _shared_experts(defer_all_reduce: bool = True) -> torch.nn.Module:
+    """A shared-experts module whose down proj does/doesn't defer its reduce."""
+    module = torch.nn.Module()
+    module.down_proj = _fake_row_parallel_linear(defer_all_reduce)
+    return module
 
 
 def _make_runner(*,
@@ -33,6 +55,9 @@ def _make_runner(*,
     set directly (mirroring ``test_gdn_attention_op.py``).
     """
     runner = fm.VllmMoERunner.__new__(fm.VllmMoERunner)
+    # Initialize the bare nn.Module machinery (skipping MoERunner.__init__)
+    # so module-valued attributes like ``_shared_experts`` can be assigned.
+    torch.nn.Module.__init__(runner)
     runner._shared_experts = shared_experts
     runner.moe_config = moe_config or SimpleNamespace(
         is_sequence_parallel=is_sequence_parallel)
@@ -48,7 +73,7 @@ class TestFusedOutputIsReduced:
             assert runner._fused_output_is_reduced is True
 
     def test_true_under_attention_dp(self):
-        runner = _make_runner(shared_experts=object())
+        runner = _make_runner(shared_experts=_shared_experts())
         with patch.object(fm, "_get_mesh", return_value=object()), \
              patch.object(fm, "is_attn_dp", return_value=True):
             assert runner._fused_output_is_reduced is True
@@ -60,7 +85,7 @@ class TestFusedOutputIsReduced:
         # reduction axes match the shared expert's), DP resolves the reduction
         # separately so the kernel must still reduce its own output. Guards the
         # order of the checks -- the DP short-circuit must precede the GMM ones.
-        runner = _make_runner(shared_experts=object())
+        runner = _make_runner(shared_experts=_shared_experts())
         with patch.object(fm, "_get_mesh", return_value=object()), \
              patch.object(fm, "is_attn_dp", return_value=True), \
              patch.object(fm, "select_moe_backend_from_fused_moe_config",
@@ -70,7 +95,7 @@ class TestFusedOutputIsReduced:
             assert runner._fused_output_is_reduced is True
 
     def test_true_when_no_mesh(self):
-        runner = _make_runner(shared_experts=object())
+        runner = _make_runner(shared_experts=_shared_experts())
         with patch.object(fm, "_get_mesh", return_value=None):
             assert runner._fused_output_is_reduced is True
 
@@ -78,7 +103,7 @@ class TestFusedOutputIsReduced:
                              [MoEBackend.FUSED_MOE, MoEBackend.DENSE_MAT])
     def test_true_for_non_gmm_backends(self, backend):
         # Only GMM_EP / GMM_TP defer the all-reduce; others always reduce.
-        runner = _make_runner(shared_experts=object())
+        runner = _make_runner(shared_experts=_shared_experts())
         with patch.object(fm, "is_attn_dp", return_value=False), \
              patch.object(fm, "_get_mesh", return_value=object()), \
              patch.object(fm, "select_moe_backend_from_fused_moe_config",
@@ -87,7 +112,7 @@ class TestFusedOutputIsReduced:
 
     @pytest.mark.parametrize("backend", [MoEBackend.GMM_EP, MoEBackend.GMM_TP])
     def test_true_when_gmm_reduces_different_axes(self, backend):
-        runner = _make_runner(shared_experts=object())
+        runner = _make_runner(shared_experts=_shared_experts())
         with patch.object(fm, "is_attn_dp", return_value=False), \
              patch.object(fm, "_get_mesh", return_value=object()), \
              patch.object(fm, "select_moe_backend_from_fused_moe_config",
@@ -100,7 +125,7 @@ class TestFusedOutputIsReduced:
 
     @pytest.mark.parametrize("backend", [MoEBackend.GMM_EP, MoEBackend.GMM_TP])
     def test_false_when_all_conditions_met(self, backend):
-        runner = _make_runner(shared_experts=object())
+        runner = _make_runner(shared_experts=_shared_experts())
         with patch.object(fm, "is_attn_dp", return_value=False), \
              patch.object(fm, "_get_mesh", return_value=object()), \
              patch.object(fm, "select_moe_backend_from_fused_moe_config",
@@ -110,6 +135,22 @@ class TestFusedOutputIsReduced:
             # Shared expert present, no DP, GMM backend, matching axes -> the
             # kernel skips its reduce and the late single collective handles it.
             assert runner._fused_output_is_reduced is False
+
+    @pytest.mark.parametrize("backend", [MoEBackend.GMM_EP, MoEBackend.GMM_TP])
+    def test_true_when_shared_expert_cannot_defer(self, backend):
+        # Regression test for the Qwen1.5-MoE EP accuracy collapse: the
+        # unquantized shared expert cannot skip its own all-reduce (its plain
+        # einsum is always reduced by GSPMD), so even when every other deferred
+        # -path condition holds the kernel must still reduce its own output.
+        runner = _make_runner(shared_experts=_shared_experts(
+            defer_all_reduce=False))
+        with patch.object(fm, "is_attn_dp", return_value=False), \
+             patch.object(fm, "_get_mesh", return_value=object()), \
+             patch.object(fm, "select_moe_backend_from_fused_moe_config",
+                          return_value=backend), \
+             patch.object(fm, "_gmm_and_shared_reduce_over_same_axes",
+                          return_value=True):
+            assert runner._fused_output_is_reduced is True
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +188,7 @@ class TestMaybeReduceSharedExpertOutput:
         assert out is shared
 
     def test_reduces_shared_output_on_early_path(self):
-        runner = _make_runner()
+        runner = _make_runner(shared_experts=_shared_experts())
         shared = torch.ones(2, 3)
         reduced = torch.full((2, 3), 7.0)
         mesh = object()
@@ -161,13 +202,30 @@ class TestMaybeReduceSharedExpertOutput:
         reduce.assert_called_once_with(shared, mesh)
         assert out is reduced
 
+    def test_passthrough_when_shared_expert_cannot_defer(self):
+        # Regression test for the Qwen1.5-MoE EP accuracy collapse: the shared
+        # output of an unquantized shared expert is ALREADY all-reduced by
+        # GSPMD, so the early path must not reduce it a second time (doing so
+        # multiplies it by the TP degree and garbles the model output).
+        runner = _make_runner(shared_experts=_shared_experts(
+            defer_all_reduce=False))
+        shared = torch.ones(2, 3)
+        with patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
+                          new_callable=PropertyMock, return_value=True), \
+             patch.object(fm, "_get_mesh", return_value=object()), \
+             patch.object(fm, "is_attn_dp", return_value=False), \
+             patch.object(fm, "_all_reduce_over_tp") as reduce:
+            out = runner._maybe_reduce_shared_expert_output(shared)
+        reduce.assert_not_called()
+        assert out is shared
+
     def test_reduces_shared_output_under_attention_dp(self):
         # Under attention DP the fused kernel reduces its own output, so the
         # shared-expert output is reduced separately on the early path. Unlike
         # the test above this drives the real ``_fused_output_is_reduced``
         # property (via ``is_attn_dp``) instead of mocking it, exercising the
         # attn-DP -> early-reduce routing end to end.
-        runner = _make_runner(shared_experts=object())
+        runner = _make_runner(shared_experts=_shared_experts())
         shared = torch.ones(2, 3)
         reduced = torch.full((2, 3), 7.0)
         mesh = object()
