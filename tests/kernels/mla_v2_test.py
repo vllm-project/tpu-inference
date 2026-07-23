@@ -233,6 +233,7 @@ class MlaRaggedPagedAttentionTestBase(jtu.JaxTestCase):
         q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
+        topk_indices: jax.Array | None = None,
     ):
         if not jtu.is_device_tpu_at_least(version=4):
             self.skipTest("Expect TPUv4+")
@@ -290,6 +291,7 @@ class MlaRaggedPagedAttentionTestBase(jtu.JaxTestCase):
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                topk_indices=topk_indices,
             ))
 
         logging.vlog(1, "DEBUG ---------------------------------")
@@ -338,6 +340,7 @@ class MlaRaggedPagedAttentionTestBase(jtu.JaxTestCase):
             num_queries_per_block=num_queries_per_block,
             vmem_limit_bytes=vmem_limit_bytes,
             debug_mode=FLAGS.debug_mode,
+            topk_indices=topk_indices,
         )
         kernel_out = jnp.transpose(kernel_out, (1, 0, 2))
         with np.printoptions(threshold=np.inf):
@@ -1487,6 +1490,36 @@ class MlaRaggedPagedAttentionKernelV2Test(MlaRaggedPagedAttentionTestBase):
             num_pages,
             num_kv_pages_per_block=num_kv_pages_per_block,
             num_queries_per_block=num_queries_per_block,
+        )
+
+    def test_ragged_paged_attention_dsa(self, dtype=jnp.bfloat16):
+        seq_lens = [(1, 10), (2, 20), (3, 30)]
+        num_heads = 4
+        lkv_dim = 512
+        r_dim = 64
+        page_size = 16
+        num_pages = 20
+        csa_topk = 128
+        total_q_len = sum(s[0] for s in seq_lens)
+
+        # Create random topk_indices. The kv indices should just be selected from a valid range.
+        # But for testing correctness, any random integer is fine, we just need to verify the outputs match.
+        rng = jax.random.key(42)
+        topk_indices = jax.random.randint(rng, (total_q_len, csa_topk),
+                                          0,
+                                          num_pages * page_size,
+                                          dtype=jnp.int32)
+
+        self._test_mla_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            lkv_dim,
+            r_dim,
+            page_size,
+            dtype,
+            dtype,
+            num_pages,
+            topk_indices=topk_indices,
         )
 
 
