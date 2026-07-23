@@ -333,6 +333,7 @@ def _format_attention_output(
         "k_scale",
         "v_scale",
         "sliding_window",
+        "soft_cap",
     ),
     donate_argnames=("kv_cache"),
 )
@@ -353,6 +354,7 @@ def _jax_attn_func(
     k_scale: float | None = None,
     v_scale: float | None = None,
     sliding_window: int | None = None,
+    soft_cap: float | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
     q_len = q.shape[0]
     q, k, v = _prepare_qkv_layout(q, k, v, num_heads, num_kv_heads, head_size)
@@ -370,6 +372,7 @@ def _jax_attn_func(
         v_scale=v_scale,
         sinks=sinks,
         attention_chunk_size=sliding_window,
+        attn_logits_soft_cap=soft_cap,
         shared_attention_metadata=shared_attention_metadata,
     )
 
