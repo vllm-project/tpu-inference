@@ -137,6 +137,16 @@ class TpuPlatform(Platform):
     ]
 
     @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        # Opt in to `torch.ops.vllm.all_reduce/all_gather` custom collective
+        # ops. This is the override referenced by the TODO in vLLM's
+        # `vllm/distributed/parallel_state.py` at the
+        # `self.use_custom_op_call = current_platform.is_tpu() or ...`
+        # line -- once landed, the `is_tpu()` short-circuit there can be
+        # removed (vllm-project/vllm#35915).
+        return True
+
+    @classmethod
     def get_attn_backend_cls(cls, selected_backend: "AttentionBackendEnum",
                              attn_selector_config: "AttentionSelectorConfig",
                              **kwargs) -> str:
