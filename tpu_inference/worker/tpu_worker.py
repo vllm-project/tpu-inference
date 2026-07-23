@@ -422,6 +422,10 @@ class TPUWorker(WorkerBase):
         self.parallel_config.data_parallel_size = 1
         try:
             with set_current_vllm_config(self.vllm_config):
+                # Close the file descriptor returned by mkstemp to prevent a resource leak.
+                # In multihost environments, leaving this fd open on Host 0 (which runs both
+                # Ray GCS and the engine core) can conflict with Gloo's file locking and socket
+                # binding, resulting in a startup hang.
                 fd, temp_file = tempfile.mkstemp()
                 os.close(fd)
                 init_distributed_environment(

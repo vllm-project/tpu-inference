@@ -36,7 +36,6 @@ spec:
       # This gives the TPU and vLLM time to shut down gracefully.
       terminationGracePeriodSeconds: 1200
       nodeSelector:
-        kubernetes.io/hostname: gke-tpu-8f4b85ba-jfps  # FORCES scheduling to this specific node
         cloud.google.com/gke-tpu-accelerator: tpu7x
         cloud.google.com/gke-tpu-topology: 2x2x1 # Specify the physical topology for the TPU slice.
       initContainers:
