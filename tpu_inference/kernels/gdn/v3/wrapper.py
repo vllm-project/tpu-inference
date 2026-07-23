@@ -66,7 +66,6 @@ def inner_kernel(
     """
 
     p_id = pl.program_id(0)
-    is_spec = cfg.mode == config.GDNMode.SPEC
 
     # Prepare states.
     real_sizes, prev_conv, prev_recurrent = vmem_ldst.load_and_select_states(
@@ -100,12 +99,13 @@ def inner_kernel(
         conv_weight=conv_weight,
         conv_bias=conv_bias,
         cfg=cfg,
-        collect_windows=is_spec,
     )
 
     conv_state_slot_ref[...] = new_conv_state
     if carry_conv_scratch_ref is not None:
-        carry_conv_scratch_ref[...] = new_conv_state
+        # The next tile resumes from the state after this tile's last token,
+        # which is the final checkpoint.
+        carry_conv_scratch_ref[...] = new_conv_state[:, -1]
 
     # Apply activation function.
     qkv_out_compact = jax.nn.silu(qkv_out_compact)
@@ -120,10 +120,7 @@ def inner_kernel(
     # NOTE: Ideally, we want to move this branching logic into gdn.py. However,
     # load_activation_as_compact and load_activation_as_large leverages vmem ldst.
     # Passing refs into gdn.py breaks strict separation of concerns.
-    # SPEC mode uses the token-recurrent path: windows are tiny
-    # (num_spec + 1 tokens) and the scan produces the per-token state
-    # checkpoints the rollback scheme stores.
-    if cfg.chunk_size == 1 or is_spec:
+    if cfg.use_recurrent:
         q_compact, k_compact, v_compact, b_compact, a_compact = (
             vmem_ldst.load_activation_as_compact(
                 qkv_vreg=qkv_out_compact,
@@ -144,7 +141,6 @@ def inner_kernel(
             dt_bias=dt_bias,
             cfg=cfg,
             real_sizes=real_sizes,
-            collect_states=is_spec,
         )
 
     else:
@@ -176,7 +172,7 @@ def inner_kernel(
         recurrent_slot_ref.dtype)
 
     if carry_recurrent_scratch_ref is not None:
-        carry_recurrent_scratch_ref[...] = new_recurrent_state
+        carry_recurrent_scratch_ref[...] = new_recurrent_state[:, -1]
 
 
 def outer_kernel(
@@ -454,15 +450,18 @@ def fused_conv1d_gdn(
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         if mode == config.GDNMode.PER_SEQ:
             tile_size = mixed_tile_size
+            # Prefill / mixed sequences keep a single state checkpoint.
+            window_size = 1
         else:
             tile_size = decode_tile_size
+            window_size = num_spec_tokens + 1
 
         cfg = config.GDNConfig(
             mode=mode,
             batch_size=padded_batch_size,
             kernel_size=kernel_size,
             tile_size=tile_size,
-            window_size=num_spec_tokens + 1,
+            window_size=window_size,
             dim_size=dim,
             num_kq_heads=n_kq,
             num_v_heads=n_v,
@@ -479,16 +478,8 @@ def fused_conv1d_gdn(
 
         # Step 6: Metadata preprocessing. Will be executed multiple times per-layer
         # but will be CSEed by compiler.
-        if mode == config.GDNMode.BATCHED:
+        if mode != config.GDNMode.PER_SEQ:
             metadata_obj = metadata.compute_batched_seq_metadata(
-                cfg=cfg,
-                seq_lens=seq_lens,
-                query_start_loc=query_start_loc,
-                state_indices=state_indices,
-                end_seq=distribution[0],
-            )
-        elif mode == config.GDNMode.SPEC:
-            metadata_obj = metadata.compute_spec_seq_metadata(
                 cfg=cfg,
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,

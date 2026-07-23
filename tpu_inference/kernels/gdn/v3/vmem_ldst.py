@@ -154,9 +154,9 @@ def load_and_select_states(
         metadata_ref: Metadata reference containing grid and sequence mappings.
         p_id: Current Pallas program ID.
         conv_state_slot_ref: Convolution state read from HBM of shape
-            [seq_tile_size, prev_kernel_size, 1, dim_size].
+            [seq_tile_size, window_size, prev_kernel_size, 1, dim_size].
         recurrent_slot_ref: Recurrent state read from HBM of shape [seq_tile_size,
-            num_v_heads, kq_head_dim, v_head_dim].
+            window_size, num_v_heads, kq_head_dim, v_head_dim].
         carry_conv_scratch_ref: Optional inter-tile convolution carry of shape
             [seq_tile_size, prev_kernel_size, 1, dim_size].
         carry_recurrent_scratch_ref: Optional inter-tile recurrent state carry of
@@ -175,18 +175,16 @@ def load_and_select_states(
     prev_conv_state_list = []
     prev_recurrent_state_list = []
 
-    is_spec = cfg.mode == config.GDNMode.SPEC
     for idx in range(cfg.seq_tile_size):
         s_idx = metadata_ref.p_id_to_s_idx[p_id, idx]
         real_sizes = metadata_ref.p_id_to_r_size[p_id, idx]
         is_first_tile = metadata_ref.p_id_is_first_tile[p_id, idx]
         has_initial_state = metadata_ref.s_idx_has_initial_state[s_idx]
 
-        # NOTE: In SPEC mode the VMEM window holds one state per window
-        # position; the initial state was DMA'd into position 0.
+        # NOTE: The VMEM window holds one state per window position and the
+        # initial state was DMA'd into position 0.
         # NOTE: Conv1D mandates fp32 due to its usage of compact layout.
-        hbm_conv_state = (conv_state_slot_ref[idx, 0] if is_spec else
-                          conv_state_slot_ref[idx]).astype(jnp.float32)
+        hbm_conv_state = conv_state_slot_ref[idx, 0].astype(jnp.float32)
         prev_conv_state = jnp.where(has_initial_state, hbm_conv_state, 0)
 
         if carry_conv_scratch_ref is not None:
@@ -194,8 +192,7 @@ def load_and_select_states(
             prev_conv_state = jnp.where(is_first_tile, prev_conv_state,
                                         prev_tile_conv)
 
-        hbm_recurrent_state = (recurrent_slot_ref[idx, 0]
-                               if is_spec else recurrent_slot_ref[idx])
+        hbm_recurrent_state = recurrent_slot_ref[idx, 0]
         prev_recurrent_state = jnp.where(has_initial_state,
                                          hbm_recurrent_state, 0)
 

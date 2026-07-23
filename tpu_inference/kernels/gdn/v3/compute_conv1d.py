@@ -24,16 +24,13 @@ def causal_conv1d(
     conv_weight: jax.Array,  # [prev_kernel_size, 1, dim_size]
     conv_bias: jax.Array | None,  # [dim_size]
     cfg: config.GDNConfig,
-    collect_windows: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform causal Conv1D. Returns Conv1D output and convolution states.
 
-    With `collect_windows=True` (SPEC mode), the returned state holds one
-    sliding window per token position of shape [seq, chunk,
-    prev_kernel_size, q, dim_size]: window t is the last `prev_kernel_size`
-    inputs ending at token t, i.e. the conv state a sequence resuming right
-    after token t must start from. Windows at positions >= real_sizes are
-    never written back, so their (garbage) contents are harmless.
+    States are [seq, window_size, prev_kernel_size, q, dim_size]: checkpoint
+    w holds the last prev_kernel_size inputs ending at token
+    `chunk_size - window_size + w`, clamped to the last real token, i.e. the
+    state a sequence resuming right after that token must start from.
     """
 
     assert lhs.ndim == 4
@@ -54,32 +51,27 @@ def causal_conv1d(
 
         out_list.append(out)
 
-    if collect_windows:
-        # One window per token position: rows [t + 1, t + kernel_size) of
-        # `lhs` are exactly the last prev_kernel_size inputs ending at
-        # token t (lhs = [prev_state | tokens]).
-        windows = jnp.stack(
-            [lhs[:, t + 1:t + cfg.kernel_size] for t in range(cfg.chunk_size)],
-            axis=1,
-        )
-        return jnp.stack(out_list, axis=1), windows
-
     # Last prev_kernel_size elements needs to be returned as conv_state. However,
     # real_sizes may be smaller than chunk_size. Therefore, slicing last
     # prev_kernel_size elements does not gurantee numeric correctness. Instead,
     # kernel iterate each rows and perform masking to fetch correct values.
     # NOTE: lhs[:, : prev_kernel_size] can be skipped since they were loaded from
     # previous conv states.
-    new_conv_state = lhs[:, 1:cfg.kernel_size]
     real_sizes = real_sizes.reshape(-1, 1, 1, 1)
-    # NOTE: Even though for loop is invoked twice, since they are static loops,
-    # compiler will perform loop fusion.
-    for c_idx in range(2, cfg.chunk_size + 1):
-        row_end = c_idx + cfg.prev_kernel_size
-        new_conv_state = jnp.where(
-            c_idx == real_sizes,
-            lhs[:, c_idx:row_end],
-            new_conv_state,
-        )
+    state_list = []
+    # NOTE: Even though for loop is invoked multiple times, since they are
+    # static loops, compiler will perform loop fusion.
+    for w_idx in range(cfg.window_size):
+        last_row = 1 + cfg.chunk_size - cfg.window_size + w_idx
+        # Checkpoint of sequences whose last real token is at or past this
+        # window position; shorter ones are picked by the masking loop below.
+        new_conv_state = lhs[:, last_row:last_row + cfg.prev_kernel_size]
+        for c_idx in range(1, last_row):
+            new_conv_state = jnp.where(
+                c_idx == real_sizes,
+                lhs[:, c_idx:c_idx + cfg.prev_kernel_size],
+                new_conv_state,
+            )
+        state_list.append(new_conv_state)
 
-    return jnp.stack(out_list, axis=1), new_conv_state
+    return jnp.stack(out_list, axis=1), jnp.stack(state_list, axis=1)

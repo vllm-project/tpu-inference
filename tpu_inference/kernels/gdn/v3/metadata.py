@@ -24,57 +24,24 @@ def compute_batched_seq_metadata(
     seq_lens: jax.Array,
     query_start_loc: jax.Array,
     state_indices: jax.Array,
-    end_seq: jax.Array,
-) -> memory_ref.MetadataRef:
-    """Metadata for computing multiple sequences per tile."""
-
-    max_seqs = seq_lens.size
-    all_seqs = jnp.arange(max_seqs)
-
-    # NOTE: Only supports use case where query_lens[i] = 1 where i < end_seq.
-    # This must be guaranteed by the function caller.
-    # TODO(kyuyeunk): Add error handling when above condition is not met.
-    query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    is_valid_seqs = jnp.where(all_seqs < end_seq, True, False)
-    has_initial_state = (seq_lens - query_lens) > 0
-    all_valid_seqs = jnp.where(is_valid_seqs, all_seqs, 0)
-
-    return memory_ref.MetadataRef.create(
-        cfgs=cfg,
-        num_tiles=pl.cdiv(end_seq, cfg.tile_size),
-        p_id_to_s_idx=all_valid_seqs,
-        p_id_to_r_base=all_valid_seqs,
-        p_id_to_r_size=jnp.where(is_valid_seqs, 1, 0),
-        p_id_is_first_tile=is_valid_seqs,
-        p_id_is_last_tile=is_valid_seqs,
-        s_idx_has_initial_state=has_initial_state,
-        s_idx_to_state_indices=state_indices,
-        s_idx_to_read_offset=jnp.zeros_like(state_indices),
-    )
-
-
-def compute_spec_seq_metadata(
-    cfg: config.GDNConfig,
-    seq_lens: jax.Array,
-    query_start_loc: jax.Array,
-    state_indices: jax.Array,
     read_offsets: jax.Array,
     end_seq: jax.Array,
 ) -> memory_ref.MetadataRef:
-    """Metadata for SPEC mode: one speculative verify window per sequence.
+    """Metadata for computing multiple sequences per tile.
 
-    Like `compute_batched_seq_metadata` but each sequence carries
-    `query_lens[s]` tokens (1 <= query_lens[s] <= cfg.window_size). The
-    initial state is read from `state_indices[s] + read_offsets[s]` and one
-    state checkpoint per window position is written back to
-    `state_indices[s] + t`.
+    A sequence contributes exactly one tile holding all of its query tokens:
+    a single decoded token, or a speculative verify window of up to
+    `cfg.window_size` of them. The initial state is read from
+    `state_indices[s] + read_offsets[s]` and one state checkpoint per window
+    position is written back to `state_indices[s] + t`.
     """
 
     max_seqs = seq_lens.size
     all_seqs = jnp.arange(max_seqs)
 
-    # NOTE: Only supports query_lens[i] <= cfg.window_size where i < end_seq.
-    # This must be guaranteed by the function caller.
+    # NOTE: Only supports use case where query_lens[i] <= cfg.window_size where
+    # i < end_seq. This must be guaranteed by the function caller.
+    # TODO(kyuyeunk): Add error handling when above condition is not met.
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     is_valid_seqs = jnp.where(all_seqs < end_seq, True, False)
     has_initial_state = (seq_lens - query_lens) > 0

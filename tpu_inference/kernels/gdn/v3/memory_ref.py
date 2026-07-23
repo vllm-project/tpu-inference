@@ -238,20 +238,16 @@ class OutBufferedRef(BaseBufferedRef):
 class StateBufferedRef(BaseBufferedRef):
     """Input/output buffered ref for per-sequence state (conv / recurrent).
 
-    In BATCHED / PER_SEQ modes the VMEM window holds one state per sequence
-    ([seq_tile_size, *state_shape]); a sequence's state is read from and
-    written back to `state_indices[s]`.
-
-    In SPEC mode the window holds one state *per window position*
-    ([seq_tile_size, window_size, *state_shape]). The initial state is read
+    The VMEM window holds one state per window position,
+    [seq_tile_size, window_size, *state_shape]. The initial state is read
     from `state_indices[s] + read_offset[s]` into position 0 of the
-    sequence's window row, and after compute all `r_size` per-token
-    checkpoints are written back to `state_indices[s] .. + r_size - 1`.
-    """
+    sequence's window row, and after compute the first
+    `min(r_size, window_size)` checkpoints are written back to
+    `state_indices[s] .. + that many slots`.
 
-    @property
-    def _is_spec(self) -> bool:
-        return self.cfg.mode == config.GDNMode.SPEC
+    Outside SPEC mode `window_size` is 1 and `read_offset` is 0, so this
+    reduces to reading and writing the single state at `state_indices[s]`.
+    """
 
     def copy_in(self, src_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
         assert self.sem_recvs is not None
@@ -271,17 +267,12 @@ class StateBufferedRef(BaseBufferedRef):
             should_read = jnp.logical_and(is_first_tile, has_initial_state)
             dma_size = jnp.where(should_read, 1, 0)
 
-            if self._is_spec:
-                # Resume from the checkpoint of the last accepted token.
-                state_idx = state_idx + self.metadata_ref.s_idx_to_read_offset[
-                    s_idx]
-                dst = vmem_ref.at[idx, pl.ds(0, dma_size)]
-            else:
-                dst = vmem_ref.at[pl.ds(idx, dma_size)]
+            # Resume from the checkpoint of the last accepted token.
+            state_idx += self.metadata_ref.s_idx_to_read_offset[s_idx]
 
             pltpu.make_async_copy(
                 src_ref.at[pl.ds(state_idx, dma_size)],
-                dst,
+                vmem_ref.at[idx, pl.ds(0, dma_size)],
                 sem,
             ).start()
 
@@ -302,13 +293,10 @@ class StateBufferedRef(BaseBufferedRef):
             should_read = jnp.logical_and(is_first_tile, has_initial_state)
             dma_size += jnp.where(should_read, 1, 0)
 
-        # NOTE: The self-copy descriptor only needs to cover the same number
-        # of bytes as the copies issued in `copy_in`; one unit of the sliced
-        # leading dim equals one state slot in both layouts.
-        if self._is_spec:
-            wait_ref = vmem_ref.at[0, pl.ds(0, dma_size)]
-        else:
-            wait_ref = vmem_ref.at[pl.ds(0, dma_size)]
+        # NOTE: With bounds checks disabled, the self-copy descriptor may
+        # nominally exceed the window row; it is never executed, only used
+        # to wait for the same number of bytes `copy_in` issued.
+        wait_ref = vmem_ref.at[0, pl.ds(0, dma_size)]
         pltpu.make_async_copy(wait_ref, wait_ref, sem).wait()
 
     def copy_out(self, dst_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
@@ -323,19 +311,16 @@ class StateBufferedRef(BaseBufferedRef):
             is_last_tile = self.metadata_ref.p_id_is_last_tile[p_id, idx]
             s_idx = self.metadata_ref.p_id_to_s_idx[p_id, idx]
             state_idx = self.metadata_ref.s_idx_to_state_indices[s_idx]
-
-            if self._is_spec:
-                # Write one checkpoint per (valid) window position, starting
-                # at the group's base slot.
-                r_size = self.metadata_ref.p_id_to_r_size[p_id, idx]
-                dma_size = jnp.where(is_last_tile, r_size, 0)
-                src = vmem_ref.at[idx, pl.ds(0, dma_size)]
-            else:
-                dma_size = jnp.where(is_last_tile, 1, 0)
-                src = vmem_ref.at[pl.ds(idx, dma_size)]
+            # Write one checkpoint per valid window position, starting at the
+            # group's base slot. `r_size` never exceeds `window_size` for
+            # windowed sequences; clamping keeps this at a single checkpoint
+            # for the modes whose tiles hold more tokens than that.
+            r_size = self.metadata_ref.p_id_to_r_size[p_id, idx]
+            num_ckpts = jnp.minimum(r_size, self.cfg.window_size)
+            dma_size = jnp.where(is_last_tile, num_ckpts, 0)
 
             pltpu.make_async_copy(
-                src,
+                vmem_ref.at[idx, pl.ds(0, dma_size)],
                 dst_ref.at[pl.ds(state_idx, dma_size)],
                 sem,
             ).start()
@@ -351,19 +336,14 @@ class StateBufferedRef(BaseBufferedRef):
         dma_size = 0
         for idx in range(self.cfg.seq_tile_size):
             is_last_tile = self.metadata_ref.p_id_is_last_tile[p_id, idx]
-            if self._is_spec:
-                r_size = self.metadata_ref.p_id_to_r_size[p_id, idx]
-                dma_size += jnp.where(is_last_tile, r_size, 0)
-            else:
-                dma_size += jnp.where(is_last_tile, 1, 0)
+            r_size = self.metadata_ref.p_id_to_r_size[p_id, idx]
+            num_ckpts = jnp.minimum(r_size, self.cfg.window_size)
+            dma_size += jnp.where(is_last_tile, num_ckpts, 0)
 
         # NOTE: With bounds checks disabled, the self-copy descriptor may
         # nominally exceed the window row; it is never executed, only used
-        # to wait for the matching number of bytes.
-        if self._is_spec:
-            wait_ref = vmem_ref.at[0, pl.ds(0, dma_size)]
-        else:
-            wait_ref = vmem_ref.at[pl.ds(0, dma_size)]
+        # to wait for the same number of bytes `copy_out` issued.
+        wait_ref = vmem_ref.at[0, pl.ds(0, dma_size)]
         pltpu.make_async_copy(wait_ref, wait_ref, sem).wait()
 
 
@@ -393,25 +373,17 @@ def create_allocs(
         cfg.num_v_heads,
         cfg.v_head_dim,
     )
-    if cfg.mode == config.GDNMode.SPEC:
-        # One state checkpoint per window position per sequence.
-        conv_shape = (cfg.seq_tile_size, cfg.chunk_size, cfg.prev_kernel_size,
-                      1, cfg.dim_size)
-        recurrent_shape = (
-            cfg.seq_tile_size,
-            cfg.chunk_size,
-            cfg.num_v_heads,
-            cfg.kq_head_dim,
-            cfg.v_head_dim,
-        )
-    else:
-        conv_shape = (cfg.seq_tile_size, cfg.prev_kernel_size, 1, cfg.dim_size)
-        recurrent_shape = (
-            cfg.seq_tile_size,
-            cfg.num_v_heads,
-            cfg.kq_head_dim,
-            cfg.v_head_dim,
-        )
+    # One state checkpoint per window position per sequence (a single one
+    # outside SPEC mode, where window_size is 1).
+    conv_shape = (cfg.seq_tile_size, cfg.window_size, cfg.prev_kernel_size, 1,
+                  cfg.dim_size)
+    recurrent_shape = (
+        cfg.seq_tile_size,
+        cfg.window_size,
+        cfg.num_v_heads,
+        cfg.kq_head_dim,
+        cfg.v_head_dim,
+    )
 
     pipeline_mode = pl.Buffered(buffer_count=cfg.num_buffers,
                                 use_lookahead=False)

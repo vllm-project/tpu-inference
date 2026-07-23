@@ -59,17 +59,20 @@ class GDNConfig:
     kq_head_dim: int
     v_head_dim: int
     num_buffers: int = 2
-    # SPEC mode only: max tokens per speculative verify window
-    # (= num_speculative_tokens + 1).
+    # Max tokens per speculative verify window (= num_speculative_tokens + 1),
+    # which is also the number of state checkpoints kept per sequence. It is 1
+    # outside SPEC mode, where only the state after the last real token is
+    # kept, so shapes and loops can be sized off it unconditionally and the
+    # extra axis / iterations fold away in the existing paths.
     window_size: int = 1
 
     @property
     def chunk_size(self) -> int:
-        if self.mode == GDNMode.BATCHED:
-            return 1
-        if self.mode == GDNMode.SPEC:
-            return self.window_size
-        return self.tile_size
+        if self.mode == GDNMode.PER_SEQ:
+            return self.tile_size
+        # One tile per sequence, holding its whole verify window. BATCHED is
+        # the single-token case of that (window_size == 1).
+        return self.window_size
 
     @property
     def seq_tile_size(self) -> int:
@@ -80,6 +83,15 @@ class GDNConfig:
     @property
     def prev_kernel_size(self) -> int:
         return self.kernel_size - 1
+
+    @property
+    def use_recurrent(self) -> bool:
+        """Whether GDN runs the token-recurrent scan over the chunked path.
+
+        Keeping more than one state checkpoint mandates the recurrent scan,
+        since the chunked path only ever produces the final state.
+        """
+        return self.chunk_size == 1 or self.window_size > 1
 
     @property
     def v_dim_size(self) -> int:
