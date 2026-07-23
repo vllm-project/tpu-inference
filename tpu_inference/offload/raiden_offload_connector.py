@@ -379,8 +379,10 @@ class RaidenOffloadConnectorScheduler:
 
             for i in range(load_start_idx,
                            load_start_idx + num_blocks_to_load):
-                _, raiden_ids = matched[i]
-                r_id = raiden_ids[0]
+                # lookup() returns a single RaidenBlockID per hash; its
+                # job_name/replica/data_name/data_replica_idx convenience
+                # properties delegate to the wrapped RaidenId.
+                _, r_id = matched[i]
                 src_chunk_ids.append(r_id.data_replica_idx)
                 src_locators.append(
                     RaidenLocator(r_id.job_name, r_id.job_replica_id,
@@ -608,25 +610,25 @@ class RaidenOffloadConnectorScheduler:
                         locator = RaidenLocator(self.job_name,
                                                 self.job_replica_id,
                                                 self.data_name, cid)
-                        # 1. Insert into C++ metadata lookup store
-                        # 1. Insert into C++ logical store and process evictions
+                        # 1. Insert into C++ logical store and process evictions.
+                        # KVCacheStore maps a single RaidenBlockID per block
+                        # hash, so slices is a flat list (one id per hash) and
+                        # each evicted entry is a single RaidenBlockID.
                         all_inserted, evicted = self.kv_store.insert(
-                            [h], [[locator.to_raiden_id()]], on_host=True)
+                            [h], [locator.to_raiden_id()], on_host=True)
                         if all_inserted:
                             self.metrics_collector.record_insertion(1)
 
                             # Handle C++ LRU evictions immediately
                             if evicted:
-                                for evict_hash, evict_slices in evicted:
-                                    for slice_id in evict_slices:
-                                        evict_cid = slice_id.data_replica_idx
-                                        self._pending_unlocks_to_send.append(
-                                            evict_cid)
-                                        self.metrics_collector.record_eviction(
-                                            1)
-                                        logger.debug(
-                                            f"[RaidenOffload] C++ Eviction: Staging physical unlock for chunk {evict_cid} (hash {evict_hash})"
-                                        )
+                                for evict_hash, evict_slice in evicted:
+                                    evict_cid = evict_slice.data_replica_idx
+                                    self._pending_unlocks_to_send.append(
+                                        evict_cid)
+                                    self.metrics_collector.record_eviction(1)
+                                    logger.debug(
+                                        f"[RaidenOffload] C++ Eviction: Staging physical unlock for chunk {evict_cid} (hash {evict_hash})"
+                                    )
 
                 if not pending_hashes:
                     self._pending_save_hashes.pop(req_id, None)
