@@ -254,6 +254,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         bkv_sz values are filtered to multiples of page_size as required by the
         scheduler.
         """
+        # TODO: This is only for PREFILL Case. Refactor this when support DECODE Case
         bkv_sz_list = [
             v for v in range(256, 2049, 256) if v % tuning_key.page_size == 0
         ]
