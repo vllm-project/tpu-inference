@@ -18,11 +18,10 @@ import random
 import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
-import jaxtyping
 import numpy as np
 import torch
 import vllm.lora.utils as lora_utils_mod
@@ -70,8 +69,6 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.models.jax.utils.weight_utils import (
-    shard_put, transfer_state_with_mappings)
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
@@ -3160,35 +3157,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     ):
         return self.kv_cache_manager.insert_request_with_kv_cache(
             request, kv_cache_slices, block_ids)
-
-    ###### RL framework integration ######
-
-    def _sync_weights(
-        self,
-        updated_weights: jaxtyping.PyTree,
-        mappings: Dict[str, Tuple[str, Tuple[str]]],
-        transpose_keys: Dict[str, Tuple[int]],
-        reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
-                             jaxtyping.PyTree] = None
-    ) -> None:
-        """For RL framework integration."""
-        if reshard_fn is not None:
-            updated_weights = reshard_fn(updated_weights, self.state)
-            shard = None
-        else:
-            shard = functools.partial(shard_put, mesh=self.mesh)
-        self.state = transfer_state_with_mappings(
-            src_state=updated_weights,
-            tgt_state=self.state,
-            mappings=mappings,
-            transpose_keys=transpose_keys,
-            shard=shard)
-        # Keep the dispatch-side view in sync with the updated state so
-        # subsequent jit dispatches see the new weights.
-        if isinstance(self.state, nnx.State):
-            self.state_leaves = tuple(jax.tree_util.tree_leaves(self.state))
-        else:
-            self.state_leaves = self.state
 
     def _get_padded_total_tokens(
             self, scheduler_output: "VllmSchedulerOutput") -> int:
