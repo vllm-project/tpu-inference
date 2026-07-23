@@ -277,7 +277,6 @@ class Gemma4MTPAttention(JaxModule):
         dummy_v = jnp.zeros((num_tokens, self.num_kv_heads, self.head_dim),
                             dtype=dummy_dtype)
 
-
         new_kv_cache, outputs = attention(
             kv_cache,
             q,
@@ -420,7 +419,6 @@ class Gemma4MultiTokenPredictor(JaxModule):
         text_config = draft_config.text_config
         self.config = text_config
         dtype = vllm_config.model_config.dtype
-        spec_config = getattr(vllm_config, "speculative_config", None)
 
         self.hidden_size = text_config.hidden_size
         self.backbone_hidden_size = getattr(draft_config,
