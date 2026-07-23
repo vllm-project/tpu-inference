@@ -627,8 +627,9 @@ class KVCacheManager:
                 if disable_sliding_window:
                     attn_module.sliding_window = None
 
-                if (kv_tgt_layer := getattr(
-                        attn_module, "kv_sharing_target_layer_name", None)) is not None:
+                if (kv_tgt_layer :=
+                        getattr(attn_module, "kv_sharing_target_layer_name",
+                                None)) is not None:
                     # The layer doesn't need its own KV cache and will use that of
                     # the target layer. We skip creating a KVCacheSpec for it, so
                     # that KV cache management logic will act as this layer does

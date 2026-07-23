@@ -52,20 +52,45 @@ class VllmSparseAttnIndexer(SparseAttnIndexer):
     ) -> torch.Tensor:
         wrapper_ctx = get_vllm_model_wrapper_context()
         prefix = getattr(self.k_cache, "prefix", None)
-        if prefix is None or prefix not in wrapper_ctx.layer_name_to_kvcache_index:
-            return self.topk_indices_buffer
 
-        kv_cache_index = wrapper_ctx.layer_name_to_kvcache_index[prefix]
+        def _get_fallback_buffer():
+            if self.topk_indices_buffer is not None:
+                try:
+                    return torch_view(jax_view(self.topk_indices_buffer))
+                except Exception:
+                    pass
+            topk = getattr(self, "topk_tokens", 2048)
+            return torch_view(jnp.zeros((hidden_states.shape[0], topk), dtype=jnp.int32))
+
+        if prefix is None:
+            return _get_fallback_buffer()
+
+        kv_cache_index = wrapper_ctx.layer_name_to_kvcache_index.get(prefix)
+        if kv_cache_index is None:
+            for alt_prefix in [prefix.rsplit(".", 1)[0], prefix.rsplit(".", 2)[0]]:
+                if alt_prefix in wrapper_ctx.layer_name_to_kvcache_index:
+                    kv_cache_index = wrapper_ctx.layer_name_to_kvcache_index[alt_prefix]
+                    break
+
+        if kv_cache_index is None:
+            return _get_fallback_buffer()
+
         kv_cache = wrapper_ctx.kv_caches[kv_cache_index]
         mesh = wrapper_ctx.mesh
 
         attn_meta = get_forward_context().attn_metadata
         if attn_meta is None:
-            return self.topk_indices_buffer
+            return _get_fallback_buffer()
+
         if isinstance(attn_meta, dict):
-            if prefix not in attn_meta:
-                return self.topk_indices_buffer
-            attn_metadata = attn_meta[prefix]
+            attn_metadata = attn_meta.get(prefix)
+            if attn_metadata is None:
+                for alt_prefix in [prefix.rsplit(".", 1)[0], prefix.rsplit(".", 2)[0]]:
+                    if alt_prefix in attn_meta:
+                        attn_metadata = attn_meta[alt_prefix]
+                        break
+            if attn_metadata is None:
+                return _get_fallback_buffer()
         else:
             attn_metadata = attn_meta
 
