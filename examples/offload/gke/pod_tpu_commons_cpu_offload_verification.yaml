@@ -33,7 +33,7 @@ spec:
     imagePullPolicy: Always
     command:
     - python
-    - /tpu_inference/examples/offload/offline_inference_kv_cache_verification.py
+    - /tpu-inference/workspace/tpu_inference/examples/offload/offline_inference_kv_cache_verification.py
     - --model=meta-llama/Llama-3.1-8B
     - --tensor_parallel_size=8
     - --max_model_len=1024

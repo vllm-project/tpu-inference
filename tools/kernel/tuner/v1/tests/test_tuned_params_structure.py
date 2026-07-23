@@ -37,7 +37,7 @@ from tools.kernel.tuner.v1.autotune.kernel_autotune_config import \
     kernel_autotune_mapping
 
 # The docker workspace prefix used in kernel_autotune_mapping paths.
-_DOCKER_PREFIX = "/tpu-inference/workspace/tpu_inference/"
+_DOCKER_PREFIX = "/workspace/tpu_inference/"
 
 # Resolve the repository root (the directory that contains 'tpu_inference/' and 'tools/').
 _REPO_ROOT = Path(__file__).resolve().parents[5]

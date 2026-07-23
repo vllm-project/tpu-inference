@@ -162,7 +162,8 @@ if [ -z "$dataset_path" ]; then
         rclone config create mlc-inference s3 provider=Cloudflare \
             access_key_id=f65ba5eef400db161ea49967de89f47b \
             secret_access_key=fbea333914c292b854f14d3fe232bad6c5407bf0ab1bebf78833c2b359bdfd2b \
-            endpoint=https://c2686074cb2caf5cbaf6d134bdba8b47.r2.cloudflarestorage.com
+            endpoint=https://c2686074cb2caf5cbaf6d134bdba8b47.r2.cloudflarestorage.com \
+            > /dev/null
         rclone copy mlc-inference:mlcommons-inference-wg-public/open_orca ./open_orca -P
         gzip -d open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl.gz
     else
@@ -205,6 +206,8 @@ echo "Using the dataset at $dataset_path"
 
 cd "$vllm_dir" || exit
 echo "Current working directory: $(pwd)"
+echo "Using vLLM hash: $(git -C "$vllm_dir" rev-parse HEAD)"
+echo "Using TPU Inference hash: $(git -C "$tpu_inf_dir" rev-parse HEAD)"
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Inference ones
 cp -r "$tpu_inf_dir"/scripts/vllm/benchmarking/*.py "$vllm_dir"/benchmarks/

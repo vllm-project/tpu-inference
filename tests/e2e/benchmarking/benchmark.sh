@@ -139,6 +139,8 @@ echo "Using the dataset at $dataset_path"
 
 cd "$vllm_dir" || exit
 echo "Current working directory: $(pwd)"
+echo "Using vLLM hash: $(git -C "$vllm_dir" rev-parse HEAD)"
+echo "Using TPU Inference hash: $(git -C "$tpu_inf_dir" rev-parse HEAD)"
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Commons ones
 cp -r "$tpu_inf_dir"/scripts/vllm/benchmarking/*.py "$vllm_dir"/benchmarks/

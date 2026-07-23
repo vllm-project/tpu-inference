@@ -17,7 +17,8 @@
 # Install dependencies
 pip install -U --pre jax jaxlib libtpu requests -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
-TPU_INFERENCE_DIR="/tpu-inference/workspace/tpu_inference"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+TPU_INFERENCE_DIR=$(cd -- "$SCRIPT_DIR/../.." &>/dev/null && pwd)
 
 # RPA v3 test files - add new tests here
 RPA_V3_TESTS=(
@@ -32,4 +33,4 @@ done
 
 pytest "${FULL_PATHS[@]}"
 # NOTE: `test_deepseek_v3.py` includes all model-related tests, so we only want to run the attention tests
-pytest "$TPU_INFERENCE_DIR/tpu-inference/tests/models/jax/test_deepseek_v3.py" -k "TestDeepseekV3Attention"
+pytest "$TPU_INFERENCE_DIR/tests/models/jax/test_deepseek_v3.py" -k "TestDeepseekV3Attention"

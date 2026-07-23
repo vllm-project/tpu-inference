@@ -14,5 +14,5 @@
 
 kernel_autotune_mapping = {
     'mla_kernel_tuner':
-    '/tpu-inference/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py',
+    '/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py',
 }

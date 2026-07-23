@@ -101,6 +101,8 @@ resolve_benchmark_workspace "$root_dir"
 echo "Using vLLM directory at $vllm_dir"
 
 cd "$vllm_dir/tests/entrypoints/llm" || exit
+echo "Using vLLM hash: $(git -C "$vllm_dir" rev-parse HEAD)"
+echo "Using TPU Inference hash: $(git -C "$tpu_inf_dir" rev-parse HEAD)"
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Inference ones
 cp "$tpu_inf_dir"/scripts/vllm/integration/*.py "$vllm_dir"/tests/entrypoints/llm/

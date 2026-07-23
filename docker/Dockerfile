@@ -20,6 +20,7 @@ FROM $BASE_IMAGE
 
 ARG IS_TEST="false"
 ARG BM_INFRA="false"
+ENV TPU_INFERENCE_WORKSPACE=/tpu-inference/workspace
 
 # Update pip
 RUN pip install --upgrade pip
@@ -52,7 +53,7 @@ RUN if [ "$BM_INFRA" = "true" ]; then \
     fi
 
 # Build vLLM
-WORKDIR /tpu-inference/workspace/vllm
+WORKDIR ${TPU_INFERENCE_WORKSPACE}/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_COMMIT_HASH
 
@@ -72,10 +73,11 @@ RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
     pytest-asyncio \
     "lm-eval[api,math]==0.4.12" \
     pytest-cov \
+    coverage==7.15.2 \
     tblib
 
 # Install tpu_inference
-WORKDIR /tpu-inference/workspace/tpu_inference
+WORKDIR ${TPU_INFERENCE_WORKSPACE}/tpu_inference
 # Install requirements first and cache so we don't need to re-install on code change.
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt --retries 3
@@ -94,8 +96,8 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
 # outside that tree. Keep the legacy paths available for the bare-metal runner,
 # whose pipeline commands still use /workspace/{vllm,tpu_inference}.
 RUN mkdir -p /workspace && \
-    ln -sfn /tpu-inference/workspace/vllm /workspace/vllm && \
-    ln -sfn /tpu-inference/workspace/tpu_inference /workspace/tpu_inference
+    ln -sfn "${TPU_INFERENCE_WORKSPACE}/vllm" /workspace/vllm && \
+    ln -sfn "${TPU_INFERENCE_WORKSPACE}/tpu_inference" /workspace/tpu_inference
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
