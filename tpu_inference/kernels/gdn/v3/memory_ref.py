@@ -77,6 +77,11 @@ class MetadataRef:
     p_id_is_last_tile: SmemWrapper
     s_idx_has_initial_state: Any
     s_idx_to_state_indices: Any
+    # Per-sequence state read offset for speculative decoding: the initial
+    # state is read from `s_idx_to_state_indices[s] + s_idx_to_read_offset[s]`
+    # (the checkpoint of the last accepted token). Zero everywhere without
+    # speculative decoding.
+    s_idx_to_read_offset: Any
 
     @classmethod
     def create(
@@ -90,6 +95,7 @@ class MetadataRef:
         p_id_is_last_tile: jax.Array,
         s_idx_has_initial_state: jax.Array,
         s_idx_to_state_indices: jax.Array,
+        s_idx_to_read_offset: jax.Array,
     ):
         # NOTE: First dim does not matter when it comes to calculating stride.
         shape = (1, cfgs.seq_tile_size)
@@ -102,6 +108,7 @@ class MetadataRef:
             p_id_is_last_tile=SmemWrapper(p_id_is_last_tile, shape),
             s_idx_has_initial_state=s_idx_has_initial_state,
             s_idx_to_state_indices=s_idx_to_state_indices,
+            s_idx_to_read_offset=s_idx_to_read_offset,
         )
 
     def __len__(self) -> int:
@@ -229,6 +236,19 @@ class OutBufferedRef(BaseBufferedRef):
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class StateBufferedRef(BaseBufferedRef):
+    """Input/output buffered ref for per-sequence state (conv / recurrent).
+
+    The VMEM window holds one state per window position,
+    [seq_tile_size, window_size, *state_shape]. The initial state is read
+    from `state_indices[s] + read_offset[s]` into position 0 of the
+    sequence's window row, and after compute the first
+    `min(r_size, window_size)` checkpoints are written back to
+    `state_indices[s] .. + that many slots`.
+
+    Without speculative decoding `window_size` is 1 and `read_offset` is 0,
+    so this reduces to reading and writing the single state at
+    `state_indices[s]`.
+    """
 
     def copy_in(self, src_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
         assert self.sem_recvs is not None
@@ -248,9 +268,12 @@ class StateBufferedRef(BaseBufferedRef):
             should_read = jnp.logical_and(is_first_tile, has_initial_state)
             dma_size = jnp.where(should_read, 1, 0)
 
+            # Resume from the checkpoint of the last accepted token.
+            state_idx += self.metadata_ref.s_idx_to_read_offset[s_idx]
+
             pltpu.make_async_copy(
                 src_ref.at[pl.ds(state_idx, dma_size)],
-                vmem_ref.at[pl.ds(idx, dma_size)],
+                vmem_ref.at[idx, pl.ds(0, dma_size)],
                 sem,
             ).start()
 
@@ -271,11 +294,11 @@ class StateBufferedRef(BaseBufferedRef):
             should_read = jnp.logical_and(is_first_tile, has_initial_state)
             dma_size += jnp.where(should_read, 1, 0)
 
-        pltpu.make_async_copy(
-            vmem_ref.at[pl.ds(0, dma_size)],
-            vmem_ref.at[pl.ds(0, dma_size)],
-            sem,
-        ).wait()
+        # NOTE: With bounds checks disabled, the self-copy descriptor may
+        # nominally exceed the window row; it is never executed, only used
+        # to wait for the same number of bytes `copy_in` issued.
+        wait_ref = vmem_ref.at[0, pl.ds(0, dma_size)]
+        pltpu.make_async_copy(wait_ref, wait_ref, sem).wait()
 
     def copy_out(self, dst_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
         assert self.sem_sends is not None
@@ -289,10 +312,16 @@ class StateBufferedRef(BaseBufferedRef):
             is_last_tile = self.metadata_ref.p_id_is_last_tile[p_id, idx]
             s_idx = self.metadata_ref.p_id_to_s_idx[p_id, idx]
             state_idx = self.metadata_ref.s_idx_to_state_indices[s_idx]
-            dma_size = jnp.where(is_last_tile, 1, 0)
+            # Write one checkpoint per valid window position, starting at the
+            # group's base slot. `r_size` never exceeds `window_size` for
+            # windowed sequences; the clamp is for PER_SEQ tiles, which hold
+            # many tokens but keep only the final state.
+            r_size = self.metadata_ref.p_id_to_r_size[p_id, idx]
+            num_ckpts = jnp.minimum(r_size, self.cfg.window_size)
+            dma_size = jnp.where(is_last_tile, num_ckpts, 0)
 
             pltpu.make_async_copy(
-                vmem_ref.at[pl.ds(idx, dma_size)],
+                vmem_ref.at[idx, pl.ds(0, dma_size)],
                 dst_ref.at[pl.ds(state_idx, dma_size)],
                 sem,
             ).start()
@@ -308,13 +337,15 @@ class StateBufferedRef(BaseBufferedRef):
         dma_size = 0
         for idx in range(self.cfg.seq_tile_size):
             is_last_tile = self.metadata_ref.p_id_is_last_tile[p_id, idx]
-            dma_size += jnp.where(is_last_tile, 1, 0)
+            r_size = self.metadata_ref.p_id_to_r_size[p_id, idx]
+            num_ckpts = jnp.minimum(r_size, self.cfg.window_size)
+            dma_size += jnp.where(is_last_tile, num_ckpts, 0)
 
-        pltpu.make_async_copy(
-            vmem_ref.at[pl.ds(0, dma_size)],
-            vmem_ref.at[pl.ds(0, dma_size)],
-            sem,
-        ).wait()
+        # NOTE: With bounds checks disabled, the self-copy descriptor may
+        # nominally exceed the window row; it is never executed, only used
+        # to wait for the same number of bytes `copy_out` issued.
+        wait_ref = vmem_ref.at[0, pl.ds(0, dma_size)]
+        pltpu.make_async_copy(wait_ref, wait_ref, sem).wait()
 
 
 def create_allocs(
@@ -343,9 +374,13 @@ def create_allocs(
         cfg.num_v_heads,
         cfg.v_head_dim,
     )
-    conv_shape = (cfg.seq_tile_size, cfg.prev_kernel_size, 1, cfg.dim_size)
+    # One state checkpoint per window position per sequence (a single one
+    # without speculative decoding, where window_size is 1).
+    conv_shape = (cfg.seq_tile_size, cfg.window_size, cfg.prev_kernel_size, 1,
+                  cfg.dim_size)
     recurrent_shape = (
         cfg.seq_tile_size,
+        cfg.window_size,
         cfg.num_v_heads,
         cfg.kq_head_dim,
         cfg.v_head_dim,
