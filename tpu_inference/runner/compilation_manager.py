@@ -798,9 +798,9 @@ class CompilationManager:
                 self._run_compilation(
                     f"select_from_array [{name}]",
                     self.runner._select_from_array_fn,
-                    self.runner,
                     array,
                     indices_to_select,
+                    self.runner.mesh,
                     compile_only=True,
                     array_size=array_size,
                     index_size=indices_count,
