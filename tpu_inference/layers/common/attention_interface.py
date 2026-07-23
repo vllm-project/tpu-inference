@@ -455,7 +455,8 @@ def sharded_ragged_paged_attention(
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             kwargs["use_causal_mask"] = use_causal_mask
-            kwargs["decode_query_size"] = decode_query_size
+            if envs.USE_BATCHED_RPA_KERNEL:
+                kwargs["decode_query_size"] = decode_query_size
         return func(*args, **kwargs)
 
     return jax.shard_map(
