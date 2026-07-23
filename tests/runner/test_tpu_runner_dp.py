@@ -1013,6 +1013,84 @@ class TestTPUJaxRunnerDPInputsLightweight:
         # Verify placeholder_num
         assert call_args[4] == 2  # Number of actual substitutions
 
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('jax.lax.with_sharding_constraint',
+           side_effect=lambda x, *args, **kwargs: x)
+    @patch('tpu_inference.runner.tpu_runner.device_array')
+    def test_apply_async_token_substitution_sharding(
+            self, mock_device_array, mock_with_sharding_constraint,
+            mock_named_sharding):
+        """Test that _apply_async_token_substitution uses correct sharding for device_array."""
+
+        # Bind the actual method
+        self.runner._apply_async_token_substitution = TPUModelRunner._apply_async_token_substitution.__get__(
+            self.runner)
+
+        input_ids = np.array([1, 2, 3, 4, 5, 6, 7, 8])
+        next_tokens_in_tpu = np.array([100, 200, 300])
+        token_in_tpu_cur_input_indices = np.array([2, 5])
+        token_in_tpu_pre_next_tokens_indices = np.array([0, 1])
+
+        # Mock the device_array calls to return their inputs
+        def device_array_side_effect(mesh, tensor, sharding=None):
+            return tensor
+
+        mock_device_array.side_effect = device_array_side_effect
+
+        # Setup _pre_async_results
+        self.runner._pre_async_results = MagicMock()
+        self.runner._pre_async_results.next_tokens = next_tokens_in_tpu
+
+        # Use a non-mock class name for mesh so NamedSharding is instantiated
+        class RealMeshStub:
+            pass
+
+        fake_mesh = RealMeshStub()
+        self.runner.mesh = fake_mesh
+        self.runner.maybe_forbid_compile = nullcontext()
+
+        # Mock the substitute function
+        mock_substitute_fn = MagicMock(
+            return_value=np.array([1, 2, 100, 4, 5, 200, 7, 8]))
+        self.runner._substitute_placeholder_token_fn = mock_substitute_fn
+
+        # 1. Test Non-Speculative path (self.speculative_config is None)
+        self.runner.speculative_config = None
+        mock_named_sharding.return_value = "non_spec_sharding"
+
+        _ = self.runner._apply_async_token_substitution(
+            input_ids, next_tokens_in_tpu, token_in_tpu_cur_input_indices,
+            token_in_tpu_pre_next_tokens_indices)
+
+        # Verify device_array was called on next_tokens_in_tpu with correct non-speculative sharding
+        found_call = False
+        for args, kwargs in mock_device_array.call_args_list:
+            if len(args) >= 2 and np.array_equal(
+                    args[1], next_tokens_in_tpu) and kwargs.get(
+                        'sharding') == "non_spec_sharding":
+                found_call = True
+                break
+        assert found_call, "Could not find expected device_array call in non-speculative path"
+
+        # 2. Test Speculative path (self.speculative_config is not None)
+        self.runner.speculative_config = MagicMock()
+        mock_device_array.reset_mock()
+        mock_named_sharding.return_value = "spec_sharding"
+
+        _ = self.runner._apply_async_token_substitution(
+            input_ids, next_tokens_in_tpu, token_in_tpu_cur_input_indices,
+            token_in_tpu_pre_next_tokens_indices)
+
+        # Verify device_array was called on next_tokens_in_tpu with correct speculative sharding
+        found_call = False
+        for args, kwargs in mock_device_array.call_args_list:
+            if len(args) >= 2 and np.array_equal(
+                    args[1], next_tokens_in_tpu) and kwargs.get(
+                        'sharding') == "spec_sharding":
+                found_call = True
+                break
+        assert found_call, "Could not find expected device_array call in speculative path"
+
     @patch('jax.device_put', side_effect=lambda x, y: x)
     @patch('tpu_inference.runner.tpu_runner.NamedSharding')
     @patch('tpu_inference.runner.tpu_runner.runner_utils')
