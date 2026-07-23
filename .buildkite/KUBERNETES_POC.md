@@ -603,6 +603,22 @@ networking disabled, then skips every standard TPU step. The same tests remain
 in their TPU shards until repeated CPU-only builds pass; this is deliberate
 shadowing rather than an immediate reduction in TPU coverage.
 
+`select_kube_tests.py` and `test_ownership.json` implement the corresponding
+change selector in shadow mode. For example:
+
+```bash
+python3 .buildkite/scripts/select_kube_tests.py --base origin/main
+```
+
+The JSON output includes selected CPU and TPU step keys, ownership reasons,
+unowned files, and whether the full matrix is required. Documentation-only
+changes select no tests; unknown code widens to the complete default matrix;
+CI/image/dependency changes and main/nightly/release events select the full
+feasible matrix. The output retains `"shadow": true` until repeated audits show
+that targeted plans would not have hidden failures. Selection emits logical
+steps only; a later Test Engine integration may split those candidates by
+historical timing without changing this ownership policy.
+
 The existing bootstrap already skips documentation-only builds and gates the
 kernel and collective-kernel shards from changed paths. Extend that mechanism
 through one deterministic selector which consumes the merge-base diff and

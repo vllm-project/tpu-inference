@@ -6,5 +6,6 @@ tests/test_nightly_gate.py
 tests/offload/tpu_offload_cpu_backend_test.py
 tests/ci/test_manage_kube_cache_pvc.py
 tests/ci/test_prepare_kube_resources.py
+tests/ci/test_select_kube_tests.py
 tools/kernel/tuner/v1/tests/test_tuned_params_structure.py
 tools/kernel/tuner/v1/tests/test_inspect_result_cli.py

@@ -1,0 +1,54 @@
+{
+  "rules": [
+    {
+      "patterns": [".buildkite/**", "docker/**", "requirements*.txt", "pyproject.toml", "setup.py"],
+      "full": true,
+      "reason": "CI, image, dependency, or packaging change"
+    },
+    {
+      "patterns": ["tests/e2e/test_speculative_decoding.py", "tpu_inference/**/speculat*", "tests/**/speculat*"],
+      "steps": ["kube_e2e_speculative_decoding"],
+      "reason": "speculative decoding ownership"
+    },
+    {
+      "patterns": ["tests/lora/**", "tpu_inference/**/lora/**"],
+      "steps": ["kube_lora_unit_tests", "kube_lora_e2e_single_chip", "kube_lora_adapter_e2e_single_chip", "kube_lora_e2e_multi_chip", "kube_lora_unit_tests_multi_chip"],
+      "reason": "LoRA ownership"
+    },
+    {
+      "patterns": ["tests/kernels/collectives/**", "tpu_inference/kernels/**/collective*"],
+      "steps": ["kube_jax_unit_tests_collectives"],
+      "reason": "collective-kernel ownership"
+    },
+    {
+      "patterns": ["tests/kernels/**", "tpu_inference/kernels/**"],
+      "steps": ["kube_jax_unit_tests_kernels"],
+      "reason": "kernel ownership"
+    },
+    {
+      "patterns": ["tests/offload/**", "tpu_inference/offload/**"],
+      "steps": ["kube_jax_unit_tests_part2"],
+      "reason": "offload ownership"
+    },
+    {
+      "patterns": ["tests/e2e/benchmarking/**", ".buildkite/benchmark/**"],
+      "steps": ["kube_e2e_mlperf_jax", "kube_e2e_mlperf_jax_vllm", "kube_qwen2_5_vl_7b_accuracy"],
+      "reason": "benchmarking ownership"
+    },
+    {
+      "patterns": ["tests/e2e/test_runai_model_streamer_loader.py", "tpu_inference/**/model_streamer*"],
+      "steps": ["kube_runai_streamer_jax", "kube_runai_streamer_torchax", "kube_runai_streamer_torchax_ray"],
+      "reason": "model-streamer ownership"
+    },
+    {
+      "patterns": ["examples/disagg/**", "tpu_inference/**/disagg*"],
+      "steps": ["kube_disagg_single_host"],
+      "reason": "disaggregation ownership"
+    },
+    {
+      "patterns": ["tests/test_envs.py", "tests/test_nightly_gate.py", "tests/ci/**", "tools/kernel/tuner/**"],
+      "steps": [],
+      "reason": "CPU-safe ownership"
+    }
+  ]
+}
