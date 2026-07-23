@@ -27,7 +27,7 @@ and implementing all `torch` operators that this tensor is supposed to support.
 
 ![torchax](../assets/torchax.png)
 
-See  [this page](https://jax-torch-interop.readthedocs.io/en/latest) for more details on how torchax works.
+See  [this page](https://google.github.io/torchax/) for more details on how torchax works.
 
 ## TPU JAX worker
 
