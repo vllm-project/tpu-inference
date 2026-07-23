@@ -50,6 +50,27 @@ steps:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
+  # Gemma3-4B MaxText inference smoke test (dev trial of .buildkite/rl/gemma3_maxtext_inference.yml)
+  # Runs the same script the nightly rl/ matrix runs, but on tpu7x here.
+  # Requires: HF_TOKEN in the agent env, and read access to GEMMA3_MT_CKPT.
+  # This step is a dev-only trial; remove it before merging the rl/ entry.
+  # -----------------------------------------------------------------
+  - label: "tpu7x [dev] gemma3 maxtext inference smoke test"
+    key: tpu7x_dev_gemma3_maxtext_inference
+    depends_on: tpu7x_build_docker
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: tpu_v7x_2_queue
+    commands:
+      # run_in_docker.sh forwards HF_TOKEN into the container but not arbitrary
+      # env, so to override the checkpoint, set GEMMA3_MT_CKPT *inside* the
+      # command, e.g.:
+      #   ... bash -c 'GEMMA3_MT_CKPT=gs://.../items bash /workspace/tpu_inference/tests/e2e/test_gemma3_maxtext_inference.sh'
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/test_gemma3_maxtext_inference.sh
+
+  # -----------------------------------------------------------------
   # Demo 1: offline_inference.py
   # Shows the simplest pattern: run a Python script inside Docker.
   # Use this as a starting point for any offline batch inference test.
