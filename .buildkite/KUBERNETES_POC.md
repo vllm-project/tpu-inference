@@ -381,6 +381,14 @@ versions that produced the data without another Docker Hub pull or PyPI install;
 its configuration aliases all source layouts. Combining build 34's two real
 artifacts locally passes the 68% threshold.
 
+When only the reporting environment changes, set
+`KUBE_COVERAGE_SOURCE_BUILD=<build number>` on a CPU-only build. The gated
+`kube_validate_prior_coverage` step downloads that build's two real shard
+artifacts and runs the current commit-specific reporting image, so a Docker or
+coverage-consumer fix can be proven without repeating several TPU-hours. It is
+a diagnostic/recovery path; normal builds still combine artifacts produced by
+their own two shards.
+
 Cold compilation, rather than serving throughput, explains the execution gap.
 For example, the first Qwen3.5 MTP speculative case took 50m 44s here versus
 5m 58s in the same-time warm bare-metal build 23029. MLPerf post-readiness
