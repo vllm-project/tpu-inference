@@ -845,6 +845,17 @@ def pcp_ragged_paged_attention(
     #             every rank (memory ~ pcp * local cache).
     # "auto":     pick per-compile by comparing the two static comm estimates.
     _cache_phase = os.environ.get("PCP_CACHE_PHASE", "gather_q").lower()
+    # gather-KV can either issue one kernel launch per stripe and LSE-merge in
+    # XLA ("loop", default), or hand the whole gathered cache to a single
+    # launch that walks the disjoint stripes internally ("fused").
+    #
+    # "fused" is numerically correct (test_pcp_attention_interface 8/8) but is
+    # NOT yet a win: it doubles pages_per_seq (pcp * npages), which inflates
+    # the kernel's VMEM budget and blows the 64M vmem limit at
+    # pcp2/CTX=64k/HD=256.  Needs block-size selection to account for the
+    # gathered page count before it can be enabled by default.
+    _cache_phase_fused = (os.environ.get("PCP_GKV_MODE",
+                                         "loop").lower() == "fused")
     if _cache_phase == "auto":
         nq_total, hd = q.shape[1], q.shape[2]
         nkv_total = k.shape[1]
@@ -901,22 +912,57 @@ def pcp_ragged_paged_attention(
             # this is numerically identical to gather-Q. No reduce-scatter.
             local_q = q_l.shape[0]  # = padded_q_len // pcp = 2 * pcp_chunk_size
             cu_kv = jnp.zeros_like(cu_q_lens[0]).at[1:].set(local_q)
-            kv_full = lax.all_gather(kvc, pcp_axis, axis=1, tiled=True)
-            page_local = kvc.shape[1]
             common_kv = {k: v for k, v in common.items() if k != "cp_rank"}
-            o1 = l1 = None
-            for j in range(pcp_size):
-                kvc_j = lax.dynamic_slice_in_dim(kv_full, j * page_local,
-                                                 page_local, axis=1)
-                oj, _, lj = rpa_v3_cp.ragged_paged_attention(
-                    q_l, k_l, v_l, kvc_j, kvl, pi, cu_kv, dist_cache,
-                    kv_cache_lens=kvcl, cp_rank=_rank_i32(j),
-                    skip_current_attn=True, use_causal_mask=False,
-                    update_kv_cache=False, **common_kv)
-                if j == 0:
-                    o1, l1 = oj, lj
-                else:
-                    o1, l1 = merge_attn_states(o1, l1, oj, lj)
+            npages_l = kvc.shape[0]
+            if _cache_phase_fused:
+                # ONE launch: stack the stripes on the PAGE axis interleaved
+                # round-robin (walked page pp -> stripe pp % pcp, local page
+                # pp // pcp) and let the kernel walk all stripes in a single
+                # pass, accumulating the online softmax in registers. The
+                # kernel's cp_gathered_stripes mask rejects slots whose global
+                # token index is past the cache length. Replaces the pcp
+                # separate launches + XLA-level LSE merges below.
+                # Stripe-major concat on the page axis: a FREE reshape (no
+                # transpose). Stripe j owns gathered pages [j*npages, ...).
+                kv_st = lax.all_gather(kvc, pcp_axis, axis=0, tiled=False)
+                kv_g = kv_st.reshape(pcp_size * npages_l, *kvc.shape[1:])
+                # Walked page w -> stripe j = w // ppl, local page w % ppl,
+                # where ppl is the COMPACT per-stripe page count matching the
+                # kernel's get_stripe_stride (valid tokens rounded to pages).
+                page_l = kvc.shape[1]
+                cache_len = kvl[0] - (kvl[0] - kvcl[0])  # = kv_cache_lens[0]
+                per_stripe = (kvcl[0] + pcp_size - 1) // pcp_size
+                ppl = jnp.maximum(
+                    (per_stripe + page_l - 1) // page_l, 1).astype(jnp.int32)
+                w = jnp.arange(pi.shape[0], dtype=jnp.int32)
+                j_of_w = w // ppl
+                lp_of_w = w - j_of_w * ppl
+                pi_l = pi[:npages_l]
+                pi_g = (j_of_w * npages_l +
+                        pi_l[jnp.clip(lp_of_w, 0, npages_l - 1)]).astype(
+                            pi.dtype)
+                del cache_len
+                o1, _, l1 = rpa_v3_cp.ragged_paged_attention(
+                    q_l, k_l, v_l, kv_g, kvl, pi_g, cu_kv, dist_cache,
+                    kv_cache_lens=kvcl, cp_rank=_rank_i32(0),
+                    cp_gathered_stripes=pcp_size, skip_current_attn=True,
+                    use_causal_mask=False, update_kv_cache=False, **common_kv)
+            else:
+                kv_full = lax.all_gather(kvc, pcp_axis, axis=1, tiled=True)
+                page_local = kvc.shape[1]
+                o1 = l1 = None
+                for j in range(pcp_size):
+                    kvc_j = lax.dynamic_slice_in_dim(kv_full, j * page_local,
+                                                     page_local, axis=1)
+                    oj, _, lj = rpa_v3_cp.ragged_paged_attention(
+                        q_l, k_l, v_l, kvc_j, kvl, pi, cu_kv, dist_cache,
+                        kv_cache_lens=kvcl, cp_rank=_rank_i32(j),
+                        skip_current_attn=True, use_causal_mask=False,
+                        update_kv_cache=False, **common_kv)
+                    if j == 0:
+                        o1, l1 = oj, lj
+                    else:
+                        o1, l1 = merge_attn_states(o1, l1, oj, lj)
             kvc1 = kvc  # cache unchanged in this phase; current phase writes it
         else:
             ag_q = ag(q_l)  # [pcp*2*chunk]
