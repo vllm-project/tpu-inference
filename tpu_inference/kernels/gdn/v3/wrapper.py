@@ -325,11 +325,11 @@ def fused_conv1d_gdn(
             of per-request groups of `num_spec_tokens + 1` consecutive slots.
         distribution: Tensor of shape [3] int32 — [decode_end, prefill_end,
             mixed_end]. With `num_spec_tokens > 0`, the first segment holds
-            windowed sequences (decodes and speculative verify windows of up
-            to `num_spec_tokens + 1` tokens) processed in SPEC mode.
+            speculative verify windows of up to `num_spec_tokens + 1` tokens
+            rather than 1-token decodes.
         seq_lens: Sequence lengths for each sequence of shape [num_seqs].
         read_offsets: Optional [num_seqs] int32 — per-sequence state read
-            offset (num_accepted - 1 from the last verify step). SPEC-mode
+            offset (num_accepted - 1 from the last verify step). Windowed
             sequences read their initial state from
             `state_indices[s] + read_offsets[s]` and write one checkpoint
             per window position to `state_indices[s] + t`. Required when
@@ -339,8 +339,8 @@ def fused_conv1d_gdn(
         d_k: Key/query dimension.
         d_v: Value dimension.
         kernel_size: Convolution kernel size.
-        num_spec_tokens: Number of speculative draft tokens (0 disables SPEC
-            mode and preserves the original BATCHED decode path).
+        num_spec_tokens: Number of speculative draft tokens (0 gives the
+            plain 1-token-per-sequence decode path).
         zero_initialize_out: Whether to zero-initialize the output buffer before
             executing non-batched sequences.
         compute_precision: Computation precision dtype.
@@ -390,7 +390,7 @@ def fused_conv1d_gdn(
     aligned_num_v_heads = pl.cdiv(n_v, num_lanes) * num_lanes
 
     if num_spec_tokens > 0:
-        # SPEC mode holds one state checkpoint per window position per
+        # A verify window holds one state checkpoint per window position per
         # sequence in VMEM, which multiplies the per-sequence footprint by
         # the window size. Shrink the tile so the double-buffered windows
         # fit in roughly half the scoped-VMEM budget (the rest goes to
@@ -405,7 +405,7 @@ def fused_conv1d_gdn(
             + (kernel_size - 1) * dim * 4
             # qkv (fp32), b/a (fp32), out (act_out).
             + dim * 4 + 2 * aligned_num_v_heads * 4 + n_v * d_v * 2)
-        vmem_budget = int(config.GDNConfig.SPEC_VMEM_FRACTION *
+        vmem_budget = int(config.GDNConfig.WINDOWED_VMEM_FRACTION *
                           pltpu.get_tpu_info().vmem_capacity_bytes)
         spec_tile_budget = (vmem_budget // 2) // num_buffers
         decode_tile_size = max(
@@ -547,13 +547,10 @@ def fused_conv1d_gdn(
             weights,
         )
 
-    # With speculative decoding the first (windowed) segment holds verify
-    # windows of up to `num_spec_tokens + 1` tokens and runs in SPEC mode;
-    # otherwise it holds 1-token decodes and runs in BATCHED mode.
-    first_mode = (config.GDNMode.SPEC
-                  if num_spec_tokens > 0 else config.GDNMode.BATCHED)
+    # The first segment holds verify windows of up to `num_spec_tokens + 1`
+    # tokens, or plain 1-token decodes without speculative decoding.
     out_act, out_conv_state, out_recurrent_state = call_kernel(
-        conv_state, recurrent_state, None, first_mode)
+        conv_state, recurrent_state, None, config.GDNMode.BATCHED)
     out_act, out_conv_state, out_recurrent_state = call_kernel(
         out_conv_state, out_recurrent_state, out_act, config.GDNMode.PER_SEQ)
 

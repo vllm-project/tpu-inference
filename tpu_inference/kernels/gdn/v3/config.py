@@ -23,16 +23,11 @@ from jax.experimental.pallas import tpu as pltpu
 
 
 class GDNMode(enum.StrEnum):
+    # Multiple sequences per tile, one tile per sequence. Each sequence
+    # carries `window_size` tokens: a single decoded token, or a speculative
+    # verify window. See `GDNConfig.window_size`.
     BATCHED = enum.auto()
     PER_SEQ = enum.auto()
-    # Speculative-decoding windowed mode: like BATCHED (multiple sequences
-    # per tile, one tile per sequence) but each sequence carries a verify
-    # window of up to `window_size` tokens, processed with the recurrent
-    # scan. The kernel reads the initial state from
-    # `state_indices[s] + read_offset[s]` and writes one state checkpoint
-    # per window position to `state_indices[s] + t`, which is how rejected
-    # draft tokens are rolled back (by checkpoint selection).
-    SPEC = enum.auto()
 
 
 @jax.tree_util.register_dataclass
@@ -60,10 +55,14 @@ class GDNConfig:
     v_head_dim: int
     num_buffers: int = 2
     # Max tokens per speculative verify window (= num_speculative_tokens + 1),
-    # which is also the number of state checkpoints kept per sequence. It is 1
-    # outside SPEC mode, where only the state after the last real token is
-    # kept, so shapes and loops can be sized off it unconditionally and the
-    # extra axis / iterations fold away in the existing paths.
+    # which is also the number of state checkpoints kept per sequence. The
+    # kernel reads a sequence's initial state from
+    # `state_indices[s] + read_offset[s]` and writes one checkpoint per window
+    # position to `state_indices[s] + t`, which is how rejected draft tokens
+    # are rolled back (by checkpoint selection). It is 1 without speculative
+    # decoding, where only the state after the last real token is kept, so
+    # shapes and loops can be sized off it unconditionally and the extra axis
+    # / iterations fold away in the non-speculative paths.
     window_size: int = 1
 
     @property
@@ -86,7 +85,7 @@ class GDNConfig:
 
     @property
     def use_recurrent(self) -> bool:
-        """Whether GDN runs the token-recurrent scan over the chunked path.
+        """Whether GDN runs the token-recurrent scan instead of the chunked one.
 
         Keeping more than one state checkpoint mandates the recurrent scan,
         since the chunked path only ever produces the final state.
@@ -112,8 +111,10 @@ class GDNConfig:
         return pl.cdiv(self.num_v_heads, num_lanes) * num_lanes
 
     def get_kernel_name(self) -> str:
-        prefix = f"fused_conv1d_gdn_{self.mode.value}"
-        return prefix
+        # Windows of different sizes compile to different kernels; keep them
+        # distinguishable in profiles.
+        suffix = f"_w{self.window_size}" if self.window_size > 1 else ""
+        return f"fused_conv1d_gdn_{self.mode.value}{suffix}"
 
     def get_metadata(self) -> dict[str, str | int | float]:
         cfgs_dict = dataclasses.asdict(self)
@@ -131,18 +132,18 @@ class GDNConfig:
             self.dtypes.act_out,
         )
 
-    # Fraction of VMEM the kernel may use. SPEC mode holds one state
-    # checkpoint per window position in VMEM, so for large-head models
+    # Fraction of VMEM the kernel may use. A multi-token window holds one
+    # state checkpoint per position in VMEM, so for large-head models
     # (e.g. Qwen3.5-397B: 64 local v-heads -> 21M per buffered window even
-    # at tile_size=1) the default 0.7 budget is not enough; SPEC gets a
+    # at tile_size=1) the default 0.7 budget is not enough; those get a
     # higher limit and the wrapper sizes the tile against the same factor.
     DEFAULT_VMEM_FRACTION = 0.7
-    SPEC_VMEM_FRACTION = 0.9
+    WINDOWED_VMEM_FRACTION = 0.9
 
     def get_vmem_limit_bytes(self) -> int:
         tpu_info = pltpu.get_tpu_info()
-        fraction = (self.SPEC_VMEM_FRACTION if self.mode == GDNMode.SPEC else
-                    self.DEFAULT_VMEM_FRACTION)
+        fraction = (self.WINDOWED_VMEM_FRACTION
+                    if self.window_size > 1 else self.DEFAULT_VMEM_FRACTION)
         return int(fraction * tpu_info.vmem_capacity_bytes)
 
     def get_scratch_shape_dict(self) -> dict[str, Any]:
@@ -156,8 +157,8 @@ class GDNConfig:
         )
 
         carry_conv_scratch = carry_recurrent_scratch = None
-        # NOTE: In batched and spec modes 1 seq = 1 tile, so inter-tile carry
-        # is not needed.
+        # NOTE: In batched mode 1 seq = 1 tile, so inter-tile carry is not
+        # needed.
         if self.mode == GDNMode.PER_SEQ:
             carry_conv_scratch = pltpu.VMEM(conv_shape, jnp.float32)
             carry_recurrent_scratch = pltpu.VMEM(recurrent_shape, jnp.float32)

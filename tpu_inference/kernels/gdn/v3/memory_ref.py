@@ -79,8 +79,8 @@ class MetadataRef:
     s_idx_to_state_indices: Any
     # Per-sequence state read offset for speculative decoding: the initial
     # state is read from `s_idx_to_state_indices[s] + s_idx_to_read_offset[s]`
-    # (the checkpoint of the last accepted token). Zero everywhere unless
-    # SPEC mode is active.
+    # (the checkpoint of the last accepted token). Zero everywhere without
+    # speculative decoding.
     s_idx_to_read_offset: Any
 
     @classmethod
@@ -245,8 +245,9 @@ class StateBufferedRef(BaseBufferedRef):
     `min(r_size, window_size)` checkpoints are written back to
     `state_indices[s] .. + that many slots`.
 
-    Outside SPEC mode `window_size` is 1 and `read_offset` is 0, so this
-    reduces to reading and writing the single state at `state_indices[s]`.
+    Without speculative decoding `window_size` is 1 and `read_offset` is 0,
+    so this reduces to reading and writing the single state at
+    `state_indices[s]`.
     """
 
     def copy_in(self, src_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
@@ -313,8 +314,8 @@ class StateBufferedRef(BaseBufferedRef):
             state_idx = self.metadata_ref.s_idx_to_state_indices[s_idx]
             # Write one checkpoint per valid window position, starting at the
             # group's base slot. `r_size` never exceeds `window_size` for
-            # windowed sequences; clamping keeps this at a single checkpoint
-            # for the modes whose tiles hold more tokens than that.
+            # windowed sequences; the clamp is for PER_SEQ tiles, which hold
+            # many tokens but keep only the final state.
             r_size = self.metadata_ref.p_id_to_r_size[p_id, idx]
             num_ckpts = jnp.minimum(r_size, self.cfg.window_size)
             dma_size = jnp.where(is_last_tile, num_ckpts, 0)
@@ -374,7 +375,7 @@ def create_allocs(
         cfg.v_head_dim,
     )
     # One state checkpoint per window position per sequence (a single one
-    # outside SPEC mode, where window_size is 1).
+    # without speculative decoding, where window_size is 1).
     conv_shape = (cfg.seq_tile_size, cfg.window_size, cfg.prev_kernel_size, 1,
                   cfg.dim_size)
     recurrent_shape = (
