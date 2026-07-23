@@ -670,13 +670,12 @@ class TPUWorker(WorkerBase):
             self.profile_step_counter = 0
             self.active_profiler_steps = envs.VLLM_ACTIVE_PROFILER_STEPS
         else:
+            self.is_profiling = False
             try:
                 logger.info("Stopping JAX profiler trace.")
                 jax.profiler.stop_trace()
             except Exception as e:
-                logger.warning("Failed to stop JAX profiler trace: %s", e)
-            finally:
-                self.is_profiling = False
+                logger.warning("Failed to stop JAX profiler trace: %s", e)                
 
     def load_model(self) -> None:
         self.model_runner.load_model()
