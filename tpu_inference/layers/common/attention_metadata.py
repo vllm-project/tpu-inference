@@ -27,6 +27,8 @@ import jax
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "pcp_q_pos_offsets",
+        "pcp_kv_cache_lens",
     ],
     meta_fields=["padded_num_reqs"],
 )
@@ -51,6 +53,14 @@ class AttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+
+    # (max_num_seqs, ) int32 — PCP only. For a single request, it is [rank*C, (2*pcp-1-rank)*C].
+    pcp_q_pos_offsets: jax.Array | None = None
+
+    # (max_num_seqs,) int32 — PCP only: [P, P, 0...] where P = num_computed.
+    # The kernel derives the new KV length as
+    # `seq_lens - pcp_kv_cache_lens`, so only real tokens are attended/written.
+    pcp_kv_cache_lens: jax.Array | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket
     # contains only max_reqs by default to reduce model precompilation time.

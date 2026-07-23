@@ -378,20 +378,42 @@ class CompilationManager:
         assert num_tokens is not None
 
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
-        dp_sharding = NamedSharding(
-            self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+        metadata_attn_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
+        pcp_size = self.runner.vllm_config.sharding_config.prefill_cp_size
 
         # Keep existing pattern for complex array operations
         seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
-                                             jnp.int32, dp_sharding)
+                                             jnp.int32, metadata_attn_sharding)
         query_start_loc = self._create_dummy_tensor(
-            (self.runner.max_num_reqs + dp_size, ), jnp.int32, dp_sharding)
+            (self.runner.max_num_reqs + dp_size, ), jnp.int32,
+            metadata_attn_sharding)
 
         # Keep existing pattern for specific value arrays
         request_distribution = np.array([0, 0, 0] * dp_size, dtype=np.int32)
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution,
-                                            sharding=dp_sharding)
+                                            sharding=metadata_attn_sharding)
+        pcp_kv_cache_lens = None
+        pcp_q_pos_offsets = None
+        if pcp_size > 1:
+            n_reqs = self.runner.max_num_reqs
+            pcp_kv_cache_lens = device_array(self.runner.mesh,
+                                             np.zeros(n_reqs, dtype=np.int32),
+                                             sharding=NamedSharding(
+                                                 self.runner.mesh,
+                                                 PartitionSpec()))
+            pcp_spec = NamedSharding(
+                self.runner.mesh,
+                PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
+            query_start_loc = device_array(self.runner.mesh,
+                                           np.zeros((pcp_size, n_reqs + 1),
+                                                    dtype=np.int32),
+                                           sharding=pcp_spec)
+            pcp_q_pos_offsets = device_array(self.runner.mesh,
+                                             np.zeros((pcp_size, n_reqs),
+                                                      dtype=np.int32),
+                                             sharding=pcp_spec)
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
         # populate for hybrid attn+mamba models — for pure-attention models we
         # pass None at runtime (see `_prepare_inputs`), and the precompile
@@ -401,7 +423,7 @@ class CompilationManager:
                                                np.zeros(
                                                    self.runner.max_num_reqs,
                                                    dtype=np.int32),
-                                               sharding=dp_sharding)
+                                               sharding=metadata_attn_sharding)
         else:
             mamba_state_indices = None
 
@@ -413,7 +435,7 @@ class CompilationManager:
             block_tables = block_tables.reshape(-1)
             block_tables = device_array(self.runner.mesh,
                                         block_tables,
-                                        sharding=dp_sharding)
+                                        sharding=metadata_attn_sharding)
             return block_tables
 
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
@@ -425,6 +447,8 @@ class CompilationManager:
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
+                pcp_kv_cache_lens=pcp_kv_cache_lens,
+                pcp_q_pos_offsets=pcp_q_pos_offsets,
             )
 
             return attention_metadata_gid
@@ -635,8 +659,10 @@ class CompilationManager:
                 dp_sharding = NamedSharding(
                     self.runner.mesh,
                     PartitionSpec(ShardingAxisName.ATTN_DATA, ))
-                input_ids = self._create_dummy_tensor((num_tokens, ),
-                                                      jnp.int32, dp_sharding)
+                metadata_attn_sharding = NamedSharding(
+                    self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
+                input_ids = self._create_dummy_tensor(
+                    (num_tokens, ), jnp.int32, metadata_attn_sharding)
                 if self.runner.uses_mrope:
                     mrope_sharding = NamedSharding(
                         self.runner.mesh,
@@ -801,6 +827,7 @@ class CompilationManager:
                     array,
                     indices_to_select,
                     self.runner.mesh,
+                    self.runner.vllm_config.sharding_config.prefill_cp_size,
                     compile_only=True,
                     array_size=array_size,
                     index_size=indices_count,
@@ -1219,6 +1246,7 @@ class CompilationManager:
                     array,
                     indices_bonus,
                     self.runner.mesh,
+                    self.runner.vllm_config.sharding_config.prefill_cp_size,
                     num_logits=num_logits,
                     num_reqs=num_reqs,
                 )
@@ -1232,6 +1260,7 @@ class CompilationManager:
                     array,
                     indices_target,
                     self.runner.mesh,
+                    self.runner.vllm_config.sharding_config.prefill_cp_size,
                     num_logits=num_logits,
                 )
 
