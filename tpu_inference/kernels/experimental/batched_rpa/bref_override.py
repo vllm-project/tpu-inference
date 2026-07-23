@@ -250,11 +250,13 @@ class KVBufferedRefHeadAlongSublane(_BypassRef):
 
     def copy_in(
         self,
-        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
+        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref,
+                       jax.Ref | None, jax.Ref | None],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        # src_ref: (kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref)
-        kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref = src_ref
+        # src_ref: (kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref,
+        #           [cp_rank_ref, kv_shuffle_ref]) last two only when CP is set.
+        kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref = src_ref[:4]
         slot = self.current_copy_in_slot
         sem = self.sem_recvs.at[slot]
         block_idx = jnp.maximum(grid_indices[0], 0)
@@ -302,41 +304,103 @@ class KVBufferedRefHeadAlongSublane(_BypassRef):
 
     def copy_out(
         self,
-        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
+        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref,
+                       jax.Ref | None, jax.Ref | None],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        kv_out_ref, _, schedule_ref, page_indices_ref = dst_ref
+        kv_out_ref, _, schedule_ref, page_indices_ref, cp_rank_ref, kv_shuffle_ref = dst_ref
+        kv_out_ref_flat = kv_out_ref.reshape(-1, *kv_out_ref.shape[2:])
         slot = self.current_copy_out_slot
         sem = self.sem_sends.at[slot]
         block_idx = grid_indices[0]
+        cp_group_size = self.cfgs.serve.cp_group_size
 
-        kv_out_ref_flat = kv_out_ref.reshape(-1, *kv_out_ref.shape[2:])
         vmem_src = self.window_ref.at[slot, :, :, :self.cfgs.kv_hbm_stride]
 
-        for b in range(self.cfgs.batch_size):
-            do_writeback = schedule_ref.do_writeback[block_idx, b] == 1
-            for i in range(self.cfgs.bkv_p_new):
-                dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
-                encoded_dst_hbm_off = dma_entry.wb_hbm[...]
-                src_vmem_off = dma_entry.wb_vmem[...]
-                new_sz = dma_entry.wb_val
-                global_p_idx = encoded_dst_hbm_off >> self.cfgs.serve.page_size_log2
-                p_off = encoded_dst_hbm_off & self.cfgs.serve.page_size_mask
-                dst_hbm_off = (page_indices_ref[global_p_idx] <<
-                               self.cfgs.serve.page_size_log2) | p_off
-                sz = jnp.where(do_writeback, new_sz, 0)
-                pltpu.make_async_copy(
-                    vmem_src.at[b, pl.ds(src_vmem_off, sz)],
-                    kv_out_ref_flat.at[pl.ds(dst_hbm_off, sz)],
-                    sem,
-                ).start()
+        if cp_group_size is not None and self.cfgs.serve.update_kv_cache:
+            cp_rank = cp_rank_ref[0]
+            # Static capacity: ceiling-div of block size by group size.
+            n_strided = pl.cdiv(self.cfgs.bkv_sz, cp_group_size)
+            for b in range(self.cfgs.batch_size):
+                do_writeback = schedule_ref.do_writeback[block_idx, b] == 1
+
+                # first_idx: offset within [0, new_sz) where this rank's tokens
+                # start. new_tok_off tells which rank owns the first new token.
+                new_tok_off = schedule_ref.new_tok_off[block_idx, b]
+                first_idx = (cp_rank - new_tok_off +
+                             cp_group_size) % cp_group_size
+
+                # Calculate total new tokens in this block
+                global_new_sz = jnp.zeros((), jnp.int32)
+                for i in range(self.cfgs.bkv_p_new):
+                    dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
+                    global_new_sz = global_new_sz + dma_entry.wb_val
+                local_sz_total = jnp.maximum(
+                    0, (global_new_sz - first_idx + cp_group_size - 1) //
+                    cp_group_size)
+
+                # strided VMEM gather per batch slot to kv_shuffle_ref[slot, b]..
+                src_vmem_off_base = schedule_ref.dma_kv_new[block_idx, b,
+                                                            0].wb_vmem[...]
+                vmem_u32 = vmem_src.at[b].bitcast(jnp.uint32)
+                shuf_u32 = kv_shuffle_ref.at[slot, b].bitcast(jnp.uint32)
+                shuf_u32[pl.ds(0, n_strided)] = vmem_u32[
+                    pl.ds(src_vmem_off_base +
+                          first_idx, n_strided, cp_group_size),
+                    :self.cfgs.kv_hbm_stride,
+                ]
+
+                # DMA each page from the shuffle buffer.
+                local_done = jnp.zeros((), jnp.int32)
+                for i in range(self.cfgs.bkv_p_new):
+                    dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
+                    encoded_dst_hbm_off = dma_entry.wb_hbm[...]
+                    global_p_idx = (
+                        encoded_dst_hbm_off >> self.cfgs.serve.page_size_log2)
+                    p_off = (encoded_dst_hbm_off
+                             & self.cfgs.serve.page_size_mask)
+                    dst_hbm_off = (page_indices_ref[global_p_idx] <<
+                                   self.cfgs.serve.page_size_log2) | p_off
+
+                    slot_local_sz = jnp.maximum(
+                        0,
+                        jnp.minimum(
+                            self.cfgs.serve.page_size,
+                            local_sz_total - i * self.cfgs.serve.page_size))
+                    local_sz = jnp.where(do_writeback, slot_local_sz, 0)
+                    pltpu.make_async_copy(
+                        kv_shuffle_ref.at[slot, b,
+                                          pl.ds(local_done, local_sz)],
+                        kv_out_ref_flat.at[pl.ds(dst_hbm_off, local_sz)],
+                        sem,
+                    ).start()
+                    local_done = local_done + local_sz
+        else:
+            for b in range(self.cfgs.batch_size):
+                do_writeback = schedule_ref.do_writeback[block_idx, b] == 1
+                for i in range(self.cfgs.bkv_p_new):
+                    dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
+                    encoded_dst_hbm_off = dma_entry.wb_hbm[...]
+                    src_vmem_off = dma_entry.wb_vmem[...]
+                    new_sz = dma_entry.wb_val
+                    global_p_idx = encoded_dst_hbm_off >> self.cfgs.serve.page_size_log2
+                    p_off = encoded_dst_hbm_off & self.cfgs.serve.page_size_mask
+                    dst_hbm_off = (page_indices_ref[global_p_idx] <<
+                                   self.cfgs.serve.page_size_log2) | p_off
+                    sz = jnp.where(do_writeback, new_sz, 0)
+                    pltpu.make_async_copy(
+                        vmem_src.at[b, pl.ds(src_vmem_off, sz)],
+                        kv_out_ref_flat.at[pl.ds(dst_hbm_off, sz)],
+                        sem,
+                    ).start()
 
     def wait_in(
         self,
-        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
+        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref,
+                       jax.Ref | None, jax.Ref | None],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        _, _, schedule_ref, _ = src_ref
+        _, _, schedule_ref, _ = src_ref[:4]
         slot = self.current_wait_in_slot
         sem = self.sem_recvs.at[slot]
         vmem_dst = self.window_ref.at[slot]
@@ -363,22 +427,45 @@ class KVBufferedRefHeadAlongSublane(_BypassRef):
 
     def wait_out(
         self,
-        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
+        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref,
+                       jax.Ref | None, jax.Ref | None],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        kv_out_ref, _, schedule_ref, page_indices_ref = dst_ref
+        kv_out_ref, _, schedule_ref, _, cp_rank_ref, _ = dst_ref
         slot = self.current_wait_out_slot
         sem = self.sem_sends.at[slot]
         block_idx = grid_indices[0]
+        cp_group_size = self.cfgs.serve.cp_group_size
 
         total_sz = 0
         for b in range(self.cfgs.batch_size):
             do_writeback = schedule_ref.do_writeback[block_idx, b] == 1
-            for i in range(self.cfgs.bkv_p_new):
-                dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
-                new_sz = dma_entry.wb_val
-                sz = jnp.where(do_writeback, new_sz, 0)
-                total_sz += sz
+            if cp_group_size is not None and self.cfgs.serve.update_kv_cache:
+                # Mirror copy_out
+                new_tok_off = schedule_ref.new_tok_off[block_idx, b]
+                first_idx = ((cp_rank_ref[0] - new_tok_off + cp_group_size) %
+                             cp_group_size)
+                global_new_sz = jnp.zeros((), jnp.int32)
+                for i in range(self.cfgs.bkv_p_new):
+                    dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
+                    global_new_sz = global_new_sz + dma_entry.wb_val
+                local_sz_total = jnp.maximum(
+                    0, (global_new_sz - first_idx + cp_group_size - 1) //
+                    cp_group_size)
+                for i in range(self.cfgs.bkv_p_new):
+                    slot_local_sz = jnp.maximum(
+                        0,
+                        jnp.minimum(
+                            self.cfgs.serve.page_size,
+                            local_sz_total - i * self.cfgs.serve.page_size))
+                    sz = jnp.where(do_writeback, slot_local_sz, 0)
+                    total_sz += sz
+            else:
+                for i in range(self.cfgs.bkv_p_new):
+                    dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
+                    new_sz = dma_entry.wb_val
+                    sz = jnp.where(do_writeback, new_sz, 0)
+                    total_sz += sz
 
         # Flatten to 2D: (Total_Rows, Head_Dim)
         flat_ref = kv_out_ref.reshape((-1, *kv_out_ref.shape[2:]))

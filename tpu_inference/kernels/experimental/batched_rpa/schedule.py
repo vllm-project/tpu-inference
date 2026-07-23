@@ -172,6 +172,10 @@ class RpaSchedule:
     k_idx: SmemWrapper  # [steps, batch]
     is_last_k: SmemWrapper  # [steps, batch]
     do_writeback: SmemWrapper  # [steps, batch]
+    # global_cache_len % cp_group_size; 0 when CP is disabled.  Tells
+    # copy_out which rank owns the first new token in this block so the
+    # strided shuffle reads the correct interleaved offset.
+    new_tok_off: SmemWrapper  # [steps, batch]
     dma_q: SmemWrapper  # [steps, batch, 2]
     dma_kv_cache: SmemWrapper  # [steps, batch, bkv_p_cache, 3]
     dma_kv_new: SmemArrayOfStructs  # [steps, batch, bkv_p_new]
@@ -191,6 +195,7 @@ class RpaSchedule:
             k_idx=idx_wrapper,
             is_last_k=idx_wrapper,
             do_writeback=idx_wrapper,
+            new_tok_off=idx_wrapper,
             dma_q=SmemWrapper.create_shape_dtype(
                 (cfgs.max_steps_ub, cfgs.batch_size, 2)),
             dma_kv_cache=SmemWrapper.create_shape_dtype(
@@ -271,6 +276,7 @@ def compute_metadata(
     *,
     cfgs: configs.RpaConfigs,
     update_kv_cache: bool = True,
+    cp_rank_ref: jax.Ref | None = None,
 ):
     """Fill metadata using triple nested loop of seq->q->k loop.
 
@@ -296,6 +302,7 @@ def compute_metadata(
         k_len,
         q_len,
         end_k_idx,
+        global_cache_len,
     ):
 
         schedule.s_idx[step, target_lane] = s_idx
@@ -348,8 +355,37 @@ def compute_metadata(
         q_wb = jnp.maximum(0, (kv_len_start - (k_len - q_len))) // cfgs.bq_sz
 
         do_writeback = jnp.where((new_sz > 0) & (q_idx == q_wb), 1, 0)
+        if cfgs.serve.cp_group_size is not None and cfgs.mode == configs.RpaCase.DECODE:
+            # For DCP decode (new_sz=1): only write back if this rank owns the
+            # new token.  global_cache_len tells us which global position the
+            # first new token occupies; its rank is global_cache_len % cp_group_size.
+            cp_cond = (global_cache_len %
+                       cfgs.serve.cp_group_size) == cp_rank_ref[0]
+            do_writeback = jnp.where(cp_cond, do_writeback, 0)
+        # For prefill CP (new_sz>1): do_writeback unchanged; copy_out handles
+        # the strided shuffle from VMEM to the local KV cache positions.
         schedule.do_writeback[step, target_lane] = do_writeback
+
         src_hbm = q_end - kv_left_frm_new
+
+        # Pre-compute CP layout quantities used in both dma_kv_new branches.
+        # j_start: new tokens before this block in [0, q_len).
+        # j_start_rank: rank's new tokens before this block.
+        # new_tok_off_block: which rank owns the first new token in this block.
+        if cfgs.serve.cp_group_size is not None:
+            cp_group_size = cfgs.serve.cp_group_size
+            rank = cp_rank_ref[0]
+            local_cache_len = k_len - q_len
+            j_start = jnp.maximum(0, kv_len_start - local_cache_len)
+            new_tok_off_block = (global_cache_len + j_start) % cp_group_size
+            first_idx_seq = (rank - global_cache_len % cp_group_size +
+                             cp_group_size) % cp_group_size
+            j_start_rank = jnp.maximum(
+                0,
+                (j_start - first_idx_seq + cp_group_size - 1) // cp_group_size)
+            schedule.new_tok_off[step, target_lane] = new_tok_off_block
+        else:
+            schedule.new_tok_off[step, target_lane] = 0
 
         def fill_dma_kv_new(i, dst_vmem, dma_sz, slot_start):
             dma_entry = schedule.dma_kv_new[step, target_lane, i]
@@ -386,16 +422,25 @@ def compute_metadata(
                 dma_entry.wb_vmem[...] = slot_start
                 dma_entry.set_flags(fetch_val, wb_val)
             else:
+                if cfgs.serve.cp_group_size is not None:
+                    # CP: tok_idx is the LOCAL cache position for this rank's
+                    # tokens. fetch_vmem is bkv_sz_cache (copy_out's strided
+                    # gather handles per-page selection from vmem).
+                    tok_idx = local_cache_len + j_start_rank + i * cfgs.serve.page_size
+                    effective_dst_vmem = bkv_sz_cache
+                else:
+                    tok_idx = kv_len_start + dst_vmem
+                    effective_dst_vmem = dst_vmem
                 p_idx = jnp.minimum(
-                    (kv_len_start + dst_vmem) >> cfgs.serve.page_size_log2,
+                    tok_idx >> cfgs.serve.page_size_log2,
                     cfgs.serve.pages_per_seq - 1,
                 )
-                p_off = (kv_len_start + dst_vmem) & cfgs.serve.page_size_mask
+                p_off = tok_idx & cfgs.serve.page_size_mask
                 dst_hbm = ((s_idx * cfgs.serve.pages_per_seq + p_idx) <<
                            cfgs.serve.page_size_log2) | p_off
 
                 dma_entry.fetch_hbm[...] = src_hbm
-                dma_entry.fetch_vmem[...] = dst_vmem
+                dma_entry.fetch_vmem[...] = effective_dst_vmem
                 dma_entry.wb_hbm[...] = dst_hbm
                 dma_entry.set_flags(dma_sz, dma_sz)
 
@@ -420,7 +465,8 @@ def compute_metadata(
         return step + 1
 
     @jax.named_scope("q_loop")
-    def q_loop(q_idx, _, *, s_idx, q_start, q_end, k_len, q_len, num_k):
+    def q_loop(q_idx, _, *, s_idx, q_start, q_end, k_len, q_len, num_k,
+               global_cache_len):
         target_lane = 0
         min_len = lane_lengths_ref[0]
         for b in range(1, cfgs.batch_size):
@@ -436,10 +482,19 @@ def compute_metadata(
         if (sliding_window := cfgs.model.sliding_window) is not None:
             sw_start_idx = k_len - q_len + q_idx * cfgs.bq_sz - sliding_window + 1
             start_k_idx = jnp.maximum(0, sw_start_idx) // cfgs.bkv_sz
+        if cfgs.serve.skip_cache_attn:
+            # Skip pure-cache blocks; start at the first block containing new tokens.
+            start_k_idx = jnp.maximum(start_k_idx,
+                                      (k_len - q_len) // cfgs.bkv_sz)
 
         end_k_idx_causal = (k_len - q_len + q_idx * cfgs.bq_sz + q_sz_task -
                             1) // cfgs.bkv_sz + 1
         end_k_idx = jnp.minimum(num_k, end_k_idx_causal)
+        if cfgs.serve.skip_current_attn:
+            # Skip pure-new-token blocks; only process blocks containing cache.
+            # For prefill sequences (local_cache_len=0) this gives end_k_idx=0.
+            end_k_idx = jnp.minimum(end_k_idx,
+                                    pl.cdiv(k_len - q_len, cfgs.bkv_sz))
 
         k_loop_fn = functools.partial(
             k_loop,
@@ -452,6 +507,7 @@ def compute_metadata(
             k_len=k_len,
             q_len=q_len,
             end_k_idx=end_k_idx,
+            global_cache_len=global_cache_len,
         )
         lane_lengths_ref[target_lane] = jax.lax.fori_loop(
             start_k_idx, end_k_idx, k_loop_fn, curr_ptr)
@@ -460,8 +516,21 @@ def compute_metadata(
     def seq_loop(s_idx, _):
         q_start = cu_q_lens_ref[s_idx]
         q_end = cu_q_lens_ref[s_idx + 1]
-        k_len = kv_lens_ref[s_idx]
+        k_len_global = kv_lens_ref[s_idx]
         q_len = q_end - q_start
+
+        global_cache_len = k_len_global - q_len
+
+        # Convert to LOCAL kv_len for CP: cache is sharded (1/cp_group_size per rank),
+        # but new KV is NOT sharded (all ranks hold all q_len new tokens).
+        if cfgs.serve.cp_group_size is not None:
+            cp_group_size = cfgs.serve.cp_group_size
+            rank = cp_rank_ref[0]
+            local_cache_len = utils.cp_local_cache_len(global_cache_len,
+                                                       cp_group_size, rank)
+            k_len = local_cache_len + q_len
+        else:
+            k_len = k_len_global
 
         num_q = pl.cdiv(q_len, cfgs.bq_sz)
         num_k = pl.cdiv(k_len, cfgs.bkv_sz)
@@ -474,6 +543,7 @@ def compute_metadata(
             k_len=k_len,
             q_len=q_len,
             num_k=num_k,
+            global_cache_len=global_cache_len,
         )
 
         jax.lax.fori_loop(0, num_q, q_loop_fn, None)
@@ -487,6 +557,7 @@ def rpa_metadata_schedule_kernel(
     cu_q_lens_ref: jax.Ref,
     kv_lens_ref: jax.Ref,
     distribution_ref: jax.Ref,
+    cp_rank_ref: jax.Array | None,
     # Outputs.
     schedule_hbm_ref: RpaSchedule,
     # Scratch.
@@ -538,6 +609,7 @@ def rpa_metadata_schedule_kernel(
         lane_lengths_ref,
         cfgs=cfgs,
         update_kv_cache=update_kv_cache,
+        cp_rank_ref=cp_rank_ref,
     )
 
     # Step 2: Compute actual number of steps.
@@ -615,10 +687,17 @@ def generate_rpa_metadata(
     distribution: jax.Array,
     cfgs: configs.RpaConfigs,
     *,
+    cp_rank: jax.Array | None = None,
     interpret=False,
     update_kv_cache: bool = True,
 ) -> RpaSchedule:
     schedule_shaped_dtype = RpaSchedule.create_shape_dtype(cfgs)
+    # Same reason as rpa_kernel: None has 0 pytree leaves, so pallas would steal
+    # the first schedule output leaf as the 4th scalar. Use a dummy array instead.
+    _cp_rank_scalar = cp_rank if cp_rank is not None else jnp.zeros(
+        1, jnp.int32)
+    scalar_prefetches = (cu_q_lens, kv_lens, distribution, _cp_rank_scalar)
+    num_scalar_prefetch = len(scalar_prefetches)  # always 4
 
     return pl.pallas_call(
         functools.partial(rpa_metadata_schedule_kernel,
@@ -626,7 +705,7 @@ def generate_rpa_metadata(
                           update_kv_cache=update_kv_cache),
         out_shape=schedule_shaped_dtype,
         grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=3,
+            num_scalar_prefetch=num_scalar_prefetch,
             in_specs=[],
             out_specs=schedule_shaped_dtype.out_specs(),
             scratch_shapes=[
@@ -637,4 +716,4 @@ def generate_rpa_metadata(
         ),
         interpret=interpret,
         name="rpa_metadata_schedule",
-    )(cu_q_lens, kv_lens, distribution)
+    )(*scalar_prefetches)

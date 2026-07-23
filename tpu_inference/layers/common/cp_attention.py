@@ -19,10 +19,17 @@ from jax import lax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_v3_cp
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
+
+if envs.USE_BATCHED_RPA_KERNEL:
+    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa_cp
+    logger.info_once("Using experimental batched RPA kernel")
+else:
+    import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_cp
+    logger.info_once("Using default RPA kernel")
+
 
 # ── Shared utilities ──────────────────────────────────────────────────────────
 
@@ -68,10 +75,11 @@ def _rpa_cp_call(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    return_lse = True,
     **flags,
 ):
-    """Call rpa_v3_cp with shared CP params; always returns LSE."""
-    return rpa_v3_cp.ragged_paged_attention(
+    """Call with shared CP params"""
+    return rpa_cp.ragged_paged_attention(
         q,
         k,
         v,
@@ -86,7 +94,7 @@ def _rpa_cp_call(
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
-        return_lse=True,
+        return_lse=return_lse,
         **flags,
     )
 
@@ -324,6 +332,9 @@ def pcp_forward(
       4. current phase         local Q (head+tail) attends all-gathered current KV
       5. merge_attn_states     lse-weighted combine
     """
+    if envs.USE_BATCHED_RPA_KERNEL:
+        raise NotImplementedError(
+            "PCP is not supported with USE_BATCHED_RPA_KERNEL.")
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
     two_p = 2 * pcp_size
