@@ -120,9 +120,13 @@ fi
 # -v HF_HOME: Mounts HuggingFace cache to avoid re-downloading models
 
 # Force cleanup of the image to ensure we pull the absolute latest
-echo "Ensuring we have the latest image for ${DOCKER_IMAGE}..."
-docker rmi "${DOCKER_IMAGE}" > /dev/null 2>&1 || true
-docker pull "${DOCKER_IMAGE}"
+if [[ "${IS_MULTI_HOST_BENCH,,}" != "true" ]]; then
+    echo "Ensuring we have the latest image for ${DOCKER_IMAGE}..."
+    docker rmi "${DOCKER_IMAGE}" > /dev/null 2>&1 || true
+    docker pull "${DOCKER_IMAGE}"
+else
+    echo "IS_MULTI_HOST_BENCH is true, skipping image pull to use prebuilt image ${DOCKER_IMAGE}."
+fi
  
 
 # Default to no gcloud mount
@@ -139,11 +143,18 @@ if [ -d "/mnt/disks/checkpoint" ]; then
     CHECKPOINT_MOUNT_ARGS+=(-v "/mnt/disks/checkpoint:/mnt/disks/checkpoint")
 fi
 
+# -----------------------------------------------------------------------------
+# Docker Options Explanation:
+# - log-opt: Limits log file size and count to prevent excessive logging 
+#   from Ray/vLLM from exhausting VM disk space and causing node failures.
+# -----------------------------------------------------------------------------
 docker run \
     --privileged \
     --entrypoint /bin/bash \
     --network host \
     --shm-size=16G \
+    --log-opt max-size=50m \
+    --log-opt max-file=2 \
     --name "${CONTAINER_NAME}" \
     -v "${PATH_TO_HF_HOME}:/root/.cache/huggingface" \
     "${GCLOUD_MOUNT_ARGS[@]}" \

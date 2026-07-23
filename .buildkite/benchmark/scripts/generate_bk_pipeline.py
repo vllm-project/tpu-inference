@@ -233,6 +233,8 @@ def create_benchmark_steps(case_data: Dict[str, Any],
             "TPU_VERSION": tpu_version,
         }
 
+        timeout_in_minutes = step_env.pop("BK_TIMEOUT_IN_MINUTES", None)
+
         step_env["TARGET_CASE_NAME"] = case_name
         # Include parent_dir in label for uniqueness
         step_label = f"[{parent_dir}] {agent} {file_basename} {case_name}"
@@ -251,10 +253,14 @@ def create_benchmark_steps(case_data: Dict[str, Any],
         used_keys.add(step_safe_key)
 
         step = {
-            "label":
-            step_label,
-            "key":
-            step_safe_key,
+            "label": step_label,
+            "key": step_safe_key,
+        }
+
+        if timeout_in_minutes is not None:
+            step["timeout_in_minutes"] = timeout_in_minutes
+
+        step.update({
             "env":
             step_env,
             "agents": {
@@ -262,7 +268,7 @@ def create_benchmark_steps(case_data: Dict[str, Any],
             },
             "command":
             f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
-        }
+        })
 
         # Add dependency on global case name validation if it was uploaded in bootstrap
         if os.environ.get("BENCHMARK_VALIDATION_UPLOADED") == "true":
