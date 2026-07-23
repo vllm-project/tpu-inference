@@ -275,6 +275,14 @@ CPU cache preflight observable but adds about 3m 54s after the CPU-safe gate on
 a cold/default node; retain it for the POC and later optimize checkout and
 default-pool warm capacity if it becomes a permanent gate.
 
+[Kube-dev build 47](https://buildkite.com/tpu-commons/kube-dev/builds/47)
+repeated the CPU-only path at commit `9ae0f1585`: the recompilation-parity
+environment, 74 tests plus 11 subtests, cache inventory, and final validator
+all passed. With a warm default CPU pool, cache-inventory queue/provision time
+fell to 49.6s and execution to 17.3s; the complete build took 2m 42s. This
+confirms that most of build 45's 3m 21s inventory wait was node provisioning,
+not scanning the 16,507 cache files.
+
 ## v6e parity
 
 | `pipeline_jax.yml` | Kubernetes step | Matrix | Notes |
@@ -301,6 +309,16 @@ default-pool warm capacity if it becomes a permanent gate.
 Steps 12, 14, 17-24, 30-32, 36, and 37 require TPU v7x and have no POC
 counterpart. Step 25 is multi-host and cannot run with one instance in each
 pool. Step 26 is both v7x multi-host and currently disabled upstream.
+
+[Kube-dev build 46](https://buildkite.com/tpu-commons/kube-dev/builds/46)
+isolated the corrected step 11 counterpart at commit `6d08df43c`. The pod
+reported `v6e-8`, eight chips, and tensor parallel size eight; the Llama 3.1 8B
+server and 1,000-request MLPerf check passed with ROUGE1 above 40 and total
+token throughput of 17,741 tok/s. Execution took 8m 04s. Its 24m 15s
+dependency/gate interval includes 21m 21s deliberately waiting behind build
+44's existing eight-chip sequence; once released, pod provisioning took only
+35.5s. Do not use this as a direct speed comparison with bare-metal step 11
+until that step actually sets its eight-chip flag.
 
 ## Baseline timing
 
@@ -388,6 +406,14 @@ artifacts and runs the current commit-specific reporting image, so a Docker or
 coverage-consumer fix can be proven without repeating several TPU-hours. It is
 a diagnostic/recovery path; normal builds still combine artifacts produced by
 their own two shards.
+
+[Kube-dev build 49](https://buildkite.com/tpu-commons/kube-dev/builds/49)
+validated that path at commit `a0d379533`. It downloaded both real TPU shard
+artifacts from build 35 by Buildkite UUID, combined them with the current
+commit-specific image, and passed the 68% threshold. The reporting command
+executed in 4.5s and allocated no TPU. The agent artifact API requires the
+source build UUID; using display number `35` is intentionally rejected with a
+clear diagnostic.
 
 Cold compilation, rather than serving throughput, explains the execution gap.
 For example, the first Qwen3.5 MTP speculative case took 50m 44s here versus
