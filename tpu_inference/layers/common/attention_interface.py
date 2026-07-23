@@ -1196,4 +1196,15 @@ def encoder_only_attention(
         sm_scale=sm_scale,
         sliding_window=sliding_window,
     )
+    num_q_heads = q.shape[1]
+    num_kv_heads = k.shape[1]
+    if num_kv_heads != num_q_heads:
+        if num_q_heads % num_kv_heads != 0:
+            raise ValueError(
+                f"For GQA/MQA, num_q_heads {num_q_heads} must be divisible by "
+                f"num_kv_heads {num_kv_heads}")
+        # Grouped-query attention (GQA): repeat KV heads to match query heads.
+        n_rep = num_q_heads // num_kv_heads
+        k = jnp.repeat(k, n_rep, axis=1)
+        v = jnp.repeat(v, n_rep, axis=1)
     return kernel(q, k, v, attention_metadata.seq_lens)
