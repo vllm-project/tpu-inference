@@ -54,11 +54,6 @@ class VllmSparseAttnIndexer(SparseAttnIndexer):
         prefix = getattr(self.k_cache, "prefix", None)
 
         def _get_fallback_buffer():
-            if self.topk_indices_buffer is not None:
-                try:
-                    return torch_view(jax_view(self.topk_indices_buffer))
-                except Exception:
-                    pass
             topk = getattr(self, "topk_tokens", 2048)
             return torch_view(jnp.zeros((hidden_states.shape[0], topk), dtype=jnp.int32))
 
