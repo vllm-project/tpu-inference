@@ -12,17 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The environment variables override should be imported before any other
-# modules to ensure that the environment variables are set before any
-# other modules are imported.
-import tpu_inference.env_override  # noqa: F401
-from tpu_inference import envs
-
-# Engine-first XLA load: import Raiden's engine extension here -- the earliest
-# tpu_inference entry point, before any submodule (e.g. platforms/tpu_platform.py)
-# runs `import jax` and loads jaxlib's libjax_common.so. This ensures Raiden's
-# embedded XLA runtime comes up before jaxlib's so the two XLA copies don't collide
-# in static initializers.
+# Engine-first XLA load: import Raiden's engine extension before anything else --
+# in particular before `import tpu_inference.env_override` below, which pulls in
+# vLLM and thus loads jaxlib's libjax_common.so. This ensures Raiden's embedded XLA
+# runtime comes up before jaxlib's so the two XLA copies don't collide in static
+# initializers (a collision here manifests as a hard SIGSEGV at import time). The
+# XLA/libtpu env vars set by env_override are consumed later at device-init, not at
+# this import, so preloading Raiden ahead of env_override is safe.
 try:
     import tpu_raiden.frameworks.jax._tpu_raiden_jax  # noqa: F401
 except ModuleNotFoundError:
@@ -34,6 +30,11 @@ except Exception as _raiden_exc:  # pragma: no cover - best-effort preload
     print(f"[tpu_raiden] engine preload failed: {_raiden_exc}",
           file=_sys.stderr)
 
+# The environment variables override should be imported before any other
+# modules to ensure that the environment variables are set before any
+# other modules are imported.
+import tpu_inference.env_override  # noqa: F401
+from tpu_inference import envs
 from tpu_inference import tpu_info as ti
 from tpu_inference.logger import init_logger
 
