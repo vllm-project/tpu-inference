@@ -13,8 +13,11 @@
 # limitations under the License.
 
 # Dev pipeline for tpu-inference-dev.
-# Demo/sample steps showing how to run custom tests on tpu7x.
-# Copy and adapt any step for your own experiments.
+#
+# NOTE (branch-local): the upstream demo steps (offline_inference, serve+bench,
+# disaggregation, multi-host) have been removed on this branch so that only the
+# Gemma3-4B MaxText inference smoke test runs. Restore them from main before
+# merging -- this file is a shared starting point for other people's dev runs.
 #
 # HOW TO TRIGGER THIS PIPELINE
 # ─────────────────────────────
@@ -31,14 +34,14 @@
 #
 # HOW TO CUSTOMIZE
 # ─────────────────
-# 1. On your branch, edit this file — use any demo step below as a starting point.
+# 1. On your branch, edit this file — use the step below as a starting point.
 # 2. Change the command, model, env vars, or queue as needed.
 # 3. Trigger the pipeline — only your branch's file is used.
 
 steps:
 
   # -----------------------------------------------------------------
-  # Build Step (required by all demo steps below)
+  # Build Step (required by the test step below)
   # -----------------------------------------------------------------
   - label: ":docker: Build and Push Base Image (tpu7x)"
     key: tpu7x_build_docker
@@ -50,12 +53,13 @@ steps:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
-  # Demo 1: offline_inference.py
-  # Shows the simplest pattern: run a Python script inside Docker.
-  # Use this as a starting point for any offline batch inference test.
+  # Gemma3-4B MaxText inference smoke test (dev trial of .buildkite/rl/gemma3_maxtext_inference.yml)
+  # Runs the same script the nightly rl/ matrix runs, but on tpu7x here.
+  # Requires: HF_TOKEN in the agent env, and read access to GEMMA3_MT_CKPT.
+  # This step is a dev-only trial; remove it before merging the rl/ entry.
   # -----------------------------------------------------------------
-  - label: "tpu7x [demo] offline_inference.py"
-    key: tpu7x_demo_offline_inference
+  - label: "tpu7x [dev] gemma3 maxtext inference smoke test"
+    key: tpu7x_dev_gemma3_maxtext_inference
     depends_on: tpu7x_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
@@ -63,86 +67,9 @@ steps:
     agents:
       queue: tpu_v7x_2_queue
     commands:
-      - |
-        # Run offline inference with a small model.
-        # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
-        # Customize --model, --max-model-len, --max-tokens as needed.
-        .buildkite/scripts/run_in_docker.sh bash -c '
-          python3 examples/offline_inference.py \
-            --model Qwen/Qwen3-0.6B \
-            --tensor-parallel-size 2 \
-            --max-model-len 1024 \
-            --max-tokens 128'
+      # run_in_docker.sh forwards HF_TOKEN into the container but not arbitrary
+      # env, so to override the checkpoint, set GEMMA3_MT_CKPT *inside* the
+      # command, e.g.:
+      #   ... bash -c 'GEMMA3_MT_CKPT=gs://.../items bash /workspace/tpu_inference/tests/e2e/test_gemma3_maxtext_inference.sh'
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/test_gemma3_maxtext_inference.sh
 
-  # -----------------------------------------------------------------
-  # Demo 2: vllm serve + vllm bench serve
-  # Shows how to start a server and run a benchmark against it.
-  # Uses --dataset-name random so no dataset file is needed.
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] vllm serve + vllm bench serve"
-    key: tpu7x_demo_serve_bench
-    depends_on: tpu7x_build_docker
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_2_queue
-    commands:
-      - |
-        # Customize behaviour via env vars: MODEL, PORT, TENSOR_PARALLEL_SIZE,
-        # MAX_MODEL_LEN, RANDOM_INPUT_LEN, RANDOM_OUTPUT_LEN, NUM_PROMPTS, NUM_WARMUPS.
-        .buildkite/scripts/run_in_docker.sh bash .buildkite/scripts/run_benchmark_demo.sh
-
-  # -----------------------------------------------------------------
-  # Demo 3: DCN-based P/D disaggregation
-  # Mirrors test_25 in pipeline_jax.yml.
-  # Uses run_disagg.sh which delegates to examples/disagg/.
-  # Requires a multi-chip queue (tpu_v7x_8_queue).
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] E2E disaggregation (DCN P/D)"
-    key: tpu7x_demo_disagg
-    depends_on: tpu7x_build_docker
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-      # Customize these to change the disagg benchmark behaviour.
-      MODEL: "Qwen/Qwen3-0.6B"
-      INPUT_LEN: 1024
-      OUTPUT_LEN: 128
-      NUM_PROMPTS: 5
-      RANDOM_SEED: 10
-      MAX_CONCURRENCY: 4
-      TEST_MODE: 1
-    agents:
-      queue: tpu_v7x_8_queue
-    commands:
-      - .buildkite/scripts/run_disagg.sh
-
-  # -----------------------------------------------------------------
-  # Demo 4: Ray-based multi-host inference
-  # Mirrors test_26 in pipeline_jax.yml.
-  # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
-  # Requires a 16-chip queue (tpu_v7x_16_queue).
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] Ray-based multi-host"
-    key: tpu7x_demo_multihost
-    env:
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_16_queue
-    commands:
-      - |
-        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-        .buildkite/scripts/run_multihost.sh \
-          "vllm serve \${MODEL} \
-            --port 8000 \
-            --tensor-parallel-size 16 \
-            --trust-remote-code \
-            --max-model-len 1024 \
-            --no-async-scheduling \
-            --load-format=runai_streamer \
-            --no-enable-prefix-caching" \
-          "curl http://localhost:8000/v1/completions \
-            -X POST \
-            -H 'Content-Type: application/json' \
-            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"
