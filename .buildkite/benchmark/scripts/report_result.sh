@@ -24,7 +24,7 @@ on_crash() {
     local line_no=$1
     local command="$2"
     
-    # Ignore normal exits (Fixed SC2086 by adding double quotes)
+    # Ignore normal exits
     if [ "$exit_code" -eq 0 ]; then
         return
     fi
@@ -137,12 +137,24 @@ RUN_TYPE="${RUN_TYPE:-DAILY}"
 RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
 
 # Upload logs to GCS if bucket is provided
-if [[ -n "${GCS_BUCKET:-}" ]]; then
+if [[ -n "${GCS_BUCKET:-}" && "${SERVER_ALREADY_RUNNING:-false}" != "true" ]]; then
   # TODO: When switching to Production after validation is complete, 
   # please change to use `$GCS_BUCKET` as the log storage bucket. 
   # For now, it is hardcoded to use the `vllm-bm-bk-storage` bucket.
   # REMOTE_LOG_ROOT="gs://$GCS_BUCKET/job_logs/$RECORD_ID/"
   REMOTE_LOG_ROOT="gs://vllm-bm-bk-storage/job_logs/$RECORD_ID/"
+  if command -v gsutil &> /dev/null; then
+    echo "--- Uploading $LOG_FOLDER to unified GCS: $REMOTE_LOG_ROOT"
+    gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT" || echo "Warning: Failed to upload log folder to GCS."
+  else
+    echo "Warning: gsutil not found. Skipping log upload to GCS."
+  fi
+else
+  if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
+    echo "Multi-host mode detected (SERVER_ALREADY_RUNNING=true). Skipping unified GCS upload; logs will be uploaded to the legacy GCS location by host script."
+  else
+    echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
+  fi
 fi
 
 (
@@ -159,50 +171,36 @@ fi
   printf "[INFO] LOG_FOLDER=\n%s\n" "$LOG_FOLDER"
 
   # Handle log file
-  
-  if [[ -n "${GCS_BUCKET:-}" ]]; then
-    if command -v gsutil &> /dev/null; then
-      echo "gsutil cp $LOG_FOLDER/* $REMOTE_LOG_ROOT"
-      gsutil cp -r "$LOG_FOLDER"/* "$REMOTE_LOG_ROOT"
-    else
-      echo "Warning: gsutil not found. Skipping log upload to GCS."
-    fi
-  else
-    echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
-  fi
 
   # Metric data extraction from log file
   BM_LOG="$LOG_FOLDER/bm_log.txt"
 
+  # Use unified Python script to parse all metrics from the log
+  python3 "$(dirname "$0")/parse_benchmark_log.py" "$BM_LOG" "$RESULT_FILE" || true
+
   if [[ "$RUN_TYPE" == *"ACCURACY"* ]]; then
-    # Accuracy run logic
-    echo "Accuracy run ($RUN_TYPE) detected. Parsing accuracy metrics."
-    AccuracyMetricsJSON=$(grep -a "AccuracyMetrics:" "$BM_LOG" | sed 's/AccuracyMetrics: //' || true)
-    echo "AccuracyMetricsJSON: $AccuracyMetricsJSON"
-    if [ -n "$AccuracyMetricsJSON" ]; then
-      echo "AccuracyMetrics=$AccuracyMetricsJSON" > "$RESULT_FILE"
-    else
-      echo "Error: Accuracy run but no AccuracyMetrics found."
+    # Accuracy run logic validation
+    if ! grep -q "AccuracyMetrics" "$RESULT_FILE"; then
+      echo "Error: Accuracy run ($RUN_TYPE) but no AccuracyMetrics found."
       exit 1
     fi
   else
-    # Performance run logic
-    throughput=$(grep -i "^Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
-    echo "throughput: $throughput"
-
-    output_token_throughput=$(grep -i "^Output token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
-    total_token_throughput=$(grep -i "^Total Token throughput (tok/s):" "$BM_LOG" | sed 's/[^0-9.]//g' || true)
-
+    # Performance run logic validation
+    # Extract Throughput from RESULT_FILE to check against EXPECTED_THROUGHPUT
+    throughput=$(grep "^Throughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
+    
     if [[ -z "$throughput" || ! "$throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
       echo "Failed to get the throughput and this is not an accuracy run."
       exit 1
     fi
 
+    output_token_throughput=$(grep "^OutputTokenThroughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
     if [[ -z "$output_token_throughput" || ! "$output_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
       echo "Failed to get output_token_throughput."
       exit 1
     fi
 
+    total_token_throughput=$(grep "^TotalTokenThroughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
     if [[ -z "$total_token_throughput" || ! "$total_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
       echo "Failed to get total_token_throughput."
       exit 1
@@ -214,41 +212,6 @@ fi
     if [ "$IS_LOW_THROUGHPUT" -eq 1 ]; then
       echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT_VAL) or is 0"
     fi
-    echo "Throughput=$throughput" > "$RESULT_FILE"
-
-    extract_value() {
-      local section="$1"
-      local label="$2"  # Mean, Median, or P99
-      grep "$section (ms):" "$BM_LOG" | \
-      awk -v label="$label" '$0 ~ label { print $NF }' || true
-    }
-
-    # Median values
-    MedianITL=$(extract_value "ITL" "Median")
-    MedianTPOT=$(extract_value "TPOT" "Median")
-    MedianTTFT=$(extract_value "TTFT" "Median")
-    MedianETEL=$(extract_value "E2EL" "Median")
-
-    # P99 values
-    P99ITL=$(extract_value "ITL" "P99")
-    P99TPOT=$(extract_value "TPOT" "P99")
-    P99TTFT=$(extract_value "TTFT" "P99")
-    P99ETEL=$(extract_value "E2EL" "P99")
-
-    # Write results to file
-    (
-      printf '%s=%s\n' \
-      "MedianITL" "$MedianITL" \
-      "MedianTPOT" "$MedianTPOT" \
-      "MedianTTFT" "$MedianTTFT" \
-      "MedianETEL" "$MedianETEL" \
-      "P99ITL" "$P99ITL" \
-      "P99TPOT" "$P99TPOT" \
-      "P99TTFT" "$P99TTFT" \
-      "P99ETEL" "$P99ETEL" \
-      "OutputTokenThroughput" "$output_token_throughput" \
-      "TotalTokenThroughput" "$total_token_throughput"
-    ) >> "$RESULT_FILE"
   fi
 )
 
@@ -340,7 +303,7 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
   SQL_JOB_REFERENCE=$(prepare_sql_val "${JOB_REFERENCE:-}" "''")
   SQL_AGENT_NAME=$(prepare_sql_val "${BUILDKITE_AGENT_NAME:-}" "''")
   SQL_DEVICE=$(prepare_sql_val "${DEVICE:-}" "''")
-  SQL_MODEL=$(prepare_sql_val "${MODEL:-}" "''")
+  SQL_MODEL=$(prepare_sql_val "${MODEL_NAME:-${MODEL:-}}" "''")
   SQL_RUN_TYPE=$(prepare_sql_val "${RUN_TYPE:-DAILY}" "DAILY")
   SQL_CODE_HASH=$(prepare_sql_val "${CODE_HASH:-}" "''")
   SQL_CASE_NAME=$(prepare_sql_val "${TARGET_CASE_NAME:-}" "''")

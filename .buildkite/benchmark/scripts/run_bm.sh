@@ -67,6 +67,12 @@ echo "TARGET_CASE_NAME: $TARGET_CASE_NAME"
 cleanup() {
     local exit_code=$?
 
+    # Do not kill the server if it was started externally
+    if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
+        echo "[INFO] Multi-host server runs externally. Skipping local cleanup."
+        return
+    fi
+
     # Only perform cleanup if NOT in Buildkite (Local only)
     if [[ "${BUILDKITE:-false}" == "true" ]]; then
         return
@@ -135,10 +141,52 @@ export ARTIFACT_FOLDER
 export LOG_FOLDER
 export VLLM_TORCH_PROFILER_DIR
 
+
+run_accuracy_if_needed() {
+  # If an accuracy command was configured in JSON, execute it sequentially after throughput is completed
+  if [[ ${#ACCURACY_CMD[@]} -gt 0 ]]; then
+    echo ""
+    echo "====================================================================="
+    echo "[INFO] RUN_ACCURACY=mmlu: Executing Accuracy Verification Phase"
+    echo "====================================================================="
+
+    # Download dataset using wget if it is not present in the workspace
+    DATASET_DIR="/workspace/mmlu"
+    if [ ! -d "$DATASET_DIR/data/test" ]; then
+      echo "MMLU dataset test folder not found, downloading via wget..."
+      mkdir -p "$DATASET_DIR"
+      cd "$DATASET_DIR" || exit 1
+      if [ ! -f data.tar ]; then
+        echo "Downloading data.tar..."
+        wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .
+      fi
+      if [ ! -d "data/test" ]; then
+        echo "Extracting data.tar..."
+        tar -xf data.tar
+      fi
+      # Return to previous directory
+      cd - > /dev/null
+    fi
+
+    echo "Running accuracy benchmark using JSON configured ACCURACY_CMD..."
+    if ! "${ACCURACY_CMD[@]}" >> "$BM_LOG" 2>&1; then
+      echo "[ERROR] Accuracy benchmark failed during execution."
+      echo "--- Dumping BM_LOG for debugging ---"
+      tail -n 100 "$BM_LOG"
+      report_and_exit 1 
+    fi
+  fi
+}
+
 report_and_exit() {
   local exit_code=${1:-0}
   local record_id="${RECORD_ID:-local}"
   
+  if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
+    echo "--- Copying server log from /root/vllm_serve.log to $VLLM_LOG"
+    cp /root/vllm_serve.log "$VLLM_LOG" || true
+  fi
+
   echo "--- Calling report_result.sh for RECORD_ID=${record_id} with exit_code=${exit_code}"
   bash "$SCRIPT_DIR/report_result.sh" "$record_id" "$exit_code" || exit $?
   
@@ -150,6 +198,12 @@ echo "--- Preparing Local Artifacts Folder"
 mkdir -p "$ARTIFACT_FOLDER"
 mkdir -p "$LOG_FOLDER"
 mkdir -p "$VLLM_TORCH_PROFILER_DIR"
+
+ACCURACY_CMD=()
+SERVER_CMD=()
+CLIENT_CMD=()
+CLIENT_CMD_ENVS=()
+SERVER_CMD_ENVS=()
 
 PYTHON_PARSER="$SCRIPT_DIR/parser_case.py"
 # Evaluate the Python output to set variables in the current shell context
@@ -177,6 +231,30 @@ contains_element () {
   for e; do [[ "$e" == "$match" ]] && return 0; done
   return 1
 }
+
+# ---------------------------------------------------------
+# Dynamic Port Injection (Single & Multi-Host)
+# ---------------------------------------------------------
+# If VLLM_PORT wasn't provided by the environment, try to extract it from SERVER_CMD
+if [[ -z "${VLLM_PORT:-}" ]]; then
+  SERVER_CMD_STR="${SERVER_CMD[*]:-}"
+  if [[ "${SERVER_CMD_STR}" =~ --port[=\ ]+([0-9]+) ]]; then
+    VLLM_PORT="${BASH_REMATCH[1]}"
+    echo "--- Extracted VLLM_PORT=${VLLM_PORT} from SERVER_CMD locally"
+  fi
+fi
+
+if [[ -n "${VLLM_PORT:-}" ]]; then
+  echo "--- Injecting VLLM_PORT=${VLLM_PORT} into client commands"
+  
+  if [[ ${#CLIENT_CMD[@]} -gt 0 ]] && ! contains_element "--port" "${CLIENT_CMD[@]}"; then
+    CLIENT_CMD+=("--port" "$VLLM_PORT")
+  fi
+  
+  if [[ ${#ACCURACY_CMD[@]} -gt 0 ]] && ! contains_element "--port" "${ACCURACY_CMD[@]}"; then
+    ACCURACY_CMD+=("--port" "$VLLM_PORT")
+  fi
+fi
 
 # ---------------------------------------------------------
 # DECODE_ONLY Mode Configuration Validation & Dataset Injection
@@ -312,7 +390,7 @@ if contains_element "$DATASET" "${DATASETS[@]}"; then
 fi
 
 # Prep specialized configurations (DeepSeek)
-if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" ]]; then
+if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" && "${IS_MULTI_HOST_BENCH:-false}" == "false" ]]; then
   if command -v gsutil &> /dev/null; then
     echo "Syncing generation configs for DeepSeek-R1"
     GENERATION_CONFIG_FOLDER="$ARTIFACT_FOLDER/generation_configs"
@@ -351,127 +429,143 @@ echo "lanching vllm..."
 echo "logging to $VLLM_LOG"
 echo
 
-# Command from parser case json
-echo "[INFO] Starting vLLM Server in background..."
+SERVER_ALREADY_RUNNING="${SERVER_ALREADY_RUNNING:-false}"
+# In Single-Host mode, run_bm.sh is responsible for starting and monitoring the vLLM server.
+# In Multi-Host mode, run_multihost.sh has already started the server via Ray and sets this flag to "true",
+# so we skip the local background startup and wait logic here.
+if [[ "$SERVER_ALREADY_RUNNING" == "false" ]]; then
+  # Command from parser case json
+  echo "[INFO] Starting vLLM Server in background..."
 
-echo "Printing the vllm serve command used to start the server:"
-printf "[DEBUG] Executing server_cmd: %s %s > \"%s\" 2>&1 &\n" "${SERVER_CMD_ENVS[*]}" "${SERVER_CMD[*]}" "$VLLM_LOG"
+  echo "Printing the vllm serve command used to start the server:"
+  printf "[DEBUG] Executing server_cmd: %s %s > \"%s\" 2>&1 &\n" "${SERVER_CMD_ENVS[*]}" "${SERVER_CMD[*]}" "$VLLM_LOG"
 
-# Start the server and capture its PID
-env "${SERVER_CMD_ENVS[@]}" "${SERVER_CMD[@]}" > "$VLLM_LOG" 2>&1 &
-VLLM_PID=$!
+  # Start the server and capture its PID
+  env "${SERVER_CMD_ENVS[@]}" "${SERVER_CMD[@]}" > "$VLLM_LOG" 2>&1 &
+  VLLM_PID=$!
 
-# Immediate check to see if it crashed on startup
-sleep 2
-if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-    echo "[ERROR] vLLM Server failed to start immediately. Check log: $VLLM_LOG"
-    exit 1
+  # Immediate check to see if it crashed on startup
+  sleep 2
+  if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+      echo "[ERROR] vLLM Server failed to start immediately. Check log: $VLLM_LOG"
+      exit 1
+  fi
+
+  # ---------------------------------------------------------
+  # Server startup wait logic
+  # ---------------------------------------------------------
+  SERVER_WAIT_MINS=${SERVER_WAIT_MINS:-60}
+
+  MAX_WAIT_SECONDS=$((SERVER_WAIT_MINS * 60))
+  WAIT_START_TIME=$(date +%s)
+  ELAPSED=0
+
+  echo "Waiting up to ${SERVER_WAIT_MINS} minutes for server to start (PID: ${VLLM_PID})..."
+
+  # Initial state set to not started
+  SERVER_STARTED="false"
+
+  # Loop continues as long as elapsed time is within the maximum allowed
+  while (( ELAPSED <= MAX_WAIT_SECONDS )); do
+      
+      # 1. [Fail-Fast Check] Ask the OS if the process is still alive
+      if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+          echo "[ERROR] vLLM process (PID=$VLLM_PID) has exited unexpectedly!"
+          echo "--- Dumping VLLM_LOG for debugging ---"
+          cat "$VLLM_LOG"
+          exit 1
+      fi
+
+      # 2. [Success Check] Look for the startup completion flag
+      if grep -Fq "Application startup complete" "$VLLM_LOG"; then
+          echo "Application started successfully."
+          SERVER_STARTED="true"
+          break
+      fi
+
+      # 3. Print progress approximately every 1 minute (every 6 iterations) to keep logs clean
+      ITERATION=$((ELAPSED / 10))
+      if (( ITERATION % 6 == 0 )); then
+          ELAPSED_MIN=$((ELAPSED / 60))
+          ELAPSED_SEC=$((ELAPSED % 60))
+          printf "Still waiting... Elapsed: %02d:%02d / %02d:00\n" "$ELAPSED_MIN" "$ELAPSED_SEC" "$SERVER_WAIT_MINS"
+      fi
+
+      # 4. Wait 10 seconds before the next check
+      sleep 10
+
+      # 5. Update elapsed time for the next while loop condition evaluation
+      CURRENT_TIME=$(date +%s)
+      ELAPSED=$((CURRENT_TIME - WAIT_START_TIME))
+  done
+
+  # Direct exit if server is not started to prevent fetching the dirty bm result
+  if [[ "$SERVER_STARTED" == "false" ]]; then
+      echo "[ERROR] Server failed to start within ${SERVER_WAIT_MINS} minutes! Timeout reached."
+      echo "--- Dumping VLLM_LOG for debugging ---"
+      cat "$VLLM_LOG"
+      exit 1
+  fi
+
+  # ---------------------------------------------------------
+  # DECODE_ONLY Warmup Execution (Cache Seeding)
+  # ---------------------------------------------------------
+  if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
+      echo "====================================================================="
+      echo "[INFO] DECODE_ONLY: Executing Warmup Phase"
+      echo "====================================================================="
+      echo "Warming up HBM Cache with exactly $MAX_NUM_SEQS distinct requests to prevent Cache Eviction..."
+      
+      # Copy the array for safe modification
+      WARMUP_CMD=("${CLIENT_CMD[@]}")
+      
+      found_prompts=false
+      
+      # In-place modification of existing flags
+      for i in "${!WARMUP_CMD[@]}"; do
+          arg="${WARMUP_CMD[$i]}"
+          if [[ "$arg" == "--num-prompts" ]]; then
+              WARMUP_CMD[i+1]="$MAX_NUM_SEQS"
+              found_prompts=true
+          elif [[ "$arg" == --num-prompts=* ]]; then
+              WARMUP_CMD[i]="--num-prompts=$MAX_NUM_SEQS"
+              found_prompts=true
+          fi
+      done
+      
+      # Append the flags if they were not found in the original command
+      if [[ "$found_prompts" == false ]]; then
+          WARMUP_CMD+=( "--num-prompts" "$MAX_NUM_SEQS" )
+      fi
+      
+      echo "[DEBUG] WARMUP_CMD: ${CLIENT_CMD_ENVS[*]} ${WARMUP_CMD[*]}"
+      set +e
+      timeout 2h env "${CLIENT_CMD_ENVS[@]}" "${WARMUP_CMD[@]}" > "$LOG_FOLDER/warmup_log.txt" 2>&1
+      warmup_exit_code=$?
+      set -e
+      
+      if [[ "$warmup_exit_code" -eq 124 ]]; then
+          echo "[ERROR] Warmup phase timed out after 2 hours!"
+          echo "--- Dumping Warmup Log ---"
+          cat "$LOG_FOLDER/warmup_log.txt"
+          exit 1
+      elif [[ "$warmup_exit_code" -ne 0 ]]; then
+          echo "[ERROR] Warmup phase failed with exit code $warmup_exit_code!"
+          echo "--- Dumping Warmup Log ---"
+          cat "$LOG_FOLDER/warmup_log.txt"
+          exit 1
+      fi
+      
+      echo "[INFO] Warmup Phase Completed Successfully. Cache is strictly seeded."
+      echo "[INFO] Proceeding to Decode-Only concurrency stress testing."
+      echo "====================================================================="
+  fi
+else
+    echo "[INFO] Server is managed externally (Multi-Host). Skipping startup and wait logic."
+    SERVER_STARTED="true"
+    VLLM_PID=""
 fi
 
-# ---------------------------------------------------------
-# Server startup wait logic
-# ---------------------------------------------------------
-SERVER_WAIT_MINS=${SERVER_WAIT_MINS:-60}
-
-MAX_WAIT_SECONDS=$((SERVER_WAIT_MINS * 60))
-WAIT_START_TIME=$(date +%s)
-ELAPSED=0
-
-echo "Waiting up to ${SERVER_WAIT_MINS} minutes for server to start (PID: ${VLLM_PID})..."
-
-# Initial state set to not started
-SERVER_STARTED="false"
-
-# Loop continues as long as elapsed time is within the maximum allowed
-while (( ELAPSED <= MAX_WAIT_SECONDS )); do
-    
-    # 1. [Fail-Fast Check] Ask the OS if the process is still alive
-    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-        echo "[ERROR] vLLM process (PID=$VLLM_PID) has exited unexpectedly!"
-        echo "--- Dumping VLLM_LOG for debugging ---"
-        cat "$VLLM_LOG"
-        exit 1
-    fi
-
-    # 2. [Success Check] Look for the startup completion flag
-    if grep -Fq "Application startup complete" "$VLLM_LOG"; then
-        echo "Application started successfully."
-        SERVER_STARTED="true"
-        break
-    fi
-
-    # 3. Print progress approximately every 1 minute (every 6 iterations) to keep logs clean
-    ITERATION=$((ELAPSED / 10))
-    if (( ITERATION % 6 == 0 )); then
-        ELAPSED_MIN=$((ELAPSED / 60))
-        ELAPSED_SEC=$((ELAPSED % 60))
-        printf "Still waiting... Elapsed: %02d:%02d / %02d:00\n" "$ELAPSED_MIN" "$ELAPSED_SEC" "$SERVER_WAIT_MINS"
-    fi
-
-    # 4. Wait 10 seconds before the next check
-    sleep 10
-
-    # 5. Update elapsed time for the next while loop condition evaluation
-    CURRENT_TIME=$(date +%s)
-    ELAPSED=$((CURRENT_TIME - WAIT_START_TIME))
-done
-
-# Direct exit if server is not started to prevent fetching the dirty bm result
-if [[ "$SERVER_STARTED" == "false" ]]; then
-    echo "[ERROR] Server failed to start within ${SERVER_WAIT_MINS} minutes! Timeout reached."
-    echo "--- Dumping VLLM_LOG for debugging ---"
-    cat "$VLLM_LOG"
-    exit 1
-fi
-
-# ---------------------------------------------------------
-# DECODE_ONLY Warmup Execution (Cache Seeding)
-# ---------------------------------------------------------
-if [[ "${DECODE_ONLY:-false}" == "true" ]]; then
-    echo "====================================================================="
-    echo "[INFO] DECODE_ONLY: Executing Warmup Phase"
-    echo "====================================================================="
-    echo "Warming up HBM Cache with exactly $MAX_NUM_SEQS distinct requests to prevent Cache Eviction..."
-    
-    # Copy the array for safe modification
-    WARMUP_CMD=("${CLIENT_CMD[@]}")
-    
-    found_prompts=false
-    
-    # In-place modification of existing flags
-    for i in "${!WARMUP_CMD[@]}"; do
-        arg="${WARMUP_CMD[$i]}"
-        if [[ "$arg" == "--num-prompts" ]]; then
-            WARMUP_CMD[i+1]="$MAX_NUM_SEQS"
-            found_prompts=true
-        elif [[ "$arg" == --num-prompts=* ]]; then
-            WARMUP_CMD[i]="--num-prompts=$MAX_NUM_SEQS"
-            found_prompts=true
-        fi
-    done
-    
-    # Append the flags if they were not found in the original command
-    if [[ "$found_prompts" == false ]]; then
-        WARMUP_CMD+=( "--num-prompts" "$MAX_NUM_SEQS" )
-    fi
-    
-    echo "[DEBUG] WARMUP_CMD: ${CLIENT_CMD_ENVS[*]} ${WARMUP_CMD[*]}"
-    set +e
-    env "${CLIENT_CMD_ENVS[@]}" "${WARMUP_CMD[@]}" > "$LOG_FOLDER/warmup_log.txt" 2>&1
-    warmup_exit_code=$?
-    set -e
-    
-    if [[ "$warmup_exit_code" -ne 0 ]]; then
-        echo "[ERROR] Warmup phase failed with exit code $warmup_exit_code!"
-        echo "--- Dumping Warmup Log ---"
-        cat "$LOG_FOLDER/warmup_log.txt"
-        exit 1
-    fi
-    
-    echo "[INFO] Warmup Phase Completed Successfully. Cache is strictly seeded."
-    echo "[INFO] Proceeding to Decode-Only concurrency stress testing."
-    echo "====================================================================="
-fi
 
 # Set Default
 EXPECTED_ETEL=${EXPECTED_ETEL:-3600000}
@@ -516,11 +610,16 @@ run_benchmark(){
   echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD_ENVS[*]} ${CLIENT_CMD[*]} > $BM_LOG" >&2
   set +e
   # Execute the array directly, preserving strict argument boundaries
-  env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
+  timeout 2h env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
   local client_exit_code=$?
   set -e
 
-  if [ $client_exit_code -ne 0 ]; then
+  if [ $client_exit_code -eq 124 ]; then
+    echo "[ERROR] Client command timed out after 2 hours." >&2
+    echo "--- Dumping BM_LOG for debugging ---" >&2
+    cat "$BM_LOG" >&2
+    return $client_exit_code
+  elif [ $client_exit_code -ne 0 ]; then
     echo "[ERROR] An error occurred while executing client_cmd." >&2
     return $client_exit_code
   fi
@@ -608,66 +707,68 @@ echo "p99_e2el:$p99_e2el"
 p99_int=$(printf "%.0f" "$p99_e2el")
 goal_int=$(printf "%.0f" "$EXPECTED_ETEL")
 
-if (( p99_int <= goal_int )); then
-  echo "Initial run: P99 E2EL ($p99_e2el ms) <= EXPECTED_ETEL ($EXPECTED_ETEL ms), good enough. Exiting 0."
-  report_and_exit 0
-fi
+if [[ "${RUN_ONCE:-false}" == "true" ]]; then
+  echo "[INFO] RUN_ONCE is enabled. Skipping binary search and reporting results."
+elif (( p99_int <= goal_int )); then
+  echo "Initial run: P99 E2EL ($p99_e2el ms) <= EXPECTED_ETEL ($EXPECTED_ETEL ms), good enough. Skipping sweep."
+else
+  echo "Initial run failed: P99 E2EL ($p99_e2el ms) > EXPECTED_ETEL ($EXPECTED_ETEL ms)"
+  echo "Starting binary search to lower request rate..."
 
-echo "Initial run failed: P99 E2EL ($p99_e2el ms) > EXPECTED_ETEL ($EXPECTED_ETEL ms)"
-echo "Starting binary search to lower request rate..."
+  # Step 2: Binary search
+  low=0
+  high=$(printf "%.0f" "$throughput")
+  goal=$EXPECTED_ETEL
 
-# Step 2: Binary search
-low=0
-high=$(printf "%.0f" "$throughput")
-goal=$EXPECTED_ETEL
+  # Round goal to nearest int
+  goal_int=$(printf "%.0f" "$goal")
 
-# Round goal to nearest int
-goal_int=$(printf "%.0f" "$goal")
+  best_rate=0
+  best_throughput=0
+  best_e2el=0
 
-best_rate=0
-best_throughput=0
-best_e2el=0
+  while (( high - low > 0 )); do
+    mid=$(( (low + high + 1) / 2 ))
+    echo "Trying request_rate=$mid"
 
-while (( high - low > 0 )); do
-  mid=$(( (low + high + 1) / 2 ))
-  echo "Trying request_rate=$mid"
+    # Single function call with double-layer defense (exit code interception + regex validation)
+    execute_benchmark_safely "$mid"
+    throughput="$VALID_THROUGHPUT"
+    p99_e2el="$VALID_P99_E2EL"
 
-  # Single function call with double-layer defense (exit code interception + regex validation)
-  execute_benchmark_safely "$mid"
-  throughput="$VALID_THROUGHPUT"
-  p99_e2el="$VALID_P99_E2EL"
+    # Convert p99_e2el to integer
+    p99_int=$(printf "%.0f" "$p99_e2el")
 
-  # Convert p99_e2el to integer
-  p99_int=$(printf "%.0f" "$p99_e2el")
+    if (( p99_int <= goal_int )); then
+      echo "PASS: p99_e2el=$p99_e2el <= $goal"
+      best_rate=$mid
+      best_throughput=$throughput
+      best_e2el=$p99_e2el
+      low=$mid
 
-  if (( p99_int <= goal_int )); then
-    echo "PASS: p99_e2el=$p99_e2el <= $goal"
-    best_rate=$mid
-    best_throughput=$throughput
-    best_e2el=$p99_e2el
-    low=$mid
+      # Backup best log
+      cp "$BM_LOG" "$BEST_BM_LOG"
+    else
+      echo "FAIL: p99_e2el=$p99_e2el > $goal"
+      high=$((mid - 1))
+    fi
+  done
 
-    # Backup best log
-    cp "$BM_LOG" "$BEST_BM_LOG"
-  else
-    echo "FAIL: p99_e2el=$p99_e2el > $goal"
-    high=$((mid - 1))
+  if (( best_rate == 0 )); then
+    echo "Could not find a valid request_rate >= 1 that meets EXPECTED_ETEL=$EXPECTED_ETEL" | tee -a "$BM_LOG"
+    report_and_exit 1
   fi
-done
 
-if (( best_rate == 0 )); then
-  echo "Could not find a valid request_rate >= 1 that meets EXPECTED_ETEL=$EXPECTED_ETEL" | tee -a "$BM_LOG"
-  report_and_exit 1
+  # Restore the best log to BM_LOG
+  cp "$BEST_BM_LOG" "$BM_LOG"
+
+  echo
+  echo "======================================"
+  echo "✓ Final best request_rate: $best_rate"
+  echo "✓ Throughput: $best_throughput"
+  echo "✓ P99 E2EL: $best_e2el"
+  echo "======================================"
 fi
 
-# Restore the best log to BM_LOG
-cp "$BEST_BM_LOG" "$BM_LOG"
-
-echo
-echo "======================================"
-echo "✓ Final best request_rate: $best_rate"
-echo "✓ Throughput: $best_throughput"
-echo "✓ P99 E2EL: $best_e2el"
-echo "======================================"
-
+run_accuracy_if_needed
 report_and_exit 0
