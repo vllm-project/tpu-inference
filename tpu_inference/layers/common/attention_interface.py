@@ -917,9 +917,34 @@ def pcp_ragged_paged_attention(
             # launches, no cross-rank LSE merge.
             local_q = q_l.shape[0]  # = padded_q_len // pcp = 2 * pcp_chunk_size
             cu_kv = jnp.zeros_like(cu_q_lens[0]).at[1:].set(local_q)
-            kv_tok = lax.all_gather(kvc, pcp_axis, axis=2, tiled=False)
-            kv_tok = kv_tok.reshape(kvc.shape[0], kvc.shape[1] * pcp_size,
-                                    *kvc.shape[2:])
+
+            # Only all-gather the pages this request actually owns.  The KV
+            # cache holds pages for every in-flight sequence, but a request
+            # only ever reads its own block table, so gathering the whole
+            # buffer moves pages_per_seq/npages of useful data.  Compact to
+            # the request's pages first (all ranks share the same block table
+            # -- page_indices is replicated and the page axis is not
+            # pcp-sharded -- so every rank selects the identical pages), then
+            # gather.  After compaction logical page k IS physical page k, so
+            # the block table becomes the identity.
+            #
+            # Gated on a STATIC comparison: when pages_per_seq == npages (e.g.
+            # microbenchmarks where one request owns the entire cache) the
+            # take would be a full-cache copy for zero benefit, so skip it.
+            npages_all = kvc.shape[0]
+            max_seqs = kvl.shape[0]
+            pages_per_seq = pi.shape[0] // max_seqs
+            if pages_per_seq < npages_all:
+                kv_src = jnp.take(kvc, pi[:pages_per_seq], axis=0)
+                pi_src = jnp.tile(
+                    jnp.arange(pages_per_seq, dtype=pi.dtype), max_seqs)
+            else:
+                kv_src, pi_src = kvc, pi
+
+            kv_tok = lax.all_gather(kv_src, pcp_axis, axis=2, tiled=False)
+            kv_tok = kv_tok.reshape(kv_src.shape[0],
+                                    kv_src.shape[1] * pcp_size,
+                                    *kv_src.shape[2:])
             common_kv = {
                 k: v
                 for k, v in common.items()
@@ -931,7 +956,7 @@ def pcp_ragged_paged_attention(
                 v_l,
                 kv_tok,
                 kvl,
-                pi,
+                pi_src,
                 cu_kv,
                 dist_cache,
                 kv_cache_lens=kvcl,
