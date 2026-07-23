@@ -61,7 +61,25 @@ cleanup_docker_resource() {
       CLEANED_CONTAINERS=$(echo "$TOTAL_CONTAINERS" | tr ' ' '\n' | grep -v '^$' | sort -u || true)
       if [[ -n "$CLEANED_CONTAINERS" ]]; then
         echo "Removing leftover containers using ${IMG} image(s)..."
-        echo "$CLEANED_CONTAINERS" | xargs -r docker rm -f
+
+        for container in $CLEANED_CONTAINERS; do
+          # 1. Attempt standard force removal
+          if ! docker rm -f "$container" 2>/dev/null; then
+            echo "⚠️ Standard 'docker rm' failed for $container. Attempting PID kill..."
+            
+            # 2. Try to find the PID and kill it directly on the host
+            local PID
+            PID=$(docker inspect -f '{{.State.Pid}}' "$container" 2>/dev/null || echo "0")
+            
+            if [[ "$PID" -gt 0 ]]; then
+              echo "Killing process $PID for container $container..."
+              sudo kill -9 "$PID" 2>/dev/null || true
+              sleep 2
+              # Final attempt to clear metadata
+              docker rm -f "$container" || true
+            fi
+          fi
+        done
       fi
       
       echo "Removing old ${IMG} image(s) by ID..."
