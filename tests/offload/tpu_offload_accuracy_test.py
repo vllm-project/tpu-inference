@@ -178,7 +178,7 @@ def test_kv_cache_cpu_offloading_accuracy_smaller_then_cpu_ram(
 # The test does the following
 #   1. generates tokens for the input prompt
 #   2. clears HBM which forces clean up of KV cache from HBM, since KV cache size > CPU RAM the tokens spills over CPU RAM
-#   3. re-calculates tokens for input prompt, since teh KV cache size > CPU RAM, it loads any available tokens from CPU RAM and re-calculates remaining tokens lost due to spillover
+#   3. re-calculates tokens for input prompt, since the KV cache size > CPU RAM, it loads any available tokens from CPU RAM and re-calculates remaining tokens lost due to spillover
 #   4. verifies tokens generated for 1. and 3. are identical when KV cache>CPU RAM
 def test_kv_cache_cpu_offloading_accuracy_larger_than_cpu_ram(
     monkeypatch: pytest.MonkeyPatch, ):
