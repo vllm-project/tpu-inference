@@ -3,11 +3,12 @@
 set -euo pipefail
 
 artifact_args=(".coverage.part*" .)
-if [[ -n "${KUBE_COVERAGE_SOURCE_BUILD:-}" ]]; then
-  artifact_args+=(
-    --build "${KUBE_COVERAGE_SOURCE_BUILD}"
-    --pipeline "${KUBE_COVERAGE_SOURCE_PIPELINE:-kube-dev}"
-  )
+if [[ -n "${KUBE_COVERAGE_SOURCE_BUILD_ID:-}" ]]; then
+  if [[ ! "${KUBE_COVERAGE_SOURCE_BUILD_ID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    echo "KUBE_COVERAGE_SOURCE_BUILD_ID must be a Buildkite build UUID, not its display number." >&2
+    exit 2
+  fi
+  artifact_args+=(--build "${KUBE_COVERAGE_SOURCE_BUILD_ID}")
 fi
 
 buildkite-agent artifact download "${artifact_args[@]}"

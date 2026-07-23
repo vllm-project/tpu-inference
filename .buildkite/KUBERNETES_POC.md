@@ -382,7 +382,7 @@ its configuration aliases all source layouts. Combining build 34's two real
 artifacts locally passes the 68% threshold.
 
 When only the reporting environment changes, set
-`KUBE_COVERAGE_SOURCE_BUILD=<build number>` on a CPU-only build. The gated
+`KUBE_COVERAGE_SOURCE_BUILD_ID=<Buildkite build UUID>` on a CPU-only build. The gated
 `kube_validate_prior_coverage` step downloads that build's two real shard
 artifacts and runs the current commit-specific reporting image, so a Docker or
 coverage-consumer fix can be proven without repeating several TPU-hours. It is

@@ -565,11 +565,12 @@ steps:
 
   # CPU-only recovery/validation path for coverage artifacts from an earlier
   # build. This avoids repeating both long TPU shards when only the reporting
-  # environment changed. Set KUBE_COVERAGE_SOURCE_BUILD to opt in.
+  # environment changed. Set KUBE_COVERAGE_SOURCE_BUILD_ID to opt in; the
+  # agent artifact API requires the build UUID rather than its display number.
   - label: ":bar_chart: Validate prior JAX coverage artifacts"
     key: "kube_validate_prior_coverage"
     depends_on: "kube_build_image"
-    if: build.env("KUBE_COVERAGE_SOURCE_BUILD") != null
+    if: build.env("KUBE_COVERAGE_SOURCE_BUILD_ID") != null
     agents:
       queue: "cpu"
     commands:
