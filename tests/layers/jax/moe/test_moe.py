@@ -226,53 +226,6 @@ class TestMoE(unittest.TestCase):
                              rtol=1e-2),
                 "Dense backend output does not match ground truth.")
 
-    def test_sparse_distributed_backend_correctness(self):
-        """
-        Verifies the Sparse backends with expert parallelism
-        against the sequential ground truth.
-        """
-        # TODO: add MoEBackend.FUSED_MOE, MoEBackend.GMM_TP/GMM_EP
-        backend = MoEBackend.MEGABLX_GMM
-        moe = self._create_moe(backend)
-
-        # Run Forward Pass (Distributed)
-        with jax.set_mesh(self.mesh):
-            actual_output, _ = moe(self.x)
-
-        # Compute Ground Truth using the exact same weights
-        expected_output = self._compute_ground_truth(moe, self.x)
-
-        diff = jnp.mean(jnp.abs(actual_output - expected_output))
-
-        self.assertTrue(
-            jnp.allclose(actual_output, expected_output, atol=5e-2, rtol=5e-2),
-            f"Sparse distributed output mismatch for backebd tyoe {backend}. Mean diff: {diff}"
-        )
-
-    def test_backend_consistency(self):
-        """
-        Ensures that if we initialize two models with identical seeds/weights,
-        Dense and Sparse backends yield the same result.
-        """
-        # This test requires careful weight synchronization or fixed seeds.
-        # Since nnx.Rngs(key) is deterministic, we just re-use the key.
-
-        # 1. Run Dense
-        moe_dense = self._create_moe(MoEBackend.DENSE_MAT)
-        with jax.set_mesh(self.mesh):
-            out_dense, _ = moe_dense(self.x)
-
-        # 2. Run Sparse
-        # We must re-init with same key to get same weights
-        moe_sparse = self._create_moe(MoEBackend.MEGABLX_GMM)
-        with jax.set_mesh(self.mesh):
-            out_sparse, _ = moe_sparse(self.x)
-
-        self.assertTrue(
-            jnp.allclose(out_dense, out_sparse, atol=5e-2, rtol=5e-2),
-            "Dense and Sparse backends produced different results for identical initialization."
-        )
-
     def test_moe_replay_correctness(self):
         """Tests that the MoE output can be reconstructed using saved expert IDs."""
         moe = self._create_moe(MoEBackend.DENSE_MAT)

@@ -35,8 +35,8 @@ def select_moe_backend_from_fused_moe_config(
     """
     Select the MoE backend based on the FusedMoEConfig.
 
-    NOTE (jacobplatin): we don't currently support DENSE_MAT or MEGABLX_GMM
-    backends on the vLLM path for now.
+    NOTE (jacobplatin): we don't currently support the DENSE_MAT
+    backend on the vLLM path for now.
 
     Args:
         moe: The FusedMoEConfig.
