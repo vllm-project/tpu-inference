@@ -71,10 +71,39 @@ if [[ -z "${HF_TOKEN:-}" ]]; then
     exit 1
 fi
 
-echo "--- Installing maxtext==${MAXTEXT_VERSION}"
-# Install normally and let pip resolve against the image's existing jax/vllm. If
-# maxtext's pins conflict with the image, this is the step that will surface it.
-pip install "maxtext==${MAXTEXT_VERSION}"
+echo "--- Installing maxtext[tpu]==${MAXTEXT_VERSION}"
+# NOTE: the maxtext wheel declares *no* unconditional dependencies -- every dep
+# sits behind an extra (cuda12 / docs / runner / tpu / tpu-post-train). A plain
+# `pip install maxtext` therefore installs the package with none of its imports
+# available (omegaconf, etc.), so the [tpu] extra is required.
+#
+# The [tpu] extra specifies its deps as lower bounds (jax>=0.10.0,
+# jaxlib>=0.10.0, libtpu>=0.0.40, ...). pip resolves `>=` to the *newest*
+# release, so an unconstrained install would upgrade the image's pinned
+# jax/jaxlib/libtpu out from under vLLM and break the TPU runtime, even though
+# the pinned versions already satisfy the bounds. Constrain the critical stack
+# to whatever the image already has and let the rest resolve freely.
+CONSTRAINTS_FILE="$(mktemp)"
+pip freeze 2>/dev/null \
+    | grep -iE '^(jax|jaxlib|libtpu|numpy|torch|torchvision|torchax)==' \
+    > "${CONSTRAINTS_FILE}" || true
+echo "Pinning the following image packages during the maxtext install:"
+cat "${CONSTRAINTS_FILE}"
+
+pip install "maxtext[tpu]==${MAXTEXT_VERSION}" --constraint "${CONSTRAINTS_FILE}"
+
+# Fail fast with a clear message if the install still left imports missing,
+# rather than surfacing a bare ModuleNotFoundError from deep inside maxtext.
+echo "--- Verifying maxtext imports"
+python3 -c "import maxtext; import omegaconf; print('maxtext import OK')"
+
+# The constrained install must not have moved the TPU stack. flax and
+# transformers are NOT constrained because maxtext requires flax>=0.12.7 while
+# tpu-inference pins flax==0.12.4 -- those bounds are mutually exclusive, so flax
+# is necessarily upgraded here. Print the resulting versions so any breakage from
+# that upgrade is attributable from the log.
+echo "--- Post-install versions of the shared stack"
+pip freeze 2>/dev/null | grep -iE '^(jax|jaxlib|libtpu|flax|transformers|numpy)==' || true
 
 echo "--- Running maxtext.inference.vllm_decode"
 set -x
