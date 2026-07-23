@@ -577,29 +577,10 @@ def ragged_paged_attention(
             cfgs=cfgs,
         )
 
-    def do_decode(carry):
-        q_in, cache_in = carry
-        return run_rpa_kernel(configs.RpaCase.DECODE, q_in, cache_in)
-
-    def do_mixed(carry):
-        q_in, cache_in = carry
-        return run_rpa_kernel(configs.RpaCase.MIXED, q_in, cache_in)
-
-    def skip_kernel(carry):
-        return carry
-
-    o_hbm_alias_q_hbm, kv_cache = jax.lax.cond(
-        distribution[0] > 0,
-        do_decode,
-        skip_kernel,
-        (q_hbm, kv_cache),
-    )
-    o_hbm_alias_q_hbm, kv_cache = jax.lax.cond(
-        distribution[2] > distribution[1],
-        do_mixed,
-        skip_kernel,
-        (o_hbm_alias_q_hbm, kv_cache),
-    )
+    o_hbm_alias_q_hbm, kv_cache = run_rpa_kernel(configs.RpaCase.DECODE, q_hbm,
+                                                 kv_cache)
+    o_hbm_alias_q_hbm, kv_cache = run_rpa_kernel(configs.RpaCase.MIXED,
+                                                 o_hbm_alias_q_hbm, kv_cache)
 
     # before: [kv_heads, max_tokens, q_per_kv // q_packing, q_packing, d]
     o_hbm = prepare_outputs(o_hbm_alias_q_hbm)
