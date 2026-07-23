@@ -157,6 +157,11 @@ else
   fi
 fi
 
+if [ "$EXIT_CODE" -ne 0 ]; then
+  echo "--- run_bm.sh failed with exit code $EXIT_CODE. Skipping metric parsing, DB reporting, and MLCompass export."
+  exit 0
+fi
+
 (
   if [ "${BUILDKITE:-false}" == "true" ]; then
     ENV_CONTEXT="Buildkite environment"
@@ -217,11 +222,6 @@ fi
 
 # Database Reporting Logic (ON CONFLICT (RecordId) DO UPDATE SET)
 if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANCE_ID:-}" ]]; then
-  if [ "$EXIT_CODE" -ne 0 ]; then
-    echo "--- run_bm.sh failed with exit code $EXIT_CODE. Skipping DB reporting."
-    exit 0
-  fi
-
   MANDATORY_VARS=(
     "RECORD_ID"
     "DEVICE"
