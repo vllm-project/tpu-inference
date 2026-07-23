@@ -23,6 +23,11 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+# Lane width of the tile the packed lhs scale is read from. A block narrower
+# than the lane width is not expressible, so the packed path loads this many
+# columns and slices the two transport bytes out in-register.
+_SCALE_TILE_LANES = 128
+
 # Util.
 
 
@@ -185,6 +190,26 @@ class FusedWeightsRef(RhsRef):
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
+class LhsRef:
+    """Dataclass for lhs, optionally carrying a per-token dequant scale.
+
+    When ``scale`` is None, ``data`` is the (unquantized) lhs and the kernel
+    quantizes it internally, exactly as before. When ``scale`` is not None,
+    ``data`` is assumed to already be quantized (e.g. to fp8) and ``scale``
+    holds the per-token multiplier applied to the accumulator after the matmul
+    (the scale is constant across k, so it factors out of the k reduction).
+    """
+
+    data: Any
+    scale: Any | None = None
+
+    def get_scale(self) -> jax.Array:
+        assert self.scale is not None
+        return self.scale[...]
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
 class MetadataRef:
     gm_id_to_group_id: jax.Array
     gm_id_to_m_offset: jax.Array
@@ -215,6 +240,11 @@ class InputConfigs:
     dtype: jnp.dtype
     has_bias: bool = False
     has_scale: bool = False
+    # lhs only: data is already quantized and its per-token scale rides in the
+    # lhs buffer's trailing columns (two fp8-typed transport bytes at column
+    # size_k). Skip internal quantization, read the scale from the buffer the
+    # kernel already holds, and apply it after the matmul.
+    prequantized: bool = False
 
     @property
     def should_dequantize_before_matmul(self) -> bool:
@@ -280,6 +310,20 @@ class IndexMaps:
 
         return (pl.ds(row_start, row_size), 0, k_id)
 
+    def lhs_scale_index_map(self, _: jax.Array, gm_id: jax.Array,
+                            __: jax.Array):
+        # Scale rides in the lhs buffer itself, in the lane tile that starts at
+        # column size_k. Same row tiling as lhs; independent of k.
+        m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
+        m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
+
+        row_start = m_start // self.cfgs.dims.size_lhs_sublane
+        row_end = pl.cdiv(m_end, self.cfgs.dims.size_lhs_sublane)
+        row_size = row_end - row_start
+
+        return (pl.ds(row_start,
+                      row_size), 0, self.cfgs.dims.size_k // _SCALE_TILE_LANES)
+
     def rhs_weight_index_map(self, n_id: jax.Array, gm_id: jax.Array,
                              k_id: jax.Array):
         group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
@@ -323,10 +367,21 @@ def generate_block_specs(
     bounded_slice_gm = pl.BoundedSlice(cfgs.tiles.tile_m //
                                        cfgs.dims.size_lhs_sublane)
 
-    lhs_block_spec = pl.BlockSpec(
+    lhs_data_block_spec = pl.BlockSpec(
         (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_k),
         index_map.lhs_index_map,
     )
+    lhs_scale_block_spec = None
+    if cfgs.lhs_cfgs.prequantized:
+        # A block narrower than the lane width is not expressible, so this
+        # pulls the whole trailing lane tile and slices the two transport
+        # bytes out in-register.
+        lhs_scale_block_spec = pl.BlockSpec(
+            (bounded_slice_gm, cfgs.dims.size_lhs_sublane, _SCALE_TILE_LANES),
+            index_map.lhs_scale_index_map,
+        )
+    lhs_block_spec = LhsRef(data=lhs_data_block_spec,
+                            scale=lhs_scale_block_spec)
 
     rhs_weight_spec = pl.BlockSpec(
         (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
@@ -364,8 +419,9 @@ def generate_block_specs(
 
 def inner_kernel(
     # In
-    tiled_lhs_ref: jax.Array,
-    # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
+    tiled_lhs_ref: LhsRef,
+    # data [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k],
+    # optional scale [tile_m // size_lhs_sublane, size_lhs_sublane, 1]
     tiled_rhs_ref: RhsRef,  # [tile_k, tile_n]
     # Out
     tiled_out_ref: jax.Array,
@@ -410,7 +466,8 @@ def inner_kernel(
         mxu_size = tpu_info.mxu_column_size
 
         # Step 1: Input pre-processing.
-        tiled_lhs = tiled_lhs_ref.reshape(-1, cfgs.tiles.tile_k)[:bucket_m]
+        tiled_lhs = tiled_lhs_ref.data.reshape(-1,
+                                               cfgs.tiles.tile_k)[:bucket_m]
         tiled_rhs = tiled_rhs_ref.get_weight()
 
         # This should only be taken in the case where we don't requantize
@@ -491,22 +548,28 @@ def inner_kernel(
                     block_lhs = tiled_lhs[:, start_k:end_k]
                     block_rhs = tiled_rhs[start_k:end_k, start_n:end_n]
 
-                    # Perform lhs quantization. Note that for every block_lhs,
-                    # same computation will be performed tiles_n//mxu_size times.
-                    # But we can let compiler perform CSE and avoid recomputation.
-                    block_abs_max = jnp.max(jnp.abs(block_lhs),
-                                            axis=1,
-                                            keepdims=True)
-                    block_scale = block_abs_max / dtype_max
+                    if cfgs.lhs_cfgs.prequantized:
+                        # lhs is already quantized; its per-token scale is
+                        # applied once after the full k reduction (below), so no
+                        # per-block quantization or scaling happens here.
+                        block_lhs_q = block_lhs
+                    else:
+                        # Perform lhs quantization. Note that for every block_lhs,
+                        # same computation will be performed tiles_n//mxu_size times.
+                        # But we can let compiler perform CSE and avoid recomputation.
+                        block_abs_max = jnp.max(jnp.abs(block_lhs),
+                                                axis=1,
+                                                keepdims=True)
+                        block_scale = block_abs_max / dtype_max
 
-                    # If block_scale=0, it will cause division by zero and return either
-                    # NaN or Inf. Since this can cause numeric issue when downcasting to
-                    # quantized value, we convert them into 0.
-                    block_scale_inv = jnp.where(block_scale == 0, 0,
-                                                1 / block_scale)
-                    # Convert lhs into quantized dtype.
-                    block_lhs_q = (block_lhs *
-                                   block_scale_inv).astype(lhs_q_dtype)
+                        # If block_scale=0, it will cause division by zero and return
+                        # either NaN or Inf. Since this can cause numeric issue when
+                        # downcasting to quantized value, we convert them into 0.
+                        block_scale_inv = jnp.where(block_scale == 0, 0,
+                                                    1 / block_scale)
+                        # Convert lhs into quantized dtype.
+                        block_lhs_q = (block_lhs *
+                                       block_scale_inv).astype(lhs_q_dtype)
 
                     # Unlike unquantized path, compiler may not perform implicit type
                     # conversion due to numeric concerns. As this can cause unsupported
@@ -521,7 +584,8 @@ def inner_kernel(
                         preferred_element_type=preferred_element_type,
                     ).astype(acc_ref.dtype)
 
-                    block_acc *= block_scale.astype(acc_ref.dtype)
+                    if not cfgs.lhs_cfgs.prequantized:
+                        block_acc *= block_scale.astype(acc_ref.dtype)
 
                     # Apply rhs subchannel scale per quant block.
                     if cfgs.rhs_cfgs.should_dequantize_after_matmul:
@@ -542,6 +606,40 @@ def inner_kernel(
         acc_m = acc.shape[0]
 
         if is_last_k_step:
+            if cfgs.lhs_cfgs.prequantized:
+                # Dequantize with the per-token scale. It is constant across k
+                # so applying it once to the fully reduced accumulator is exact,
+                # and must happen before the (post-matmul) bias and activation.
+                #
+                # Rebuild the scale from its two fp8 transport bytes, which ride
+                # in the trailing lane tile of the lhs buffer.
+                #
+                # Done in int32: Mosaic cannot legalize arith.shli on 16-bit
+                # vectors. bf16 is exactly the high half of an f32, so shifting
+                # the reassembled bf16 pattern up by 16 gives the f32 bit
+                # pattern directly -- which also skips a widening convert, since
+                # the accumulator is f32 anyway.
+                #
+                # Slice to bucket_m the same way tiled_lhs is sliced, and do it
+                # BEFORE the recombine so the unpack only touches the rows this
+                # bucket actually computes.
+                scale_bytes = tiled_lhs_ref.scale.reshape(
+                    -1, _SCALE_TILE_LANES)[:bucket_m]
+                packed = jax.lax.bitcast_convert_type(scale_bytes, jnp.uint8)
+                lo = packed[..., 0:1].astype(jnp.int32)
+                hi = packed[..., 1:2].astype(jnp.int32)
+                bits = (lo | (hi << 8)) << 16
+                tiled_lhs_scale = jax.lax.bitcast_convert_type(
+                    bits, jnp.float32).reshape(-1, 1)
+                if acc_m != bucket_m:
+                    # acc was front-padded up to tile_m to accumulate against
+                    # acc_ref. Pad the scale to match, with 1.0 so the rows
+                    # carried over from earlier k steps are left untouched.
+                    tiled_lhs_scale = jnp.pad(tiled_lhs_scale,
+                                              ((acc_m - bucket_m, 0), (0, 0)),
+                                              constant_values=1.0)
+                acc *= tiled_lhs_scale.astype(acc.dtype)
+
             if cfgs.rhs_cfgs.has_bias:
                 tiled_rhs_bias = tiled_rhs_ref.get_bias()
                 acc += tiled_rhs_bias.astype(acc.dtype)
@@ -813,7 +911,7 @@ def kernel_main(
     lhs_group_sizes_ref: jax.Array,  # int32[size_lhs_group]
     group_offset_ref: jax.Array,  # int32[1]
     # In
-    lhs_ref: jax.Array,  # [size_m, size_k]
+    lhs_ref: LhsRef,  # data [size_m, size_k], optional scale [size_m, 1]
     rhs_ref: WeightsRef,  # [size_group, size_k, size_n]
     # Out
     out_ref: jax.Array,  # [size_m, size_n]
@@ -896,7 +994,11 @@ def kernel_main(
 
     # Bounded slice requires second last dim to be aligned to the sublane size.
     # rhs_ref uses static tiling thus reshape is not needed.
-    lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
+    lhs_data_in = lhs_ref.data.reshape(-1, cfgs.dims.size_lhs_sublane,
+                                       lhs_ref.data.shape[-1])
+    # Same buffer as the data; the block spec picks the trailing tile out of it.
+    lhs_scale_in = lhs_data_in if lhs_ref.scale is not None else None
+    lhs_in = LhsRef(data=lhs_data_in, scale=lhs_scale_in)
     out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, out_ref.shape[-1])
     scratches = [partial_out_ref, acc_ref, metadata_ref]
     pipeline_fn(lhs_in, rhs_ref, out_in, scratches=scratches)
@@ -1055,7 +1157,13 @@ def validate_inputs(
     size_lhs_group = group_sizes.shape[0]
 
     assert size_group <= size_lhs_group
-    assert lhs.shape == (size_m, size_k)
+    # lhs may be physically wider than size_k: callers can pack extra trailing
+    # columns (e.g. a per-token scale) into the lhs buffer. The kernel contracts
+    # only the first size_k columns (num_k = cdiv(size_k, tile_k) tiles), so the
+    # trailing columns are never read.
+    assert lhs.shape[0] == size_m, f"{lhs.shape=} vs {size_m=}"
+    assert lhs.shape[1] >= size_k, (
+        f"lhs width {lhs.shape[1]} must be >= size_k {size_k}")
     assert rhs.shape == (size_group, size_k, size_n)
     if rhs_bias is not None:
         assert rhs_bias.shape == (size_group, 1, size_n)
@@ -1144,6 +1252,7 @@ def make_gmm_configs(
     maybe_quantize_lhs: bool,
     zero_initialize: bool,
     fuse_act: str | None = None,
+    lhs_prequantized: bool = False,
 ):
     """Fills the GMM config for the GMM kernel."""
 
@@ -1169,7 +1278,11 @@ def make_gmm_configs(
     )
 
     lhs_q_dtype = None
-    if maybe_quantize_lhs and rhs_cfgs.should_dequantize_after_matmul:
+    if lhs_prequantized:
+        # lhs already carries quantized values in its own dtype; skip the
+        # hardware-based dtype selection and internal quantization entirely.
+        lhs_q_dtype = lhs.dtype
+    elif maybe_quantize_lhs and rhs_cfgs.should_dequantize_after_matmul:
         # Choose lhs quantization dtype based on TPU hardware support.
         is_rhs_float = jnp.issubdtype(rhs_quant_dtype, jnp.floating)
         tpu_info = pltpu.get_tpu_info()
@@ -1193,6 +1306,7 @@ def make_gmm_configs(
         # enough to minimize compute overhead of quantization.
         quant_block_size=512,
         dtype=lhs.dtype,
+        prequantized=lhs_prequantized,
     )
 
     if out_dtype is None:
@@ -1244,6 +1358,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
     "maybe_quantize_lhs",
     "zero_initialize",
     "fuse_act",
+    "lhs_scale_packed",
 ])
 def gmm_v2(
     lhs: jax.Array,  # [size_m, size_k]
@@ -1262,6 +1377,7 @@ def gmm_v2(
     maybe_quantize_lhs: bool = True,
     zero_initialize: bool = True,
     fuse_act: str | None = None,
+    lhs_scale_packed: bool = False,
 ) -> jax.Array:
     """GMM kernel implemented with emit_pipeline.
 
@@ -1284,6 +1400,10 @@ def gmm_v2(
         maybe_quantize_lhs: Quantize lhs if set to True and rhs is quantized.
         zero_initialize: Whether to initialize unvisited output elements to zero.
         fuse_act: Activation function to fuse with GMM, None if no fusion.
+        lhs_scale_packed: Treat lhs as already quantized, carrying its per-token
+            dequant scale as two fp8-typed transport bytes at column size_k.
+            The kernel contracts only the first size_k columns and applies the
+            scale to the accumulator, skipping internal lhs quantization.
 
     Returns:
         Output of shape [size_m, size_n].
@@ -1300,6 +1420,12 @@ def gmm_v2(
     if vmem_limit_bytes is None:
         vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
 
+    # The scale rides in lhs's trailing lane tile. Bind it HERE, inside the jit:
+    # object identity does not survive jit argument tracing (passing the same
+    # array twice yields two distinct tracers), so the caller cannot hand us
+    # "the same buffer" -- it has to be bound in-function.
+    lhs_scale = lhs if lhs_scale_packed else None
+
     cfgs = make_gmm_configs(
         lhs,
         rhs,
@@ -1314,6 +1440,7 @@ def gmm_v2(
         maybe_quantize_lhs=maybe_quantize_lhs,
         zero_initialize=zero_initialize,
         fuse_act=fuse_act,
+        lhs_prequantized=lhs_scale_packed,
     )
     dims = cfgs.dims
     tiles = cfgs.tiles
@@ -1326,6 +1453,18 @@ def gmm_v2(
     if rhs_bias is not None:
         rhs_bias = rhs_bias.astype(jnp.float32)
         rhs_bias_spec = pl.BlockSpec(memory_space=pltpu.HBM)
+
+    lhs_scale_spec = None
+    if lhs_scale is not None:
+        # The scale rides in lhs itself: same buffer, two fp8-typed transport
+        # bytes at column size_k, inside the trailing lane tile.
+        assert dims.size_k % _SCALE_TILE_LANES == 0, (
+            f"{dims.size_k=} must be a multiple of {_SCALE_TILE_LANES} "
+            "for the packed scale tile index to be exact")
+        assert lhs.shape[1] >= dims.size_k + 2, (
+            f"{lhs.shape=} must have >= size_k+2 ({dims.size_k + 2}) "
+            "columns to carry the packed scale")
+        lhs_scale_spec = pl.BlockSpec(memory_space=pltpu.HBM)
 
     # Initialize scratch shapes.
     max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
@@ -1371,6 +1510,7 @@ def gmm_v2(
     aligned_n = align_to(cfgs.out_size_n, num_lanes)
     out_init = jax.ShapeDtypeStruct((dims.size_m, aligned_n), cfgs.out_dtype)
     rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
+    lhs_in = LhsRef(data=lhs, scale=lhs_scale)
 
     return pl.pallas_call(
         functools.partial(kernel_main, cfgs=cfgs),
@@ -1378,7 +1518,10 @@ def gmm_v2(
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=2,
             in_specs=[
-                pl.BlockSpec(memory_space=pltpu.HBM),
+                LhsRef(
+                    data=pl.BlockSpec(memory_space=pltpu.HBM),
+                    scale=lhs_scale_spec,
+                ),
                 WeightsRef(
                     weight=pl.BlockSpec(memory_space=pltpu.HBM),
                     scale=rhs_scale_spec,
@@ -1395,4 +1538,4 @@ def gmm_v2(
         name=get_scope_name(cfgs),
         cost_estimate=get_cost_estimate(cfgs),
         metadata=get_metadata(cfgs),
-    )(group_sizes, group_offset, lhs, rhs_weights)[:, :cfgs.out_size_n]
+    )(group_sizes, group_offset, lhs_in, rhs_weights)[:, :cfgs.out_size_n]
