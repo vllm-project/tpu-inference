@@ -14,6 +14,7 @@
 
 import math
 import tempfile
+from unittest.mock import MagicMock, patch
 
 import jax
 import pytest
@@ -29,6 +30,7 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers import linear as vllm_linear
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -37,6 +39,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 
 from tests.layers.common import utils as test_utils
+from tpu_inference import envs
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
@@ -582,3 +585,132 @@ def test_unaligned_block_quantization(model, input_size, output_size):
     initialize_layer_weights(linear_layer)
     ref_output, layer_output = return_ref_and_layer_output(linear_layer)
     torch.testing.assert_close(ref_output, layer_output)
+
+
+def test_fp8_incremental_loading_trigger():
+    """Test that maybe_process_weights tracks shards and triggers sharding on exact last shard."""
+    mesh = test_utils.get_spmd_mesh(1)
+    engine_args = EngineArgs(model=MODELS[0], max_model_len=64)
+    vllm_config = engine_args.create_engine_config()
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+
+    with set_current_vllm_config(vllm_config):
+        mock_linear_config = MagicMock()
+        mock_linear_config.num_proj = 1
+        method = VllmFp8LinearMethod(quant_config, mock_linear_config)
+
+    layer = MagicMock(spec=vllm_linear.ColumnParallelLinear)
+    layer.named_parameters.return_value = [("weight", MagicMock()),
+                                           ("weight_scale", MagicMock())]
+    layer._loaded_weights = set()
+
+    with patch.object(method, "process_weights_after_loading") as mock_process:
+        with patch.object(envs, "VLLM_INCREMENTAL_FP8_LOADING", True):
+            # First shard: weight
+            method.maybe_process_weights(layer, "weight", (), {})
+            assert mock_process.call_count == 0
+            assert "weight" in layer._loaded_weights
+
+            # Second shard: weight_scale (last shard)
+            method.maybe_process_weights(layer, "weight_scale", (), {})
+            assert mock_process.call_count == 1
+
+
+def test_fp8_incremental_loading_already_processed_noop():
+    """Test that process_weights_after_loading is a no-op if weight is no longer in CPU or missing."""
+    mesh = test_utils.get_spmd_mesh(1)
+    engine_args = EngineArgs(model=MODELS[0], max_model_len=64)
+    vllm_config = engine_args.create_engine_config()
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+
+    with set_current_vllm_config(vllm_config):
+        layer = ColumnParallelLinear(
+            input_size=128,
+            output_size=256,
+            bias=False,
+            quant_config=quant_config,
+        )
+
+    method = layer.quant_method
+    delattr(layer, "weight")
+    # Should safely return without error when weight is missing
+    method.process_weights_after_loading(layer)
+
+
+def test_fp8_e8m0_scale_parameter_conversion():
+    """Test that float8_e8m0fnu scale conversion converts to float32 and retains Parameter type."""
+    mesh = test_utils.get_spmd_mesh(1)
+    engine_args = EngineArgs(model=MODELS[0], max_model_len=64)
+    vllm_config = engine_args.create_engine_config()
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+
+    with set_current_vllm_config(vllm_config):
+        layer = ColumnParallelLinear(
+            input_size=128,
+            output_size=256,
+            bias=False,
+            quant_config=quant_config,
+        )
+
+    method = layer.quant_method
+    method.block_quant = False
+    initialize_layer_weights(layer)
+
+    layer.weight_scale = torch.nn.Parameter(torch.tensor(
+        1.0, dtype=torch.float8_e8m0fnu),
+                                            requires_grad=False)
+
+    method.process_weights_after_loading(layer)
+
+    assert isinstance(layer.weight_scale, torch.nn.Parameter)
+    assert layer.weight_scale.dtype == torch.float32
+
+
+def test_fp8_moe_incremental_loading_trigger():
+    """Test that VllmFp8MoEMethod triggers sharding only when expected 6E shards arrive."""
+    mesh = test_utils.get_spmd_mesh(1)
+    mock_moe_config = MagicMock()
+    mock_moe_config.num_experts = 4
+    layer = MagicMock()
+    layer.moe_config = mock_moe_config
+    layer.global_num_experts = 4
+    layer._loaded_weights = set()
+
+    fp8_config = MagicMock()
+    fp8_config.weight_block_size = [128, 128]
+
+    with patch(
+            "tpu_inference.layers.vllm.quantization.fp8.select_moe_backend_from_fused_moe_config"
+    ):
+        method = VllmFp8MoEMethod(fp8_config, layer, mesh)
+
+    with patch.object(method, "process_weights_after_loading") as mock_process:
+        with patch.object(envs, "VLLM_INCREMENTAL_FP8_LOADING", True):
+            # Load 23 shards (1 short of expected 24)
+            for expert_id in range(4):
+                for shard_id in range(5):
+                    method.maybe_process_weights(layer, "w13_weight", (), {
+                        "expert_id": expert_id,
+                        "shard_id": shard_id
+                    })
+            method.maybe_process_weights(layer, "w2_weight", (), {
+                "expert_id": 0,
+                "shard_id": 5
+            })
+            method.maybe_process_weights(layer, "w2_weight", (), {
+                "expert_id": 1,
+                "shard_id": 5
+            })
+            method.maybe_process_weights(layer, "w2_weight", (), {
+                "expert_id": 2,
+                "shard_id": 5
+            })
+
+            assert mock_process.call_count == 0
+
+            # 24th shard triggers process_weights_after_loading
+            method.maybe_process_weights(layer, "w2_weight", (), {
+                "expert_id": 3,
+                "shard_id": 5
+            })
+            assert mock_process.call_count == 1
