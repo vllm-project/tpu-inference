@@ -358,10 +358,7 @@ class GmmTest(jtu.JaxTestCase):
             group_offset=group_offset,
         )
 
-        tile_info = TileSizes(tile_m=128,
-                              bucket_base=128,
-                              tile_k=tile_k,
-                              tile_n=out_size)
+        tile_info = TileSizes(tile_m=128, tile_k=tile_k, tile_n=out_size)
         actual = gmm_v2(
             lhs,
             rhs_q,
@@ -420,10 +417,7 @@ class GmmTest(jtu.JaxTestCase):
             group_offset=group_offset,
         )
 
-        tile_info = TileSizes(tile_m=128,
-                              bucket_base=128,
-                              tile_k=tile_k,
-                              tile_n=out_size)
+        tile_info = TileSizes(tile_m=128, tile_k=tile_k, tile_n=out_size)
         actual = gmm_v2(
             lhs,
             rhs_q,
