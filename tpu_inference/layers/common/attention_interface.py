@@ -14,7 +14,6 @@
 
 import functools
 import math
-import os
 from typing import Any, Callable, Optional, Tuple
 
 import jax
@@ -813,6 +812,7 @@ def pcp_ragged_paged_attention(
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
     cache_pages: int = -1,
+    cache_phase: str | None = None,
 ):
     """Single-request prefill context-parallel (PCP) attention.
 
@@ -836,18 +836,19 @@ def pcp_ragged_paged_attention(
     pcp_chunk_size = padded_q_len // two_p  # head-tail chunk size
 
     # --- cache-phase communication strategy ---------------------------------
-    # "gather_q"  (default): replicate Q across pcp, attend the local KV shard,
-    #             LSE reduce-scatter.  Comm ~ 2 * chunk * NQ (Q gather + O a2a),
-    #             independent of context length.
-    # "gather_kv": all-gather the striped KV cache into GLOBAL TOKEN ORDER so
-    #             every rank holds the full cache, then attend the LOCAL Q
-    #             against it as ordinary paged attention.  No output
-    #             collective, no per-rank bookkeeping.  Comm ~ ctx * NKV.
-    #             Wins at short context / low NKV, but materializes the full
-    #             cache on every rank (memory ~ pcp * local cache).
-    # "auto":     pick per-compile by comparing the two static comm estimates.
-    _cache_phase = os.environ.get("PCP_CACHE_PHASE", "gather_q").lower()
-    if _cache_phase == "auto":
+    # Two ways to give every rank what it needs for the cache phase:
+    #   "gather_q":  replicate Q across pcp, attend the local KV shard, LSE
+    #                reduce-scatter.  Comm ~ 2 * chunk * NQ (Q gather + output
+    #                all-to-all), independent of context length.
+    #   "gather_kv": all-gather the striped KV cache into global token order so
+    #                every rank holds the full cache, then attend the LOCAL Q
+    #                against it as ordinary paged attention.  No output
+    #                collective.  Comm ~ ctx * NKV.
+    # The choice is made per compile by comparing those two static estimates:
+    # gather-KV wins at short context / few KV heads, gather-Q at long context.
+    # `cache_phase` overrides the decision (tests only); production leaves it
+    # None and gets the automatic choice.
+    if cache_phase is None:
         nq_total, hd = q.shape[1], q.shape[2]
         nkv_total = k.shape[1]
         # ctx upper bound from the cache shape: pages_per_seq * global_page.
@@ -859,6 +860,8 @@ def pcp_ragged_paged_attention(
         comm_q = 2 * padded_q_len * nq_total * hd
         comm_kv = ctx_ub * nkv_total * hd
         _cache_phase = "gather_kv" if comm_kv < comm_q else "gather_q"
+    else:
+        _cache_phase = cache_phase.lower()
 
     _row = [c for r in range(pcp_size) for c in (r, two_p - 1 - r)]
     _inv = [0] * two_p
@@ -964,10 +967,18 @@ def pcp_ragged_paged_attention(
             else:
                 kv_src, pi_src = kvc, pi
 
+            # [npages, page_l, pcp, ...] -- flattening (page, offset, rank) is
+            # already global token order.  Regroup that stream into pages of
+            # the ORIGINAL page_l (a pure reshape, since the token axis is
+            # contiguous): keeping page_size unchanged matters because a
+            # page_l*pcp-wide page blows the kernel's VMEM budget at large
+            # pcp / NKV / HD.  Pages are then identity-indexed.
             kv_tok = lax.all_gather(kv_src, pcp_axis, axis=2, tiled=False)
-            kv_tok = kv_tok.reshape(kv_src.shape[0],
-                                    kv_src.shape[1] * pcp_size,
+            n_pages_tok = kv_src.shape[0] * pcp_size
+            kv_tok = kv_tok.reshape(n_pages_tok, kv_src.shape[1],
                                     *kv_src.shape[2:])
+            pi_src = jnp.tile(jnp.arange(n_pages_tok, dtype=pi.dtype),
+                              max_seqs)
             common_kv = {
                 k: v
                 for k, v in common.items()

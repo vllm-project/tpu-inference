@@ -341,6 +341,26 @@ class CompilationManager:
                 num_tokens=num_tokens,
             )
 
+    def _pcp_cache_page_buckets(self) -> list[int]:
+        """Values of AttentionMetadata.pcp_cache_pages the runner can emit.
+
+        It is a META field, so each distinct value is its own compiled graph;
+        precompiling them keeps the first request of each bucket off the
+        compile path.  The runner emits 0 (first chunk, cache phase elided)
+        and then powers of two up to max_num_blocks_per_req.  Non-PCP runs
+        only ever see the -1 sentinel.
+        """
+        pcp_size = self.runner.vllm_config.sharding_config.prefill_cp_size
+        if pcp_size <= 1:
+            return [-1]
+        max_blocks = self.runner.max_num_blocks_per_req
+        buckets, b = [0], 1
+        while b < max_blocks:
+            buckets.append(b)
+            b *= 2
+        buckets.append(max_blocks)
+        return sorted(set(buckets))
+
     def _precompile_backbone_helper(self,
                                     name,
                                     *,
@@ -350,7 +370,8 @@ class CompilationManager:
                                     intermediate_tensors=None,
                                     is_first_rank=True,
                                     is_last_rank=True,
-                                    num_reqs: int) -> None:
+                                    num_reqs: int,
+                                    pcp_cache_pages: int = -1) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -430,6 +451,7 @@ class CompilationManager:
                 padded_num_reqs=num_reqs,
                 pcp_kv_cache_lens=pcp_kv_cache_lens,
                 pcp_q_pos_offsets=pcp_q_pos_offsets,
+                pcp_cache_pages=pcp_cache_pages,
             )
 
             return attention_metadata_gid
@@ -676,15 +698,17 @@ class CompilationManager:
                             "hidden_states": hidden_states,
                             "residual": residual
                         })
-                self._precompile_backbone_helper(
-                    f"worker{self.runner.rank} backbone",
-                    input_ids=input_ids,
-                    positions=positions,
-                    inputs_embeds=None,
-                    intermediate_tensors=intermediate_tensors,
-                    is_first_rank=is_first_rank,
-                    is_last_rank=is_last_rank,
-                    num_reqs=num_reqs)
+                for _cache_pages in self._pcp_cache_page_buckets():
+                    self._precompile_backbone_helper(
+                        f"worker{self.runner.rank} backbone",
+                        input_ids=input_ids,
+                        positions=positions,
+                        inputs_embeds=None,
+                        intermediate_tensors=intermediate_tensors,
+                        is_first_rank=is_first_rank,
+                        is_last_rank=is_last_rank,
+                        num_reqs=num_reqs,
+                        pcp_cache_pages=_cache_pages)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()

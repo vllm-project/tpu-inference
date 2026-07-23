@@ -9,8 +9,6 @@ pages) is never taken there.  This test forces it: the cache is allocated with
 non-contiguous permutation, so a bug in the compaction indexing shows up as a
 numerical mismatch against the plain reference.
 """
-import os
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -73,15 +71,9 @@ class PcpGatherKvPagesTest(jtu.JaxTestCase):
             self.skipTest("Expect TPUv4+")
         self._saved_cls = sharding_mod.ShardingAxisName._cls
         sharding_mod.ShardingAxisName._cls = ShardingAxisNameBase
-        self._prev = os.environ.get("PCP_CACHE_PHASE")
-        os.environ["PCP_CACHE_PHASE"] = "gather_kv"
 
     def tearDown(self):
         sharding_mod.ShardingAxisName._cls = self._saved_cls
-        if self._prev is None:
-            os.environ.pop("PCP_CACHE_PHASE", None)
-        else:
-            os.environ["PCP_CACHE_PHASE"] = self._prev
         super().tearDown()
 
     @property
@@ -193,7 +185,7 @@ class PcpGatherKvPagesTest(jtu.JaxTestCase):
             _to_rank_order(k, pcp, C), _to_rank_order(v, pcp, C), cache,
             pad1([kv_total, kv_total]), pi, cu,
             jnp.array([0, 0, 2], jnp.int32), pad1([L, L]), qpos, SM,
-            cache_pages=hint)
+            cache_pages=hint, cache_phase="gather_kv")
 
         inv = _inv_row(pcp)
         got = np.asarray(out).reshape(2 * pcp, C, NQ, HD)[inv].reshape(
@@ -246,7 +238,7 @@ class PcpGatherKvPagesTest(jtu.JaxTestCase):
             _to_rank_order(k, pcp, C), _to_rank_order(v, pcp, C), cache,
             pad1([kv_total, kv_total]), pi, cu,
             jnp.array([0, 0, 2], jnp.int32), pad1([0, 0]), qpos, SM,
-            cache_pages=0)
+            cache_pages=0, cache_phase="gather_kv")
 
         inv = _inv_row(pcp)
         got = np.asarray(out).reshape(2 * pcp, C, NQ, HD)[inv].reshape(
