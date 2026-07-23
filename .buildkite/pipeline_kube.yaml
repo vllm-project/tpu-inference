@@ -245,7 +245,7 @@ steps:
 
   - label: ":floppy_disk: Create resource-prep cache clone"
     key: "kube_resource_pvc_create"
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     if: build.env("KUBE_RESOURCE_PREP_POC") == "1"
     agents:
       queue: "kube"
@@ -351,7 +351,7 @@ steps:
   - label: ":kubernetes: E2E MLPerf tests for JAX models"
     key: "kube_e2e_mlperf_jax"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
@@ -370,7 +370,7 @@ steps:
   - label: ":kubernetes: E2E MLPerf tests for JAX models with quantization"
     key: "kube_e2e_mlperf_quantized"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
@@ -389,7 +389,7 @@ steps:
   - label: ":kubernetes: E2E MLPerf tests for JAX new models"
     key: "kube_e2e_mlperf_new_models"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
@@ -408,7 +408,7 @@ steps:
   - label: ":kubernetes: E2E MLPerf tests for JAX + vLLM models on single chip"
     key: "kube_e2e_mlperf_jax_vllm"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_RESOURCE_PREP_POC") != "1"
     agents:
@@ -427,7 +427,7 @@ steps:
   - label: ":kubernetes: E2E MLPerf tests for Llama4 models"
     key: "kube_e2e_mlperf_llama4"
     <<: *kube_v6e_8chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
@@ -446,7 +446,7 @@ steps:
   - label: ":kubernetes: E2E speculative decoding test"
     key: "kube_e2e_speculative_decoding"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     timeout_in_minutes: 180
     if: build.env("KUBE_CPU_ONLY") != "1"
@@ -470,7 +470,7 @@ steps:
   - label: ":kubernetes: JAX unit tests part1"
     key: "kube_jax_unit_tests_part1"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     artifact_paths: ".coverage.part1.tpu6e"
     if: build.env("KUBE_CPU_ONLY") != "1"
@@ -490,7 +490,7 @@ steps:
   - label: ":kubernetes: JAX unit tests part2"
     key: "kube_jax_unit_tests_part2"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     artifact_paths: ".coverage.part2.tpu6e"
     if: build.env("KUBE_CPU_ONLY") != "1"
@@ -542,7 +542,7 @@ steps:
   - label: ":kubernetes: JAX unit tests - kernels"
     key: "kube_jax_unit_tests_kernels"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
@@ -560,7 +560,7 @@ steps:
   - label: ":kubernetes: JAX unit tests - collective kernels"
     key: "kube_jax_unit_tests_collectives"
     <<: *kube_v6e_8chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
@@ -577,7 +577,7 @@ steps:
   - label: ":kubernetes: LoRA unit tests on single chip"
     key: "kube_lora_unit_tests"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
@@ -596,7 +596,7 @@ steps:
   - label: ":kubernetes: LoRA E2E tests on single chip - test_lora"
     key: "kube_lora_e2e_single_chip"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
@@ -615,7 +615,7 @@ steps:
   - label: ":kubernetes: LoRA E2E tests on single chip - test_lora_adapter"
     key: "kube_lora_adapter_e2e_single_chip"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
@@ -637,7 +637,7 @@ steps:
   - label: ":kubernetes: E2E MLPerf tests for JAX + vLLM models on multiple chips"
     key: "kube_e2e_mlperf_jax_vllm_multi_chip"
     <<: *kube_v6e_8chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1" && build.env("KUBE_FULL_MATRIX") == "1"
     agents:
@@ -656,7 +656,7 @@ steps:
   - label: ":kubernetes: Correctness Test | Runai Model Streamer JAX UniProcExecutor"
     key: "kube_runai_streamer_jax"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
@@ -673,7 +673,7 @@ steps:
   - label: ":kubernetes: Correctness Test | Runai Model Streamer Torchax UniProcExecutor"
     key: "kube_runai_streamer_torchax"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
@@ -690,7 +690,7 @@ steps:
   - label: ":kubernetes: Accuracy for Qwen/Qwen2.5-VL-7B-Instruct"
     key: "kube_qwen2_5_vl_7b_accuracy"
     <<: *kube_v6e_1chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
@@ -710,7 +710,7 @@ steps:
   - label: ":kubernetes: LoRA E2E tests for JAX + vLLM models multi chips"
     key: "kube_lora_e2e_multi_chip"
     <<: *kube_v6e_8chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
@@ -731,7 +731,7 @@ steps:
   - label: ":kubernetes: LoRA unit tests on multi chips"
     key: "kube_lora_unit_tests_multi_chip"
     <<: *kube_v6e_8chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
@@ -750,7 +750,7 @@ steps:
   - label: ":kubernetes: Correctness Test | Runai Model Streamer Torchax RayDistributedExecutor"
     key: "kube_runai_streamer_torchax_ray"
     <<: *kube_v6e_8chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
@@ -767,7 +767,7 @@ steps:
   - label: ":kubernetes: E2E test for Single Host DCN-based P/D disaggregation"
     key: "kube_disagg_single_host"
     <<: *kube_v6e_8chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1"
     agents:
@@ -789,7 +789,7 @@ steps:
   - label: ":kubernetes: E2E test for MPMD data parallelism"
     key: "kube_mpmd_data_parallelism"
     <<: *kube_v6e_8chip_concurrency
-    depends_on: "kube_build_image"
+    depends_on: "kube_cpu_safe_tests"
     soft_fail: true
     if: build.env("KUBE_CPU_ONLY") != "1"
     agents:

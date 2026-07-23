@@ -637,10 +637,18 @@ networking disabled, then skips every standard TPU step. The same tests remain
 in their TPU shards until repeated CPU-only builds pass; this is deliberate
 shadowing rather than an immediate reduction in TPU coverage.
 
+Every TPU and resource-preparation entry step depends on this CPU tier. It is
+still a shadow with respect to test ownership—the same tests remain in their
+TPU shards—but it is now a fail-fast preflight: a CPU-safe regression blocks
+new TPU allocation instead of merely making the final validator fail after TPU
+work has already started.
+
 The exact selector commit was validated by kube-dev build 40: 72 tests and 11
-subtests passed in 9.64 seconds with Docker networking disabled. Its enclosing
-Buildkite job took 14.5 seconds and started 0.6 seconds after the image became
-available. The remaining warning is deliberate evidence that
+subtests passed in 9.64 seconds with Docker networking disabled. Build 43 added
+the resource hardening tests and passed 74 tests plus 11 subtests in 9.85
+seconds. Their enclosing Buildkite jobs took about 14 seconds and started less
+than a second after the image became available. The remaining warning is
+deliberate evidence that
 `BUILDKITE_ANALYTICS_TOKEN` still needs to be provisioned before Test Engine
 history can be used.
 
