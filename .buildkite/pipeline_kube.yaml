@@ -145,6 +145,7 @@ steps:
       BM_INFRA: "false"
       TPU_VERSION: "tpu6e"
       CI_IMAGE_ALIAS_TAG: "kube-${BUILDKITE_COMMIT}"
+      KEEP_IMAGE_AFTER_PUSH: "true"
     commands:
       - buildkite-agent meta-data set VLLM_COMMIT_HASH "$$(tr -d '[:space:]' < .buildkite/vllm_lkg.version)"
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
@@ -164,7 +165,10 @@ steps:
           --network none \
           --user "$$(id -u):$$(id -g)" \
           -e HOME=/tmp \
+          -e LOGNAME=buildkite \
+          -e USER=buildkite \
           -e HF_HOME=/tmp/hf_home \
+          -e XDG_CACHE_HOME=/tmp/.cache \
           -e JAX_PLATFORMS=cpu \
           -e TPU_NAME=cpu-safe \
           -v "$$PWD:/workspace/build/buildkite" \

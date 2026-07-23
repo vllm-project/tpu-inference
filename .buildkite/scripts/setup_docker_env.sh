@@ -248,8 +248,11 @@ setup_environment() {
   # Only clean up resources in setup_environment after pushing to a remote registry
   # (e.g., standalone builder jobs in CI). When building locally to run on the same machine
   # (push_to_ci_cache=false and should_push=false), preserve the image so the caller can run it.
-  if [[ "$push_to_ci_cache" == "true" || "$should_push" == "true" ]]; then
+  if [[ ( "$push_to_ci_cache" == "true" || "$should_push" == "true" ) && \
+        "${KEEP_IMAGE_AFTER_PUSH:-false}" != "true" ]]; then
     echo "--- Cleaning up Docker resources after push..."
     cleanup_docker_resource "${IMAGE_NAME}"
+  elif [[ "$push_to_ci_cache" == "true" || "$should_push" == "true" ]]; then
+    echo "--- Preserving the pushed image locally for dependent jobs."
   fi
 }

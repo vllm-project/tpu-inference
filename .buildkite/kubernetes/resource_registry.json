@@ -1,0 +1,20 @@
+{
+  "datasets": {
+    "mlperf": {
+      "destination": "datasets/open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl",
+      "prepare_script": ".buildkite/scripts/prepare_mlperf_dataset.sh",
+      "sha256": "b64e66e54b6267f79eb4f9ccec52d466bab3ac94747ed258c3b0f337ed166fab"
+    }
+  },
+  "models": {
+    "Qwen/Qwen2.5-0.5B-Instruct": {
+      "repo_id": "Qwen/Qwen2.5-0.5B-Instruct"
+    },
+    "Qwen/Qwen2.5-1.5B-Instruct": {
+      "repo_id": "Qwen/Qwen2.5-1.5B-Instruct"
+    },
+    "meta-llama/Llama-3.1-8B-Instruct": {
+      "repo_id": "meta-llama/Llama-3.1-8B-Instruct"
+    }
+  }
+}
