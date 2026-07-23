@@ -11,7 +11,7 @@ To add a new kernel to the tuning framework, create a new file (e.g. `my_kernel_
 ### Step 1 — Define `TuningKey` and `TunableParams`
 
 `TuningKey` describes the fixed properties of a kernel invocation (shapes, types, etc.).  
-`TunableParams` describes the parameters you want to search over (tile sizes, etc.).  
+`TunableParams` describes the parameters you want to search over (tile sizes, etc.).  Must implement `__ge__(self, other)` and `__le__(self, other)` function as they are used for OOM early termination.
 Both must be `@dataclass` so the framework can serialize/deserialize them.
 
 ```python
