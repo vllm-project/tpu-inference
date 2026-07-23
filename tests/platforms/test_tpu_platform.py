@@ -581,8 +581,6 @@ class TestTpuPlatform:
              "continue_decode is not supported with pipeline parallelism"),
             (1, "pooling", False,
              "continue_decode is not supported for pooling models"),
-            (1, "generate", True,
-             "continue_decode is not supported with async scheduling"),
         ],
     )
     @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")

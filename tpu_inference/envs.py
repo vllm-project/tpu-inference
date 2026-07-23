@@ -41,6 +41,13 @@ if TYPE_CHECKING:
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
     USE_BATCHED_RPA_KERNEL: bool = False
+    USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
+    # Optional operator override for the RPA v3 kernel block sizes, one per
+    # case. Each is a comma-separated 4-tuple (bq_sz, bkv_sz, bq_csz, bkv_csz).
+    # Empty (default) = use the built-in tuned/heuristic sizes.
+    RPA_V3_DECODE_BLOCK_SIZES: list[int] = []
+    RPA_V3_PREFILL_BLOCK_SIZES: list[int] = []
+    RPA_V3_MIXED_BLOCK_SIZES: list[int] = []
     FORCE_MOE_RANDOM_ROUTING: bool = False
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
@@ -69,6 +76,8 @@ if TYPE_CHECKING:
     SLICE_ROPE_CACHE: bool = False
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
+    VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+    TPU_MESH_SORT_BY_COORDS: bool = False
 
 
 def env_with_choices(
@@ -319,6 +328,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
+    "USE_BATCHED_RPA_SEQ_ON_LANE":
+    env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
+    # Optional operator override for RPA v3 kernel block sizes, per case.
+    # Comma-separated 4-tuple: bq_sz,bkv_sz,bq_csz,bkv_csz. Empty = use the
+    # built-in tuned/heuristic sizes. Lets operators retune the decode
+    # KV-fetch/compute split (e.g. deeper double-buffering) without a rebuild.
+    "RPA_V3_DECODE_BLOCK_SIZES":
+    env_int_list("RPA_V3_DECODE_BLOCK_SIZES"),
+    "RPA_V3_PREFILL_BLOCK_SIZES":
+    env_int_list("RPA_V3_PREFILL_BLOCK_SIZES"),
+    "RPA_V3_MIXED_BLOCK_SIZES":
+    env_int_list("RPA_V3_MIXED_BLOCK_SIZES"),
     # Force random expert routing in MoE layers (for testing purposes only)
     "FORCE_MOE_RANDOM_ROUTING":
     env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
@@ -425,6 +446,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # is interleaved per rank and a single valid-token count cannot describe it.
     "MOE_ROUTE_PADDING_TO_EXPERT0":
     env_bool("MOE_ROUTE_PADDING_TO_EXPERT0", default=False),
+    # Gap between token-bucket padding sizes for TPU precompilation. When 0,
+    # buckets grow as powers of two; otherwise buckets increase by this gap
+    # once past the power-of-two ramp. Previously provided by vllm.envs, which
+    # removed it upstream as an orphaned var, so it now lives here.
+    "VLLM_TPU_BUCKET_PADDING_GAP":
+    lambda: int(os.getenv("VLLM_TPU_BUCKET_PADDING_GAP", "0")),
+    # Sort devices by coords and core_on_chip when constructing a tpu mesh.
+    # Currently, it only supports a single host set up.
+    "TPU_MESH_SORT_BY_COORDS":
+    env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
 }
 
 

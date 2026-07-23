@@ -251,8 +251,11 @@ class ShardingConfigManager:
             # Use attention DP instead to reduce per-device num_kv_heads and
             # eliminate this waste.
 
-            num_kv_heads_per_device_in_kv_cache = max(1, (num_kv_heads * 2) /
-                                                      packing)
+            if envs.USE_BATCHED_RPA_KERNEL and envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+                num_kv_heads_per_device_in_kv_cache = max(1, num_kv_heads * 2)
+            else:
+                num_kv_heads_per_device_in_kv_cache = max(
+                    1, (num_kv_heads * 2) / packing)
             attn_dp_size = sharding_strategy.get("attn_dp_size", None)
             if attn_dp_size is None:
                 attn_dp = max(
