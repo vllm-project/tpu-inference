@@ -66,6 +66,7 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install setuptools-rust>=1.9.
 RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install --no-build-isolation -e .
 
 # Install test dependencies
+COPY --from=buildkite/test-engine-client /usr/local/bin/bktec /usr/local/bin/bktec
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/vllm_test_utils
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install \
     git+https://github.com/thuml/depyf.git \
