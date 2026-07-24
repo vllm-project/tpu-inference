@@ -78,5 +78,8 @@ kind: LocalQueue
 metadata:
   name: v6e-1
   namespace: buildkite-v6e-1
+  # Requires the pinned Kueue release's LocalQueueDefaulting feature gate.
+  labels:
+    kueue.x-k8s.io/default-queue: "true"
 spec:
   clusterQueue: v6e-1

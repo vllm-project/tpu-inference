@@ -308,6 +308,19 @@ the stack advertises every tag. Express TPU shape through the shared pod
 profile/resource request. Let namespace defaulting or a scoped admission rule
 assign top-level Job label `kueue.x-k8s.io/queue-name: v6e-1`.
 
+For the current dedicated namespace, the checked-in manager LocalQueue carries
+`kueue.x-k8s.io/default-queue: "true"`. This only takes effect when the pinned
+Kueue release supports and enables `LocalQueueDefaulting`; verify that an
+unlabeled, unsuspended test Job is stored with queue name `v6e-1` and
+`spec.suspend: true` before enabling the Agent Stack queue.
+
+In the current hand-written pipeline, the logical profile is selected by the
+shared `kube_tpu_v6e_1chip_plugin` or `kube_tpu_v6e_8chip_plugin` YAML anchor.
+The anchor—not an arbitrary profile label—renders `google.com/tpu`, accelerator,
+and topology requirements. Kueue uses those hard PodSpec requirements to choose
+a compatible ResourceFlavor. A future test registry/generator can expose a
+friendlier `profile: v6e-1` input and render the same anchor internally.
+
 Set `KUEUE_SMOKE_IMAGE` to an immutable image digest available to every worker,
 then upload `buildkite-smoke.yaml` from the existing CPU bootstrap queue. It is
 kept separate from `pipeline_kube.yaml` so no production or POC TPU matrix is

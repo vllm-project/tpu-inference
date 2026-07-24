@@ -547,13 +547,124 @@ Install Agent Stack only on `ci-test-controller`, configured to create
 Kubernetes Jobs in manager namespace `buildkite-v6e-1`. Do not install an Agent
 Stack controller on the worker.
 
-Before sending a TPU command, establish how the generated top-level Job receives
-`kueue.x-k8s.io/queue-name: v6e-1`:
+### Exact queue and profile contract
 
-1. prefer an Agent Stack value/plugin field that adds metadata to the Job;
-2. otherwise use the pinned Kueue release's LocalQueue defaulting feature in
-   this dedicated namespace; or
-3. use a narrowly scoped admission mutation as a POC fallback.
+There are three independent selections; do not conflate their names:
+
+| Selection | Current value | Selected by | Purpose |
+| --- | --- | --- | --- |
+| Buildkite queue | `kube` | `agents.queue` | Sends a Buildkite command job to the one Agent Stack controller. |
+| Kueue LocalQueue | `v6e-1` (internal POC name) | top-level Kubernetes Job queue label or LocalQueue defaulting | Maps the namespaced Job to the manager ClusterQueue and MultiKueue admission policy. |
+| TPU profile | `v6e-1` | infrastructure-owned PodSpec resource request and selectors | Makes only the compatible worker ResourceFlavor eligible. |
+
+For the current repository, choosing a profile means choosing a shared plugin
+anchor, not writing a free-form Pod label:
+
+```yaml
+# One chip
+plugins:
+  - *kube_tpu_v6e_1chip_plugin
+
+# Eight chips
+plugins:
+  - *kube_tpu_v6e_8chip_plugin
+```
+
+Those anchors render the actual scheduling contract. For example, the one-chip
+profile produces:
+
+```yaml
+nodeSelector:
+  cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+  cloud.google.com/gke-tpu-topology: 1x1
+resources:
+  requests:
+    google.com/tpu: "1"
+  limits:
+    google.com/tpu: "1"
+```
+
+Kueue compares those hard requirements with candidate ResourceFlavors. On the
+South America worker, flavor `v6e-1` adds the local zone and any verified
+reservation/ComputeClass selector. A flavor whose topology conflicts with the
+PodSpec is not eligible. A neutral label such as `ci.example/profile=v6e-1`
+could be added for reporting, but Kueue does not interpret arbitrary profile
+labels unless a custom admission controller is explicitly written to do so.
+
+Feature engineers should eventually choose `profile: v6e-1` in a test registry
+or helper API. A shared pipeline generator then emits the plugin anchor/PodSpec.
+Do not put an unsupported `profile` key directly on a Buildkite step; Buildkite
+does not know that field. Until that generator exists, selecting the shared
+anchor is the concrete interface.
+
+The current MultiKueue POC resources expose only one-chip quota and the `1x1`
+flavor. A step using `kube_tpu_v6e_8chip_plugin` will therefore remain
+inadmissible. Add and test an eight-chip worker flavor/quota on both manager and
+worker before routing eight-chip steps through this stack.
+
+### How Kueue picks up an Agent Stack Job
+
+Kueue manages a `batch/v1 Job` only when it can resolve a LocalQueue. The normal
+explicit signal is this top-level Job label:
+
+```yaml
+metadata:
+  labels:
+    kueue.x-k8s.io/queue-name: v6e-1
+```
+
+Without that label and without LocalQueue defaulting, Kueue ignores the Job and
+the normal Job controller may create a manager-cluster Pod. MultiKueue never
+sees it.
+
+To hide Kueue from pipeline authors, enable the pinned Kueue release's
+`LocalQueueDefaulting` feature gate and mark `v6e-1` as the default LocalQueue
+for namespace `buildkite-v6e-1`:
+
+```yaml
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: v6e-1
+  namespace: buildkite-v6e-1
+  labels:
+    kueue.x-k8s.io/default-queue: "true"
+spec:
+  clusterQueue: v6e-1
+```
+
+The checked-in manager manifests include this label. Confirm that the pinned
+release serves the feature and that it is enabled in the Kueue controller
+configuration; its default state has changed across releases. If it is not
+available, use one of the explicit-label fallbacks below. The Kueue admission
+webhook must add/resolve the queue and suspend the Job during the original API
+admission request. Do not assume that the mere existence of one LocalQueue
+makes it default.
+
+Prove defaulting before installing/enabling Agent Stack:
+
+1. create an **unsuspended** Job in `buildkite-v6e-1` with no
+   `kueue.x-k8s.io/queue-name` label and a TPU request larger than the current
+   one-chip quota, so successful Kueue pickup cannot dispatch it;
+2. read the stored Job and confirm the queue label was applied and
+   `spec.suspend` became `true`;
+3. confirm Kueue created a Workload referencing LocalQueue `v6e-1`;
+4. confirm no Pod exists on the manager; and
+5. delete the test Job and confirm its Workload disappears.
+
+This is the expected stored state:
+
+```yaml
+metadata:
+  labels:
+    kueue.x-k8s.io/queue-name: v6e-1
+spec:
+  suspend: true
+```
+
+If defaulting is unavailable or fails, configure Agent Stack to put the fixed
+label on the top-level Job, or use a namespace-scoped mutating admission rule.
+Do not continue with an unlabeled Agent Stack Job.
 
 The existing `podSpec.metadata.labels` labels the Pod template and must not be
 assumed to label the parent Job. Prove the bridge with an unlabeled, harmless

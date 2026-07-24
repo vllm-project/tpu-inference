@@ -1,14 +1,14 @@
 # Upload only after Gate 1 through Gate 3 in README.md pass.
-# KUBE_BUILDKITE_QUEUE is expanded when the pipeline is uploaded. Use
-# kueue-poc while the original ci-dev stack still consumes kube; use kube only
-# after the original controller is stopped. The generated Kubernetes Job uses
+# KUBE_BUILDKITE_QUEUE is expanded when the pipeline is uploaded. It defaults
+# to kube for the selected direct cutover; upload only after the original
+# ci-dev controller is stopped. The generated Kubernetes Job uses
 # the internal Kueue LocalQueue v6e-1 through namespace defaulting/admission.
 steps:
   - label: ":kubernetes: MultiKueue v6e-1 Buildkite smoke"
     key: "multikueue_v6e1_smoke"
     timeout_in_minutes: 20
     agents:
-      queue: "${KUBE_BUILDKITE_QUEUE:-kueue-poc}"
+      queue: "${KUBE_BUILDKITE_QUEUE:-kube}"
     command: |
       set -euo pipefail
       echo "Buildkite MultiKueue smoke running on $${HOSTNAME}"
