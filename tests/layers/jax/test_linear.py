@@ -21,7 +21,6 @@ import torch
 from flax import nnx
 from jax import numpy as jnp
 from jax.sharding import Mesh
-from parameterized import parameterized
 from torch import nn
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -147,13 +146,9 @@ class TestJaxLinear(unittest.TestCase):
                 for k, v in vllm_mlp.named_parameters()
             })
 
-    @parameterized.expand([('eager_sharding_on', True),
-                           ('eager_sharding_off', False)])
-    def test_sharding_assignment(self, name, eager_sharding):
+    def test_sharding_assignment(self):
         """Tests sharding assignment of JaxLinear layer."""
 
-        sharding = (None, 'model')
-        expected_sharding = sharding if eager_sharding else ()
         mesh = Mesh(jax.devices('cpu')[:1], ("model", ))
         unquantize_config = get_tpu_quantization_config(
             VllmConfig(model_config=ModelConfig(model="Qwen/Qwen3-0.6B")),
@@ -163,15 +158,16 @@ class TestJaxLinear(unittest.TestCase):
                 16,
                 32,
                 kernel_init=nnx.with_partitioning(nnx.initializers.uniform(),
-                                                  sharding=sharding),
+                                                  sharding=(None, "model")),
                 use_bias=True,
                 quant_config=unquantize_config,
                 rngs=nnx.Rngs(0),
-                kernel_metadata={'eager_sharding': eager_sharding})
+            )
 
-        self.assertSequenceEqual(jax_linear.weight.sharding.spec,
-                                 expected_sharding)
-        self.assertSequenceEqual(jax_linear.weight.out_sharding, sharding)
+        # eager_sharding is False
+        self.assertSequenceEqual(jax_linear.weight.sharding.spec, jax.P())
+        self.assertSequenceEqual(jax_linear.weight.out_sharding,
+                                 (None, "model"))
         self.assertEqual(f"{jax.typeof(jax_linear.weight.value)}",
                          "float32[16,32]")
 
@@ -206,28 +202,25 @@ class TestJaxLinear(unittest.TestCase):
                          [intermediate_size, intermediate_size])
         self.assertEqual(method.linear_config.n_shards, 1)
 
-    @parameterized.expand([('eager_sharding_on', True),
-                           ('eager_sharding_off', False)])
-    def test_merged_column_parallel_sharding(self, name, eager_sharding):
+    def test_merged_column_parallel_sharding(self):
         """The fused kernel's output dim (gate + up) is sharded on `model`."""
 
-        sharding = (None, 'model')
-        expected_sharding = sharding if eager_sharding else ()
         mesh = Mesh(jax.devices('cpu')[:1], ("model", ))
         with jax.set_mesh(mesh):
             jax_merged = JaxMergedColumnParallelLinear(
-                16, [32, 32],
+                16,
+                [32, 32],
                 kernel_init=nnx.with_partitioning(nnx.initializers.uniform(),
                                                   sharding=(None, "model")),
                 use_bias=False,
                 quant_config=UnquantizedConfig({}),
                 rngs=nnx.Rngs(0),
                 prefix="mlp.gate_up_proj",
-                kernel_metadata={'eager_sharding': eager_sharding})
+            )
 
-        self.assertSequenceEqual(jax_merged.weight.sharding.spec,
-                                 expected_sharding)
-        self.assertSequenceEqual(jax_merged.weight.out_sharding, sharding)
+        self.assertEqual(jax_merged.weight.sharding.spec, jax.P())
+        self.assertSequenceEqual(jax_merged.weight.out_sharding,
+                                 (None, "model"))
         self.assertEqual(f"{jax.typeof(jax_merged.weight.value)}",
                          "float32[16,64]")
 
