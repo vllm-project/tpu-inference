@@ -82,11 +82,9 @@ def run_jax_gdn_attention(
         kernel_size: Convolution kernel size.
         mesh: The device mesh for distributed computation.
         config: Configuration for implementation selection.
-        slot_read_offsets: Optional tensor of shape `(num_blocks,)` — per
-          physical slot mamba read offset for speculative decoding. Gathered
-          per sequence (`slot_read_offsets[state_indices]`) inside the shard
-          so the kernel resumes each verify window from the checkpoint of the
-          last accepted token. Required iff `num_spec_tokens > 0`.
+        slot_read_offsets: Optional `(num_blocks,)` per-slot mamba read offset
+          for spec decoding, gathered per request as
+          `slot_read_offsets[state_indices]`. Required iff `num_spec_tokens > 0`.
         num_spec_tokens: Number of speculative draft tokens (0 disables the
           spec-decode windowed mode).
 
@@ -148,9 +146,8 @@ def run_jax_gdn_attention(
                                       slot_read_offsets=None):
         read_offsets = None
         if slot_read_offsets is not None:
-            # Per-sequence read offsets: `state_indices` holds rank-local
-            # base slots, `slot_read_offsets` is the rank-local shard of the
-            # per-slot offset buffer.
+            # `state_indices` are rank-local base slots; `slot_read_offsets`
+            # is the rank-local shard of the per-slot offset buffer.
             read_offsets = slot_read_offsets[state_indices]
         return wrapper.fused_conv1d_gdn(
             j_mixed_qkv,

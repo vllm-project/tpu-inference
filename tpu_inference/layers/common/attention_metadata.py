@@ -55,26 +55,16 @@ class AttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
-    # (mamba_num_blocks,) int32 — per-*slot* read offset for speculative
-    # decoding with mamba layers. `mamba_slot_read_offsets[base_slot]` is
-    # `num_accepted - 1` from the request's most recent verify step: the GDN
-    # kernel reads the request's initial state from
-    # `base_slot + offset` (the checkpoint of the last accepted token) and
-    # writes fresh checkpoints starting at `base_slot`. Indexed by physical
-    # slot (not batch position) so the value survives requests being
-    # rescheduled, condensed, or skipped for several steps. Updated on
-    # device after each rejection-sampling step; None unless the model has
-    # mamba layers *and* speculative decoding is enabled.
+    # (mamba_num_blocks,) int32 — mamba + spec decode only, else None. Per-slot
+    # state read offset (num_accepted - 1 from the last verify step): the GDN
+    # kernel resumes from checkpoint `base_slot + offset` and writes new
+    # checkpoints from `base_slot`. Indexed by physical slot so it survives
+    # rescheduling.
     mamba_slot_read_offsets: jax.Array | None = None
-    # (3 * dp_size,) int32 — GDN-specific request distribution, same
-    # 3-counters-per-rank format as `request_distribution` but with the
-    # first segment covering all *windowed* sequences (plain decodes and
-    # speculative verify windows of up to num_spec + 1 tokens) instead of
-    # only 1-token decodes. The persistent batch is ordered
-    # [decode][verify][prefill/mixed] so both segmentations hold at once:
-    # ragged paged attention keeps its 1-token decode front segment while
-    # the GDN kernel runs its windowed mode over the first two groups.
-    # None unless the model has mamba layers and spec decoding is enabled.
+    # (3 * dp_size,) int32 — mamba + spec decode only, else None. Like
+    # `request_distribution`, but its first segment counts all windowed
+    # sequences (decodes + verify windows), so the GDN kernel runs its windowed
+    # mode over the [decode][verify] prefix of the batch.
     mamba_request_distribution: jax.Array | None = None
 
     # (max_num_seqs, ) int32 — PCP only. For a single request, it is [rank*C, (2*pcp-1-rank)*C].
