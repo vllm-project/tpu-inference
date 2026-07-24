@@ -19,12 +19,13 @@ steps:
     agents:
       queue: tpu_v7x_16_queue
       hostname: tpu7x-16-ci-2-cicd-us-central1-c
+      # queue: default
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu7x}"
       TEST_MODE: 2 # only run correctness test
     commands:
       - |
-        .buildkite/e2e/run_disagg_multi.sh
+        .buildkite/e2e/run_multi_disagg.sh
 
   - label: "${TPU_VERSION:-tpu7x} Record correctness test result for Multi-host P/D disaggregation"
     key: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_CorrectnessTest"
