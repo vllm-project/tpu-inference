@@ -2,7 +2,7 @@
 
 ## Recommendation
 
-Use Kueue on each zonal TPU cluster and evaluate MultiKueue as the
+Use Kueue on each TPU worker cluster and evaluate MultiKueue as the
 cross-cluster dispatcher. This is preferable to encoding a regional queue and
 selection algorithm in `pipeline_kube.yaml` if the integration gates below
 pass. Buildkite should expose one logical queue per resource shape (`v6e-1`,
@@ -37,7 +37,7 @@ Agent Stack lifecycle compatibility.
 ## Target architecture
 
 ```text
-                         manager zonal GKE cluster
+                         manager GKE cluster
  Buildkite v6e-1 queue -> Agent Stack controller
                                   |
                          suspended batch/v1 Job
@@ -80,19 +80,21 @@ mistaken for failed GKE provisioning.
 
 ## Worker-cluster contract
 
-Create each execution cluster as a zonal GKE cluster in the TPU's zone. Before
-installing Kueue, verify all of the following:
+A Standard execution cluster may be zonal. GKE Autopilot clusters have regional
+control planes, but each TPU workload and zonal Persistent Disk still lands in
+one zone. Before installing Kueue, verify all of the following:
 
-- an ordinary CPU node pool can autoscale in that same zone;
-- each TPU shape has a distinct autoscaling node pool with the expected GKE
-  accelerator/topology labels and TPU taint;
-- cluster autoscaling maxima do not exceed project TPU quota or expected stock;
+- Autopilot is allowed to provision the requested TPU shape/topology in at
+  least one zone in the worker region;
+- the expected GKE accelerator/topology selectors cause Autopilot to provision
+  the intended TPU rather than being rejected by admission;
+- Kueue quota does not exceed project TPU quota or expected stock;
 - the chosen StorageClass uses the intended zonal disk type and, where
   appropriate, `WaitForFirstConsumer`;
 - the Buildkite namespace, service accounts, secrets, image-pull access, and
   network egress required by the copied Job exist;
-- an identically named local golden PVC/snapshot generation has the expected
-  cache, model, and dataset manifest; and
+- for the initial Autopilot POC, a `WaitForFirstConsumer` generic ephemeral PVC
+  is created by the same TPU Pod rather than by an earlier CPU Job;
 - the manager Kueue controller can reach the worker Kubernetes API.
 
 Capture this contract in cluster provisioning rather than `pipeline_kube.yaml`.
@@ -117,10 +119,15 @@ request.
 - Buildkite concurrency groups can remain as a temporary safety ceiling, but
   Kueue should become the source of truth for physical capacity after the POC.
 
-For the first POC, use the normal self-contained TPU steps with a worker-local
-golden PVC and skip `KUBE_RESOURCE_PREP_POC`. The latter creates a named PVC in
-one Buildkite step and consumes it in another, which is deliberately outside
-the placement guarantee being tested.
+For the first POC, use a self-contained TPU Job and skip
+`KUBE_RESOURCE_PREP_POC`. The Job may hydrate cache/models/datasets and publish
+its delta while holding the TPU; that cost must be timed, but it avoids both
+cross-cluster and cross-zone handoff. Start with a fresh generic ephemeral PVC,
+then add worker-local golden cloning only after its zonal placement is proven.
+
+The concrete handoff for the already-created Autopilot clusters
+`ci-test-controller` and `ci-test-southamerica-west1-worker` is in
+[`AUTOPILOT_HANDOFF.md`](AUTOPILOT_HANDOFF.md).
 
 ## Gate 0: pin and inspect versions
 
@@ -256,8 +263,14 @@ kubectl --context MANAGER_CONTEXT describe admissioncheck multikueue-dispatch
 kubectl --context MANAGER_CONTEXT get clusterqueue v6e-1
 ```
 
-Apply `smoke-job.yaml` to the manager. Watch the manager and both workers in
+Create `smoke-job.yaml` on the manager. It uses `generateName`, so use
+`kubectl create`, not `kubectl apply`. Watch the manager and both workers in
 separate terminals:
+
+```bash
+kubectl --context MANAGER_CONTEXT create \
+  -f .buildkite/kubernetes/kueue-poc/smoke-job.yaml
+```
 
 ```bash
 kubectl --context MANAGER_CONTEXT get job,workload,pod -n buildkite-v6e-1 -w

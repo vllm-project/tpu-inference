@@ -47,10 +47,12 @@ remainder covering verification and registry publication.
 
 The hand-written regional planner described in the first version of this POC
 would make capacity migration a code change and would duplicate scheduling
-policy in Buildkite. The preferred direction is now one zonal worker cluster
-per TPU zone, with Kueue enforcing local quota and MultiKueue selecting a
-worker cluster. Buildkite exposes only logical queues such as `v6e-1`, `v6e-8`,
-and `v7x-8`; pipeline and feature declarations do not contain a region, zone,
+policy in Buildkite. The preferred direction is now one worker cluster per TPU
+placement domain, with Kueue enforcing local quota and MultiKueue selecting a
+worker cluster. A Standard worker may be zonal; an Autopilot worker has a
+regional control plane but its TPU Pod and Persistent Disk are still placed in
+one zone. Buildkite exposes only logical queues such as `v6e-1`, `v6e-8`, and
+`v7x-8`; pipeline and feature declarations do not contain a region, zone,
 cluster name, regional queue, golden-PVC name, or placement algorithm.
 
 The proposed control path is:
@@ -70,12 +72,15 @@ change the pipeline. Kueue does not know whether Google Cloud can actually
 allocate an autoscaled TPU after admission, however, so bounded pod-pending
 timeouts and infrastructure retries are still required.
 
-Zonal worker clusters also remove the current three-zone PVC ambiguity. Their
-ordinary CPU pool, TPU pool, dynamically provisioned volumes, and local golden
-snapshot all live in one zone. Each worker must expose the same logical
-namespace, LocalQueue, secret/configuration names, golden-PVC name, and image
-digest. The underlying disks and regional Artifact Registry copies remain
-worker-local implementation details.
+A zonal Standard worker removes the current three-zone PVC ambiguity directly.
+With regional Autopilot, keep the first POC Job self-contained and use a
+`WaitForFirstConsumer` generic ephemeral claim. The worker ResourceFlavor owns
+the local `topology.kubernetes.io/zone` label, so Kueue pins the TPU Pod and the
+Pod's first-consumer claim is provisioned in that zone. Do not let an earlier
+CPU-only Job bind that claim in another zone. The manager ResourceFlavor and
+pipeline remain region-neutral. Each worker must expose the same logical
+namespace, LocalQueue, secret/configuration names, and image reference. The
+underlying disks and registry implementation remain worker-local details.
 
 There is one important limit: MultiKueue places a Kubernetes Workload, not a
 Buildkite dependency bundle. Independent CPU-prepare, TPU-run, CPU-finalize,
