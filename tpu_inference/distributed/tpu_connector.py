@@ -4,7 +4,7 @@
 Proxy server routes the request to P with max_output_tokens=1
 
 P workflow:
-    P recives the request
+    P receives the request
 
     P scheduler checks if the prefill is full done in `request_finished()`
     If done:
@@ -18,7 +18,7 @@ P workflow:
     P worker checks if the request has been pulled by D
     If done:
         P worker puts the request-id in `done_sending()`
-        P scheduler frees blocks for the requet in done sending.
+        P scheduler frees blocks for the request in done sending.
     Else:
         P holds the blocks for the request until it's pulled by D
 
@@ -28,10 +28,10 @@ P workflow:
         The waiting buffer will get freed after notified by D or expired.
     )
 
-Proxy server recives the response from P and forwards it to D
+Proxy server receives the response from P and forwards it to D
 
 D workflow:
-    D recives the request
+    D receives the request
 
     D scheduler calculates the num of tokens needing to pull from P in `get_num_new_matched_tokens()`
     D checks if need to pull from P
@@ -488,7 +488,7 @@ class TPUConnectorWorker:
         # req_id: (kv, indices)
         self.reqs_ready_to_insert: dict[ReqId, tuple[list[jax.Array],
                                                      jax.Array]] = {}
-        # the KV cache strafer uuid to request mapping
+        # the KV cache transfer uuid to request mapping
         # the reason is vllm add prefix + external uuid suffix for each request id
         # for example: prefill req_id:cmpl-cd70b21e-0f2b-46ed-910c-9525f706389a-0-99ae74c8
         # decode req_id:cmpl-cd70b21e-0f2b-46ed-910c-9525f706389a-0-23cb9419
@@ -601,7 +601,7 @@ class TPUConnectorWorker:
             if uuid in self.kv_pull_uuid_to_req_id_map:
                 req_id = self.kv_pull_uuid_to_req_id_map[uuid]
                 logger.info(
-                    f"TPUConnector Worker {self.node_id} --> zmq recieve | req_id={req_id} | uuid={uuid}"
+                    f"TPUConnector Worker {self.node_id} --> zmq receive | req_id={req_id} | uuid={uuid}"
                 )
                 if req_id in self.reqs_wait_pull:
                     # Set the expiration time of this request to -1, mark to be done
@@ -613,11 +613,11 @@ class TPUConnectorWorker:
                     self.kv_pull_uuid_to_req_id_map.pop(uuid)
                 else:
                     logger.warning(
-                        f"TPUConnector Worker {self.node_id} --> Disagg producer recives a non-exist pulling finished notification request {req_id} | uuid {uuid}"
+                        f"TPUConnector Worker {self.node_id} --> Disagg producer receives a non-exist pulling finished notification request {req_id} | uuid {uuid}"
                     )
             else:
                 logger.warning(
-                    f"TPUConnector Worker {self.node_id} --> Disagg producer recives a non-exist pulling finished notification uuid {uuid}"
+                    f"TPUConnector Worker {self.node_id} --> Disagg producer receives a non-exist pulling finished notification uuid {uuid}"
                 )
             time.sleep(0)
             # The response is not really needed.
@@ -912,7 +912,7 @@ class TPUConnectorWorker:
         if not self.reqs_wait_pull and not self.reqs_pulling:
             return done_sending, done_recving
 
-        # Mark a req as done recieving after its pulling thread returns.
+        # Mark a req as done receiving after its pulling thread returns.
         # This req can then be scheduled for decoding in the next scheduler step.
         for req_id in list(self.reqs_pulling.keys()):
             if self.reqs_pulling[req_id][1] is None:
@@ -922,7 +922,7 @@ class TPUConnectorWorker:
                     self.reqs_pulling[req_id][1] = kv
                     done_recving.add(req_id)
 
-        # Mark a req as done seding when it's expired.
+        # Mark a req as done sending when it's expired.
         # This req can then be released blocks in the current scheduler step.
         now = time.perf_counter()
         for req_id in list(self.reqs_wait_pull):
