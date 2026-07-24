@@ -591,6 +591,32 @@ def _subtract_num_rejected_tokens_fn(seq_lens: jax.Array, positions: jax.Array,
     return seq_lens, positions
 
 
+@jax.jit(static_argnames=["mesh"])
+def _update_mamba_slot_read_offsets_fn(slot_read_offsets: jax.Array,
+                                       mamba_state_indices: jax.Array,
+                                       read_offsets: jax.Array,
+                                       mesh: jax.sharding.Mesh) -> jax.Array:
+    """Scatter this step's mamba read offsets into the slot-indexed buffer.
+
+    `mamba_state_indices` (rank-local base slot per batch position) and
+    `read_offsets` (num_accepted - 1 per batch position, 0 for non-spec
+    sequences) share the per-DP-rank layout of the current step. Padded
+    positions carry slot 0 (the null block) and offset 0, so their writes
+    are harmless.
+    """
+
+    def _scatter(offsets, indices, values):
+        return offsets.at[indices].set(values)
+
+    data_spec = PartitionSpec(ShardingAxisName.ATTN_DATA)
+    return jax.shard_map(
+        _scatter,
+        mesh=mesh,
+        in_specs=(data_spec, data_spec, data_spec),
+        out_specs=data_spec,
+    )(slot_read_offsets, mamba_state_indices, read_offsets)
+
+
 def _jax_logprobs_materialize(
         logprobs_tensors: LogprobsTensors,
         logits_indices_selector: Optional[List[int]] = None,
@@ -822,6 +848,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self._init_inputs()
         self._init_speculative_decoding()
 
+        # Slot-indexed mamba read offsets for speculative decoding with
+        # hybrid (attention + mamba) models; allocated in
+        # `initialize_kv_cache` once the mamba pool size is known. See
+        # `AttentionMetadata.mamba_slot_read_offsets`.
+        self.mamba_slot_read_offsets: Optional[jax.Array] = None
+
         # Delegate functions to specific manager classes.
         self.compilation_manager = CompilationManager(self)
         if self.is_last_rank:
@@ -855,6 +887,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             "enable_continue_decode", False)
         self.continue_decode_eos_check_interval = self.vllm_config.additional_config.get(
             "continue_decode_eos_check_interval", 1)
+        if self.enable_continue_decode and self.vllm_config.speculative_config:
+            # The continue-decode loop builds its own AttentionMetadata
+            # without the mamba spec-decode fields (slot read offsets), so a
+            # hybrid model could read a stale state checkpoint after a
+            # verify step. Spec decoding never takes the decode-only fast
+            # path on verify steps anyway.
+            logger.warning("Disabling enable_continue_decode: not supported "
+                           "with speculative decoding.")
+            self.enable_continue_decode = False
         self.static_max_decode_steps = self.vllm_config.additional_config.get(
             "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
         self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
@@ -1277,6 +1318,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.kv_cache_manager.actual_mamba_num_blocks is not None:
             self.input_batch.init_mamba_pools(
                 self.kv_cache_manager.actual_mamba_num_blocks)
+
+        # For hybrid models with spec decoding, keep a per-slot device buffer
+        # of mamba read offsets (num_accepted - 1 from each request's last
+        # verify step). The GDN kernel reads a request's initial state from
+        # `base_slot + offset`, which is how rejected draft tokens are
+        # rolled back (by selecting the checkpoint of the last accepted
+        # token, never by copying state).
+        if (kv_cache_config.has_mamba_layers
+                and self.speculative_config is not None):
+            mamba_num_blocks = self.kv_cache_manager.actual_mamba_num_blocks
+            if mamba_num_blocks is None:
+                mamba_num_blocks = (self.input_batch._mamba_local_slots *
+                                    self.dp_size)
+            offsets_sharding = NamedSharding(
+                self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+            self.mamba_slot_read_offsets = jax.jit(
+                lambda: jnp.zeros((mamba_num_blocks, ), dtype=jnp.int32),
+                out_shardings=offsets_sharding)()
 
         # This buffer grows dynamically to accommodate metadata and block tables.
         # We re-initialize with a precise capacity now that kv_cache_config is known.
@@ -2108,11 +2167,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         spec_decode_num_rejected_tokens = None
         if self.speculative_config:
             with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
-                last_sampled_token_id, num_rejected_tokens = extract_last_sampled_tokens(
-                    spec_decode_metadata, next_tokens,
-                    self.speculative_config.num_speculative_tokens,
-                    self.input_batch.vocab_size,
-                    self.max_num_reqs // self.dp_size, self.mesh)
+                (last_sampled_token_id, num_rejected_tokens,
+                 mamba_read_offsets) = extract_last_sampled_tokens(
+                     spec_decode_metadata, next_tokens,
+                     self.speculative_config.num_speculative_tokens,
+                     self.input_batch.vocab_size,
+                     self.max_num_reqs // self.dp_size, self.mesh)
+                if self.mamba_slot_read_offsets is not None:
+                    if isinstance(attn_metadata, dict):
+                        _mamba_state_indices = next(
+                            iter(attn_metadata.values())).mamba_state_indices
+                    else:
+                        _mamba_state_indices = attn_metadata.mamba_state_indices
+                    assert _mamba_state_indices is not None
+                    self.mamba_slot_read_offsets = (
+                        _update_mamba_slot_read_offsets_fn(
+                            self.mamba_slot_read_offsets, _mamba_state_indices,
+                            mamba_read_offsets, self.mesh))
                 self.speculative_decoding_manager.propose_draft_token_ids(
                     next_tokens,
                     logits_indices_selector,
@@ -2803,18 +2874,33 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
         _request_distribution = []
+        _mamba_request_distribution = []
         for dp_rank in range(dp_size):
             _num_reqs = num_req_per_dp_rank[dp_rank]
-            # The batch has been reordered by _reorder_batch so decode requests come first
-            # Count decode requests (those with num_scheduled_tokens == 1) in this DP rank
+            # The batch has been reordered by _reorder_batch into
+            # [decode][spec verify][prefill/mixed] segments. Count 1-token
+            # decode requests (the RPA decode segment) and windowed requests
+            # (decodes + speculative verify windows, the GDN windowed
+            # segment) in this DP rank.
             num_decode_in_dp_rank = 0
+            num_windowed_in_dp_rank = 0
             for req_id in req_ids_dp[dp_rank]:
                 if scheduler_output.num_scheduled_tokens[req_id] == 1:
                     num_decode_in_dp_rank += 1
+                    num_windowed_in_dp_rank += 1
+                elif req_id in scheduler_output.scheduled_spec_decode_tokens:
+                    num_windowed_in_dp_rank += 1
             _request_distribution.append(
                 [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
+            _mamba_request_distribution.append(
+                [num_windowed_in_dp_rank, num_windowed_in_dp_rank, _num_reqs])
         request_distribution = np.array(_request_distribution,
                                         dtype=np.int32).ravel()
+        use_mamba_spec_decode = (self.kv_cache_config.has_mamba_layers
+                                 and self.speculative_config is not None)
+        mamba_request_distribution_cpu = np.array(
+            _mamba_request_distribution,
+            dtype=np.int32).ravel() if use_mamba_spec_decode else None
 
         # Prefill context parallelism (single request, prefill only): head-tail
         # arrange this request's current tokens into rank order
@@ -2995,13 +3081,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices_cpu[req_offset:req_offset +
                                         _num_reqs] = (global_slots %
                                                       local_slots)
-            (request_distribution, mamba_state_indices,
-             dev_arrays_payload) = device_array(
-                 self.mesh, (request_distribution, mamba_state_indices_cpu,
-                             metadata_blob),
-                 sharding=metadata_attn_sharding)
+            if mamba_request_distribution_cpu is not None:
+                (request_distribution, mamba_state_indices,
+                 mamba_request_distribution,
+                 dev_arrays_payload) = device_array(
+                     self.mesh,
+                     (request_distribution, mamba_state_indices_cpu,
+                      mamba_request_distribution_cpu, metadata_blob),
+                     sharding=metadata_attn_sharding)
+            else:
+                mamba_request_distribution = None
+                (request_distribution, mamba_state_indices,
+                 dev_arrays_payload) = device_array(
+                     self.mesh, (request_distribution, mamba_state_indices_cpu,
+                                 metadata_blob),
+                     sharding=metadata_attn_sharding)
         else:
             mamba_state_indices = None
+            mamba_request_distribution = None
             (request_distribution, dev_arrays_payload) = device_array(
                 self.mesh, (request_distribution, metadata_blob),
                 sharding=metadata_attn_sharding)
@@ -3029,6 +3126,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                mamba_slot_read_offsets=self.mamba_slot_read_offsets,
+                mamba_request_distribution=mamba_request_distribution,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp_kv_cache_lens=pcp_kv_cache_lens,
                 pcp_q_pos_offsets=pcp_q_pos_offsets,
