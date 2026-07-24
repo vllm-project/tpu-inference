@@ -241,9 +241,24 @@ def _cn_w1w2_fused_token_kernel_fp8(
                 gj = ids_ref[idx]
                 gj = pl.multiple_of(gj, 1)
                 weight = topk_weights_ref[idx]
-                _expert_body(gj, weight, prefetch_first_w1=(e == 0), **body_kw)
+                _expert_body(gj, weight, prefetch_first_w1=(e == 0 and token == 0), **body_kw)
                 if e + 1 < TOP_K_:
                     next_idx = token * TOP_K_ + (e + 1)
+                    next_gj = ids_ref[next_idx]
+                    next_gj = pl.multiple_of(next_gj, 1)
+                    pltpu.make_async_copy(
+                        w1_ref.at[pl.ds(next_gj, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
+                        w1_bufs_ref.at[pl.ds(0, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
+                        sem_ref.at[0 * NBUF_ + 0]
+                    ).start()
+                    pltpu.make_async_copy(
+                        w1_scale_ref.at[pl.ds(next_gj, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
+                        w1_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
+                        sem_ref.at[1 * NBUF_ + 0]
+                    ).start()
+                elif token + 1 < N_TOKENS_:
+                    # Inter-token pipelining: prefetch next token's first expert
+                    next_idx = (token + 1) * TOP_K_ + 0
                     next_gj = ids_ref[next_idx]
                     next_gj = pl.multiple_of(next_gj, 1)
                     pltpu.make_async_copy(
