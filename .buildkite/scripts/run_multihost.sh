@@ -416,8 +416,6 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${HEAD_INTERNAL_IP}" \
   --head \
   "${HOST_HF_HOME}" \
-  -e CLOUD_TPU_TASK_ID="${HEAD_TPU_TASK_ID}" \
-  -e TPU_WORKER_ID="${HEAD_TPU_TASK_ID}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -454,8 +452,6 @@ for worker_index in "${!WORKER_IPS_ARRAY[@]}"; do
     # shellcheck disable=SC2029
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
-  -e CLOUD_TPU_TASK_ID='${worker_task_id}' \
-  -e TPU_WORKER_ID='${worker_task_id}' \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
