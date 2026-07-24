@@ -2795,7 +2795,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         num_spec_tokens = getattr(self.input_batch, "num_speculative_tokens", 0)
         if not isinstance(num_spec_tokens, int):
             num_spec_tokens = 0
-        max_decode_tokens = (num_spec_tokens + 1) if is_spec_decode else 1
+        max_decode_tokens = (num_spec_tokens + 1) if (is_spec_decode and envs.USE_BATCHED_RPA_KERNEL) else 1
 
         _request_distribution = []
         for dp_rank in range(dp_size):
