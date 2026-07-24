@@ -19,6 +19,7 @@ steps:
     agents:
       queue: tpu_v7x_16_queue
       hostname: tpu7x-16-ci-2-cicd-us-central1-c
+      # queue: default
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       HEAD_SSH_IP: ""
