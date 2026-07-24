@@ -45,185 +45,59 @@ remainder covering verification and registry publication.
 
 ## Cluster, queue, and storage topology
 
-A GKE cluster cannot place node pools in two regions. Run one Agent Stack
-installation per GKE cluster/region and give each installation a distinct
-Buildkite queue, for example `kube-sa-west1` and `kube-us-central1`. Do not let
-controllers in both regions consume a generic shared queue: either can claim a
-job before its TPU or data locality is known. A shared pipeline generator maps
-the logical request (`v6e`, one or eight chips; `v7x`, topology) to the regional
-queue and pod scheduling rules so feature engineers do not choose queues,
-regions, zones, or node selectors themselves.
+The hand-written regional planner described in the first version of this POC
+would make capacity migration a code change and would duplicate scheduling
+policy in Buildkite. The preferred direction is now one zonal worker cluster
+per TPU zone, with Kueue enforcing local quota and MultiKueue selecting a
+worker cluster. Buildkite exposes only logical queues such as `v6e-1`, `v6e-8`,
+and `v7x-8`; pipeline and feature declarations do not contain a region, zone,
+cluster name, regional queue, golden-PVC name, or placement algorithm.
 
-Within a region, prefer topology profiles over a queue for every zone. A
-regional GKE cluster can keep its control plane and ordinary CPU node pool
-spread across zones, while each TPU node pool is restricted to the zones where
-that TPU type is available. Add a zone-specific queue only when it represents a
-separate controller, security boundary, or operational capacity pool; otherwise
-the generated pod's node affinity is the authoritative placement control.
-
-For the current v6e cluster, ordinary CPU work that uses no persistent volume
-can omit selectors and affinity and let the default node pool scale in any of
-`southamerica-west1-a`, `b`, or `c`. CPU cache/model/dataset preparation is
-different because it hands a zonal `premium-rwo` volume to a TPU pod that can
-run only in `southamerica-west1-a`. Both the PVC and every CPU/TPU consumer must
-therefore be constrained to `a`. In particular:
-
-- If the PVC already exists, its volume node affinity should make the scheduler
-  choose `a`, but explicit generated affinity makes the contract observable and
-  prevents surprises.
-- If the storage class delays provisioning until the first consumer, an
-  unconstrained CPU prep pod could cause a new volume to be provisioned in `b`
-  or `c`; constrain the prep pod and claim topology before it is scheduled.
-- Ensure the default CPU pool can autoscale in `a`. The CPU prep pod must fully
-  release the `ReadWriteOnce` attachment before the TPU pod starts.
-- Use inexpensive zonal scratch volumes for disposable per-job caches. A
-  regional persistent disk costs more and does not make a volume portable to a
-  different region; use it only when same-region failure tolerance is actually
-  required.
-
-Maintain a region/zone-local golden PVC or snapshot generation beside each TPU
-pool. Persistent disks and PVCs are not cross-region cache distribution. Keep
-the trusted cache delta, model manifests, and dataset manifests in object
-storage, then seed immutable local goldens independently in
-`southamerica-west1` for v6e and `us-central1` for v7x. Compilation-cache keys
-remain based on software version, TPU generation, and topology rather than
-region, while the materialized snapshots are region-local. Measure and budget
-cross-region object transfer before choosing the bucket locations.
-
-Apply the same locality rule to container images. The POC currently publishes
-to `us-central1-docker.pkg.dev`, so a newly scaled v6e node in South America
-must pull layers across regions before its Buildkite agent can start. Build the
-v6e image once, address it by digest, copy that digest to a regional Artifact
-Registry repository beside each TPU cluster, and let the topology profile
-choose the regional reference. This avoids duplicate builds while reducing
-cold-node pull latency and cross-region transfer.
-
-For a cost-sensitive POC, a zonal cluster in the TPU zone is sufficient. For a
-production service, a regional cluster per TPU region is the better default:
-the Agent Stack controller and generic CPU work can survive a zonal failure,
-while TPU node pools and their zonal cache volumes stay in supported zones.
-
-### Concrete multi-region balancing example
-
-Suppose `v6e-1` exists in both `us-central1` and `us-west1`. Register two
-physical execution pools for the one logical topology:
-
-```yaml
-v6e-1:
-  - region: us-central1
-    queue: kube-v6e1-us-central1
-    max_parallel: 4
-    zone: us-central1-b
-    image_repository: us-central1-docker.pkg.dev/PROJECT/ci/vllm-tpu
-    golden_pvc: tpu-cache-v6e1-golden
-  - region: us-west1
-    queue: kube-v6e1-us-west1
-    max_parallel: 2
-    zone: us-west1-b
-    image_repository: us-west1-docker.pkg.dev/PROJECT/ci/vllm-tpu
-    golden_pvc: tpu-cache-v6e1-golden
-```
-
-If one Agent Stack controller handles every accelerator profile in a region,
-the queue names can simply be `kube-us-central1` and `kube-us-west1`; keep the
-TPU type in the topology registry. Use accelerator-specific queues only when
-controllers, permissions, quotas, or operational ownership are intentionally
-separate.
-
-A feature test remains region-neutral:
-
-```toml
-key = "jax-unit-part2"
-topology = "v6e-1"
-models = []
-datasets = []
-command = ["python3", "-m", "pytest", "tests/"]
-```
-
-The CPU planner queries or is given each pool's capacity and queued work,
-represents every usable TPU slot by its estimated next-available time, sorts
-the new jobs by expected duration, and greedily assigns each job to the pool
-whose earliest slot gives the lowest predicted completion score:
+The proposed control path is:
 
 ```text
-score = earliest slot availability
-        + new job duration
-        + cold-node penalty
-        + missing-cache/model penalty
+Buildkite logical queue
+  -> Agent Stack creates a suspended Job in a manager cluster
+  -> manager Kueue creates a Workload
+  -> MultiKueue offers it to eligible zonal worker clusters
+  -> the first worker Kueue that reserves real local quota runs the Job
 ```
 
-For example, suppose central's four slots are next available in
-`[35, 55, 70, 80]` minutes and west's two slots in `[10, 45]` minutes. A new
-90-minute unit shard has an earliest finish of `35 + 90 = 125m` in central and
-`10 + 90 = 100m` in west, so it goes west. West's slot vector becomes
-`[45, 100]` before the next job is placed. This balances the whole uploaded
-matrix and accounts for a 90-minute shard differently from a five-minute test.
+This is a better fit than first-agent-wins queue sharing or a custom Buildkite
+planner because worker membership, quota, fair sharing, and draining are
+Kubernetes control-plane configuration. Adding or removing a region should not
+change the pipeline. Kueue does not know whether Google Cloud can actually
+allocate an autoscaled TPU after admission, however, so bounded pod-pending
+timeouts and infrastructure retries are still required.
 
-Buildkite does not support `agents.queue: A OR B`. Make the routing decision
-before uploading the TPU steps. A small CPU planning step receives the logical
-test declarations and uploads the already-routed graph:
+Zonal worker clusters also remove the current three-zone PVC ambiguity. Their
+ordinary CPU pool, TPU pool, dynamically provisioned volumes, and local golden
+snapshot all live in one zone. Each worker must expose the same logical
+namespace, LocalQueue, secret/configuration names, golden-PVC name, and image
+digest. The underlying disks and regional Artifact Registry copies remain
+worker-local implementation details.
 
-```yaml
-steps:
-  - label: ":traffic_light: Plan regional TPU work"
-    agents:
-      queue: cpu
-    command: |
-      python3 .buildkite/scripts/plan_kube_matrix.py \
-        --topology v6e-1 \
-        --output /tmp/routed-pipeline.yaml
-      buildkite-agent pipeline upload /tmp/routed-pipeline.yaml
-```
+There is one important limit: MultiKueue places a Kubernetes Workload, not a
+Buildkite dependency bundle. Independent CPU-prepare, TPU-run, CPU-finalize,
+and cleanup steps can be sent to different workers, and a named PVC created in
+one worker does not appear in another. The first MultiKueue POC must therefore
+use independent TPU Jobs with a worker-local golden or ephemeral clone. Keep
+the existing named-PVC resource-preparation POC on one cluster until resource
+hydration is changed to one of these forms:
 
-`plan_kube_matrix.py` should emit a full regional bundle, not merely set one
-global queue variable: every logical test can be routed independently, while
-each test's CPU-prepare, TPU-run, CPU-finalize, and cleanup steps stay together.
+- an out-of-band CPU seed/compaction job populates an identically named golden
+  in every worker, after which each TPU Job is self-contained;
+- a worker-local workflow controller owns the entire prepare/run/publish
+  lifecycle as one MultiKueue-dispatched workload; or
+- a future supported gang/workflow integration provides cluster affinity for
+  all phases. Kueue admission alone does not provide that guarantee.
 
-The generated TPU step then contains physical details that were absent from the
-feature declaration:
-
-```yaml
-agents:
-  queue: kube-v6e1-us-west1
-concurrency: 2
-concurrency_group: tpu/v6e-1/us-west1
-plugins:
-  - kubernetes:
-      podSpec:
-        nodeSelector:
-          cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
-          cloud.google.com/gke-tpu-topology: 1x1
-          topology.kubernetes.io/zone: us-west1-b
-        containers:
-          - name: vllm-tpu-runner
-            image: us-west1-docker.pkg.dev/PROJECT/ci/vllm-tpu@sha256:DIGEST
-```
-
-Its generated prep and finalizer use the same queue and zone but omit the TPU
-accelerator/topology selectors and TPU resource request, allowing ordinary CPU
-nodes in `us-west1-b` to run them.
-
-For an initial implementation without live capacity APIs, use weighted
-rendezvous hashing over `pull-request + step key`, with four virtual slots for
-central and two for west in this example. It provides the intended 2:1 split,
-keeps the same PR test in the same region across commits for cache locality,
-and avoids reshuffling most jobs when a pool changes. Add live Buildkite queue
-and Kubernetes pending-state inputs later; Buildkite Test Engine timing history
-can supply the duration estimates.
-
-The planner emits the selected region into the entire CPU-prepare, TPU-run,
-CPU-finalize bundle. All three steps use the same physical queue, regional
-image, zone, and PVC names. Once preparation creates a regional PVC, do not
-move only the TPU step to another region. If the chosen pool reaches a pending
-timeout before work starts, clean up and retry the whole bundle in the other
-region. Provide an operator override such as `KUBE_REGION=us-west1` for outage
-handling and reproducible debugging.
-
-Do not make both regional Agent Stack installations consume one shared queue
-to get accidental first-agent-wins balancing. It can work for a stateless
-single pod with identical resources in both clusters, but it cannot guarantee
-that separate preparation and TPU steps land in the same region, and it hides
-which cache, image registry, quota, and PVC namespace the job will use.
+The detailed architecture, example Kueue resources, rollout commands,
+failure tests, measurements, and acceptance criteria are in
+[`kueue-poc/README.md`](kubernetes/kueue-poc/README.md). The manifests are
+starter examples rather than an unattended installer because their APIs and
+feature gates must be matched to the Kueue, GKE, and Agent Stack versions used
+by the operator.
 
 ## Reproducibility and source integrity
 
@@ -561,13 +435,15 @@ still spend materially longer executing because a point-in-time golden clone
 does not yet have the persistent cache coverage accumulated by the bare-metal
 workers.
 
-The next architecture gate is therefore the cache feedback loop, not basic TPU
-scheduling. Before treating Kubernetes as faster or cheaper, validate the
-named-PVC CPU prepare/TPU run/CPU publish lifecycle, measure the number and size
-of new cache entries per test, and compact successful overlays into regional
-goldens. Also finish the current long-shard timing capture and repeat the
-current exact matrix; targeted repair builds prove individual fixes but do not
-replace a final end-to-end run.
+The next performance gate is therefore the cache feedback loop, while the next
+multi-region scheduling gate is the Kueue/MultiKueue experiment described
+above. Validate the named-PVC CPU prepare/TPU run/CPU publish lifecycle on one
+cluster, measure the number and size of new cache entries per test, and compact
+successful overlays into worker-local goldens. Do not send those independent
+PVC-sharing steps through MultiKueue until a worker-local workflow owns the
+whole lifecycle. Also finish the current long-shard timing capture and repeat
+the current exact matrix; targeted repair builds prove individual fixes but do
+not replace a final end-to-end run.
 
 The POC is successful when:
 
@@ -579,9 +455,13 @@ The POC is successful when:
    the deliberately serial 8-chip workload.
 4. Cache policy is explicit and reproducible rather than an accidental benefit
    of either platform.
+5. A zonal worker can be added, drained, or removed without changing the
+   Buildkite pipeline, and cancellation cannot leave a remote TPU Job running.
 
 Recommended follow-ups:
 
+- Run the staged Kueue/MultiKueue gates with a disposable logical `v6e-1`
+  queue before changing the existing `kube` queue or pipeline matrix.
 - Reserve quota for a second 8-chip node or intentionally limit 8-chip job
   concurrency to one and treat its queue time as expected.
 - Set a finite `pendingTimeout` after measuring realistic scale-up p95, so quota

@@ -1,0 +1,28 @@
+# Upload only after Gate 1 through Gate 3 in README.md pass.
+# The Agent Stack controller for queue v6e-1 must create this Job in the
+# manager's buildkite-v6e-1 namespace, where Kueue labels/defaults it.
+steps:
+  - label: ":kubernetes: MultiKueue v6e-1 Buildkite smoke"
+    key: "multikueue_v6e1_smoke"
+    timeout_in_minutes: 20
+    agents:
+      queue: "v6e-1"
+    command: |
+      set -euo pipefail
+      echo "Buildkite MultiKueue smoke running on $${HOSTNAME}"
+      sleep 30
+    plugins:
+      - kubernetes:
+          # This deliberately replaces the POC's indefinite pending timeout.
+          # Increase only if measured cold TPU provisioning requires it.
+          pendingTimeout: 900
+          podSpec:
+            terminationGracePeriodSeconds: 5
+            containers:
+              - name: vllm-tpu-runner
+                image: "${KUEUE_SMOKE_IMAGE}"
+                resources:
+                  requests:
+                    google.com/tpu: "1"
+                  limits:
+                    google.com/tpu: "1"

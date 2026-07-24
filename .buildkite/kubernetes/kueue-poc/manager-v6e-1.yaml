@@ -1,0 +1,82 @@
+# Starter resources for the MultiKueue manager cluster.
+# The referenced kubeconfig Secrets must be created in the namespace expected
+# by the pinned Kueue installation before these resources are applied.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: buildkite-v6e-1
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: MultiKueueCluster
+metadata:
+  name: worker-us-central1-b
+spec:
+  kubeConfig:
+    locationType: Secret
+    location: worker-us-central1-b-kubeconfig
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: MultiKueueCluster
+metadata:
+  name: worker-us-west1-b
+spec:
+  kubeConfig:
+    locationType: Secret
+    location: worker-us-west1-b-kubeconfig
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: MultiKueueConfig
+metadata:
+  name: v6e-1-workers
+spec:
+  clusters:
+    - worker-us-central1-b
+    - worker-us-west1-b
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: AdmissionCheck
+metadata:
+  name: multikueue-dispatch
+spec:
+  controllerName: kueue.x-k8s.io/multikueue
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: MultiKueueConfig
+    name: v6e-1-workers
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: v6e-1
+spec:
+  nodeLabels:
+    cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+    cloud.google.com/gke-tpu-topology: 1x1
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: v6e-1
+spec:
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite-v6e-1
+  admissionChecks:
+    - multikueue-dispatch
+  resourceGroups:
+    - coveredResources:
+        - google.com/tpu
+      flavors:
+        - name: v6e-1
+          resources:
+            - name: google.com/tpu
+              # Example: four chips in central plus two chips in west.
+              nominalQuota: 6
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: v6e-1
+  namespace: buildkite-v6e-1
+spec:
+  clusterQueue: v6e-1

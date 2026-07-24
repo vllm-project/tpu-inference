@@ -1,0 +1,42 @@
+# Submit this to the manager only after both worker ClusterQueues and the
+# manager MultiKueue resources are active. Replace the image with an immutable
+# digest that exists in every eligible worker cluster.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: multikueue-v6e1-smoke-
+  namespace: buildkite-v6e-1
+  labels:
+    kueue.x-k8s.io/queue-name: v6e-1
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: multikueue-v6e1-smoke
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 5
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+        cloud.google.com/gke-tpu-topology: 1x1
+      tolerations:
+        - key: google.com/tpu
+          operator: Equal
+          value: present
+          effect: NoSchedule
+      containers:
+        - name: smoke
+          image: us-central1-docker.pkg.dev/replace-project/tpu-inference-ci/vllm-tpu@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          command:
+            - /bin/sh
+            - -ceu
+            - |
+              echo "MultiKueue smoke running on ${HOSTNAME}"
+              sleep 30
+          resources:
+            requests:
+              google.com/tpu: "1"
+            limits:
+              google.com/tpu: "1"

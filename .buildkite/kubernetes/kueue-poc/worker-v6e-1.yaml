@@ -1,0 +1,42 @@
+# Starter resources for EACH zonal worker cluster.
+# Copy this file per worker and set nominalQuota to that worker's real,
+# autoscalable v6e chip ceiling before applying it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: buildkite-v6e-1
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: v6e-1
+spec:
+  nodeLabels:
+    cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+    cloud.google.com/gke-tpu-topology: 1x1
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: v6e-1
+spec:
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite-v6e-1
+  resourceGroups:
+    - coveredResources:
+        - google.com/tpu
+      flavors:
+        - name: v6e-1
+          resources:
+            - name: google.com/tpu
+              # Example only: change to this worker's maximum usable chips.
+              nominalQuota: 4
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: v6e-1
+  namespace: buildkite-v6e-1
+spec:
+  clusterQueue: v6e-1
