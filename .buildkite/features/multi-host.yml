@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-steps: 
+steps:
   - label: "${TPU_VERSION:-tpu7x} Correctness tests for multi-host"
     key: "${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest"
     soft_fail: true
     agents:
       queue: tpu_v7x_16_queue
+      hostname: tpu7x-16-ci-2-cicd-us-central1-c
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       HEAD_SSH_IP: ""
@@ -57,24 +58,24 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi-host_CorrectnessTest
 
-  - label: "${TPU_VERSION:-tpu7x} Performance tests for multi-host"
-    key: "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu7x}_record_multi-host_CorrectnessTest"
-    soft_fail: true
-    agents:
-      queue: tpu_v7x_16_queue
-    commands:
-      - buildkite-agent meta-data set "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest" "unverified"
-  - label: "${TPU_VERSION:-tpu7x} Record performance test result for multi-host"
-    key: "${TPU_VERSION:-tpu7x}_record_multi-host_PerformanceTest"
-    depends_on: "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest"
-    env:
-      CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-      CI_TARGET: "multi-host"
-      CI_STAGE: "PerformanceTest"
-      CI_CATEGORY: "feature support matrix"
-    agents:
-      queue: cpu
-    commands:
-      - |
-        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest
+  # - label: "${TPU_VERSION:-tpu7x} Performance tests for multi-host"
+  #   key: "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest"
+  #   depends_on: "${TPU_VERSION:-tpu7x}_record_multi-host_CorrectnessTest"
+  #   soft_fail: true
+  #   agents:
+  #     queue: tpu_v7x_16_queue
+  #   commands:
+  #     - buildkite-agent meta-data set "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest" "unverified"
+  # - label: "${TPU_VERSION:-tpu7x} Record performance test result for multi-host"
+  #   key: "${TPU_VERSION:-tpu7x}_record_multi-host_PerformanceTest"
+  #   depends_on: "${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest"
+  #   env:
+  #     CI_TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+  #     CI_TARGET: "multi-host"
+  #     CI_STAGE: "PerformanceTest"
+  #     CI_CATEGORY: "feature support matrix"
+  #   agents:
+  #     queue: cpu
+  #   commands:
+  #     - |
+  #       .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu7x}_multi-host_PerformanceTest
