@@ -20,7 +20,8 @@ import sys
 CMD_MAP = {
     "vllm_serve": "vllm serve",
     "vllm_bench_serve": "vllm bench serve",
-    "lm_eval": "lm_eval"
+    "lm_eval": "lm_eval",
+    "local_benchmark_serving": "python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py"
 }
 
 # Helper function to print export statement only if value is valid
@@ -31,10 +32,24 @@ def export_env_if_valid(opts_dict, json_key, env_var_name):
     if val not in (None, {}, ""):
         print(f"export {env_var_name}=\"{val}\"")
 
-def get_current_machine_type():
+def normalize_device_name(device_name):
+    """
+    Normalizes device name from cases config (e.g., 'tpu7x-16' -> 'v7x-16')
+    """
+    if not device_name:
+        return None
+    normalized = device_name.lower()
+    if normalized.startswith("tpu"):
+        normalized = normalized[3:]
+    if not normalized.startswith("v") and len(normalized) > 0:
+        normalized = f"v{normalized}"
+    return normalized
+
+
+def get_current_machine_type(fallback_device=None):
     """
     Returns the current machine type string (e.g., 'v6e-8', 'v7x-2') 
-    using the tpu_info library.
+    using the tpu_info library, falling back to the case config if needed.
     """
     try:
         from tpu_info import device
@@ -54,14 +69,29 @@ def get_current_machine_type():
                 num_devices = num_chips * chip_type.value.devices_per_chip
 
             machine_type = f"{name}-{num_devices}"
-            print(f"echo '[DEBUG] Detected machine type: {machine_type}' >&2")
+            print(f"echo '[DEBUG] Detected local machine type via tpu_info: {machine_type}' >&2")
+
+            # Check if fallback_device matches the detected family but specifies a larger cluster count (multi-host setup)
+            if fallback_device and fallback_device.startswith(name):
+                try:
+                    fallback_count = int(fallback_device.split("-")[1])
+                    if fallback_count > num_devices:
+                        print(f"echo '[DEBUG] Multi-host TPU cluster detected. Local chips: {num_devices}, Cluster chips: {fallback_count}. Using cluster device: {fallback_device}' >&2")
+                        return fallback_device
+                except (ValueError, IndexError):
+                    pass
+
             return machine_type
         else:
             print(f"echo '[WARNING] No TPU chips detected: chip_type={chip_type}, num_chips={num_chips}' >&2")
     except ImportError:
-        print("echo '[WARNING] tpu_info library not found. Cannot determine machine type.' >&2")
+        print("echo '[WARNING] tpu_info library not found. Cannot determine machine type via library.' >&2")
     except Exception as e:
-        print(f"echo '[WARNING] Failed to determine machine type: {e}' >&2")
+        print(f"echo '[WARNING] Failed to determine machine type via library: {e}' >&2")
+
+    if fallback_device:
+        print(f"echo '[DEBUG] Falling back to case config device: {fallback_device}' >&2")
+        return fallback_device
     return None
 
 
@@ -99,11 +129,16 @@ def build_command(cmd_type, args_dict):
         return shlex.join(cmd_parts)
 
     for key, value in args_dict.items():
+        if key == "model" and "model-path" in args_dict:
+            continue
+
+        output_key = "model" if key == "model-path" else key
+
         if isinstance(value, bool):
             if value:
-                cmd_parts.append(f"--{key}")
+                cmd_parts.append(f"--{output_key}")
         else:
-            cmd_parts.append(f"--{key}")
+            cmd_parts.append(f"--{output_key}")
             cmd_parts.append(str(value))
 
     return shlex.join(cmd_parts)
@@ -116,9 +151,6 @@ def main():
 
     config_file = sys.argv[1]
     target_case = sys.argv[2] if len(sys.argv) > 2 else None
-
-    # Determine current machine type from tpu_info
-    current_machine = get_current_machine_type()
 
     try:
         with open(config_file, 'r') as f:
@@ -141,6 +173,15 @@ def main():
         print(
             f"echo 'Error: Case \"{target_case}\" not found in \"{config_file}\".' >&2; exit 1")
         sys.exit(1)
+
+    # Resolve fallback device from config
+    device_env = case_data.get("env", {}).get("DEVICE")
+    if not device_env:
+        device_env = data.get("global_env", {}).get("DEVICE")
+    fallback_machine = normalize_device_name(device_env)
+
+    # Determine current machine type
+    current_machine = get_current_machine_type(fallback_machine)
 
     merged_env = data.get("global_env", {}).copy()
     merged_env.update(case_data.get("env", {}))
@@ -170,7 +211,8 @@ def main():
     export_env_if_valid(srv_opts, "max-num-seqs", "MAX_NUM_SEQS")
     export_env_if_valid(srv_opts, "max-num-batched-tokens", "MAX_NUM_BATCHED_TOKENS")
     export_env_if_valid(srv_opts, "max-model-len", "MAX_MODEL_LEN")
-    cli_env = cli_opts.get("env", {})
+    cli_cmd_type = cli_opts.get("command_type", "vllm_bench_serve")
+    cli_env = cli_opts.get("env", {}).copy()
     cli_env_parts = [f"{k}={v}" for k, v in cli_env.items()]
     quoted_cli_env = ' '.join(shlex.quote(p) for p in cli_env_parts)
     print(f"CLIENT_CMD_ENVS=({quoted_cli_env})")
@@ -180,8 +222,6 @@ def main():
     srv_env_list = [f"{k}={v}" for k, v in srv_env.items()]
     srv_env_str = ' '.join(shlex.quote(item) for item in srv_env_list)
     print(f"SERVER_CMD_ENVS=({srv_env_str})")
-
-    cli_cmd_type = cli_opts.get("command_type", "vllm_bench_serve")
 
     # Output execution strategy based on command_type
     if cli_cmd_type == "lm_eval":
@@ -212,6 +252,18 @@ def main():
         quoted_cli_cmd = ' '.join(
             shlex.quote(arg) for arg in shlex.split(cli_cmd))
         print(f"CLIENT_CMD=({quoted_cli_cmd})")
+
+        acc_opts = case_data.get("accuracy_command_options")
+        if acc_opts:
+            acc_cmd_type = acc_opts.get("command_type", "local_benchmark_serving")
+            acc_resolved_args = resolve_device_args(acc_opts.get("args", {}), current_machine)
+
+            # If the user sets dataset-path with env var references like $DATASET_DIR/test,
+            # we need to be careful with shlex.quote. build_command already handles it but we should pass it correctly.
+            acc_cmd = build_command(acc_cmd_type, acc_resolved_args)
+            quoted_acc_cmd = ' '.join(
+                shlex.quote(arg) for arg in shlex.split(acc_cmd))
+            print(f"ACCURACY_CMD=({quoted_acc_cmd})")
 
         tensor_parallel_size = srv_resolved_args.get("tensor-parallel-size", {})
         print(f"export TENSOR_PARALLEL_SIZE=\"{tensor_parallel_size}\"")
