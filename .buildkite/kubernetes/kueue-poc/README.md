@@ -5,8 +5,10 @@
 Use Kueue on each TPU worker cluster and evaluate MultiKueue as the
 cross-cluster dispatcher. This is preferable to encoding a regional queue and
 selection algorithm in `pipeline_kube.yaml` if the integration gates below
-pass. Buildkite should expose one logical queue per resource shape (`v6e-1`,
-`v6e-8`, and later `v7x-*`), while Kubernetes owns physical placement.
+pass. Use one stable Buildkite queue, `kube`, while Kubernetes owns physical
+placement. The current internal Kueue LocalQueue remains `v6e-1` during the
+single-worker POC; that internal name is not part of the feature-engineer
+interface.
 
 This design is feasible for independent Kubernetes `Job` objects. It is not
 yet proven to be a supported Buildkite Agent Stack configuration, and it does
@@ -38,7 +40,7 @@ Agent Stack lifecycle compatibility.
 
 ```text
                          manager GKE cluster
- Buildkite v6e-1 queue -> Agent Stack controller
+ Buildkite kube queue -> Agent Stack controller
                                   |
                          suspended batch/v1 Job
                                   |
@@ -53,14 +55,18 @@ Agent Stack lifecycle compatibility.
 The manager can be a small non-TPU cluster. It runs the Agent Stack controller
 and MultiKueue manager. Worker clusters run Kueue and the copied Buildkite Job,
 but do not need another Agent Stack controller. Use a dedicated manager
-namespace per logical Buildkite queue, for example `buildkite-v6e-1`. That
-makes queue defaulting and admission isolation easy to audit.
+namespace for the stack. The current POC already uses `buildkite-v6e-1`; a
+clean production naming pass could use `buildkite-kube`. Namespace isolation
+makes LocalQueue defaulting and admission behavior easy to audit.
 
-Keep different TPU shapes in different namespaces/LocalQueues/ClusterQueues.
-For example, a `v6e-1` Job must not become flavor-fungible with a `v6e-8` pool
-merely because both request `google.com/tpu`. Give `v6e-8` its own manager
-namespace and worker queues, set its ResourceFlavor topology to `2x4`, and make
-its quota a multiple of eight chips.
+Different TPU shapes can share one LocalQueue/ClusterQueue if their
+ResourceFlavors have explicit accelerator/topology labels and separate quotas.
+For example, `v6e-1` uses topology `1x1` and one-chip requests, while `v6e-8`
+uses `2x4`, eight-chip requests, and quota in multiples of eight. Keep the
+logical topology selector/resource request in the infrastructure-owned pod
+profile so a one-chip Job cannot become flavor-fungible with an eight-chip
+pool. Use separate LocalQueues only when priority, tenant, borrowing, or
+preemption policy is intentionally different.
 
 For `v6e-1` in two zones, both workers have a LocalQueue named `v6e-1` backed by
 a local ClusterQueue. The manager ClusterQueue represents the aggregate
@@ -162,7 +168,7 @@ the POC resources layered on top of Kueue are included here.
 
 ## Gate 1: prove Agent Stack creates a Kueue-manageable Job
 
-Before introducing MultiKueue, use one zonal cluster and a disposable Buildkite
+Before introducing MultiKueue, use one worker and an isolated Buildkite test
 queue. Trigger a one-line Agent Stack job and immediately capture the generated
 object:
 
@@ -286,12 +292,21 @@ compete for local admission; exactly one worker creates/runs the remote Job;
 the other worker does not run a duplicate; completion status returns to the
 manager Job.
 
-## Gate 4: attach the logical Buildkite queue
+## Gate 4: attach the Buildkite queue
 
-Point a disposable Agent Stack controller at Buildkite queue `v6e-1` and have
-it create Jobs in manager namespace `buildkite-v6e-1`. Do not install regional
-Agent Stack controllers consuming that same queue. Use the label/defaulting
-bridge proven in Gate 1.
+The intended steady-state Buildkite queue is `kube`. It is already consumed by
+the existing `ci-dev` Agent Stack, so do not attach the new controller while the
+old one is active. For the integration test, either create an isolated queue
+such as `kueue-poc`, or scale the old controller to zero before reusing `kube`.
+Have the new controller create Jobs in manager namespace
+`buildkite-v6e-1`. Do not install Agent Stack on worker clusters. Use the
+label/defaulting bridge proven in Gate 1.
+
+Buildkite agent tags do not rewrite Kubernetes metadata. With one Agent Stack
+controller, extra `agents` constraints can prevent a job from matching unless
+the stack advertises every tag. Express TPU shape through the shared pod
+profile/resource request. Let namespace defaulting or a scoped admission rule
+assign top-level Job label `kueue.x-k8s.io/queue-name: v6e-1`.
 
 Set `KUEUE_SMOKE_IMAGE` to an immutable image digest available to every worker,
 then upload `buildkite-smoke.yaml` from the existing CPU bootstrap queue. It is
@@ -302,7 +317,7 @@ The eventual pipeline-facing shape is intentionally small:
 
 ```yaml
 agents:
-  queue: v6e-1
+  queue: kube
 plugins:
   - kubernetes:
       # Use a bounded value after measuring cold node provisioning.

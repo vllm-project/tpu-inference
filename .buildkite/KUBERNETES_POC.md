@@ -51,19 +51,35 @@ policy in Buildkite. The preferred direction is now one worker cluster per TPU
 placement domain, with Kueue enforcing local quota and MultiKueue selecting a
 worker cluster. A Standard worker may be zonal; an Autopilot worker has a
 regional control plane but its TPU Pod and Persistent Disk are still placed in
-one zone. Buildkite exposes only logical queues such as `v6e-1`, `v6e-8`, and
-`v7x-8`; pipeline and feature declarations do not contain a region, zone,
-cluster name, regional queue, golden-PVC name, or placement algorithm.
+one zone. Buildkite exposes one stable queue, `kube`. Pipeline and feature
+declarations contain a logical TPU profile/resource request but no region,
+zone, cluster name, Kueue queue label, regional queue, golden-PVC name, or
+placement algorithm.
 
 The proposed control path is:
 
 ```text
-Buildkite logical queue
+Buildkite queue `kube`
   -> Agent Stack creates a suspended Job in a manager cluster
-  -> manager Kueue creates a Workload
+  -> namespace defaulting/admission assigns an internal Kueue LocalQueue
+  -> manager Kueue creates a Workload and selects a compatible ResourceFlavor
   -> MultiKueue offers it to eligible zonal worker clusters
   -> the first worker Kueue that reserves real local quota runs the Job
 ```
+
+The Kueue queue-name label selects a quota/policy domain; it does not need to
+encode the TPU shape. For the current one-chip POC the internal LocalQueue is
+still named `v6e-1`. Longer term it can be renamed to `kube`/`tpu-ci` and its
+ClusterQueue can expose separate flavors and quotas for `v6e-1`, `v6e-8`, and
+`v7x-*`. The Pod's resource request and topology/profile select a compatible
+flavor. Separate LocalQueues are warranted only for policy boundaries such as
+tenant, priority, or preemption—not merely because the TPU shape differs.
+
+Buildkite agent tags are matching constraints, not a Kubernetes mutation
+mechanism. Agent Stack does not automatically translate an arbitrary Buildkite
+tag into `kueue.x-k8s.io/queue-name`. Keep that implementation detail hidden by
+defaulting the LocalQueue in the dedicated Agent Stack namespace or by a
+narrowly scoped admission mutation on generated Jobs.
 
 The concrete Autopilot experiment uses `ci-test-controller` in `us-central1`
 and `ci-test-southamerica-west1-worker` in `southamerica-west1`, with v6e-1
@@ -473,8 +489,10 @@ The POC is successful when:
 
 Recommended follow-ups:
 
-- Run the staged Kueue/MultiKueue gates with a disposable logical `v6e-1`
-  queue before changing the existing `kube` queue or pipeline matrix.
+- Run the staged Kueue/MultiKueue gates with an isolated temporary Buildkite
+  queue before changing the existing `kube` queue or pipeline matrix, unless
+  the old `ci-dev` Agent Stack controller is first scaled to zero. Two stacks
+  consuming `kube` can race for the same Buildkite job.
 - Reserve quota for a second 8-chip node or intentionally limit 8-chip job
   concurrency to one and treat its queue time as expected.
 - Set a finite `pendingTimeout` after measuring realistic scale-up p95, so quota

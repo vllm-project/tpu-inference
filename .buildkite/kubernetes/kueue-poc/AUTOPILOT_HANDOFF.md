@@ -529,9 +529,23 @@ removes the generic ephemeral claim, and all non-test time is measured.
 
 ## Phase 7: attach Buildkite Agent Stack
 
-Create a disposable Buildkite queue named `v6e-1`. Install Agent Stack only on
-`ci-test-controller`, configured to create Kubernetes Jobs in manager namespace
-`buildkite-v6e-1`. Do not install an Agent Stack controller on the worker.
+The intended steady-state Buildkite queue is the existing `kube` queue. That
+queue is already associated with the original `ci-dev` Agent Stack. Never let
+the old and new controllers consume it simultaneously: Buildkite may let either
+controller claim a job before Kueue is involved.
+
+Choose one migration-safe test mode:
+
+1. **Isolated test queue (recommended):** create `kueue-poc`, configure the new
+   Agent Stack to consume it, complete the lifecycle tests, then drain it and
+   cut over the new stack to `kube`; or
+2. **Direct cutover:** scale the old `ci-dev` Agent Stack controller to zero,
+   confirm no queued/running `kube` jobs, and configure the new controller to
+   consume `kube`.
+
+Install Agent Stack only on `ci-test-controller`, configured to create
+Kubernetes Jobs in manager namespace `buildkite-v6e-1`. Do not install an Agent
+Stack controller on the worker.
 
 Before sending a TPU command, establish how the generated top-level Job receives
 `kueue.x-k8s.io/queue-name: v6e-1`:
@@ -545,6 +559,14 @@ The existing `podSpec.metadata.labels` labels the Pod template and must not be
 assumed to label the parent Job. Prove the bridge with an unlabeled, harmless
 Job before enabling the Buildkite queue. The Job must be mutated to the queue
 and suspended before any Pod is created.
+
+Do not use a Buildkite agent tag as the label bridge. Buildkite tags constrain
+agent matching and Agent Stack does not inherently translate them into
+Kubernetes Job metadata. For the single-stack POC, namespace LocalQueue
+defaulting is the simplest hidden mapping. If multiple internal LocalQueues are
+introduced later for policy isolation, use a documented Agent Stack Job-metadata
+field or a namespace-scoped admission mutation driven by a neutral logical
+profile annotation.
 
 Trigger one Buildkite smoke, then immediately capture its generated Job:
 
