@@ -15,6 +15,8 @@ TOP_K = 10
 
 _GEMV_NBUF = max(2, int(_os.getenv("MOE_GEMV_NBUF", "2")))
 _FUSE_NBUF = max(2, int(_os.getenv("MOE_FUSE_NBUF", str(_GEMV_NBUF))))
+_CN_K_TILE = int(_os.getenv("MOE_CN_K_TILE", "1024"))
+_CN_I_TILE = int(_os.getenv("MOE_CN_I_TILE", "2048"))
 
 
 def _expert_body(
@@ -316,12 +318,13 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
     topk_weights = topk_weights.astype(jnp.float32)
 
     any_spec = pl.BlockSpec(memory_space=pl.ANY)
-    K_TILE = min(256, K)
-    assert K % K_TILE == 0, f"K={K} not divisible by K_TILE={K_TILE}"
+    K_TILE = min(_CN_K_TILE, K)
+    while K % K_TILE != 0:
+        K_TILE -= 1
     QB_eff = min(K_TILE, QB)
     KB_TILE = K_TILE // QB_eff
-    # Find largest tile <= 1792 that divides I
-    I_TILE = min(1792, I)
+    # Find largest tile <= _CN_I_TILE that divides I
+    I_TILE = min(_CN_I_TILE, I)
     while I % I_TILE != 0:
         I_TILE -= 1
     IB_TILE = I_BLOCKS // (I // I_TILE)
