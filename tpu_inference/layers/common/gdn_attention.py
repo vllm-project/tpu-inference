@@ -15,7 +15,6 @@
 Bridge the torch gdn_attention_core op for gated deltanet attention TPU impl
 
 """
-import functools
 from typing import Optional, Tuple
 
 import jax
@@ -133,50 +132,50 @@ def run_jax_gdn_attention(
 
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
 
-    kernel_kwargs = dict(
-        n_kq=n_kq // tp_size,
-        n_v=n_v // tp_size,
-        d_k=d_k,
-        d_v=d_v,
-        kernel_size=kernel_size,
-        num_spec_tokens=num_spec_tokens,
-    )
-
-    if slot_read_offsets is None:
-        p_run_jax_gdn_attention_local = functools.partial(
-            wrapper.fused_conv1d_gdn, **kernel_kwargs)
-        args = ()
-    else:
-
-        def p_run_jax_gdn_attention_local(j_mixed_qkv, j_b, j_a, conv_state,
-                                          recurrent_state, j_conv_weight,
-                                          j_conv_bias, j_A_log, j_dt_bias,
-                                          query_start_loc, state_indices,
-                                          distribution, seq_lens,
-                                          slot_read_offsets):
+    def p_run_jax_gdn_attention_local(j_mixed_qkv,
+                                      j_b,
+                                      j_a,
+                                      conv_state,
+                                      recurrent_state,
+                                      j_conv_weight,
+                                      j_conv_bias,
+                                      j_A_log,
+                                      j_dt_bias,
+                                      query_start_loc,
+                                      state_indices,
+                                      distribution,
+                                      seq_lens,
+                                      slot_read_offsets=None):
+        read_offsets = None
+        if slot_read_offsets is not None:
             # Per-sequence read offsets: `state_indices` holds rank-local
             # base slots, `slot_read_offsets` is the rank-local shard of the
             # per-slot offset buffer.
             read_offsets = slot_read_offsets[state_indices]
-            return wrapper.fused_conv1d_gdn(
-                j_mixed_qkv,
-                j_b,
-                j_a,
-                conv_state,
-                recurrent_state,
-                j_conv_weight,
-                j_conv_bias,
-                j_A_log,
-                j_dt_bias,
-                query_start_loc,
-                state_indices,
-                distribution,
-                seq_lens,
-                read_offsets,
-                **kernel_kwargs,
-            )
+        return wrapper.fused_conv1d_gdn(
+            j_mixed_qkv,
+            j_b,
+            j_a,
+            conv_state,
+            recurrent_state,
+            j_conv_weight,
+            j_conv_bias,
+            j_A_log,
+            j_dt_bias,
+            query_start_loc,
+            state_indices,
+            distribution,
+            seq_lens,
+            read_offsets,
+            n_kq=n_kq // tp_size,
+            n_v=n_v // tp_size,
+            d_k=d_k,
+            d_v=d_v,
+            kernel_size=kernel_size,
+            num_spec_tokens=num_spec_tokens,
+        )
 
-        args = (slot_read_offsets, )
+    args = () if slot_read_offsets is None else (slot_read_offsets, )
 
     mapped_fn = jax.shard_map(
         p_run_jax_gdn_attention_local,
