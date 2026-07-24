@@ -241,6 +241,8 @@ upload_multihost_disagg_only_pipeline() {
     echo "--- 🚨 HACK: Only uploading multi_host_disagg.yml"
     export TPU_VERSION="tpu7x"
     upload_with_priority .buildkite/features/multi_host_disagg.yml "$JOB_PRIORITY"
+    upload_with_priority .buildkite/features/multi-host.yml "$JOB_PRIORITY"
+    set_jax_envs unset
     echo "--- 🚨 HACK: Finished uploading only multi-host disaggregation pipeline"
 }
 
