@@ -136,14 +136,19 @@ def test_extract_last_sampled_tokens_matches_parse_output(
 
     mesh = _make_mesh()
     with jax.set_mesh(mesh):
-        last_sampled, num_rejected = extract_last_sampled_tokens(
-            metadata, sampled, num_speculative, VOCAB_SIZE, max_num_seq, mesh)
+        (last_sampled, num_rejected,
+         mamba_read_offsets) = extract_last_sampled_tokens(
+             metadata, sampled, num_speculative, VOCAB_SIZE, max_num_seq, mesh)
 
     ref_last, ref_num_rej = _reference(sampled, num_draft_cpu, VOCAB_SIZE,
                                        max_num_seq)
 
     np.testing.assert_array_equal(np.asarray(last_sampled), ref_last)
     np.testing.assert_array_equal(np.asarray(num_rejected), ref_num_rej)
+    padded_num_draft = np.zeros(max_num_seq, dtype=np.int32)
+    padded_num_draft[:len(num_draft_cpu)] = num_draft_cpu
+    np.testing.assert_array_equal(np.asarray(mamba_read_offsets),
+                                  padded_num_draft - ref_num_rej)
 
 
 def test_filter_speculative_logprobs():

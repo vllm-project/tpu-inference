@@ -47,6 +47,8 @@ def run_jax_gdn_attention(
     d_v: int,
     kernel_size: int,
     mesh: jax.sharding.Mesh,
+    slot_read_offsets: Optional[jnp.ndarray] = None,
+    num_spec_tokens: int = 0,
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Runs the Jax GDN attention mechanism.
 
@@ -81,6 +83,13 @@ def run_jax_gdn_attention(
         kernel_size: Convolution kernel size.
         mesh: The device mesh for distributed computation.
         config: Configuration for implementation selection.
+        slot_read_offsets: Optional tensor of shape `(num_blocks,)` — per
+          physical slot mamba read offset for speculative decoding. Gathered
+          per sequence (`slot_read_offsets[state_indices]`) inside the shard
+          so the kernel resumes each verify window from the checkpoint of the
+          last accepted token. Required iff `num_spec_tokens > 0`.
+        num_spec_tokens: Number of speculative draft tokens (0 disables the
+          spec-decode windowed mode).
 
     Returns:
         A tuple containing:
@@ -108,6 +117,9 @@ def run_jax_gdn_attention(
         P(ShardingAxisName.ATTN_DATA),  # distribution
         P(ShardingAxisName.ATTN_DATA),  # seq_lens
     )
+    if slot_read_offsets is not None:
+        in_specs = in_specs + (P(ShardingAxisName.ATTN_DATA),
+                               )  # slot_read_offsets
 
     out_specs = (
         (
@@ -121,14 +133,50 @@ def run_jax_gdn_attention(
 
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
 
-    p_run_jax_gdn_attention_local = functools.partial(
-        wrapper.fused_conv1d_gdn,
+    kernel_kwargs = dict(
         n_kq=n_kq // tp_size,
         n_v=n_v // tp_size,
         d_k=d_k,
         d_v=d_v,
         kernel_size=kernel_size,
+        num_spec_tokens=num_spec_tokens,
     )
+
+    if slot_read_offsets is None:
+        p_run_jax_gdn_attention_local = functools.partial(
+            wrapper.fused_conv1d_gdn, **kernel_kwargs)
+        args = ()
+    else:
+
+        def p_run_jax_gdn_attention_local(j_mixed_qkv, j_b, j_a, conv_state,
+                                          recurrent_state, j_conv_weight,
+                                          j_conv_bias, j_A_log, j_dt_bias,
+                                          query_start_loc, state_indices,
+                                          distribution, seq_lens,
+                                          slot_read_offsets):
+            # Per-sequence read offsets: `state_indices` holds rank-local
+            # base slots, `slot_read_offsets` is the rank-local shard of the
+            # per-slot offset buffer.
+            read_offsets = slot_read_offsets[state_indices]
+            return wrapper.fused_conv1d_gdn(
+                j_mixed_qkv,
+                j_b,
+                j_a,
+                conv_state,
+                recurrent_state,
+                j_conv_weight,
+                j_conv_bias,
+                j_A_log,
+                j_dt_bias,
+                query_start_loc,
+                state_indices,
+                distribution,
+                seq_lens,
+                read_offsets,
+                **kernel_kwargs,
+            )
+
+        args = (slot_read_offsets, )
 
     mapped_fn = jax.shard_map(
         p_run_jax_gdn_attention_local,
@@ -152,6 +200,7 @@ def run_jax_gdn_attention(
         state_indices,
         distribution,
         seq_lens,
+        *args,
     )
 
     return (new_conv_state, new_recurrent_state), output
