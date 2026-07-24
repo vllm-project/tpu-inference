@@ -20,7 +20,6 @@
         "OUTPUT_LEN": 8192,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "CREATED_BY": "bm-scheduler",
         "MODEL_NAME": "DeepSeek-R1",
         "USER": "for test run"
       },
