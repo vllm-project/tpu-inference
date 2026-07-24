@@ -279,7 +279,7 @@ dump_tpu_process_env() {
   local host=$1
   local role=$2
   local dump_cmd
-  dump_cmd='printf "CLOUD_TPU_TASK_ID=%s\nJAX_PROCESS_ID=%s\nTPU_PROCESS_BOUNDS=%s\n" "${CLOUD_TPU_TASK_ID-<unset>}" "${JAX_PROCESS_ID-<unset>}" "${TPU_PROCESS_BOUNDS-<unset>}"'
+  dump_cmd='printf "CLOUD_TPU_TASK_ID=%s\nTPU_WORKER_ID=%s\nJAX_PROCESS_ID=%s\nJAX_NUM_PROCESSES=%s\nTPU_PROCESS_BOUNDS=%s\nTPU_CHIPS_PER_PROCESS_BOUNDS=%s\n" "${CLOUD_TPU_TASK_ID-<unset>}" "${TPU_WORKER_ID-<unset>}" "${JAX_PROCESS_ID-<unset>}" "${JAX_NUM_PROCESSES-<unset>}" "${TPU_PROCESS_BOUNDS-<unset>}" "${TPU_CHIPS_PER_PROCESS_BOUNDS-<unset>}"'
 
   echo "--- TPU process environment: ${role} (${host})"
   if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
@@ -393,6 +393,13 @@ DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 echo "--- Cleaning up previous cluster state..."
 cleanup 0
 
+# A tpu-v7x-16 slice has two hosts. Each host owns a 2x2x1 chip partition
+# (8 TPU devices because v7x exposes two cores per chip), and the two
+# processes are arranged across the final topology dimension.
+readonly JAX_NUM_PROCESSES_VALUE=2
+readonly TPU_PROCESS_BOUNDS_VALUE="1,1,2"
+readonly TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE="2,2,1"
+
 # libtpu uses CLOUD_TPU_TASK_ID to identify the local process in a TPU slice.
 # Do not rely solely on automatic detection from inside Ray actors: if both
 # actors default to task 0, jax.local_devices() reports process_index=0 on both
@@ -402,6 +409,11 @@ HEAD_TPU_TASK_ID="$(get_metadata_value "instance/attributes/agent-worker-number"
 validate_tpu_task_id "$HEAD_INTERNAL_IP" "$HEAD_TPU_TASK_ID"
 
 IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
+if (( ${#WORKER_IPS_ARRAY[@]} != 1 )); then
+  echo "ERROR: tpu-v7x-16 requires exactly one remote host; found ${#WORKER_IPS_ARRAY[@]}." >&2
+  exit 1
+fi
+
 WORKER_TPU_TASK_IDS=()
 SEEN_TPU_TASK_IDS=",${HEAD_TPU_TASK_ID},"
 for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
@@ -415,17 +427,31 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
   WORKER_TPU_TASK_IDS+=("$worker_task_id")
 done
 
+if [[ "$HEAD_TPU_TASK_ID" != "0" ]]; then
+  echo "ERROR: The tpu-v7x-16 head must have TPU process ID 0; metadata returned ${HEAD_TPU_TASK_ID}." >&2
+  exit 1
+fi
+if [[ "${WORKER_TPU_TASK_IDS[0]}" != "1" ]]; then
+  echo "ERROR: The second tpu-v7x-16 host must have TPU process ID 1; metadata returned ${WORKER_TPU_TASK_IDS[0]}." >&2
+  exit 1
+fi
+
 echo "--- TPU process identity mapping"
-echo "Head ${HEAD_INTERNAL_IP}: CLOUD_TPU_TASK_ID=${HEAD_TPU_TASK_ID}"
+echo "Head ${HEAD_INTERNAL_IP}: process_index=${HEAD_TPU_TASK_ID}"
 for worker_index in "${!WORKER_IPS_ARRAY[@]}"; do
-  echo "Worker ${WORKER_IPS_ARRAY[$worker_index]}: CLOUD_TPU_TASK_ID=${WORKER_TPU_TASK_IDS[$worker_index]}"
+  echo "Worker ${WORKER_IPS_ARRAY[$worker_index]}: process_index=${WORKER_TPU_TASK_IDS[$worker_index]}"
 done
+echo "TPU_PROCESS_BOUNDS=${TPU_PROCESS_BOUNDS_VALUE}"
+echo "TPU_CHIPS_PER_PROCESS_BOUNDS=${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}"
 
 # 1. Start Ray Head Node locally
 echo "--- Starting Ray Head Node Locally"
 WORKER_LAUNCHER_PIDS=()
 WORKER_LAUNCHER_HOSTS=()
 
+# Disable xtrace while expanding HF_TOKEN so the credential is not written to
+# Buildkite logs. The child script does not enable xtrace.
+set +x
 bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${DOCKER_IMAGE}" \
   "${HEAD_INTERNAL_IP}" \
@@ -433,6 +459,10 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${HOST_HF_HOME}" \
   -e CLOUD_TPU_TASK_ID="${HEAD_TPU_TASK_ID}" \
   -e TPU_WORKER_ID="${HEAD_TPU_TASK_ID}" \
+  -e JAX_PROCESS_ID="${HEAD_TPU_TASK_ID}" \
+  -e JAX_NUM_PROCESSES="${JAX_NUM_PROCESSES_VALUE}" \
+  -e TPU_PROCESS_BOUNDS="${TPU_PROCESS_BOUNDS_VALUE}" \
+  -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -446,6 +476,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
   -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" &
+set -x
 
 wait_for_ray_head
 sleep 60
@@ -469,10 +500,16 @@ for worker_index in "${!WORKER_IPS_ARRAY[@]}"; do
 
     # shellcheck disable=SC2087
     # shellcheck disable=SC2029
+    # Keep xtrace disabled while the heredoc expands HF_TOKEN.
+    set +x
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
   -e CLOUD_TPU_TASK_ID='${worker_task_id}' \
   -e TPU_WORKER_ID='${worker_task_id}' \
+  -e JAX_PROCESS_ID='${worker_task_id}' \
+  -e JAX_NUM_PROCESSES='${JAX_NUM_PROCESSES_VALUE}' \
+  -e TPU_PROCESS_BOUNDS='${TPU_PROCESS_BOUNDS_VALUE}' \
+  -e TPU_CHIPS_PER_PROCESS_BOUNDS='${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}' \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -489,6 +526,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_
 EOF
     WORKER_LAUNCHER_PIDS+=("$!")
     WORKER_LAUNCHER_HOSTS+=("$worker_ip")
+    set -x
 done
 
 
