@@ -272,10 +272,12 @@ stop_tpu_runtime() {
   local host=$1
   local grace_seconds=$2
 
-  run_host_script "$host" "$grace_seconds" <<'EOF' >/dev/null
+  run_host_script "$host" "$grace_seconds" "$host" <<'EOF'
 grace_seconds=$1
+host=$2
 if docker inspect node >/dev/null 2>&1; then
-  docker exec -i node bash -s -- "$grace_seconds" <<'INNER_EOF' >/dev/null 2>&1 || true
+  echo "[cleanup] gracefully stopping TPU runtime on ${host}"
+  if ! docker exec -i node bash -s -- "$grace_seconds" <<'INNER_EOF'
 grace_seconds=$1
 pkill -TERM -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
 end_time=$((SECONDS + grace_seconds))
@@ -283,10 +285,30 @@ while (( SECONDS < end_time )); do
   pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || break
   sleep 1
 done
-pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
-ray stop --force >/dev/null 2>&1 || true
+if pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1; then
+  echo "[cleanup] vLLM/EngineCore did not exit within ${grace_seconds}s" >&2
+  pgrep -af '[v]llm serve|[A]PIServer|[E]ngineCore' >&2 || true
+  exit 1
+fi
+ray stop >/dev/null 2>&1 || true
 INNER_EOF
-  docker rm -f node >/dev/null 2>&1 || true
+  then
+    echo "[cleanup] graceful TPU process shutdown failed on ${host}" >&2
+    exit 1
+  fi
+
+  # run_multi_disagg.sh is the explicit cleanup owner for these launchers, so
+  # run_cluster.sh will not race this stop/remove sequence.
+  if ! docker stop --time "$grace_seconds" node >/dev/null 2>&1; then
+    echo "[cleanup] container node did not stop cleanly on ${host}" >&2
+    exit 1
+  fi
+  if docker inspect node >/dev/null 2>&1 \
+    && ! docker rm node >/dev/null 2>&1 \
+    && docker inspect node >/dev/null 2>&1; then
+    echo "[cleanup] failed to remove stopped container node on ${host}" >&2
+    exit 1
+  fi
 fi
 ! docker inspect node >/dev/null 2>&1
 EOF
@@ -319,14 +341,10 @@ verify_tpu_clean() {
   run_host_script "$host" "$timeout" "$host" <<'EOF'
 timeout=$1
 host=$2
-force_after=$((SECONDS + 10))
 deadline=$((SECONDS + timeout))
-forced=0
 fuser_cmd=(fuser)
-rm_cmd=(rm -f)
 if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   fuser_cmd=(sudo -n fuser)
-  rm_cmd=(sudo -n rm -f)
 fi
 
 while (( SECONDS < deadline )); do
@@ -336,25 +354,11 @@ while (( SECONDS < deadline )); do
     "${fuser_cmd[@]}" "$device" >/dev/null 2>&1 && device_busy=1
   done
 
-  if (( device_busy == 1 && forced == 0 && SECONDS >= force_after )); then
-    for device in /dev/accel* /dev/vfio/[0-9]*; do
-      [[ -e "$device" ]] || continue
-      "${fuser_cmd[@]}" -k -9 "$device" >/dev/null 2>&1 || true
-    done
-    forced=1
-    sleep 2
-    continue
-  fi
-
-  if (( device_busy == 0 )); then
-    "${rm_cmd[@]}" /tmp/libtpu_lockfile >/dev/null 2>&1 || true
-  fi
-
   if ! docker inspect node >/dev/null 2>&1 \
     && ! pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 \
     && (( device_busy == 0 )) \
     && [[ ! -e /tmp/libtpu_lockfile ]] \
-    && { ! command -v ss >/dev/null 2>&1 || ! ss -ltnH | awk '$4 ~ /:(6379|8400|9400)$/ { found=1 } END { exit !found }'; }; then
+    && { ! command -v ss >/dev/null 2>&1 || ! ss -ltnH | awk '$4 ~ /:(6379|8400|8476|9400)$/ { found=1 } END { exit !found }'; }; then
     exit 0
   fi
   sleep 2
@@ -367,13 +371,23 @@ for device in /dev/accel* /dev/vfio/[0-9]*; do
   [[ -e "$device" ]] || continue
   "${fuser_cmd[@]}" -v "$device" >&2 || true
 done
+if [[ -e /tmp/libtpu_lockfile ]]; then
+  echo "[cleanup] stale /tmp/libtpu_lockfile remains; refusing to delete it" >&2
+fi
+if command -v ss >/dev/null 2>&1; then
+  ss -ltnp | awk '$4 ~ /:(6379|8400|8476|9400)$/ { print }' >&2 || true
+fi
+if [[ -d /tmp/tpu_logs ]]; then
+  find /tmp/tpu_logs -maxdepth 1 -type f -printf '%T@ %p\n' 2>/dev/null \
+    | sort -nr | head -5 >&2 || true
+fi
 exit 1
 EOF
 }
 
 cleanup() {
   local exit_code=${1:-0}
-  local grace_seconds="${TPU_CLEANUP_GRACE_SECONDS:-30}"
+  local grace_seconds="${TPU_CLEANUP_GRACE_SECONDS:-120}"
   local verify_seconds="${TPU_CLEANUP_VERIFY_SECONDS:-120}"
   local settle_seconds="${TPU_RUNTIME_SETTLE_SECONDS:-30}"
   local failed=0
@@ -382,7 +396,7 @@ cleanup() {
   local -a cleanup_pids=()
   local -a remote_hosts=()
 
-  [[ "$grace_seconds" =~ ^[0-9]+$ ]] || grace_seconds=30
+  [[ "$grace_seconds" =~ ^[0-9]+$ ]] || grace_seconds=120
   [[ "$verify_seconds" =~ ^[0-9]+$ ]] || verify_seconds=120
   [[ "$settle_seconds" =~ ^[0-9]+$ ]] || settle_seconds=30
 
@@ -448,7 +462,16 @@ cleanup() {
   fi
   echo "[cleanup] complete"
 }
-trap 'exit_code=$?; trap - EXIT; cleanup "$exit_code" || exit 1; exit "$exit_code"' EXIT
+
+exit_on_signal() {
+  local exit_code=$1
+  exit "$exit_code"
+}
+
+trap 'exit_on_signal 129' HUP
+trap 'exit_on_signal 130' INT
+trap 'exit_on_signal 143' TERM
+trap 'exit_code=$?; trap - EXIT HUP INT TERM; cleanup "$exit_code" || exit 1; exit "$exit_code"' EXIT
 
 wait_for_server_remote() {
   local host=$1
@@ -614,6 +637,7 @@ cleanup 0
 # 1. Start Prefill Ray Cluster
 # -----------------------------------------------------------------
 echo "--- Starting Prefill Ray Head Node Locally on ${PREFILL_HEAD_IP}"
+RUN_CLUSTER_CLEANUP_OWNER=parent \
 bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${DOCKER_IMAGE}" \
   "${PREFILL_HEAD_IP}" \
@@ -648,6 +672,7 @@ for worker_ip in "${PREFILL_WORKER_IPS[@]}"; do
 
     # shellcheck disable=SC2087
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
+RUN_CLUSTER_CLEANUP_OWNER=parent \
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${PREFILL_HEAD_IP}' --worker '${HOST_HF_HOME}' \
   ${PREFILL_TPU_ENV_ARGS[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \
@@ -676,6 +701,7 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "mkdir -p ~/tpu-inference/s
 cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" << EOF &
+RUN_CLUSTER_CLEANUP_OWNER=parent \
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECODE_HEAD_IP}' --head '${HOST_HF_HOME}' \
   ${DECODE_TPU_ENV_ARGS[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \
@@ -707,6 +733,7 @@ for worker_ip in "${DECODE_WORKER_IPS[@]}"; do
 
     # shellcheck disable=SC2087
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
+RUN_CLUSTER_CLEANUP_OWNER=parent \
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECODE_HEAD_IP}' --worker '${HOST_HF_HOME}' \
   ${DECODE_TPU_ENV_ARGS[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \

@@ -95,11 +95,30 @@ gcloud auth configure-docker us-central1-docker.pkg.dev
 
 CONTAINER_NAME="node"
 
-# Define a cleanup routine that removes the container when the script exits.
-# This prevents orphaned containers from accumulating if the script is interrupted.
+# Normally this launcher owns the container lifecycle. A higher-level
+# orchestrator may explicitly take ownership so that two cleanup handlers do
+# not stop/remove the same container concurrently.
+RUN_CLUSTER_CLEANUP_OWNER="${RUN_CLUSTER_CLEANUP_OWNER:-self}"
+if [[ "$RUN_CLUSTER_CLEANUP_OWNER" != "self" && "$RUN_CLUSTER_CLEANUP_OWNER" != "parent" ]]; then
+    echo "Error: RUN_CLUSTER_CLEANUP_OWNER must be 'self' or 'parent'." >&2
+    exit 1
+fi
+
 cleanup() {
-    docker stop "${CONTAINER_NAME}"
-    docker rm "${CONTAINER_NAME}"
+    local exit_code=$?
+
+    if [[ "$RUN_CLUSTER_CLEANUP_OWNER" == "parent" ]]; then
+        return "$exit_code"
+    fi
+
+    if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        docker stop --time "${RUN_CLUSTER_STOP_TIMEOUT:-120}" \
+            "${CONTAINER_NAME}" >/dev/null 2>&1 || return 1
+    fi
+    if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        docker rm "${CONTAINER_NAME}" >/dev/null 2>&1 || return 1
+    fi
+    return "$exit_code"
 }
 trap cleanup EXIT
 
