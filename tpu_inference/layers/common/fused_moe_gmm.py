@@ -671,8 +671,11 @@ def fused_moe_func(
                                     use_ep=use_ep)
             reduction_axes = (ShardingAxisName.EXPERT
                               if use_ep else ShardingAxisName.MLP_TENSOR)
-            return jax.lax.psum(
-                local_out, axis_name=reduction_axes).astype(hs.dtype)
+            if not defer_all_reduce:
+                return jax.lax.psum(
+                    local_out, axis_name=reduction_axes).astype(hs.dtype)
+            else:
+                return local_out.astype(hs.dtype)
 
         # TP vs EP weight/scale sharding. EP shards the expert axis; TP shards
         # the intermediate dim (N for w1, I for w2), matching
