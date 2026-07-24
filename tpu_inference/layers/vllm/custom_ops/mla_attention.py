@@ -37,6 +37,24 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 
 
+# Patch torchax.tensor.Tensor.type_as to handle View objects without _elem
+_orig_type_as = getattr(torchax.tensor.Tensor, "type_as", None)
+if _orig_type_as is not None:
+
+    def _safe_type_as(self, other):
+        target_dtype = getattr(other, "dtype", None)
+        if target_dtype is None and hasattr(other, "_elem"):
+            target_dtype = other._elem.dtype
+        if hasattr(self, "_elem") and target_dtype is not None:
+            if isinstance(target_dtype, torch.dtype):
+                target_dtype = utils.to_jax_dtype(target_dtype)
+            self._elem = self._elem.astype(target_dtype)
+            return self
+        return self.to(target_dtype)
+
+    torchax.tensor.Tensor.type_as = _safe_type_as
+
+
 # Provides a no-op implementation for upstream MLA prefill backend.
 # This is used since upstream vllm has moved prefill backend ownership
 # to the MLAAttention __init__ method:
@@ -135,25 +153,33 @@ class VllmMLAAttention(MLAAttention):
                     "'.scheme.linear_config.mesh' on the kv_b_proj layer.")
 
             sharding = NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))
-            self.W_UK_T, self.W_UK_T_scale = quantize_tensor(
+            w_uk_t, w_uk_t_scale = quantize_tensor(
                 self.kv_cache_quantized_dtype, jax_view(self.W_UK_T), axis=1)
-            self.W_UK_T = torch_view(general_device_put(self.W_UK_T, sharding))
-            self.W_UK_T_scale = torch_view(
-                general_device_put(jnp.expand_dims(self.W_UK_T_scale, 1),
+            w_uk_t = torch_view(general_device_put(w_uk_t, sharding))
+            w_uk_t_scale = torch_view(
+                general_device_put(jnp.expand_dims(w_uk_t_scale, 1),
                                    sharding))
 
-            self.W_UV, self.W_UV_scale = quantize_tensor(
+            w_uv, w_uv_scale = quantize_tensor(
                 self.kv_cache_quantized_dtype, jax_view(self.W_UV), axis=1)
-            self.W_UV = torch_view(general_device_put(self.W_UV, sharding))
-            self.W_UV_scale = torch_view(
-                general_device_put(jnp.expand_dims(self.W_UV_scale, 0),
+            w_uv = torch_view(general_device_put(w_uv, sharding))
+            w_uv_scale = torch_view(
+                general_device_put(jnp.expand_dims(w_uv_scale, 0),
                                    sharding))
 
-            self.W_UK_T = Parameter(self.W_UK_T, requires_grad=False)
-            self.W_UK_T_scale = Parameter(self.W_UK_T_scale,
-                                          requires_grad=False)
-            self.W_UV = Parameter(self.W_UV, requires_grad=False)
-            self.W_UV_scale = Parameter(self.W_UV_scale, requires_grad=False)
+            if hasattr(self, "W_UK_T"):
+                del self.W_UK_T
+            if hasattr(self, "W_UK_T_scale"):
+                del self.W_UK_T_scale
+            if hasattr(self, "W_UV"):
+                del self.W_UV
+            if hasattr(self, "W_UV_scale"):
+                del self.W_UV_scale
+
+            self.W_UK_T = Parameter(w_uk_t, requires_grad=False)
+            self.W_UK_T_scale = Parameter(w_uk_t_scale, requires_grad=False)
+            self.W_UV = Parameter(w_uv, requires_grad=False)
+            self.W_UV_scale = Parameter(w_uv_scale, requires_grad=False)
 
             # Delete kv_b_proj_params as the dequantized weights are now stored
             # in self.W_UK_T and self.W_UV.
@@ -315,9 +341,10 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         if self.rotary_emb is not None:
             q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
 
+        topk_indices = None
         if self.indexer and self.is_sparse:
-            _topk_indices = self.indexer(hidden_states, q_c, positions,
-                                         self.indexer_rope_emb)
+            topk_indices = self.indexer(hidden_states, q_c, positions,
+                                        self.indexer_rope_emb)
 
         if llama_4_scaling is not None:
             q_nope *= llama_4_scaling
@@ -329,6 +356,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             k_pe,
             output_shape=(hidden_states.shape[0],
                           self.num_heads * self.v_head_dim),
+            topk_indices=topk_indices,
         )
 
         return self.o_proj(attn_out)[0]

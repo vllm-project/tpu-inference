@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tpu_inference.models.vllm import model_loader  # noqa F401
-from tpu_inference.models.vllm import vllm_model_loader  # noqa F401
+from vllm.model_executor.models.registry import ModelRegistry
 
+# Register DeepseekV32ForCausalLM / GLM52ForCausalLM out-of-tree model wrappers
+ModelRegistry.register_model(
+    "DeepseekV32ForCausalLM",
+    "vllm.model_executor.models.deepseek_v2:DeepseekV3ForCausalLM",
+)
+ModelRegistry.register_model(
+    "GLM52ForCausalLM",
+    "vllm.model_executor.models.deepseek_v2:DeepseekV3ForCausalLM",
+)
+ModelRegistry.register_model(
+    "Glm52ForCausalLM",
+    "vllm.model_executor.models.deepseek_v2:DeepseekV3ForCausalLM",
+)

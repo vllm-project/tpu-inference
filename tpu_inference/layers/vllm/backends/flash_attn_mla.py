@@ -180,6 +180,17 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
                                   value=None,
                                   k_scale=k_scale)
         k_pe = k_pe.squeeze(1)
+        topk_indices = kwargs.get("topk_indices", None)
+        if topk_indices is not None and not isinstance(topk_indices, jnp.ndarray):
+            if hasattr(topk_indices, "_elem"):
+                topk_indices = topk_indices._elem
+            elif hasattr(topk_indices, "_tensor") and hasattr(topk_indices._tensor, "_elem"):
+                topk_indices = topk_indices._tensor._elem
+            elif isinstance(topk_indices, torch.Tensor):
+                try:
+                    topk_indices = jax_view(topk_indices)
+                except Exception:
+                    topk_indices = jnp.array(topk_indices.detach().cpu().numpy())
         new_kv_cache, outputs = mla_attention(
             q_nope,
             q_pe,
@@ -198,6 +209,7 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             k_scale=k_scale,
             v_scale=v_scale,
             sm_scale=self.scale,
+            topk_indices=topk_indices,
         )
 
         # einsum selects 'n' as the major-most physical dimension again.

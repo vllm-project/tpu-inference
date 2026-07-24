@@ -1043,7 +1043,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                next_power_of_2(self.dp_size * kv_packing)),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
-            padding_gap=vllm_envs.VLLM_TPU_BUCKET_PADDING_GAP)
+            padding_gap=getattr(vllm_envs, "VLLM_TPU_BUCKET_PADDING_GAP", 128))
         self.num_tokens_paddings = sorted(self.num_tokens_paddings +
                                           additional_sizes)
         self.num_tokens_paddings_per_dp = [

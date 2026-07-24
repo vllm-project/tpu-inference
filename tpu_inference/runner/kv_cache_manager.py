@@ -624,7 +624,7 @@ class KVCacheManager:
                         kv_cache_spec[layer_name] = spec
                     continue
 
-                if is_cache_for_ds_v4(attn_module):
+                if hasattr(attn_module, "get_kv_cache_spec"):
                     spec = attn_module.get_kv_cache_spec(
                         self.runner.vllm_config)
                     if spec is not None:
@@ -635,7 +635,7 @@ class KVCacheManager:
                     attn_module.sliding_window = None
 
                 if (kv_tgt_layer :=
-                        attn_module.kv_sharing_target_layer_name) is not None:
+                        getattr(attn_module, "kv_sharing_target_layer_name", None)) is not None:
                     # The layer doesn't need its own KV cache and will use that of
                     # the target layer. We skip creating a KVCacheSpec for it, so
                     # that KV cache management logic will act as this layer does
@@ -645,7 +645,7 @@ class KVCacheManager:
                     # or enable more requests to be processed simultaneously.
                     self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                     continue
-                if attn_module.attn_type == AttentionType.DECODER:
+                if getattr(attn_module, "attn_type", None) == AttentionType.DECODER:
                     num_kv_heads = common_utils.get_padded_num_heads(
                         attn_module.num_kv_heads,
                         self.runner.mesh.shape["model"])

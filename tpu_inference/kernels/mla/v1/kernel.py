@@ -112,6 +112,7 @@ def ref_mla_ragged_paged_attention(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    topk_indices: jax.Array | None = None,
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -135,6 +136,7 @@ def ref_mla_ragged_paged_attention(
         page_indices,
         cu_q_lens,
         distribution,
+        topk_indices=topk_indices,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
@@ -143,6 +145,9 @@ def ref_mla_ragged_paged_attention(
         k_scale=k_scale,
         v_scale=v_scale,
     )
+
+    if topk_indices is not None:
+        topk_indices = topk_indices.reshape(topk_indices.shape[0], -1)
 
     updated_cache_kv = update_kv_cache(
         new_kv_c,
@@ -238,6 +243,12 @@ def ref_mla_ragged_paged_attention(
         mask = q_span < kv_span
         if sliding_window is not None:
             mask = jnp.logical_or(mask, q_span - sliding_window >= kv_span)
+        if topk_indices is not None:
+            topk_indices_i = topk_indices[q_start:q_end]
+            dsa_mask = (
+                topk_indices_i[:, :, None] == jnp.arange(kv_len)[None, None, :]
+            ).any(axis=1)
+            mask = jnp.logical_or(mask, ~dsa_mask[None, :, :])
         if soft_cap is not None:
             attn = soft_cap * jnp.tanh(attn / soft_cap)
         attn = jnp.where(mask, mask_value, attn)
@@ -267,6 +278,7 @@ def dynamic_validate_inputs(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    topk_indices: jax.Array | None = None,
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -295,6 +307,7 @@ def dynamic_validate_inputs(
         page_indices,
         cu_q_lens,
         distribution,
+        topk_indices=topk_indices,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
@@ -358,6 +371,7 @@ def static_validate_inputs(
     page_indices: jax.Array,  # i32[max_num_seqs * pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     distribution: jax.Array,  # i32[3]
+    topk_indices: jax.Array | None = None,
     *,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -384,6 +398,16 @@ def static_validate_inputs(
         raise ValueError(f"Expected 2D array for {new_kv_c.shape=}")
     if len(new_k_pe.shape) != 2:
         raise ValueError(f"Expected 2D array for {new_k_pe.shape=}")
+
+    if topk_indices is not None:
+        if topk_indices.shape[0] != ql_nope.shape[0]:
+            raise ValueError(
+                f"Expected topk_indices.shape[0]={topk_indices.shape[0]} to be equal to ql_nope.shape[0]={ql_nope.shape[0]}"
+            )
+        if not jnp.issubdtype(topk_indices.dtype, jnp.integer):
+            raise ValueError(
+                f"Expected topk_indices.dtype={topk_indices.dtype} to be integer."
+            )
 
     if ql_nope.shape[:2] != q_pe.shape[:2]:
         raise ValueError(
@@ -484,6 +508,7 @@ def static_validate_inputs(
     del k_scale
     del v_scale
     del debug_mode
+    del topk_indices
 
 
 def _mla_ragged_paged_attention_kernel(

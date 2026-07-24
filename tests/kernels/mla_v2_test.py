@@ -421,6 +421,172 @@ class MlaRaggedPagedAttentionKernelV2Test(MlaRaggedPagedAttentionTestBase):
             expected_shape,
         )
 
+    def test_dsa_mla_v2(self):
+        """Test Pallas TPU MLA v2 kernel with topk_indices against JAX reference."""
+        if not jtu.is_device_tpu_at_least(version=4):
+            self.skipTest("Expect TPUv4+")
+
+        seq_lens = [(1, 32), (4, 32)]
+        num_heads = 4
+        lkv_dim = 128
+        r_dim = 64
+        page_size = 16
+        q_dtype = jnp.bfloat16
+        kv_dtype = jnp.bfloat16
+        num_pages = 20
+        topk = 8
+        rng = np.random.default_rng(1234)
+
+        (
+            ql_nope,
+            q_pe,
+            new_kv_c,
+            new_k_pe,
+            cache_kv,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+        ) = generate_mla_inputs(
+            seq_lens,
+            num_heads,
+            lkv_dim,
+            r_dim,
+            page_size,
+            q_dtype,
+            kv_dtype,
+            num_pages,
+            rng=rng,
+        )
+
+        topk_indices_list = []
+        for seq_idx, (q_len, kv_len) in enumerate(seq_lens):
+            for _ in range(q_len):
+                idx = list(rng.choice(kv_len, size=topk, replace=False))
+                topk_indices_list.append(idx)
+        topk_indices = jnp.array(topk_indices_list, dtype=jnp.int32)
+
+        expected_out, _ = kernel_v1.ref_mla_ragged_paged_attention(
+            ql_nope,
+            q_pe,
+            new_kv_c,
+            new_k_pe,
+            cache_kv.copy(),
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+            topk_indices=topk_indices,
+        )
+
+        kernel_out, _ = kernel_v2.mla_ragged_paged_attention(
+            jnp.transpose(ql_nope.copy(), (1, 0, 2)),
+            q_pe.copy(),
+            new_kv_c,
+            new_k_pe,
+            cache_kv.copy(),
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+            topk_indices=topk_indices,
+            transpose_kv_cache=False,
+            s_dtype=jnp.float32,
+            decode_batch_size=1,
+            num_kv_pages_per_block=2,
+            num_queries_per_block=4,
+            vmem_limit_bytes=100 * 1024 * 1024,
+            debug_mode=False,
+        )
+        kernel_out = jnp.transpose(kernel_out, (1, 0, 2))
+        np.testing.assert_allclose(kernel_out, expected_out, rtol=1e-2, atol=1e-2)
+
+    def test_dsa_mla_v2_transposed(self):
+        """Test Pallas TPU MLA v2 kernel with transpose_kv_cache=True and topk_indices."""
+        if not jtu.is_device_tpu_at_least(version=4):
+            self.skipTest("Expect TPUv4+")
+
+        seq_lens = [(1, 128), (4, 128)]
+        num_heads = 4
+        lkv_dim = 128
+        r_dim = 64
+        page_size = 128
+        q_dtype = jnp.bfloat16
+        kv_dtype = jnp.bfloat16
+        num_pages = 20
+        topk = 16
+        rng = np.random.default_rng(1234)
+
+        (
+            ql_nope,
+            q_pe,
+            new_kv_c,
+            new_k_pe,
+            cache_kv,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+        ) = generate_mla_inputs(
+            seq_lens,
+            num_heads,
+            lkv_dim,
+            r_dim,
+            page_size,
+            q_dtype,
+            kv_dtype,
+            num_pages,
+            rng=rng,
+        )
+
+        topk_indices_list = []
+        for _seq_idx, (q_len, kv_len) in enumerate(seq_lens):
+            for _ in range(q_len):
+                idx = list(rng.choice(kv_len, size=topk, replace=False))
+                topk_indices_list.append(idx)
+        topk_indices = jnp.array(topk_indices_list, dtype=jnp.int32)
+
+        # Transpose cache_kv from [total_num_pages, page_size/packing, packing, kv_dim]
+        # to [total_num_pages, kv_dim, page_size]
+        transposed_cache_kv = jnp.transpose(
+            cache_kv.reshape(num_pages, page_size, -1), (0, 2, 1)
+        )
+
+        expected_out, _ = kernel_v1.ref_mla_ragged_paged_attention(
+            ql_nope,
+            q_pe,
+            new_kv_c,
+            new_k_pe,
+            cache_kv.copy(),
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+            topk_indices=topk_indices,
+        )
+
+        kernel_out, _ = kernel_v2.mla_ragged_paged_attention(
+            jnp.transpose(ql_nope.copy(), (1, 0, 2)),
+            q_pe.copy(),
+            new_kv_c,
+            new_k_pe,
+            transposed_cache_kv,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+            topk_indices=topk_indices,
+            transpose_kv_cache=True,
+            s_dtype=jnp.float32,
+            decode_batch_size=1,
+            num_kv_pages_per_block=2,
+            num_queries_per_block=4,
+            vmem_limit_bytes=100 * 1024 * 1024,
+            debug_mode=False,
+        )
+        kernel_out = jnp.transpose(kernel_out, (1, 0, 2))
+        np.testing.assert_allclose(kernel_out, expected_out, rtol=1e-2, atol=1e-2)
+
     def test_ragged_paged_attention_basic(self):
         dtype = jnp.bfloat16
         seq_lens = [(192, 328), (128, 180), (64, 255)]

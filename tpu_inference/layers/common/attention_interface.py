@@ -868,7 +868,8 @@ def mla_attention(
         q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
-        sm_scale: float | None = None) -> Tuple[jax.Array, jax.Array]:
+        sm_scale: float | None = None,
+        topk_indices: jax.Array | None = None) -> Tuple[jax.Array, jax.Array]:
     """
     Main shared interface for MLA attention.  Computes the sharded attention
     output and kv cache update.
@@ -891,8 +892,9 @@ def mla_attention(
         k_scale: scale to apply to k (if quantized)
         v_scale: scale to apply to v (if quantized)
         sm_scale: softmax scale
+        topk_indices: optional topk indices for sparse attention indexing
     """
-    in_specs = (
+    in_specs = [
         query_nth_sharding
         or P(None, ShardingAxisName.MLP_TENSOR, None),  # q (head-major)
         query_tnh_sharding
@@ -905,7 +907,16 @@ def mla_attention(
         P(ShardingAxisName.ATTN_DATA),  # md.page_indices_flat
         P(ShardingAxisName.ATTN_DATA),  # md.query_start_loc
         P(ShardingAxisName.ATTN_DATA),  # md.distribution
-    )
+    ]
+    call_args = [
+        q_NTA, q_rope_TNH, k_SA, k_rope_SH, kv_cache, md.seq_lens,
+        md.block_tables, md.query_start_loc, md.request_distribution
+    ]
+
+    if topk_indices is not None:
+        in_specs.append(P(ShardingAxisName.ATTN_DATA, None))
+        call_args.append(topk_indices)
+
     out_specs = (
         P(ShardingAxisName.BATCH),  # kv cache
         attn_o_nth_sharding
@@ -913,6 +924,9 @@ def mla_attention(
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
+        md_args = args[:4]
+        local_topk_indices = args[4] if len(args) > 4 else None
+
         dp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA)
         batched_decode_tuning_key = TuningKey(
             case="batched_decode",
@@ -925,7 +939,7 @@ def mla_attention(
             page_size_per_kv_packing=cache.shape[1],
             kv_packing=cache.shape[2],
             max_num_seqs=md.padded_num_reqs // dp_size,
-            pages_per_seq=args[1].shape[0] // args[0].shape[0],
+            pages_per_seq=md_args[1].shape[0] // md_args[0].shape[0],
         )
         batched_decode_tuned_params = get_tuned_params(
             batched_decode_tuning_key)
@@ -940,7 +954,7 @@ def mla_attention(
             page_size_per_kv_packing=cache.shape[1],
             kv_packing=cache.shape[2],
             max_num_seqs=md.padded_num_reqs // dp_size,
-            pages_per_seq=args[1].shape[0] // args[0].shape[0],
+            pages_per_seq=md_args[1].shape[0] // md_args[0].shape[0],
         )
         mixed_tuned_params = get_tuned_params(mixed_tuning_key)
 
@@ -967,7 +981,8 @@ def mla_attention(
             k,
             k_rope,
             cache,
-            *args,
+            *md_args,
+            topk_indices=local_topk_indices,
             sm_scale=sm_scale,
             num_kv_pages_per_block=num_kv_pages_per_block,
             num_queries_per_block=num_queries_per_block,
@@ -983,12 +998,9 @@ def mla_attention(
     kv_cache, output_TNA = jax.jit(
         jax.shard_map(_mla_ragged_paged_attention,
                       mesh=mesh,
-                      in_specs=in_specs,
+                      in_specs=tuple(in_specs),
                       out_specs=out_specs,
-                      check_vma=False))(q_NTA, q_rope_TNH, k_SA, k_rope_SH,
-                                        kv_cache, md.seq_lens, md.block_tables,
-                                        md.query_start_loc,
-                                        md.request_distribution)
+                      check_vma=False))(*call_args)
     return kv_cache, output_TNA
 
 
