@@ -114,9 +114,10 @@ def run_jax_gdn_attention(
         P(ShardingAxisName.ATTN_DATA),  # distribution
         P(ShardingAxisName.ATTN_DATA),  # seq_lens
     )
-    if slot_read_offsets is not None:
-        in_specs = in_specs + (P(ShardingAxisName.ATTN_DATA),
-                               )  # slot_read_offsets
+    # slot_read_offsets is an optional operand: when absent it is passed as
+    # None with a matching None spec (no sharded array).
+    in_specs = in_specs + (P(ShardingAxisName.ATTN_DATA) if slot_read_offsets
+                           is not None else None, )  # slot_read_offsets
 
     out_specs = (
         (
@@ -130,20 +131,12 @@ def run_jax_gdn_attention(
 
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
 
-    def p_run_jax_gdn_attention_local(j_mixed_qkv,
-                                      j_b,
-                                      j_a,
-                                      conv_state,
-                                      recurrent_state,
-                                      j_conv_weight,
-                                      j_conv_bias,
-                                      j_A_log,
-                                      j_dt_bias,
-                                      query_start_loc,
-                                      state_indices,
-                                      distribution,
-                                      seq_lens,
-                                      slot_read_offsets=None):
+    def p_run_jax_gdn_attention_local(j_mixed_qkv, j_b, j_a, conv_state,
+                                      recurrent_state, j_conv_weight,
+                                      j_conv_bias, j_A_log, j_dt_bias,
+                                      query_start_loc, state_indices,
+                                      distribution, seq_lens,
+                                      slot_read_offsets):
         read_offsets = None
         if slot_read_offsets is not None:
             # `state_indices` are rank-local base slots; `slot_read_offsets`
@@ -172,8 +165,6 @@ def run_jax_gdn_attention(
             num_spec_tokens=num_spec_tokens,
         )
 
-    args = () if slot_read_offsets is None else (slot_read_offsets, )
-
     mapped_fn = jax.shard_map(
         p_run_jax_gdn_attention_local,
         mesh=mesh,
@@ -196,7 +187,7 @@ def run_jax_gdn_attention(
         state_indices,
         distribution,
         seq_lens,
-        *args,
+        slot_read_offsets,
     )
 
     return (new_conv_state, new_recurrent_state), output
