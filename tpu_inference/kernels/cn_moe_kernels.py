@@ -15,7 +15,7 @@ TOP_K = 10
 
 _GEMV_NBUF = max(2, int(_os.getenv("MOE_GEMV_NBUF", "2")))
 _FUSE_NBUF = max(2, int(_os.getenv("MOE_FUSE_NBUF", str(_GEMV_NBUF))))
-_CN_K_TILE = int(_os.getenv("MOE_CN_K_TILE", "1024"))
+_CN_K_TILE = int(_os.getenv("MOE_CN_K_TILE", "2048"))
 _CN_I_TILE = int(_os.getenv("MOE_CN_I_TILE", "2048"))
 
 
