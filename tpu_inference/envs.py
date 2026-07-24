@@ -396,7 +396,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_MOE_CHUNK_SIZE", "0")),
     "MOE_LOW_CONC_THRESHOLD":
-    lambda: int(os.getenv("MOE_LOW_CONC_THRESHOLD", "64")),
+    lambda: int(os.getenv("MOE_LOW_CONC_THRESHOLD", "8")),
     # Use Onehot+Matmul for permute and unpermute before and after moe
     # when the batch size <= this threshold. When set to 0, this feature
     # is effectively disabled.

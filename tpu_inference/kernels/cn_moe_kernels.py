@@ -24,7 +24,7 @@ def _expert_body(
     acc_scratch_ref, sem_ref,
     *, K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, NBUF_,
     K_TILE, NUM_K, QB_eff, KB_TILE, I_TILE, NUM_I, IB_TILE,
-    DTYPE_LHS, DTYPE_OUT, prefetch_first_w1,
+    DTYPE_LHS, DTYPE_OUT, DEQUANT_AFTER_, prefetch_first_w1, next_expert_gj,
 ):
     """Core expert computation: gate+up matmul, SwiGLU, down matmul, accumulate.
 
@@ -81,11 +81,21 @@ def _expert_body(
 
         w1_fp8 = w1_bufs_ref[buf]
         s1 = w1_s_bufs_ref[buf]
-        w1_fp32 = w1_fp8.astype(jnp.float32).reshape(KB_TILE, QB_eff, 2 * I)
-        w1_dequant = (w1_fp32 * s1).reshape(K_TILE, 2 * I).astype(DTYPE_LHS)
-
         lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD), pl.ds(k * K_TILE, K_TILE)]
-        gate_up_acc = gate_up_acc + jnp.matmul(lhs_tile, w1_dequant, preferred_element_type=jnp.float32)
+
+        if DEQUANT_AFTER_:
+            # Native fp8 cast + matmul, scale after (saves VPU dequant work)
+            w1_cast = w1_fp8.astype(DTYPE_LHS)
+            block_acc = jnp.matmul(lhs_tile, w1_cast, preferred_element_type=jnp.float32)
+            s1_flat = s1.reshape(KB_TILE, 1, 2 * I)
+            # Broadcast scale across QB_eff rows, reduce to per-tile scale
+            block_acc = block_acc * s1_flat.reshape(1, 2 * I).astype(jnp.float32)
+            gate_up_acc = gate_up_acc + block_acc
+        else:
+            # Dequant before matmul (original path for small QB)
+            w1_fp32 = w1_fp8.astype(jnp.float32).reshape(KB_TILE, QB_eff, 2 * I)
+            w1_dequant = (w1_fp32 * s1).reshape(K_TILE, 2 * I).astype(DTYPE_LHS)
+            gate_up_acc = gate_up_acc + jnp.matmul(lhs_tile, w1_dequant, preferred_element_type=jnp.float32)
 
     # ---- Prefetch first w2 tile early (overlaps with SwiGLU compute) ----
     pltpu.make_async_copy(
@@ -98,6 +108,19 @@ def _expert_body(
         w2_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
         sem_ref.at[3 * NBUF_ + 0]
     ).start()
+
+    # ---- Prefetch NEXT expert's first w1 tile (overlaps with SwiGLU + w2 phase) ----
+    if next_expert_gj is not None:
+        pltpu.make_async_copy(
+            w1_ref.at[pl.ds(next_expert_gj, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
+            w1_bufs_ref.at[pl.ds(0, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
+            sem_ref.at[0 * NBUF_ + 0]
+        ).start()
+        pltpu.make_async_copy(
+            w1_scale_ref.at[pl.ds(next_expert_gj, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
+            w1_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
+            sem_ref.at[1 * NBUF_ + 0]
+        ).start()
 
     # ---- SwiGLU (w2 DMA runs in parallel) ----
     gate_up_bf16 = gate_up_acc.astype(DTYPE_OUT)
@@ -141,11 +164,18 @@ def _expert_body(
 
         w2_fp8 = w2_bufs_ref[buf]
         s2 = w2_s_bufs_ref[buf]
-        w2_fp32 = w2_fp8.astype(jnp.float32).reshape(IB_TILE, IB, H)
-        w2_dequant = (w2_fp32 * s2).reshape(I_TILE, H).astype(DTYPE_LHS)
-
         inter_tile = intermediate[:, m * I_TILE : (m + 1) * I_TILE]
-        down_acc = down_acc + jnp.matmul(inter_tile, w2_dequant, preferred_element_type=jnp.float32)
+
+        if DEQUANT_AFTER_:
+            w2_cast = w2_fp8.astype(DTYPE_LHS)
+            block_acc = jnp.matmul(inter_tile, w2_cast, preferred_element_type=jnp.float32)
+            s2_flat = s2.reshape(IB_TILE, 1, H)
+            block_acc = block_acc * s2_flat.reshape(1, H).astype(jnp.float32)
+            down_acc = down_acc + block_acc
+        else:
+            w2_fp32 = w2_fp8.astype(jnp.float32).reshape(IB_TILE, IB, H)
+            w2_dequant = (w2_fp32 * s2).reshape(I_TILE, H).astype(DTYPE_LHS)
+            down_acc = down_acc + jnp.matmul(inter_tile, w2_dequant, preferred_element_type=jnp.float32)
 
     # Accumulate weighted expert contribution
     acc_scratch_ref[...] = acc_scratch_ref[...] + down_acc * weight
@@ -176,7 +206,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
     sem_ref,              # DMA semaphores
     *,
     K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, TOP_K_, NBUF_,
-    N_TOKENS_,
+    N_TOKENS_, DEQUANT_AFTER_,
     SKIP_ZERO_WEIGHT_, DTYPE_LHS, DTYPE_OUT,
 ):
     C_PAD = full_lhs_scratch_ref.shape[0]
@@ -201,7 +231,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
         I_BLOCKS=I_BLOCKS, IB=IB, NBUF_=NBUF_,
         K_TILE=K_TILE, NUM_K=NUM_K, QB_eff=QB_eff, KB_TILE=KB_TILE,
         I_TILE=I_TILE, NUM_I=NUM_I, IB_TILE=IB_TILE,
-        DTYPE_LHS=DTYPE_LHS, DTYPE_OUT=DTYPE_OUT,
+        DTYPE_LHS=DTYPE_LHS, DTYPE_OUT=DTYPE_OUT, DEQUANT_AFTER_=DEQUANT_AFTER_,
     )
 
     # ---- DMA ALL tokens from HBM -> VMEM (once) ----
@@ -234,43 +264,23 @@ def _cn_w1w2_fused_token_kernel_fp8(
 
                 @pl.when(weight != 0.0)
                 def _():
-                    _expert_body(gj, weight, prefetch_first_w1=True, **body_kw)
+                    _expert_body(gj, weight, prefetch_first_w1=True, next_expert_gj=None, **body_kw)
         else:
             for e in range(TOP_K_):
                 idx = token * TOP_K_ + e
                 gj = ids_ref[idx]
                 gj = pl.multiple_of(gj, 1)
                 weight = topk_weights_ref[idx]
-                _expert_body(gj, weight, prefetch_first_w1=(e == 0 and token == 0), **body_kw)
+
+                # Compute next expert gj for w1 prefetch inside _expert_body
+                _next_gj = None
                 if e + 1 < TOP_K_:
-                    next_idx = token * TOP_K_ + (e + 1)
-                    next_gj = ids_ref[next_idx]
-                    next_gj = pl.multiple_of(next_gj, 1)
-                    pltpu.make_async_copy(
-                        w1_ref.at[pl.ds(next_gj, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-                        w1_bufs_ref.at[pl.ds(0, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-                        sem_ref.at[0 * NBUF_ + 0]
-                    ).start()
-                    pltpu.make_async_copy(
-                        w1_scale_ref.at[pl.ds(next_gj, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-                        w1_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-                        sem_ref.at[1 * NBUF_ + 0]
-                    ).start()
+                    _next_gj = pl.multiple_of(ids_ref[token * TOP_K_ + (e + 1)], 1)
                 elif token + 1 < N_TOKENS_:
-                    # Inter-token pipelining: prefetch next token's first expert
-                    next_idx = (token + 1) * TOP_K_ + 0
-                    next_gj = ids_ref[next_idx]
-                    next_gj = pl.multiple_of(next_gj, 1)
-                    pltpu.make_async_copy(
-                        w1_ref.at[pl.ds(next_gj, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-                        w1_bufs_ref.at[pl.ds(0, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-                        sem_ref.at[0 * NBUF_ + 0]
-                    ).start()
-                    pltpu.make_async_copy(
-                        w1_scale_ref.at[pl.ds(next_gj, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-                        w1_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-                        sem_ref.at[1 * NBUF_ + 0]
-                    ).start()
+                    _next_gj = pl.multiple_of(ids_ref[(token + 1) * TOP_K_ + 0], 1)
+
+                _expert_body(gj, weight, prefetch_first_w1=(e == 0 and token == 0),
+                             next_expert_gj=_next_gj, **body_kw)
 
         # Store this token result via 3D write (1x128 tiling allows per-row access)
         token_result = acc_scratch_ref[...].astype(DTYPE_OUT)  # [M_PAD, H]
@@ -310,8 +320,10 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
     assert K % K_TILE == 0, f"K={K} not divisible by K_TILE={K_TILE}"
     QB_eff = min(K_TILE, QB)
     KB_TILE = K_TILE // QB_eff
+    # Find largest tile <= 1792 that divides I
     I_TILE = min(1792, I)
-    assert I % I_TILE == 0, f"I={I} not divisible by I_TILE={I_TILE}"
+    while I % I_TILE != 0:
+        I_TILE -= 1
     IB_TILE = I_BLOCKS // (I // I_TILE)
 
     C_PAD = lhs.shape[0]
@@ -342,6 +354,7 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
                           I_BLOCKS=I_BLOCKS, IB=IB,
                           TOP_K_=TOP_K, NBUF_=NBUF,
                           N_TOKENS_=n_tokens,
+                          DEQUANT_AFTER_=(QB >= 128),
                           SKIP_ZERO_WEIGHT_=use_ep,
                           DTYPE_LHS=lhs.dtype, DTYPE_OUT=jnp.bfloat16),
         out_shape=jax.ShapeDtypeStruct((C_PAD, 1, H), jnp.bfloat16),
