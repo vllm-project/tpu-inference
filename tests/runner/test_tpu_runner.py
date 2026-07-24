@@ -861,8 +861,9 @@ class TestTPUJaxRunner:
         mock_sharding_config.expert_size = 1
         mock_sharding_config.tp_size = 1
         mock_sharding_config.decode_cp_size = 1
+        mock_sharding_config.prefill_cp_size = 1
         vllm_config.sharding_config = mock_sharding_config
-        mesh_shape = (8, 1, 1, 1, 1, 1)
+        mesh_shape = (8, 1, 1, 1, 1, 1, 1)
 
         # Case A: envs.NEW_MODEL_DESIGN = True and envs.TPU_MESH_SORT_BY_COORDS = True
         with patch('tpu_inference.runner.tpu_runner.envs.NEW_MODEL_DESIGN', True), \
