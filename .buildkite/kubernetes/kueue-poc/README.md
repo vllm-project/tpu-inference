@@ -127,7 +127,10 @@ then add worker-local golden cloning only after its zonal placement is proven.
 
 The concrete handoff for the already-created Autopilot clusters
 `ci-test-controller` and `ci-test-southamerica-west1-worker` is in
-[`AUTOPILOT_HANDOFF.md`](AUTOPILOT_HANDOFF.md).
+[`AUTOPILOT_HANDOFF.md`](AUTOPILOT_HANDOFF.md). It records the controller in
+`us-central1` and treats reservation
+`cloudtpu-20250327121501-861300654` as a mandatory, independently verified
+worker provisioning constraint rather than an assumed Kubernetes label.
 
 ## Gate 0: pin and inspect versions
 

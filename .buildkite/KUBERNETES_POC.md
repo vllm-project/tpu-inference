@@ -65,6 +65,14 @@ Buildkite logical queue
   -> the first worker Kueue that reserves real local quota runs the Job
 ```
 
+The concrete Autopilot experiment uses `ci-test-controller` in `us-central1`
+and `ci-test-southamerica-west1-worker` in `southamerica-west1`, with v6e-1
+pinned to `southamerica-west1-a`. Worker provisioning must consume reservation
+`cloudtpu-20250327121501-861300654`. Reservation selection is worker-cluster
+configuration (for example, a supported Autopilot ComputeClass selector), not a
+manager or pipeline property; reservation usage must be verified independently
+during the smoke Job.
+
 This is a better fit than first-agent-wins queue sharing or a custom Buildkite
 planner because worker membership, quota, fair sharing, and draining are
 Kubernetes control-plane configuration. Adding or removing a region should not

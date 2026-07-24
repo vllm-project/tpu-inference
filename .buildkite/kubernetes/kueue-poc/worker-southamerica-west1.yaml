@@ -1,5 +1,10 @@
 # First-worker POC resources for ci-test-southamerica-west1-worker.
 # Quota is intentionally one chip until end-to-end dispatch and cleanup pass.
+# Before applying, complete AUTOPILOT_HANDOFF.md Phase 1.5. If this GKE version
+# requires a ComputeClass or other supported selector to consume reservation
+# cloudtpu-20250327121501-861300654, add that verified selector under the
+# ResourceFlavor nodeLabels below. The reservation name itself is not assumed
+# to be a Kubernetes label.
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -4,7 +4,10 @@ This is the executable handoff for two existing fleet-registered GKE Autopilot
 clusters:
 
 - manager/controller: `ci-test-controller`
+- manager/controller region: `us-central1`
 - first worker: `ci-test-southamerica-west1-worker`
+- worker region/TPU zone: `southamerica-west1` / `southamerica-west1-a`
+- intended TPU reservation: `cloudtpu-20250327121501-861300654`
 
 The goal of this phase is intentionally narrow: prove that a suspended
 `batch/v1 Job` submitted to the controller is admitted by Kueue, copied by
@@ -40,10 +43,12 @@ input because the cluster name alone does not reveal it.
 
 ```bash
 export POC_PROJECT_ID="REPLACE_PROJECT"
-export POC_CONTROLLER_REGION="REPLACE_CONTROLLER_REGION"
+export POC_CONTROLLER_REGION="us-central1"
 export POC_WORKER_REGION="southamerica-west1"
 export POC_CONTROLLER_CLUSTER="ci-test-controller"
 export POC_WORKER_CLUSTER="ci-test-southamerica-west1-worker"
+export POC_TPU_ZONE="southamerica-west1-a"
+export POC_TPU_RESERVATION="cloudtpu-20250327121501-861300654"
 ```
 
 Confirm both clusters and fleet memberships before changing anything:
@@ -91,8 +96,9 @@ kubectl --context "$POC_WORKER_CONTEXT" auth can-i create customresourcedefiniti
 kubectl --context "$POC_WORKER_CONTEXT" auth can-i create mutatingwebhookconfigurations.admissionregistration.k8s.io
 ```
 
-Gate: both contexts are correct, both clusters are `RUNNING` Autopilot clusters,
-and all four authorization checks return `yes`.
+Gate: both contexts are correct, `ci-test-controller` reports location
+`us-central1`, both clusters are `RUNNING` Autopilot clusters, and all four
+authorization checks return `yes`.
 
 ## Phase 1: select and install Kueue
 
@@ -157,6 +163,81 @@ Gate: both Kueue controllers are Available; all required resource kinds are
 served; no webhook, Pod Security, resource-request, or Autopilot rejection is
 present. Save controller logs before continuing if either cluster is unhealthy.
 
+## Phase 1.5: prove how Autopilot will consume the TPU reservation
+
+Complete this gate before creating the worker ResourceFlavor or any TPU Job.
+Kueue quota and ResourceFlavor do not themselves claim a Compute Engine/Cloud
+TPU reservation. A ResourceFlavor can select Kubernetes node labels, including
+a supported ComputeClass selector, but the reservation name is not assumed to
+be a node label.
+
+Inspect the reservation and save the full result:
+
+```bash
+gcloud compute reservations describe "$POC_TPU_RESERVATION" \
+  --project "$POC_PROJECT_ID" \
+  --zone "$POC_TPU_ZONE" \
+  --format=yaml \
+  > /tmp/tpu-reservation-before.yaml
+
+sed -n '1,240p' /tmp/tpu-reservation-before.yaml
+```
+
+Record at least:
+
+- exact project and zone;
+- status;
+- `specificReservationRequired`;
+- reserved resource/machine properties and count;
+- current `inUseCount`;
+- sharing policy; and
+- whether its shape matches an Autopilot v6e-1 placement.
+
+Then inspect the ComputeClass API served by the actual worker cluster. Do not
+copy a ComputeClass example written for a different GKE minor version:
+
+```bash
+kubectl --context "$POC_WORKER_CONTEXT" api-resources | rg 'computeclass'
+kubectl --context "$POC_WORKER_CONTEXT" get computeclass -o yaml
+kubectl --context "$POC_WORKER_CONTEXT" explain computeclass.spec \
+  --api-version=cloud.google.com/v1
+kubectl --context "$POC_WORKER_CONTEXT" explain computeclass.spec.priorities \
+  --api-version=cloud.google.com/v1 --recursive
+```
+
+Choose exactly one supported mode and record it:
+
+1. **Automatic matching reservation.** If the reservation can be consumed by
+   any matching instance and Autopilot documents/supports that behavior, keep
+   the worker ResourceFlavor's TPU/topology/zone labels. The smoke must still
+   prove that reservation `inUseCount` increases; Pod success alone is not
+   evidence because Autopilot might allocate on-demand capacity.
+2. **Specific reservation through ComputeClass.** If this GKE version exposes a
+   supported reservation field in ComputeClass for Autopilot TPU workloads,
+   create a worker-local ComputeClass referring to
+   `cloudtpu-20250327121501-861300654`. Add its documented Pod selector label to
+   the worker `v6e-1` ResourceFlavor. Keep the manager ResourceFlavor generic.
+   Server-side dry-run the ComputeClass and ResourceFlavor before applying.
+3. **Specific reservation through another documented Autopilot selector.** Put
+   that selector in the worker ResourceFlavor, not in `pipeline_kube.yaml`, and
+   server-side dry-run it before applying.
+4. **Unsupported.** If the reservation requires explicit affinity but this
+   Autopilot/GKE version offers no supported way to request it for TPU Pods,
+   stop. Do not run a potentially on-demand TPU smoke. Use a Standard worker
+   node pool configured with specific reservation affinity, or change the
+   reservation consumption policy through the infrastructure owner.
+
+Do not add `compute.googleapis.com/reservation-name` to ResourceFlavor merely
+because that string appears in Compute Engine reservation-affinity APIs. Those
+APIs use it as a NodeConfig affinity key; that does not prove it is a schedulable
+Kubernetes node label on Autopilot.
+
+Gate: reservation shape/policy is recorded and one supported consumption mode
+is selected. If mode 2 or 3 is selected, update
+`worker-southamerica-west1.yaml` with the verified worker-only selector before
+Phase 2. If the result is unclear, stop and attach the reservation YAML and
+ComputeClass schema to the handoff report.
+
 ## Phase 2: configure the worker queue
 
 Apply the one-chip worker resources and the POC-only manager access identity:
@@ -201,6 +282,8 @@ The manager ResourceFlavor deliberately has no zone label. A physical worker's
 ResourceFlavor owns its local zone; the manager and Buildkite pipeline stay
 region-neutral. When another regional worker is added, its local `v6e-1`
 ResourceFlavor can use that worker's TPU zone under the same logical queue.
+Any verified worker-only reservation/ComputeClass selector belongs in this
+ResourceFlavor too; it never belongs in the manager flavor or Buildkite step.
 
 ## Phase 3: give the controller scoped worker credentials
 
@@ -346,6 +429,23 @@ The expected sequence is:
 7. the command completes once;
 8. remote completion is reflected on the manager Job.
 
+While the worker Pod is running, query the reservation again:
+
+```bash
+gcloud compute reservations describe "$POC_TPU_RESERVATION" \
+  --project "$POC_PROJECT_ID" \
+  --zone "$POC_TPU_ZONE" \
+  --format=yaml \
+  > /tmp/tpu-reservation-during.yaml
+
+diff -u /tmp/tpu-reservation-before.yaml /tmp/tpu-reservation-during.yaml || true
+```
+
+The reserved usage must increase consistently with the provisioned TPU
+resource. If the Pod runs but reservation usage does not change, mark the gate
+failed: the workload probably used on-demand capacity or a different
+reservation. Capture the selected node YAML and worker events before cleanup.
+
 Collect evidence before deleting anything:
 
 ```bash
@@ -367,8 +467,9 @@ kubectl --context "$POC_WORKER_CONTEXT" -n buildkite-v6e-1 \
 Stop here if a manager Pod starts, the remote command runs twice, completion is
 not mirrored, or cancellation leaves the worker Job running.
 
-Gate: one remote execution completes, status returns to the manager, and
-deleting/cancelling the manager Job removes the remote copy.
+Gate: one remote execution completes, status returns to the manager,
+reservation consumption is demonstrated, and deleting/cancelling the manager
+Job removes the remote copy.
 
 ## Phase 6: test Autopilot storage in the same TPU Job
 
