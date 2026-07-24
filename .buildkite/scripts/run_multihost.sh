@@ -464,6 +464,13 @@ else
     DOCKER_ENV_STR=""
 fi
 
+# A tpu-v7x-16 slice has two hosts. Each host owns a 2x2x1 chip partition
+# (8 TPU devices because v7x exposes two cores per chip), and the two
+# processes are arranged across the final topology dimension.
+readonly JAX_NUM_PROCESSES_VALUE=2
+readonly TPU_PROCESS_BOUNDS_VALUE="1,1,2"
+readonly TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE="2,2,1"
+
 # libtpu uses CLOUD_TPU_TASK_ID to identify the local process in a TPU slice.
 # Do not rely solely on automatic detection from inside Ray actors: if both
 # actors default to task 0, jax.local_devices() reports process_index=0 on both
@@ -473,6 +480,11 @@ HEAD_TPU_TASK_ID="$(get_metadata_value "instance/attributes/agent-worker-number"
 validate_tpu_task_id "$HEAD_INTERNAL_IP" "$HEAD_TPU_TASK_ID"
 
 IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
+if (( ${#WORKER_IPS_ARRAY[@]} != 1 )); then
+  echo "ERROR: tpu-v7x-16 requires exactly one remote host; found ${#WORKER_IPS_ARRAY[@]}." >&2
+  exit 1
+fi
+
 WORKER_TPU_TASK_IDS=()
 SEEN_TPU_TASK_IDS=",${HEAD_TPU_TASK_ID},"
 for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
@@ -486,11 +498,22 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
   WORKER_TPU_TASK_IDS+=("$worker_task_id")
 done
 
+if [[ "$HEAD_TPU_TASK_ID" != "0" ]]; then
+  echo "ERROR: The tpu-v7x-16 head must have TPU process ID 0; metadata returned ${HEAD_TPU_TASK_ID}." >&2
+  exit 1
+fi
+if [[ "${WORKER_TPU_TASK_IDS[0]}" != "1" ]]; then
+  echo "ERROR: The second tpu-v7x-16 host must have TPU process ID 1; metadata returned ${WORKER_TPU_TASK_IDS[0]}." >&2
+  exit 1
+fi
+
 echo "--- TPU process identity mapping"
-echo "Head ${HEAD_INTERNAL_IP}: CLOUD_TPU_TASK_ID=${HEAD_TPU_TASK_ID}"
+echo "Head ${HEAD_INTERNAL_IP}: process_index=${HEAD_TPU_TASK_ID}"
 for worker_index in "${!WORKER_IPS_ARRAY[@]}"; do
-  echo "Worker ${WORKER_IPS_ARRAY[$worker_index]}: CLOUD_TPU_TASK_ID=${WORKER_TPU_TASK_IDS[$worker_index]}"
+  echo "Worker ${WORKER_IPS_ARRAY[$worker_index]}: process_index=${WORKER_TPU_TASK_IDS[$worker_index]}"
 done
+echo "TPU_PROCESS_BOUNDS=${TPU_PROCESS_BOUNDS_VALUE}"
+echo "TPU_CHIPS_PER_PROCESS_BOUNDS=${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}"
 
 # 1. Start Ray Head Node locally
 echo "--- Starting Ray Head Node Locally"
@@ -505,6 +528,10 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${HOST_HF_HOME}" \
   -e CLOUD_TPU_TASK_ID="${HEAD_TPU_TASK_ID}" \
   -e TPU_WORKER_ID="${HEAD_TPU_TASK_ID}" \
+  -e JAX_PROCESS_ID="${HEAD_TPU_TASK_ID}" \
+  -e JAX_NUM_PROCESSES="${JAX_NUM_PROCESSES_VALUE}" \
+  -e TPU_PROCESS_BOUNDS="${TPU_PROCESS_BOUNDS_VALUE}" \
+  -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -563,6 +590,7 @@ IS_MULTI_HOST_BENCH="${IS_MULTI_HOST_BENCH:-false}" bash ~/tpu-inference/scripts
 EOF
     WORKER_LAUNCHER_PIDS+=("$!")
     WORKER_LAUNCHER_HOSTS+=("$worker_ip")
+    set -x
 done
 
 
