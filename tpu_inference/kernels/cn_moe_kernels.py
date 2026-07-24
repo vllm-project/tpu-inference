@@ -24,7 +24,7 @@ def _expert_body(
     acc_scratch_ref, sem_ref,
     *, K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, NBUF_,
     K_TILE, NUM_K, QB_eff, KB_TILE, I_TILE, NUM_I, IB_TILE,
-    DTYPE_LHS, DTYPE_OUT, DEQUANT_AFTER_, prefetch_first_w1, next_expert_gj,
+    DTYPE_LHS, DTYPE_OUT, DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_, prefetch_first_w1, next_expert_gj,
 ):
     """Core expert computation: gate+up matmul, SwiGLU, down matmul, accumulate.
 
@@ -83,7 +83,7 @@ def _expert_body(
         s1 = w1_s_bufs_ref[buf]
         lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD), pl.ds(k * K_TILE, K_TILE)]
 
-        if DEQUANT_AFTER_:
+        if DEQUANT_W1_AFTER_:
             # Native fp8 cast + matmul, scale after (saves VPU dequant work)
             w1_cast = w1_fp8.astype(DTYPE_LHS)
             block_acc = jnp.matmul(lhs_tile, w1_cast, preferred_element_type=jnp.float32)
@@ -166,7 +166,7 @@ def _expert_body(
         s2 = w2_s_bufs_ref[buf]
         inter_tile = intermediate[:, m * I_TILE : (m + 1) * I_TILE]
 
-        if DEQUANT_AFTER_:
+        if DEQUANT_W2_AFTER_:
             w2_cast = w2_fp8.astype(DTYPE_LHS)
             block_acc = jnp.matmul(inter_tile, w2_cast, preferred_element_type=jnp.float32)
             s2_flat = s2.reshape(IB_TILE, 1, H)
@@ -206,7 +206,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
     sem_ref,              # DMA semaphores
     *,
     K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, TOP_K_, NBUF_,
-    N_TOKENS_, DEQUANT_AFTER_,
+    N_TOKENS_, DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_,
     SKIP_ZERO_WEIGHT_, DTYPE_LHS, DTYPE_OUT,
 ):
     C_PAD = full_lhs_scratch_ref.shape[0]
@@ -231,7 +231,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
         I_BLOCKS=I_BLOCKS, IB=IB, NBUF_=NBUF_,
         K_TILE=K_TILE, NUM_K=NUM_K, QB_eff=QB_eff, KB_TILE=KB_TILE,
         I_TILE=I_TILE, NUM_I=NUM_I, IB_TILE=IB_TILE,
-        DTYPE_LHS=DTYPE_LHS, DTYPE_OUT=DTYPE_OUT, DEQUANT_AFTER_=DEQUANT_AFTER_,
+        DTYPE_LHS=DTYPE_LHS, DTYPE_OUT=DTYPE_OUT, DEQUANT_W1_AFTER_=DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_=DEQUANT_W2_AFTER_,
     )
 
     # ---- DMA ALL tokens from HBM -> VMEM (once) ----
@@ -354,7 +354,8 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
                           I_BLOCKS=I_BLOCKS, IB=IB,
                           TOP_K_=TOP_K, NBUF_=NBUF,
                           N_TOKENS_=n_tokens,
-                          DEQUANT_AFTER_=(QB >= 128),
+                          DEQUANT_W1_AFTER_=(KB_TILE == 1),
+                          DEQUANT_W2_AFTER_=(IB_TILE == 1),
                           SKIP_ZERO_WEIGHT_=use_ep,
                           DTYPE_LHS=lhs.dtype, DTYPE_OUT=jnp.bfloat16),
         out_shape=jax.ShapeDtypeStruct((C_PAD, 1, H), jnp.bfloat16),
