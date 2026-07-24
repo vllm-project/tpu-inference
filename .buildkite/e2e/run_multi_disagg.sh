@@ -93,18 +93,6 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
 
             WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
             echo "   -> Discovered Worker IPs: $WORKER_IPS"
-
-            ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
-            echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
-            if [[ -z "${TPU_VERSION:-}" ]]; then
-                if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
-                    export TPU_VERSION="tpu7x"
-                    echo "   -> Setting TPU_VERSION=tpu7x"
-                    elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
-                    export TPU_VERSION="tpu6e"
-                    echo "   -> Setting TPU_VERSION=tpu6e"
-                fi
-            fi
         else
             echo "❌ Could not determine TPU_NAME or ZONE from metadata. Please set WORKER_IPS manually."
             exit 1
@@ -121,35 +109,6 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
 fi
 
 HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(get_current_internal_ip)}"
-
-# Always ensure ACCELERATOR_TYPE is populated if not specified in the environment
-if [[ -z "${ACCELERATOR_TYPE:-}" ]] && command -v gcloud &> /dev/null && command -v curl &> /dev/null; then
-    ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}' || echo "")}"
-    TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
-
-    if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
-        ACCELERATOR_TYPE=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(acceleratorType)" 2>/dev/null || echo "")
-        echo "   -> Detected Accelerator Type: $ACCELERATOR_TYPE"
-    fi
-fi
-
-# Auto-discover TPU_VERSION if not specified and ACCELERATOR_TYPE is present
-if [[ -z "${TPU_VERSION:-}" && -n "${ACCELERATOR_TYPE:-}" ]]; then
-    if [[ "$ACCELERATOR_TYPE" == *"tpu7"* ]]; then
-        export TPU_VERSION="tpu7x"
-        echo "   -> Setting TPU_VERSION=tpu7x"
-        elif [[ "$ACCELERATOR_TYPE" == *"6e"* ]] || [[ "$ACCELERATOR_TYPE" == *"tpu6"* ]]; then
-        export TPU_VERSION="tpu6e"
-        echo "   -> Setting TPU_VERSION=tpu6e"
-    fi
-fi
-
-if [[ -z "${TPU_VERSION:-}" ]]; then
-    echo "❌ Error: TPU_VERSION environment variable is not set and could not be automatically discovered."
-    exit 1
-fi
-
-echo "Running on TPU_VERSION: ${TPU_VERSION}"
 
 # Auto-generate SSH Key if it doesn't exist
 if [ ! -f ~/.ssh/id_rsa ]; then
@@ -174,31 +133,13 @@ echo "Discovered TPU hosts in launch order: ${ALL_IPS_ARRAY[*]}"
 echo "Current/local head IP: ${HEAD_INTERNAL_IP}"
 echo "Total TPU hosts available: ${NUM_HOSTS}"
 
-# Dynamic TP calculation based on accelerator type or TPU Version
-if [[ "${ACCELERATOR_TYPE:-}" == *"4t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-4"* ]]; then
-  CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
-elif [[ "${ACCELERATOR_TYPE:-}" == *"8t"* ]] || [[ "${ACCELERATOR_TYPE:-}" == *"-8"* ]]; then
-  CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
-elif [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
-  CHIPS_PER_HOST="${CHIPS_PER_HOST:-4}"
-else
-  CHIPS_PER_HOST="${CHIPS_PER_HOST:-8}"
-fi
-
-if [[ "${TPU_VERSION:-tpu6e}" == "tpu7x" ]]; then
-  CORES_PER_CHIP="${CORES_PER_CHIP:-2}"
-else
-  CORES_PER_CHIP="${CORES_PER_CHIP:-1}"
-fi
+# TPU7x always exposes four chips per host, with two TensorCores per chip.
+readonly CHIPS_PER_HOST=4
+readonly CORES_PER_CHIP=2
 
 TOTAL_CHIPS=$(( NUM_HOSTS * CHIPS_PER_HOST ))
 echo "Calculated total TPU chips from hosts: ${TOTAL_CHIPS}"
 echo "Using TPU cores per chip: ${CORES_PER_CHIP}"
-
-if [[ "${TPU_VERSION:-}" == "tpu7x" && "${ACCELERATOR_TYPE:-}" == *"16"* && "$NUM_HOSTS" -lt 2 ]]; then
-  echo "❌ TPU7x-16 should expose multiple host VMs, but discovered ${NUM_HOSTS}: ${ALL_IPS_ARRAY[*]}"
-  exit 1
-fi
 
 # Specify # of hosts for each instance, or default to splitting hosts equally
 PREFILL_HOSTS_COUNT="${PREFILL_HOSTS_COUNT:-}"
@@ -260,9 +201,14 @@ echo "Calculated PREFILL_TENSOR_PARALLEL_SIZE: $PREFILL_TENSOR_PARALLEL_SIZE"
 echo "Calculated DECODE_TENSOR_PARALLEL_SIZE: $DECODE_TENSOR_PARALLEL_SIZE"
 
 TPU_VISIBLE_CHIPS_LOCAL="$(seq -s, 0 $(( CHIPS_PER_HOST - 1 )))"
+
+# A single TPU7x host has a physical 2x2x1 chip topology. Prefill and decode
+# are separate single-host JAX clusters when each side receives one host.
+readonly SINGLE_HOST_CHIP_BOUNDS="2,2,1"
+
 SINGLE_HOST_TPU_ENV_ARGS=(
   -e TPU_PROCESS_BOUNDS=1,1,1
-  -e TPU_CHIPS_PER_PROCESS_BOUNDS="1,${CHIPS_PER_HOST},1"
+  -e TPU_CHIPS_PER_PROCESS_BOUNDS="${SINGLE_HOST_CHIP_BOUNDS}"
   -e TPU_VISIBLE_CHIPS="${TPU_VISIBLE_CHIPS_LOCAL}"
   -e CLOUD_TPU_TASK_ID=0
   -e JAX_PROCESS_ID=0
@@ -272,11 +218,11 @@ PREFILL_TPU_ENV_ARGS=()
 DECODE_TPU_ENV_ARGS=()
 if (( PREFILL_HOSTS_COUNT == 1 )); then
   PREFILL_TPU_ENV_ARGS=("${SINGLE_HOST_TPU_ENV_ARGS[@]}")
-  echo "Prefill is a single-host Ray cluster; forcing single-process TPU env with TPU_VISIBLE_CHIPS=${TPU_VISIBLE_CHIPS_LOCAL}."
+  echo "Prefill is a single-host Ray cluster; forcing TPU_PROCESS_BOUNDS=1,1,1, TPU_CHIPS_PER_PROCESS_BOUNDS=${SINGLE_HOST_CHIP_BOUNDS}, TPU_VISIBLE_CHIPS=${TPU_VISIBLE_CHIPS_LOCAL}."
 fi
 if (( DECODE_HOSTS_COUNT == 1 )); then
   DECODE_TPU_ENV_ARGS=("${SINGLE_HOST_TPU_ENV_ARGS[@]}")
-  echo "Decode is a single-host Ray cluster; forcing single-process TPU env with TPU_VISIBLE_CHIPS=${TPU_VISIBLE_CHIPS_LOCAL}."
+  echo "Decode is a single-host Ray cluster; forcing TPU_PROCESS_BOUNDS=1,1,1, TPU_CHIPS_PER_PROCESS_BOUNDS=${SINGLE_HOST_CHIP_BOUNDS}, TPU_VISIBLE_CHIPS=${TPU_VISIBLE_CHIPS_LOCAL}."
 fi
 
 PREFILL_LOG_TAIL_PID=""
@@ -630,7 +576,7 @@ dump_tpu_process_env() {
   local host=$1
   local role=$2
   local dump_cmd
-  dump_cmd='printf "CLOUD_TPU_TASK_ID=%s\nJAX_PROCESS_ID=%s\nTPU_PROCESS_BOUNDS=%s\n" "${CLOUD_TPU_TASK_ID-<unset>}" "${JAX_PROCESS_ID-<unset>}" "${TPU_PROCESS_BOUNDS-<unset>}"'
+  dump_cmd='printf "CLOUD_TPU_TASK_ID=%s\nJAX_PROCESS_ID=%s\nTPU_PROCESS_BOUNDS=%s\nTPU_CHIPS_PER_PROCESS_BOUNDS=%s\nTPU_VISIBLE_CHIPS=%s\n" "${CLOUD_TPU_TASK_ID-<unset>}" "${JAX_PROCESS_ID-<unset>}" "${TPU_PROCESS_BOUNDS-<unset>}" "${TPU_CHIPS_PER_PROCESS_BOUNDS-<unset>}" "${TPU_VISIBLE_CHIPS-<unset>}"'
 
   echo "--- TPU process environment: ${role} (${host})"
   if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
