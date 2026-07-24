@@ -34,7 +34,10 @@ def get_spmd_mesh(num_devices: int = 1, enable_attn_dp: bool = False):
         axis_names = MESH_AXIS_NAMES
         attn_dp_size = 2
         model_size = num_devices // attn_dp_size
-        mesh_shape = (1, attn_dp_size, 1, 1, model_size, 1)
+        # Derive the shape from the axis names so adding a mesh axis (e.g.
+        # 'pcp') doesn't silently desync this from MESH_AXIS_NAMES.
+        sizes = {"attn_dp": attn_dp_size, "model": model_size}
+        mesh_shape = tuple(sizes.get(a, 1) for a in axis_names)
     else:
         axis_names = MESH_AXIS_NAMES_2D
         mesh_shape = (1, len(devices))

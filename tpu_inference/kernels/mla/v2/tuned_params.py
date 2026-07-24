@@ -49,13 +49,104 @@ class TunableParams:
     # with steps of powers of two.
     num_queries_per_block: int  # for batched_decode, this is always 1
     vmem_limit_bytes: int  # 16MiB(?) to 64MiB, increments of 8MiB.
+
     # Select lowest value that gives the highest performance
     decode_batch_size: int = 1  # range from 1 to as high as possible before OOM with steps powers of two
     # Constraint: batch size % decode_batch_size = 0
     q_split: int = 1  # number of query split for running parallel.
 
+    def __ge__(self, other) -> bool:
+        if not isinstance(other, TunableParams):
+            return NotImplemented
+
+        # Higher decode_batch_size, num_kv_pages_per_block, and num_queries_per_block
+        # represent more memory demanding configurations. For vmem_limit_bytes, a larger limit
+        # is less OOM-prone, so the comparison is inverted.
+        return (self.decode_batch_size >= other.decode_batch_size
+                and self.num_kv_pages_per_block >= other.num_kv_pages_per_block
+                and self.num_queries_per_block >= other.num_queries_per_block
+                and self.vmem_limit_bytes <= other.vmem_limit_bytes)
+
+    def __le__(self, other) -> bool:
+        if not isinstance(other, TunableParams):
+            return NotImplemented
+
+        return (self.decode_batch_size <= other.decode_batch_size
+                and self.num_kv_pages_per_block <= other.num_kv_pages_per_block
+                and self.num_queries_per_block <= other.num_queries_per_block
+                and self.vmem_limit_bytes >= other.vmem_limit_bytes)
+
 
 tuned_params_mapping: dict[TuningKey, TunableParams] = {
+    # Mistral-Small batched decode. (TPU v7-8)
+    TuningKey(
+        case="batched_decode",
+        max_num_tokens=4,
+        actual_num_q_heads=32,
+        actual_lkv_dim=256,
+        actual_r_dim=64,
+        page_size_per_kv_packing=32,
+        kv_packing=32,
+        max_num_seqs=16,
+        pages_per_seq=3,
+    ):
+    TunableParams(
+        decode_batch_size=8,
+        num_kv_pages_per_block=3,
+        num_queries_per_block=1,
+        vmem_limit_bytes=62914560,
+    ),
+    TuningKey(
+        case="batched_decode",
+        max_num_tokens=8,
+        actual_num_q_heads=32,
+        actual_lkv_dim=256,
+        actual_r_dim=64,
+        page_size_per_kv_packing=32,
+        kv_packing=32,
+        max_num_seqs=16,
+        pages_per_seq=3,
+    ):
+    TunableParams(
+        decode_batch_size=8,
+        num_kv_pages_per_block=3,
+        num_queries_per_block=1,
+        vmem_limit_bytes=62914560,
+    ),
+    TuningKey(
+        case="batched_decode",
+        max_num_tokens=16,
+        actual_num_q_heads=32,
+        actual_lkv_dim=256,
+        actual_r_dim=64,
+        page_size_per_kv_packing=32,
+        kv_packing=32,
+        max_num_seqs=16,
+        pages_per_seq=3,
+    ):
+    TunableParams(
+        decode_batch_size=8,
+        num_kv_pages_per_block=3,
+        num_queries_per_block=1,
+        vmem_limit_bytes=62914560,
+    ),
+    TuningKey(
+        case="batched_decode",
+        max_num_tokens=256,
+        actual_num_q_heads=32,
+        actual_lkv_dim=256,
+        actual_r_dim=64,
+        page_size_per_kv_packing=32,
+        kv_packing=32,
+        max_num_seqs=16,
+        pages_per_seq=3,
+    ):
+    TunableParams(
+        decode_batch_size=8,
+        num_kv_pages_per_block=3,
+        num_queries_per_block=1,
+        vmem_limit_bytes=62914560,
+    ),
     # DeepSeekV3 batched decode. (TPU v7-8)
     TuningKey(
         case="batched_decode",
