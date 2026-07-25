@@ -187,7 +187,7 @@ steps:
     env:
       <<: *kube_common_env
     commands:
-      - bash tests/e2e/benchmarking/mlperf.sh
+      - bash .buildkite/scripts/run_kube_test.sh bash tests/e2e/benchmarking/mlperf.sh
     plugins:
       - <<: *kube_tpu_v6e_1chip_plugin
 
@@ -241,7 +241,7 @@ steps:
       <<: *kube_common_env
       MODEL_IMPL_TYPE: "vllm"
     commands:
-      - bash tests/e2e/benchmarking/mlperf.sh
+      - bash .buildkite/scripts/run_kube_test.sh bash tests/e2e/benchmarking/mlperf.sh
     plugins:
       - <<: *kube_tpu_v6e_1chip_plugin
 
