@@ -407,7 +407,7 @@ def sharded_ragged_paged_attention(
 
     qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD, None, None)
+                      ShardingAxisName.KV_HEAD, None, None)
     in_specs = (
         qkv_spec,  # q
         qkv_spec,  # k
@@ -415,8 +415,8 @@ def sharded_ragged_paged_attention(
         kv_cache_spec,  # kv cache
         P(ShardingAxisName.ATTN_DATA),  # kv_lens
         P(ShardingAxisName.ATTN_DATA),  # page_indices
-        P(ShardingAxisName.ATTN_DATA),  # cu_q_lens
-        P(ShardingAxisName.ATTN_DATA),  # distribution
+        P(None),  # cu_q_lens
+        P(None),  # distribution
     )
     out_specs = (qkv_spec, kv_cache_spec)
 
@@ -442,6 +442,16 @@ def sharded_ragged_paged_attention(
             "head_dim==64 RPA kernel.")
 
     def _ragged_paged_attention(*args):
+        args = list(args)
+        kv_lens = args[4]
+        cu_q_lens = args[6]
+        local_num_seqs = kv_lens.shape[0]
+        if cu_q_lens.shape[0] != local_num_seqs + 1:
+            attn_dp_idx = jax.lax.axis_index('attn_dp') if 'attn_dp' in mesh.shape else 0
+            start_seq = attn_dp_idx * local_num_seqs
+            local_cu_q = jax.lax.dynamic_slice(cu_q_lens, (start_seq,), (local_num_seqs + 1,))
+            base_offset = jax.lax.dynamic_index_in_dim(cu_q_lens, start_seq, axis=0)
+            args[6] = local_cu_q - base_offset
         kwargs = dict(
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,
@@ -449,9 +459,6 @@ def sharded_ragged_paged_attention(
             k_scale=k_scale,
             v_scale=v_scale,
         )
-        # update_kv_cache is supported by both the v3 default and batched
-        # RPA kernels; only the hd64 path doesn't accept it. Default True
-        # is a no-op so we don't forward it to the hd64 signature.
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             kwargs["use_causal_mask"] = use_causal_mask

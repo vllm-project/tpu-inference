@@ -79,15 +79,18 @@ class Qwen3Attention(JaxModule):
 
         self.mesh = mesh
 
+        self.attn_output_gate = getattr(config, "attn_output_gate", False)
+        num_q_heads = self.num_heads * (2 if self.attn_output_gate else 1)
+
         # NOTE: LAYOUT_Q_PROJ_AS_NDH is by default False
         if envs.LAYOUT_Q_PROJ_AS_NDH:
             rhs_str = "NDH"
             q_proj_sharding = ("model", None, None)
-            kernel_shape = (self.num_heads, self.hidden_size, self.head_dim)
+            kernel_shape = (num_q_heads, self.hidden_size, self.head_dim)
         else:
             rhs_str = "DNH"
             q_proj_sharding = (None, "model", None)
-            kernel_shape = (self.hidden_size, self.num_heads, self.head_dim)
+            kernel_shape = (self.hidden_size, num_q_heads, self.head_dim)
 
         logger.info_once(
             f"Running with attention Q-Projection laid out as {rhs_str}")
@@ -168,8 +171,13 @@ class Qwen3Attention(JaxModule):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
-        # q: (T, N, H)
-        q = self.q_proj(x)
+        if self.attn_output_gate:
+            q_gate = self.q_proj(x)
+            q, gate = jnp.split(q_gate, 2, axis=1)
+        else:
+            q = self.q_proj(x)
+            gate = None
+
         q = self.q_norm(q)
         q = apply_rope(q, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
@@ -204,6 +212,8 @@ class Qwen3Attention(JaxModule):
             k_scale=k_scale,
             v_scale=v_scale,
         )
+        if gate is not None:
+            outputs = outputs * jax.nn.sigmoid(gate)
         # (T, D)
         o = self.o_proj(outputs)
         return new_kv_cache, o
@@ -269,7 +279,7 @@ class Qwen3Model(Qwen2Model):
         hf_config = model_config.hf_config
         vocab_size = model_config.get_vocab_size()
         dtype = model_config.dtype
-        rms_norm_eps = hf_config.rms_norm_eps
+        rms_norm_eps = getattr(hf_config, "rms_norm_eps", getattr(hf_config, "layer_norm_epsilon", getattr(hf_config, "norm_eps", 1e-6)))
         hidden_size = hf_config.hidden_size
 
         self.is_first_rank = get_pp_group().is_first_rank

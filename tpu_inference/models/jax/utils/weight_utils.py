@@ -1035,6 +1035,20 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 has_model_child = False
 
             for name, weight in w_iter:
+                if "mtp" in name.split("."):
+                    continue
+                if "visual" in name.split(".") or name.startswith("visual.") or name.startswith("model.visual."):
+                    continue
+
+                if ".conv1d.weight" in name:
+                    name = name.replace(".conv1d.weight", ".conv1d_weight")
+                if ".conv1d.bias" in name:
+                    name = name.replace(".conv1d.bias", ".conv1d_bias")
+                if ".in_proj_a." in name:
+                    name = name.replace(".in_proj_a.", ".a_proj.")
+                if ".in_proj_b." in name:
+                    name = name.replace(".in_proj_b.", ".b_proj.")
+
                 if self.pytorch_pooler is not None:
                     match = re.match(r"^(?:model\.)?pooler\.(.*)$", name)
                     if match:
@@ -1043,6 +1057,11 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                         continue
 
                 if base_prefix == "":
+                    if name.startswith("model.language_model."):
+                        name = name.replace("model.language_model.", "", 1)
+                    elif name.startswith("language_model."):
+                        name = name.replace("language_model.", "", 1)
+
                     top_level = name.split('.')[0]
                     if top_level in root_children:
                         # Path A: Root child, load as-is
