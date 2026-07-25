@@ -87,6 +87,51 @@ pinning the auth plugin by digest, and running failover/rotation tests. Until
 then, keep the POC secret isolated and rotate it automatically; do not call it
 production-ready.
 
+### Cross-project and VPC boundaries
+
+The manager and worker clusters may be in different Google Cloud projects,
+regions, and VPC networks. They do not need VPC peering or direct Pod-to-Pod
+connectivity when MultiKueue uses Fleet-generated `ClusterProfile` objects and
+Connect Gateway. In that model, the manager reaches each worker Kubernetes API
+through Google APIs rather than through the worker control plane's private VPC
+address:
+
+```text
+manager Kueue -> Google APIs -> Fleet Connect Gateway -> worker Kubernetes API
+```
+
+A useful ownership model is:
+
+- a fleet host project contains the Fleet and manager cluster;
+- worker projects contain their GKE clusters, TPU reservations, node pools,
+  disks, quotas, and compute billing;
+- each worker cluster is registered to the manager's Fleet, noting that a
+  cluster can belong to only one Fleet;
+- the manager Kueue identity receives Connect Gateway access in the fleet host
+  project and GKE access in every worker project.
+
+For the current role model, grant the manager-only KSA principal
+`roles/gkehub.gatewayEditor` in the fleet host project and
+`roles/container.developer` in each worker project. These project-wide roles
+are broad; production should narrow them with IAM Conditions or project/fleet
+isolation after validating the exact resource names and permissions. Do not
+reuse this manager KSA name on worker clusters.
+
+Separate VPCs still need outbound access to the required Google APIs, normally
+through public egress or Private Google Access. VPC Service Controls and
+organization policy must permit the GKE, Fleet, and Connect Gateway calls.
+Direct network connectivity becomes necessary only when using kubeconfigs that
+target private worker control-plane addresses, when tests communicate across
+clusters, or when a worker consumes a private cache, model, dataset, registry,
+or other service in another VPC. Those data-plane paths are independent of
+MultiKueue dispatch and may use local replication, Shared VPC, Private Service
+Connect, peering, or VPN according to the service.
+
+Kueue quota remains declarative in each ClusterQueue. Fleet does not discover
+or synchronize TPU reservation or project quota automatically, so the platform
+operator must keep advertised nominal quota aligned with usable capacity in
+each worker project.
+
 ## Terraform boundaries
 
 Terraform owns slow-moving Google resources:
@@ -103,6 +148,14 @@ small internal Helm chart. This avoids Terraform CRD plan-time coupling and
 lets scheduling policy roll back independently of a cluster. Kueue and Agent
 Stack Helm releases may be added to a separate platform stack once their exact
 versions and values are approved.
+
+The current Terraform scaffold assumes the manager and workers share one
+Google Cloud project. Supporting the cross-project layout above requires a
+worker-project map (and normally aliased providers), Fleet memberships created
+in the fleet host project with fully qualified worker cluster URIs, and IAM
+bindings applied separately in the fleet host and worker projects. This is an
+infrastructure-module change only; it should not change Buildkite pipeline or
+Kueue workload selection.
 
 Do not put any of these in Terraform state:
 
