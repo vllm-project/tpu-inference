@@ -1,0 +1,54 @@
+# POC-only identity used by the manager Kueue controller to
+# create, watch, and reconcile Workloads and batch Jobs on one worker.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: multikueue-sa
+  namespace: kueue-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multikueue-manager
+rules:
+  - apiGroups:
+      - kueue.x-k8s.io
+    resources:
+      - workloads
+      - workloads/status
+      - workloads/finalizers
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+      - jobs/status
+      - jobs/finalizers
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: multikueue-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: multikueue-manager
+subjects:
+  - kind: ServiceAccount
+    name: multikueue-sa
+    namespace: kueue-system

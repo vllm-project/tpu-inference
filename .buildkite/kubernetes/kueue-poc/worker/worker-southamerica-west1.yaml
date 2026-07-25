@@ -1,0 +1,136 @@
+# First-worker POC resources for ci-test-southamerica-west1-worker.
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: tpu-v6e-reservation
+spec:
+  whenUnsatisfiable: DoNotScaleUp
+  priorities:
+    - tpu:
+        type: tpu-v6e-slice
+        topology: 1x1
+        count: 1
+      reservations:
+        affinity: Specific
+        specific:
+          - name: cloudtpu-20250327121505-861300654
+---
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: tpu-v6e-8-reservation
+spec:
+  whenUnsatisfiable: DoNotScaleUp
+  priorities:
+    - tpu:
+        type: tpu-v6e-slice
+        topology: 2x4
+        count: 8
+      reservations:
+        affinity: Specific
+        specific:
+          - name: cloudtpu-20250327121505-861300654
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: buildkite
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: default
+spec:
+  nodeLabels: {}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: v6e-1
+spec:
+  nodeLabels:
+    cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+    cloud.google.com/gke-tpu-topology: 1x1
+    topology.kubernetes.io/zone: southamerica-west1-a
+    cloud.google.com/compute-class: tpu-v6e-reservation
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: v6e-8
+spec:
+  nodeLabels:
+    cloud.google.com/gke-tpu-accelerator: tpu-v6e-slice
+    cloud.google.com/gke-tpu-topology: 2x4
+    topology.kubernetes.io/zone: southamerica-west1-a
+    cloud.google.com/compute-class: tpu-v6e-8-reservation
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: v6e-1
+spec:
+  cohortName: v6e-pool
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  resourceGroups:
+    - coveredResources:
+        - google.com/tpu
+        - cpu
+        - memory
+        - ephemeral-storage
+      flavors:
+        - name: v6e-1
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 8
+            - name: cpu
+              nominalQuota: 1000
+            - name: memory
+              nominalQuota: 1000Gi
+            - name: ephemeral-storage
+              nominalQuota: 10000Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: v6e-8
+spec:
+  cohortName: v6e-pool
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: buildkite
+  resourceGroups:
+    - coveredResources:
+        - google.com/tpu
+        - cpu
+        - memory
+        - ephemeral-storage
+      flavors:
+        - name: v6e-8
+          resources:
+            - name: google.com/tpu
+              nominalQuota: 8
+            - name: cpu
+              nominalQuota: 1000
+            - name: memory
+              nominalQuota: 1000Gi
+            - name: ephemeral-storage
+              nominalQuota: 10000Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: v6e-1
+  namespace: buildkite
+spec:
+  clusterQueue: v6e-1
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: v6e-8
+  namespace: buildkite
+spec:
+  clusterQueue: v6e-8

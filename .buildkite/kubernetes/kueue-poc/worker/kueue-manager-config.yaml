@@ -1,0 +1,46 @@
+# Global Kueue Manager Configuration for Worker Cluster
+# Applied to kueue-system namespace for Agent Stack Job compatibility.
+# Note: After updating this ConfigMap, restart the controller manager:
+#   kubectl rollout restart deployment/kueue-controller-manager -n kueue-system
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kueue-manager-config
+  namespace: kueue-system
+  labels:
+    app.kubernetes.io/name: kueue
+    control-plane: controller-manager
+data:
+  controller_manager_config.yaml: |
+    apiVersion: config.kueue.x-k8s.io/v1beta2
+    kind: Configuration
+    manageJobsWithoutQueueName: false
+    health:
+      healthProbeBindAddress: :8081
+    metrics:
+      bindAddress: :8443
+    webhook:
+      port: 9443
+    leaderElection:
+      leaderElect: true
+      resourceName: c1f6bfd2.kueue.x-k8s.io
+    # Agent Stack runs checkout as a regular container. Once checkout exits,
+    # Kubernetes reports the still-running Pod as Ready=False. This extended
+    # timeout is a tested POC compatibility workaround, not a health signal.
+    waitForPodsReady:
+      timeout: 10800s
+    controller:
+      groupKindConcurrency:
+        Job.batch: 5
+        Pod: 5
+        Workload.kueue.x-k8s.io: 10
+        LocalQueue.kueue.x-k8s.io: 5
+        Cohort.kueue.x-k8s.io: 1
+        ClusterQueue.kueue.x-k8s.io: 5
+        ResourceFlavor.kueue.x-k8s.io: 1
+    clientConnection:
+      qps: 300
+      burst: 500
+    integrations:
+      frameworks:
+      - "batch/job"
