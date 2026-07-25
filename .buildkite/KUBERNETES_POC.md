@@ -153,8 +153,10 @@ meaningful by propagating failures.
 ## Observed results
 
 The builds below are historical observations, not controlled benchmark results.
-The bare-metal reference used a different commit and cache state. Use them to
-identify areas to investigate, not to declare a winner.
+The closest successful bare-metal reference is an ancestor of the Kubernetes
+commit, but the Kubernetes branch includes later vLLM LKG and POC changes and
+uses a different cache state. Use the results to identify areas to investigate,
+not to declare a winner.
 
 ### Lifecycle debugging
 
@@ -175,31 +177,112 @@ In build 76:
 That last failure was an ordinary test failure (`exit 1`), not the former
 lifecycle kill (`exit 137`).
 
-### Selected timing comparison
+### Repeated matrix validation
 
-| Step | Kubernetes build 57 | Bare-metal build 23086 | Observation |
+Builds 77–79 ran the same commit and were intentionally submitted together to
+exercise admission and limited-capacity behavior.
+
+| Build | Active TPU result | Overall result at 2026-07-25 19:55 UTC |
+|---|---|---|
+| [76](https://buildkite.com/tpu-commons/kube-dev/builds/76) | 14 of 15 passed; one ordinary test failure | Failed |
+| [77](https://buildkite.com/tpu-commons/kube-dev/builds/77) | 15 of 15 passed | Passed |
+| [78](https://buildkite.com/tpu-commons/kube-dev/builds/78) | 15 of 15 passed | Passed |
+| [79](https://buildkite.com/tpu-commons/kube-dev/builds/79) | 13 passed; speculative decoding and unit part 2 still running | Running |
+
+The conditionally disabled full-matrix and coverage-replay rows did not start
+and are excluded from the counts. Builds 77 and 78 are the strongest functional
+result: the active matrix completed twice without the former secret,
+admission, or exit-137 lifecycle failures.
+
+### Execution-time comparison
+
+The Kubernetes column is the mean of builds 77–79 for completed samples. The
+two still-running build-79 tests use builds 77 and 78 only. Bare metal is
+[build 23183](https://buildkite.com/tpu-commons/tpu-inference-ci/builds/23183),
+the closest successful main reference. The kernel step had no executed v6e
+counterpart in that build and is therefore omitted.
+
+| Step | Kubernetes mean | Bare metal | Observation |
 |---|---:|---:|---|
-| Build image | 1m13s | 9m36s | Persistent CPU builder cache strongly favored Kubernetes path |
-| MLPerf JAX | 16m35s | 8m54s | Kubernetes slower |
-| MLPerf JAX + vLLM | 16m06s | 7m40s | Kubernetes slower |
-| JAX unit part 1 | 24m02s | 23m41s | Similar |
-| LoRA E2E multi-chip | 7m15s | 7m20s | Similar |
-| LoRA unit single-chip | 2m33s | 4m17s | Kubernetes faster |
-| LoRA unit multi-chip | 2m21s | 6m01s | Kubernetes faster |
-| RunAI JAX | 6m48s | 4m12s | Kubernetes slower |
-| TorchAX | 4m03s | 3m45s | Similar |
-| Ray | 4m54s | 6m54s | Kubernetes faster |
-| Qwen accuracy | 9m47s | 6m38s | Kubernetes slower |
-| Disaggregated serving | 3m59s | 7m10s | Kubernetes faster |
-| MPMD | 7m13s | 5m46s | Kubernetes slower |
+| MLPerf JAX | 14m08s | 10m01s | Kubernetes 41% slower |
+| MLPerf JAX + vLLM | 14m01s | 8m04s | Kubernetes 74% slower |
+| Speculative decoding | 2h11m25s | 27m25s | Kubernetes 4.8x slower |
+| JAX unit part 1 | 20m32s | 20m49s | Similar |
+| JAX unit part 2 | 1h33m31s | 1h24m13s | Kubernetes 11% slower |
+| LoRA unit single-chip | 1m41s | 3m23s | Kubernetes 50% faster |
+| LoRA E2E multi-chip | 6m52s | 8m30s | Kubernetes 19% faster |
+| LoRA unit multi-chip | 1m55s | 7m05s | Kubernetes 73% faster |
+| RunAI JAX | 5m17s | 4m41s | Kubernetes 13% slower |
+| RunAI TorchAX | 3m47s | 4m05s | Similar |
+| RunAI Ray | 4m29s | 8m07s | Kubernetes 45% faster |
+| Qwen accuracy | 9m31s | 6m43s | Kubernetes 42% slower |
+| Disaggregated serving | 3m42s | 7m48s | Kubernetes 53% faster |
+| MPMD | 5m52s | 5m57s | Similar |
 
-The data does not support the statement that either platform is uniformly
-faster. It does show that eliminating per-test image work is valuable and that
-some compilation-heavy tests regress when their cache is cold. In one sampled
-comparison, the bare-metal speculative-decoding log reported roughly 2,031
-compilation events totaling 6.66 seconds, while the first 619 Kubernetes events
-already totaled roughly 333 seconds. This strongly implicates cache state, but
-a same-commit controlled experiment is still required.
+The first Kubernetes image build in this batch took 6m52s; the next two
+same-commit builds took approximately 1m05s after builder-cache reuse. The
+bare-metal image build took 9m27s. Building and publishing once per commit is a
+clear benefit.
+
+These durations are not complete user-visible latency. Buildkite marks a
+Kubernetes job started only after the ephemeral agent connects, so Kueue
+admission, node/PVC provisioning, image pull, and Agent Stack startup are in
+the pre-agent wait. A bare-metal agent starts almost immediately, while its
+command duration includes GCS cache synchronization, Docker startup, and
+cleanup. A fair future benchmark must record both phases.
+
+### Capacity and startup observations
+
+For the 15 active Kubernetes jobs, the time from Buildkite `runnable_at` until
+the agent started was:
+
+| Build | Median pre-agent wait | Maximum pre-agent wait |
+|---|---:|---:|
+| 77 | 5m25s | 23m33s |
+| 78 | 37m14s | 48m28s |
+| 79 | 1h08m02s | 1h44m21s |
+
+Bare-metal jobs in build 23183 generally waited approximately one second on
+already-running agents. The increasing Kubernetes wait across three concurrent
+builds shows MultiKueue respecting limited capacity, but also shows that the
+current one-chip quota and single eight-chip instance cannot provide low
+latency for overlapping full matrices. Even the first build has an
+approximately five-minute baseline before most agents connect. Buildkite alone
+cannot divide that interval into central admission, worker admission, node
+startup, PVC binding, image pull, and agent startup; Kubernetes event metrics
+are required.
+
+Overall wall time was 2h23m for build 77, 2h43m for build 78, and 1h35m for
+bare-metal build 23183. Speculative decoding was the Kubernetes critical path;
+contention added further latency to the later concurrent builds.
+
+### Cache evidence
+
+Both speculative-decoding jobs selected exactly 11 tests and deselected 21.
+Pytest reported 7,831.95 seconds in Kubernetes versus 1,514.06 seconds on bare
+metal. A sampled steady-state inference interval was much closer—approximately
+104.1/236.7 input/output tokens per second in Kubernetes versus 107.8/245.1 on
+bare metal—so normal TPU execution speed does not explain the 4.8x job-time
+difference.
+
+Bare metal explicitly pulled its JAX cache from GCS and wrote it back after a
+successful job. Every Kubernetes Job started with an empty ephemeral model and
+compilation-cache volume. Kubernetes builds 77 and 78 both took approximately
+131–132 minutes for speculative decoding, confirming that one build did not
+warm the next. Logs also showed compile stages taking tens of seconds on the
+Kubernetes path where equivalent bare-metal stages were near-instant or much
+shorter.
+
+This strongly implicates compilation and other cacheable model-startup work,
+but the current logs do not isolate JAX compilation, model download, and
+initialization precisely enough to assign the entire difference to XLA. The
+next controlled comparison should use the same source and vLLM commit, run one
+build at a time, compare cold and prepared Kubernetes caches, and record cache
+hits, compilation count/time, model download, and Kubernetes lifecycle events.
+
+The data still does not support the statement that either platform is
+uniformly faster. Short tests benefit from removing per-job Docker/cache
+housekeeping, while compilation-heavy cold-cache tests can regress sharply.
 
 ## What the POC changed
 

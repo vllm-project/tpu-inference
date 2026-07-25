@@ -29,11 +29,15 @@ gates.
 
 ## What has been proven
 
-Build 76 is the strongest completed lifecycle result. With the Kueue
-`waitForPodsReady` timeout extended on both manager and worker, 14 of 15 TPU
-Jobs passed. The remaining unit-test shard ran for 1h36m59 and failed normally
-on `test_mesh_devices_sorting` after 1,563 passing and 340 skipped tests. This
-separates the remaining test failure from the earlier infrastructure exit 137.
+Builds 77 and 78 are the strongest completed results. Each passed all 15 active
+TPU Jobs and the final result-validation step. This verifies the tested
+Agent Stack/MultiKueue path through multi-hour execution without the earlier
+secret, admission, or exit-137 lifecycle failures.
+
+Build 76 passed 14 of 15 TPU Jobs. The remaining unit-test shard ran for
+1h36m59 and failed normally on `test_mesh_devices_sorting` after 1,563 passing
+and 340 skipped tests. This separated that test failure from the earlier
+infrastructure exit 137; the source fix was present in builds 77–79.
 
 Build 74 proved that Agent Stack and MultiKueue preserve the Kubernetes Job
 active deadline override: setting it to 120 seconds killed the command after
@@ -41,14 +45,19 @@ approximately 1m32 of agent runtime. Build 75 proved that changing only the
 manager readiness timeout is insufficient; the worker Kueue configuration must
 match.
 
-Builds 77–79 were started as a scale/admission experiment after removing
-Buildkite-side concurrency throttling. At the 2026-07-25 handoff check, all
-three builds were still running. Build 77 had 14 passed and 3 running Jobs;
-build 78 had 13 passed and 4 running Jobs; build 79 had 2 passed, 2 running, and
-13 reserved Jobs. Each also had 8 conditionally excluded steps reported as
-`broken` and 2 dependent steps waiting. Their final outcomes are not recorded
-here; inspect them before drawing conclusions. The progress does show that
-work moved beyond reservation, but does not yet prove fairness or cleanup.
+Builds 77–79 were started together as a scale/admission experiment after
+removing Buildkite-side concurrency throttling. Builds 77 and 78 passed. At
+2026-07-25 19:55 UTC, build 79 had 13 passing TPU Jobs while speculative
+decoding and unit tests part 2 were still running. Its final outcome must still
+be checked. The conditionally excluded rows did not execute and are not test
+failures for this comparison.
+
+The repeated command durations were stable, but median pre-agent wait increased
+from 5m25s in build 77 to 37m14s in build 78 and 1h08m02s in build 79. This
+shows admission respecting the limited TPU pools, but the current capacity is
+not sufficient for low-latency overlapping full matrices. See
+[`../../KUBERNETES_POC.md`](../../KUBERNETES_POC.md) for the complete timing and
+bare-metal comparison.
 
 ## Primary known issue: Running but NonReady
 
