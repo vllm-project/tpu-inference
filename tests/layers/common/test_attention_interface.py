@@ -261,6 +261,110 @@ def test_sharded_ragged_paged_attention_gqa_replication(monkeypatch, gqa_mesh):
     assert jnp.array_equal(replicated_v, expected_v)
 
 
+def test_sharded_ragged_paged_attention_fp8_cache_casts_kv(
+        monkeypatch, gqa_mesh):
+    """fp8 KV cache: bf16 k/v are cast to the fp8 cache dtype before the kernel.
+
+    The RPA v3 kernel enforces kv_cache.dtype == k.dtype == v.dtype and expects
+    KV quantization to happen outside the kernel. This checks that
+    sharded_ragged_paged_attention casts bf16 k/v to the fp8 cache dtype so the
+    kernel's invariant holds (regression test for the fp8 dtype-mismatch crash).
+    """
+    head_dim = 128
+    num_kv_heads = 4  # == tp_size, so no GQA replication interferes
+    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim), dtype=jnp.bfloat16)
+    k = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim), dtype=jnp.bfloat16)
+    v = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim), dtype=jnp.bfloat16)
+    # fp8 KV cache
+    kv_cache = jnp.zeros((num_kv_heads, NUM_BLOCKS, BLOCK_SIZE, head_dim),
+                         dtype=jnp.float8_e4m3fn)
+    kv_lens = jnp.zeros((MAX_NUM_SEQS, ), dtype=jnp.int32)
+    page_indices = jnp.zeros((MAX_NUM_SEQS, MAX_BLOCKS_PER_SEQ),
+                             dtype=jnp.int32)
+    cu_q_lens = jnp.zeros((MAX_NUM_SEQS + 1, ), dtype=jnp.int32)
+    distribution = jnp.zeros((3, ), dtype=jnp.int32)
+
+    mock_shard_map_callable = MagicMock(return_value=(jnp.ones_like(q),
+                                                      kv_cache))
+    mock_shard_map = MagicMock(return_value=mock_shard_map_callable)
+    monkeypatch.setattr("jax.shard_map", mock_shard_map)
+
+    sharded_ragged_paged_attention(
+        mesh=gqa_mesh,
+        q=q,
+        k=k,
+        v=v,
+        kv_cache=kv_cache,
+        kv_lens=kv_lens,
+        page_indices=page_indices,
+        cu_q_lens=cu_q_lens,
+        distribution=distribution,
+        attention_sink=None,
+        sm_scale=1.0,
+    )
+
+    mock_shard_map_callable.assert_called_once()
+    call_args = mock_shard_map_callable.call_args[0]
+    kernel_k = call_args[1]
+    kernel_v = call_args[2]
+    # k/v must be cast to the fp8 cache dtype so the kernel invariant holds.
+    assert kernel_k.dtype == kv_cache.dtype
+    assert kernel_v.dtype == kv_cache.dtype
+
+
+def test_sharded_ragged_paged_attention_matching_dtype_no_cast(
+        monkeypatch, gqa_mesh):
+    """No-op when k/v already match the cache dtype (e.g. pre-quantized paths).
+
+    The cast must not fire when dtypes already agree, so callers that
+    pre-quantize via quantize_kv are unaffected. Here a bf16 cache with bf16
+    k/v must pass k/v through unchanged.
+    """
+    head_dim = 128
+    num_kv_heads = 4
+    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim), dtype=jnp.bfloat16)
+    k = (jnp.arange(TOTAL_TOKENS * num_kv_heads * head_dim,
+                    dtype=jnp.bfloat16).reshape(
+                        (TOTAL_TOKENS, num_kv_heads, head_dim)))
+    v = -k
+    kv_cache = jnp.zeros((num_kv_heads, NUM_BLOCKS, BLOCK_SIZE, head_dim),
+                         dtype=jnp.bfloat16)
+    kv_lens = jnp.zeros((MAX_NUM_SEQS, ), dtype=jnp.int32)
+    page_indices = jnp.zeros((MAX_NUM_SEQS, MAX_BLOCKS_PER_SEQ),
+                             dtype=jnp.int32)
+    cu_q_lens = jnp.zeros((MAX_NUM_SEQS + 1, ), dtype=jnp.int32)
+    distribution = jnp.zeros((3, ), dtype=jnp.int32)
+
+    mock_shard_map_callable = MagicMock(return_value=(jnp.ones_like(q),
+                                                      kv_cache))
+    mock_shard_map = MagicMock(return_value=mock_shard_map_callable)
+    monkeypatch.setattr("jax.shard_map", mock_shard_map)
+
+    sharded_ragged_paged_attention(
+        mesh=gqa_mesh,
+        q=q,
+        k=k,
+        v=v,
+        kv_cache=kv_cache,
+        kv_lens=kv_lens,
+        page_indices=page_indices,
+        cu_q_lens=cu_q_lens,
+        distribution=distribution,
+        attention_sink=None,
+        sm_scale=1.0,
+    )
+
+    mock_shard_map_callable.assert_called_once()
+    call_args = mock_shard_map_callable.call_args[0]
+    kernel_k = call_args[1]
+    kernel_v = call_args[2]
+    # Unchanged: same dtype and same values (no clip/cast applied).
+    assert kernel_k.dtype == jnp.bfloat16
+    assert kernel_v.dtype == jnp.bfloat16
+    assert jnp.array_equal(kernel_k, k)
+    assert jnp.array_equal(kernel_v, v)
+
+
 def test_sharded_ragged_paged_attention_gqa_incompatible_raises_error(
     gqa_mesh, ):
     """

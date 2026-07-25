@@ -417,6 +417,31 @@ def sharded_ragged_paged_attention(
     )
     out_specs = (qkv_spec, kv_cache_spec)
 
+    # fp8 KV-cache compatibility. The RPA v3 kernel
+    # (kernels/ragged_paged_attention/v3/kernel.py:static_validate_inputs)
+    # requires kv_cache.dtype == k.dtype == v.dtype and, per its own comment,
+    # "expects the kv quantization happens outside of the RPA kernel". When the
+    # KV cache is allocated in fp8 (kv_cache_dtype=fp8) but a caller reaches this
+    # kernel with bf16 k/v -- e.g. model paths that do not pre-quantize K/V,
+    # KV-shared layers, or the warm-up/dummy capture forward -- the kernel raises
+    # a dtype ValueError. This is the common choke point every RPA caller funnels
+    # through, and it sits after the GQA jnp.repeat so the cast also covers
+    # replicated KV heads. Cast k/v to the fp8 cache dtype here so the kernel's
+    # dtype invariant holds. No-op when dtypes already match (paths that
+    # pre-quantize via quantize_kv are unaffected). Scales are threaded through
+    # k_scale/v_scale unchanged; when a caller passes none, fp8 store/read is at
+    # scale 1.0.
+    if (kv_cache.dtype != k.dtype
+            and jnp.issubdtype(kv_cache.dtype, jnp.floating)
+            and kv_cache.dtype.itemsize == 1  # fp8 (e4m3/e5m2)
+        ):
+        _fp8_info = jnp.finfo(kv_cache.dtype)
+        _lo, _hi = float(_fp8_info.min), float(_fp8_info.max)
+        # Clip before cast (matches quantization.static_per_tensor_quantize_tensor)
+        # so out-of-range magnitudes saturate instead of becoming inf/nan.
+        k = jnp.clip(k, _lo, _hi).astype(kv_cache.dtype)
+        v = jnp.clip(v, _lo, _hi).astype(kv_cache.dtype)
+
     args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
 
     use_hd64 = q.shape[-1] == 64
