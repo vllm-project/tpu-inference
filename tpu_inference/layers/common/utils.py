@@ -139,10 +139,15 @@ def general_device_put(tensor: jax.Array,
 
     def _put(t):
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
-        # If we are not in multi-host setup, or the tensor is not fully addressable,
-        # we can use jax.device_put directly.
-        if multihost_backend != "ray" or (isinstance(t, jax.Array)
-                                          and not t.is_fully_addressable):
+        # The multi-host branch below (jax.make_array_from_callback) is pure JAX
+        # SPMD: each process contributes only its locally-addressable shards. It
+        # is correct for any multi-controller deployment -- both "ray" (Ray owns
+        # the hosts) and "spmd" (bare jax.distributed). If we are not in a
+        # multi-host setup, or the tensor is not fully addressable, we can use
+        # jax.device_put directly.
+        is_multihost = multihost_backend in ("ray", "spmd")
+        if (not is_multihost) or (isinstance(t, jax.Array)
+                                  and not t.is_fully_addressable):
             if layout is not None:
                 return jax.device_put(t, Format(layout, sharding))
             else:
