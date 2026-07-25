@@ -1,0 +1,15 @@
+# PersistentVolumeClaim for Golden JAX Cache
+# Created in buildkite namespace on worker cluster to serve as the cloning dataSource
+# for individual Buildkite test job ephemeral cache volumes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: golden-jax-cache-pvc
+  namespace: buildkite
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: premium-rwo
+  resources:
+    requests:
+      storage: 500Gi

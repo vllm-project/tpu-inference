@@ -86,6 +86,9 @@
         spec:
           accessModes: [ "ReadWriteOnce" ]
           storageClassName: "premium-rwo"
+          dataSource:
+            kind: PersistentVolumeClaim
+            name: golden-jax-cache-pvc
           resources:
             requests:
               storage: 500Gi

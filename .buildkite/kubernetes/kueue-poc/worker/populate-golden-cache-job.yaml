@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: populate-golden-cache-job
+  namespace: buildkite
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: populate-golden-cache
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: gcloud-rsync
+          image: google/cloud-sdk:slim
+          command:
+            - sh
+            - -c
+            - |
+              echo "Starting GCS sync to golden-jax-cache-pvc..."
+              mkdir -p /cache/tpu_jax_cache
+              gcloud storage rsync -r --no-clobber gs://ullm-ci-cache/jax_cache/jax0.11.0_tputpu6e /cache/tpu_jax_cache
+              echo "Golden cache sync complete. Total items:"
+              ls -1 /cache/tpu_jax_cache | wc -l
+          volumeMounts:
+            - name: golden-cache-vol
+              mountPath: /cache/tpu_jax_cache
+      volumes:
+        - name: golden-cache-vol
+          persistentVolumeClaim:
+            claimName: golden-jax-cache-pvc
