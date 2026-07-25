@@ -2,6 +2,10 @@
 
 Status: POC design, not an adoption decision.
 
+For the follow-on Standard GKE target, secretless Fleet authentication,
+Terraform foundation, and production gap analysis, see
+[`../production/README.md`](../production/README.md).
+
 ## Purpose
 
 This document describes the tested Buildkite Agent Stack, Kueue, MultiKueue,

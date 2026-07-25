@@ -4,6 +4,8 @@ This directory contains the manifests needed to reproduce the tested
 Buildkite-to-GKE TPU path. It is an experiment, not a production installation
 bundle. Read the [architecture and alternatives](DESIGN.md) before extending
 it, and use [HANDOFF.md](HANDOFF.md) for current findings and diagnostics.
+The production-oriented Standard GKE design is intentionally separate under
+[`../production`](../production/README.md).
 
 ## Tested topology
 

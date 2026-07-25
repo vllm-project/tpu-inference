@@ -13,6 +13,8 @@ architecture and the objective alternative analysis, see
 [`kubernetes/kueue-poc/DESIGN.md`](kubernetes/kueue-poc/DESIGN.md). Current
 operational state and next investigations are in
 [`kubernetes/kueue-poc/HANDOFF.md`](kubernetes/kueue-poc/HANDOFF.md).
+The production-oriented Standard GKE target, Terraform foundation, and gap
+analysis are in [`kubernetes/production/README.md`](kubernetes/production/README.md).
 
 ## Executive result
 
