@@ -143,7 +143,7 @@ def run_jax_gdn_attention(
         # passed into run_jax_gdn_attention are global. Compute exact local metadata for this DP shard.
         if global_num_seqs != local_num_seqs and local_num_seqs > 0:
             local_num_tokens = j_mixed_qkv.shape[0]
-            tokens_per_seq = local_num_tokens // local_num_seqs
+            tokens_per_seq = max(1, local_num_tokens // local_num_seqs)
             query_start_loc = jnp.arange(0, (local_num_seqs + 1) * tokens_per_seq, tokens_per_seq, dtype=jnp.int32)
             state_indices = jnp.arange(local_num_seqs, dtype=jnp.int32)
             distribution = jnp.array([0, local_num_tokens, 0], dtype=jnp.int32)
