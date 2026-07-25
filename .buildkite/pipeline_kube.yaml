@@ -26,7 +26,6 @@
   TPU_NAME: "buildkite-gke"
   HF_HOME: "/cache/hf_home"
   NLTK_DATA: "/cache/nltk_data"
-  MLPERF_DATASET_PATH: "/cache/datasets/open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
   VLLM_XLA_CACHE_PATH: "/cache/tpu_jax_cache"
   JAX_COMPILATION_CACHE_DIR: "/cache/tpu_jax_cache"
   # pipeline_jax receives this from run_in_docker.sh. Keep the same guard when
