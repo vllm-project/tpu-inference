@@ -225,9 +225,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Worker ID for multi-host TPU setups
     "TPU_WORKER_ID":
     lambda: os.getenv("TPU_WORKER_ID", None),
-    # Backend for multi-host communication on TPU
+    # Backend for multi-host communication on TPU.
+    #   "ray"  : vLLM's RayDistributedExecutor owns the TPU hosts (spawns Ray
+    #            actor workers). Best for standalone multi-host serving.
+    #   "spmd" : bare jax.distributed (SPMD / multi-controller). Every host runs
+    #            the same process and owns only its locally-addressable devices;
+    #            no Ray actors are spawned and UniProcExecutor is kept per host.
+    #            Useful when the engine is embedded in an already-initialized
+    #            jax.distributed program (e.g. a colocated RL trainer) that owns
+    #            the devices, so a separate Ray worker group cannot re-acquire
+    #            them. The multi-host device-placement helpers below key off this.
     "TPU_MULTIHOST_BACKEND":
-    env_with_choices("TPU_MULTIHOST_BACKEND", "", ["ray"]),
+    env_with_choices("TPU_MULTIHOST_BACKEND", "", ["ray", "spmd"]),
     # Use vLLM-native multi-process data parallelism (one engine process per
     # DP rank, single load-balanced API endpoint) instead of tpu-inference's
     # single-process SPMD data parallelism. Each DP rank is pinned to a
