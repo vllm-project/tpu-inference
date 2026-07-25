@@ -54,9 +54,9 @@ else
     echo "QUANTIZATION is False. Running without quantization."
 fi
 
-root_dir=/workspace
+root_dir="${TPU_INFERENCE_WORKSPACE:-/tpu-inference/workspace}"
 dataset_name=mlperf
-dataset_path=""
+dataset_path="${MLPERF_DATASET_PATH:-}"
 num_prompts=1000
 exit_code=0
 use_dummy_weights=false
@@ -65,7 +65,7 @@ helpFunction()
 {
    echo ""
    echo "Usage: $0 [-r full_path_to_root_dir -m model_id]"
-   echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_inference' (default: /workspace/, which is used in the Dockerfile)"
+   echo -e "\t-r The workspace containing vLLM (auto-detected by default)"
    echo -e "\t-d The dataset name (default: mlperf, which will download the dataset)"
    echo -e "\t-p The path to the processed MLPerf dataset (default: None, which will download the dataset)"
    echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-0.5B-Instruct, meta-llama/Llama-3.1-8B-Instruct and meta-llama/Llama-4-Scout-17B-16E-Instruct)"
@@ -81,7 +81,8 @@ printenv
 
 # Access shared benchmarking functionality
 # shellcheck disable=SC1091
-source "$(dirname "$0")/bench_utils.sh"
+mlperf_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$mlperf_script_dir/bench_utils.sh"
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -131,6 +132,8 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
+resolve_benchmark_workspace "$root_dir"
+
 echo "Using the root directory at $root_dir"
 echo "Using $num_prompts prompts"
 echo "Using server timeout of $TIMEOUT_SECONDS seconds"
@@ -148,33 +151,8 @@ if [ -z "$dataset_path" ]; then
     dataset_path="$root_dir/open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl"
     EXPECTED_SHA256="b64e66e54b6267f79eb4f9ccec52d466bab3ac94747ed258c3b0f337ed166fab"
 
-    if [ ! -f "$dataset_path" ]; then
-        echo "Downloading and verifying the MLPerf dataset..."
-
-        # Check if rclone is installed; if not, install it via package manager for security
-        if ! command -v rclone &> /dev/null; then
-            echo "rclone not found. Installing..."
-            sudo apt-get update && sudo apt-get install -y rclone
-        fi
-
-        rclone config create mlc-inference s3 provider=Cloudflare \
-            access_key_id=f65ba5eef400db161ea49967de89f47b \
-            secret_access_key=fbea333914c292b854f14d3fe232bad6c5407bf0ab1bebf78833c2b359bdfd2b \
-            endpoint=https://c2686074cb2caf5cbaf6d134bdba8b47.r2.cloudflarestorage.com
-        rclone copy mlc-inference:mlcommons-inference-wg-public/open_orca ./open_orca -P
-        gzip -d open_orca/open_orca_gpt4_tokenized_llama.sampled_24576.pkl.gz
-    else
-        echo "Not downloading the MLPerf dataset because it already exists"
-    fi
-
-    echo "Verifying file integrity..."
-    if ! echo "$EXPECTED_SHA256  $dataset_path" | sha256sum -c -; then
-        echo "CRITICAL SECURITY ERROR: SHA256 hash mismatch for $dataset_path!"
-        echo "The file may be corrupted or tampered with. Deleting file and exiting."
-        rm -f "$dataset_path"
-        exit 1
-    fi
-    echo "Verification successful."
+    "$mlperf_script_dir/../../../.buildkite/scripts/prepare_mlperf_dataset.sh" \
+        "$dataset_path" "$EXPECTED_SHA256" || exit 1
 fi
 
 if [ "$use_dummy_weights" = true ]; then
@@ -201,13 +179,13 @@ echo extra_serve_args: "${extra_serve_args[@]}"
 
 echo "Using the dataset at $dataset_path"
 
-cd "$root_dir"/vllm || exit
+cd "$vllm_dir" || exit
 echo "Current working directory: $(pwd)"
-echo "Using vLLM hash: $(git rev-parse HEAD)"
+echo "Using vLLM hash: $(git -C "$vllm_dir" rev-parse HEAD)"
+echo "Using TPU Inference hash: $(git -C "$tpu_inf_dir" rev-parse HEAD)"
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Inference ones
-cp -r "$root_dir"/tpu_inference/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
-echo "Using TPU Inference hash: $(git -C "$root_dir"/tpu_inference rev-parse HEAD)"
+cp -r "$tpu_inf_dir"/scripts/vllm/benchmarking/*.py "$vllm_dir"/benchmarks/
 
 checkThroughputAndRouge() {
     # This function checks whether the ROUGE1 score and total token throughput

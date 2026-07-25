@@ -21,6 +21,7 @@ cleanup_docker_resource() {
   # Define defaults and get the parameter
   DEFAULT_IMAGES=("vllm-tpu")
   IMAGE_NAME="${1:-}"
+  PRESERVE_BUILD_CACHE="${2:-false}"
 
   # Combine image sets
   COMBINED_IMAGES=("${DEFAULT_IMAGES[@]}")
@@ -72,8 +73,14 @@ cleanup_docker_resource() {
     fi
   done
 
-  echo "Pruning old Docker build cache..."
-  docker builder prune -f
+  if [[ "${PRESERVE_BUILD_CACHE}" == "true" ]]; then
+    local cache_retention="${DOCKER_BUILD_CACHE_RETENTION:-168h}"
+    echo "Preserving recent Docker build cache (retention: ${cache_retention})."
+    docker builder prune -f --filter "until=${cache_retention}"
+  else
+    echo "Pruning old Docker build cache..."
+    docker builder prune -f
+  fi
 
   echo "Cleanup complete."
 }
@@ -102,8 +109,8 @@ verify_image_vllm() {
   # most common trip: the container running git as a non-owner user.
   local actual_vllm rc=0 err
   err=$(mktemp)
-  actual_vllm=$(docker run --rm --entrypoint git "${image_ref}" \
-    -C /workspace/vllm -c safe.directory=/workspace/vllm rev-parse HEAD 2>"${err}") || rc=$?
+  actual_vllm=$(docker run --rm --entrypoint bash "${image_ref}" -c \
+    "vdir=\$(if [ -d /tpu-inference/workspace/vllm ]; then echo /tpu-inference/workspace/vllm; elif [ -d /vllm ]; then echo /vllm; else echo /workspace/vllm; fi); git -C \"\$vdir\" -c safe.directory=\"\$vdir\" rev-parse HEAD" 2>"${err}") || rc=$?
   if [[ ${rc} -ne 0 ]]; then
     echo "[FATAL][verify-vllm] Could not read the vLLM commit from ${image_ref} (git exit ${rc}):" >&2
     cat "${err}" >&2
@@ -158,7 +165,7 @@ setup_environment() {
 
   # shellcheck disable=1091
   source /etc/environment
-  cleanup_docker_resource "${IMAGE_NAME}"
+  cleanup_docker_resource "${IMAGE_NAME}" "${USE_DOCKER_BUILD_CACHE:-false}"
 
   if [ -z "${BUILDKITE:-}" ]; then
       if [ "${USE_VLLM_LKG:-false}" == "true" ] && [ -f ".buildkite/vllm_lkg.version" ]; then
@@ -208,12 +215,19 @@ setup_environment() {
     return 0
   fi
 
-  # Build with specific hash and 'latest' tag for convenience
+  # Build with specific hash and 'latest' tag for convenience. Existing
+  # pipelines remain no-cache by default; dedicated persistent builders may
+  # opt in so unchanged vLLM and dependency layers survive between commits.
+  local -a DOCKER_CACHE_ARGS=(--no-cache)
+  if [[ "${USE_DOCKER_BUILD_CACHE:-false}" == "true" ]]; then
+    DOCKER_CACHE_ARGS=()
+    echo "Using the persistent Docker build cache."
+  fi
   docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
       --build-arg IS_TEST="true" \
       --build-arg BM_INFRA="${BM_INFRA:-false}" \
-      --no-cache -f docker/"${DOCKERFILE_NAME}" \
+      "${DOCKER_CACHE_ARGS[@]}" -f docker/"${DOCKERFILE_NAME}" \
       -t "${IMAGE_NAME}:${TPU_INFERENCE_HASH}" \
       -t "${IMAGE_NAME}:latest" \
       -t "${IMAGE_NAME}:${CACHE_TAG}" .
@@ -229,6 +243,12 @@ setup_environment() {
     echo "Pushing Docker image to CI Image Registry..."
     docker tag "${IMAGE_NAME}:${CACHE_TAG}" "${CI_IMAGE_REPO}:${CACHE_TAG}"
     docker push "${CI_IMAGE_REPO}:${CACHE_TAG}"
+    if [[ -n "${CI_IMAGE_ALIAS_TAG:-}" ]]; then
+      echo "Pushing additional CI image alias ${CI_IMAGE_ALIAS_TAG}..."
+      docker tag "${IMAGE_NAME}:${CACHE_TAG}" \
+        "${CI_IMAGE_REPO}:${CI_IMAGE_ALIAS_TAG}"
+      docker push "${CI_IMAGE_REPO}:${CI_IMAGE_ALIAS_TAG}"
+    fi
   fi
 
   # Push logic if requested
@@ -242,8 +262,11 @@ setup_environment() {
   # Only clean up resources in setup_environment after pushing to a remote registry
   # (e.g., standalone builder jobs in CI). When building locally to run on the same machine
   # (push_to_ci_cache=false and should_push=false), preserve the image so the caller can run it.
-  if [[ "$push_to_ci_cache" == "true" || "$should_push" == "true" ]]; then
+  if [[ ( "$push_to_ci_cache" == "true" || "$should_push" == "true" ) && \
+        "${KEEP_IMAGE_AFTER_PUSH:-false}" != "true" ]]; then
     echo "--- Cleaning up Docker resources after push..."
-    cleanup_docker_resource "${IMAGE_NAME}"
+    cleanup_docker_resource "${IMAGE_NAME}" "${USE_DOCKER_BUILD_CACHE:-false}"
+  elif [[ "$push_to_ci_cache" == "true" || "$should_push" == "true" ]]; then
+    echo "--- Preserving the pushed image locally for dependent jobs."
   fi
 }

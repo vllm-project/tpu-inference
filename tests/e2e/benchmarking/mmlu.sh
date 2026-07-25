@@ -52,7 +52,7 @@ else
     echo "QUANTIZATION is False. Running without quantization."
 fi
 
-root_dir=/workspace
+root_dir="${TPU_INFERENCE_WORKSPACE:-/tpu-inference/workspace}"
 dataset_name=mmlu
 dataset_path=""
 num_prompts=1000
@@ -63,7 +63,7 @@ helpFunction()
 {
    echo ""
    echo "Usage: $0 [-r full_path_to_root_dir -m model_id]"
-   echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_inference' (default: /workspace/, which is used in the Dockerfile)"
+   echo -e "\t-r The workspace containing vLLM (auto-detected by default)"
    echo -e "\t-d The dataset name (default: mmlu, which will download the dataset)"
    echo -e "\t-p The path to the processed MMLU dataset (default: None, which will download the dataset)"
    echo -e "\t-m A space-separated list of HuggingFace model ids to use (default: Qwen/Qwen2.5-1.5B-Instruct, Qwen/Qwen2.5-0.5B-Instruct, meta-llama/Llama-3.1-8B-Instruct and meta-llama/Llama-4-Scout-17B-16E-Instruct)"
@@ -117,6 +117,8 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
+resolve_benchmark_workspace "$root_dir"
+
 echo "Using the root directory at $root_dir"
 echo "Using $num_prompts prompts"
 
@@ -144,12 +146,12 @@ echo extra_serve_args: "${extra_serve_args[@]}"
 
 echo "Using the dataset at $dataset_path"
 
-cd "$root_dir"/tpu_inference || exit
+cd "$tpu_inf_dir" || exit
 echo "Current working directory: $(pwd)"
-echo "Using vLLM hash: $(git rev-parse HEAD)"
+echo "Using vLLM hash: $(git -C "$vllm_dir" rev-parse HEAD)"
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Inference ones
-echo "Using TPU Inference hash: $(git -C "$root_dir"/tpu_inference rev-parse HEAD)"
+echo "Using TPU Inference hash: $(git -C "$tpu_inf_dir" rev-parse HEAD)"
 
 checkThroughputAndAccuracy() {
     # This function checks whether the accuracy score and total token throughput

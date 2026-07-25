@@ -22,14 +22,17 @@ minimum_accuracy_threshold=0
 extra_serve_args=()
 echo extra_serve_args: "${extra_serve_args[@]}"
 
-root_dir=/workspace
+root_dir="${TPU_INFERENCE_WORKSPACE:-/tpu-inference/workspace}"
 exit_code=0
+
+# shellcheck disable=SC1091
+source "$(dirname "$0")/bench_utils.sh"
 
 helpFunction()
 {
    echo ""
    echo "Usage: $0 [-r full_path_to_root_dir -m model_id]"
-   echo -e "\t-r The path your root directory containing both 'vllm' and 'tpu_inference' (default: /workspace/, which is used in the Dockerfile)"
+   echo -e "\t-r The workspace containing vLLM (auto-detected by default)"
    exit 1
 }
 
@@ -93,12 +96,16 @@ if [[ "$has_error" -ne 0 ]]; then
 fi
 
 
-echo "Using the root directory at $root_dir"
+resolve_benchmark_workspace "$root_dir"
 
-cd "$root_dir"/vllm/tests/entrypoints/llm || exit
+echo "Using vLLM directory at $vllm_dir"
+
+cd "$vllm_dir/tests/entrypoints/llm" || exit
+echo "Using vLLM hash: $(git -C "$vllm_dir" rev-parse HEAD)"
+echo "Using TPU Inference hash: $(git -C "$tpu_inf_dir" rev-parse HEAD)"
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Inference ones
-cp "$root_dir"/tpu_inference/scripts/vllm/integration/*.py "$root_dir"/vllm/tests/entrypoints/llm/
+cp "$tpu_inf_dir"/scripts/vllm/integration/*.py "$vllm_dir"/tests/entrypoints/llm/
 
 echo "--------------------------------------------------"
 echo "Running integration for model: $test_model"
