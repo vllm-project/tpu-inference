@@ -3,6 +3,8 @@ kind: Job
 metadata:
   name: populate-golden-cache-job
   namespace: buildkite
+  labels:
+    kueue.x-k8s.io/queue-name: "cpu"
 spec:
   ttlSecondsAfterFinished: 600
   template:
