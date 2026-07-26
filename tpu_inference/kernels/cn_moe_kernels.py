@@ -26,7 +26,7 @@ def _expert_body(
     acc_scratch_ref, sem_ref,
     *, K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, NBUF_,
     K_TILE, NUM_K, QB_eff, KB_TILE, I_TILE, NUM_I, IB_TILE,
-    DTYPE_LHS, DTYPE_OUT, DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_, prefetch_first_w1, next_expert_gj,
+    DTYPE_LHS, DTYPE_OUT, DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_, prefetch_first_w1, prefetch_first_w2, next_expert_gj,
 ):
     """Core expert computation: gate+up matmul, SwiGLU, down matmul, accumulate.
 
@@ -100,16 +100,18 @@ def _expert_body(
             gate_up_acc = gate_up_acc + jnp.matmul(lhs_tile, w1_dequant, preferred_element_type=jnp.float32)
 
     # ---- Prefetch first w2 tile early (overlaps with SwiGLU compute) ----
-    pltpu.make_async_copy(
-        w2_ref.at[pl.ds(gj, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
-        w2_bufs_ref.at[pl.ds(0, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
-        sem_ref.at[2 * NBUF_ + 0]
-    ).start()
-    pltpu.make_async_copy(
-        w2_scale_ref.at[pl.ds(gj, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-        w2_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-        sem_ref.at[3 * NBUF_ + 0]
-    ).start()
+    if prefetch_first_w2:
+        pltpu.make_async_copy(
+            w2_ref.at[pl.ds(gj, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
+            w2_bufs_ref.at[pl.ds(0, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
+            sem_ref.at[2 * NBUF_ + 0]
+        ).start()
+        pltpu.make_async_copy(
+            w2_scale_ref.at[pl.ds(gj, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+            w2_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+            sem_ref.at[3 * NBUF_ + 0]
+        ).start()
+    # else: w2 tile-0 was already prefetched by previous expert
 
     # ---- Prefetch NEXT expert's first w1 tile (overlaps with SwiGLU + w2 phase) ----
     if next_expert_gj is not None:
@@ -178,6 +180,19 @@ def _expert_body(
             w2_fp32 = w2_fp8.astype(jnp.float32).reshape(IB_TILE, IB, H)
             w2_dequant = (w2_fp32 * s2).reshape(I_TILE, H).astype(DTYPE_LHS)
             down_acc = down_acc + jnp.matmul(inter_tile, w2_dequant, preferred_element_type=jnp.float32)
+
+        # After m=0 is consumed, buf 0 is free — prefetch NEXT expert's w2 tile-0
+        if m == 0 and next_expert_gj is not None:
+            pltpu.make_async_copy(
+                w2_ref.at[pl.ds(next_expert_gj, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
+                w2_bufs_ref.at[pl.ds(0, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
+                sem_ref.at[2 * NBUF_ + 0]
+            ).start()
+            pltpu.make_async_copy(
+                w2_scale_ref.at[pl.ds(next_expert_gj, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+                w2_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+                sem_ref.at[3 * NBUF_ + 0]
+            ).start()
 
     # Accumulate weighted expert contribution
     acc_scratch_ref[...] = acc_scratch_ref[...] + down_acc * weight
@@ -266,7 +281,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
 
                 @pl.when(weight != 0.0)
                 def _():
-                    _expert_body(gj, weight, prefetch_first_w1=True, next_expert_gj=None, **body_kw)
+                    _expert_body(gj, weight, prefetch_first_w1=True, prefetch_first_w2=True, next_expert_gj=None, **body_kw)
         else:
             for e in range(TOP_K_):
                 idx = token * TOP_K_ + e
@@ -282,6 +297,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
                     _next_gj = pl.multiple_of(ids_ref[(token + 1) * TOP_K_ + 0], 1)
 
                 _expert_body(gj, weight, prefetch_first_w1=(e == 0 and token == 0),
+                             prefetch_first_w2=(e == 0 and token == 0),
                              next_expert_gj=_next_gj, **body_kw)
 
         # Store this token result via 3D write (1x128 tiling allows per-row access)
@@ -328,6 +344,9 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
     while I % I_TILE != 0:
         I_TILE -= 1
     IB_TILE = I_BLOCKS // (I // I_TILE)
+    assert I // I_TILE <= 2, (
+        f"Cross-expert w2 prefetch requires NUM_I <= 2, got {I // I_TILE} "
+        f"(I={I}, I_TILE={I_TILE}). Increase MOE_CN_I_TILE or reduce I.")
 
     C_PAD = lhs.shape[0]
     grid_spec = pltpu.PrefetchScalarGridSpec(
