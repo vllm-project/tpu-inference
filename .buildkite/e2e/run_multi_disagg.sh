@@ -186,6 +186,7 @@ echo "Partitioning cluster: $PREFILL_HOSTS_COUNT hosts for Prefill, $DECODE_HOST
 
 PREFILL_HOSTS=("${ALL_IPS_ARRAY[@]:0:PREFILL_HOSTS_COUNT}")
 DECODE_HOSTS=("${ALL_IPS_ARRAY[@]:PREFILL_HOSTS_COUNT:DECODE_HOSTS_COUNT}")
+SHARED_CLUSTER_HOSTS=("${PREFILL_HOSTS[@]}" "${DECODE_HOSTS[@]}")
 
 PREFILL_HEAD_IP="${PREFILL_HOSTS[0]}"
 DECODE_HEAD_IP="${DECODE_HOSTS[0]}"
@@ -202,28 +203,57 @@ echo "Calculated DECODE_TENSOR_PARALLEL_SIZE: $DECODE_TENSOR_PARALLEL_SIZE"
 
 TPU_VISIBLE_CHIPS_LOCAL="$(seq -s, 0 $(( CHIPS_PER_HOST - 1 )))"
 
-# A single TPU7x host has a physical 2x2x1 chip topology. Prefill and decode
-# are separate single-host JAX clusters when each side receives one host.
-readonly SINGLE_HOST_CHIP_BOUNDS="2,2,1"
+# Prefill and decode share one Ray control plane but use disjoint actor sets.
+# Each role forms its own role-local JAX mesh over the selected Ray nodes.
+readonly TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE="2,2,1"
+SHARED_RAY_HEAD_IP="${PREFILL_HEAD_IP}"
+PREFILL_NODE_IPS="$(IFS=,; echo "${PREFILL_HOSTS[*]}")"
+DECODE_NODE_IPS="$(IFS=,; echo "${DECODE_HOSTS[*]}")"
 
-SINGLE_HOST_TPU_ENV_ARGS=(
-  -e TPU_PROCESS_BOUNDS=1,1,1
-  -e TPU_CHIPS_PER_PROCESS_BOUNDS="${SINGLE_HOST_CHIP_BOUNDS}"
+PREFILL_PROCESS_MAP=""
+PREFILL_PROCESS_ADDRESSES=""
+for host_index in "${!PREFILL_HOSTS[@]}"; do
+  [[ -z "$PREFILL_PROCESS_MAP" ]] || PREFILL_PROCESS_MAP+=","
+  [[ -z "$PREFILL_PROCESS_ADDRESSES" ]] || PREFILL_PROCESS_ADDRESSES+=","
+  PREFILL_PROCESS_MAP+="${PREFILL_HOSTS[$host_index]}=${host_index}"
+  PREFILL_PROCESS_ADDRESSES+="${PREFILL_HOSTS[$host_index]}:8476"
+done
+
+DECODE_PROCESS_MAP=""
+DECODE_PROCESS_ADDRESSES=""
+for host_index in "${!DECODE_HOSTS[@]}"; do
+  [[ -z "$DECODE_PROCESS_MAP" ]] || DECODE_PROCESS_MAP+=","
+  [[ -z "$DECODE_PROCESS_ADDRESSES" ]] || DECODE_PROCESS_ADDRESSES+=","
+  DECODE_PROCESS_MAP+="${DECODE_HOSTS[$host_index]}=${host_index}"
+  DECODE_PROCESS_ADDRESSES+="${DECODE_HOSTS[$host_index]}:8476"
+done
+
+PREFILL_TPU_ENV_ARGS=(
+  -e TPU_PROCESS_BOUNDS="1,1,${PREFILL_HOSTS_COUNT}"
+  -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}"
   -e TPU_VISIBLE_CHIPS="${TPU_VISIBLE_CHIPS_LOCAL}"
-  -e CLOUD_TPU_TASK_ID=0
-  -e JAX_PROCESS_ID=0
-  -e JAX_NUM_PROCESSES=1
+  -e TPU_PROCESS_ADDRESSES="${PREFILL_PROCESS_ADDRESSES}"
+  -e TPU_PROCESS_PORT=8476
+  -e JAX_NUM_PROCESSES="${PREFILL_HOSTS_COUNT}"
+  -e VLLM_TPU_RAY_NODE_IPS="${PREFILL_NODE_IPS}"
+  -e VLLM_TPU_RAY_PROCESS_MAP="${PREFILL_PROCESS_MAP}"
+  -e VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
 )
-PREFILL_TPU_ENV_ARGS=()
-DECODE_TPU_ENV_ARGS=()
-if (( PREFILL_HOSTS_COUNT == 1 )); then
-  PREFILL_TPU_ENV_ARGS=("${SINGLE_HOST_TPU_ENV_ARGS[@]}")
-  echo "Prefill is a single-host Ray cluster; forcing TPU_PROCESS_BOUNDS=1,1,1, TPU_CHIPS_PER_PROCESS_BOUNDS=${SINGLE_HOST_CHIP_BOUNDS}, TPU_VISIBLE_CHIPS=${TPU_VISIBLE_CHIPS_LOCAL}."
-fi
-if (( DECODE_HOSTS_COUNT == 1 )); then
-  DECODE_TPU_ENV_ARGS=("${SINGLE_HOST_TPU_ENV_ARGS[@]}")
-  echo "Decode is a single-host Ray cluster; forcing TPU_PROCESS_BOUNDS=1,1,1, TPU_CHIPS_PER_PROCESS_BOUNDS=${SINGLE_HOST_CHIP_BOUNDS}, TPU_VISIBLE_CHIPS=${TPU_VISIBLE_CHIPS_LOCAL}."
-fi
+DECODE_TPU_ENV_ARGS=(
+  -e TPU_PROCESS_BOUNDS="1,1,${DECODE_HOSTS_COUNT}"
+  -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}"
+  -e TPU_VISIBLE_CHIPS="${TPU_VISIBLE_CHIPS_LOCAL}"
+  -e TPU_PROCESS_ADDRESSES="${DECODE_PROCESS_ADDRESSES}"
+  -e TPU_PROCESS_PORT=8476
+  -e JAX_NUM_PROCESSES="${DECODE_HOSTS_COUNT}"
+  -e VLLM_TPU_RAY_NODE_IPS="${DECODE_NODE_IPS}"
+  -e VLLM_TPU_RAY_PROCESS_MAP="${DECODE_PROCESS_MAP}"
+  -e VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
+)
+
+echo "Shared Ray head: ${SHARED_RAY_HEAD_IP}"
+echo "Prefill actor hosts: ${PREFILL_NODE_IPS}; process map: ${PREFILL_PROCESS_MAP}"
+echo "Decode actor hosts: ${DECODE_NODE_IPS}; process map: ${DECODE_PROCESS_MAP}"
 
 PREFILL_LOG_TAIL_PID=""
 DECODE_LOG_TAIL_PID=""
@@ -592,6 +622,26 @@ wait_for_ray_head() {
   return 1
 }
 
+wait_for_ray_cluster_members() {
+  local expected_nodes=$1
+  local timeout=${2:-900}
+  local ready_cmd
+  ready_cmd="import ray; ray.init(address='auto', ignore_reinit_error=True); alive=sum(node.get('Alive', False) for node in ray.nodes()); raise SystemExit(0 if alive == ${expected_nodes} else 1)"
+
+  echo "Waiting for shared Ray cluster to register ${expected_nodes} nodes..."
+  local end_time=$((SECONDS + timeout))
+  while [[ $SECONDS -lt $end_time ]]; do
+    if docker exec node python3 -c "$ready_cmd" >/dev/null 2>&1; then
+      echo "Shared Ray cluster has registered ${expected_nodes} nodes."
+      return 0
+    fi
+    sleep 5
+  done
+
+  echo "Error: shared Ray cluster did not register ${expected_nodes} nodes within ${timeout}s." >&2
+  return 1
+}
+
 dump_ray_resources() {
   local host=$1
   local label=$2
@@ -609,7 +659,7 @@ dump_tpu_process_env() {
   local host=$1
   local role=$2
   local dump_cmd
-  dump_cmd='printf "CLOUD_TPU_TASK_ID=%s\nJAX_PROCESS_ID=%s\nTPU_PROCESS_BOUNDS=%s\nTPU_CHIPS_PER_PROCESS_BOUNDS=%s\nTPU_VISIBLE_CHIPS=%s\n" "${CLOUD_TPU_TASK_ID-<unset>}" "${JAX_PROCESS_ID-<unset>}" "${TPU_PROCESS_BOUNDS-<unset>}" "${TPU_CHIPS_PER_PROCESS_BOUNDS-<unset>}" "${TPU_VISIBLE_CHIPS-<unset>}"'
+  dump_cmd='printf "CLOUD_TPU_TASK_ID=%s\nTPU_WORKER_ID=%s\nJAX_PROCESS_ID=%s\nJAX_NUM_PROCESSES=%s\nTPU_PROCESS_BOUNDS=%s\nTPU_CHIPS_PER_PROCESS_BOUNDS=%s\nTPU_PROCESS_ADDRESSES=%s\nTPU_VISIBLE_CHIPS=%s\n" "${CLOUD_TPU_TASK_ID-<unset>}" "${TPU_WORKER_ID-<unset>}" "${JAX_PROCESS_ID-<unset>}" "${JAX_NUM_PROCESSES-<unset>}" "${TPU_PROCESS_BOUNDS-<unset>}" "${TPU_CHIPS_PER_PROCESS_BOUNDS-<unset>}" "${TPU_PROCESS_ADDRESSES-<unset>}" "${TPU_VISIBLE_CHIPS-<unset>}"'
 
   echo "--- TPU process environment: ${role} (${host})"
   if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
@@ -644,16 +694,18 @@ echo "--- Cleaning up previous cluster state..."
 cleanup 0
 
 # -----------------------------------------------------------------
-# 1. Start Prefill Ray Cluster
+# 1. Start one shared Ray cluster for Prefill and Decode actors
 # -----------------------------------------------------------------
-echo "--- Starting Prefill Ray Head Node Locally on ${PREFILL_HEAD_IP}"
+echo "--- Starting shared Ray Head Node locally on ${SHARED_RAY_HEAD_IP}"
 RUN_CLUSTER_CLEANUP_OWNER=parent \
 bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${DOCKER_IMAGE}" \
-  "${PREFILL_HEAD_IP}" \
+  "${SHARED_RAY_HEAD_IP}" \
   --head \
   "${HOST_HF_HOME}" \
   "${PREFILL_TPU_ENV_ARGS[@]}" \
+  -e CLOUD_TPU_TASK_ID=0 \
+  -e JAX_PROCESS_ID=0 \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -669,10 +721,37 @@ CLUSTER_LAUNCHER_PIDS+=("$!")
 
 sleep 30
 
-wait_for_ray_head "${PREFILL_HEAD_IP}"
+wait_for_ray_head "${SHARED_RAY_HEAD_IP}"
 
-for worker_ip in "${PREFILL_WORKER_IPS[@]}"; do
-    echo "--- Distributing and starting Prefill Ray Worker on ${worker_ip}"
+for worker_ip in "${SHARED_CLUSTER_HOSTS[@]:1}"; do
+    worker_role=""
+    worker_process_id=""
+    worker_tpu_env_args=()
+
+    for host_index in "${!PREFILL_HOSTS[@]}"; do
+      if [[ "${PREFILL_HOSTS[$host_index]}" == "$worker_ip" ]]; then
+        worker_role="prefill"
+        worker_process_id="$host_index"
+        worker_tpu_env_args=("${PREFILL_TPU_ENV_ARGS[@]}")
+        break
+      fi
+    done
+    if [[ -z "$worker_role" ]]; then
+      for host_index in "${!DECODE_HOSTS[@]}"; do
+        if [[ "${DECODE_HOSTS[$host_index]}" == "$worker_ip" ]]; then
+          worker_role="decode"
+          worker_process_id="$host_index"
+          worker_tpu_env_args=("${DECODE_TPU_ENV_ARGS[@]}")
+          break
+        fi
+      done
+    fi
+    if [[ -z "$worker_role" || -z "$worker_process_id" ]]; then
+      echo "Error: unable to assign Ray worker ${worker_ip} to prefill or decode." >&2
+      exit 1
+    fi
+
+    echo "--- Starting shared Ray Worker on ${worker_ip} for ${worker_role} actor process ${worker_process_id}"
     echo "   -> Pruning Docker on worker to free disk space..."
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f >/dev/null 2>&1" || true
 
@@ -683,8 +762,10 @@ for worker_ip in "${PREFILL_WORKER_IPS[@]}"; do
     # shellcheck disable=SC2087
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
 RUN_CLUSTER_CLEANUP_OWNER=parent \
-bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${PREFILL_HEAD_IP}' --worker '${HOST_HF_HOME}' \
-  ${PREFILL_TPU_ENV_ARGS[*]} \
+bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${SHARED_RAY_HEAD_IP}' --worker '${HOST_HF_HOME}' \
+  ${worker_tpu_env_args[*]} \
+  -e CLOUD_TPU_TASK_ID='${worker_process_id}' \
+  -e JAX_PROCESS_ID='${worker_process_id}' \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -701,72 +782,10 @@ EOF
     sleep 15
 done
 
-# -----------------------------------------------------------------
-# 2. Start Decode Ray Cluster
-# -----------------------------------------------------------------
-echo "--- Starting Decode Ray Head Node on ${DECODE_HEAD_IP}"
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "docker system prune -a --volumes -f >/dev/null 2>&1" || true
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
-# shellcheck disable=SC2002
-cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
+echo "--- Waiting for the shared Ray cluster to fully form..."
+wait_for_ray_cluster_members "$TOTAL_HOSTS_USED" "${RAY_CLUSTER_TIMEOUT:-900}"
 
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" << EOF &
-RUN_CLUSTER_CLEANUP_OWNER=parent \
-bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECODE_HEAD_IP}' --head '${HOST_HF_HOME}' \
-  ${DECODE_TPU_ENV_ARGS[*]} \
-  -e HF_TOKEN='${HF_TOKEN:-}' \
-  -e TPU_MULTIHOST_BACKEND=ray \
-  -e JAX_PLATFORMS='' \
-  -e TPU_BACKEND_TYPE=jax \
-  -e MODEL_IMPL_TYPE=vllm \
-  -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
-  -e NEW_MODEL_DESIGN='${NEW_MODEL_DESIGN:-0}' \
-  -e MOE_REQUANTIZE_BLOCK_SIZE="${MOE_REQUANTIZE_BLOCK_SIZE:-}" \
-  -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" \
-  -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
-  -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}"
-EOF
-CLUSTER_LAUNCHER_PIDS+=("$!")
-
-sleep 30
-
-wait_for_ray_head "${DECODE_HEAD_IP}"
-
-for worker_ip in "${DECODE_WORKER_IPS[@]}"; do
-    echo "--- Distributing and starting Decode Ray Worker on ${worker_ip}"
-    echo "   -> Pruning Docker on worker to free disk space..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f >/dev/null 2>&1" || true
-
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
-    # shellcheck disable=SC2002
-    cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
-
-    # shellcheck disable=SC2087
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
-RUN_CLUSTER_CLEANUP_OWNER=parent \
-bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECODE_HEAD_IP}' --worker '${HOST_HF_HOME}' \
-  ${DECODE_TPU_ENV_ARGS[*]} \
-  -e HF_TOKEN='${HF_TOKEN:-}' \
-  -e TPU_MULTIHOST_BACKEND=ray \
-  -e JAX_PLATFORMS='' \
-  -e TPU_BACKEND_TYPE=jax \
-  -e MODEL_IMPL_TYPE=vllm \
-  -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
-  -e NEW_MODEL_DESIGN='${NEW_MODEL_DESIGN:-0}' \
-  -e MOE_REQUANTIZE_BLOCK_SIZE='${MOE_REQUANTIZE_BLOCK_SIZE:-}' \
-  -e MOE_REQUANTIZE_WEIGHT_DTYPE='${MOE_REQUANTIZE_WEIGHT_DTYPE:-}' \
-  -e MOE_ALL_GATHER_ACTIVATION_DTYPE='${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}' \
-  -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}'
-EOF
-    CLUSTER_LAUNCHER_PIDS+=("$!")
-    sleep 15
-done
-
-echo "--- Waiting for Ray Clusters to fully form..."
-sleep 120
-
-dump_ray_resources "$PREFILL_HEAD_IP" "Prefill"
-dump_ray_resources "$DECODE_HEAD_IP" "Decode"
+dump_ray_resources "$SHARED_RAY_HEAD_IP" "Shared Prefill/Decode"
 
 echo "--- TPU process environment on all Prefill and Decode nodes"
 for host in "${PREFILL_HOSTS[@]}"; do
@@ -789,6 +808,9 @@ set -x
 docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
+  -e CLOUD_TPU_TASK_ID=0 \
+  -e TPU_WORKER_ID=0 \
+  -e JAX_PROCESS_ID=0 \
   ${PREFILL_DOCKER_EXEC_ENV_ARGS} \
   node bash -c "vllm serve ${MODEL} \
     --port ${PREFILL_VLLM_PORT} \
@@ -813,6 +835,9 @@ set -x
 docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
+  -e CLOUD_TPU_TASK_ID=0 \
+  -e TPU_WORKER_ID=0 \
+  -e JAX_PROCESS_ID=0 \
   ${DECODE_DOCKER_EXEC_ENV_ARGS} \
   node bash -c "vllm serve ${MODEL} \
     --port ${DECODE_VLLM_PORT} \
