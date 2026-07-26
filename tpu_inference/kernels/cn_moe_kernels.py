@@ -288,7 +288,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
             def _():
                 _expert_body(gj, weight, tok,
                              is_new_expert=jnp.bool_(True),
-                             is_first_slot=(slot == 0),
+                             is_first_slot=True,
                              next_expert_gj=None, is_next_new=None,
                              **body_kw)
     else:
