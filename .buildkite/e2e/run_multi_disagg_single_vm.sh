@@ -273,8 +273,51 @@ exit 1
   fi
 }
 
+force_release_tpu() {
+  local host=$1
+  local force_script
+  # This script is intentionally expanded only by bash on the target host.
+  # shellcheck disable=SC2016
+  force_script='
+status=0
+fuser_cmd=(fuser)
+rm_cmd=(rm -f)
+if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+  fuser_cmd=(sudo -n fuser)
+  rm_cmd=(sudo -n rm -f)
+elif (( EUID != 0 )); then
+  echo "Warning: forcing TPU release on host $1 without root privileges." >&2
+  status=1
+fi
+
+if command -v fuser >/dev/null 2>&1; then
+  shopt -s nullglob
+  devices=(/dev/accel* /dev/vfio/[0-9]*)
+  shopt -u nullglob
+  if (( ${#devices[@]} > 0 )); then
+    "${fuser_cmd[@]}" -k -TERM "${devices[@]}" >/dev/null 2>&1 || true
+    sleep 2
+    "${fuser_cmd[@]}" -k -KILL "${devices[@]}" >/dev/null 2>&1 || true
+  fi
+else
+  echo "Warning: fuser is unavailable on host $1; TPU holders cannot be killed." >&2
+  status=1
+fi
+
+if ! "${rm_cmd[@]}" /tmp/libtpu_lockfile; then
+  echo "Warning: failed to remove /tmp/libtpu_lockfile on host $1." >&2
+  status=1
+fi
+exit "${status}"
+'
+  if [[ "${host}" == "${HEAD_INTERNAL_IP}" ]]; then
+    bash -c "${force_script}" _ "${host}"
+  else
+    run_decode_host bash -c "${force_script}" _ "${host}"
+  fi
+}
+
 cleanup() {
-  local exit_code=$1
   local cleanup_failed=0
 
   echo "--- Cleaning up two-host disaggregated serving"
@@ -292,19 +335,35 @@ cleanup() {
   verify_tpu_released "${DECODE_HOST_IP}" || cleanup_failed=1
   verify_test_containers_removed "${HEAD_INTERNAL_IP}" || cleanup_failed=1
   verify_test_containers_removed "${DECODE_HOST_IP}" || cleanup_failed=1
-  print_logs
 
   if (( cleanup_failed != 0 )); then
-    echo "Cleanup did not fully release both TPU hosts." >&2
-    return 1
+    echo "Warning: normal cleanup failed; forcing TPU release on both hosts." >&2
+    force_release_tpu "${HEAD_INTERNAL_IP}" ||
+      echo "Warning: forced TPU release reported an error on ${HEAD_INTERNAL_IP}." >&2
+    force_release_tpu "${DECODE_HOST_IP}" ||
+      echo "Warning: forced TPU release reported an error on ${DECODE_HOST_IP}." >&2
+    stop_local_test_containers ||
+      echo "Warning: local containers remain after forced cleanup." >&2
+    stop_decode_test_containers ||
+      echo "Warning: Decode containers remain after forced cleanup." >&2
+
+    verify_tpu_released "${HEAD_INTERNAL_IP}" ||
+      echo "Warning: TPU resources may remain busy on ${HEAD_INTERNAL_IP}." >&2
+    verify_tpu_released "${DECODE_HOST_IP}" ||
+      echo "Warning: TPU resources may remain busy on ${DECODE_HOST_IP}." >&2
+    verify_test_containers_removed "${HEAD_INTERNAL_IP}" ||
+      echo "Warning: test containers still exist on ${HEAD_INTERNAL_IP}." >&2
+    verify_test_containers_removed "${DECODE_HOST_IP}" ||
+      echo "Warning: test containers still exist on ${DECODE_HOST_IP}." >&2
   fi
-  return "${exit_code}"
+  print_logs
+  return 0
 }
 
 on_exit() {
   local exit_code=$?
   trap - EXIT INT TERM
-  cleanup "${exit_code}" || exit 1
+  cleanup "${exit_code}" || true
   exit "${exit_code}"
 }
 trap on_exit EXIT
