@@ -69,7 +69,7 @@
   - name: dshm
     mountPath: /dev/shm
   - name: cache-volume
-    mountPath: /cache
+    mountPath: /cache/tpu_jax_cache
 
 .kube_common_volumes: &kube_common_volumes
   - name: dshm
