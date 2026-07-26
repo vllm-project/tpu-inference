@@ -763,26 +763,42 @@ class InputBatch:
                 sharding=sharding,
             )
 
-        # Pack the new accepted tokens into fixed-length buffers. Padding rows
-        # point at slot 0 with an out-of-range token id (vocab_size), which the
-        # scatter drops (mode="drop") -- so no scratch row / sharding hazard.
-        rows = np.zeros(padded_num_new_tokens, dtype=np.int32)
-        toks = np.full(padded_num_new_tokens, self.vocab_size, dtype=np.int32)
-        pos = 0
-        for slot in range(num_reqs):
-            lo = int(self.seen_scattered_upto[slot])
-            hi = int(self.num_tokens_no_spec[slot])
-            n = hi - lo
-            if n <= 0:
-                continue
-            n = min(n, padded_num_new_tokens - pos)
-            if n <= 0:
-                break  # bucket full (should not happen: new <= scheduled)
-            rows[pos:pos + n] = slot
-            toks[pos:pos + n] = self.token_ids_cpu[slot, lo:lo + n]
-            self.seen_scattered_upto[slot] = lo + n
-            pos += n
-        if pos > 0:
+        # Pack the new accepted tokens into fixed-length buffers and scatter,
+        # looping until the ENTIRE per-slot backlog is drained. Padding rows point
+        # at slot 0 with an out-of-range token id (vocab_size), which the scatter
+        # drops (mode="drop") -- so no scratch row / sharding hazard.
+        #
+        # A single `padded_num_new_tokens`-sized bucket is NOT always enough: the
+        # aggregate backlog (sum over slots of num_tokens_no_spec -
+        # seen_scattered_upto) exceeds it whenever a freshly prefilled prompt must
+        # be seeded (num_tokens_no_spec jumps to the full prompt while the step
+        # schedules only a chunk) or preemption/recompute leaves a backlog under
+        # concurrency. Bailing after one bucket would leave those slots' mask rows
+        # INCOMPLETE, so repetition_penalty would miss already-emitted tokens and
+        # fail to penalise them (repetition loops). Draining fully each step keeps
+        # the mask complete before every sample -- matching vLLM's GPU path, which
+        # rebuilds prompt+output masks from the full token tensors every step. Each
+        # pass keeps the same fixed shape (compile-cache hit); steady-state decode
+        # (backlog <= bucket) still takes a single pass.
+        while True:
+            rows = np.zeros(padded_num_new_tokens, dtype=np.int32)
+            toks = np.full(padded_num_new_tokens, self.vocab_size, dtype=np.int32)
+            pos = 0
+            for slot in range(num_reqs):
+                lo = int(self.seen_scattered_upto[slot])
+                hi = int(self.num_tokens_no_spec[slot])
+                n = hi - lo
+                if n <= 0:
+                    continue
+                n = min(n, padded_num_new_tokens - pos)
+                if n <= 0:
+                    break  # bucket full this pass; the while loop does another pass
+                rows[pos:pos + n] = slot
+                toks[pos:pos + n] = self.token_ids_cpu[slot, lo:lo + n]
+                self.seen_scattered_upto[slot] = lo + n
+                pos += n
+            if pos == 0:
+                break
             self.seen_token_ids_mask = _scatter_seen_tokens(
                 self.seen_token_ids_mask, jnp.asarray(rows), jnp.asarray(toks))
 
