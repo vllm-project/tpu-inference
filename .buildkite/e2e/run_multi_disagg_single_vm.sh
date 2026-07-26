@@ -283,8 +283,11 @@ cleanup() {
     :
   fi
 
-  stop_local_test_containers || cleanup_failed=1
-  stop_decode_test_containers || cleanup_failed=1
+  # Stop commands are best effort; final-state checks below are authoritative.
+  stop_local_test_containers ||
+    echo "Warning: local container cleanup command returned non-zero." >&2
+  stop_decode_test_containers ||
+    echo "Warning: Decode container cleanup command returned non-zero." >&2
   verify_tpu_released "${HEAD_INTERNAL_IP}" || cleanup_failed=1
   verify_tpu_released "${DECODE_HOST_IP}" || cleanup_failed=1
   verify_test_containers_removed "${HEAD_INTERNAL_IP}" || cleanup_failed=1
