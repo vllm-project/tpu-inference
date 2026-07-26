@@ -534,6 +534,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
+  -e TPU_LOG_JAX_PROCESS_INFO=1 \
   -e JAX_PLATFORMS='' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE="${MODEL_IMPL_TYPE:-vllm}" \
@@ -572,6 +573,7 @@ for worker_index in "${!WORKER_IPS_ARRAY[@]}"; do
 IS_MULTI_HOST_BENCH="${IS_MULTI_HOST_BENCH:-false}" bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
+  -e TPU_LOG_JAX_PROCESS_INFO=1 \
   -e JAX_PLATFORMS='' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE='${MODEL_IMPL_TYPE:-vllm}' \
