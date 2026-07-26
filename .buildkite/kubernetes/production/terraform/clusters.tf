@@ -183,9 +183,10 @@ resource "google_container_node_pool" "manager_system" {
 }
 
 resource "google_container_cluster" "worker" {
+  provider = google.worker
   for_each = var.worker_clusters
 
-  project  = var.project_id
+  project  = local.worker_project
   name     = "${var.name_prefix}-${each.key}"
   location = each.value.location
 
@@ -207,6 +208,8 @@ resource "google_container_cluster" "worker" {
     workload_pool = "${var.project_id}.svc.id.goog"
   }
 
+  # Deliberately var.project_id, not the worker's own project: a cluster can
+  # belong to only one fleet, and MultiKueue needs both sides in the same one.
   fleet {
     project = var.project_id
   }
@@ -305,13 +308,17 @@ resource "google_container_cluster" "worker" {
     }
   }
 
-  depends_on = [google_project_service.required]
+  depends_on = [
+    google_project_service.required,
+    google_project_service.worker_required,
+  ]
 }
 
 resource "google_container_node_pool" "worker_system" {
+  provider = google.worker
   for_each = var.worker_clusters
 
-  project  = var.project_id
+  project  = local.worker_project
   name     = "system"
   location = google_container_cluster.worker[each.key].location
   cluster  = google_container_cluster.worker[each.key].name
@@ -358,9 +365,10 @@ resource "google_container_node_pool" "worker_system" {
 }
 
 resource "google_container_node_pool" "worker_tpu" {
+  provider = google.worker
   for_each = local.tpu_node_pools
 
-  project  = var.project_id
+  project  = local.worker_project
   name     = each.value.profile_name
   location = google_container_cluster.worker[each.value.worker_name].location
   cluster  = google_container_cluster.worker[each.value.worker_name].name

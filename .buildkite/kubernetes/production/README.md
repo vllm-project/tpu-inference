@@ -6,6 +6,8 @@ This directory turns the POC findings into a production-oriented target. It
 does not replace the working Autopilot POC. The two designs intentionally live
 side-by-side until the production acceptance gates pass.
 
+- [`SETUP.md`](SETUP.md) is the ordered runbook: what a human runs, in order,
+  with a gate after every step.
 - [`PRODUCTION_READINESS.md`](PRODUCTION_READINESS.md) is the prioritized gap
   analysis and rollout plan.
 - [`terraform`](terraform) creates the Google Cloud foundation: APIs, regional
@@ -13,6 +15,9 @@ side-by-side until the production acceptance gates pass.
   IAM, Artifact Registry, and Secret Manager metadata.
 - [`kueue`](kueue) shows the simplified Standard-GKE scheduling objects and the
   secretless Fleet ClusterProfile connection model.
+- [`cache`](cache) holds the compilation-cache loop: the golden PVC each job
+  clones, the identities that reach GCS, and the CronJob that promotes
+  published entries back into the golden.
 
 ## Target shape
 
@@ -149,13 +154,20 @@ lets scheduling policy roll back independently of a cluster. Kueue and Agent
 Stack Helm releases may be added to a separate platform stack once their exact
 versions and values are approved.
 
-The current Terraform scaffold assumes the manager and workers share one
-Google Cloud project. Supporting the cross-project layout above requires a
-worker-project map (and normally aliased providers), Fleet memberships created
-in the fleet host project with fully qualified worker cluster URIs, and IAM
-bindings applied separately in the fleet host and worker projects. This is an
-infrastructure-module change only; it should not change Buildkite pipeline or
-Kueue workload selection.
+The Terraform supports the cross-project layout above through the optional
+`worker_project` variable and an aliased `google.worker` provider. Worker
+clusters, their node pools, and their node service accounts are created there,
+while the Fleet, manager cluster, and Artifact Registry stay in `project_id`.
+Cross-project deployments also enable the required APIs in the worker project,
+grant the manager Kueue identity `roles/container.developer` there, and add a
+repository-level Artifact Registry reader binding so worker nodes can pull the
+test image from the manager project. Leave `worker_project` null to keep both
+sides in one project. Either way this is an infrastructure-module concern; it
+does not change Buildkite pipeline or Kueue workload selection.
+
+One worker project is assumed for all workers. Spreading workers across several
+projects needs a child module instantiated per project, because Terraform
+cannot select a provider alias per `for_each` key.
 
 Do not put any of these in Terraform state:
 

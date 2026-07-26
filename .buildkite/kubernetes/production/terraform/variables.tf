@@ -3,6 +3,20 @@ variable "project_id" {
   type        = string
 }
 
+variable "worker_project" {
+  description = <<-EOT
+    Project that owns the worker clusters, their TPU node pools, and the TPU
+    reservation those pools consume. Leave null when manager and workers share
+    one project.
+
+    The split exists because a reservation is only consumable from the project
+    that holds it, so the worker cluster has to live beside it. The Fleet, the
+    manager cluster, and Artifact Registry stay in project_id.
+  EOT
+  type        = string
+  default     = null
+}
+
 variable "name_prefix" {
   description = "Short prefix used for cluster, service-account, and registry names."
   type        = string
@@ -165,4 +179,38 @@ variable "kueue_fleet_service_account" {
   description = "Manager-only KSA created by the multikueue-fleet Helm release for Fleet/Connect Gateway access. Do not reuse it on workers."
   type        = string
   default     = "multikueue-fleet-controller-manager"
+}
+
+variable "cache_bucket" {
+  description = <<-EOT
+    Existing bucket holding the shared JAX/XLA compilation cache. Terraform
+    manages only its IAM; the bucket itself is shared with the bare-metal
+    pipeline and is not owned by this stack.
+  EOT
+  type        = string
+  default     = "ullm-ci-cache"
+}
+
+variable "cache_prefix" {
+  description = "Object prefix within cache_bucket. Grants are conditioned on it, so Pods cannot reach the rest of the bucket."
+  type        = string
+  default     = "jax_cache"
+}
+
+variable "buildkite_namespace" {
+  description = "Namespace holding Agent Stack Jobs and the cache ServiceAccounts on every cluster."
+  type        = string
+  default     = "buildkite"
+}
+
+variable "cache_writer_service_account" {
+  description = "KSA used by TPU test Pods to publish newly compiled cache entries. Must exist in every worker cluster under this name."
+  type        = string
+  default     = "buildkite-cache"
+}
+
+variable "cache_reader_service_account" {
+  description = "KSA used by the golden-refresh CronJob. Read-only on GCS."
+  type        = string
+  default     = "buildkite-cache-refresh"
 }

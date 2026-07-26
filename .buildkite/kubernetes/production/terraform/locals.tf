@@ -1,4 +1,7 @@
 locals {
+  worker_project = coalesce(var.worker_project, var.project_id)
+  cross_project  = local.worker_project != var.project_id
+
   common_labels = merge(var.labels, {
     managed_by = "terraform"
     component  = "buildkite-tpu-ci"
@@ -36,6 +39,18 @@ locals {
           key         = "${worker_name}/${role}"
           worker_name = worker_name
           role        = role
+        }
+      ]
+    ]) : item.key => item
+  }
+
+  worker_registry_pull_bindings = {
+    for item in flatten([
+      for worker_name in keys(var.worker_clusters) : [
+        for location in local.artifact_registry_regions : {
+          key         = "${worker_name}/${location}"
+          worker_name = worker_name
+          location    = location
         }
       ]
     ]) : item.key => item

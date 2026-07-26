@@ -6,6 +6,17 @@ resource "google_project_service" "required" {
   disable_on_destroy = false
 }
 
+# The worker project needs its own compute/container/gkehub APIs before a
+# cluster, node pool, or fleet membership can be created there.
+resource "google_project_service" "worker_required" {
+  provider = google.worker
+  for_each = local.cross_project ? local.required_services : toset([])
+
+  project            = local.worker_project
+  service            = each.value
+  disable_on_destroy = false
+}
+
 resource "google_artifact_registry_repository" "ci_images" {
   for_each = local.artifact_registry_regions
 
