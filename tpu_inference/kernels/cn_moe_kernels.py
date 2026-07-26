@@ -25,7 +25,7 @@ def _expert_body(
     w1_bufs_ref, w1_s_bufs_ref, w2_bufs_ref, w2_s_bufs_ref,
     acc_scratch_ref, sem_ref,
     *, K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, NBUF_,
-    K_TILE, NUM_K, QB_eff, KB_TILE, I_TILE, NUM_I, IB_TILE,
+    K_TILE, NUM_K, QB_eff, KB_TILE, I_TILE, NUM_I, IB_eff, IB_TILE,
     DTYPE_LHS, DTYPE_OUT, DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_, prefetch_first_w1, prefetch_first_w2, next_expert_gj,
 ):
     """Core expert computation: gate+up matmul, SwiGLU, down matmul, accumulate.
@@ -149,7 +149,7 @@ def _expert_body(
                 sem_ref.at[2 * NBUF_ + nxt_buf]
             ).start()
             pltpu.make_async_copy(
-                w2_scale_ref.at[pl.ds(gj, 1), pl.ds(nxt_m * IB_TILE, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+                w2_scale_ref.at[pl.ds(gj, 1), pl.ds((nxt_m * I_TILE) // IB, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
                 w2_s_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
                 sem_ref.at[3 * NBUF_ + nxt_buf]
             ).start()
@@ -161,7 +161,7 @@ def _expert_body(
             sem_ref.at[2 * NBUF_ + buf]
         ).wait()
         pltpu.make_async_copy(
-            w2_scale_ref.at[pl.ds(gj, 1), pl.ds(m * IB_TILE, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
+            w2_scale_ref.at[pl.ds(gj, 1), pl.ds((m * I_TILE) // IB, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
             w2_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
             sem_ref.at[3 * NBUF_ + buf]
         ).wait()
@@ -177,7 +177,7 @@ def _expert_body(
             block_acc = block_acc * s2_flat.reshape(1, H).astype(jnp.float32)
             down_acc = down_acc + block_acc
         else:
-            w2_fp32 = w2_fp8.astype(jnp.float32).reshape(IB_TILE, IB, H)
+            w2_fp32 = w2_fp8.astype(jnp.float32).reshape(IB_TILE, IB_eff, H)
             w2_dequant = (w2_fp32 * s2).reshape(I_TILE, H).astype(DTYPE_LHS)
             down_acc = down_acc + jnp.matmul(inter_tile, w2_dequant, preferred_element_type=jnp.float32)
 
@@ -234,7 +234,8 @@ def _cn_w1w2_fused_token_kernel_fp8(
     KB_TILE = K_TILE // QB_eff
     I_TILE = w2_bufs_ref.shape[1]
     NUM_I = I // I_TILE
-    IB_TILE = I_BLOCKS // NUM_I
+    IB_eff = min(I_TILE, IB)
+    IB_TILE = I_TILE // IB_eff
 
     # Shared kwargs for _expert_body
     body_kw = dict(
@@ -247,7 +248,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
         K=K, I=I, H=H, K_BLOCKS=K_BLOCKS, QB=QB,
         I_BLOCKS=I_BLOCKS, IB=IB, NBUF_=NBUF_,
         K_TILE=K_TILE, NUM_K=NUM_K, QB_eff=QB_eff, KB_TILE=KB_TILE,
-        I_TILE=I_TILE, NUM_I=NUM_I, IB_TILE=IB_TILE,
+        I_TILE=I_TILE, NUM_I=NUM_I, IB_eff=IB_eff, IB_TILE=IB_TILE,
         DTYPE_LHS=DTYPE_LHS, DTYPE_OUT=DTYPE_OUT, DEQUANT_W1_AFTER_=DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_=DEQUANT_W2_AFTER_,
     )
 
@@ -343,7 +344,8 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
     I_TILE = min(_CN_I_TILE, I)
     while I % I_TILE != 0:
         I_TILE -= 1
-    IB_TILE = I_BLOCKS // (I // I_TILE)
+    IB_eff = min(I_TILE, IB)  # effective quant block size within a tile (mirrors QB_eff)
+    IB_TILE = I_TILE // IB_eff  # scale blocks per tile (always >= 1)
     assert I // I_TILE <= 2, (
         f"Cross-expert w2 prefetch requires NUM_I <= 2, got {I // I_TILE} "
         f"(I={I}, I_TILE={I_TILE}). Increase MOE_CN_I_TILE or reduce I.")
@@ -373,7 +375,7 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
         functools.partial(_cn_w1w2_fused_token_kernel_fp8,
                           K=K, I=I, H=H,
                           K_BLOCKS=K_BLOCKS, QB=QB,
-                          I_BLOCKS=I_BLOCKS, IB=IB,
+                          I_BLOCKS=I_BLOCKS, IB=IB, IB_eff=IB_eff,
                           TOP_K_=TOP_K, NBUF_=NBUF,
                           N_TOKENS_=n_tokens,
                           DEQUANT_W1_AFTER_=(KB_TILE == 1),
