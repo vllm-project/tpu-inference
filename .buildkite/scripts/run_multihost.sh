@@ -465,6 +465,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
+  -e TPU_LOG_JAX_PROCESS_INFO=1 \
   -e JAX_PLATFORMS='' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE=vllm \
@@ -510,6 +511,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_
   -e TPU_CHIPS_PER_PROCESS_BOUNDS='${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}' \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
+  -e TPU_LOG_JAX_PROCESS_INFO=1 \
   -e JAX_PLATFORMS='' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE=vllm \

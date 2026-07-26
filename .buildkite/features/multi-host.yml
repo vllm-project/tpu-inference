@@ -38,7 +38,7 @@ steps:
             --trust-remote-code \
             --max-model-len 1024 \
             --async-scheduling \
-            --load-format=runai_streamer \
+            --load-format=auto \
             --no-enable-prefix-caching" \
           "curl http://localhost:8000/v1/completions \
             -X POST \
