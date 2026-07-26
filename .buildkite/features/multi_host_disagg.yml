@@ -25,7 +25,7 @@ steps:
       TEST_MODE: 2 # only run correctness test
     commands:
       - |
-        .buildkite/e2e/run_multi_disagg.sh
+        .buildkite/e2e/run_multi_disagg_single_vm.sh
 
   - label: "${TPU_VERSION:-tpu7x} Record correctness test result for Multi-host P/D disaggregation"
     key: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_CorrectnessTest"

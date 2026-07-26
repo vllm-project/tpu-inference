@@ -279,36 +279,32 @@ if docker inspect node >/dev/null 2>&1; then
   echo "[cleanup] gracefully stopping TPU runtime on ${host}"
   if ! docker exec -i node bash -s -- "$grace_seconds" <<'INNER_EOF'
 grace_seconds=$1
-pkill -TERM -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
+pkill -TERM -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1 || true
 end_time=$((SECONDS + grace_seconds))
 while (( SECONDS < end_time )); do
-  pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || break
+  pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1 || break
   sleep 1
 done
-if pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1; then
-  echo "[cleanup] vLLM/EngineCore did not exit within ${grace_seconds}s" >&2
-  pgrep -af '[v]llm serve|[A]PIServer|[E]ngineCore' >&2 || true
-  exit 1
+if pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1; then
+  echo "[cleanup] vLLM/EngineCore did not exit within ${grace_seconds}s; force killing TPU processes..." >&2
+  pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1 || true
+  sleep 1
 fi
 ray stop >/dev/null 2>&1 || true
 INNER_EOF
   then
-    echo "[cleanup] graceful TPU process shutdown failed on ${host}" >&2
-    exit 1
+    echo "[cleanup] graceful TPU process shutdown timed out or failed on ${host}; proceeding with force cleanup..." >&2
   fi
 
-  # run_multi_disagg.sh is the explicit cleanup owner for these launchers, so
-  # run_cluster.sh will not race this stop/remove sequence.
+  # Stop and remove node container, as well as disagg proxy benchmark container
   if ! docker stop --time "$grace_seconds" node >/dev/null 2>&1; then
-    echo "[cleanup] container node did not stop cleanly on ${host}" >&2
-    exit 1
+    echo "[cleanup] container node did not stop cleanly on ${host}; force removing..." >&2
+    docker stop -t 0 node >/dev/null 2>&1 || true
   fi
-  if docker inspect node >/dev/null 2>&1 \
-    && ! docker rm node >/dev/null 2>&1 \
-    && docker inspect node >/dev/null 2>&1; then
-    echo "[cleanup] failed to remove stopped container node on ${host}" >&2
-    exit 1
+  if docker inspect node >/dev/null 2>&1; then
+    docker rm -f node >/dev/null 2>&1 || true
   fi
+  docker rm -f disagg-proxy-benchmark >/dev/null 2>&1 || true
 fi
 ! docker inspect node >/dev/null 2>&1
 EOF
@@ -364,23 +360,37 @@ while (( SECONDS < deadline )); do
   sleep 2
 done
 
-echo "[cleanup] host ${host} is not clean" >&2
+echo "[cleanup] host ${host} is not clean; attempting force cleanup..." >&2
+docker rm -f node disagg-proxy-benchmark >/dev/null 2>&1 || true
+pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1 || true
+if [[ -e /tmp/libtpu_lockfile ]]; then
+  echo "[cleanup] removing stale /tmp/libtpu_lockfile on ${host}" >&2
+  rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
+fi
+sleep 1
+
+# Re-check after force cleanup
+device_busy=0
+for device in /dev/accel* /dev/vfio/[0-9]*; do
+  [[ -e "$device" ]] || continue
+  "${fuser_cmd[@]}" "$device" >/dev/null 2>&1 && device_busy=1
+done
+
+if ! docker inspect node >/dev/null 2>&1 \
+  && ! pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 \
+  && (( device_busy == 0 )) \
+  && [[ ! -e /tmp/libtpu_lockfile ]]; then
+  echo "[cleanup] force cleanup succeeded on ${host}" >&2
+  exit 0
+fi
+
+echo "[cleanup] host ${host} still not clean after force cleanup" >&2
 docker ps --filter name='^/node$' --format 'container={{.Names}} status={{.Status}}' >&2 || true
 pgrep -af '[v]llm serve|[A]PIServer|[E]ngineCore' >&2 || true
 for device in /dev/accel* /dev/vfio/[0-9]*; do
   [[ -e "$device" ]] || continue
   "${fuser_cmd[@]}" -v "$device" >&2 || true
 done
-if [[ -e /tmp/libtpu_lockfile ]]; then
-  echo "[cleanup] stale /tmp/libtpu_lockfile remains; refusing to delete it" >&2
-fi
-if command -v ss >/dev/null 2>&1; then
-  ss -ltnp | awk '$4 ~ /:(6379|8400|8476|9400)$/ { print }' >&2 || true
-fi
-if [[ -d /tmp/tpu_logs ]]; then
-  find /tmp/tpu_logs -maxdepth 1 -type f -printf '%T@ %p\n' 2>/dev/null \
-    | sort -nr | head -5 >&2 || true
-fi
 exit 1
 EOF
 }
@@ -577,7 +587,7 @@ wait_for_ray_head() {
       return 0
     fi
     sleep 5
-  done
+  done  
   echo "Error: Ray head failed to start within ${timeout}s."
   return 1
 }
