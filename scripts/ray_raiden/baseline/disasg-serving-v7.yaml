@@ -1,0 +1,528 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: standard-rwx
+provisioner: filestore.csi.storage.gke.io
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+parameters:
+  tier: zonal
+  network: default
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-vllm-p
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: standard-rwx
+---
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm-prefill
+  labels:
+    llm-d.ai/inferenceServing: "true"
+    llm-d.ai/model: Qwen3-8B
+    llm-d.ai/role: test
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          llm-d.ai/inferenceServing: "true"
+          llm-d.ai/model: Qwen3-8B
+          llm-d.ai/role: test
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu7x
+          cloud.google.com/gke-tpu-topology: 2x2x2
+        containers:
+          - name: vllm-leader
+            image: vllm/vllm-tpu:nightly
+            imagePullPolicy: Always
+            env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+            - name: HF_HOME
+              value: /usr/vllm
+            - name: TPU_MULTIHOST_BACKEND
+              value: ray
+            - name: SKIP_JAX_PRECOMPILE
+              value: "1"
+            - name: TPU_NODE_ID
+              value: $(LWS_WORKER_INDEX)
+            - name: JAX_PLATFORMS
+              value: ""
+            - name: MODEL_IMPL_TYPE
+              value: vllm
+            - name: TPU_BACKEND_TYPE
+              value: jax
+            - name: PJRT_DEVICE
+              value: TPU
+            - name: USE_MOE_EP_KERNEL
+              value: "0"
+            - name: VLLM_DISABLE_SHARED_EXPERTS_STREAM
+              value: "1"
+            - name: VLLM_LOGGING_LEVEL
+              value: DEBUG
+            - name: TPU_PROCESS_ADDRESSES
+              value: vllm-prefill-0.vllm-prefill:8476,vllm-prefill-0-1.vllm-prefill:8476
+            - name: TPU_PROCESS_PORT
+              value: "8476"
+            - name: VLLM_MLA_DISABLE
+              value: "1"
+            - name: VLLM_ENGINE_CLIENT_STARTUP_TIMEOUT
+              value: "1800"
+            - name: USE_BATCHED_RPA_KERNEL
+              value: "0"
+            - name: RAY_RESERVE_CPU_FOR_RAYLET
+              value: "1"
+            - name: RAY_heartbeat_timeout_milliseconds
+              value: "300000" # 5 minutes
+            - name: RAY_initial_reconstruction_timeout_milliseconds
+              value: "300000"
+            - name: RAY_external_storage_heartbeat_timeout_ms
+              value: "60000"
+            - name: RAY_grpc_server_thread_pool_size
+              value: "100"  # Give Ray more threads to handle heartbeats while busy
+            - name: RAY_max_pending_lease_requests_per_scheduling_category
+              value: "1000"
+            - name: RAY_rpc_server_listen_quiet_period_ms
+              value: "3600000"
+            - name: RAY_gcs_server_request_timeout_seconds
+              value: "3600"
+            command:
+              - sh
+              - -c
+              - |
+                chmod +x /workspace/vllm/examples/ray_serving/multi-node-serving.sh
+                bash /workspace/vllm/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE) --ray_init_timeout=1800
+                vllm serve --seed=42 --model=Qwen/Qwen3-8B --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --tensor-parallel-size=8 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.70 --async-scheduling --enable-expert-parallel --kv-transfer-config '{"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_connector","kv_role":"kv_producer"}'
+            resources:
+              limits:
+                google.com/tpu: "4"
+                memory: "500Gi"
+                cpu: "80"
+                ephemeral-storage: "40Gi"
+              requests:
+                google.com/tpu: "4"
+                memory: "500Gi"
+                cpu: "80"
+                ephemeral-storage: "40Gi"
+            ports:
+              - containerPort: 8000
+            volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: pvc-vllm-vol
+                mountPath: "/usr/vllm"
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: pvc-vllm-vol
+          persistentVolumeClaim:
+            claimName: pvc-vllm-p
+    workerTemplate:
+      metadata:
+        labels:
+          llm-d.ai/inferenceServing: "true"
+          llm-d.ai/model: Qwen3-8B
+          llm-d.ai/role: test
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu7x
+          cloud.google.com/gke-tpu-topology: 2x2x2
+        containers:
+          - name: vllm-worker
+            image: vllm/vllm-tpu:nightly
+            imagePullPolicy: Always
+            command:
+              - sh
+              - -c
+              - |
+                chmod +x /workspace/vllm/examples/ray_serving/multi-node-serving.sh
+                /workspace/vllm/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS) --ray_init_timeout=1800
+            resources:
+              limits:
+                google.com/tpu: "4"
+                memory: "500Gi"
+                cpu: "80"
+                ephemeral-storage: "40Gi"
+              requests:
+                google.com/tpu: "4"
+                memory: "500Gi"
+                cpu: "80"
+                ephemeral-storage: "40Gi"
+            env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+            - name: HF_HOME
+              value: /usr/vllm
+            - name: TPU_MULTIHOST_BACKEND
+              value: ray
+            - name: SKIP_JAX_PRECOMPILE
+              value: "1"
+            - name: TPU_NODE_ID
+              value: $(LWS_WORKER_INDEX)
+            - name: JAX_PLATFORMS
+              value: ""
+            - name: MODEL_IMPL_TYPE
+              value: vllm
+            - name: TPU_BACKEND_TYPE
+              value: jax
+            - name: PJRT_DEVICE
+              value: TPU
+            - name: USE_MOE_EP_KERNEL
+              value: "0"
+            - name: VLLM_DISABLE_SHARED_EXPERTS_STREAM
+              value: "1"
+            - name: VLLM_LOGGING_LEVEL
+              value: DEBUG
+            - name: TPU_PROCESS_ADDRESSES
+              value: vllm-prefill-0.vllm-prefill:8476,vllm-prefill-0-1.vllm-prefill:8476
+            - name: TPU_PROCESS_PORT
+              value: "8476"
+            - name: VLLM_MLA_DISABLE
+              value: "1"
+            - name: VLLM_ENGINE_CLIENT_STARTUP_TIMEOUT
+              value: "1800"
+            - name: USE_BATCHED_RPA_KERNEL
+              value: "0"
+            - name: RAY_RESERVE_CPU_FOR_RAYLET
+              value: "1"
+            - name: RAY_heartbeat_timeout_milliseconds
+              value: "300000" # 5 minutes
+            - name: RAY_initial_reconstruction_timeout_milliseconds
+              value: "300000"
+            - name: RAY_external_storage_heartbeat_timeout_ms
+              value: "60000"
+            - name: RAY_grpc_server_thread_pool_size
+              value: "100"  # Give Ray more threads to handle heartbeats while busy
+            - name: RAY_max_pending_lease_requests_per_scheduling_category
+              value: "1000"
+            - name: RAY_rpc_server_listen_quiet_period_ms
+              value: "3600000"
+            - name: RAY_gcs_server_request_timeout_seconds
+              value: "3600"
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - name: pvc-vllm-vol
+                mountPath: "/usr/vllm"
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: pvc-vllm-vol
+          persistentVolumeClaim:
+            claimName: pvc-vllm-p
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-vllm-d
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: standard-rwx
+---
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm-decode
+  labels:
+    llm-d.ai/inferenceServing: "true"
+    llm-d.ai/model: Qwen3-8B
+    llm-d.ai/role: test
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          llm-d.ai/inferenceServing: "true"
+          llm-d.ai/model: Qwen3-8B
+          llm-d.ai/role: test
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu7x
+          cloud.google.com/gke-tpu-topology: 2x2x2
+        containers:
+          - name: vllm-leader
+            image: vllm/vllm-tpu:nightly
+            imagePullPolicy: Always
+            env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+            - name: HF_HOME
+              value: /usr/vllm
+            - name: TPU_MULTIHOST_BACKEND
+              value: ray
+            - name: SKIP_JAX_PRECOMPILE
+              value: "1"
+            - name: TPU_NODE_ID
+              value: $(LWS_WORKER_INDEX)
+            - name: JAX_PLATFORMS
+              value: ""
+            - name: MODEL_IMPL_TYPE
+              value: vllm
+            - name: TPU_BACKEND_TYPE
+              value: jax
+            - name: PJRT_DEVICE
+              value: TPU
+            - name: USE_MOE_EP_KERNEL
+              value: "0"
+            - name: VLLM_DISABLE_SHARED_EXPERTS_STREAM
+              value: "1"
+            - name: VLLM_LOGGING_LEVEL
+              value: DEBUG
+            - name: TPU_PROCESS_ADDRESSES
+              value: vllm-decode-0.vllm-decode:8476,vllm-decode-0-1.vllm-decode:8476
+            - name: TPU_PROCESS_PORT
+              value: "8476"
+            - name: VLLM_MLA_DISABLE
+              value: "1"
+            - name: VLLM_ENGINE_CLIENT_STARTUP_TIMEOUT
+              value: "1800"
+            - name: USE_BATCHED_RPA_KERNEL
+              value: "0"
+            - name: RAY_RESERVE_CPU_FOR_RAYLET
+              value: "1"
+            - name: RAY_heartbeat_timeout_milliseconds
+              value: "300000" # 5 minutes
+            - name: RAY_initial_reconstruction_timeout_milliseconds
+              value: "300000"
+            - name: RAY_external_storage_heartbeat_timeout_ms
+              value: "60000"
+            - name: RAY_grpc_server_thread_pool_size
+              value: "100"  # Give Ray more threads to handle heartbeats while busy
+            - name: RAY_max_pending_lease_requests_per_scheduling_category
+              value: "1000"
+            - name: RAY_rpc_server_listen_quiet_period_ms
+              value: "3600000"
+            - name: RAY_gcs_server_request_timeout_seconds
+              value: "3600"
+            command:
+              - sh
+              - -c
+              - |
+                chmod +x /workspace/vllm/examples/ray_serving/multi-node-serving.sh
+                bash /workspace/vllm/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE) --ray_init_timeout=1800
+                vllm serve --seed=42 --model=Qwen/Qwen3-8B --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --tensor-parallel-size=8 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.80 --async-scheduling --enable-expert-parallel --kv-transfer-config '{"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_connector","kv_role":"kv_consumer"}'
+            resources:
+              limits:
+                google.com/tpu: "4"
+                memory: "500Gi"
+                cpu: "80"
+                ephemeral-storage: "40Gi"
+              requests:
+                google.com/tpu: "4"
+                memory: "500Gi"
+                cpu: "80"
+                ephemeral-storage: "40Gi"
+            ports:
+              - containerPort: 8000
+            volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: pvc-vllm-vol
+                mountPath: "/usr/vllm"
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: pvc-vllm-vol
+          persistentVolumeClaim:
+            claimName: pvc-vllm-d
+    workerTemplate:
+      metadata:
+        labels:
+          llm-d.ai/inferenceServing: "true"
+          llm-d.ai/model: Qwen3-8B
+          llm-d.ai/role: test
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu7x
+          cloud.google.com/gke-tpu-topology: 2x2x2
+        containers:
+          - name: vllm-worker
+            image: vllm/vllm-tpu:nightly
+            imagePullPolicy: Always
+            command:
+              - sh
+              - -c
+              - |
+                chmod +x /workspace/vllm/examples/ray_serving/multi-node-serving.sh
+                /workspace/vllm/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS) --ray_init_timeout=1800
+            resources:
+              limits:
+                google.com/tpu: "4"
+                memory: "500Gi"
+                cpu: "80"
+                ephemeral-storage: "40Gi"
+              requests:
+                google.com/tpu: "4"
+                memory: "500Gi"
+                cpu: "80"
+                ephemeral-storage: "40Gi"
+            env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+            - name: HF_HOME
+              value: /usr/vllm
+            - name: TPU_MULTIHOST_BACKEND
+              value: ray
+            - name: SKIP_JAX_PRECOMPILE
+              value: "1"
+            - name: TPU_NODE_ID
+              value: $(LWS_WORKER_INDEX)
+            - name: JAX_PLATFORMS
+              value: ""
+            - name: MODEL_IMPL_TYPE
+              value: vllm
+            - name: TPU_BACKEND_TYPE
+              value: jax
+            - name: PJRT_DEVICE
+              value: TPU
+            - name: USE_MOE_EP_KERNEL
+              value: "0"
+            - name: VLLM_DISABLE_SHARED_EXPERTS_STREAM
+              value: "1"
+            - name: VLLM_LOGGING_LEVEL
+              value: DEBUG
+            - name: TPU_PROCESS_ADDRESSES
+              value: vllm-decode-0.vllm-decode:8476,vllm-decode-0-1.vllm-decode:8476
+            - name: TPU_PROCESS_PORT
+              value: "8476"
+            - name: VLLM_MLA_DISABLE
+              value: "1"
+            - name: VLLM_ENGINE_CLIENT_STARTUP_TIMEOUT
+              value: "1800"
+            - name: USE_BATCHED_RPA_KERNEL
+              value: "0"
+            - name: RAY_RESERVE_CPU_FOR_RAYLET
+              value: "1"
+            - name: RAY_heartbeat_timeout_milliseconds
+              value: "300000" # 5 minutes
+            - name: RAY_initial_reconstruction_timeout_milliseconds
+              value: "300000"
+            - name: RAY_external_storage_heartbeat_timeout_ms
+              value: "60000"
+            - name: RAY_grpc_server_thread_pool_size
+              value: "100"  # Give Ray more threads to handle heartbeats while busy
+            - name: RAY_max_pending_lease_requests_per_scheduling_category
+              value: "1000"
+            - name: RAY_rpc_server_listen_quiet_period_ms
+              value: "3600000"
+            - name: RAY_gcs_server_request_timeout_seconds
+              value: "3600"
+            volumeMounts:
+              - mountPath: /dev/shm
+                name: dshm
+              - name: pvc-vllm-vol
+                mountPath: "/usr/vllm"
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: pvc-vllm-vol
+          persistentVolumeClaim:
+            claimName: pvc-vllm-d
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-disagg-proxy
+  labels:
+    app: vllm-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-proxy
+  template:
+    metadata:
+      labels:
+        app: vllm-proxy
+    spec:
+      containers:
+      - name: proxy-container
+        image: vllm/vllm-tpu:nightly
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            # Start the proxy server in the background
+            python3 examples/disagg/toy_proxy_server.py \
+              --host 0.0.0.0 \
+              --port 10000 \
+              --prefiller-host vllm-prefill-0.vllm-prefill \
+              --prefiller-port 8000 \
+              --decoder-host vllm-decode-0.vllm-decode \
+              --decoder-port 8000 &
+            # Keep the container alive for benchmarking
+            echo "Proxy started. Ready for benchmark."
+            tail -f /dev/null
+        ports:
+        - containerPort: 10000
+        resources:
+          requests:
+            cpu: "8"
+            memory: "16Gi"
+            ephemeral-storage: "20Gi"
+          limits:
+            cpu: "16"
+            memory: "32Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-proxy-service
+spec:
+  selector:
+    app: vllm-proxy
+  ports:
+  - protocol: TCP
+    port: 10000
+    targetPort: 10000
+  type: ClusterIP
