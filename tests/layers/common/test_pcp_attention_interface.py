@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+from unittest import mock
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -19,6 +22,7 @@ from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 from jax.sharding import Mesh
 
+from tpu_inference import envs
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
     merge_kv, ref_ragged_paged_attention)
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
@@ -170,11 +174,12 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         return Mesh(
             np.array(jax.devices()[:pcp]).reshape(shape), MESH_AXIS_NAMES)
 
-    def _run(self, pcp, L, num_current, padded_s):
+    def _run(self, pcp, L, num_current, padded_s, cache_phase=None):
         """Drive the wrapper; return (out_rank_order, kv_cache, exp_token_order).
 
         L = num_computed (already in the strided cache), num_current = the real
         current tokens, padded_s = 2*pcp*C (what the token buffers are sized to).
+        `cache_phase` selects the cache-phase strategy (None = auto-dispatch).
         """
         C = padded_s // (2 * pcp)
         kv_total = L + num_current  # the REAL kv length
@@ -245,7 +250,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                                                     sm_scale=SM_SCALE,
                                                     cache_pages=cache_pages,
                                                     update_kv_cache=True,
-                                                    use_causal_mask=True)
+                                                    use_causal_mask=True,
+                                                    cache_phase=cache_phase)
         return np.asarray(out), np.asarray(new_cache), exp, C
 
     def _assert_matches(self, out, exp, pcp, C, num_current):
@@ -319,8 +325,10 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
             got = cache[page, r * PAGE + off]
             self.assertAllClose(got, ref[i], atol=2e-2, rtol=2e-2)
 
-    @parameterized.parameters((2, False), (4, False), (2, True), (4, True))
-    def test_noncontiguous_block_table(self, pcp, tight_hint):
+    @parameterized.product(pcp=[2, 4],
+                           tight_hint=[False, True],
+                           cache_phase=["gather_kv", "ring_kv"])
+    def test_noncontiguous_block_table(self, pcp, tight_hint, cache_phase):
         """The cache phase must be correct when the request's pages are an
         arbitrary, non-contiguous subset of a cache that is bigger than the
         request -- i.e. what a real server looks like, where one KV cache holds
@@ -408,7 +416,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                                             qpos,
                                             SM_SCALE,
                                             cache_pages=hint,
-                                            cache_phase="gather_kv")
+                                            cache_phase=cache_phase)
 
         inv = _inv_row(pcp)
         got = np.asarray(out).reshape(2 * pcp, C, NQ,
@@ -416,6 +424,71 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         self.assertTrue(np.all(np.isfinite(got)))
         self.assertGreater(float(np.abs(got).max()), 0.0)
         self.assertAllClose(got, np.asarray(exp), atol=2e-2, rtol=2e-2)
+
+    @parameterized.product(pcp=[2, 4])
+    def test_ring_kv_chunked_prefill(self, pcp):
+        """Ring cache phase: instead of all-gathering the cache, each rank
+        rotates its own shard around the pcp ring and LSE-merges the pcp
+        partials. The result must still equal the full-causal reference."""
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs >= {pcp} devices")
+        L, S = 128, 128
+        out, _, exp, C = self._run(pcp, L, S, S, cache_phase="ring_kv")
+        self._assert_matches(out, exp, pcp, C, S)
+
+    @parameterized.product(pcp=[2, 4])
+    def test_ring_kv_partial_tail(self, pcp):
+        """Ring cache phase with a partly-padded tail: the per-rank `tail_real`
+        skew lives in the current phase, but the ring's local-Q layout must not
+        disturb it."""
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs >= {pcp} devices")
+        L, S, padded_s = 128, 100, 128
+        out, _, exp, C = self._run(pcp, L, S, padded_s, cache_phase="ring_kv")
+        self._assert_matches(out, exp, pcp, C, S)
+
+    @parameterized.product(pcp=[2, 4], other=["ring_kv", "gather_q"])
+    def test_cache_phases_agree(self, pcp, other):
+        """The three cache-phase strategies are communication schedules for the
+        same math, so each must agree with gather-KV far more tightly than any
+        of them agrees with the reference -- on the attention output AND on the
+        cache the current phase writes (the cache phase must not touch it)."""
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs >= {pcp} devices")
+        L, S = 128, 128
+        out, cache, _, _ = self._run(pcp, L, S, S, cache_phase=other)
+        ag_out, ag_cache, _, _ = self._run(pcp,
+                                           L,
+                                           S,
+                                           S,
+                                           cache_phase="gather_kv")
+        self.assertTrue(np.all(np.isfinite(out)))
+        # The ring splits the same softmax into pcp partials and merges them,
+        # so it differs from gather-KV only by accumulation order (~1e-4 here,
+        # vs the 2e-2 the reference comparisons allow). A real divergence --
+        # e.g. a shard mapped to the wrong cp_rank -- is O(1).
+        self.assertAllClose(out, ag_out, atol=2e-3, rtol=2e-3)
+        # Unwritten cache slots stay NaN in both; compare the live ones.
+        live = np.isfinite(ag_cache)
+        np.testing.assert_array_equal(np.isfinite(cache), live)
+        self.assertAllClose(cache[live], ag_cache[live])
+
+    def test_cache_phase_env_var(self):
+        """`PCP_CACHE_PHASE` is the only way a deployment opts into the ring
+        (auto-dispatch never picks it), so the env name must be spelled right
+        all the way through to the wrapper -- and must reject typos rather than
+        silently falling back."""
+        pcp = 2
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs >= {pcp} devices")
+        with mock.patch.dict(os.environ, {"PCP_CACHE_PHASE": "ring_kv"}):
+            self.assertEqual(envs.PCP_CACHE_PHASE, "ring_kv")
+            L, S = 128, 128
+            out, _, exp, C = self._run(pcp, L, S, S)  # cache_phase unset
+        self._assert_matches(out, exp, pcp, C, S)
+        with mock.patch.dict(os.environ, {"PCP_CACHE_PHASE": "ring"}):
+            with self.assertRaises(ValueError):
+                _ = envs.PCP_CACHE_PHASE
 
     @parameterized.parameters(2, 4)
     def test_first_chunk_skips_cache_phase(self, pcp):

@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     RPA_V3_DECODE_BLOCK_SIZES: list[int] = []
     RPA_V3_PREFILL_BLOCK_SIZES: list[int] = []
     RPA_V3_MIXED_BLOCK_SIZES: list[int] = []
+    PCP_CACHE_PHASE: str = "auto"
     FORCE_MOE_RANDOM_ROUTING: bool = False
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
@@ -340,6 +341,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_int_list("RPA_V3_PREFILL_BLOCK_SIZES"),
     "RPA_V3_MIXED_BLOCK_SIZES":
     env_int_list("RPA_V3_MIXED_BLOCK_SIZES"),
+    # How the PCP cache phase gives every rank what it needs to attend the
+    # pcp-striped KV cache:
+    #   "gather_q"  all-gather Q, attend the local shard, LSE reduce-scatter O
+    #   "gather_kv" all-gather the cache into global token order, attend locally
+    #   "ring_kv"   rotate the cache shard around the pcp ring, LSE-merge the
+    #               per-round partials (same bytes as gather_kv, but peak memory
+    #               is 2 shards instead of pcp)
+    #   "auto"      (default) pick gather_q or gather_kv per compile from their
+    #               static communication volumes; never picks ring_kv.
+    "PCP_CACHE_PHASE":
+    env_with_choices("PCP_CACHE_PHASE", "auto",
+                     ["auto", "gather_q", "gather_kv", "ring_kv"]),
     # Force random expert routing in MoE layers (for testing purposes only)
     "FORCE_MOE_RANDOM_ROUTING":
     env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
