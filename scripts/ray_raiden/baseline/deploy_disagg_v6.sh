@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Deploy Raiden-accelerated Disaggregated Serving on piv-cluster-europe
+# Deploy Baseline Disaggregated Serving on piv-cluster-europe
 set -euo pipefail
 
 CLUSTER="piv-cluster-europe"
@@ -22,39 +22,30 @@ ZONE="europe-west4-a"
 KUBE_CONTEXT="gke_${PROJECT}_${ZONE}_${CLUSTER}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MANIFEST_FILE="${SCRIPT_DIR}/disagg-serving-v6-raiden.yaml"
+MANIFEST_FILE="${SCRIPT_DIR}/disagg-serving-v6.yaml"
 MODEL_NAME="Qwen/Qwen3-8B"
-IMAGE_TAG="us-east5-docker.pkg.dev/cloud-tpu-inference-test/piv/vllm-tpu-raiden:latest"
-
-# Set BUILD_IMAGE=true to build and push Dockerfile before deploying
-if [ "${BUILD_IMAGE:-false}" = "true" ]; then
-  echo "=== Step 0: Building & pushing custom image locally (${IMAGE_TAG}) ==="
-  gcloud auth configure-docker us-east5-docker.pkg.dev --quiet 2>/dev/null || true
-  docker build -t "${IMAGE_TAG}" "${SCRIPT_DIR}"
-  docker push "${IMAGE_TAG}"
-fi
 
 echo "=== Step 1: Connecting to cluster ${CLUSTER} (${PROJECT} / ${ZONE}) ==="
 gcloud container clusters get-credentials "${CLUSTER}" \
   --project="${PROJECT}" \
   --zone="${ZONE}"
 
-echo "=== Step 2: Deploying Raiden Disaggregated Serving Manifest (${MANIFEST_FILE}) ==="
+echo "=== Step 2: Deploying Baseline Disaggregated Serving Manifest (${MANIFEST_FILE}) ==="
 kubectl --context="${KUBE_CONTEXT}" apply -f "${MANIFEST_FILE}"
 
-echo "=== Step 3: Waiting for vLLM Raiden Prefill & Decode Engines ==="
+echo "=== Step 3: Waiting for vLLM Prefill & Decode Engines ==="
 START_TIME=$(date +%s)
 while true; do
   PREFILL_COUNT=$(kubectl --context="${KUBE_CONTEXT}" logs vllm-prefill-0 2>/dev/null | grep -c -E "Uvicorn running on|Engine 000:" || true)
   DECODE_COUNT=$(kubectl --context="${KUBE_CONTEXT}" logs vllm-decode-0 2>/dev/null | grep -c -E "Uvicorn running on|Engine 000:" || true)
 
   if [ "$PREFILL_COUNT" -gt 0 ] && [ "$DECODE_COUNT" -gt 0 ]; then
-    echo "✅ Both Prefill and Decode vLLM Raiden engines are ready!"
+    echo "✅ Both Prefill and Decode vLLM engines are ready!"
     break
   fi
 
   ELAPSED=$(( $(date +%s) - START_TIME ))
-  echo -ne "Waiting for Raiden engines... (${ELAPSED}s elapsed | prefill_count: ${PREFILL_COUNT}, decode_count: ${DECODE_COUNT})\r"
+  echo -ne "Waiting for engines... (${ELAPSED}s elapsed | prefill_count: ${PREFILL_COUNT}, decode_count: ${DECODE_COUNT})\r"
   sleep 10
 done
 echo ""

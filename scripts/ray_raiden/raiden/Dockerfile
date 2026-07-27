@@ -27,12 +27,14 @@ RUN rm -rf /workspace/tpu-inference && \
     git -C /workspace/tpu-inference checkout 7ed46a69e4bf6900af69ad681e01df40a355be85 && \
     pip install --no-deps -e /workspace/tpu-inference
 
-# Copy local tpu-raiden repository (including downloaded wheel if present)
-COPY tpu-raiden /workspace/tpu-raiden
+# Clone pinned tpu-raiden commit
+RUN rm -rf /workspace/tpu-raiden && \
+    git clone https://github.com/google/tpu-raiden.git /workspace/tpu-raiden && \
+    git -C /workspace/tpu-raiden fetch origin 110ebcef084232816c9e30d3ce2ee27f47062055 && \
+    git -C /workspace/tpu-raiden checkout 110ebcef084232816c9e30d3ce2ee27f47062055
 
-# Install pre-compiled tpu-raiden-jax wheel (uses local wheel if present, otherwise fetches from Artifact Registry)
-RUN pip install /workspace/tpu-raiden/*.whl --no-deps 2>/dev/null || \
-    pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/ --no-deps
+# Build tpu-raiden from source
+RUN cd /workspace/tpu-raiden && ./build.sh jax
 
 # Default tpu-raiden tunables & environment variables
 ENV RAIDEN_PRELOAD_ENGINE="1"
