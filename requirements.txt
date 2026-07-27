@@ -5,14 +5,14 @@ pytest-mock
 absl-py
 numpy
 google-cloud-storage
-jax==0.10.2
-jaxlib==0.10.2
-libtpu==0.0.43
+jax==0.11.0
+jaxlib==0.11.0
+libtpu==0.0.44
 jaxtyping
 # Temporarily restrict fastapi version due to https://github.com/vllm-project/vllm/pull/45629
 # TODO(lk-chen): remove once LKG moves past above commit
 fastapi[standard]<0.137.0
-flax==0.12.4
+flax==0.12.8
 torchax==0.0.13
 qwix==0.1.2
 torchvision==0.25.0
