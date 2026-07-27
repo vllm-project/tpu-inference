@@ -29,6 +29,7 @@ from jax.sharding import PartitionSpec as P
 from jax.sharding import Sharding
 
 import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_v3_cp
+import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa_v3_default
 import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference import envs
 from tpu_inference.kernels.flash_attention.kernel import (
@@ -388,12 +389,16 @@ def sharded_ragged_paged_attention(
     v_scale: float | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    batch_axis: str = ShardingAxisName.ATTN_DATA,
+    head_axis: str = ShardingAxisName.ATTN_HEAD,
+    m_block_sizes: tuple[int, int, int, int] | None = None,
+    use_default_v3_kernel: bool = False,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
     # We replicate KV heads to match tp_size so that we can shard them evenly.
     # TODO (ranlihao): This is not performant and introduces extra overhead during inference. We need to handle this during weight loading
-    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    tp_size = get_mesh_shape_product(mesh, head_axis)
     if tp_size > 1:
         num_kv_heads = k.shape[1]
         if num_kv_heads < tp_size:
@@ -405,32 +410,34 @@ def sharded_ragged_paged_attention(
             k = jnp.repeat(k, factor, axis=1)
             v = jnp.repeat(v, factor, axis=1)
 
-    qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD, None, None)
+    qkv_spec = P(batch_axis, head_axis, None)
+    kv_cache_spec = P(batch_axis, None, head_axis, None, None)
     in_specs = (
         qkv_spec,  # q
         qkv_spec,  # k
         qkv_spec,  # v
         kv_cache_spec,  # kv cache
-        P(ShardingAxisName.ATTN_DATA),  # kv_lens
-        P(ShardingAxisName.ATTN_DATA),  # page_indices
-        P(ShardingAxisName.ATTN_DATA),  # cu_q_lens
-        P(ShardingAxisName.ATTN_DATA),  # distribution
+        P(batch_axis),  # kv_lens
+        P(batch_axis),  # page_indices
+        P(batch_axis),  # cu_q_lens
+        P(batch_axis),  # distribution
     )
     out_specs = (qkv_spec, kv_cache_spec)
 
     args = (q, k, v, kv_cache, kv_lens, page_indices, cu_q_lens, distribution)
 
-    use_hd64 = q.shape[-1] == 64
-    func = ragged_paged_attention_hd64 if use_hd64 else ragged_paged_attention
+    # use_default_v3_kernel to bypass batched rpa kernel for now (switch to batched rpa after adding non-causal mask)
+    use_hd64 = not use_default_v3_kernel and q.shape[-1] == 64
+    func = (
+        rpa_v3_default.ragged_paged_attention if use_default_v3_kernel else
+        ragged_paged_attention_hd64 if use_hd64 else ragged_paged_attention)
 
     if attention_sink is not None:
         if not use_hd64:
             raise NotImplementedError(
                 "Attention sink support is only available when head_dim==64")
 
-        in_specs += (P(ShardingAxisName.ATTN_HEAD), )
+        in_specs += (P(head_axis), )
         args += (attention_sink, )
 
     # update_kv_cache=False (KV-share) is supported by the v3 default RPA
@@ -455,6 +462,8 @@ def sharded_ragged_paged_attention(
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             kwargs["use_causal_mask"] = use_causal_mask
+            if m_block_sizes is not None:
+                kwargs["m_block_sizes"] = m_block_sizes
         return func(*args, **kwargs)
 
     return jax.shard_map(
@@ -820,11 +829,11 @@ def pcp_ragged_paged_attention(
     `2*pcp-1-r` (tail), so its local buffer is `[head_chunk | tail_chunk]`.
 
     Two kernel launches per rank and is LSE-combined:
-      * cache phase:  all-gather Q across pcp , attend the pcp-strided 
+      * cache phase:  all-gather Q across pcp , attend the pcp-strided
         cache (non-causal, no write), LSE all-reduce over pcp.
       * current phase: the local Q attends the current KV (causal,
         token-order all-gathered KV, per-chunk `q_pos_offset`); the tail phase
-        writes the strided cache. 
+        writes the strided cache.
     """
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)

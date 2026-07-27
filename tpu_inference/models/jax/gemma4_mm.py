@@ -14,8 +14,8 @@
 
 import functools
 from itertools import islice
-from typing import (Any, Callable, Iterable, List, Literal, NamedTuple,
-                    Optional, Tuple, TypedDict)
+from typing import (Any, Callable, Iterable, List, Literal, Optional, Tuple,
+                    TypedDict)
 
 import jax
 import jax.numpy as jnp
@@ -28,8 +28,12 @@ from vllm.model_executor.models.gemma4_mm import \
     Gemma4ForConditionalGeneration as PtGemma4MM
 from vllm.model_executor.models.utils import WeightsMapper
 
+from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
+    get_kv_cache_shape
+from tpu_inference.kernels.ragged_paged_attention.v3.util import (
+    align_to, get_dtype_packing)
 from tpu_inference.layers.common.attention_interface import \
-    sharded_flash_attention
+    sharded_ragged_paged_attention
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import JaxEinsum
@@ -124,15 +128,9 @@ def apply_multidimensional_rope(
     return out_rotated
 
 
-class SegmentIds(NamedTuple):
-    """SegmentIds required by TPU sharded_flash_attention backend."""
-    q: jax.Array
-    kv: jax.Array
-
-
-class Gemma4VisionFlashAttention(JaxModule):
+class Gemma4VisionAttention(JaxModule):
     """
-    Gemma 4 Vision Attention using TPU sharded_flash_attention.
+    Gemma 4 Vision Attention using the RPA v3 kernel (ragged_paged_attention).
     """
 
     def __init__(self,
@@ -214,16 +212,6 @@ class Gemma4VisionFlashAttention(JaxModule):
                  segment_pos: jax.Array,
                  input_mask: Optional[jax.Array] = None) -> jax.Array:
         B, T, _ = x.shape
-        orig_T = T
-
-        pad_len = (128 - (T % 128)) % 128
-        if pad_len > 0:
-            x = jnp.pad(x, ((0, 0), (0, pad_len), (0, 0)))
-            segment_pos = jnp.pad(segment_pos, ((0, 0), (0, pad_len), (0, 0)))
-
-            if input_mask is not None:
-                input_mask = jnp.pad(input_mask, ((0, 0), (0, pad_len)))
-            T = T + pad_len
 
         query_proj = self.q_proj(x)
         key_proj = self.k_proj(x)
@@ -238,40 +226,68 @@ class Gemma4VisionFlashAttention(JaxModule):
         key_proj = apply_multidimensional_rope(
             key_proj, segment_pos, base_frequency=self.rope_base_frequency)
 
-        # Transpose for Flash Attention: (B, T, N, H) -> (B, N, T, H)
-        q_BNTH = jnp.transpose(query_proj, (0, 2, 1, 3))
-        k_BKTH = jnp.transpose(key_proj, (0, 2, 1, 3))
-        v_BKTH = jnp.transpose(value_proj, (0, 2, 1, 3))
+        if input_mask is None:
+            input_mask = jnp.ones((B, T), dtype=jnp.bool_)
 
-        if input_mask is not None:
-            segment_ids_val = jnp.where(input_mask, 1, 2).astype(jnp.int32)
-        else:
-            valid_ids = jnp.ones((B, orig_T), dtype=jnp.int32)
-            if pad_len > 0:
-                pad_ids = jnp.full((B, pad_len), 2, dtype=jnp.int32)
-                segment_ids_val = jnp.concatenate([valid_ids, pad_ids], axis=1)
-            else:
-                segment_ids_val = valid_ids
+        # Create a kv cache
+        dp_size = get_mesh_shape_product(self.mesh, ShardingAxisName.VIT_BATCH)
+        if B % dp_size != 0:
+            raise ValueError(
+                "Gemma4VisionAttention requires the image batch to divide "
+                f"evenly across VIT_BATCH shards, got {B} images for "
+                f"dp_size={dp_size}.")
+        images_per_shard = B // dp_size
 
-        segment_ids = SegmentIds(q=segment_ids_val, kv=segment_ids_val)
+        valid_counts = jnp.sum(input_mask.astype(jnp.int32), axis=1)  # (B,)
 
-        outputs_BNTH = sharded_flash_attention(
-            mesh=self.mesh,
-            causal=False,
+        q_flat = query_proj.reshape(B * T, self.num_heads, self.head_dim)
+        k_flat = key_proj.reshape(B * T, self.num_kv_heads, self.head_dim)
+        v_flat = value_proj.reshape(B * T, self.num_kv_heads, self.head_dim)
+
+        kv_packing = get_dtype_packing(k_flat.dtype)
+        page_size = align_to(256, kv_packing)  # set to 256 to avoid OOM
+        pages_per_seq = -(-T // page_size)  # cdiv(T, page_size)
+        kv_cache = jnp.zeros(get_kv_cache_shape(B * pages_per_seq, page_size,
+                                                self.num_kv_heads,
+                                                self.head_dim, k_flat.dtype),
+                             dtype=k_flat.dtype)
+
+        page_indices = jnp.tile(
+            jnp.arange(images_per_shard * pages_per_seq, dtype=jnp.int32),
+            dp_size)
+        local_valid = valid_counts.reshape(dp_size, images_per_shard)
+        cu_q_lens = jnp.concatenate([
+            jnp.zeros((dp_size, 1), dtype=jnp.int32),
+            jnp.cumsum(local_valid, axis=1)
+        ],
+                                    axis=1).reshape(-1)
+        kv_lens = valid_counts
+        distribution = jnp.tile(
+            jnp.array([0, 0, images_per_shard], dtype=jnp.int32), dp_size)
+
+        attn_out_flat, _ = sharded_ragged_paged_attention(
+            self.mesh,
+            q_flat,
+            k_flat,
+            v_flat,
+            kv_cache,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            distribution,
+            attention_sink=None,
             sm_scale=1.0,
+            use_causal_mask=False,
             batch_axis=ShardingAxisName.VIT_BATCH,
             head_axis=ShardingAxisName.VIT_MODEL,
-        )(q_BNTH, k_BKTH, v_BKTH, segment_ids)
+            m_block_sizes=(256, 256, 256,
+                           256),  # force small tiles to avoid OOM
+            use_default_v3_kernel=
+            True,  # use RPA v3 for now (use batched rpa after adding non-causal mask)
+        )
 
-        # Transpose back: (B, N, T, H) -> (B, T, N, H)
-        outputs_BTNH = jnp.transpose(outputs_BNTH, (0, 2, 1, 3))
-
-        final_output = self.o_proj(outputs_BTNH)
-
-        if pad_len > 0:
-            final_output = final_output[:, :orig_T, :]
-
-        return final_output
+        attn_out = attn_out_flat.reshape(B, T, self.num_heads, self.head_dim)
+        return self.o_proj(attn_out)
 
 
 class Gemma4VisionPatchEmbedder(JaxModule):
@@ -412,13 +428,12 @@ class Gemma4VisionEncoderLayer(JaxModule):
                                           rngs=rng,
                                           quant_config=quant_config)
 
-        self.self_attn = Gemma4VisionFlashAttention(
-            config,
-            dtype,
-            rng,
-            mesh,
-            quant_config,
-            prefix=f"{prefix}.self_attn")
+        self.self_attn = Gemma4VisionAttention(config,
+                                               dtype,
+                                               rng,
+                                               mesh,
+                                               quant_config,
+                                               prefix=f"{prefix}.self_attn")
 
         self.post_attention_layernorm = JaxRmsNorm(
             config.hidden_size,
