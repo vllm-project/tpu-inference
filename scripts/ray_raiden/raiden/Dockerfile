@@ -33,8 +33,10 @@ RUN rm -rf /workspace/tpu-raiden && \
     git -C /workspace/tpu-raiden fetch origin 110ebcef084232816c9e30d3ce2ee27f47062055 && \
     git -C /workspace/tpu-raiden checkout 110ebcef084232816c9e30d3ce2ee27f47062055
 
-# Build tpu-raiden from source
-RUN cd /workspace/tpu-raiden && ./build.sh jax
+# Install pre-compiled tpu-raiden-jax wheel from Google Artifact Registry
+RUN --mount=type=secret,id=adc,target=/root/.config/gcloud/application_default_credentials.json \
+    pip install keyrings.google-artifactregistry-auth && \
+    pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/ --no-deps
 
 # Default tpu-raiden tunables & environment variables
 ENV RAIDEN_PRELOAD_ENGINE="1"

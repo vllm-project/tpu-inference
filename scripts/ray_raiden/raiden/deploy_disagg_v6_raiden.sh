@@ -30,7 +30,12 @@ IMAGE_TAG="us-east5-docker.pkg.dev/cloud-tpu-inference-test/piv/vllm-tpu-raiden:
 if [ "${BUILD_IMAGE:-false}" = "true" ]; then
   echo "=== Step 0: Building & pushing custom image locally (${IMAGE_TAG}) ==="
   gcloud auth configure-docker us-east5-docker.pkg.dev --quiet 2>/dev/null || true
-  docker build -t "${IMAGE_TAG}" "${SCRIPT_DIR}"
+  ADC_FILE="${HOME}/.config/gcloud/application_default_credentials.json"
+  if [ ! -f "${ADC_FILE}" ]; then
+    echo "Running gcloud auth application-default login..."
+    gcloud auth application-default login
+  fi
+  DOCKER_BUILDKIT=1 docker build --secret "id=adc,src=${ADC_FILE}" -t "${IMAGE_TAG}" "${SCRIPT_DIR}"
   docker push "${IMAGE_TAG}"
 fi
 
