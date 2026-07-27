@@ -136,6 +136,7 @@ echo "torch before install: ${TORCH_BEFORE}"
 
 echo "--- Installing ${MAXTEXT_SPEC}"
 CONSTRAINTS_FILE="$(mktemp)"
+trap 'rm -f "${CONSTRAINTS_FILE}"' EXIT
 CONSTRAIN_RE='^(jax|jaxlib|libtpu|flax|numpy)=='
 if [[ "${ALLOW_TORCH_UPGRADE}" != "1" ]]; then
     # Also hold torch, which makes maxtext HEAD unresolvable -- opt-in only.
@@ -205,9 +206,19 @@ set +x
 # `set -o pipefail` above means a non-zero exit from vllm_decode already fails
 # the test. As an extra correctness guard, require that the run actually emitted
 # generated text rather than exiting 0 after an early no-op.
+#
+# Match vllm_decode's result line specifically:
+#     max_logging.log(f"Prompt: {prompt}, Generated text: {generated_text}")
+# and require at least one non-whitespace character after "Generated text:", so
+# an empty completion fails too. A loose pattern such as "output|generated" is
+# not sufficient -- vllm_decode logs "Generating output..." *before* calling
+# llm.generate(), so it matches even when nothing is ever produced.
+#
+# This is coupled to maxtext's log format: if that message changes, this check
+# fails rather than silently passing, which is the safe direction.
 echo "--- Verifying decode produced output"
-if ! grep -qiE "output|generated|completion" "${LOG_FILE}"; then
-    echo "ERROR: vllm_decode did not appear to produce any generated output." >&2
+if ! grep -qE "Generated text:[[:space:]]*[^[:space:]]" "${LOG_FILE}"; then
+    echo "ERROR: vllm_decode did not emit a non-empty 'Generated text:' line." >&2
     echo "See ${LOG_FILE} for details." >&2
     exit 1
 fi
