@@ -206,6 +206,21 @@ TPU_VISIBLE_CHIPS_LOCAL="$(seq -s, 0 $(( CHIPS_PER_HOST - 1 )))"
 # Prefill and decode share one Ray control plane but use disjoint actor sets.
 # Each role forms its own role-local JAX mesh over the selected Ray nodes.
 readonly TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE="2,2,1"
+readonly TPU_PROCESS_PORT_VALUE=8476
+readonly ROLE_HEAD_PROCESS_ID=0
+
+# Populates PROCESS_IDENTITY_ENV_ARGS for a role-local JAX process. Keep the
+# three equivalent identity variables synchronized at every launch site.
+PROCESS_IDENTITY_ENV_ARGS=()
+build_process_identity_env_args() {
+  local process_id="$1"
+  PROCESS_IDENTITY_ENV_ARGS=(
+    -e CLOUD_TPU_TASK_ID="${process_id}"
+    -e TPU_WORKER_ID="${process_id}"
+    -e JAX_PROCESS_ID="${process_id}"
+  )
+}
+
 SHARED_RAY_HEAD_IP="${PREFILL_HEAD_IP}"
 PREFILL_NODE_IPS="$(IFS=,; echo "${PREFILL_HOSTS[*]}")"
 DECODE_NODE_IPS="$(IFS=,; echo "${DECODE_HOSTS[*]}")"
@@ -216,7 +231,7 @@ for host_index in "${!PREFILL_HOSTS[@]}"; do
   [[ -z "$PREFILL_PROCESS_MAP" ]] || PREFILL_PROCESS_MAP+=","
   [[ -z "$PREFILL_PROCESS_ADDRESSES" ]] || PREFILL_PROCESS_ADDRESSES+=","
   PREFILL_PROCESS_MAP+="${PREFILL_HOSTS[$host_index]}=${host_index}"
-  PREFILL_PROCESS_ADDRESSES+="${PREFILL_HOSTS[$host_index]}:8476"
+  PREFILL_PROCESS_ADDRESSES+="${PREFILL_HOSTS[$host_index]}:${TPU_PROCESS_PORT_VALUE}"
 done
 
 DECODE_PROCESS_MAP=""
@@ -225,31 +240,33 @@ for host_index in "${!DECODE_HOSTS[@]}"; do
   [[ -z "$DECODE_PROCESS_MAP" ]] || DECODE_PROCESS_MAP+=","
   [[ -z "$DECODE_PROCESS_ADDRESSES" ]] || DECODE_PROCESS_ADDRESSES+=","
   DECODE_PROCESS_MAP+="${DECODE_HOSTS[$host_index]}=${host_index}"
-  DECODE_PROCESS_ADDRESSES+="${DECODE_HOSTS[$host_index]}:8476"
+  DECODE_PROCESS_ADDRESSES+="${DECODE_HOSTS[$host_index]}:${TPU_PROCESS_PORT_VALUE}"
 done
 
-PREFILL_TPU_ENV_ARGS=(
-  -e TPU_PROCESS_BOUNDS="1,1,${PREFILL_HOSTS_COUNT}"
+COMMON_TPU_ENV_ARGS=(
   -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}"
   -e TPU_VISIBLE_CHIPS="${TPU_VISIBLE_CHIPS_LOCAL}"
+  -e TPU_PROCESS_PORT="${TPU_PROCESS_PORT_VALUE}"
+  -e VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
+)
+PREFILL_TPU_ENV_ARGS=(
+  "${COMMON_TPU_ENV_ARGS[@]}"
+  -e TPU_PROCESS_BOUNDS="1,1,${PREFILL_HOSTS_COUNT}"
   -e TPU_PROCESS_ADDRESSES="${PREFILL_PROCESS_ADDRESSES}"
-  -e TPU_PROCESS_PORT=8476
   -e JAX_NUM_PROCESSES="${PREFILL_HOSTS_COUNT}"
   -e VLLM_TPU_RAY_NODE_IPS="${PREFILL_NODE_IPS}"
   -e VLLM_TPU_RAY_PROCESS_MAP="${PREFILL_PROCESS_MAP}"
-  -e VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
 )
 DECODE_TPU_ENV_ARGS=(
+  "${COMMON_TPU_ENV_ARGS[@]}"
   -e TPU_PROCESS_BOUNDS="1,1,${DECODE_HOSTS_COUNT}"
-  -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}"
-  -e TPU_VISIBLE_CHIPS="${TPU_VISIBLE_CHIPS_LOCAL}"
   -e TPU_PROCESS_ADDRESSES="${DECODE_PROCESS_ADDRESSES}"
-  -e TPU_PROCESS_PORT=8476
   -e JAX_NUM_PROCESSES="${DECODE_HOSTS_COUNT}"
   -e VLLM_TPU_RAY_NODE_IPS="${DECODE_NODE_IPS}"
   -e VLLM_TPU_RAY_PROCESS_MAP="${DECODE_PROCESS_MAP}"
-  -e VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
 )
+build_process_identity_env_args "${ROLE_HEAD_PROCESS_ID}"
+ROLE_HEAD_PROCESS_ENV_ARGS=("${PROCESS_IDENTITY_ENV_ARGS[@]}")
 
 echo "Shared Ray head: ${SHARED_RAY_HEAD_IP}"
 echo "Prefill actor hosts: ${PREFILL_NODE_IPS}; process map: ${PREFILL_PROCESS_MAP}"
@@ -704,8 +721,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   --head \
   "${HOST_HF_HOME}" \
   "${PREFILL_TPU_ENV_ARGS[@]}" \
-  -e CLOUD_TPU_TASK_ID=0 \
-  -e JAX_PROCESS_ID=0 \
+  "${ROLE_HEAD_PROCESS_ENV_ARGS[@]}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -725,13 +741,13 @@ wait_for_ray_head "${SHARED_RAY_HEAD_IP}"
 
 for worker_ip in "${SHARED_CLUSTER_HOSTS[@]:1}"; do
     worker_role=""
-    worker_process_id=""
+    role_process_id=""
     worker_tpu_env_args=()
 
     for host_index in "${!PREFILL_HOSTS[@]}"; do
       if [[ "${PREFILL_HOSTS[$host_index]}" == "$worker_ip" ]]; then
         worker_role="prefill"
-        worker_process_id="$host_index"
+        role_process_id="$host_index"
         worker_tpu_env_args=("${PREFILL_TPU_ENV_ARGS[@]}")
         break
       fi
@@ -740,18 +756,21 @@ for worker_ip in "${SHARED_CLUSTER_HOSTS[@]:1}"; do
       for host_index in "${!DECODE_HOSTS[@]}"; do
         if [[ "${DECODE_HOSTS[$host_index]}" == "$worker_ip" ]]; then
           worker_role="decode"
-          worker_process_id="$host_index"
+          role_process_id="$host_index"
           worker_tpu_env_args=("${DECODE_TPU_ENV_ARGS[@]}")
           break
         fi
       done
     fi
-    if [[ -z "$worker_role" || -z "$worker_process_id" ]]; then
+    if [[ -z "$worker_role" || -z "$role_process_id" ]]; then
       echo "Error: unable to assign Ray worker ${worker_ip} to prefill or decode." >&2
       exit 1
     fi
 
-    echo "--- Starting shared Ray Worker on ${worker_ip} for ${worker_role} actor process ${worker_process_id}"
+    build_process_identity_env_args "${role_process_id}"
+    role_process_env_args=("${PROCESS_IDENTITY_ENV_ARGS[@]}")
+
+    echo "--- Starting shared Ray Worker on ${worker_ip} for ${worker_role} actor process ${role_process_id}"
     echo "   -> Pruning Docker on worker to free disk space..."
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f >/dev/null 2>&1" || true
 
@@ -764,8 +783,7 @@ for worker_ip in "${SHARED_CLUSTER_HOSTS[@]:1}"; do
 RUN_CLUSTER_CLEANUP_OWNER=parent \
 bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${SHARED_RAY_HEAD_IP}' --worker '${HOST_HF_HOME}' \
   ${worker_tpu_env_args[*]} \
-  -e CLOUD_TPU_TASK_ID='${worker_process_id}' \
-  -e JAX_PROCESS_ID='${worker_process_id}' \
+  ${role_process_env_args[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
@@ -808,9 +826,7 @@ set -x
 docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
-  -e CLOUD_TPU_TASK_ID=0 \
-  -e TPU_WORKER_ID=0 \
-  -e JAX_PROCESS_ID=0 \
+  ${ROLE_HEAD_PROCESS_ENV_ARGS[*]} \
   ${PREFILL_DOCKER_EXEC_ENV_ARGS} \
   node bash -c "vllm serve ${MODEL} \
     --port ${PREFILL_VLLM_PORT} \
@@ -835,9 +851,7 @@ set -x
 docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
-  -e CLOUD_TPU_TASK_ID=0 \
-  -e TPU_WORKER_ID=0 \
-  -e JAX_PROCESS_ID=0 \
+  ${ROLE_HEAD_PROCESS_ENV_ARGS[*]} \
   ${DECODE_DOCKER_EXEC_ENV_ARGS} \
   node bash -c "vllm serve ${MODEL} \
     --port ${DECODE_VLLM_PORT} \
