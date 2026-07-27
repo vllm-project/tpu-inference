@@ -320,10 +320,11 @@ if pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>
   pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1 || true
   sleep 1
 fi
-ray stop >/dev/null 2>&1 || true
+ray stop --force >/dev/null 2>&1 || true
 INNER_EOF
   then
     echo "[cleanup] graceful TPU process shutdown timed out or failed on ${host}; proceeding with force cleanup..." >&2
+    ray stop --force >/dev/null 2>&1 || true
   fi
 
   # Stop and remove node container, as well as disagg proxy benchmark container
@@ -617,7 +618,7 @@ wait_for_ray_head() {
       return 0
     fi
     sleep 5
-  done  
+  done
   echo "Error: Ray head failed to start within ${timeout}s."
   return 1
 }
