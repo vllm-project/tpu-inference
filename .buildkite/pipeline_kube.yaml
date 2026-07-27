@@ -76,21 +76,9 @@
     emptyDir:
       medium: Memory
       sizeLimit: 16Gi
-  # Start each TPU Job with an empty, job-scoped cache volume. Until a golden
-  # cache or CPU preparation flow is reintroduced, the TPU command downloads
-  # and compiles everything it needs under /cache itself.
+  # Empty job-scoped cache volume without golden PVC dependency.
   - name: cache-volume
-    ephemeral:
-      volumeClaimTemplate:
-        spec:
-          accessModes: [ "ReadWriteOnce" ]
-          storageClassName: "premium-rwo"
-          dataSource:
-            kind: PersistentVolumeClaim
-            name: golden-jax-cache-pvc
-          resources:
-            requests:
-              storage: 500Gi
+    emptyDir: {}
 
 # ==============================================================================
 # Topology Specific Anchors
