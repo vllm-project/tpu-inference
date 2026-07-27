@@ -806,11 +806,13 @@ def pcp_ragged_paged_attention(
     kv_cache_lens: jax.Array,
     pcp_q_pos_offsets: jax.Array,
     sm_scale: float,
+    cache_pages: int,
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    cache_phase: str | None = None,
 ):
     """Single-request prefill context-parallel (PCP) attention.
 
@@ -832,6 +834,28 @@ def pcp_ragged_paged_attention(
     padded_q_len = q.shape[
         0]  # padded current tokens across all pcp ranks = 2*pcp*chunk
     pcp_chunk_size = padded_q_len // two_p  # head-tail chunk size
+
+    # --- cache-phase communication strategy ---------------------------------
+    if cache_phase is None:
+        nq_h, nkv_h = q.shape[1], k.shape[1]
+        hd = q.shape[2]
+        max_cached_tokens = cache_pages * kv_cache.shape[1]
+        # Two ways to give every rank what it needs for the cache phase:
+        #   gather-Q : all-gather(Q) + reduce-scatter(O)
+        #   gather-KV: all-gather(cache)
+        comm_q = 2 * padded_q_len * nq_h * hd
+        comm_kv = 2 * max_cached_tokens * nkv_h * hd
+        # Empirically gather-Q needs ~2x the raw
+        # volume advantage before it actually wins.
+        # TODO(wenxindong): apply more accurate heuristic for choosing Q vs KV.
+        GATHER_Q_OVERHEAD = 2.0
+        _cache_phase = ("gather_kv" if comm_kv < GATHER_Q_OVERHEAD *
+                        comm_q else "gather_q")
+    else:
+        _cache_phase = cache_phase.lower()
+
+    assert _cache_phase in ("gather_kv", "gather_q"), (
+        f"cache_phase must be 'gather_kv' or 'gather_q', got {_cache_phase!r}")
 
     _row = [c for r in range(pcp_size) for c in (r, two_p - 1 - r)]
     _inv = [0] * two_p
@@ -868,23 +892,66 @@ def pcp_ragged_paged_attention(
                       v_scale=v_scale)
 
         # ---- cache phase ----
-        ag_q = ag(q_l)  # [pcp*2*chunk]
         cu_cache = jnp.zeros_like(cu_q_lens[0]).at[1:].set(padded_q_len)
         dist_cache = jnp.array([0, 0, 1], jnp.int32)
-        o1, kvc1, l1 = rpa_v3_cp.ragged_paged_attention(ag_q,
-                                                        k_l,
-                                                        v_l,
-                                                        kvc,
-                                                        kvl,
-                                                        pi,
-                                                        cu_cache,
-                                                        dist_cache,
-                                                        kv_cache_lens=kvcl,
-                                                        skip_current_attn=True,
-                                                        use_causal_mask=False,
-                                                        update_kv_cache=False,
-                                                        **common)
-        o1, l1 = _lse_reduce_scatter(o1, l1, pcp_axis, pcp_size)
+        # First chunk of a chunked prefill has no cached tokens
+        if cache_pages == 0:
+            o1 = l1 = None
+            kvc1 = kvc
+        elif _cache_phase == "gather_kv":
+            local_q = q_l.shape[
+                0]  # = padded_q_len // pcp = 2 * pcp_chunk_size
+            cu_kv = jnp.zeros_like(cu_q_lens[0]).at[1:].set(local_q)
+
+            max_seqs = kvl.shape[0]
+            n_gather = int(cache_pages)
+            kv_src = jnp.take(kvc, pi[:n_gather], axis=0)
+
+            kv_tok = lax.all_gather(kv_src, pcp_axis, axis=2, tiled=False)
+            n_pages_tok = kv_src.shape[0] * pcp_size
+            kv_tok = kv_tok.reshape(n_pages_tok, kv_src.shape[1],
+                                    *kv_src.shape[2:])
+            pi_src = jnp.tile(jnp.arange(n_pages_tok, dtype=pi.dtype),
+                              max_seqs)
+            common_kv = {
+                k: v
+                for k, v in common.items()
+                if k not in ("cp_rank", "cp_group_size")
+            }
+            o1, _, l1 = rpa_v3_cp.ragged_paged_attention(
+                q_l,
+                k_l,
+                v_l,
+                kv_tok,
+                kvl,
+                pi_src,
+                cu_kv,
+                dist_cache,
+                kv_cache_lens=kvcl,
+                cp_rank=_rank_i32(0),
+                cp_group_size=1,
+                skip_current_attn=True,
+                use_causal_mask=False,
+                update_kv_cache=False,
+                **common_kv)
+            kvc1 = kvc  # cache unchanged in this phase; current phase writes it
+        else:
+            ag_q = ag(q_l)  # [pcp*2*chunk]
+            o1, kvc1, l1 = rpa_v3_cp.ragged_paged_attention(
+                ag_q,
+                k_l,
+                v_l,
+                kvc,
+                kvl,
+                pi,
+                cu_cache,
+                dist_cache,
+                kv_cache_lens=kvcl,
+                skip_current_attn=True,
+                use_causal_mask=False,
+                update_kv_cache=False,
+                **common)
+            o1, l1 = _lse_reduce_scatter(o1, l1, pcp_axis, pcp_size)
 
         # ---- current phase -----
         # `cu_q_lens[0]` = [0, chunk, chunk+tail_real] and `pcp_qpos` =
@@ -915,8 +982,12 @@ def pcp_ragged_paged_attention(
             write_last_seq_only=True,
             **common)
 
-        # cache term vs. current term: disjoint KV, so LSE-combine.
-        out, _ = merge_attn_states(o1, l1, o2, l2)  # [2*chunk] = [head | tail]
+        # cache term vs. current term: disjoint KV, so LSE-combine.  With no
+        # cached tokens the current phase already is the answer.
+        if o1 is None:
+            out = o2
+        else:
+            out, _ = merge_attn_states(o1, l1, o2, l2)  # [2*chunk]=[head|tail]
         return out.astype(q.dtype), kvc2
 
     return jax.shard_map(
@@ -987,6 +1058,8 @@ def attention(
             v_scale=v_scale,
         )
     if 'pcp' in mesh.shape and mesh.shape['pcp'] > 1:
+        assert md.pcp_cache_pages is not None, (
+            "pcp_cache_pages must be set whenever PCP is enabled")
         output, kv_cache = pcp_ragged_paged_attention(
             mesh,
             q,
@@ -1003,6 +1076,7 @@ def attention(
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            cache_pages=md.pcp_cache_pages,
             update_kv_cache=update_kv_cache,
             use_causal_mask=use_causal_mask,
         )

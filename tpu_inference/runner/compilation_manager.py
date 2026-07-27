@@ -28,7 +28,7 @@ import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, SharedAttentionMetadata, pcp_cache_page_buckets)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)
@@ -360,16 +360,24 @@ class CompilationManager:
                 num_tokens=num_tokens,
             )
 
-    def _precompile_backbone_helper(self,
-                                    name,
-                                    *,
-                                    input_ids,
-                                    positions,
-                                    inputs_embeds,
-                                    intermediate_tensors=None,
-                                    is_first_rank=True,
-                                    is_last_rank=True,
-                                    num_reqs: int) -> None:
+    def _pcp_cache_page_buckets(self) -> list[int]:
+        pcp_size = self.runner.vllm_config.sharding_config.prefill_cp_size
+        if pcp_size <= 1:
+            return [None]
+        return pcp_cache_page_buckets(self.runner.max_num_blocks_per_req)
+
+    def _precompile_backbone_helper(
+            self,
+            name,
+            *,
+            input_ids,
+            positions,
+            inputs_embeds,
+            intermediate_tensors=None,
+            is_first_rank=True,
+            is_last_rank=True,
+            num_reqs: int,
+            pcp_cache_pages: int | None = None) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -449,6 +457,7 @@ class CompilationManager:
                 padded_num_reqs=num_reqs,
                 pcp_kv_cache_lens=pcp_kv_cache_lens,
                 pcp_q_pos_offsets=pcp_q_pos_offsets,
+                pcp_cache_pages=pcp_cache_pages,
             )
 
             return attention_metadata_gid
@@ -693,15 +702,17 @@ class CompilationManager:
                             "hidden_states": hidden_states,
                             "residual": residual
                         })
-                self._precompile_backbone_helper(
-                    f"worker{self.runner.rank} backbone",
-                    input_ids=input_ids,
-                    positions=positions,
-                    inputs_embeds=None,
-                    intermediate_tensors=intermediate_tensors,
-                    is_first_rank=is_first_rank,
-                    is_last_rank=is_last_rank,
-                    num_reqs=num_reqs)
+                for _cache_pages in self._pcp_cache_page_buckets():
+                    self._precompile_backbone_helper(
+                        f"worker{self.runner.rank} backbone",
+                        input_ids=input_ids,
+                        positions=positions,
+                        inputs_embeds=None,
+                        intermediate_tensors=intermediate_tensors,
+                        is_first_rank=is_first_rank,
+                        is_last_rank=is_last_rank,
+                        num_reqs=num_reqs,
+                        pcp_cache_pages=_cache_pages)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()

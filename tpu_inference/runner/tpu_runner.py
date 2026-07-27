@@ -53,7 +53,7 @@ import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, SharedAttentionMetadata, round_up_pcp_cache_pages)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -2832,6 +2832,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # Prefill context parallelism (single request, prefill only): head-tail
         # arrange this request's current tokens into rank order
         pcp_kv_cache_lens = None
+        pcp_cache_pages = None
         pcp_query_start_loc = None
         pcp_q_pos_offsets = None
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
@@ -2896,6 +2897,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh, PartitionSpec(ShardingAxisName.PREFILL_CONTEXT,
                                          None))
             repl = NamedSharding(self.mesh, PartitionSpec())
+            pcp_cache_pages = round_up_pcp_cache_pages(
+                num_computed, self.block_size, self.max_num_blocks_per_req)
             pcp_kv_cache_lens = device_array(self.mesh,
                                              kv_cache_lens_np,
                                              sharding=repl)
@@ -3045,6 +3048,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp_kv_cache_lens=pcp_kv_cache_lens,
                 pcp_q_pos_offsets=pcp_q_pos_offsets,
+                pcp_cache_pages=pcp_cache_pages,
             )
 
             return attention_metadata_gid

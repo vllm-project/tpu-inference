@@ -13,9 +13,11 @@
 # limitations under the License.
 
 import functools
+import math
 from dataclasses import dataclass
 
 import jax
+from vllm.utils.math_utils import cdiv
 
 
 @functools.partial(
@@ -30,7 +32,7 @@ import jax
         "pcp_q_pos_offsets",
         "pcp_kv_cache_lens",
     ],
-    meta_fields=["padded_num_reqs"],
+    meta_fields=["padded_num_reqs", "pcp_cache_pages"],
 )
 @dataclass
 class AttentionMetadata(object):
@@ -69,6 +71,9 @@ class AttentionMetadata(object):
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
 
+    # PCP gather-KV only. Number of kv pages occupied by the current request.
+    pcp_cache_pages: int | None = None
+
 
 @functools.partial(
     jax.tree_util.register_dataclass,
@@ -106,3 +111,32 @@ class SharedAttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
+
+
+PCP_CACHE_PAGE_BUCKET_COUNT = 5
+
+
+def pcp_cache_page_buckets(max_num_blocks_per_req: int) -> list[int]:
+    """The buckets for the `pcp_cache_pages` value, including 0.
+    """
+    buckets = {0, max_num_blocks_per_req}
+    n = PCP_CACHE_PAGE_BUCKET_COUNT - len(buckets)
+    if n > 0 and max_num_blocks_per_req > 1:
+        step = math.log(max_num_blocks_per_req) / (n + 1)
+        for i in range(1, n + 1):
+            v = 1 << max(0, round(math.exp(step * i)).bit_length() - 1)
+            buckets.add(min(max(v, 1), max_num_blocks_per_req))
+    return sorted(buckets)
+
+
+def round_up_pcp_cache_pages(num_computed_tokens: int, block_size: int,
+                             max_num_blocks_per_req: int) -> int:
+    """Round a request's number of kv pages up to the nearest bucket.
+    """
+    if num_computed_tokens <= 0:
+        return 0
+    live_pages = cdiv(num_computed_tokens, block_size)
+    for b in pcp_cache_page_buckets(max_num_blocks_per_req):
+        if b >= live_pages:
+            return b
+    return max_num_blocks_per_req
