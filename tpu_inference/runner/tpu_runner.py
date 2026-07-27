@@ -53,7 +53,8 @@ import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, PCPMetadata, SharedAttentionMetadata)
+    AttentionMetadata, PCPMetadata, SharedAttentionMetadata,
+    round_up_pcp_cache_pages)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -2916,6 +2917,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                            kv_cache_lens_np,
                                            sharding=repl),
                 q_pos_offsets=pcp_q_pos_offsets,
+                # Snap the request's live cached-page count up to the shared
+                # ladder that precompilation warms (0 == nothing cached, which
+                # elides the cache phase entirely).
+                cache_pages=round_up_pcp_cache_pages(
+                    num_computed, self.block_size,
+                    self.max_num_blocks_per_req),
             )
         spec_decode_metadata = None
         if self.speculative_config:

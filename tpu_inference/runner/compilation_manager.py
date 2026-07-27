@@ -28,7 +28,8 @@ import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, PCPMetadata, SharedAttentionMetadata)
+    AttentionMetadata, PCPMetadata, SharedAttentionMetadata,
+    pcp_cache_page_buckets)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)
@@ -360,6 +361,19 @@ class CompilationManager:
                 num_tokens=num_tokens,
             )
 
+    def _pcp_cache_page_buckets(self) -> list[int]:
+        """Rungs of the shared `pcp_cache_pages` ladder to precompile.
+
+        It is a META field of PCPMetadata, so each value is its own compiled
+        program; precompiling the ladder keeps the first request of each rung
+        off the compile path.  Non-PCP runs use a single value (0), where the
+        field is never read.
+        """
+        pcp_size = self.runner.vllm_config.sharding_config.prefill_cp_size
+        if pcp_size <= 1:
+            return [0]
+        return pcp_cache_page_buckets(self.runner.max_num_blocks_per_req)
+
     def _precompile_backbone_helper(self,
                                     name,
                                     *,
@@ -369,7 +383,8 @@ class CompilationManager:
                                     intermediate_tensors=None,
                                     is_first_rank=True,
                                     is_last_rank=True,
-                                    num_reqs: int) -> None:
+                                    num_reqs: int,
+                                    pcp_cache_pages: int = 0) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -413,6 +428,7 @@ class CompilationManager:
                                            np.zeros((pcp_size, n_reqs),
                                                     dtype=np.int32),
                                            sharding=pcp_spec),
+                cache_pages=pcp_cache_pages,
             )
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
         # populate for hybrid attn+mamba models — for pure-attention models we
@@ -692,15 +708,17 @@ class CompilationManager:
                             "hidden_states": hidden_states,
                             "residual": residual
                         })
-                self._precompile_backbone_helper(
-                    f"worker{self.runner.rank} backbone",
-                    input_ids=input_ids,
-                    positions=positions,
-                    inputs_embeds=None,
-                    intermediate_tensors=intermediate_tensors,
-                    is_first_rank=is_first_rank,
-                    is_last_rank=is_last_rank,
-                    num_reqs=num_reqs)
+                for _cache_pages in self._pcp_cache_page_buckets():
+                    self._precompile_backbone_helper(
+                        f"worker{self.runner.rank} backbone",
+                        input_ids=input_ids,
+                        positions=positions,
+                        inputs_embeds=None,
+                        intermediate_tensors=intermediate_tensors,
+                        is_first_rank=is_first_rank,
+                        is_last_rank=is_last_rank,
+                        num_reqs=num_reqs,
+                        pcp_cache_pages=_cache_pages)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()

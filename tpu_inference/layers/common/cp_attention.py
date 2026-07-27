@@ -347,6 +347,19 @@ def pcp_forward(
                   k_scale=k_scale,
                   v_scale=v_scale)
 
+    # Cache-phase strategy, decided per compile from static comm estimates.
+    # all_gather and reduce_scatter are duals and move the same (p-1)/p
+    # fraction, so gather-Q counts both legs; gather-KV moves K and V but has
+    # no output collective.  Volume alone puts the crossover at
+    # ctx = chunk*NQ/NKV, but gather-Q issues TWO collective rounds (two sync
+    # points) plus an LSE reweight, so empirically it needs ~2x the raw volume
+    # advantage before it actually wins.
+    cache_pages = md.pcp.cache_pages
+    _GATHER_Q_OVERHEAD = 2.0
+    comm_q = 2 * padded_q_len * q.shape[1] * q.shape[2]
+    comm_kv = 2 * (cache_pages * kv_cache.shape[1]) * k.shape[1] * q.shape[2]
+    use_gather_kv = comm_kv < _GATHER_Q_OVERHEAD * comm_q
+
     def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local,
                   kv_cache_lens_local, page_indices_local, distribution_local,
                   pcp_cu_q_lens_local, pcp_q_pos_offsets_local):
@@ -361,32 +374,89 @@ def pcp_forward(
                                                 *x.shape[1:])[inv_row].reshape(
                                                     padded_q_len, *x.shape[1:])
 
-        # Cache phase: all_gather Q tokens so every rank sees the full sequence.
-        # PCP local q_local has 2*C tokens (head + tail chunk for this rank).
-        # After all_gather along tokens axis: pcp_size * 2 * C = padded_q_len.
-        q_all_tokens = all_gather_tokens(q_local)
-        cu_cache = jnp.zeros_like(
-            pcp_cu_q_lens_local[0]).at[1:].set(padded_q_len)
-        context_out, kv_cache_temp, context_lse = _rpa_cp_call(
-            q_all_tokens,
-            k_local,
-            v_local,
-            kv_cache_local,
-            kv_lens_local,
-            page_indices_local,
-            cu_cache,
-            jnp.array([0, 0, 1], jnp.int32),
-            cp_rank=cp_rank,
-            cp_group_size=pcp_size,
-            kv_cache_lens=kv_cache_lens_local,
-            skip_current_attn=True,
-            use_causal_mask=False,
-            update_kv_cache=False,
-            **common)
+        # ---- Cache phase --------------------------------------------------
+        # Two ways to give every rank what it needs:
+        #   gather-Q : all_gather Q, attend this rank's KV shard, then
+        #              reduce_scatter the partials.  Comm ~ 2*chunk*NQ, i.e.
+        #              INDEPENDENT of context length.
+        #   gather-KV: all_gather the striped KV cache into global token order
+        #              so every rank holds the full cache, then attend the
+        #              LOCAL Q against it as ordinary paged attention.  No
+        #              output collective at all.  Comm ~ ctx*NKV.
+        # gather-KV wins at short/medium context, gather-Q once ctx is long.
+        # The cache phase never writes the cache (update_kv_cache=False), so
+        # the current phase starts from the untouched local shard unless the
+        # gather-Q path threaded a copy through.
+        kv_cache_temp = kv_cache_local
+        if cache_pages == 0:
+            # Nothing cached (first chunk of a chunked prefill): the cache
+            # phase would attend an empty cache, be fully masked, and have its
+            # -inf result discarded by merge_attn_states.  Skip it outright.
+            context_out = context_lse = None
+        elif use_gather_kv:
+            # Compact to this request's live pages, then all_gather with the
+            # pcp axis INNERMOST: for local page p, offset o, rank j the cache
+            # holds global token (p*page_l + o)*pcp + j, so flattening
+            # (p, o, j) is already global token order.  Regroup into pages of
+            # the ORIGINAL width (a pure reshape) and the cache phase becomes
+            # plain paged attention with cp_group_size=1.
+            local_q = q_local.shape[0]
+            cu_kv = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1:].set(local_q)
+            max_seqs = kv_lens_local.shape[0]
+            kv_src = jnp.take(kv_cache_local,
+                              page_indices_local[:cache_pages],
+                              axis=0)
+            kv_tok = lax.all_gather(kv_src, pcp_axis, axis=2, tiled=False)
+            n_pages_tok = kv_src.shape[0] * pcp_size
+            kv_tok = kv_tok.reshape(n_pages_tok, kv_src.shape[1],
+                                    *kv_src.shape[2:])
+            pi_tok = jnp.tile(
+                jnp.arange(n_pages_tok, dtype=page_indices_local.dtype),
+                max_seqs)
+            context_out, _, context_lse = _rpa_cp_call(
+                q_local,
+                k_local,
+                v_local,
+                kv_tok,
+                kv_lens_local,
+                pi_tok,
+                cu_kv,
+                jnp.array([0, 0, 1], jnp.int32),
+                cp_rank=jnp.zeros((1, ), jnp.int32),
+                cp_group_size=1,
+                kv_cache_lens=kv_cache_lens_local,
+                skip_current_attn=True,
+                use_causal_mask=False,
+                update_kv_cache=False,
+                **common)
+        else:
+            # Cache phase: all_gather Q tokens so every rank sees the full
+            # sequence.  PCP local q_local has 2*C tokens (head + tail chunk
+            # for this rank).  After all_gather along the tokens axis:
+            # pcp_size * 2 * C = padded_q_len.
+            q_all_tokens = all_gather_tokens(q_local)
+            cu_cache = jnp.zeros_like(
+                pcp_cu_q_lens_local[0]).at[1:].set(padded_q_len)
+            context_out, kv_cache_temp, context_lse = _rpa_cp_call(
+                q_all_tokens,
+                k_local,
+                v_local,
+                kv_cache_local,
+                kv_lens_local,
+                page_indices_local,
+                cu_cache,
+                jnp.array([0, 0, 1], jnp.int32),
+                cp_rank=cp_rank,
+                cp_group_size=pcp_size,
+                kv_cache_lens=kv_cache_lens_local,
+                skip_current_attn=True,
+                use_causal_mask=False,
+                update_kv_cache=False,
+                **common)
 
-        # Rank reduce: reduce_scatter so each rank gets its own 2*C token chunk.
-        context_out, context_lse = _pcp_rs_reduce(context_out, context_lse,
-                                                  pcp_axis, pcp_size)
+            # Rank reduce: reduce_scatter so each rank gets its own 2*C chunk.
+            context_out, context_lse = _pcp_rs_reduce(context_out, context_lse,
+                                                      pcp_axis, pcp_size)
 
         # Current phase: local Q (head+tail chunks) attends all-gathered current KV.
         # pcp_cu_q_lens_local[0] = [0, chunk, chunk+tail_real]; pcp_q_pos_offsets_local[0] = [head_offset, tail_offset].
@@ -417,8 +487,12 @@ def pcp_forward(
             write_last_seq_only=True,
             **common)
 
-        out, _ = merge_attn_states(context_out, context_lse, curr_out,
-                                   curr_lse)
+        # With nothing cached the current phase already IS the answer.
+        if context_out is None:
+            out = curr_out
+        else:
+            out, _ = merge_attn_states(context_out, context_lse, curr_out,
+                                       curr_lse)
         return kv_cache_updated, out.astype(q.dtype)
 
     return jax.shard_map(
