@@ -822,11 +822,31 @@ def pcp_ragged_paged_attention(
     `2*pcp-1-r` (tail), so its local buffer is `[head_chunk | tail_chunk]`.
 
     Two kernel launches per rank and is LSE-combined:
-      * cache phase:  all-gather Q across pcp , attend the pcp-strided 
-        cache (non-causal, no write), LSE all-reduce over pcp.
+      * cache phase:  attend the pcp-strided cache (non-causal, no write) by
+        one of three strategies -- see `cache_phase`.
       * current phase: the local Q attends the current KV (causal,
         token-order all-gathered KV, per-chunk `q_pos_offset`); the tail phase
-        writes the strided cache. 
+        writes the strided cache.
+
+    Args:
+      cache_phase: how the cache phase is communicated. One of
+
+        * `"gather_q"`  - all-gather Q, attend the local shard, LSE
+          reduce-scatter the output. Moves `~2 * S * NQ * HD`, independent of
+          context length.
+        * `"gather_kv"` - all-gather the live cache pages into global token
+          order so every rank holds the whole cache, then attend the local Q as
+          ordinary paged attention. Moves `~ctx * NKV * HD` and materialises
+          `pcp` shards.
+        * `"ring_kv"`   - keep only the local shard and rotate it around the
+          pcp ring, LSE-merging the `pcp` partials. Same bytes on the wire as
+          gather-KV, but peak memory is 2 shards instead of `pcp`, at the cost
+          of `pcp` kernel launches. A memory play, not a bandwidth play.
+        * `None` (default) - take the `PCP_CACHE_PHASE` env var, or `"auto"`,
+          which compares the two static communication estimates and picks
+          gather-KV at short/medium context and gather-Q once it is long
+          enough. Auto never picks ring-KV: it costs the same bandwidth as
+          gather-KV and only pays off under memory pressure, so it is opt-in.
     """
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
@@ -836,13 +856,19 @@ def pcp_ragged_paged_attention(
     pcp_chunk_size = padded_q_len // two_p  # head-tail chunk size
 
     # --- cache-phase communication strategy ---------------------------------
-    if cache_phase is None:
+    _cache_phase = (cache_phase or envs.PCP_CACHE_PHASE or "auto").lower()
+    assert _cache_phase in ("auto", "gather_kv", "gather_q", "ring_kv"), (
+        "cache_phase must be 'auto', 'gather_kv', 'gather_q' or 'ring_kv', "
+        f"got {_cache_phase!r}")
+    if _cache_phase == "auto":
         nq_h, nkv_h = q.shape[1], k.shape[1]
         hd = q.shape[2]
         max_cached_tokens = cache_pages * kv_cache.shape[1]
         # Two ways to give every rank what it needs for the cache phase:
         #   gather-Q : all-gather(Q) + reduce-scatter(O)
         #   gather-KV: all-gather(cache)
+        # (ring-KV moves the same bytes as gather-KV, so it is never chosen
+        # here -- it trades kernel launches for memory and is opt-in.)
         comm_q = 2 * padded_q_len * nq_h * hd
         comm_kv = 2 * max_cached_tokens * nkv_h * hd
         # Empirically gather-Q needs ~2x the raw
@@ -851,11 +877,6 @@ def pcp_ragged_paged_attention(
         GATHER_Q_OVERHEAD = 2.0
         _cache_phase = ("gather_kv" if comm_kv < GATHER_Q_OVERHEAD *
                         comm_q else "gather_q")
-    else:
-        _cache_phase = cache_phase.lower()
-
-    assert _cache_phase in ("gather_kv", "gather_q"), (
-        f"cache_phase must be 'gather_kv' or 'gather_q', got {_cache_phase!r}")
 
     _row = [c for r in range(pcp_size) for c in (r, two_p - 1 - r)]
     _inv = [0] * two_p
@@ -883,28 +904,29 @@ def pcp_ragged_paged_attention(
             g = ag(x).reshape(two_p, pcp_chunk_size, *x.shape[1:])
             return g[inv_row].reshape(padded_q_len, *x.shape[1:])
 
-        common = dict(cp_rank=_rank_i32(r),
-                      cp_group_size=pcp_size,
-                      return_lse=True,
+        common = dict(return_lse=True,
                       sm_scale=sm_scale,
                       q_scale=q_scale,
                       k_scale=k_scale,
                       v_scale=v_scale)
+        # The local shard's view of the strided cache: global token g lives on
+        # rank g % pcp at local slot g // pcp.
+        cp_local = dict(cp_rank=_rank_i32(r), cp_group_size=pcp_size)
 
         # ---- cache phase ----
         cu_cache = jnp.zeros_like(cu_q_lens[0]).at[1:].set(padded_q_len)
         dist_cache = jnp.array([0, 0, 1], jnp.int32)
+        # Only the request's live pages participate; the block table is sized
+        # for max_model_len.  `local_q` = padded_q_len // pcp = 2 * chunk.
+        local_q = q_l.shape[0]
+        cu_kv = jnp.zeros_like(cu_q_lens[0]).at[1:].set(local_q)
+        max_seqs = kvl.shape[0]
+        n_gather = int(cache_pages)
         # First chunk of a chunked prefill has no cached tokens
         if cache_pages == 0:
             o1 = l1 = None
             kvc1 = kvc
         elif _cache_phase == "gather_kv":
-            local_q = q_l.shape[
-                0]  # = padded_q_len // pcp = 2 * pcp_chunk_size
-            cu_kv = jnp.zeros_like(cu_q_lens[0]).at[1:].set(local_q)
-
-            max_seqs = kvl.shape[0]
-            n_gather = int(cache_pages)
             kv_src = jnp.take(kvc, pi[:n_gather], axis=0)
 
             kv_tok = lax.all_gather(kv_src, pcp_axis, axis=2, tiled=False)
@@ -913,11 +935,6 @@ def pcp_ragged_paged_attention(
                                     *kv_src.shape[2:])
             pi_src = jnp.tile(jnp.arange(n_pages_tok, dtype=pi.dtype),
                               max_seqs)
-            common_kv = {
-                k: v
-                for k, v in common.items()
-                if k not in ("cp_rank", "cp_group_size")
-            }
             o1, _, l1 = rpa_v3_cp.ragged_paged_attention(
                 q_l,
                 k_l,
@@ -933,7 +950,49 @@ def pcp_ragged_paged_attention(
                 skip_current_attn=True,
                 use_causal_mask=False,
                 update_kv_cache=False,
-                **common_kv)
+                **common)
+            kvc1 = kvc  # cache unchanged in this phase; current phase writes it
+        elif _cache_phase == "ring_kv":
+            # Ring: nobody materialises the whole cache.  Each rank keeps only
+            # its own shard and rotates it one hop per round, so over `pcp`
+            # rounds the local Q meets every rank's shard exactly once and the
+            # partials LSE-merge into the same answer gather-KV computes.
+            # Bytes on the wire match gather-KV ((pcp-1) shards per rank), but
+            # only two shards are ever live.
+            kv_shard = jnp.take(kvc, pi[:n_gather], axis=0)
+            pi_ring = jnp.tile(jnp.arange(n_gather, dtype=pi.dtype), max_seqs)
+            # Rank i hands its shard to rank i+1, so the shard rank r holds at
+            # round t started on rank (r - t) % pcp -- which is exactly the
+            # `cp_rank` the kernel needs to place those tokens globally.
+            rot = [(i, (i + 1) % pcp_size) for i in range(pcp_size)]
+            o1 = l1 = None
+            for t in range(pcp_size):
+                # Issue the rotation before attending so the collective
+                # overlaps this round's kernel.
+                kv_next = (lax.ppermute(kv_shard, pcp_axis, perm=rot)
+                           if t < pcp_size - 1 else None)
+                src_rank = lax.rem(r + pcp_size - t, pcp_size)
+                o_t, _, l_t = rpa_v3_cp.ragged_paged_attention(
+                    q_l,
+                    k_l,
+                    v_l,
+                    kv_shard,
+                    kvl,
+                    pi_ring,
+                    cu_kv,
+                    dist_cache,
+                    kv_cache_lens=kvcl,
+                    cp_rank=_rank_i32(src_rank),
+                    cp_group_size=pcp_size,
+                    skip_current_attn=True,
+                    use_causal_mask=False,
+                    update_kv_cache=False,
+                    **common)
+                # Disjoint KV per round, so the merge is exact and
+                # order-independent.
+                o1, l1 = ((o_t, l_t) if o1 is None else merge_attn_states(
+                    o1, l1, o_t, l_t))
+                kv_shard = kv_next
             kvc1 = kvc  # cache unchanged in this phase; current phase writes it
         else:
             ag_q = ag(q_l)  # [pcp*2*chunk]
@@ -950,7 +1009,8 @@ def pcp_ragged_paged_attention(
                 skip_current_attn=True,
                 use_causal_mask=False,
                 update_kv_cache=False,
-                **common)
+                **common,
+                **cp_local)
             o1, l1 = _lse_reduce_scatter(o1, l1, pcp_axis, pcp_size)
 
         # ---- current phase -----
@@ -980,7 +1040,8 @@ def pcp_ragged_paged_attention(
             use_causal_mask=use_causal_mask,
             update_kv_cache=update_kv_cache,
             write_last_seq_only=True,
-            **common)
+            **common,
+            **cp_local)
 
         # cache term vs. current term: disjoint KV, so LSE-combine.  With no
         # cached tokens the current phase already is the answer.
