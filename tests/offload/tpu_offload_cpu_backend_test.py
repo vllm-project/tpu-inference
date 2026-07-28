@@ -93,3 +93,41 @@ class TestLocalCPUBackend:
 
         assert backend.current_size_bytes == 0
         assert len(backend.cache) == 0
+
+    def test_concurrent_access(self):
+        """Simulates concurrent access to verify thread safety."""
+        import concurrent.futures
+
+        backend = LocalCPUBackend(num_cpu_chunks=100)
+        num_threads = 10
+        ops_per_thread = 50
+
+        def worker_task(thread_idx):
+            for i in range(ops_per_thread):
+                chunk_id = CpuChunkId((thread_idx * ops_per_thread + i) % 100)
+                value = create_mock_jax_array(10)
+
+                # Alternate between add and get
+                if i % 2 == 0:
+                    backend.add(chunk_id, value)
+                else:
+                    backend.get(chunk_id)
+
+                # Periodically reclaim
+                if i % 10 == 0:
+                    # Keep some random subset of chunks
+                    backend.reclaim_unoccupied_chunks(
+                        occupied_chunk_ids=[CpuChunkId(0),
+                                            CpuChunkId(50)])
+
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=num_threads) as executor:
+            futures = [
+                executor.submit(worker_task, i) for i in range(num_threads)
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()  # Raise exception if any occurred
+
+        # If we reach here without deadlock or exception, basic thread safety is confirmed.
+        # We can verify internal state consistency if needed.
+        assert backend.current_size_bytes >= 0

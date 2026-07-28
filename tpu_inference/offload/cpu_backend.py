@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import sys
+import threading
 from collections import OrderedDict
 from typing import Any, Optional
 
@@ -42,6 +43,7 @@ class LocalCPUBackend:
         self.current_size_bytes = 0
         self._num_saved_cpu_chunks = 0
         self.metrics_collector = TPUKVCacheMetrics.get_or_create()
+        self.lock = threading.Lock()
         logger.info(
             "LocalCPUBackend initialized."
             f"CPU cache capacity: {self.max_num_cpu_chunks} chunks / pages.")
@@ -70,54 +72,58 @@ class LocalCPUBackend:
         If the cache is full, it evicts the least recently used, unpinned
         entries until there is enough space.
         """
-        if chunk_id < 0 or chunk_id >= self.max_num_cpu_chunks:
-            # TODO(jcgu): report failure when offload scheduler / worker
-            # can handle failed operations.
-            raise ValueError(f" get invalid chunk_id: {chunk_id}")
+        with self.lock:
+            if chunk_id < 0 or chunk_id >= self.max_num_cpu_chunks:
+                # TODO(jcgu): report failure when offload scheduler / worker
+                # can handle failed operations.
+                raise ValueError(f" get invalid chunk_id: {chunk_id}")
 
-        # Add the new item.
-        if chunk_id in self.cache:
-            old_value = self.cache.pop(chunk_id)
-            self.current_size_bytes -= self._get_value_size(old_value)
-            del old_value
-            self._num_saved_cpu_chunks -= 1
+            # Add the new item.
+            if chunk_id in self.cache:
+                old_value = self.cache.pop(chunk_id)
+                self.current_size_bytes -= self._get_value_size(old_value)
+                del old_value
+                self._num_saved_cpu_chunks -= 1
 
-        self.cache[chunk_id] = value
-        self._num_saved_cpu_chunks += 1
-        value_size = self._get_value_size(value)
-        self.current_size_bytes += value_size
-        logger.debug(
-            f"Added chunk_id: {chunk_id} (size:{value_size}) to CPU backend.")
-        logger.debug(
-            f"Cache: {self.current_size_bytes} bytes, {self._num_saved_cpu_chunks} occupied chunks."
-        )
-        self.metrics_collector.record_host_memory_usage(
-            self.current_size_bytes)
-        return True
+            self.cache[chunk_id] = value
+            self._num_saved_cpu_chunks += 1
+            value_size = self._get_value_size(value)
+            self.current_size_bytes += value_size
+            logger.debug(
+                f"Added chunk_id: {chunk_id} (size:{value_size}) to CPU backend."
+            )
+            logger.debug(
+                f"Cache: {self.current_size_bytes} bytes, {self._num_saved_cpu_chunks} occupied chunks."
+            )
+            self.metrics_collector.record_host_memory_usage(
+                self.current_size_bytes)
+            return True
 
     def get(self, chunk_id: CpuChunkId) -> Optional[Any]:
         """
         Gets the value for a given chunk_id and marks it as recently used.
         """
-        if chunk_id in self.cache:
-            return self.cache[chunk_id]
-        return None
+        with self.lock:
+            if chunk_id in self.cache:
+                return self.cache[chunk_id]
+            return None
 
     def reclaim_unoccupied_chunks(self, occupied_chunk_ids: list[CpuChunkId]):
-        chunk_ids = list(self.cache.keys())
-        unoccupied_chunk_ids = [
-            chunk_id for chunk_id in chunk_ids
-            if chunk_id not in occupied_chunk_ids
-        ]
-        reclaimed_size_bytes = 0
-        for chunk_id in unoccupied_chunk_ids:
-            dummy_value = self.cache.pop(chunk_id)
-            reclaimed_size_bytes += self._get_value_size(dummy_value)
-            del dummy_value
-        self.current_size_bytes -= reclaimed_size_bytes
+        with self.lock:
+            chunk_ids = list(self.cache.keys())
+            unoccupied_chunk_ids = [
+                chunk_id for chunk_id in chunk_ids
+                if chunk_id not in occupied_chunk_ids
+            ]
+            reclaimed_size_bytes = 0
+            for chunk_id in unoccupied_chunk_ids:
+                dummy_value = self.cache.pop(chunk_id)
+                reclaimed_size_bytes += self._get_value_size(dummy_value)
+                del dummy_value
+            self.current_size_bytes -= reclaimed_size_bytes
 
-        logger.debug(
-            f" Reclaimed {len(unoccupied_chunk_ids)} unoccupied chunks, "
-            f"with {reclaimed_size_bytes} bytes.")
-        self.metrics_collector.record_host_memory_usage(
-            self.current_size_bytes)
+            logger.debug(
+                f" Reclaimed {len(unoccupied_chunk_ids)} unoccupied chunks, "
+                f"with {reclaimed_size_bytes} bytes.")
+            self.metrics_collector.record_host_memory_usage(
+                self.current_size_bytes)
