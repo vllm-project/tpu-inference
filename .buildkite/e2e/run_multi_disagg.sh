@@ -136,6 +136,10 @@ echo "Using TPU7x-16 hosts by TPU process ID: ${ORDERED_SLICE_HOSTS[*]}"
 echo "Prefill uses chips 0,1 on both hosts; Decode uses chips 2,3 on both hosts."
 echo "Tensor parallel size per role: ${PREFILL_TENSOR_PARALLEL_SIZE}"
 
+# TPU7x-16 exposes four chips per physical host. Each disaggregated role uses
+# only two of them, so keep the physical host topology separate from the
+# per-process topology selected through TPU_VISIBLE_CHIPS.
+readonly TPU_CHIPS_PER_HOST_BOUNDS_VALUE="2,2,1"
 readonly TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE="1,2,1"
 readonly PREFILL_TPU_PROCESS_PORT=8476
 readonly DECODE_TPU_PROCESS_PORT=9476
@@ -174,9 +178,10 @@ for host_index in "${!DECODE_HOSTS[@]}"; do
 done
 
 # Ray normally rewrites TPU_VISIBLE_CHIPS and forces TPU_HOST_BOUNDS=1,1,1
-# for a partial-chip actor. That conflicts with TPU7x-16's two-host metadata,
-# so preserve the role-specific chip IDs and topology configured here.
+# for a partial-chip actor. Preserve the role-specific chip IDs while reporting
+# the complete physical host topology required by TPU7x-16 VM metadata.
 PREFILL_TPU_ENV_ARGS=(
+  -e TPU_CHIPS_PER_HOST_BOUNDS="${TPU_CHIPS_PER_HOST_BOUNDS_VALUE}"
   -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}"
   -e TPU_VISIBLE_CHIPS="0,1"
   -e TPU_PROCESS_PORT="${PREFILL_TPU_PROCESS_PORT}"
@@ -189,6 +194,7 @@ PREFILL_TPU_ENV_ARGS=(
   -e VLLM_TPU_RAY_PROCESS_MAP="${PREFILL_PROCESS_MAP}"
 )
 DECODE_TPU_ENV_ARGS=(
+  -e TPU_CHIPS_PER_HOST_BOUNDS="${TPU_CHIPS_PER_HOST_BOUNDS_VALUE}"
   -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}"
   -e TPU_VISIBLE_CHIPS="2,3"
   -e TPU_PROCESS_PORT="${DECODE_TPU_PROCESS_PORT}"
