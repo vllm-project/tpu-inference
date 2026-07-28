@@ -523,8 +523,9 @@ def shard_transport_tables_in_blocks(routing, me, *, e_total, ep):
     my_recv_base = lax.dynamic_slice(recv_base, (0, me, 0),
                                      (ep, 1, g_local))[:, 0]
     push_dst = my_recv_base.T
-    send_rows = (my_region_rows * not_me[None, :]).sum()
-    self_rows = jnp.sum(aligned_rows * (~not_me)[None, :])
+    not_me_i = not_me.astype(my_region_rows.dtype)
+    send_rows = (my_region_rows * not_me_i[None, :]).sum()
+    self_rows = jnp.sum(aligned_rows * (1 - not_me_i)[None, :])
     recv_remote = lax.dynamic_slice(routing.recv_rows, (me,), (1,))[0] \
         - self_rows
     totals = jnp.stack([send_rows // B, recv_remote // B]).astype(jnp.int32)
