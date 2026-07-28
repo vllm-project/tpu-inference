@@ -15,7 +15,7 @@ TOP_K = 10
 
 _GEMV_NBUF = max(2, int(_os.getenv("MOE_GEMV_NBUF", "2")))
 _FUSE_NBUF = max(2, int(_os.getenv("MOE_FUSE_NBUF", str(_GEMV_NBUF))))
-_CN_K_TILE = int(_os.getenv("MOE_CN_K_TILE", "2048"))
+_CN_K_TILE = int(_os.getenv("MOE_CN_K_TILE", "4096"))
 _CN_I_TILE = int(_os.getenv("MOE_CN_I_TILE", "2048"))
 
 
@@ -24,7 +24,7 @@ def _expert_body(
     w1_ref, w1_scale_ref, w2_ref, w2_scale_ref,
     w1_bufs_ref, w1_s_bufs_ref, w2_bufs_ref, w2_s_bufs_ref,
     acc_scratch_ref, sem_ref,
-    *, K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, NBUF_,
+    *, K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, NBUF_W1_, NBUF_W2_,
     K_TILE, NUM_K, QB_eff, KB_TILE, I_TILE, NUM_I, IB_TILE,
     DTYPE_LHS, DTYPE_OUT, DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_,
     is_new_expert, is_first_slot, next_expert_gj, is_next_new,
@@ -41,19 +41,19 @@ def _expert_body(
         pltpu.make_async_copy(
             w1_ref.at[pl.ds(gj, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
             w1_bufs_ref.at[pl.ds(0, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-            sem_ref.at[0 * NBUF_ + 0]
+            sem_ref.at[0 * NBUF_W1_ + 0]
         ).start()
         pltpu.make_async_copy(
             w1_scale_ref.at[pl.ds(gj, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
             w1_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-            sem_ref.at[1 * NBUF_ + 0]
+            sem_ref.at[1 * NBUF_W1_ + 0]
         ).start()
 
     # ---- Phase 1: K-tiled gate+up matmul ----
     gate_up_acc = jnp.zeros((M_PAD, 2 * I), dtype=jnp.float32)
 
     for k in range(NUM_K):
-        buf = k % NBUF_
+        buf = k % NBUF_W1_
         k_block_start = (k * K_TILE) // QB
 
         @pl.when(is_new_expert)
@@ -61,29 +61,29 @@ def _expert_body(
             # Start next tile DMA (if exists)
             nxt_k = k + 1
             if nxt_k < NUM_K:
-                nxt_buf = nxt_k % NBUF_
+                nxt_buf = nxt_k % NBUF_W1_
                 pltpu.make_async_copy(
                     w1_ref.at[pl.ds(gj, 1), pl.ds(nxt_k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
                     w1_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-                    sem_ref.at[0 * NBUF_ + nxt_buf]
+                    sem_ref.at[0 * NBUF_W1_ + nxt_buf]
                 ).start()
                 nxt_k_block_start = (nxt_k * K_TILE) // QB
                 pltpu.make_async_copy(
                     w1_scale_ref.at[pl.ds(gj, 1), pl.ds(nxt_k_block_start, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
                     w1_s_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-                    sem_ref.at[1 * NBUF_ + nxt_buf]
+                    sem_ref.at[1 * NBUF_W1_ + nxt_buf]
                 ).start()
 
             # Wait for current tile
             pltpu.make_async_copy(
                 w1_ref.at[pl.ds(gj, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
                 w1_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-                sem_ref.at[0 * NBUF_ + buf]
+                sem_ref.at[0 * NBUF_W1_ + buf]
             ).wait()
             pltpu.make_async_copy(
                 w1_scale_ref.at[pl.ds(gj, 1), pl.ds(k_block_start, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
                 w1_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-                sem_ref.at[1 * NBUF_ + buf]
+                sem_ref.at[1 * NBUF_W1_ + buf]
             ).wait()
 
         # ---- UNCONDITIONAL compute (buffer valid either way) ----
@@ -107,12 +107,12 @@ def _expert_body(
         pltpu.make_async_copy(
             w2_ref.at[pl.ds(gj, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
             w2_bufs_ref.at[pl.ds(0, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
-            sem_ref.at[2 * NBUF_ + 0]
+            sem_ref.at[2 * NBUF_W1_ + 0]
         ).start()
         pltpu.make_async_copy(
             w2_scale_ref.at[pl.ds(gj, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
             w2_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-            sem_ref.at[3 * NBUF_ + 0]
+            sem_ref.at[2 * NBUF_W1_ + NBUF_W2_ + 0]
         ).start()
 
     # ---- Prefetch NEXT expert's w1 tile 0 (gated by is_next_new) ----
@@ -122,12 +122,12 @@ def _expert_body(
             pltpu.make_async_copy(
                 w1_ref.at[pl.ds(next_expert_gj, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
                 w1_bufs_ref.at[pl.ds(0, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
-                sem_ref.at[0 * NBUF_ + 0]
+                sem_ref.at[0 * NBUF_W1_ + 0]
             ).start()
             pltpu.make_async_copy(
                 w1_scale_ref.at[pl.ds(next_expert_gj, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
                 w1_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, KB_TILE), pl.ds(0, 1), pl.ds(0, 2 * I)],
-                sem_ref.at[1 * NBUF_ + 0]
+                sem_ref.at[1 * NBUF_W1_ + 0]
             ).start()
 
     # ---- SwiGLU (DMA runs in parallel) ----
@@ -140,7 +140,7 @@ def _expert_body(
     down_acc = jnp.zeros((M_PAD, H), dtype=jnp.float32)
 
     for m in range(NUM_I):
-        buf = m % NBUF_
+        buf = m % NBUF_W2_
         i_block_start = (m * I_TILE) // IB
 
         @pl.when(is_new_expert)
@@ -148,29 +148,29 @@ def _expert_body(
             # Start next w2 tile DMA (if exists)
             nxt_m = m + 1
             if nxt_m < NUM_I:
-                nxt_buf = nxt_m % NBUF_
+                nxt_buf = nxt_m % NBUF_W2_
                 nxt_i_block_start = (nxt_m * I_TILE) // IB
                 pltpu.make_async_copy(
                     w2_ref.at[pl.ds(gj, 1), pl.ds(nxt_m * I_TILE, I_TILE), pl.ds(0, H)],
                     w2_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
-                    sem_ref.at[2 * NBUF_ + nxt_buf]
+                    sem_ref.at[2 * NBUF_W1_ + nxt_buf]
                 ).start()
                 pltpu.make_async_copy(
                     w2_scale_ref.at[pl.ds(gj, 1), pl.ds(nxt_i_block_start, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
                     w2_s_bufs_ref.at[pl.ds(nxt_buf, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-                    sem_ref.at[3 * NBUF_ + nxt_buf]
+                    sem_ref.at[2 * NBUF_W1_ + NBUF_W2_ + nxt_buf]
                 ).start()
 
             # Wait for current w2 tile
             pltpu.make_async_copy(
                 w2_ref.at[pl.ds(gj, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
                 w2_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
-                sem_ref.at[2 * NBUF_ + buf]
+                sem_ref.at[2 * NBUF_W1_ + buf]
             ).wait()
             pltpu.make_async_copy(
                 w2_scale_ref.at[pl.ds(gj, 1), pl.ds(i_block_start, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
                 w2_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-                sem_ref.at[3 * NBUF_ + buf]
+                sem_ref.at[2 * NBUF_W1_ + NBUF_W2_ + buf]
             ).wait()
 
         # ---- UNCONDITIONAL w2 compute ----
@@ -196,12 +196,12 @@ def _expert_body(
                 pltpu.make_async_copy(
                     w2_ref.at[pl.ds(next_expert_gj, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
                     w2_bufs_ref.at[pl.ds(0, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
-                    sem_ref.at[2 * NBUF_ + 0]
+                    sem_ref.at[2 * NBUF_W1_ + 0]
                 ).start()
                 pltpu.make_async_copy(
                     w2_scale_ref.at[pl.ds(next_expert_gj, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
                     w2_s_bufs_ref.at[pl.ds(0, 1), pl.ds(0, IB_TILE), pl.ds(0, 1), pl.ds(0, H)],
-                    sem_ref.at[3 * NBUF_ + 0]
+                    sem_ref.at[2 * NBUF_W1_ + NBUF_W2_ + 0]
                 ).start()
 
     # ---- Accumulate weighted expert contribution to this token's row ----
@@ -228,7 +228,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
     full_out_scratch_ref,  # [C_PAD, 1, H] bf16
     sem_ref,               # semaphores
     *,
-    K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, TOP_K_, NBUF_,
+    K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, TOP_K_, NBUF_W1_, NBUF_W2_,
     N_TOKENS_, DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_,
     SKIP_ZERO_WEIGHT_, DTYPE_LHS, DTYPE_OUT,
 ):
@@ -252,7 +252,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
         w2_bufs_ref=w2_bufs_ref, w2_s_bufs_ref=w2_s_bufs_ref,
         acc_scratch_ref=acc_scratch_ref, sem_ref=sem_ref,
         K=K, I=I, H=H, K_BLOCKS=K_BLOCKS, QB=QB,
-        I_BLOCKS=I_BLOCKS, IB=IB, NBUF_=NBUF_,
+        I_BLOCKS=I_BLOCKS, IB=IB, NBUF_W1_=NBUF_W1_, NBUF_W2_=NBUF_W2_,
         K_TILE=K_TILE, NUM_K=NUM_K, QB_eff=QB_eff, KB_TILE=KB_TILE,
         I_TILE=I_TILE, NUM_I=NUM_I, IB_TILE=IB_TILE,
         DTYPE_LHS=DTYPE_LHS, DTYPE_OUT=DTYPE_OUT, DEQUANT_W1_AFTER_=DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_=DEQUANT_W2_AFTER_,
@@ -262,7 +262,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
     full_lhs_copy = pltpu.make_async_copy(
         lhs_ref.at[pl.ds(0, C_PAD), pl.ds(0, 1), pl.ds(0, K)],
         full_lhs_scratch_ref,
-        sem_ref.at[4 * NBUF_]
+        sem_ref.at[2 * NBUF_W1_ + 2 * NBUF_W2_]
     )
     full_lhs_copy.start()
     full_lhs_copy.wait()
@@ -332,7 +332,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
     out_copy = pltpu.make_async_copy(
         full_out_scratch_ref,
         o_ref.at[pl.ds(0, C_PAD), pl.ds(0, 1), pl.ds(0, H)],
-        sem_ref.at[4 * NBUF_ + 1]
+        sem_ref.at[2 * NBUF_W1_ + 2 * NBUF_W2_ + 1]
     )
     out_copy.start()
     out_copy.wait()
@@ -373,6 +373,11 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
         I_TILE -= 1
     IB_eff = min(I_TILE, IB)
     IB_TILE = I_TILE // IB_eff
+    NUM_K_setup = K // K_TILE
+    NUM_I_setup = I // I_TILE
+    NBUF_W1 = min(NBUF, NUM_K_setup)
+    NBUF_W2 = min(NBUF, NUM_I_setup)
+
     assert I // I_TILE <= 2, (
         f"Cross-expert w2 prefetch requires NUM_I <= 2, got {I // I_TILE} "
         f"(I={I}, I_TILE={I_TILE}). Increase MOE_CN_I_TILE or reduce I.")
@@ -386,13 +391,13 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
         scratch_shapes=[
             pltpu.VMEM((C_PAD, 1, K), lhs.dtype),                  # full_lhs_scratch
             pltpu.VMEM((M_PAD, K), lhs.dtype),                    # lhs_scratch
-            pltpu.VMEM((NBUF, K_TILE, N1), w1.dtype),             # w1_bufs
-            pltpu.VMEM((NBUF, KB_TILE, 1, N1), w1_scale.dtype),   # w1_s_bufs
-            pltpu.VMEM((NBUF, I_TILE, H), w2.dtype),              # w2_bufs
-            pltpu.VMEM((NBUF, IB_TILE, 1, H), w2_scale.dtype),    # w2_s_bufs
+            pltpu.VMEM((NBUF_W1, K_TILE, N1), w1.dtype),             # w1_bufs
+            pltpu.VMEM((NBUF_W1, KB_TILE, 1, N1), w1_scale.dtype),   # w1_s_bufs
+            pltpu.VMEM((NBUF_W2, I_TILE, H), w2.dtype),              # w2_bufs
+            pltpu.VMEM((NBUF_W2, IB_TILE, 1, H), w2_scale.dtype),    # w2_s_bufs
             pltpu.VMEM((n_tokens, 1, H), jnp.float32),            # acc_scratch (per-token, 3D)
             pltpu.VMEM((C_PAD, 1, H), jnp.bfloat16),              # full_out_scratch
-            pltpu.SemaphoreType.DMA((4 * NBUF + 2,)),             # semaphores
+            pltpu.SemaphoreType.DMA((2 * NBUF_W1 + 2 * NBUF_W2 + 2,)),             # semaphores
         ])
     compiler_params = None if interpret else pltpu.CompilerParams(
         vmem_limit_bytes=int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9))
@@ -402,7 +407,7 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
                           K=K, I=I, H=H,
                           K_BLOCKS=K_BLOCKS, QB=QB,
                           I_BLOCKS=I_BLOCKS, IB=IB,
-                          TOP_K_=TOP_K, NBUF_=NBUF,
+                          TOP_K_=TOP_K, NBUF_W1_=NBUF_W1, NBUF_W2_=NBUF_W2,
                           N_TOKENS_=n_tokens,
                           DEQUANT_W1_AFTER_=(KB_TILE == 1),
                           DEQUANT_W2_AFTER_=(IB_TILE == 1),
