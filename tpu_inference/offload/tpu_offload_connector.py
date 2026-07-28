@@ -127,11 +127,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
-try:
-    import ray
-except ImportError:
-    ray = None
-
 from vllm.platforms import current_platform
 
 from tpu_inference import envs
@@ -808,22 +803,28 @@ class TPUOffloadConnectorScheduler():
                  stage (representing the number of expected completion stats per chunk).
         """
         num_nodes = 1
-        if ray is not None and ray.is_initialized():
+        try:
+            is_multihost = jax.process_count() > 1
+        except Exception:
+            is_multihost = False
+
+        if is_multihost:
+            try:
+                import ray
+            except ImportError as e:
+                raise ValueError(
+                    "Multi-host KVCache offloading currently only supports Ray backend. "
+                    "However, 'ray' module could not be imported.") from e
+
+            if not ray.is_initialized():
+                raise ValueError(
+                    "Multi-host KVCache offloading currently only supports Ray backend. "
+                    "However, Ray is not initialized.")
+
             device_str = current_platform.ray_device_key
             num_nodes = len([
                 n for n in ray.nodes() if device_str in n.get("Resources", {})
             ])
-        else:
-            try:
-                is_multihost = jax.process_count() > 1
-            except Exception:
-                is_multihost = False
-
-            if is_multihost:
-                raise ValueError(
-                    "Multi-host CPU offloading is currently only supported when running under Ray."
-                )
-            num_nodes = 1
 
         # TODO(dannawang): Pipeline Parallelism (PP) is not supported/tested for KV cache offloading yet.
         # Move or remove this note once PP mode is fully supported and verified.
