@@ -665,8 +665,11 @@ def _build_fused_ep_moe_kernel(*,
                 sync(w1b_hbm, w1b_vm)
             if has_w2_bias:
                 sync(w2b_hbm, w2b_vm)
-            # Guarded on b < n_visit, matching the head waits.
-            for b in range(WEIGHT_PREFETCH_DISTANCE):
+            # Guarded on b < n_visit, matching the head waits. The range is
+            # clamped to the visit-list length: at one local expert,
+            # visit_sm[1] would be a statically out-of-bounds read before
+            # the predicate could save it.
+            for b in range(min(WEIGHT_PREFETCH_DISTANCE, g_local)):
 
                 @pl.when(jnp.int32(b) < n_visit_sm[0])
                 def _(b=b):
@@ -800,18 +803,29 @@ def _build_fused_ep_moe_kernel(*,
                     hi = jnp.minimum(run_start + run_len,
                                      tile_block_base + live_blocks)
                     overlap = jnp.maximum(hi - lo, 0)
+                    # An empty intersection leaves lo unclamped, so the
+                    # offsets below can point out of range; the copies are
+                    # predicated out rather than issued at zero length. The
+                    # commit waits count bytes, and a skipped copy
+                    # contributes zero bytes either way.
+                    lo = jnp.minimum(lo, hi)
                     src_block = lo - tile_block_base
                     dst_block = contrib_off_sm[e, d] + (lo - run_start)
-                    pltpu.make_async_copy(
-                        out_vm.at[parity,
-                                  pl.ds(src_block * ROWBLK, overlap * ROWBLK)],
-                        contrib_hbm.at[pl.ds(dst_block * ROWBLK,
-                                             overlap * ROWBLK)],
-                        commit_sems.at[parity]).start()
-                    pltpu.make_async_copy(
-                        oscl_vm.at[parity, pl.ds(src_block, overlap)],
-                        cscl_hbm.at[pl.ds(dst_block, overlap)],
-                        commit_scl_sems.at[parity]).start()
+
+                    @pl.when(overlap > 0)
+                    def _(src_block=src_block, dst_block=dst_block,
+                          overlap=overlap, parity=parity):
+                        pltpu.make_async_copy(
+                            out_vm.at[parity,
+                                      pl.ds(src_block * ROWBLK,
+                                            overlap * ROWBLK)],
+                            contrib_hbm.at[pl.ds(dst_block * ROWBLK,
+                                                 overlap * ROWBLK)],
+                            commit_sems.at[parity]).start()
+                        pltpu.make_async_copy(
+                            oscl_vm.at[parity, pl.ds(src_block, overlap)],
+                            cscl_hbm.at[pl.ds(dst_block, overlap)],
+                            commit_scl_sems.at[parity]).start()
 
             def tile_body(t, carried):
                 """Compute tile t, stage it for the wire and commit it."""

@@ -484,9 +484,9 @@ def shard_push_tables_in_rows(routing, me, *, e_total, ep):
     my_recv_base = lax.dynamic_slice(recv_base, (0, me, 0),
                                      (ep, 1, g_local))[:, 0]
     recv_row_off = my_recv_base.T  # [G, d]
-    not_me = (jnp.arange(ep) != me)
+    not_me = (jnp.arange(ep) != me).astype(true_rows.dtype)
     send_true = (true_rows * not_me[None, :]).sum()
-    self_true = (true_rows * (~not_me)[None, :]).sum()
+    self_true = (true_rows * (1 - not_me)[None, :]).sum()
     recv_true = lax.dynamic_slice(
         all_run_rows.sum(axis=0).astype(jnp.int32), (me,), (1,))[0] \
         - self_true
