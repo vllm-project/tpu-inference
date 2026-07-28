@@ -77,6 +77,7 @@ class ServingConfigs:
     scale_k: int | None = None
     scale_v: int | None = None
     kv_layout: KVLayout = KVLayout.HEAD_ALONG_SUBLANE
+    is_spec_decode: bool = False
 
     @property
     def pages_per_seq(self) -> int:
@@ -222,7 +223,7 @@ class RpaConfigs:
     @property
     def bkv_p_new(self) -> int:
         if self.mode == RpaCase.DECODE:
-            return 1
+            return min(2, self.bkv_p) if self.serve.is_spec_decode else 1
         if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
             return self.bkv_p + 1
         return self.bkv_p
