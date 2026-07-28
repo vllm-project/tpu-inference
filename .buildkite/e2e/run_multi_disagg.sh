@@ -56,7 +56,7 @@ get_current_internal_ip() {
 
 # Automatic Worker IP Discovery
 if [[ -z "${WORKER_IPS:-}" ]]; then
-    echo "⚠️  WORKER_IPS not provided. Attempting to discover via gcloud..."
+    echo "WORKER_IPS not provided. Attempting to discover via gcloud..."
 
     if command -v gcloud &> /dev/null; then
         ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}')}"
@@ -87,18 +87,18 @@ if [[ -z "${WORKER_IPS:-}" ]]; then
             done
 
             if (( CURRENT_IP_IN_SLICE != 1 )); then
-                echo "❌ Current VM IP (${HEAD_INTERNAL_IP}) is not in discovered TPU endpoints: ${ALL_IPS_ARRAY[*]}"
+                echo "Current VM IP (${HEAD_INTERNAL_IP}) is not in discovered TPU endpoints: ${ALL_IPS_ARRAY[*]}"
                 exit 1
             fi
 
             WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
             echo "   -> Discovered Worker IPs: $WORKER_IPS"
         else
-            echo "❌ Could not determine TPU_NAME or ZONE from metadata. Please set WORKER_IPS manually."
+            echo "Could not determine TPU_NAME or ZONE from metadata. Please set WORKER_IPS manually."
             exit 1
         fi
     else
-        echo "❌ gcloud not found. Please set WORKER_IPS environment variable manually."
+        echo "gcloud not found. Please set WORKER_IPS environment variable manually."
         exit 1
     fi
 fi
@@ -149,36 +149,36 @@ if [[ -z "$PREFILL_HOSTS_COUNT" && -z "$DECODE_HOSTS_COUNT" ]]; then
   # Default to equal split if neither is explicitly provided.
   PREFILL_HOSTS_COUNT=$(( NUM_HOSTS / 2 ))
   DECODE_HOSTS_COUNT=$(( NUM_HOSTS - PREFILL_HOSTS_COUNT ))
-  echo "⚠️ PREFILL_HOSTS_COUNT and DECODE_HOSTS_COUNT not specified. Defaulting to equal split: $PREFILL_HOSTS_COUNT hosts for Prefill, $DECODE_HOSTS_COUNT hosts for Decode."
+  echo "PREFILL_HOSTS_COUNT and DECODE_HOSTS_COUNT not specified. Defaulting to equal split: $PREFILL_HOSTS_COUNT hosts for Prefill, $DECODE_HOSTS_COUNT hosts for Decode."
 elif [[ -z "$PREFILL_HOSTS_COUNT" ]]; then
   if [[ ! "$DECODE_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-    echo "❌ DECODE_HOSTS_COUNT must be a positive integer. Got: $DECODE_HOSTS_COUNT"
+    echo "DECODE_HOSTS_COUNT must be a positive integer. Got: $DECODE_HOSTS_COUNT"
     exit 1
   fi
   PREFILL_HOSTS_COUNT=$(( NUM_HOSTS - DECODE_HOSTS_COUNT ))
-  echo "⚠️ PREFILL_HOSTS_COUNT not specified. Using remaining hosts for Prefill: $PREFILL_HOSTS_COUNT."
+  echo "PREFILL_HOSTS_COUNT not specified. Using remaining hosts for Prefill: $PREFILL_HOSTS_COUNT."
 elif [[ -z "$DECODE_HOSTS_COUNT" ]]; then
   if [[ ! "$PREFILL_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-    echo "❌ PREFILL_HOSTS_COUNT must be a positive integer. Got: $PREFILL_HOSTS_COUNT"
+    echo "PREFILL_HOSTS_COUNT must be a positive integer. Got: $PREFILL_HOSTS_COUNT"
     exit 1
   fi
   DECODE_HOSTS_COUNT=$(( NUM_HOSTS - PREFILL_HOSTS_COUNT ))
-  echo "⚠️ DECODE_HOSTS_COUNT not specified. Using remaining hosts for Decode: $DECODE_HOSTS_COUNT."
+  echo "DECODE_HOSTS_COUNT not specified. Using remaining hosts for Decode: $DECODE_HOSTS_COUNT."
 fi
 
 if [[ ! "$PREFILL_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-  echo "❌ PREFILL_HOSTS_COUNT must be at least 1. Got: $PREFILL_HOSTS_COUNT"
+  echo "PREFILL_HOSTS_COUNT must be at least 1. Got: $PREFILL_HOSTS_COUNT"
   exit 1
 fi
 
 if [[ ! "$DECODE_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-  echo "❌ DECODE_HOSTS_COUNT must be at least 1. Got: $DECODE_HOSTS_COUNT"
+  echo "DECODE_HOSTS_COUNT must be at least 1. Got: $DECODE_HOSTS_COUNT"
   exit 1
 fi
 
 TOTAL_HOSTS_USED=$(( PREFILL_HOSTS_COUNT + DECODE_HOSTS_COUNT ))
 if (( TOTAL_HOSTS_USED > NUM_HOSTS )); then
-  echo "❌ Requested hosts for Prefill ($PREFILL_HOSTS_COUNT) + Decode ($DECODE_HOSTS_COUNT) = $TOTAL_HOSTS_USED exceeds total available hosts ($NUM_HOSTS)."
+  echo "Requested hosts for Prefill ($PREFILL_HOSTS_COUNT) + Decode ($DECODE_HOSTS_COUNT) = $TOTAL_HOSTS_USED exceeds total available hosts ($NUM_HOSTS)."
   exit 1
 fi
 
@@ -272,39 +272,6 @@ echo "Shared Ray head: ${SHARED_RAY_HEAD_IP}"
 echo "Prefill actor hosts: ${PREFILL_NODE_IPS}; process map: ${PREFILL_PROCESS_MAP}"
 echo "Decode actor hosts: ${DECODE_NODE_IPS}; process map: ${DECODE_PROCESS_MAP}"
 
-PREFILL_LOG_TAIL_PID=""
-DECODE_LOG_TAIL_PID=""
-CLUSTER_LAUNCHER_PIDS=()
-
-stop_vllm_log_streaming() {
-  if [[ -n "${PREFILL_LOG_TAIL_PID:-}" ]]; then
-    kill "$PREFILL_LOG_TAIL_PID" >/dev/null 2>&1 || true
-    wait "$PREFILL_LOG_TAIL_PID" >/dev/null 2>&1 || true
-    PREFILL_LOG_TAIL_PID=""
-  fi
-
-  if [[ -n "${DECODE_LOG_TAIL_PID:-}" ]]; then
-    kill "$DECODE_LOG_TAIL_PID" >/dev/null 2>&1 || true
-    wait "$DECODE_LOG_TAIL_PID" >/dev/null 2>&1 || true
-    DECODE_LOG_TAIL_PID=""
-  fi
-}
-
-start_vllm_log_streaming() {
-  stop_vllm_log_streaming
-
-  echo "--- Streaming vLLM Prefill and Decode logs while waiting for health..."
-
-  docker exec node bash -c "touch /root/vllm_serve_prefill.log && tail -n +1 -F /root/vllm_serve_prefill.log" \
-    > >(sed -u 's/^/[prefill] /') 2>&1 &
-  PREFILL_LOG_TAIL_PID=$!
-
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
-    "docker exec node bash -c 'touch /root/vllm_serve_decode.log && tail -n +1 -F /root/vllm_serve_decode.log'" \
-    > >(sed -u 's/^/[decode] /') 2>&1 &
-  DECODE_LOG_TAIL_PID=$!
-}
-
 run_host_script() {
   local host=$1
   shift
@@ -315,220 +282,74 @@ run_host_script() {
   fi
 }
 
-stop_tpu_runtime() {
-  local host=$1
-  local grace_seconds=$2
-
-  run_host_script "$host" "$grace_seconds" "$host" <<'EOF'
-grace_seconds=$1
-host=$2
-if docker inspect node >/dev/null 2>&1; then
-  echo "[cleanup] gracefully stopping TPU runtime on ${host}"
-  if ! docker exec -i node bash -s -- "$grace_seconds" <<'INNER_EOF'
-grace_seconds=$1
-pkill -TERM -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1 || true
-end_time=$((SECONDS + grace_seconds))
-while (( SECONDS < end_time )); do
-  pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1 || break
-  sleep 1
-done
-if pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1; then
-  echo "[cleanup] vLLM/EngineCore did not exit within ${grace_seconds}s; force killing TPU processes..." >&2
-  pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1 || true
-  sleep 1
-fi
-ray stop >/dev/null 2>&1 || true
-INNER_EOF
-  then
-    echo "[cleanup] graceful TPU process shutdown timed out or failed on ${host}; proceeding with force cleanup..." >&2
-  fi
-
-  # Stop and remove node container, as well as disagg proxy benchmark container
-  if ! docker stop --time "$grace_seconds" node >/dev/null 2>&1; then
-    echo "[cleanup] container node did not stop cleanly on ${host}; force removing..." >&2
-    docker stop -t 0 node >/dev/null 2>&1 || true
-  fi
-  if docker inspect node >/dev/null 2>&1; then
-    docker rm -f node >/dev/null 2>&1 || true
-  fi
-  docker rm -f disagg-proxy-benchmark >/dev/null 2>&1 || true
-fi
-! docker inspect node >/dev/null 2>&1
-EOF
-}
-
-wait_for_cluster_launchers() {
-  local timeout=$1
-  local deadline=$((SECONDS + timeout))
-  local pid
-  local failed=0
-
-  for pid in "${CLUSTER_LAUNCHER_PIDS[@]}"; do
-    while kill -0 "$pid" >/dev/null 2>&1 && (( SECONDS < deadline )); do
-      sleep 1
-    done
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      kill "$pid" >/dev/null 2>&1 || true
-      failed=1
+print_logs() {
+  local log_file
+  for log_file in prefill.txt decode.txt proxy.txt correctness.txt benchmark.txt; do
+    echo "--- ${log_file} ---"
+    if [[ -f "${LOG_DIR}/${log_file}" ]]; then
+      cat "${LOG_DIR}/${log_file}"
+    else
+      echo "(not found)"
     fi
-    wait "$pid" >/dev/null 2>&1 || true
   done
-  CLUSTER_LAUNCHER_PIDS=()
-  return "$failed"
 }
 
-verify_tpu_clean() {
+cleanup_host() {
   local host=$1
-  local timeout=$2
+  echo "  Cleaning up containers on ${host}..."
 
-  run_host_script "$host" "$timeout" "$host" <<'EOF'
-timeout=$1
-host=$2
-deadline=$((SECONDS + timeout))
-fuser_cmd=(fuser)
-if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-  fuser_cmd=(sudo -n fuser)
-fi
-
-while (( SECONDS < deadline )); do
-  device_busy=0
-  for device in /dev/accel* /dev/vfio/[0-9]*; do
-    [[ -e "$device" ]] || continue
-    "${fuser_cmd[@]}" "$device" >/dev/null 2>&1 && device_busy=1
-  done
-
-  if ! docker inspect node >/dev/null 2>&1 \
-    && ! pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 \
-    && (( device_busy == 0 )) \
-    && [[ ! -e /tmp/libtpu_lockfile ]] \
-    && { ! command -v ss >/dev/null 2>&1 || ! ss -ltnH | awk '$4 ~ /:(6379|8400|8476|9400)$/ { found=1 } END { exit !found }'; }; then
-    exit 0
+  run_host_script "$host" <<'CLEANUP_HOST'
+status=0
+for container in node disagg-proxy-benchmark; do
+  if docker inspect "$container" >/dev/null 2>&1; then
+    if ! docker rm -f "$container" >/dev/null 2>&1; then
+      echo "Warning: failed to remove container $container" >&2
+      status=1
+    fi
   fi
-  sleep 2
 done
+exit $status
+CLEANUP_HOST
+}
 
-echo "[cleanup] host ${host} is not clean; attempting force cleanup..." >&2
-docker rm -f node disagg-proxy-benchmark >/dev/null 2>&1 || true
-pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1 || true
-if [[ -e /tmp/libtpu_lockfile ]]; then
-  echo "[cleanup] removing stale /tmp/libtpu_lockfile on ${host}" >&2
-  rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
-fi
-sleep 1
-
-# Re-check after force cleanup
-device_busy=0
-for device in /dev/accel* /dev/vfio/[0-9]*; do
-  [[ -e "$device" ]] || continue
-  "${fuser_cmd[@]}" "$device" >/dev/null 2>&1 && device_busy=1
-done
-
-if ! docker inspect node >/dev/null 2>&1 \
-  && ! pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 \
-  && (( device_busy == 0 )) \
-  && [[ ! -e /tmp/libtpu_lockfile ]]; then
-  echo "[cleanup] force cleanup succeeded on ${host}" >&2
-  exit 0
-fi
-
-echo "[cleanup] host ${host} still not clean after force cleanup" >&2
-docker ps --filter name='^/node$' --format 'container={{.Names}} status={{.Status}}' >&2 || true
-pgrep -af '[v]llm serve|[A]PIServer|[E]ngineCore' >&2 || true
-for device in /dev/accel* /dev/vfio/[0-9]*; do
-  [[ -e "$device" ]] || continue
-  "${fuser_cmd[@]}" -v "$device" >&2 || true
-done
-exit 1
-EOF
+collect_remote_logs() {
+  echo "  Collecting server logs before cleanup..."
+  # Prefill server log (on local head node)
+  docker exec node cat /root/vllm_serve_prefill.log \
+    > "${LOG_DIR}/prefill.txt" 2>/dev/null || true
+  # Decode server log (on remote decode head)
+  if [[ -n "${DECODE_HEAD_IP:-}" && "${DECODE_HEAD_IP}" != "${HEAD_INTERNAL_IP}" ]]; then
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
+      "docker exec node cat /root/vllm_serve_decode.log 2>/dev/null" \
+      > "${LOG_DIR}/decode.txt" 2>/dev/null || true
+  elif [[ -n "${DECODE_HEAD_IP:-}" ]]; then
+    docker exec node cat /root/vllm_serve_decode.log \
+      > "${LOG_DIR}/decode.txt" 2>/dev/null || true
+  fi
 }
 
 cleanup() {
-  local exit_code=${1:-0}
-  local grace_seconds="${TPU_CLEANUP_GRACE_SECONDS:-120}"
-  local verify_seconds="${TPU_CLEANUP_VERIFY_SECONDS:-120}"
-  local settle_seconds="${TPU_RUNTIME_SETTLE_SECONDS:-30}"
-  local failed=0
-  local ip
-  local pid
-  local -a cleanup_pids=()
-  local -a remote_hosts=()
+  echo "--- Cleaning up multi-host disaggregated serving"
 
-  [[ "$grace_seconds" =~ ^[0-9]+$ ]] || grace_seconds=120
-  [[ "$verify_seconds" =~ ^[0-9]+$ ]] || verify_seconds=120
-  [[ "$settle_seconds" =~ ^[0-9]+$ ]] || settle_seconds=30
+  collect_remote_logs
 
-  echo "[cleanup] stopping disaggregated TPU runtimes"
-  stop_vllm_log_streaming
-  docker rm -f disagg-proxy-benchmark >/dev/null 2>&1 || true
-
-  docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
-  if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
-      "rm -f /tmp/vllm_serve_decode.log; docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
-    scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" \
-      "$LOG_DIR/decode.txt" >/dev/null 2>&1 || true
-  fi
-
-  for ip in "${PREFILL_WORKER_IPS[@]}" "${DECODE_HEAD_IP:-}" "${DECODE_WORKER_IPS[@]}"; do
-    [[ -n "$ip" && "$ip" != "$HEAD_INTERNAL_IP" ]] || continue
-    if [[ " ${remote_hosts[*]} " != *" ${ip} "* ]]; then
-      remote_hosts+=("$ip")
-    fi
+  for ip in "${SHARED_CLUSTER_HOSTS[@]}"; do
+    cleanup_host "$ip" ||
+      echo "Warning: failed to remove test containers on ${ip}." >&2
   done
 
-  stop_tpu_runtime "$HEAD_INTERNAL_IP" "$grace_seconds" &
-  cleanup_pids+=("$!")
-  for ip in "${remote_hosts[@]}"; do
-    stop_tpu_runtime "$ip" "$grace_seconds" &
-    cleanup_pids+=("$!")
-  done
-  for pid in "${cleanup_pids[@]}"; do
-    wait "$pid" || failed=1
-  done
-
-  wait_for_cluster_launchers "$grace_seconds" || failed=1
-
-  cleanup_pids=()
-  verify_tpu_clean "$HEAD_INTERNAL_IP" "$verify_seconds" &
-  cleanup_pids+=("$!")
-  for ip in "${remote_hosts[@]}"; do
-    verify_tpu_clean "$ip" "$verify_seconds" &
-    cleanup_pids+=("$!")
-  done
-  for pid in "${cleanup_pids[@]}"; do
-    wait "$pid" || failed=1
-  done
-
-  if (( failed == 0 && settle_seconds > 0 )); then
-    sleep "$settle_seconds"
-  fi
-
-  if (( exit_code != 0 )); then
-    echo "[cleanup] run failed with exit code ${exit_code}; recent logs follow" >&2
-    for log_file in prefill.txt decode.txt proxy.txt correctness.txt benchmark.txt; do
-      if [[ -s "$LOG_DIR/$log_file" ]]; then
-        echo "--- ${log_file} (last 30 lines)" >&2
-        tail -n 30 "$LOG_DIR/$log_file" >&2
-      fi
-    done
-  fi
-
-  if (( failed != 0 )); then
-    echo "[cleanup] failed; native multihost startup is unsafe" >&2
-    return 1
-  fi
-  echo "[cleanup] complete"
+  print_logs
 }
 
-exit_on_signal() {
-  local exit_code=$1
+on_exit() {
+  local exit_code=$?
+  trap - EXIT INT TERM
+  cleanup || true
   exit "$exit_code"
 }
-
-trap 'exit_on_signal 129' HUP
-trap 'exit_on_signal 130' INT
-trap 'exit_on_signal 143' TERM
-trap 'exit_code=$?; trap - EXIT HUP INT TERM; cleanup "$exit_code" || exit 1; exit "$exit_code"' EXIT
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 wait_for_server_remote() {
   local host=$1
@@ -634,7 +455,7 @@ wait_for_ray_head() {
       return 0
     fi
     sleep 5
-  done  
+  done
   echo "Error: Ray head failed to start within ${timeout}s."
   return 1
 }
@@ -692,6 +513,7 @@ PROJECT="$(gcloud config get-value project)"
 GCR_REPO="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference"
 IMAGE_NAME="${GCR_REPO}/vllm-tpu"
 
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 TOP_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
 
@@ -733,7 +555,6 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
   -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" &
-CLUSTER_LAUNCHER_PIDS+=("$!")
 
 sleep 30
 
@@ -796,7 +617,6 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${SHARE
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE='${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}' \
   -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}'
 EOF
-    CLUSTER_LAUNCHER_PIDS+=("$!")
     sleep 15
 done
 
@@ -877,9 +697,7 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "bash ~/tpu-inference/scrip
 # 4. Wait for healthiness
 # -----------------------------------------------------------------
 echo "--- vLLM Prefill and Decode start commands submitted. Checking both health endpoints and server processes..."
-start_vllm_log_streaming
 wait_for_vllm_prefill_and_decode "$PREFILL_VLLM_PORT" "$DECODE_HEAD_IP" "$DECODE_VLLM_PORT" 7200
-stop_vllm_log_streaming
 
 # -----------------------------------------------------------------
 # 5. Start Proxy & Run Tests
