@@ -150,10 +150,11 @@ def _expert_body(
             _wait_w1_dma(gj, cur_w1_buf, k, **dma_kw_w1)
 
         # ---- UNCONDITIONAL compute (buffer valid either way) ----
+        # pl.ds keeps size-1 buffer axis; reshape it away.
         w1_fp8 = w1_bufs_ref[pl.ds(cur_w1_buf, 1), pl.ds(0, K_TILE),
-                             pl.ds(0, 2 * I)]
+                             pl.ds(0, 2 * I)].reshape(K_TILE, 2 * I)
         s1 = w1_s_bufs_ref[pl.ds(cur_w1_buf, 1), pl.ds(0, KB_TILE),
-                           pl.ds(0, 1), pl.ds(0, 2 * I)]
+                           pl.ds(0, 1), pl.ds(0, 2 * I)].reshape(KB_TILE, 1, 2 * I)
         lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD), pl.ds(k * K_TILE, K_TILE)]
 
         if DEQUANT_W1_AFTER_:
@@ -186,9 +187,9 @@ def _expert_body(
 
         # ---- UNCONDITIONAL w2 compute ----
         w2_fp8 = w2_bufs_ref[pl.ds(cur_w2_buf, 1), pl.ds(0, I_TILE),
-                             pl.ds(0, H)]
+                             pl.ds(0, H)].reshape(I_TILE, H)
         s2 = w2_s_bufs_ref[pl.ds(cur_w2_buf, 1), pl.ds(0, IB_TILE),
-                           pl.ds(0, 1), pl.ds(0, H)]
+                           pl.ds(0, 1), pl.ds(0, H)].reshape(IB_TILE, 1, H)
         inter_tile = intermediate[:, m * I_TILE : (m + 1) * I_TILE]
 
         if DEQUANT_W2_AFTER_:
