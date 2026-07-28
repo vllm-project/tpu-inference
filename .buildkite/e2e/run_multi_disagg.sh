@@ -54,61 +54,9 @@ get_current_internal_ip() {
   hostname -I | awk '{print $1}'
 }
 
-# Automatic Worker IP Discovery
-if [[ -z "${WORKER_IPS:-}" ]]; then
-    echo "WORKER_IPS not provided. Attempting to discover via gcloud..."
-
-    if command -v gcloud &> /dev/null; then
-        ZONE="${ZONE:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/zone" | awk -F/ '{print $NF}')}"
-        TPU_NAME="${TPU_NAME:-$(curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/description" 2>/dev/null || echo "")}"
-
-        if [[ -n "$TPU_NAME" && -n "$ZONE" ]]; then
-            echo "   -> Found TPU_NAME: $TPU_NAME, ZONE: $ZONE"
-            ALL_IPS=$(gcloud compute tpus tpu-vm describe "$TPU_NAME" --zone "$ZONE" --format="value(networkEndpoints[].ipAddress)")
-            ALL_IPS="${ALL_IPS//;/ }"
-            ALL_IPS="${ALL_IPS//,/ }"
-
-            # shellcheck disable=SC2206
-            ALL_IPS_ARRAY=($ALL_IPS)
-
-            if [[ -z "${HEAD_INTERNAL_IP:-}" ]]; then
-                HEAD_INTERNAL_IP="$(get_current_internal_ip)"
-                echo "   -> Current VM internal IP: $HEAD_INTERNAL_IP"
-            fi
-
-            CURRENT_IP_IN_SLICE=0
-            WORKER_IPS_LIST=()
-            for ip in "${ALL_IPS_ARRAY[@]}"; do
-                if [[ "$ip" == "$HEAD_INTERNAL_IP" ]]; then
-                    CURRENT_IP_IN_SLICE=1
-                elif [[ -n "$ip" ]]; then
-                    WORKER_IPS_LIST+=("$ip")
-                fi
-            done
-
-            if (( CURRENT_IP_IN_SLICE != 1 )); then
-                echo "Current VM IP (${HEAD_INTERNAL_IP}) is not in discovered TPU endpoints: ${ALL_IPS_ARRAY[*]}"
-                exit 1
-            fi
-
-            WORKER_IPS=$(IFS=, ; echo "${WORKER_IPS_LIST[*]}")
-            echo "   -> Discovered Worker IPs: $WORKER_IPS"
-        else
-            echo "Could not determine TPU_NAME or ZONE from metadata. Please set WORKER_IPS manually."
-            exit 1
-        fi
-    else
-        echo "gcloud not found. Please set WORKER_IPS environment variable manually."
-        exit 1
-    fi
-fi
-
-if [[ -z "${WORKER_IPS:-}" ]]; then
-    echo "ERROR: Failed to discover WORKER_IPS. Please provide it manually."
-    exit 1
-fi
-
 HEAD_INTERNAL_IP="${HEAD_INTERNAL_IP:-$(get_current_internal_ip)}"
+ZONE="${ZONE:-$(get_metadata_value "instance/zone" | awk -F/ '{print $NF}')}"
+TPU_NAME="${TPU_NAME:-$(get_metadata_value "instance/description")}"
 
 # Auto-generate SSH Key if it doesn't exist
 if [ ! -f ~/.ssh/id_rsa ]; then
@@ -119,82 +67,123 @@ fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o IPQoS=none -i ~/.ssh/id_rsa)
 
-# Assemble all IP addresses (Head + Workers)
-IFS=',' read -r -a ALL_WORKERS_ARRAY <<< "${WORKER_IPS}"
-ALL_IPS_ARRAY=("$HEAD_INTERNAL_IP")
-for ip in "${ALL_WORKERS_ARRAY[@]}"; do
-  if [[ -n "$ip" && "$ip" != "$HEAD_INTERNAL_IP" ]]; then
-    ALL_IPS_ARRAY+=("$ip")
-  fi
-done
-NUM_HOSTS=${#ALL_IPS_ARRAY[@]}
+get_remote_metadata_value() {
+  local host=$1
+  local path=$2
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+    "curl -fs -H 'Metadata-Flavor: Google' 'http://metadata.google.internal/computeMetadata/v1/${path}' 2>/dev/null || true"
+}
 
-echo "Discovered TPU hosts in launch order: ${ALL_IPS_ARRAY[*]}"
-echo "Current/local head IP: ${HEAD_INTERNAL_IP}"
-echo "Total TPU hosts available: ${NUM_HOSTS}"
+# Prefill and Decode must be separate 2x2x1 TPU slices. Discovery from the
+# local TPU resource cannot find Decode, so accept its IP or TPU resource name
+# explicitly. WORKER_IPS remains as a compatibility fallback when it contains
+# exactly the one Decode endpoint.
+DECODE_HOST_IP="${DECODE_HOST_IP:-}"
+if [[ -z "$DECODE_HOST_IP" && -n "${DECODE_TPU_NAME:-}" ]]; then
+  DECODE_ZONE="${DECODE_ZONE:-$ZONE}"
+  decode_endpoints="$({
+    gcloud compute tpus tpu-vm describe "$DECODE_TPU_NAME" \
+      --zone "$DECODE_ZONE" \
+      --format="value(networkEndpoints[].ipAddress)"
+  })"
+  decode_endpoints="${decode_endpoints//;/ }"
+  decode_endpoints="${decode_endpoints//,/ }"
+  # shellcheck disable=SC2206
+  decode_endpoint_array=($decode_endpoints)
+  if (( ${#decode_endpoint_array[@]} != 1 )); then
+    echo "ERROR: Decode TPU resource must be a single-host slice; found endpoints: ${decode_endpoint_array[*]:-none}" >&2
+    exit 1
+  fi
+  DECODE_HOST_IP="${decode_endpoint_array[0]}"
+elif [[ -z "$DECODE_HOST_IP" && -n "${WORKER_IPS:-}" ]]; then
+  IFS=',' read -r -a decode_endpoint_array <<< "$WORKER_IPS"
+  remote_decode_endpoints=()
+  for ip in "${decode_endpoint_array[@]}"; do
+    [[ -n "$ip" && "$ip" != "$HEAD_INTERNAL_IP" ]] && remote_decode_endpoints+=("$ip")
+  done
+  if (( ${#remote_decode_endpoints[@]} != 1 )); then
+    echo "ERROR: WORKER_IPS must contain exactly one Decode host from an independent single-host slice." >&2
+    exit 1
+  fi
+  DECODE_HOST_IP="${remote_decode_endpoints[0]}"
+fi
+
+if [[ -z "$DECODE_HOST_IP" ]]; then
+  echo "ERROR: Set DECODE_HOST_IP, or set DECODE_TPU_NAME and DECODE_ZONE, for the independent Decode 2x2x1 slice." >&2
+  exit 1
+fi
+if [[ "$DECODE_HOST_IP" == "$HEAD_INTERNAL_IP" ]]; then
+  echo "ERROR: Prefill and Decode must use different TPU slices and hosts." >&2
+  exit 1
+fi
+if [[ ! "$HEAD_INTERNAL_IP" =~ ^[A-Za-z0-9.:-]+$ || ! "$DECODE_HOST_IP" =~ ^[A-Za-z0-9.:-]+$ ]]; then
+  echo "ERROR: Prefill or Decode host contains unexpected characters: ${HEAD_INTERNAL_IP}, ${DECODE_HOST_IP}" >&2
+  exit 1
+fi
+
+DECODE_ZONE="${DECODE_ZONE:-$(get_remote_metadata_value "$DECODE_HOST_IP" "instance/zone" | awk -F/ '{print $NF}')}"
+DECODE_TPU_NAME="${DECODE_TPU_NAME:-$(get_remote_metadata_value "$DECODE_HOST_IP" "instance/description")}"
+
+validate_single_host_slice() {
+  local role=$1
+  local tpu_name=$2
+  local zone=$3
+  local expected_ip=$4
+  local accelerator_type
+  local endpoints
+  local -a endpoint_array
+
+  if [[ -z "$tpu_name" || -z "$zone" ]]; then
+    echo "ERROR: Could not determine ${role} TPU resource name or zone." >&2
+    return 1
+  fi
+  endpoints="$({
+    gcloud compute tpus tpu-vm describe "$tpu_name" \
+      --zone "$zone" \
+      --format="value(networkEndpoints[].ipAddress)"
+  })"
+  endpoints="${endpoints//;/ }"
+  endpoints="${endpoints//,/ }"
+  # shellcheck disable=SC2206
+  endpoint_array=($endpoints)
+  if (( ${#endpoint_array[@]} != 1 )) || [[ "${endpoint_array[0]:-}" != "$expected_ip" ]]; then
+    echo "ERROR: ${role} must be a 2x2x1 single-host slice at ${expected_ip}; resource ${tpu_name} has endpoints: ${endpoint_array[*]:-none}" >&2
+    return 1
+  fi
+  accelerator_type="$({
+    gcloud compute tpus tpu-vm describe "$tpu_name" \
+      --zone "$zone" \
+      --format="value(acceleratorType)"
+  })"
+  if [[ "$accelerator_type" != *"v7x-8"* && "$accelerator_type" != *"tpu7x-8"* ]]; then
+    echo "ERROR: ${role} resource ${tpu_name} must be a TPU7x 2x2x1 slice; accelerator type is: ${accelerator_type:-unknown}" >&2
+    return 1
+  fi
+  echo "Validated ${role} TPU7x 2x2x1 slice: ${tpu_name} (${expected_ip})"
+}
+
+validate_single_host_slice "Prefill" "$TPU_NAME" "$ZONE" "$HEAD_INTERNAL_IP"
+validate_single_host_slice "Decode" "$DECODE_TPU_NAME" "$DECODE_ZONE" "$DECODE_HOST_IP"
+if [[ "$TPU_NAME" == "$DECODE_TPU_NAME" && "$ZONE" == "$DECODE_ZONE" ]]; then
+  echo "ERROR: Prefill and Decode resolved to the same TPU resource." >&2
+  exit 1
+fi
+
+readonly PREFILL_HOSTS_COUNT=1
+readonly DECODE_HOSTS_COUNT=1
+readonly TOTAL_HOSTS_USED=2
+PREFILL_HOSTS=("$HEAD_INTERNAL_IP")
+DECODE_HOSTS=("$DECODE_HOST_IP")
+SHARED_CLUSTER_HOSTS=("$HEAD_INTERNAL_IP" "$DECODE_HOST_IP")
+PREFILL_HEAD_IP="$HEAD_INTERNAL_IP"
+DECODE_HEAD_IP="$DECODE_HOST_IP"
+
+echo "Prefill slice: ${TPU_NAME} (${PREFILL_HEAD_IP})"
+echo "Decode slice: ${DECODE_TPU_NAME} (${DECODE_HEAD_IP})"
 
 # TPU7x always exposes four chips per host, with two TensorCores per chip.
 readonly CHIPS_PER_HOST=4
 readonly CORES_PER_CHIP=2
-
-TOTAL_CHIPS=$(( NUM_HOSTS * CHIPS_PER_HOST ))
-echo "Calculated total TPU chips from hosts: ${TOTAL_CHIPS}"
-echo "Using TPU cores per chip: ${CORES_PER_CHIP}"
-
-# Specify # of hosts for each instance, or default to splitting hosts equally
-PREFILL_HOSTS_COUNT="${PREFILL_HOSTS_COUNT:-}"
-DECODE_HOSTS_COUNT="${DECODE_HOSTS_COUNT:-}"
-
-if [[ -z "$PREFILL_HOSTS_COUNT" && -z "$DECODE_HOSTS_COUNT" ]]; then
-  # Default to equal split if neither is explicitly provided.
-  PREFILL_HOSTS_COUNT=$(( NUM_HOSTS / 2 ))
-  DECODE_HOSTS_COUNT=$(( NUM_HOSTS - PREFILL_HOSTS_COUNT ))
-  echo "PREFILL_HOSTS_COUNT and DECODE_HOSTS_COUNT not specified. Defaulting to equal split: $PREFILL_HOSTS_COUNT hosts for Prefill, $DECODE_HOSTS_COUNT hosts for Decode."
-elif [[ -z "$PREFILL_HOSTS_COUNT" ]]; then
-  if [[ ! "$DECODE_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-    echo "DECODE_HOSTS_COUNT must be a positive integer. Got: $DECODE_HOSTS_COUNT"
-    exit 1
-  fi
-  PREFILL_HOSTS_COUNT=$(( NUM_HOSTS - DECODE_HOSTS_COUNT ))
-  echo "PREFILL_HOSTS_COUNT not specified. Using remaining hosts for Prefill: $PREFILL_HOSTS_COUNT."
-elif [[ -z "$DECODE_HOSTS_COUNT" ]]; then
-  if [[ ! "$PREFILL_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-    echo "PREFILL_HOSTS_COUNT must be a positive integer. Got: $PREFILL_HOSTS_COUNT"
-    exit 1
-  fi
-  DECODE_HOSTS_COUNT=$(( NUM_HOSTS - PREFILL_HOSTS_COUNT ))
-  echo "DECODE_HOSTS_COUNT not specified. Using remaining hosts for Decode: $DECODE_HOSTS_COUNT."
-fi
-
-if [[ ! "$PREFILL_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-  echo "PREFILL_HOSTS_COUNT must be at least 1. Got: $PREFILL_HOSTS_COUNT"
-  exit 1
-fi
-
-if [[ ! "$DECODE_HOSTS_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-  echo "DECODE_HOSTS_COUNT must be at least 1. Got: $DECODE_HOSTS_COUNT"
-  exit 1
-fi
-
-TOTAL_HOSTS_USED=$(( PREFILL_HOSTS_COUNT + DECODE_HOSTS_COUNT ))
-if (( TOTAL_HOSTS_USED > NUM_HOSTS )); then
-  echo "Requested hosts for Prefill ($PREFILL_HOSTS_COUNT) + Decode ($DECODE_HOSTS_COUNT) = $TOTAL_HOSTS_USED exceeds total available hosts ($NUM_HOSTS)."
-  exit 1
-fi
-
-echo "Partitioning cluster: $PREFILL_HOSTS_COUNT hosts for Prefill, $DECODE_HOSTS_COUNT hosts for Decode"
-
-PREFILL_HOSTS=("${ALL_IPS_ARRAY[@]:0:PREFILL_HOSTS_COUNT}")
-DECODE_HOSTS=("${ALL_IPS_ARRAY[@]:PREFILL_HOSTS_COUNT:DECODE_HOSTS_COUNT}")
-SHARED_CLUSTER_HOSTS=("${PREFILL_HOSTS[@]}" "${DECODE_HOSTS[@]}")
-
-PREFILL_HEAD_IP="${PREFILL_HOSTS[0]}"
-DECODE_HEAD_IP="${DECODE_HOSTS[0]}"
-
-PREFILL_WORKER_IPS=("${PREFILL_HOSTS[@]:1}")
-DECODE_WORKER_IPS=("${DECODE_HOSTS[@]:1}")
-echo "Prefill hosts: ${PREFILL_HOSTS[*]}"
-echo "Decode hosts: ${DECODE_HOSTS[*]}"
 
 PREFILL_TENSOR_PARALLEL_SIZE=$(( PREFILL_HOSTS_COUNT * CHIPS_PER_HOST * CORES_PER_CHIP ))
 DECODE_TENSOR_PARALLEL_SIZE=$(( DECODE_HOSTS_COUNT * CHIPS_PER_HOST * CORES_PER_CHIP ))
