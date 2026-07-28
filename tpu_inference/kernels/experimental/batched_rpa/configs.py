@@ -205,8 +205,17 @@ class RpaConfigs:
 
         max_steps_ub = available_bytes // bytes_per_step
 
+        # Round down to a multiple of num_lanes, but only when there's room
+        # to do so -- for small page sizes (e.g. page_size=16),
+        # bytes_per_step grows large enough that the raw budget-safe value
+        # can fall below num_lanes. Rounding that up to a full num_lanes
+        # would allocate past smem_limit_bytes and crash with
+        # RESOURCE_EXHAUSTED, so below that threshold just use the raw
+        # (SMEM-safe) value directly.
         num_lanes = pltpu.get_tpu_info().num_lanes
-        max_steps_ub = max(1, max_steps_ub // num_lanes) * num_lanes
+        if max_steps_ub >= num_lanes:
+            max_steps_ub = (max_steps_ub // num_lanes) * num_lanes
+        max_steps_ub = max(1, max_steps_ub)
         return max_steps_ub
 
     @property
