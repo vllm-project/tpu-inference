@@ -95,6 +95,22 @@ def moe_apply(
         raise ValueError(
             "defer_all_reduce can only be True for GMM_EP and GMM_TP backends")
 
+    # The switch names a program that serves expert-parallel MoE calls only,
+    # so with any other backend selected it does nothing and nothing else in
+    # this path would say so. The two ways to arrive here are the same
+    # silence: expert parallelism off, which selects gmm_tp, and
+    # USE_MOE_EP_KERNEL set beside the switch, which selects fused_moe. The
+    # backend that was selected is named rather than the setting that
+    # selected it, because the operator can read which program their calls
+    # run from the first and has to guess at the second.
+    if (envs.USE_MOE_FUSED_EP_KERNEL and moe_backend is not MoEBackend.GMM_EP):
+        logger.warning_once(
+            "USE_MOE_FUSED_EP_KERNEL is set, but this deployment selected "
+            "the %s MoE backend. The fused expert-parallel MoE kernel serves "
+            "expert-parallel MoE calls only, so the switch is ignored here "
+            "and every MoE call runs on %s. Enable expert parallelism to "
+            "reach the kernel.", moe_backend.value, moe_backend.value)
+
     with jax.named_scope(layer._get_name()):
         activation = layer.activation if isinstance(
             layer.activation, str) else layer.activation.value
@@ -148,6 +164,22 @@ def moe_apply(
                 all_gather_fp8 = (bool(activation_dtype)
                                   and to_jax_dtype(activation_dtype)
                                   == jnp.float8_e4m3fn)
+
+                # Opt-in: with USE_MOE_FUSED_EP_KERNEL unset this branch is
+                # not taken, nothing below is imported, and the call runs the
+                # general path unchanged. The adapter returns None where the
+                # kernel does not serve this batch, which falls through to
+                # that same path.
+                if (moe_backend == MoEBackend.GMM_EP
+                        and envs.USE_MOE_FUSED_EP_KERNEL):
+                    from tpu_inference.layers.common.moe_fused_ep import \
+                        moe_fused_ep_route
+                    output = moe_fused_ep_route(
+                        layer, x, gating_output, weights, mesh, activation,
+                        scatter_results, extra_backend_kwargs,
+                        defer_all_reduce, moe_chunk_size, activation_dtype)
+                    if output is not None:
+                        return output
 
                 output = fused_moe_func(
                     hidden_states=x,

@@ -78,6 +78,8 @@ if TYPE_CHECKING:
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     TPU_MESH_SORT_BY_COORDS: bool = False
+    USE_MOE_FUSED_EP_KERNEL: bool = False
+    MOE_FUSED_EP_KERNEL_MIN_TOKENS: int = 1024
 
 
 def env_with_choices(
@@ -166,6 +168,33 @@ def env_bool(env_name: str,
         return parsed_value
 
     return _get_bool_env
+
+
+def moe_fused_ep_kernel_min_tokens() -> int:
+    """MOE_FUSED_EP_KERNEL_MIN_TOKENS, or an error naming it and the value.
+
+    Unset or empty is the default. Anything else has to be a positive
+    integer. Zero and negatives are refused rather than clamped or ignored:
+    zero is what a launcher writes for "no threshold" and here it means the
+    opposite of that, sending every batch to the kernel including the small
+    ones the general MoE path serves faster, and a negative is not a count
+    of tokens at all. Neither has a safe reading, so the boot stops with
+    the value quoted back.
+    """
+    value = os.getenv("MOE_FUSED_EP_KERNEL_MIN_TOKENS", "").strip()
+    if not value:
+        return 1024
+    try:
+        tokens = int(value)
+    except ValueError:
+        tokens = 0
+    if tokens < 1:
+        raise ValueError(
+            f"MOE_FUSED_EP_KERNEL_MIN_TOKENS={value!r} is not a positive "
+            "integer. It is the token count at or above which an "
+            "expert-parallel MoE call takes the fused expert-parallel MoE "
+            "kernel; unset it for the default of 1024.")
+    return tokens
 
 
 def env_str_list(env_name: str) -> Callable[[], list[str]]:
@@ -456,6 +485,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Currently, it only supports a single host set up.
     "TPU_MESH_SORT_BY_COORDS":
     env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
+    # Use the fused expert-parallel kernel for MoE. On, a model whose layers
+    # it cannot take is an error at build time. Distinct from
+    # USE_MOE_EP_KERNEL, which selects a different expert-parallel program.
+    "USE_MOE_FUSED_EP_KERNEL":
+    env_bool("USE_MOE_FUSED_EP_KERNEL", default=False),
+    # Token count at or above which a call takes that kernel; below it the
+    # general MoE path is faster, which is routing rather than a refusal.
+    "MOE_FUSED_EP_KERNEL_MIN_TOKENS":
+    moe_fused_ep_kernel_min_tokens,
 }
 
 

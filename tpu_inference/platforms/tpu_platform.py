@@ -134,6 +134,24 @@ class TpuPlatform(Platform):
         "JAX_PROFILER_SERVER_PORT",
         "ENABLE_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
+        # The worker process builds the model, so a setting it never sees
+        # does nothing where it matters. That covers the switch, its token
+        # threshold, and every other setting the fused expert-parallel MoE
+        # decision reads. Two of the three below are refusals whose whole
+        # point is that a run cannot quietly be something other than what
+        # was asked for: with MOE_APPROX_TOPK set the driver would refuse,
+        # the worker would never see the variable, the build would succeed,
+        # and the deployment would serve exact top-k while the operator
+        # asked for approximate. FORCE_MOE_RANDOM_ROUTING exists so that a
+        # run with it set cannot measure real routing and report random.
+        # ONEHOT_MOE_PERMUTE_THRESHOLD is the warning that says the kernel
+        # carries its own permute, which cannot fire on a worker that does
+        # not carry the setting.
+        "USE_MOE_FUSED_EP_KERNEL",
+        "MOE_FUSED_EP_KERNEL_MIN_TOKENS",
+        "MOE_APPROX_TOPK",
+        "FORCE_MOE_RANDOM_ROUTING",
+        "ONEHOT_MOE_PERMUTE_THRESHOLD",
     ]
 
     @classmethod
