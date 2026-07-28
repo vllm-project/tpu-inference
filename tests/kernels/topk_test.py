@@ -60,7 +60,9 @@ class IterativeTopKKernelTest(parameterized.TestCase):
                                    np.asarray(got_vals).astype(np.float32))
 
     def test_output_shape_and_dtype(self):
-        x = jnp.ones((5, 10), dtype=jnp.bfloat16)
+        # Experts axis must be a multiple of 128 (lane-tile aligned) for the
+        # grid/block kernel.
+        x = jnp.ones((5, 128), dtype=jnp.bfloat16)
         vals, idxs = iterative_top_k_kernel(x, k=4)
         self.assertEqual(vals.shape, (5, 4))
         self.assertEqual(idxs.shape, (5, 4))

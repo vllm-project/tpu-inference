@@ -625,14 +625,17 @@ def fused_moe_func(
             # k must be bound before shard_map wraps the kernel: the
             # shard_map wrapper's call signature only accepts the array
             # args from in_specs, not arbitrary kwargs like k=topk below.
+            data_p_spec_t = P(None, ShardingAxisName.MLP_DATA)
+
             def topk_fn(x, k):
-                return jax.shard_map(
-                    functools.partial(iterative_top_k_kernel, k=k),
+                vals, idxs = jax.shard_map(
+                    functools.partial(iterative_top_k_kernel, k=k, axis=0),
                     mesh=mesh,
-                    in_specs=(data_p_spec, ),
-                    out_specs=(data_p_spec, data_p_spec),
+                    in_specs=(data_p_spec_t, ),
+                    out_specs=(data_p_spec_t, data_p_spec_t),
                     check_vma=False,
-                )(x)
+                )(x.T)
+                return vals.T, idxs.T
         else:
             topk_fn = jax.lax.top_k
         if expert_score_correction_bias is not None:
