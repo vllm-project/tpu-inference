@@ -20,6 +20,8 @@ reference implementations in HF moonshotai/Kimi-K3 and
 flash-linear-attention's fla.ops.kda.
 """
 
+import os
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -285,7 +287,7 @@ def test_gdn_reduction_property():
                                rtol=5e-4)
 
 
-GOLDEN = "/mnt/disks/persist/models_cuiq/k3-tiny/kda_op_goldens.npz"
+GOLDEN = os.environ.get("K3_KDA_GOLDENS", "")
 
 
 @pytest.mark.parametrize("case", [
@@ -296,8 +298,7 @@ GOLDEN = "/mnt/disks/persist/models_cuiq/k3-tiny/kda_op_goldens.npz"
 def test_cross_impl_golden_parity(case):
     """Gate 6 (op-level): parity vs the fla-derived fp64 op goldens —
     an independent implementation of the same contract."""
-    import os
-    if not os.path.exists(GOLDEN):
+    if not GOLDEN or not os.path.exists(GOLDEN):
         pytest.skip(f"golden file not present: {GOLDEN}")
     z = np.load(GOLDEN)
     lower_bound = float(z["lower_bound"]) if case.endswith("_sig") else None
