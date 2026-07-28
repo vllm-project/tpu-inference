@@ -57,28 +57,53 @@ Reported by the operator, not yet reproduced under instrumentation:
 
 ## Mechanism
 
-Buildkite delivers cancellation **to a running agent**. A job with no agent has
-no recipient. Under MultiKueue this is not an edge case, it is the normal state
-for most of a job's life:
+Buildkite delivers cancellation **to a running agent**, so a job with no agent
+has no recipient. Everything else follows from two properties of how Agent Stack
+compensates for that.
+
+Operator finding — cite the source file or the observed evidence here before
+treating it as settled:
+
+1. **Agent Stack watches Pods, not Jobs**, and its cancellation acts on a
+   **Pod**, not the Job. Nothing in that path deletes or suspends the Job
+   object.
+2. **The check is edge-triggered.** It runs at the moment the build is
+   cancelled. It is not re-evaluated afterwards.
+
+Both assumptions are sound in a plain Agent Stack deployment, where the Job and
+its Pod are created together, so "there is a Pod now" and "there will ever be a
+Pod" are the same statement.
+
+**Kueue breaks that equivalence.** Admission inserts an unbounded delay between
+Job creation and Pod creation:
 
 ```text
-Buildkite cancel  ->  agent (Agent API)  ->  process exits
-                       ^
-                       |
-              does not exist yet
+plain Agent Stack     Job created ── Pod created ─────────────► cancel sees a Pod
+
+with Kueue            Job created ── suspended ── ... hours ... ── admitted ── Pod
+                                        ▲                                       ▲
+                                   cancel fires here                  Pod appears here,
+                                   and finds nothing                  unwatched, and runs
 ```
 
-The manager Job is suspended and podless for its entire life — `spec.managedBy`
-tells the built-in Job controller to stand down so MultiKueue owns it. So the
-only thing that can act on a cancelled, unstarted job is the controller,
-comparing Buildkite state against Kubernetes state.
+At cancellation the manager Job is suspended and has no Pod, so the one-shot
+check finds nothing to act on and completes successfully. Later, Kueue admits
+the Workload, `suspend` flips to false, a Pod is created — and nothing looks at
+it again, because the only evaluation already happened.
 
-Agent Stack has machinery for exactly this. The suspected gap is its **trigger
-condition**: if the cancel-checker is driven off a Pending Pod, a manager Job
-that never has a Pod is invisible to it until MultiKueue dispatches and a Pod
-appears on the worker — which matches the observed timing precisely.
+That is the whole bug. It is not that the controller cannot see the Job; it is
+that it only ever looks once, at the one moment the answer is guaranteed to be
+"no Pod".
 
-**This is a hypothesis, not a finding.** Phase 2 settles it.
+Two consequences worth stating plainly:
+
+- **A Pod-scoped fix would not be enough.** Deleting a Pod leaves the Job, which
+  recreates one within `backoffLimit`. Cleanup has to act on the Job or the
+  Workload.
+- **This is not MultiKueue-specific.** Any delay between Job and Pod creation
+  opens the same window, so a plain Kueue install has it too — and even without
+  Kueue there is a narrow race if a build is cancelled between Job creation and
+  Pod creation. MultiKueue only widens the window from milliseconds to hours.
 
 ## Cost
 
@@ -190,59 +215,76 @@ kubectl --context "$MANAGER_CONTEXT" -n "$NS" get workloads -o json | jq -r \
 admission, and no Pod exists anywhere. Anything else and you are reproducing a
 different bug.
 
-## Phase 2: determine whether the controller sees it
+## Phase 2: confirm both properties
 
-This is the decisive phase. Start the watch before cancelling if you can.
+Run two arms. One alone proves nothing — the point is the contrast between them.
+
+**Arm A — cancel while suspended (the failing case).** Using the Phase 1 setup,
+cancel while the Job is suspended with no Pod anywhere, then keep watching well
+past the point where quota frees up:
 
 ```bash
 kubectl --context "$MANAGER_CONTEXT" -n "$NS" \
   logs deployment/agent-stack-k8s --since=15m --follow \
-  | grep -iE "$JOB_UUID|cancel"
-```
+  | grep -iE "$JOB_UUID|cancel" &
 
-In parallel, poll the objects for at least three times the cancel-checker poll
-interval found in Phase 0, or five minutes if none was found:
-
-```bash
 watch -n 10 "kubectl --context $MANAGER_CONTEXT -n $NS get job $JOB \
-  -o jsonpath='{.metadata.deletionTimestamp}{\" \"}{.metadata.finalizers}{\"\n\"}'"
+  -o jsonpath='suspend={.spec.suspend} deleted={.metadata.deletionTimestamp}{\"\n\"}'"
 ```
 
-**Gate:** you can state, with a log line or its absence as evidence, whether the
-controller ever evaluated this job after cancellation.
+Expected if the finding holds: a cancellation log line at cancel time, no Job
+deletion, then later `suspend` flips to `false`, a Pod appears, and **no second
+evaluation occurs**. Record the interval between the cancel log line and the Pod
+appearing — that gap is the evidence.
+
+**Arm B — cancel while a Pod is running (the control).** Let a job reach a
+running Pod, then cancel. Expected: it is cancelled promptly.
+
+Arm B passing while Arm A fails is what distinguishes "cancellation is broken"
+from "cancellation is evaluated once, at the wrong moment". That distinction is
+the entire upstream report.
+
+**Gate:** you can state, with timestamps, that the controller evaluated the job
+exactly once and that a Pod was created after that evaluation.
 
 ## Phase 3: interpret
 
 | Evidence | Owner | Next action |
 | --- | --- | --- |
-| No log line mentions the UUID after cancellation | Agent Stack trigger condition | The Pod-gated hypothesis holds. File upstream with the podless-manager-Job explanation, then apply the Phase 5 bridge. |
-| Log line says cancelled, Job survives, no `deletionTimestamp` | Controller RBAC | Check its Role for `delete` on `jobs.batch` in `buildkite`. |
-| `deletionTimestamp` set, Job stuck `Terminating` | Kueue finalizer | Inspect `metadata.finalizers` and Kueue controller health. Do not remove a finalizer by hand before capturing why it is stuck. |
-| Manager Job deleted, worker Job still running | MultiKueue garbage collection | Check `multiKueue.gcInterval` and manager Kueue logs for the remote object. This is the expensive failure — a TPU is held. |
-| Cancel-checker key absent or zero in effective values | Configuration | Set a sane poll interval, redeploy through the Helm/GitOps source, repeat Phase 1. |
+| Arm A: one cancel log line, no re-evaluation, Pod created later | Agent Stack, edge-triggered and Pod-scoped | Confirms the finding. Go to Phase 4. |
+| Arm A: no log line at all, even at cancel time | Different bug — the controller is not seeing the build | Check queue/tags and controller polling before assuming anything here applies. |
+| Arm B also fails | Cancellation is broken generally, not just for delayed Pods | Stop. This handoff assumes Arm B works; re-scope. |
+| Job deleted but worker Job still running | MultiKueue garbage collection | Check `multiKueue.gcInterval` and manager Kueue logs. This is the expensive failure — a TPU is held. |
+| `deletionTimestamp` set, Job stuck `Terminating` | Kueue finalizer | Inspect `metadata.finalizers` and Kueue controller health. Capture why before removing one by hand. |
 
-Record which row matched. Do not apply more than one fix at a time.
+## Phase 4: remediation
 
-## Phase 4: candidate fixes, in order
+Note the ordering change from a normal triage: **configuration is not expected
+to help.** No poll interval makes an edge-triggered, Pod-scoped check into a
+level-triggered, Job-scoped one. Confirm the effective values from Phase 0 for
+the record, then move on rather than tuning.
 
-1. **Configuration.** If a cancel-checker poll interval exists and is unset or
-   zero, set it in the Helm values source — never `kubectl edit` — and re-run
-   Phase 1. Cheapest possible outcome; try it first.
-2. **RBAC.** If the controller wants to delete and cannot, widen only the verb
+1. **Report upstream.** This is an integration gap, not a misconfiguration.
+   Include: Agent Stack evaluates cancellation once, at cancel time, against
+   Pods; Kueue admission decouples Job creation from Pod creation, so the
+   evaluation lands in a window where no Pod can exist; `spec.managedBy` on the
+   manager Job; and the Arm A / Arm B timestamps. Note that `v0.46.2` already
+   consults Buildkite job state before reaping a supposedly empty Job, so the
+   capability exists — the question is which code path uses it and when.
+   Note also that the race exists without MultiKueue; Kueue only widens it.
+2. **Deploy the reconciler.** Phase 5. Given (1) is an upstream code change,
+   treat this as the operative fix for as long as that takes, not as a stopgap
+   to be tolerated for a week.
+3. **RBAC**, only if something wants to act and cannot: widen exactly the verb
    and resource named in the denial, in the namespace it operates in.
-3. **Upstream.** If the checker never evaluates podless Jobs, this is an
-   integration gap between Agent Stack and MultiKueue rather than a
-   misconfiguration. Report it with: the podless-by-design explanation,
-   `spec.managedBy` on the manager Job, and the Phase 2 log evidence. Note that
-   `v0.46.2` already checks Buildkite job state before reaping a supposedly
-   empty Job, so the capability exists and the question is which code path
-   consults it.
-4. **Local bridge.** Phase 5, only while 3 is open.
 
-## Phase 5: the reconciler bridge
+## Phase 5: the reconciler
 
-Only if Phase 3 shows the controller never evaluates these Jobs. Keep it small,
-keep it removable, and record it as temporary.
+The two properties that make Agent Stack's check insufficient are the two this
+must not repeat. It has to be **level-triggered** — reconciling desired against
+actual on an interval, so it is correct no matter when the Pod appears — and it
+must act on the **Job or Workload**, never the Pod, because deleting a Pod
+leaves a Job that creates another one.
 
 Contract:
 
@@ -259,8 +301,8 @@ kubectl --context "$MANAGER_CONTEXT" -n "$NS" patch workload "$WL" \
 
 Why deactivate rather than delete:
 
-- it works regardless of Pod existence, which is the property Agent Stack's
-  checker appears to lack;
+- it works regardless of Pod existence, and regardless of *when* it runs
+  relative to admission — the two properties Agent Stack's check lacks;
 - Kueue evicts the Workload and releases the quota reservation, which is the
   outcome that actually matters;
 - the object survives briefly for inspection instead of vanishing.
@@ -271,8 +313,17 @@ poll interval; structured logs correlating Buildkite job UUID, Workload name,
 and action taken. It must be idempotent — patching an already-inactive Workload
 is a no-op.
 
-**Gate:** a cancelled, unadmitted job has its quota released within one poll
-interval, and no TPU node scales up on its behalf.
+Test it against both windows, because passing only the first is the failure
+mode being fixed:
+
+- cancel **before** admission — the Workload is deactivated and never admitted;
+- cancel **after** admission but before the Pod is Ready — the Workload is
+  deactivated and the remote Job is torn down;
+- cancel a job whose Pod is already running — Agent Stack still handles this, and
+  the reconciler must not fight it or double-report.
+
+**Gate:** in all three, quota is released within one poll interval, no TPU node
+scales up on behalf of a cancelled job, and Buildkite reports the job once.
 
 ## Related but out of scope
 
@@ -297,6 +348,8 @@ Phase:
 Agent Stack chart version / image digest:
 Kueue version:
 Cancel-checker key present / value:
+Arm A: cancel log timestamp / Pod creation timestamp / re-evaluated? :
+Arm B: cancelled promptly? :
 Buildkite build and job UUIDs:
 Job state at cancellation (suspend / admission / pods):
 Controller log evidence (quote or "absent"):
