@@ -163,6 +163,9 @@ class KernelTunerRunnerSmokeTest(absltest.TestCase):
     def test_batched_rpa_kernel_tuner(self):
         self._run_tuner_smoke_test("batched_rpa_kernel_tuner")
 
+    def test_gmm_v2_kernel_tuner(self):
+        self._run_tuner_smoke_test("gmm_v2_kernel_tuner")
+
 
 class TuningCaseSerializationTest(absltest.TestCase):
     """Tests for TuningCase serialization and deserialization."""

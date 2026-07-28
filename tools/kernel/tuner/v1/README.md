@@ -142,6 +142,53 @@ On Buildkite, set `KERNEL_TUNING_KERNEL_TUNER_NAME=my_kernel_tuner` in the build
 
 ## 2. Running Locally
 
+### Available built-in tuners
+
+The framework currently includes these built-in tuners:
+
+- `example_kernel_tuner`
+- `rpa_v3_kernel_tuner`
+- `mla_kernel_tuner`
+- `batched_rpa_kernel_tuner`
+- `gmm_v2_kernel_tuner`
+
+### GMM v2 tuner
+
+The `gmm_v2_kernel_tuner` targets the Megablox GMM v2 kernel. It uses a `TuningKey` that captures the fixed problem description from the GMM worker contract (`m`, `k`, `n`, `tg`, `cg`, `ldt`, `rdt`, `q_block`, `fuse_act`) and a `TunableParams` that captures the tile sizes (`tm`, `tk`, `tn`).
+
+```python
+@dataclasses.dataclass(frozen=True)
+class TuningKey:
+    m: int
+    k: int
+    n: int
+    tg: int
+    cg: int
+    ldt: str
+    rdt: str
+    q_block: int
+    fuse_act: str | None = None
+
+@dataclasses.dataclass(frozen=True)
+class TunableParams:
+    tm: int
+    tk: int
+    tn: int
+```
+
+Example local run:
+
+```bash
+python -m tools.kernel.tuner.v1.kernel_tuner_runner \
+  --run_locally \
+  --kernel_tuner_name=gmm_v2_kernel_tuner \
+  --case_set_id=gmm_v2_local_smoke \
+  --run_id=0 \
+  --case_set_desc='gmm_v2_local_smoke' \
+  --tpu_version=tpu7x \
+  --tpu_cores=2
+```
+
 Install dependencies first:
 
 ```bash

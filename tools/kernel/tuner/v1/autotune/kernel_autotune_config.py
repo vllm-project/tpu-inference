@@ -15,4 +15,6 @@
 kernel_autotune_mapping = {
     'mla_kernel_tuner':
     '/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py',
+    'batched_rpa_kernel_tuner':
+    '/workspace/tpu_inference/tpu_inference/kernels/experimental/batched_rpa/tuned_params.py'
 }

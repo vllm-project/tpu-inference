@@ -90,10 +90,10 @@ def _get_page_indices(kv_lens, page_size, max_decode_seqs, max_prefill_seqs,
     return page_indices
 
 
-def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
-                                         rng: np.random.Generator
-                                         | None = None):
-    """Generates inputs for the batched RPA kernel Prefill case ONLY.
+def _generate_batched_rpa_inputs(tuning_key: TuningKey,
+                                 rng: np.random.Generator
+                                 | None = None):
+    """Generates inputs for the batched RPA kernel based on tuning_key.case.
 
   Args:
     tuning_key: TuningKey object containing the configuration for the kernel.
@@ -124,6 +124,9 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
   """
+    assert tuning_key.case in [
+        'decode', 'prefill'
+    ], f'Only support tuning for prefill and decode case but receives {tuning_key.case=}'
     if rng is None:
         rng = np.random.default_rng(1234)
 
@@ -155,22 +158,40 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
         (num_page_indices, page_size, cdiv(
             num_kv_heads * 2, kv_packing), kv_packing, head_dim), kv_dtype)
 
-    max_input_len = 1024  # This depends on the bench serve command line input-len flag
-    max_prefill_seqs = min(num_seqs, total_q_tokens // max_input_len)
-    remaining_tokens = total_q_tokens - max_prefill_seqs * max_input_len
-    max_decode_seqs = min(num_seqs - max_prefill_seqs, remaining_tokens)
-    assert max_decode_seqs == 0, "Only pack prefill sequences in prefill case, expect max_decode_seqs to be 0"
+    # prefill and decode context length is from Gemma-4 1k/500 Case
+    prefill_input_len = 1024
+    decode_kv_len = 1523
 
-    pages_per_seq = num_page_indices // num_seqs
-    kv_lens = jnp.pad(jnp.full((max_prefill_seqs, ),
-                               max_input_len,
-                               dtype=jnp.int32),
-                      (0, num_seqs - max_prefill_seqs),
-                      constant_values=0)
-    cu_q_lens = jnp.pad(jnp.arange(max_prefill_seqs + 1) * max_input_len,
-                        (0, num_seqs - max_prefill_seqs),
-                        constant_values=total_q_tokens)
-    distribution = jnp.array([0, 0, max_prefill_seqs], dtype=jnp.int32)
+    # The 1524 here is because in Gemma-4 1k/500 case, prefill 1024 tokens and decode 500 tokens
+    pages_per_seq = (1524 + page_size - 1) // page_size
+    if tuning_key.case == 'prefill':
+        assert total_q_tokens % prefill_input_len == 0, f'Expect prefill_input_len to align with total_q_tokens, got {prefill_input_len=} and {total_q_tokens=} '
+        max_prefill_seqs = min(num_seqs, total_q_tokens // prefill_input_len)
+        max_decode_seqs = 0
+        kv_lens = jnp.pad(jnp.full((max_prefill_seqs, ),
+                                   prefill_input_len,
+                                   dtype=jnp.int32),
+                          (0, num_seqs - max_prefill_seqs),
+                          constant_values=0)
+        cu_q_lens = jnp.pad(jnp.arange(max_prefill_seqs + 1) *
+                            prefill_input_len,
+                            (0, num_seqs - max_prefill_seqs),
+                            constant_values=total_q_tokens)
+    else:
+        max_prefill_seqs = 0
+        max_decode_seqs = min(num_seqs, total_q_tokens)
+        kv_lens = jnp.pad(jnp.full((max_decode_seqs, ),
+                                   decode_kv_len,
+                                   dtype=jnp.int32),
+                          (0, num_seqs - max_decode_seqs),
+                          constant_values=0)
+        cu_q_lens = jnp.pad(jnp.arange(max_decode_seqs + 1),
+                            (0, num_seqs - max_decode_seqs),
+                            constant_values=total_q_tokens)
+
+    distribution = jnp.array(
+        [max_decode_seqs, max_decode_seqs, max_decode_seqs + max_prefill_seqs],
+        dtype=jnp.int32)
     page_indices = _get_page_indices(kv_lens, page_size, max_decode_seqs,
                                      max_prefill_seqs, pages_per_seq,
                                      num_page_indices)
@@ -271,8 +292,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         if tuning_key == self._tuning_key:
             return self._kernel_inputs_cache
         self._tuning_key = tuning_key
-        self._kernel_inputs_cache = _generate_batched_rpa_inputs_prefill(
-            tuning_key)
+        self._kernel_inputs_cache = _generate_batched_rpa_inputs(tuning_key)
 
         return self._kernel_inputs_cache
 
