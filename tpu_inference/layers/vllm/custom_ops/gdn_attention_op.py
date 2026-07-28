@@ -176,7 +176,7 @@ class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
+        output: torch.Tensor | None = None,
     ):
         """
         Implements the exact same logic as in vLLM (https://github.com/vllm-project/vllm/blob/9c81f35/vllm/model_executor/layers/mamba/gdn_linear_attn.py#L508)
@@ -247,4 +247,8 @@ class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         # ============================================================
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        if output is not None:
+            output[:num_tokens], _ = self.out_proj(core_attn_out)
+            return output
+        else:
+            return self.out_proj(core_attn_out)[0]

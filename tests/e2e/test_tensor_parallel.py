@@ -135,9 +135,8 @@ def _test_tensor_parallelism_performance(
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         max_model_len=cfg.max_model_len,
-        max_num_batched_tokens=cfg.max_num_batched_tokens //
-        tensor_parallel_size,
-        max_num_seqs=cfg.max_num_seqs // tensor_parallel_size,
+        max_num_batched_tokens=cfg.max_num_batched_tokens,
+        max_num_seqs=cfg.max_num_seqs,
         additional_config=additional_config or {},
     )
     _, tp_time = _run_inference(tp_config, test_prompts, sampling_params)

@@ -20,8 +20,8 @@ set -euo pipefail
 
 MODEL=Qwen/Qwen3.5-397B-A17B-FP8
 PORT="${PORT:-8000}"
-# Fixed ISL/OSL per request, to match InferenceX setup.
-RANDOM_RANGE_RATIO="${RANDOM_RANGE_RATIO:-1.0}"
+# Matching InferenceX's Qwen3.5 benchmarks.
+RANDOM_RANGE_RATIO="${RANDOM_RANGE_RATIO:-0.8}"
 if [ -z "${INFERENCEX_REPO:-}" ]; then
   INFERENCEX_REPO=/tmp/InferenceX
   if [ ! -d "$INFERENCEX_REPO/.git" ]; then

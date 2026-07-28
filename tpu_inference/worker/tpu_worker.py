@@ -2,13 +2,13 @@
 
 import math
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 import jaxlib
-import jaxtyping
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           has_kv_transfer_group)
@@ -89,7 +89,96 @@ class PPConfig:
                 self.default_tpu_chips_per_process_bounds = f"1,{chips_per_stage},1"
 
 
+_STANDARD_KEYS = frozenset({
+    "host_tracer_level",
+    "device_tracer_level",
+    "python_tracer_level",
+})
+
+_ALLOWED_VALUE_CHARS = re.compile(r'^[a-zA-Z0-9_./,:-]*$')
+_OPTION_PATTERN = re.compile(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.+)$')
+
+
+def _parse_option_value(key: str, val: str) -> Any:
+    """Parses and infers the type of an option value string.
+
+    Tries to parse the value as a boolean (true/false) or integer. If those fail,
+    verifies that the string contains only safe whitelisted characters and returns
+    it as-is.
+    """
+    val_lower = val.lower()
+    if val_lower == "true":
+        return True
+    if val_lower == "false":
+        return False
+    try:
+        return int(val)
+    except ValueError:
+        if not _ALLOWED_VALUE_CHARS.match(val):
+            raise ValueError(f"Invalid characters in option value '{val}' "
+                             f"for key '{key}'")
+        return val
+
+
+def _parse_profile_options(
+        profile_prefix: Optional[str]
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Parses profile options from a semicolon-separated profile_prefix string.
+
+    This function extracts profiling parameters from the provided profile_prefix
+    string and splits them into standard options (which map directly to native
+    jax.profiler.ProfileOptions attributes) and advanced/custom options
+    (which map to JAX's advanced_configuration dictionary).
+
+    Args:
+        profile_prefix: A semicolon-separated string of key-value pairs.
+          E.g., "host_tracer_level:3;tpu_num_chips_to_profile_per_task:2;my_custom_option:true"
+
+    Returns:
+        A tuple containing two dictionaries:
+          1. standard_opts: Dictionaries of parsed option keys and their typed
+             values (e.g. bool, int, or str) that match standard JAX options
+             (host_tracer_level, device_tracer_level, python_tracer_level).
+          2. advanced_opts: Dictionaries of parsed custom option keys and their
+             typed values to be passed to JAX's advanced_configuration dictionary.
+          E.g., ({"host_tracer_level": 3}, {"tpu_num_chips_to_profile_per_task": 2, "my_custom_option": True})
+    """
+    if not profile_prefix or not profile_prefix.strip():
+        return {}, {}
+
+    if not profile_prefix.isascii():
+        raise ValueError("profile_prefix contains non-ASCII characters")
+
+    standard_opts = {}
+    advanced_opts = {}
+
+    parts = profile_prefix.split(';')
+
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        match = _OPTION_PATTERN.match(part)
+        if not match:
+            raise ValueError(f"Invalid profile option format in '{part}'. "
+                             "Expected 'key:value' format.")
+        key = match.group(1)
+        val = match.group(2)
+
+        parsed_val = _parse_option_value(key, val)
+
+        if key in _STANDARD_KEYS:
+            standard_opts[key] = parsed_val
+        else:
+            advanced_opts[key] = parsed_val
+
+    return standard_opts, advanced_opts
+
+
 class TPUWorker(WorkerBase):
+
+    _weight_update_active: bool = False
+    _kv_cache_freed: bool = False
 
     def __init__(
         self,
@@ -535,15 +624,35 @@ class TPUWorker(WorkerBase):
                 is_start: bool = True,
                 profile_prefix: str | None = None):
         if is_start:
+            standard_opts, advanced_opts = _parse_profile_options(
+                profile_prefix)
             options = jax.profiler.ProfileOptions()
             # default: https://docs.jax.dev/en/latest/profiling.html#general-options
             options.python_tracer_level = envs.PYTHON_TRACER_LEVEL
+
+            # Enable strict validation of experimental options by default. If an
+            # unrecognized configuration is passed, JAX/libtpu will raise a
+            # runtime initialization error instead of silently ignoring it.
+            # Users can opt-out by passing 'check_experimental_options:false'.
+            advanced_config = {
+                "check_experimental_options": True,
+            }
             if envs.PROFILE_SINGLE_DEVICE:
-                options.advanced_configuration = {
+                advanced_config.update({
                     "tpu_num_chips_to_profile_per_task": 1,
                     "tpu_num_sparse_cores_to_trace": 1,
                     "tpu_num_sparse_core_tiles_to_trace": 1,
-                }
+                })
+
+            # Override with parsed options
+            for key, val in standard_opts.items():
+                if hasattr(options, key):
+                    setattr(options, key, val)
+
+            advanced_config.update(advanced_opts)
+            if advanced_config:
+                options.advanced_configuration = advanced_config
+
             jax.profiler.start_trace(self.profile_dir,
                                      profiler_options=options)
         else:
@@ -612,19 +721,49 @@ class TPUWorker(WorkerBase):
         port = get_kv_transfer_port()
         return (int(self.topology_order_id), ip, int(port))
 
-    def sync_weights(
-        self,
-        updated_weights: jaxtyping.PyTree,
-        mappings: Dict[str, Tuple[str, Tuple[str]]],
-        transpose_keys: Dict[str, Tuple[int]],
-        reshard_fn: Callable[[jaxtyping.PyTree, jaxtyping.PyTree],
-                             jaxtyping.PyTree] = None
-    ) -> None:
-        """Sync the updated weights to the model runner."""
-        return self.model_runner._sync_weights(updated_weights=updated_weights,
-                                               mappings=mappings,
-                                               transpose_keys=transpose_keys,
-                                               reshard_fn=reshard_fn)
+    def init_weight_transfer_engine(self, init_info: Dict[str, Any]) -> None:
+        """Prepare the transport.
+
+        No setup is needed today; Raiden will build its `WeightSynchronizer`
+        here.
+        """
+        logger.info("init_weight_transfer_engine: %s", sorted(init_info or {}))
+
+    def start_weight_update(self, free_kv_cache: bool = True) -> None:
+        """Open a weight update session.
+
+        Freeing the KV cache is on by default: an incoming set of weights
+        roughly doubles peak HBM, and decoding from KV computed under the old
+        weights is incorrect. `finish_weight_update` reallocates it.
+
+        The prefix cache is scheduler-side and cannot be dropped here, so
+        callers must `reset_prefix_cache()` first -- otherwise the scheduler
+        serves hits from blocks this frees.
+        """
+        if self._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update called while an update is already "
+                "active. Call finish_weight_update first.")
+        if free_kv_cache:
+            self.model_runner.delete_kv_cache()
+        self._kv_cache_freed = free_kv_cache
+        self._weight_update_active = True
+
+    def update_weights(self, update_info: Dict[str, Any]) -> None:
+        """No-op. Tunix writes into the exposed vLLM model weights directly, and
+        Raiden's receiver auto-H2Ds on receipt. The phase is kept because
+        vLLM's contract has it.
+        """
+        logger.info(
+            "update_weights is a no-op on TPU; weights are applied "
+            "out-of-band (%s).", sorted(update_info or {}))
+
+    def finish_weight_update(self) -> None:
+        """Close the session and restore serving state."""
+        self._weight_update_active = False
+        if self._kv_cache_freed:
+            self.model_runner.reinitialize_kv_cache()
+            self._kv_cache_freed = False
 
     def delete_kv_cache(self) -> None:
         self.model_runner.delete_kv_cache()

@@ -79,10 +79,15 @@ def scaled_dot_product_attention(
             constant_values=mask_value,
         )
 
+    # batch is always 1 here (vLLM's ViT flattens all images in a request
+    # into one sequence via cu_seqlens/segment_ids, no real batch axis), so
+    # it must stay replicated rather than sharded by the DP ('data') axis --
+    # sharding a size-1 axis by DP>1 fails divisibility under enable_dp_attention.
     attn_fn = sharded_flash_attention(mesh,
                                       causal=is_causal,
                                       sm_scale=scale,
-                                      use_attention_bias=True)
+                                      use_attention_bias=True,
+                                      batch_axis=None)
     out = attn_fn(query, key, value, attention_bias, None)
 
     if q_pad > 0:
@@ -166,10 +171,15 @@ def vllm_vit_sdpa(
     # Note:
     # 1. causal=False as ViT attention is bidirectional (non-causal)
     # 2. use_attention_bias=False as sequence boundaries are handled by seg_ids instead of an explicit attention bias matrix.
+    # 3. batch_axis=None: batch is always 1 here (all images in a request are
+    #    flattened into one sequence via cu_seqlens/segment_ids), so it must
+    #    stay replicated -- sharding a size-1 axis by DP>1 fails divisibility
+    #    under enable_dp_attention.
     attn_fn = sharded_flash_attention(mesh,
                                       causal=False,
                                       sm_scale=scale,
-                                      use_attention_bias=False)
+                                      use_attention_bias=False,
+                                      batch_axis=None)
 
     out = attn_fn(query, key, value, seg_ids)
 

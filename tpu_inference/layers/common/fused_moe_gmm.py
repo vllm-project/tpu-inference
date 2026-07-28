@@ -21,40 +21,20 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
-from tpu_inference.kernels.collectives import \
-    hierarchical_reduce_scatter as hier_rs
+from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
-from tpu_inference.kernels.sparse_core.ragged_gather import \
-    ragged_gather as ragged_gather_v1
-from tpu_inference.kernels.sparse_core.ragged_gather_reduce import \
-    ragged_gather_reduce as ragged_gather_reduce_v1
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
-    ragged_gather_reduce as ragged_gather_reduce_v2
-from tpu_inference.kernels.sparse_core.ragged_gather_v2 import ragged_gather_v2
+    ragged_gather_reduce
+from tpu_inference.kernels.sparse_core.ragged_gather_v2 import \
+    ragged_gather_v2 as ragged_gather
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
-
-# Select the SparseCore MoE gather and gather-reduce kernels independently at
-# import time, driven by the RAGGED_GATHER_VERSION / RAGGED_GATHER_REDUCE_VERSION
-# env vars (set in the server process before boot, so they are fixed for the
-# server's lifetime). Both default to "v2" (the new kernels); set either to "v1"
-# to fall back to the legacy kernel. Call sites below use the bound names.
-if envs.RAGGED_GATHER_VERSION == "v1":
-    ragged_gather = ragged_gather_v1
-else:
-    ragged_gather = ragged_gather_v2
-if envs.RAGGED_GATHER_REDUCE_VERSION == "v1":
-    ragged_gather_reduce = ragged_gather_reduce_v1
-else:
-    ragged_gather_reduce = ragged_gather_reduce_v2
-logger.info("fused_moe_gmm SparseCore kernels: gather=%s gather_reduce=%s",
-            envs.RAGGED_GATHER_VERSION, envs.RAGGED_GATHER_REDUCE_VERSION)
 
 # Target chunk size of 2048 slots was found empirically to be optimal
 # for MoE workloads (e.g., Qwen) to hide ICI/DMA latency during AllReduce.
@@ -323,29 +303,12 @@ def moe_gmm_local(x: jax.Array,
                 topk_weights,
                 topk,
             )
-
         if enable_rs_kernel:
-            # Fallback to psum-scatter for small token sizes to avoid Mosaic compilation.
-            # The threshold is chosen based on the tile dimension (8) in the
-            # hierarchical reduce-scatter kernel.
-            if chunk_hidden.shape[0] // scatter_axis_size < 8:
-                out = jax.lax.psum_scatter(chunk_hidden,
-                                           axis_name=reduction_axis,
-                                           scatter_dimension=0,
-                                           tiled=True).astype(x.dtype)
-            else:
-                # Determine the number of micro-batches
-                # Use 4 for large inputs to improve efficiency by maximizing the number of
-                # concurrent reduction streams, and 2 for smaller inputs to fit in ~32MB VMEM
-                num_mb = 2
-                if chunk_hidden.shape[0] // scatter_axis_size > 600:
-                    num_mb = 4
-                rs_out = hier_rs.hierarchical_reduce_scatter_local(
-                    chunk_hidden,
-                    num_devices=scatter_axis_size,
-                    num_micro_batches=num_mb,
-                    axis_name=reduction_axis)
-                out = rs_out.astype(x.dtype)
+            rs_out = hier_rs_sc.hierarchical_reduce_scatter_local(
+                chunk_hidden,
+                num_devices=scatter_axis_size,
+                axis_name=reduction_axis)
+            out = rs_out.astype(x.dtype)
         elif scatter_results:
             if reduce_axes:
                 chunk_hidden = jax.lax.psum(chunk_hidden,
@@ -600,6 +563,7 @@ def fused_moe_func(
     hash_based_topk_indices: jax.Array | None = None,
     expert_score_correction_bias: jax.Array | None = None,
     moe_chunk_size: int = 0,
+    num_valid_tokens: jax.Array | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -653,6 +617,14 @@ def fused_moe_func(
             topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
+    # Route padding tokens to expert 0 instead of picking a selected expert. This
+    # is especially useful when we have a low number of tokens (e.g. low
+    # concurrency), where padding tokens may activate unnecessary expert weights
+    # and slow down the gmm kernel.
+    if num_valid_tokens is not None:
+        token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
+        topk_indices = jnp.where(token_valid, topk_indices, 0)
+        topk_weights = jnp.where(token_valid, topk_weights, 0.0)
     # All gathering topk_indices and topk_weights if attention dp is used.
     if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(

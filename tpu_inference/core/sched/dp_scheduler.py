@@ -144,6 +144,10 @@ def _scheduler_worker_process(
     original_scheduler_cls: type,
 ):
     """Worker process that manages a single scheduler instance."""
+    import atexit
+    import gc
+    atexit._clear()
+    gc.enable()
     # Initialize the scheduler in this process
     import inspect
     sig = inspect.signature(original_scheduler_cls)
@@ -210,6 +214,24 @@ def _scheduler_worker_process(
                 case SchedulerCommand.UPDATE_FROM_OUTPUT:
                     model_runner_output = data
                     scheduler_output = _cached_scheduler_outputs.popleft()
+
+                    if model_runner_output.sampled_token_ids:
+                        # Synchronize the locally cached `num_scheduled_tokens` with the actual
+                        # count of generated tokens from the continue-decode multi-step execution.
+                        # This ensures correct request state updates and MoE experts slicing inside
+                        # local `scheduler.update_from_output(...)`.
+                        cached_data = scheduler_output.scheduled_cached_reqs
+                        num_output_tokens_dict = dict(
+                            zip(cached_data.req_ids,
+                                cached_data.num_output_tokens))
+                        for req_id, req_idx in model_runner_output.req_id_to_index.items(
+                        ):
+                            if num_output_tokens_dict.get(req_id, 0) > 0:
+                                num_sampled = len(model_runner_output.
+                                                  sampled_token_ids[req_idx])
+                                if num_sampled > 0:
+                                    scheduler_output.num_scheduled_tokens[
+                                        req_id] = num_sampled
 
                     result = scheduler.update_from_output(
                         scheduler_output, model_runner_output)
@@ -292,7 +314,7 @@ def _scheduler_worker_process(
                         _send_result(0)
                     else:
                         max_cache_hit_length = request.num_tokens - 1
-                        _, num_cached_tokens = (
+                        _, num_cached_tokens, *_ = (
                             kv_cache_mgr.coordinator.find_longest_cache_hit(
                                 request.block_hashes, max_cache_hit_length))
                         _send_result(num_cached_tokens)
@@ -439,6 +461,11 @@ class DPScheduler(SchedulerInterface):
         self.output_conns: List[Connection] = []  # child writes, parent reads
         self.processes: List[Process] = []
 
+        gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.disable()
+        gc.freeze()
+
         for rank in range(self.dp_size):
             # Each pipe gives (parent_end, child_end)
             # Input pipe: parent sends commands, child receives
@@ -471,6 +498,9 @@ class DPScheduler(SchedulerInterface):
             input_child_conn.close()
             output_child_conn.close()
             self.processes.append(process)
+
+        if gc_was_enabled:
+            gc.enable()
 
         # Reverse mapping from output connection to rank for wait()-based collection.
         self._output_conn_to_rank: Dict[int, int] = {
@@ -1117,8 +1147,11 @@ class DPScheduler(SchedulerInterface):
         for req_id, req_idx in model_runner_output.req_id_to_index.items():
             if num_output_tokens_dict.get(req_id, 0) > 0:
                 if model_runner_output.sampled_token_ids:
-                    scheduler_output.num_scheduled_tokens[req_id] = len(
+                    num_sampled = len(
                         model_runner_output.sampled_token_ids[req_idx])
+                    if num_sampled > 0:
+                        scheduler_output.num_scheduled_tokens[
+                            req_id] = num_sampled
 
         # Split model output by DP rank (each rank gets only its req_ids).
         rank_model_outputs = self._split_model_output_by_rank(

@@ -90,17 +90,42 @@ def xla_quantized_matmul(
     return out.astype(x.dtype)
 
 
-def _get_x_q_dtype(w_q_dtype: jnp.dtype) -> jnp.dtype:
-    """Return 8-bit float or integer dtype depending on w_q_dtype."""
-    if jnp.issubdtype(w_q_dtype, jnp.integer):
-        return jnp.int8
-    elif jnp.issubdtype(w_q_dtype, jnp.floating):
-        return jnp.float8_e4m3fn
-    # TODO: we need a new flag for 4bit activation later such as w4a4.
-    else:
-        raise ValueError(
-            f"Unsupported quantized dtype: {w_q_dtype}, it should be integer or float"
-        )
+def sharded_matmul(x: jax.Array,
+                   w: jax.Array,
+                   weight_sharding: P | NamedSharding,
+                   *,
+                   mesh: Mesh | None = None,
+                   defer_all_reduce: bool = False) -> jax.Array:
+    """Matmul that can skip its all-reduce (``defer_all_reduce=True``).
+
+    A plain einsum under GSPMD is always all-reduced by the partitioner, so it
+    runs in shard_map. No bias: vLLM's RowParallelLinear rejects
+    reduce_results=False with an in-layer bias.
+    """
+    if isinstance(weight_sharding, NamedSharding):
+        mesh = mesh or weight_sharding.mesh
+        weight_sharding = weight_sharding.spec
+    in_axis, out_axis = weight_sharding
+    # x may have extra leading batch dims.
+    batch_dims = (None, ) * (x.ndim - 2)
+    x_spec = P(ShardingAxisName.ATTN_DATA, *batch_dims, in_axis)
+    x = jax.lax.with_sharding_constraint(
+        x,
+        NamedSharding(mesh, x_spec) if mesh else x_spec)
+
+    def wrapper(x, w):
+        out = x @ w
+        if in_axis and not defer_all_reduce:
+            out = jax.lax.psum(out, axis_name=in_axis)
+        return out
+
+    return jax.shard_map(
+        wrapper,
+        mesh=mesh,
+        in_specs=(x_spec, weight_sharding),
+        out_specs=P(ShardingAxisName.ATTN_DATA, *batch_dims, out_axis),
+        check_vma=False,
+    )(x, w)
 
 
 def sharded_quantized_matmul(x: jax.Array,
@@ -109,7 +134,6 @@ def sharded_quantized_matmul(x: jax.Array,
                              weight_sharding: P | NamedSharding,
                              *,
                              mesh: Mesh | None = None,
-                             x_q_dtype: jnp.dtype | None = None,
                              defer_all_reduce: bool = False) -> jax.Array:
     """
     Wrapper around the quantized matmul kernel.
@@ -120,7 +144,6 @@ def sharded_quantized_matmul(x: jax.Array,
         w_s: Weight quantization scale. [n_output_features] for xla quantized matmul, [n_blocks, 1, n_output_features] for quantized matmul kernel
         weight_sharding: PartitionSpec or NamedSharding for the weight tensor.
         mesh: (Optional) Mesh to shard on. If None, mesh from current context is used, similar to jax.shard_map().
-        x_q_dtype: (Optional) Quantized dtype for the activation. If None, inferred from w_q dtype (int -> int8, float -> float8).
         defer_all_reduce: (Optional) If True, defer the all-reduce (psum) over
             the contracting (in) axis: it is not performed here even when that
             axis is sharded. The output then holds per-shard partial sums; the
@@ -162,8 +185,6 @@ def sharded_quantized_matmul(x: jax.Array,
             scale_sharding = P(out_axis, )
     out_sharding = P(ShardingAxisName.ATTN_DATA, out_axis)
 
-    if x_q_dtype is None:
-        x_q_dtype = _get_x_q_dtype(w_q.dtype)
     x = jax.lax.with_sharding_constraint(
         x,
         NamedSharding(mesh, x_sharding) if mesh else x_sharding)

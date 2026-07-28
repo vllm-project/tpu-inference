@@ -31,6 +31,8 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.compiler_options import \
+    get_step_fn_compiler_options
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
 from tpu_inference.models.jax.utils.multi_modal_utils import \
@@ -87,13 +89,11 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.qwen2_5_vl import \
         Qwen2_5_VLForConditionalGeneration
     from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
-    from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
     _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
     _MODEL_REGISTRY["DeepseekV3ForCausalLM"] = DeepseekV3ForCausalLM
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Llama4ForConditionalGeneration"] = LlamaGuard4ForCausalLM
     _MODEL_REGISTRY["Qwen3ForCausalLM"] = Qwen3ForCausalLM
-    _MODEL_REGISTRY["Qwen3MoeForCausalLM"] = Qwen3MoeForCausalLM
     _MODEL_REGISTRY[
         "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
     _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
@@ -104,6 +104,7 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Gemma4ForCausalLM"] = Gemma4ForCausalLM
     _MODEL_REGISTRY["Gemma4MTPModel"] = Gemma4MTPForCausalLM
     _MODEL_REGISTRY["DFlashForCausalLM"] = DFlashForCausalLM
+    _MODEL_REGISTRY["DFlashDraftModel"] = DFlashForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -191,7 +192,7 @@ def _get_nnx_model(
                 mesh,
                 apply_to_abstract_model=True)
 
-            model = nnx.eval_shape(abstract_model_fn)
+            model = nnx.eval_shape(abstract_model_fn, graph_updates=False)
             quantization_config = vllm_config.model_config.hf_config.quantization_config if hasattr(
                 vllm_config.model_config.hf_config,
                 "quantization_config") else {}
@@ -267,7 +268,7 @@ def _get_nnx_model(
                 mesh,
                 apply_to_abstract_model=True)
         with jax.set_mesh(mesh):
-            model = nnx.eval_shape(abstract_model_fn)
+            model = nnx.eval_shape(abstract_model_fn, graph_updates=False)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
@@ -353,8 +354,8 @@ def get_flax_model(
     vllm_config.model_config.dtype = original_dtype
     kv_cache_sharding = NamedSharding(
         mesh,
-        PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD))
+        PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                      ShardingAxisName.KV_HEAD))
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,
@@ -382,6 +383,7 @@ def get_flax_model(
         static_argnums=(
             6, 9, 10
         ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
+        compiler_options=get_step_fn_compiler_options(),
     )
     def run_model(state_leaves, *args):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
@@ -465,6 +467,7 @@ def get_flax_model(
     def wrapped_model_fn(*args, **kwargs):
         if not model_supports_spec_step:
             kwargs.pop("spec_step_idx", None)
+        kwargs.pop("shared_attention_metadata", None)
         return jitted_model_fn(*args, **kwargs)
 
     compute_logits_fn = run_compute_logits

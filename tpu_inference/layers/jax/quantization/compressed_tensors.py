@@ -94,15 +94,15 @@ class CompressedTensorsConfig(QuantizationConfig):
             if should_ignore_layer(prefix,
                                    ignore=self._ignore,
                                    fused_mapping=self._fused_mapping):
-                return UnquantizedFusedMoEMethod()
+                return UnquantizedFusedMoEMethod(layer)
             scheme = self._match_target(layer, prefix)
             if scheme is None:
-                return UnquantizedFusedMoEMethod()
+                return UnquantizedFusedMoEMethod(layer)
             weight_quant = scheme.get("weights")
             input_quant = scheme.get("input_activations")
             if self._ct._is_fp8_w8a8(weight_quant, input_quant):
                 return Fp8FusedMoEMethod(_weight_block_size(weight_quant))
-            return UnquantizedFusedMoEMethod()
+            return UnquantizedFusedMoEMethod(layer)
         if not isinstance(layer, JaxEinsum):
             return None
 

@@ -77,7 +77,9 @@ class GptOss(nnx.Module):
         rms_norm_eps: float = self.hf_config.rms_norm_eps
         swiglu_limit: float = self.hf_config.swiglu_limit
 
-        rope_theta: float = self.hf_config.rope_theta
+        rope_theta: float = getattr(
+            self.hf_config, "rope_theta",
+            None) or self.hf_config.rope_scaling["rope_theta"]
         rope_scaling_factor: float = self.hf_config.rope_scaling["factor"]
         rope_ntk_alpha: float = self.hf_config.rope_scaling["beta_slow"]
         rope_ntk_beta: float = self.hf_config.rope_scaling["beta_fast"]

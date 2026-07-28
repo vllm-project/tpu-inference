@@ -175,6 +175,8 @@ def moe_apply(
                     expert_score_correction_bias=extra_backend_kwargs.get(
                         "e_score_correction_bias", None),
                     moe_chunk_size=moe_chunk_size,
+                    num_valid_tokens=extra_backend_kwargs.get(
+                        "num_valid_tokens", None),
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
@@ -211,3 +213,16 @@ def moe_apply(
                                        mesh=mesh)
 
         return output
+
+
+# TODO(#3041): Inherit from vLLM's FusedMoEMethodBase, so it can take FusedMoeConfig
+# as init arg, and unify more logic.
+class FusedMoEMethodBase:
+    """Base class that prepare TPU specific configs"""
+
+    def __init__(self, moe_backend: MoEBackend, ep_axis_name: str):
+        self.extra_backend_kwargs: dict = {
+            "moe_chunk_size": envs.VLLM_MOE_CHUNK_SIZE
+        }
+        if moe_backend == MoEBackend.FUSED_MOE:
+            self.extra_backend_kwargs["ep_axis_name"] = ep_axis_name

@@ -35,7 +35,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 
-from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.moe import \
+    FusedMoEMethodBase as TpuFusedMoEMethodBase
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
@@ -346,9 +347,8 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         return out
 
 
-class VllmUnquantizedFusedMoEMethod(
-        UnquantizedFusedMoEMethod,
-        common_unquantized.UnquantizedFusedMoEMethod, VllmQuantizationMethod):
+class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
+                                    VllmQuantizationMethod):
 
     def __init__(
         self,
@@ -360,11 +360,7 @@ class VllmUnquantizedFusedMoEMethod(
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
 
-        self.extra_backend_kwargs = {}
-        if self.moe_backend == MoEBackend.FUSED_MOE:
-            # When fused moe kernle is used, we pass extra arguments like
-            # tuned block sizes to the kernel.
-            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
+        TpuFusedMoEMethodBase.__init__(self, self.moe_backend, ep_axis_name)
 
     @property
     def is_monolithic(self) -> bool:

@@ -103,3 +103,26 @@ In order to use this approach, you can do the following:
 5. Click `Capture Profile` and, in the `Profile Service URL(s) or TPU name` box, enter `localhost:XXXX` where `XXXX` is your `JAX_PROFILER_SERVER_PORT` (default is `9999`)
 
 6. Enter the desired amount of time (in ms)
+
+## Configuring Profiler Options
+
+Users can customize the JAX profiler settings by passing a configuration string via the `profile_prefix` parameter from upstream.
+
+### Syntax Format
+
+Options are specified as a semicolon-separated string of key:value pairs:
+
+* **Key-Value Separator**: A colon (`:`) must be used to separate keys and values (e.g. `host_tracer_level:3`). Using `=` (e.g. `host_tracer_level=3`) will raise a `ValueError`.
+* **Types**:
+  * Values matching `true` or `false` (case-insensitive) are parsed as Python booleans.
+  * Integer values are parsed as Python `int`.
+  * Other values are parsed as strings.
+* **Validation & Safety Rules**:
+  * Only ASCII characters are allowed.
+  * Option values can only contain safe alphanumeric and basic special characters (`^[a-zA-Z0-9_./,:-]*$`). Using quotes, backslashes, or other special characters will fail validation.
+
+### Options Mapping
+
+* **Standard JAX Options**: Option keys matching standard JAX general options (such as `host_tracer_level`, `device_tracer_level`, or `python_tracer_level`) are set directly on the JAX `ProfileOptions` object. For more details, refer to the [General options in JAX Profiling Documentation](https://docs.jax.dev/en/latest/profiling.html#general-options).
+* **Advanced & Experimental Options**: Any other custom keys (such as `tpu_power_trace_level`, `tpu_perf_counters`, etc.) are forwarded directly to JAX's `advanced_configuration` dictionary. For more details, refer to the [Advanced options in JAX Profiling Documentation](https://docs.jax.dev/en/latest/profiling.html#advanced-configuration-options).
+  * By default, strict validation of experimental options is enabled (`check_experimental_options:true`). If an unrecognized configuration key is passed, JAX/libtpu will raise a runtime initialization error. You can disable this strict check by passing `check_experimental_options:false` in the `profile_prefix` string.

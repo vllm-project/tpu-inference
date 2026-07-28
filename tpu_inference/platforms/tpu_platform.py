@@ -306,8 +306,6 @@ class TpuPlatform(Platform):
                             min_page_size,
                         )
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
-            if envs.USE_BATCHED_RPA_KERNEL and cache_config.block_size < 256:
-                cache_config.block_size = 256
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
@@ -369,7 +367,6 @@ class TpuPlatform(Platform):
         enable_continue_decode = vllm_config.additional_config.get(
             "enable_continue_decode", False)
         is_pooling_model = vllm_config.model_config.runner_type == "pooling"
-        async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         # Late initialization to avoid circular import.
         from tpu_inference.core.sched.dp_scheduler import \
@@ -384,9 +381,6 @@ class TpuPlatform(Platform):
             if is_pooling_model:
                 raise ValueError(
                     "continue_decode is not supported for pooling models")
-            if async_scheduling:
-                raise ValueError(
-                    "continue_decode is not supported with async scheduling")
 
             from tpu_inference.core.sched.utils import \
                 patch_vllm_scheduler_for_continue_decode

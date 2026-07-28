@@ -401,3 +401,73 @@ class TestSpeculativeDecodingManager:
         assert result == [[10, 11], [20, 21]]
         self.runner.drafter.prepare_inputs.assert_called_once()
         self.runner.drafter.propose.assert_called_once()
+
+    def test_propose_dflash_draft_token_ids(self):
+        """Tests the logic for proposing DFlash draft tokens."""
+        # 1. ===== Setup =====
+        from tpu_inference.spec_decode.jax.dflash import DFlashProposer
+        self.runner.drafter = MagicMock(spec=DFlashProposer)
+        self.runner.speculative_config.method = "dflash"
+
+        # Mock TPUModelRunner attributes
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.req_ids = ["req-1", "req-2"]
+        self.runner.requests = {
+            "req-1": MagicMock(),
+            "req-2": MagicMock(),
+        }
+        self.runner.mesh = self.mock_mesh
+        self.runner.kv_caches = MagicMock()
+
+        # Mock drafter methods
+        mock_attn_metadata = MagicMock()
+        mock_target_token_ids = MagicMock()
+        mock_last_token_indices = MagicMock()
+        mock_target_hidden_states = MagicMock()
+        self.runner.drafter.prepare_inputs.return_value = (
+            mock_target_hidden_states,
+            mock_target_token_ids,
+            mock_last_token_indices,
+            mock_attn_metadata,
+        )
+        mock_draft_token_ids = [[10, 11], [20, 21]]
+        self.runner.drafter.propose.return_value = (
+            self.runner.kv_caches,
+            mock_draft_token_ids,
+        )
+
+        # Inputs
+        aux_hidden_states = MagicMock()
+        attn_metadata = MagicMock()
+        attn_metadata.seq_lens.shape = [2]
+        spec_decode_metadata = MagicMock(spec=SpecDecodeMetadata)
+        spec_decode_metadata.req_indices_dp = {0: [0, 1]}
+        spec_decode_metadata.draft_lengths_cpu = np.array([2, 3])
+        last_sampled_token_id = MagicMock()
+        num_rejected_tokens = MagicMock()
+        discard_sampled_tokens_req_indices = []
+        scheduler_output = MagicMock()
+        input_ids = MagicMock()
+        hidden_states = MagicMock()
+
+        # 2. ===== Act =====
+        with patch(
+                "tpu_inference.runner.speculative_decoding_manager.device_array",
+                side_effect=lambda mesh, x, **kwargs: x):
+            result = self.runner.speculative_decoding_manager.propose_dflash_draft_token_ids(
+                spec_decode_metadata,
+                last_sampled_token_id,
+                num_rejected_tokens,
+                discard_sampled_tokens_req_indices,
+                aux_hidden_states,
+                attn_metadata,
+                scheduler_output,
+                input_ids,
+                async_scheduling=False,
+                hidden_states=hidden_states,
+            )
+
+        # 3. ===== Assert =====
+        assert result == [[10, 11], [20, 21]]
+        self.runner.drafter.prepare_inputs.assert_called_once()
+        self.runner.drafter.propose.assert_called_once()

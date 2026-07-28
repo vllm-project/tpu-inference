@@ -89,7 +89,10 @@ class VllmMoERunner(MoERunner):
         if mesh is None:
             return True
 
-        if self._shared_experts is None or is_attn_dp(mesh):
+        if self._shared_experts is None:
+            return True
+
+        if is_attn_dp(mesh) or self.moe_config.is_sequence_parallel:
             return True
 
         moe_backend = select_moe_backend_from_fused_moe_config(self.moe_config)
