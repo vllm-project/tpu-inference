@@ -24,8 +24,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from absl.testing import absltest, parameterized
-from jax._src import test_util as jtu
 from jax._src import mesh as mesh_lib
+from jax._src import test_util as jtu
 from jax.experimental.pallas import tpu as pltpu
 
 from tests.layers.common.conftest import (EightDeviceTestCase, FakeMoELayer,

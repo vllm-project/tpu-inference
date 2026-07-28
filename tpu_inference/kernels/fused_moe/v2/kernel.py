@@ -813,17 +813,20 @@ def _build_fused_ep_moe_kernel(*,
                     dst_block = contrib_off_sm[e, d] + (lo - run_start)
 
                     @pl.when(overlap > 0)
-                    def _(src_block=src_block, dst_block=dst_block,
-                          overlap=overlap, parity=parity):
+                    def _(src_block=src_block,
+                          dst_block=dst_block,
+                          overlap=overlap,
+                          parity=parity):
                         pltpu.make_async_copy(
                             out_vm.at[parity,
-                                      pl.ds(src_block * ROWBLK,
-                                            overlap * ROWBLK)],
+                                      pl.ds(src_block * ROWBLK, overlap *
+                                            ROWBLK)],
                             contrib_hbm.at[pl.ds(dst_block * ROWBLK,
                                                  overlap * ROWBLK)],
                             commit_sems.at[parity]).start()
                         pltpu.make_async_copy(
-                            oscl_vm.at[parity, pl.ds(src_block, overlap)],
+                            oscl_vm.at[parity,
+                                       pl.ds(src_block, overlap)],
                             cscl_hbm.at[pl.ds(dst_block, overlap)],
                             commit_scl_sems.at[parity]).start()
 
@@ -866,16 +869,15 @@ def _build_fused_ep_moe_kernel(*,
                     w1s_blocks = w1s_vm[e]  # [nb1, 2*inter] f32
                     w2s_blocks = w2s_vm[e]  # [nb2, hidden] f32
                     w1_block, w2_block = _fp4_block_readers(slot)
-                    acc2, mid_scale = expert_ffn_blockscale(
-                        act_rows,
-                        act_scales,
-                        w1_block,
-                        w2_block,
-                        w1s_blocks,
-                        w2s_blocks,
-                        qb=rhs_qb,
-                        act_fn=act_fn,
-                        w1b=w1b_row)
+                    acc2, mid_scale = expert_ffn_blockscale(act_rows,
+                                                            act_scales,
+                                                            w1_block,
+                                                            w2_block,
+                                                            w1s_blocks,
+                                                            w2s_blocks,
+                                                            qb=rhs_qb,
+                                                            act_fn=act_fn,
+                                                            w1b=w1b_row)
                 elif weight_format == host.WeightFormat.INT8:
                     w1_chunk, w2_chunk = _int8_chunk_readers(slot)
                     acc2, mid_scale = expert_ffn_int8(
