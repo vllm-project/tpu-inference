@@ -32,8 +32,8 @@ PLACEHOLDER_TOKEN_ID = -1
 def extract_last_sampled_tokens(
         spec_decode_metadata: SpecDecodeMetadata,
         sampled_token_ids: jnp.ndarray, num_speculative_tokens: int,
-        vocab_size: int, max_num_reqs_per_dp_rank: int,
-        mesh: jax.sharding.Mesh) -> tuple[jnp.ndarray, jnp.ndarray]:
+        vocab_size: int, max_num_reqs_per_dp_rank: int, mesh: jax.sharding.Mesh
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
 
     def _body(draft_lengths, sampled_token_ids):
         return _extract_last_sampled_tokens(draft_lengths, sampled_token_ids,
@@ -45,7 +45,7 @@ def extract_last_sampled_tokens(
         _body,
         mesh=mesh,
         in_specs=(data_spec, data_spec),
-        out_specs=(data_spec, data_spec),
+        out_specs=(data_spec, data_spec, data_spec),
     )(spec_decode_metadata.draft_lengths, sampled_token_ids)
 
 
@@ -54,8 +54,9 @@ def extract_last_sampled_tokens(
 def _extract_last_sampled_tokens(
         draft_lengths: jnp.ndarray, sampled_token_ids: jnp.ndarray,
         num_speculative_tokens: int, vocab_size: int,
-        max_num_seq: int) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Extract the last sampled token and number rejected tokens per seq. """
+        max_num_seq: int) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Extract the last sampled token, rejected count and mamba read offset
+    per seq."""
     # `sampled_token_ids` is the output of the rejection sampler.
     num_draft_tokens = draft_lengths
     batch_size = num_draft_tokens.shape[0]
@@ -93,7 +94,14 @@ def _extract_last_sampled_tokens(
     num_rejected_tokens = jnp.pad(num_rejected_per_seq,
                                   (0, max_num_seq - batch_size),
                                   constant_values=0)
-    return last_sampled_tokens, num_rejected_tokens
+    # Mamba state checkpoint the request must resume from next step:
+    # `num_draft - num_rejected` == number of accepted output tokens - 1.
+    # Zero for sequences that did not run spec decoding this step (prefill,
+    # decode without drafts), which also resets the offset after prefill.
+    mamba_read_offsets = jnp.pad(num_draft_tokens - num_rejected_per_seq,
+                                 (0, max_num_seq - batch_size),
+                                 constant_values=0)
+    return last_sampled_tokens, num_rejected_tokens, mamba_read_offsets
 
 
 @jax.jit

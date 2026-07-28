@@ -27,6 +27,8 @@ import jax
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "mamba_slot_read_offsets",
+        "mamba_request_distribution",
         "pcp_q_pos_offsets",
         "pcp_kv_cache_lens",
     ],
@@ -53,6 +55,17 @@ class AttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+    # (mamba_num_blocks,) int32 — mamba + spec decode only, else None. Per-slot
+    # state read offset (num_accepted - 1 from the last verify step): the GDN
+    # kernel resumes from checkpoint `base_slot + offset` and writes new
+    # checkpoints from `base_slot`. Indexed by physical slot so it survives
+    # rescheduling.
+    mamba_slot_read_offsets: jax.Array | None = None
+    # (3 * dp_size,) int32 — mamba + spec decode only, else None. Like
+    # `request_distribution`, but its first segment counts all windowed
+    # sequences (decodes + verify windows), so the GDN kernel runs its windowed
+    # mode over the [decode][verify] prefix of the batch.
+    mamba_request_distribution: jax.Array | None = None
 
     # (max_num_seqs, ) int32 — PCP only. For a single request, it is [rank*C, (2*pcp-1-rank)*C].
     pcp_q_pos_offsets: jax.Array | None = None
