@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2029,SC2087,SC2320,SC2054,SC2002
 # Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -324,13 +325,15 @@ cleanup_node_runtime() {
   local cleanup_cmd
   cleanup_cmd=$(cat <<'EOF'
 set -x
+ip=$1
+label=$2
 grace_seconds=10
 # 1. Gracefully stop inside the container if it exists
 if docker inspect node >/dev/null 2>&1; then
   echo "   -> Gracefully stopping processes inside 'node' container..."
   docker exec -i node bash -c "
     pkill -TERM -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
-    end_time=\$((SECONDS + grace_seconds))
+    end_time=\$((SECONDS + ${grace_seconds}))
     while (( SECONDS < end_time )); do
       pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || break
       sleep 1
@@ -367,9 +370,9 @@ else
 fi
 
 # 5. Clean up any lingering Ray processes on host (outside docker)
-if pgrep -f ray >/dev/null 2>&1; then
+if pgrep -f 'raylet|gcs_server|plasma_store_server|ray::|bin/ray|python -m ray' >/dev/null 2>&1; then
   echo "   -> Warning: Lingering Ray processes found on host. Force killing..."
-  pkill -9 -f ray >/dev/null 2>&1 || true
+  pkill -9 -f 'raylet|gcs_server|plasma_store_server|ray::|bin/ray|python -m ray' >/dev/null 2>&1 || true
 fi
 
 # 6. Verification
@@ -388,9 +391,9 @@ for device in /dev/accel* /dev/vfio/[0-9]*; do
   fi
 done
 
-if pgrep -f ray >/dev/null 2>&1; then
+if pgrep -f 'raylet|gcs_server|plasma_store_server|ray::|bin/ray|python -m ray' >/dev/null 2>&1; then
   echo "❌ Verification Failed: Ray processes are still running on host!"
-  pgrep -l -f ray || true
+  pgrep -l -f 'raylet|gcs_server|plasma_store_server|ray::|bin/ray|python -m ray' || true
   verification_passed=0
 fi
 
@@ -403,9 +406,9 @@ EOF
 )
 
   if (( is_local == 1 )); then
-    bash -c "$cleanup_cmd"
+    bash -s "$ip" "$label" <<< "$cleanup_cmd"
   else
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "bash -s" <<< "$cleanup_cmd" || true
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "bash -s -- '$ip' '$label'" <<< "$cleanup_cmd" || true
   fi
 }
 
