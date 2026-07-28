@@ -43,14 +43,15 @@ _CN_NBUF = max(2, int(_os.getenv("MOE_CN_NBUF", "3")))
 def _select_buf(ref, cur_buf, nbuf):
     """Read buffer slot `cur_buf` from ref[nbuf, ...].
 
-    Uses a jnp.where chain — each ref[i] is a static-int index that
-    Mosaic handles correctly.  VMEM reads are cheap so reading all
-    slots is not a bottleneck.
+    Uses lax.switch with static-int branches (same pattern as gmm_v2.py)
+    so Mosaic only evaluates the selected branch — avoids reading all
+    NBUF slots from VMEM.
     """
-    result = ref[0]
-    for i in range(1, nbuf):
-        result = jnp.where(cur_buf == i, ref[i], result)
-    return result
+    def _read_slot(slot_idx):
+        return ref[slot_idx]
+
+    branches = [functools.partial(_read_slot, i) for i in range(nbuf)]
+    return lax.switch(cur_buf, branches)
 
 
 # =====================================================================
