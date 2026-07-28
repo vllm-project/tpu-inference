@@ -33,8 +33,10 @@ ROWBLK = host.ROWBLK
 U32_SUBLANE_TILE = host.U32_SUBLANE_TILE
 WIDEN_KCHUNK = host.WIDEN_KCHUNK
 chip_generation = host.chip_generation
-# The accepted (weight dtype, scale layout) pairs, and the two lookups the
-# serving adapter answers a caller's weights with.
+# The weight formats the kernel takes, the accepted (weight dtype, scale
+# layout) pairs they stand for, and the two lookups the serving adapter
+# answers a caller's weights with.
+WeightFormat = host.WeightFormat
 WEIGHT_FORMS = host.WEIGHT_FORMS
 WEIGHT_FORMAT_NAMES = host.WEIGHT_FORMAT_NAMES
 weight_form = host.weight_form
@@ -49,7 +51,8 @@ vmem_limit = host.vmem_limit
 # constants above stay reachable as module attributes for the in-tree
 # serving adapter, which has to predict this kernel's geometry exactly, but
 # they are the part most likely to change and they are not API: a caller
-# outside this repository binds to the four names below.
+# outside this repository binds to the five names below.
 __all__ = [
-    "WEIGHT_FORMS", "fused_ep_moe_v2", "vmem_estimate_bytes", "vmem_limit"
+    "WEIGHT_FORMS", "WeightFormat", "fused_ep_moe_v2", "vmem_estimate_bytes",
+    "vmem_limit"
 ]

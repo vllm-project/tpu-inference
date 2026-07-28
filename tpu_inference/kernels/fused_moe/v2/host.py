@@ -15,6 +15,7 @@
 constants the two halves share, the routing tables a call builds before it
 enters the kernel, and the VMEM accounting that answers whether a build
 fits. Nothing here runs inside the Pallas body."""
+import enum
 import math
 from typing import NamedTuple
 
@@ -97,6 +98,29 @@ def scale_mirror_lanes(hidden):
     return max(1, hidden // SCALE_MIRROR_LANE_RATIO)
 
 
+class WeightFormat(str, enum.Enum):
+    """The weight formats the kernel takes, one member per accepted form.
+
+    A member IS its own spelling: the value is the word the format has
+    always been called by, and __str__ and __repr__ render that word, so a
+    kernel name, a log line, a cache key and a refusal read exactly what
+    they read when the format was a bare string. The point of the type is
+    that a format now has one declaration to spell it, and a caller naming
+    one that does not exist is refused by the table below rather than
+    carried as far as the first comparison that quietly fails.
+    """
+    FP8 = "fp8"
+    FP4 = "fp4"
+    INT8 = "int8"
+    BF16 = "bf16"
+
+    def __str__(self):
+        return self.value
+
+    def __repr__(self):
+        return repr(self.value)
+
+
 class WeightForm(NamedTuple):
     """One weight format the kernel takes, and everything that follows it.
 
@@ -115,7 +139,7 @@ class WeightForm(NamedTuple):
     transport in; it follows the activation format, because an arrival row
     re-enters its token owner's sum as one more term of the same kind.
     """
-    name: str
+    name: WeightFormat
     weight_dtype: object
     act_dtype: object
     act_max: object
@@ -150,30 +174,40 @@ class WeightForm(NamedTuple):
 # integer-four form would be one more row here plus the bitcast and widening
 # target in the block reader -- the body itself would be reused verbatim.
 WEIGHT_FORMS = {
-    "fp8": WeightForm("fp8", FP8, FP8, FP8_MAX, "per_channel", FP8),
-    "fp4": WeightForm("fp4", FP4, FP8, FP8_MAX, "per_contraction_block", FP8),
-    "int8": WeightForm("int8", INT8, BF16, None, "per_channel", BF16),
-    "bf16": WeightForm("bf16", BF16, BF16, None, "none", BF16),
+    WeightFormat.FP8:
+    WeightForm(WeightFormat.FP8, FP8, FP8, FP8_MAX, "per_channel", FP8),
+    WeightFormat.FP4:
+    WeightForm(WeightFormat.FP4, FP4, FP8, FP8_MAX, "per_contraction_block",
+               FP8),
+    WeightFormat.INT8:
+    WeightForm(WeightFormat.INT8, INT8, BF16, None, "per_channel", BF16),
+    WeightFormat.BF16:
+    WeightForm(WeightFormat.BF16, BF16, BF16, None, "none", BF16),
 }
 
 WEIGHT_FORMAT_NAMES = tuple(WEIGHT_FORMS)
 
 
 def weight_form(weight_format):
-    """The record for a format name; raises naming the accepted set."""
+    """The record for a format; raises naming the accepted set."""
     try:
-        return WEIGHT_FORMS[weight_format]
-    except KeyError:
+        return WEIGHT_FORMS[WeightFormat(weight_format)]
+    except ValueError:
         raise NotImplementedError(
             f"the fused EP MoE kernel takes weight formats "
             f"{WEIGHT_FORMAT_NAMES}; got {weight_format!r}") from None
 
 
 def weight_format_of_dtype(dtype):
-    """The format name carrying this weight element type, or None."""
-    for name, form in WEIGHT_FORMS.items():
+    """The format carrying this weight element type, or None.
+
+    This is the one place a format is DERIVED rather than named, so it is
+    also the one place the enum is constructed from something outside it;
+    everything downstream carries the member this returns.
+    """
+    for weight_format, form in WEIGHT_FORMS.items():
         if jnp.dtype(form.weight_dtype) == jnp.dtype(dtype):
-            return name
+            return WeightFormat(weight_format)
     return None
 
 
@@ -587,7 +621,7 @@ def vmem_scratch_arrays(g_local,
                         inter,
                         *,
                         nbuf=NBUF,
-                        weight_format="fp8",
+                        weight_format=WeightFormat.FP8,
                         rhs_qb=QB4,
                         has_w1_bias=False,
                         has_w2_bias=False):
@@ -618,7 +652,7 @@ def vmem_scratch_arrays(g_local,
     tile_blocks = tile_m // ROWBLK
     # Every local expert's scale table is resident. At four-bit block scales
     # that makes the two scale tables some of the largest buffers here.
-    if weight_format == "fp4":
+    if weight_format == WeightFormat.FP4:
         # Four-bit weights stream as PACKED u32 words ([K/8, N]), so the
         # transfer moves half the bytes an eight-bit slab would.
         weights = [
@@ -674,7 +708,7 @@ def vmem_tile_body_arrays(capacity,
                           hidden,
                           inter,
                           *,
-                          weight_format="fp8",
+                          weight_format=WeightFormat.FP8,
                           rhs_qb=QB4):
     """What one tile body keeps live, as (name, shape, dtype).
 
@@ -720,10 +754,10 @@ def vmem_tile_body_arrays(capacity,
     # sixteen-bit wire ships down_bf16 itself and materializes nothing.
     if form.wire_dtype is FP8:
         arrays.append(("wire_rows", (tile_m, hidden), FP8))
-    if weight_format == "fp4":
+    if weight_format == WeightFormat.FP4:
         arrays.append(("widened_weight_block", (WIDENED_BLOCK_BUFFERS, rhs_qb,
                                                 max(2 * inter, hidden)), FP8))
-    elif weight_format == "int8":
+    elif weight_format == WeightFormat.INT8:
         arrays.append(
             ("widened_weight_block", (WIDENED_BLOCK_BUFFERS, WIDEN_KCHUNK,
                                       max(2 * inter, hidden)), BF16))
@@ -735,7 +769,7 @@ def vmem_estimate_bytes(g_local,
                         hidden,
                         inter,
                         nbuf=NBUF,
-                        weight_format="fp8",
+                        weight_format=WeightFormat.FP8,
                         rhs_qb=QB4,
                         has_w1_bias=False,
                         has_w2_bias=False,

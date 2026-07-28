@@ -861,7 +861,7 @@ class ApplyEntryPointTest(EightDeviceTestCase):
 SERVED_FP8 = dict(g_local=64,
                   hidden=4096,
                   inter=1024,
-                  weight_format="fp8",
+                  weight_format=host.WeightFormat.FP8,
                   rhs_qb=4096,
                   buffers={
                       "lhs_vm": 1048576,
@@ -887,7 +887,7 @@ SERVED_FP8 = dict(g_local=64,
 GPT_OSS_20B_PADDED_FP4 = dict(g_local=4,
                               hidden=3072,
                               inter=3072,
-                              weight_format="fp4",
+                              weight_format=host.WeightFormat.FP4,
                               rhs_qb=512,
                               buffers={
                                   "lhs_vm": 1048576,
@@ -914,7 +914,7 @@ GPT_OSS_20B_PADDED_FP4 = dict(g_local=4,
 GPT_OSS_120B_PADDED_FP4 = dict(g_local=16,
                                hidden=3072,
                                inter=3072,
-                               weight_format="fp4",
+                               weight_format=host.WeightFormat.FP4,
                                rhs_qb=512,
                                buffers={
                                    "lhs_vm": 1048576,
@@ -941,7 +941,7 @@ GPT_OSS_120B_PADDED_FP4 = dict(g_local=16,
 BF16_WEIGHTS = dict(g_local=4,
                     hidden=1024,
                     inter=512,
-                    weight_format="bf16",
+                    weight_format=host.WeightFormat.BF16,
                     rhs_qb=1024,
                     buffers={
                         "lhs_vm": 1048576,
@@ -963,7 +963,7 @@ BF16_WEIGHTS = dict(g_local=4,
 INT8_WEIGHTS = dict(g_local=8,
                     hidden=2048,
                     inter=1024,
-                    weight_format="int8",
+                    weight_format=host.WeightFormat.INT8,
                     rhs_qb=2048,
                     buffers={
                         "lhs_vm": 1048576,
@@ -1078,10 +1078,10 @@ class VmemAccountingTest(EightDeviceTestCase, parameterized.TestCase):
         case = dict(BF16_WEIGHTS, g_local=4, inter=512)
         for hidden, ratio in ((1024, 1), (2048, 1), (3072, 2), (HIDDEN, 2)):
             quantized = declared_arrays(case,
-                                        weight_format="fp8",
+                                        weight_format=host.WeightFormat.FP8,
                                         hidden=hidden)
             unquantized = declared_arrays(case,
-                                          weight_format="bf16",
+                                          weight_format=host.WeightFormat.BF16,
                                           hidden=hidden)
             for name in ("lhs_vm", "out_vm"):
                 self.assertEqual(unquantized[name], ratio * quantized[name],
@@ -1104,7 +1104,7 @@ class VmemAccountingTest(EightDeviceTestCase, parameterized.TestCase):
         """Eight-bit weights hold the same slabs at twice the width: the
         four-bit form is what fits, not the shape."""
         case = dict(HAND_ARITHMETIC[TIGHTEST],
-                    weight_format="fp8",
+                    weight_format=host.WeightFormat.FP8,
                     rhs_qb=3072)
         with pinned_tpu():
             self.assertGreater(estimate_for(case), host.vmem_limit())

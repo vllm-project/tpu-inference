@@ -54,6 +54,7 @@ _hidden_lane_block = None
 _hidden_max_blocks = None
 _act_fns = None
 _routing_block = None
+_WeightFormat = None
 _weight_forms = None
 _weight_format_names = None
 _weight_format_of_dtype = None
@@ -68,7 +69,8 @@ def _import_kernel():
     global _vmem_estimate
     global _vmem_budget, _weight_buffers, _hidden_lane_block
     global _hidden_max_blocks, _act_fns, _routing_block
-    global _weight_forms, _weight_format_names, _weight_format_of_dtype
+    global _WeightFormat, _weight_forms, _weight_format_names
+    global _weight_format_of_dtype
     global _widen_kchunk, _chip_generation, _min_generation
     if _kernel is not None:
         return _kernel
@@ -112,6 +114,7 @@ def _import_kernel():
     # The accepted weight formats and what each one implies. The table is
     # the kernel's, so this file cannot accept a pair the kernel does not
     # build or refuse one it does.
+    _WeightFormat = kernel_package.WeightFormat
     _weight_forms = kernel_package.WEIGHT_FORMS
     _weight_format_names = kernel_package.WEIGHT_FORMAT_NAMES
     _weight_format_of_dtype = kernel_package.weight_format_of_dtype
@@ -461,7 +464,7 @@ def _unsupported_reason(layer, x, gating_output, weights, mesh, activation,
         return (f"kernel weights are {weights.w13_weight.dtype}, which is "
                 f"not one of the accepted weight element types "
                 f"{_accepted_weight_pairs()}")
-    rhs_packed4 = weight_format == "fp4"
+    rhs_packed4 = weight_format == _WeightFormat.FP4
     if weights.w2_weight.dtype != weights.w13_weight.dtype:
         return (f"both expert weights must carry one dtype; w13 is "
                 f"{weights.w13_weight.dtype} and w2 is "
@@ -602,7 +605,7 @@ def _unsupported_reason(layer, x, gating_output, weights, mesh, activation,
     # Integer weights reach the matrix unit through a widening, one fixed
     # contraction chunk at a time, and that chunk has to tile both matmuls'
     # contractions exactly.
-    if weight_format == "int8":
+    if weight_format == _WeightFormat.INT8:
         for name, size in (("hidden", w_hidden), ("intermediate", inter)):
             if size % _widen_kchunk != 0:
                 return (f"int8 weights widen one {_widen_kchunk}-row "
@@ -858,7 +861,7 @@ def moe_fused_ep_apply(
         raise ValueError(f"fused EP MoE: {topk}")
     w13_scale, w2_scale = (weights.w13_weight_scale, weights.w2_weight_scale)
     weight_format = _weight_format_of_dtype(weights.w13_weight.dtype)
-    rhs_packed4 = weight_format == "fp4"
+    rhs_packed4 = weight_format == _WeightFormat.FP4
     rhs_qb = w_hidden // w13_scale.shape[1] if rhs_packed4 else None
 
     w13_bias, w2_bias = weights.w13_bias, weights.w2_bias

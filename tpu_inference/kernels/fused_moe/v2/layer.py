@@ -23,7 +23,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from tpu_inference.kernels.fused_moe.v2.host import (
-    HIDDEN_LANE_BLOCK, MAX_ROUTING_BLOCK, QB4, ROWBLK, align_up,
+    HIDDEN_LANE_BLOCK, MAX_ROUTING_BLOCK, QB4, ROWBLK, WeightFormat, align_up,
     build_routing_tables, expert_visit_list, ragged_stride_bound,
     routing_block, shard_expert_slabs, shard_push_tables_in_rows,
     shard_transport_tables_in_blocks, weight_form, weight_format_of_dtype)
@@ -103,7 +103,7 @@ def fused_ep_moe_v2(x,
                     capacity,
                     block=None,
                     ragged_stride=None,
-                    weight_format="fp8",
+                    weight_format=WeightFormat.FP8,
                     rhs_qb=None,
                     act_fn="silu"):
     """Run one MoE layer through the fused expert-parallel kernel.

@@ -442,7 +442,7 @@ def _build_fused_ep_moe_kernel(*,
                                hidden,
                                inter,
                                ep,
-                               weight_format="fp8",
+                               weight_format=host.WeightFormat.FP8,
                                rhs_qb=QB4,
                                ragged_rows_alloc=None,
                                act_fn="silu",
@@ -458,7 +458,7 @@ def _build_fused_ep_moe_kernel(*,
     # (arrival rows, arrival scales f32). The element type of the staging and
     # of the wire is the weight format's, not a literal here.
     form = host.weight_form(weight_format)
-    rhs_packed4 = weight_format == "fp4"
+    rhs_packed4 = weight_format == host.WeightFormat.FP4
     assert 0 < WEIGHT_PREFETCH_DISTANCE < NBUF, (
         f"weight prefetch distance {WEIGHT_PREFETCH_DISTANCE} must satisfy "
         f"0 < distance < NBUF={NBUF}, so that distance + 1 consecutive "
@@ -498,7 +498,7 @@ def _build_fused_ep_moe_kernel(*,
                 f"({host.U32_SUBLANE_TILE * PACK4} rows): {PACK4} four-bit "
                 f"values pack into a 32-bit word and those words tile to "
                 f"{host.U32_SUBLANE_TILE} sublanes")
-    if weight_format == "int8":
+    if weight_format == host.WeightFormat.INT8:
         # The widening chunk has to tile both contractions exactly.
         if hidden % host.WIDEN_KCHUNK or inter % host.WIDEN_KCHUNK:
             raise ValueError(
@@ -862,7 +862,7 @@ def _build_fused_ep_moe_kernel(*,
                         qb=rhs_qb,
                         act_fn=act_fn,
                         w1b=w1b_row)
-                elif weight_format == "int8":
+                elif weight_format == host.WeightFormat.INT8:
                     w1_chunk, w2_chunk = _int8_chunk_readers(slot)
                     acc2, mid_scale = expert_ffn_int8(
                         act_rows,
@@ -873,7 +873,7 @@ def _build_fused_ep_moe_kernel(*,
                         n_chunks2=inter // host.WIDEN_KCHUNK,
                         act_fn=act_fn,
                         w1b=w1b_row)
-                elif weight_format == "bf16":
+                elif weight_format == host.WeightFormat.BF16:
                     acc2, mid_scale = expert_ffn_bf16(act_rows,
                                                       w1_vm[slot],
                                                       w2_vm[slot],
@@ -1120,10 +1120,10 @@ def _build_fused_ep_moe_kernel(*,
         # it had before any of those operands existed, and every fingerprint
         # taken against it still matches.
         format_tag = {
-            "fp8": "",
-            "fp4": "_fp4w",
-            "int8": "_int8w",
-            "bf16": "_bf16w",
+            host.WeightFormat.FP8: "",
+            host.WeightFormat.FP4: "_fp4w",
+            host.WeightFormat.INT8: "_int8w",
+            host.WeightFormat.BF16: "_bf16w",
         }[weight_format]
         bias_tag = (("_w13bias" if has_w1_bias else "") +
                     ("_w2bias" if has_w2_bias else ""))

@@ -187,6 +187,7 @@ def moe_fused_ep_kernel_min_tokens() -> int:
     try:
         tokens = int(value)
     except ValueError:
+        # Not an integer at all: funnel into the refusal below, value quoted.
         tokens = 0
     if tokens < 1:
         raise ValueError(

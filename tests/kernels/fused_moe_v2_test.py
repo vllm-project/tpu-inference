@@ -32,8 +32,8 @@ from tpu_inference.kernels.fused_moe.v2 import kernel as v2_kernel
 from tpu_inference.kernels.fused_moe.v2 import layer as v2_layer
 from tpu_inference.kernels.fused_moe.v2.host import (
     BF16, FP4, FP8, FP8_MAX, HIDDEN_LANE_BLOCK, INT8, MAX_ROUTING_BLOCK,
-    ROWBLK, WEIGHT_FORMAT_NAMES, WEIGHT_FORMS, WIDEN_KCHUNK, align_up,
-    build_routing_tables, expert_visit_list, ragged_stride_bound,
+    ROWBLK, WEIGHT_FORMAT_NAMES, WEIGHT_FORMS, WIDEN_KCHUNK, WeightFormat,
+    align_up, build_routing_tables, expert_visit_list, ragged_stride_bound,
     routing_block, row_lane_blocks, scale_mirror_lanes, shard_expert_slabs,
     shard_push_tables_in_rows, shard_transport_tables_in_blocks,
     weight_format_of_dtype)
@@ -1150,10 +1150,10 @@ class WeightFormatTableTest(jtu.JaxTestCase):
                              name)
 
     @parameterized.parameters(
-        ("int8", BF16),
-        ("bf16", INT8),
-        ("fp8", BF16),
-        ("bf16", FP8),
+        (WeightFormat.INT8, BF16),
+        (WeightFormat.BF16, INT8),
+        (WeightFormat.FP8, BF16),
+        (WeightFormat.BF16, FP8),
     )
     def test_the_layer_checks_the_weights_against_the_format_it_was_told(
             self, weight_format, wrong_dtype):

@@ -20,7 +20,8 @@ from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.fused_moe.v2.host import WEIGHT_FORMAT_NAMES
+from tpu_inference.kernels.fused_moe.v2.host import (WEIGHT_FORMAT_NAMES,
+                                                     WeightFormat)
 from tpu_inference.kernels.fused_moe.v2.kernel import (
     _BUILD_CACHE, build_fused_ep_moe_kernel)
 
@@ -43,7 +44,7 @@ class KernelBuildCacheTest(jtu.JaxTestCase, parameterized.TestCase):
                        inter=512,
                        ep=8,
                        ragged_rows_alloc=512,
-                       weight_format="fp8",
+                       weight_format=WeightFormat.FP8,
                        rhs_qb=512)
 
     def setUp(self):
