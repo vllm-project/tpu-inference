@@ -161,6 +161,18 @@ QUANTIZATION_CONFIG = {
     "compressed",
 }
 
+
+def softplus_gate_config():
+    """K3-tiny with Kimi-Linear-48B-style KDA gate flags: no gate_lower_bound
+    (-exp(A_log)*softplus decay form) and a low-rank g_a/g_b output gate.
+    Same dims as K3-tiny otherwise; gives the softplus gate path CPU goldens
+    that the 48B real-weight testbed exercises."""
+    cfg = json.loads(json.dumps(TINY_TEXT_CONFIG))
+    del cfg["linear_attn_config"]["gate_lower_bound"]
+    cfg["linear_attn_config"]["use_full_rank_gate"] = False
+    return cfg
+
+
 E2M1_GRID = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
 
 
@@ -219,10 +231,10 @@ def _make_mxfp4_expert_weight(rng: _Rng, out_dim: int, in_dim: int):
     return bf16_weight, packed, scale_u8
 
 
-def build_state_dicts(seed: int):
+def build_state_dicts(seed: int, cfg=None):
     """Build (bf16_state_dict, mxfp4_state_dict) sharing all non-expert
     tensors. Names follow moonshotai/Kimi-K3 modeling_kimi_linear.py."""
-    cfg = TINY_TEXT_CONFIG
+    cfg = cfg or TINY_TEXT_CONFIG
     rng = _Rng(seed)
     hidden = cfg["hidden_size"]
     lac = cfg["linear_attn_config"]
@@ -272,7 +284,11 @@ def build_state_dicts(seed: int):
             lin(f"{a}.f_a_proj.weight", head_dim, hidden)
             lin(f"{a}.f_b_proj.weight", proj, head_dim)
             lin(f"{a}.b_proj.weight", n_heads, hidden)
-            lin(f"{a}.g_proj.weight", proj, hidden)  # full-rank output gate
+            if lac.get("use_full_rank_gate", False):
+                lin(f"{a}.g_proj.weight", proj, hidden)
+            else:
+                lin(f"{a}.g_a_proj.weight", head_dim, hidden)
+                lin(f"{a}.g_b_proj.weight", proj, head_dim)
             bf16[f"{a}.o_norm.weight"] = rng.norm_weight(head_dim).to(
                 torch.bfloat16)
             lin(f"{a}.o_proj.weight", hidden, proj)
@@ -337,10 +353,13 @@ def build_state_dicts(seed: int):
     return bf16, mxfp4
 
 
-def write_checkpoint(out_dir: str, state_dict: dict, quantized: bool,
-                     remote_code_dir: str | None):
+def write_checkpoint(out_dir: str,
+                     state_dict: dict,
+                     quantized: bool,
+                     remote_code_dir: str | None,
+                     cfg=None):
     os.makedirs(out_dir, exist_ok=True)
-    config = dict(TINY_TEXT_CONFIG)
+    config = dict(cfg or TINY_TEXT_CONFIG)
     if quantized:
         config["quantization_config"] = QUANTIZATION_CONFIG
     with open(os.path.join(out_dir, "config.json"), "w") as f:
@@ -373,12 +392,16 @@ def main():
     write_checkpoint(bf16_dir, bf16, False, args.remote_code_dir)
     write_checkpoint(mxfp4_dir, mxfp4, True, args.remote_code_dir)
 
-    total = sum(v.numel() * v.element_size() for v in bf16.values())
-    print(f"k3-tiny (bf16):  {bf16_dir}  "
-          f"{len(bf16)} tensors, {total / 1e6:.1f} MB")
-    total_q = sum(v.numel() * v.element_size() for v in mxfp4.values())
-    print(f"k3-tiny (mxfp4): {mxfp4_dir}  "
-          f"{len(mxfp4)} tensors, {total_q / 1e6:.1f} MB")
+    sp_cfg = softplus_gate_config()
+    sp, _ = build_state_dicts(args.seed, cfg=sp_cfg)
+    sp_dir = os.path.join(args.output_root, "k3-tiny-softplus")
+    write_checkpoint(sp_dir, sp, False, args.remote_code_dir, cfg=sp_cfg)
+
+    for label, d, sd in (("bf16", bf16_dir, bf16), ("mxfp4", mxfp4_dir, mxfp4),
+                         ("softplus", sp_dir, sp)):
+        total = sum(v.numel() * v.element_size() for v in sd.values())
+        print(f"k3-tiny ({label}): {d}  "
+              f"{len(sd)} tensors, {total / 1e6:.1f} MB")
 
 
 if __name__ == "__main__":
