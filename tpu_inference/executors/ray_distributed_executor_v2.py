@@ -96,51 +96,18 @@ class RayDistributedExecutorV2(RayExecutorV2):
         ray_nodes = ray.nodes()
         logger.info(f"RayDistributedExecutorV2 | ray_nodes={ray_nodes}")
 
-        # Limit this engine to its role-specific hosts when prefill and decode
-        # share one Ray cluster. Preserve the requested order because it also
-        # defines the role-local JAX process order.
-        selected_node_ips = [
-            ip.strip()
-            for ip in os.environ.get("VLLM_TPU_RAY_NODE_IPS", "").split(",")
-            if ip.strip()
+        # Filter nodes that have the required TPU resource
+        nodes_with_device = [
+            n for n in ray_nodes if device_str in n.get("Resources", {})
         ]
-        if len(selected_node_ips) != len(set(selected_node_ips)):
-            raise ValueError("VLLM_TPU_RAY_NODE_IPS contains duplicate hosts: "
-                             f"{selected_node_ips}")
-
-        nodes_by_ip = {
-            node.get("NodeManagerAddress"): node
-            for node in ray_nodes
-            if device_str in node.get("Resources", {})
-        }
-        if selected_node_ips:
-            missing_node_ips = [
-                ip for ip in selected_node_ips if ip not in nodes_by_ip
-            ]
-            if missing_node_ips:
-                raise ValueError(
-                    "The selected TPU hosts are not registered in the Ray "
-                    f"cluster: {missing_node_ips}")
-            nodes_with_device = [
-                nodes_by_ip[ip] for ip in selected_node_ips
-            ]
-        else:
-            nodes_with_device = [
-                node for node in ray_nodes
-                if device_str in node.get("Resources", {})
-            ]
         logger.info(
             f"RayDistributedExecutorV2 | nodes_with_device={len(nodes_with_device)} "
-            f"(filtered from {len(ray_nodes)} total nodes) | "
-            f"selected_node_ips={selected_node_ips}")
+            f"(filtered from {len(ray_nodes)} total nodes)")
 
         if pp_size == 1:
-            placement_group_specs = []
-            for node in nodes_with_device:
-                bundle = {device_str: node['Resources'][device_str]}
-                if selected_node_ips:
-                    bundle[f"node:{node['NodeManagerAddress']}"] = 0.001
-                placement_group_specs.append(bundle)
+            placement_group_specs = [{
+                device_str: node['Resources'][device_str]
+            } for node in nodes_with_device]
         else:
             assert pp_size == len(nodes_with_device), (
                 f"Cannot use PP across hosts, please set --pipeline-parallel-size "
@@ -150,14 +117,9 @@ class RayDistributedExecutorV2(RayExecutorV2):
                 device_str: num_devices_per_pp_rank
             } for _ in range(pp_size)]
 
-        if not placement_group_specs:
-            raise ValueError("No TPU nodes are available for this Ray engine.")
-
-        # Without an explicit role partition, keep the legacy behavior of
-        # binding the first bundle to the vLLM engine node.
-        if not selected_node_ips:
-            current_ip = get_ip()
-            placement_group_specs[0][f"node:{current_ip}"] = 0.001
+        # Bind the first bundle to the current node (vLLM engine node)
+        current_ip = get_ip()
+        placement_group_specs[0][f"node:{current_ip}"] = 0.001
         logger.info(
             f"RayDistributedExecutorV2 | placement_group_specs={placement_group_specs}"
         )

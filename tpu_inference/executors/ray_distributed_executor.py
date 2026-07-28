@@ -19,7 +19,6 @@ from collections import defaultdict
 from concurrent.futures import Future
 from typing import Dict, List, Optional, Union
 
-import jax
 import ray
 import vllm.envs as envs
 from ray.util.placement_group import PlacementGroup
@@ -86,18 +85,6 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
        This set TPU resources when create each worker.
        And we omit the driver worker related logic.
     """
-
-    @staticmethod
-    def _validate_jax_process_infos(process_infos: List[dict]) -> None:
-        actual_indices = [
-            process_info.get("jax_process_index")
-            for process_info in process_infos
-        ]
-        if len(actual_indices) != 2 or set(actual_indices) != {0, 1}:
-            raise RuntimeError(
-                "Invalid JAX process topology: expected exactly two Ray actors "
-                "with jax.process_index() values [0, 1], but got "
-                f"{actual_indices}. Actor diagnostics: {process_infos}")
 
     @classmethod
     def supports_async_scheduling(cls) -> bool:
@@ -451,19 +438,6 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
             all_kwargs.append(kwargs)
         self.collective_rpc("init_worker", args=(all_kwargs, ))
         self.collective_rpc("init_device")
-        if os.environ.get("TPU_LOG_JAX_PROCESS_INFO") == "1":
-            process_infos = self.collective_rpc("get_jax_process_info")
-            for process_info in process_infos:
-                logger.info(
-                    "Ray actor JAX process info | rpc_rank=%s | node_ip=%s | "
-                    "JAX_PROCESS_ID=%s | jax.process_index()=%s | "
-                    "jax.process_count()=%s | device process indices=%s",
-                    process_info["rpc_rank"], process_info["node_ip"],
-                    process_info["JAX_PROCESS_ID"],
-                    process_info["jax_process_index"],
-                    process_info["jax_process_count"],
-                    process_info["device_process_indices"])
-            self._validate_jax_process_infos(process_infos)
         if self.parallel_config.pipeline_parallel_size > 1:
             self.collective_rpc("initialize_pp_transfer_connect")
         self.collective_rpc("load_model")
@@ -537,18 +511,6 @@ class RayWorkerWrapper(RayWorkerWrapperV1):
 
     def _is_last_rank(self) -> bool:
         return get_pp_group().is_last_rank
-
-    def get_jax_process_info(self) -> dict:
-        """Return the JAX process identity observed by this Ray actor."""
-        return {
-            "rpc_rank": self.rpc_rank,
-            "node_ip": get_ip(),
-            "JAX_PROCESS_ID": os.environ.get("JAX_PROCESS_ID", "<unset>"),
-            "jax_process_index": jax.process_index(),
-            "jax_process_count": jax.process_count(),
-            "device_process_indices":
-            [device.process_index for device in jax.devices()],
-        }
 
     # Override the execute_model method to suppprt async scheduling.
     # Once the vLLM V1 Ray executor supports async scheduling natively,

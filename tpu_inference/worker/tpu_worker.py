@@ -307,138 +307,17 @@ class TPUWorker(WorkerBase):
             "TPU_CHIPS_PER_PROCESS_BOUNDS=1,%d,1 | TPU_PROCESS_PORT=%d",
             dp_rank, visible_chips, chips_per_rank, tpu_port)
 
-    def _restore_ray_tpu_process_identity(self) -> str | None:
-        """Restores the node-local TPU task ID before JAX initialization.
-
-        Ray actors can inherit the head process environment even when they run
-        on another TPU VM. A role-local process map takes precedence when two
-        JAX meshes share one Ray cluster; otherwise, the actor's Ray node label
-        provides its physical TPU worker identity.
-        """
-        worker_id = None
-        ray_context_available = False
-
-        try:
-            import ray
-
-            runtime_context = ray.get_runtime_context()
-            ray_context_available = True
-            process_map = os.environ.get("VLLM_TPU_RAY_PROCESS_MAP", "")
-            if process_map:
-                node_process_ids = {}
-                for entry in process_map.split(","):
-                    node_ip, separator, process_id = entry.strip().partition(
-                        "=")
-                    if not separator or not node_ip or not process_id:
-                        raise ValueError(
-                            "Invalid VLLM_TPU_RAY_PROCESS_MAP entry: "
-                            f"{entry!r}")
-                    node_process_ids[node_ip] = process_id
-                node_ip = ray.util.get_node_ip_address()
-                if node_ip not in node_process_ids:
-                    raise ValueError(
-                        "The current Ray actor node is missing from "
-                        f"VLLM_TPU_RAY_PROCESS_MAP: node_ip={node_ip}, "
-                        f"process_map={process_map}")
-                worker_id = node_process_ids[node_ip]
-
-            if hasattr(runtime_context, "get_node_labels"):
-                node_labels = runtime_context.get_node_labels()
-            else:
-                node_id = runtime_context.get_node_id()
-                node_info = next((node for node in ray.nodes()
-                                  if node.get("NodeID") == node_id), {})
-                node_labels = node_info.get("Labels", {})
-            if worker_id is None:
-                worker_id = node_labels.get("ray.io/tpu-worker-id")
-                if isinstance(worker_id, list):
-                    worker_id = worker_id[0] if worker_id else None
-        except ValueError:
-            raise
-        except Exception as exc:
-            logger.debug("Unable to read TPU worker ID from Ray node labels: %s",
-                         exc)
-
-        if worker_id is None and ray_context_available:
-            from tpu_inference import tpu_info
-            worker_id = tpu_info.get_tpu_metadata(
-                key="agent-worker-number")
-
-        if worker_id is None:
-            worker_id = os.environ.get("TPU_WORKER_ID")
-        if worker_id is None:
-            return None
-
-        worker_id = str(worker_id)
-        previous_identity = {
-            name: os.environ.get(name)
-            for name in (
-                "CLOUD_TPU_TASK_ID",
-                "TPU_WORKER_ID",
-                "JAX_PROCESS_ID",
-            )
-        }
-        os.environ["CLOUD_TPU_TASK_ID"] = worker_id
-        os.environ["TPU_WORKER_ID"] = worker_id
-        os.environ["JAX_PROCESS_ID"] = worker_id
-        if any(value != worker_id for value in previous_identity.values()):
-            logger.info(
-                "Restored node-local JAX/TPU process identity for Ray worker "
-                "%d: worker_id=%s | previous=%s",
-                self.rank,
-                worker_id,
-                previous_identity,
-            )
-        return worker_id
-
-    def _validate_ray_jax_process_identity(self,
-                                           expected_worker_id: str) -> None:
-        """Validate JAX identity before native multi-host model loading."""
-        expected_process_index = int(expected_worker_id)
-        actual_process_index = jax.process_index()
-        process_count = jax.process_count()
-        local_devices = jax.local_devices()
-        local_device_ids = [device.id for device in local_devices]
-        local_device_process_indices = [
-            device.process_index for device in local_devices
-        ]
-
-        logger.info(
-            "Ray actor JAX identity | rank=%d | expected_process_index=%d | "
-            "jax.process_index()=%d | jax.process_count()=%d | "
-            "local_device_ids=%s | local_device_process_indices=%s",
-            self.rank, expected_process_index, actual_process_index,
-            process_count, local_device_ids, local_device_process_indices)
-
-        if (actual_process_index != expected_process_index or any(
-                process_index != expected_process_index
-                for process_index in local_device_process_indices)):
-            raise RuntimeError(
-                "JAX initialized with the wrong process identity for Ray actor "
-                f"rank={self.rank}: expected process_index="
-                f"{expected_process_index}, got process_index="
-                f"{actual_process_index}, local_device_ids={local_device_ids}, "
-                "local_device_process_indices="
-                f"{local_device_process_indices}")
-
     def init_device(self,
                     tpu_process_bounds="",
                     tpu_chips_per_process_bounds="",
                     tpu_visible_chips=""):
-
-        # Restore the VM-local identity before any setup can initialize JAX.
-        # More specialized singleton configurations below may intentionally
-        # replace it with task 0.
-        multihost_backend = envs.TPU_MULTIHOST_BACKEND
-        ray_worker_id = None
-        if multihost_backend == "ray":
-            ray_worker_id = self._restore_ray_tpu_process_identity()
 
         if (envs.TPU_MULTIPROCESS_DP
                 and self.parallel_config.pipeline_parallel_size == 1):
             self._setup_dp_chip_isolation()
 
         # set tpu visible devices for Jax runtime in PP.
+        multihost_backend = envs.TPU_MULTIHOST_BACKEND
         if self.parallel_config.pipeline_parallel_size > 1:
             # Log environment variables for debugging
             tpu_env_vars = [
@@ -494,11 +373,6 @@ class TPUWorker(WorkerBase):
             logger.debug(
                 f"TPUWorker | Worker {self.rank} JAX/TPU environment after init_device: {env_dump}"
             )
-
-        if (multihost_backend == "ray" and ray_worker_id is not None
-                and self.parallel_config.pipeline_parallel_size == 1
-                and not envs.TPU_MULTIPROCESS_DP):
-            self._validate_ray_jax_process_identity(ray_worker_id)
 
         if not self.devices:
             sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
