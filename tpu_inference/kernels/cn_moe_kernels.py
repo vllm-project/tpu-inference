@@ -1,10 +1,10 @@
 # Copyright 2026 Google LLC
 """C=N fused MoE Pallas kernels — per-token expert loop with dedup.
 
-N-way cross-expert buffering: while computing on buffer `cur`, prefetch the
-next NBUF-1 unique experts into the remaining buffer slots.  Buffer index
-(`cur_w1_buf` / `cur_w2_buf`) is a traced JAX value that rotates only on
-genuine expert transitions via `(cur + 1) % NBUF`.
+N-way cross-expert buffering: buffer `cur` holds the active expert,
+buffers `cur+1 .. cur+NBUF-2` hold pre-fetched upcoming experts.  On
+each genuine expert transition `cur` rotates by +1 and a SINGLE new
+prefetch fires into the freed slot `(cur+NBUF-1) % NBUF`.
 
 Set MOE_CN_NBUF=2 for double, =3 for triple (default), etc.
 """
@@ -38,13 +38,14 @@ _CN_NBUF = max(2, int(_os.getenv("MOE_CN_NBUF", "3")))
 
 
 # =====================================================================
-#  Buffer selection helper — works with any NBUF
+#  Buffer selection — reads only the selected slot via lax.switch
 # =====================================================================
 def _select_buf(ref, cur_buf, nbuf):
-    """Select buffer slot `cur_buf` from ref[nbuf, ...].
+    """Read buffer slot `cur_buf` from ref[nbuf, ...].
 
-    Uses a jnp.where chain so that every index is a static int
-    (avoids Mosaic PyTree issues with traced bracket indices).
+    Uses a jnp.where chain — each ref[i] is a static-int index that
+    Mosaic handles correctly.  VMEM reads are cheap so reading all
+    slots is not a bottleneck.
     """
     result = ref[0]
     for i in range(1, nbuf):
@@ -53,12 +54,11 @@ def _select_buf(ref, cur_buf, nbuf):
 
 
 # =====================================================================
-#  DMA helpers — thin wrappers so start/wait sites stay readable
+#  DMA helpers
 # =====================================================================
 def _start_w1_dma(gj, buf, k, w1_ref, w1_scale_ref,
                   w1_bufs_ref, w1_s_bufs_ref, sem_ref, *,
                   K_TILE, KB_TILE, I, QB, NBUF_W1_):
-    """Start async DMA for w1 tile `k` of expert `gj` into buffer `buf`."""
     k_block_start = (k * K_TILE) // QB
     pltpu.make_async_copy(
         w1_ref.at[pl.ds(gj, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
@@ -77,7 +77,6 @@ def _start_w1_dma(gj, buf, k, w1_ref, w1_scale_ref,
 def _wait_w1_dma(gj, buf, k, w1_ref, w1_scale_ref,
                  w1_bufs_ref, w1_s_bufs_ref, sem_ref, *,
                  K_TILE, KB_TILE, I, QB, NBUF_W1_):
-    """Wait for w1 tile `k` of expert `gj` in buffer `buf`."""
     k_block_start = (k * K_TILE) // QB
     pltpu.make_async_copy(
         w1_ref.at[pl.ds(gj, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
@@ -96,7 +95,6 @@ def _wait_w1_dma(gj, buf, k, w1_ref, w1_scale_ref,
 def _start_w2_dma(gj, buf, m, w2_ref, w2_scale_ref,
                   w2_bufs_ref, w2_s_bufs_ref, sem_ref, *,
                   I_TILE, IB_TILE, H, IB, NBUF_W1_, NBUF_W2_):
-    """Start async DMA for w2 tile `m` of expert `gj` into buffer `buf`."""
     i_block_start = (m * I_TILE) // IB
     pltpu.make_async_copy(
         w2_ref.at[pl.ds(gj, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
@@ -115,7 +113,6 @@ def _start_w2_dma(gj, buf, m, w2_ref, w2_scale_ref,
 def _wait_w2_dma(gj, buf, m, w2_ref, w2_scale_ref,
                  w2_bufs_ref, w2_s_bufs_ref, sem_ref, *,
                  I_TILE, IB_TILE, H, IB, NBUF_W1_, NBUF_W2_):
-    """Wait for w2 tile `m` of expert `gj` in buffer `buf`."""
     i_block_start = (m * I_TILE) // IB
     pltpu.make_async_copy(
         w2_ref.at[pl.ds(gj, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
@@ -131,55 +128,13 @@ def _wait_w2_dma(gj, buf, m, w2_ref, w2_scale_ref,
     ).wait()
 
 
-# =====================================================================
-#  Multi-depth prefetch — scan forward to find next N unique experts
-# =====================================================================
-def _prefetch_upcoming_experts(
-    slot, gj, cur_w1_buf, cur_w2_buf, ids_ref, *,
-    N_SLOTS, NUM_K, NUM_I, NBUF_W1_, NBUF_W2_,
-    dma_kw_w1, dma_kw_w2,
-):
-    """Scan forward from `slot` to find the next NBUF-1 unique experts
-    and start prefetching each into its designated buffer slot.
-
-    Since expert IDs are sorted, transitions are at group boundaries:
-      [A, A, A, B, B, C, C, C, D, ...]
-    Depth-1 finds B, depth-2 finds C, etc.
-    """
-    nbuf = max(NBUF_W1_, NBUF_W2_)  # same in practice
-    max_depth = nbuf - 1             # e.g. 2 for triple buffering
-
-    # last_gj tracks the expert at the previous depth so we can
-    # identify the *next* distinct one.  Starts as the current expert.
-    last_gj = gj
-
-    for depth in range(1, max_depth + 1):
-        target_buf_w1 = (cur_w1_buf + depth) % NBUF_W1_
-        target_buf_w2 = (cur_w2_buf + depth) % NBUF_W2_
-
-        # Scan forward to find the first slot whose expert differs
-        # from `last_gj`.  All state is traced.
-        found_gj = gj         # fallback (never used if found=False)
-        found = jnp.bool_(False)
-
-        remaining = N_SLOTS - slot - 1
-        for ahead in range(1, remaining + 1):
-            future_gj = ids_ref[slot + ahead]
-            is_hit = (future_gj != last_gj) & (~found)
-            found_gj = jnp.where(is_hit, future_gj, found_gj)
-            found = found | is_hit
-
-        # Fire prefetch only if we actually found a distinct expert
-        @pl.when(found)
-        def _():
-            fgj = pl.multiple_of(found_gj, 1)
-            for k in range(NUM_K):
-                _start_w1_dma(fgj, target_buf_w1, k, **dma_kw_w1)
-            for m in range(NUM_I):
-                _start_w2_dma(fgj, target_buf_w2, m, **dma_kw_w2)
-
-        # For the next depth, look for an expert beyond this one
-        last_gj = found_gj
+def _start_all_dma(gj, buf_w1, buf_w2, *, NUM_K, NUM_I,
+                   dma_kw_w1, dma_kw_w2):
+    """Start DMA for all tiles of expert `gj` into the given buffers."""
+    for k in range(NUM_K):
+        _start_w1_dma(gj, buf_w1, k, **dma_kw_w1)
+    for m in range(NUM_I):
+        _start_w2_dma(gj, buf_w2, m, **dma_kw_w2)
 
 
 # =====================================================================
@@ -214,12 +169,10 @@ def _expert_body(
     gate_up_acc = jnp.zeros((M_PAD, 2 * I), dtype=jnp.float32)
 
     for k in range(NUM_K):
-        # Wait for current w1 tile (gated by is_new_expert)
         @pl.when(is_new_expert)
         def _():
             _wait_w1_dma(gj, cur_w1_buf, k, **dma_kw_w1)
 
-        # ---- UNCONDITIONAL compute ----
         w1_fp8 = _select_buf(w1_bufs_ref, cur_w1_buf, NBUF_W1_)
         s1 = _select_buf(w1_s_bufs_ref, cur_w1_buf, NBUF_W1_)
         lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD), pl.ds(k * K_TILE, K_TILE)]
@@ -247,12 +200,10 @@ def _expert_body(
     down_acc = jnp.zeros((M_PAD, H), dtype=jnp.float32)
 
     for m in range(NUM_I):
-        # Wait for current w2 tile (gated by is_new_expert)
         @pl.when(is_new_expert)
         def _():
             _wait_w2_dma(gj, cur_w2_buf, m, **dma_kw_w2)
 
-        # ---- UNCONDITIONAL w2 compute ----
         w2_fp8 = _select_buf(w2_bufs_ref, cur_w2_buf, NBUF_W2_)
         s2 = _select_buf(w2_s_bufs_ref, cur_w2_buf, NBUF_W2_)
         inter_tile = intermediate[:, m * I_TILE : (m + 1) * I_TILE]
@@ -294,7 +245,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
     w1_s_bufs_ref,         # [NBUF_W1, KB_TILE, 1, 2I] fp32
     w2_bufs_ref,           # [NBUF_W2, I_TILE, H]
     w2_s_bufs_ref,         # [NBUF_W2, IB_TILE, 1, H] fp32
-    acc_scratch_ref,       # [N_TOKENS_, 1, H] fp32 (per-token accumulator)
+    acc_scratch_ref,       # [N_TOKENS_, 1, H] fp32
     full_out_scratch_ref,  # [C_PAD, 1, H] bf16
     sem_ref,               # semaphores
     *,
@@ -323,6 +274,8 @@ def _cn_w1w2_fused_token_kernel_fp8(
                      w2_bufs_ref=w2_bufs_ref, w2_s_bufs_ref=w2_s_bufs_ref,
                      sem_ref=sem_ref, I_TILE=I_TILE, IB_TILE=IB_TILE,
                      H=H, IB=IB, NBUF_W1_=NBUF_W1_, NBUF_W2_=NBUF_W2_)
+    all_dma_kw = dict(NUM_K=NUM_K, NUM_I=NUM_I,
+                      dma_kw_w1=dma_kw_w1, dma_kw_w2=dma_kw_w2)
 
     # Compute-body kwargs
     body_kw = dict(
@@ -342,11 +295,8 @@ def _cn_w1w2_fused_token_kernel_fp8(
         DEQUANT_W2_AFTER_=DEQUANT_W2_AFTER_,
     )
 
-    prefetch_kw = dict(
-        N_SLOTS=N_SLOTS, NUM_K=NUM_K, NUM_I=NUM_I,
-        NBUF_W1_=NBUF_W1_, NBUF_W2_=NBUF_W2_,
-        dma_kw_w1=dma_kw_w1, dma_kw_w2=dma_kw_w2,
-    )
+    NBUF = max(NBUF_W1_, NBUF_W2_)  # same in practice
+    MAX_DEPTH = NBUF - 1             # how far ahead we look
 
     # ---- DMA ALL tokens from HBM -> VMEM (once) ----
     full_lhs_copy = pltpu.make_async_copy(
@@ -376,11 +326,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
 
             @pl.when(weight != 0.0)
             def _():
-                for k in range(NUM_K):
-                    _start_w1_dma(gj, jnp.int32(0), k, **dma_kw_w1)
-                for m in range(NUM_I):
-                    _start_w2_dma(gj, jnp.int32(0), m, **dma_kw_w2)
-
+                _start_all_dma(gj, jnp.int32(0), jnp.int32(0), **all_dma_kw)
                 _expert_body(gj, weight, tok,
                              is_new_expert=jnp.bool_(True),
                              cur_w1_buf=jnp.int32(0),
@@ -388,7 +334,6 @@ def _cn_w1w2_fused_token_kernel_fp8(
                              **body_kw)
     else:
         # TP mode: dedup + N-way cross-expert buffering.
-        # Traced buffer indices — rotate only on genuine expert transitions.
         cur_w1_buf = jnp.int32(0)
         cur_w2_buf = jnp.int32(0)
 
@@ -405,8 +350,39 @@ def _cn_w1w2_fused_token_kernel_fp8(
                 prev_gj = ids_ref[slot - 1]
                 is_new_expert = (gj != prev_gj)
 
-            # ---- On genuine transition, rotate to next buffer ----
+            # ============================================================
+            #  SLOT 0 — SEED PHASE: fill all NBUF buffers
+            # ============================================================
+            if slot == 0:
+                # Buffer 0: current expert
+                _start_all_dma(gj, jnp.int32(0), jnp.int32(0), **all_dma_kw)
+
+                # Buffers 1..NBUF-1: next unique experts (one forward scan)
+                last_gj = gj
+                for d in range(1, NBUF):
+                    # Find the d-th unique expert after `last_gj`
+                    found_gj = gj       # fallback
+                    found = jnp.bool_(False)
+                    for ahead in range(1, N_SLOTS):
+                        future_gj = ids_ref[ahead]
+                        is_hit = (future_gj != last_gj) & (~found)
+                        found_gj = jnp.where(is_hit, future_gj, found_gj)
+                        found = found | is_hit
+
+                    buf_d_w1 = jnp.int32(d % NBUF_W1_)
+                    buf_d_w2 = jnp.int32(d % NBUF_W2_)
+                    @pl.when(found)
+                    def _(fgj=found_gj, bw1=buf_d_w1, bw2=buf_d_w2):
+                        _start_all_dma(
+                            pl.multiple_of(fgj, 1), bw1, bw2, **all_dma_kw)
+
+                    last_gj = found_gj  # next depth starts past this one
+
+            # ============================================================
+            #  SLOT > 0 — STEADY STATE: rotate + one prefetch per transition
+            # ============================================================
             if slot > 0:
+                # Rotate buffer index on genuine transition
                 cur_w1_buf = jnp.where(is_new_expert,
                                        (cur_w1_buf + 1) % NBUF_W1_,
                                        cur_w1_buf)
@@ -414,19 +390,32 @@ def _cn_w1w2_fused_token_kernel_fp8(
                                        (cur_w2_buf + 1) % NBUF_W2_,
                                        cur_w2_buf)
 
-            # ---- MULTI-DEPTH PREFETCH at top of each slot ----
-            # Scans forward to find the next NBUF-1 unique experts
-            # and starts DMA into their designated buffer slots.
-            _prefetch_upcoming_experts(
-                slot, gj, cur_w1_buf, cur_w2_buf, ids_ref,
-                **prefetch_kw)
+                # ONE prefetch into the freed buffer.
+                # Scan is unconditional (cheap traced ops); DMA is gated
+                # by a single flat pl.when to avoid nested conditionals.
+                target_w1 = (cur_w1_buf + MAX_DEPTH) % NBUF_W1_
+                target_w2 = (cur_w2_buf + MAX_DEPTH) % NBUF_W2_
 
-            # ---- Slot 0 bootstrap: start DMA for first expert ----
-            if slot == 0:
-                for k in range(NUM_K):
-                    _start_w1_dma(gj, cur_w1_buf, k, **dma_kw_w1)
-                for m in range(NUM_I):
-                    _start_w2_dma(gj, cur_w2_buf, m, **dma_kw_w2)
+                ahead_gj = gj
+                ahead_found = jnp.bool_(False)
+                transition_count = jnp.int32(0)
+                for ahead in range(1, N_SLOTS - slot):
+                    future_gj = ids_ref[slot + ahead]
+                    is_transition = (future_gj != ids_ref[slot + ahead - 1])
+                    transition_count = transition_count + \
+                        is_transition.astype(jnp.int32)
+                    is_target = (transition_count == MAX_DEPTH) & \
+                                (~ahead_found)
+                    ahead_gj = jnp.where(is_target, future_gj, ahead_gj)
+                    ahead_found = ahead_found | is_target
+
+                # Single flat gate: fire only on transition AND target found
+                should_prefetch = is_new_expert & ahead_found
+                @pl.when(should_prefetch)
+                def _():
+                    _start_all_dma(
+                        pl.multiple_of(ahead_gj, 1),
+                        target_w1, target_w2, **all_dma_kw)
 
             # ---- Load this token's lhs ----
             token_row = full_lhs_scratch_ref[pl.ds(tok, 1), pl.ds(0, 1),
@@ -457,18 +446,12 @@ def _cn_w1w2_fused_token_kernel_fp8(
 
 
 # =====================================================================
-#  Public entry point — sets up grid, scratch, and launches Pallas
+#  Public entry point
 # =====================================================================
 def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
                               sorted_ids, sorted_toks, sorted_weights, *,
                               n_tokens, use_ep=False, interpret=False):
-    """Fused gate+up+SwiGLU+down for the C=N MoE block with expert dedup.
-
-    Inputs are pre-sorted by expert_id so duplicate experts are adjacent.
-    sorted_ids [N*TOP_K]: expert indices (sorted).
-    sorted_toks [N*TOP_K]: token index each slot belongs to.
-    sorted_weights [N*TOP_K]: routing weights (sorted to match).
-    """
+    """Fused gate+up+SwiGLU+down for the C=N MoE block with expert dedup."""
     G, K, N1 = w1.shape
     assert N1 % 2 == 0, f"w1 last dim must be 2*I; got {N1}"
     I = N1 // 2
@@ -488,7 +471,6 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
         K_TILE -= 1
     QB_eff = min(K_TILE, QB)
     KB_TILE = K_TILE // QB_eff
-    # Find largest tile <= _CN_I_TILE that divides I
     I_TILE = min(_CN_I_TILE, I)
     while I % I_TILE != 0:
         I_TILE -= 1
@@ -497,25 +479,24 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
 
     NUM_K_setup = K // K_TILE
     NUM_I_setup = I // I_TILE
-    # N-way cross-expert buffering: at least _CN_NBUF buffers.
     NBUF_W1 = max(_CN_NBUF, NUM_K_setup)
     NBUF_W2 = max(_CN_NBUF, NUM_I_setup)
 
     C_PAD = lhs.shape[0]
     grid_spec = pltpu.PrefetchScalarGridSpec(
-        num_scalar_prefetch=3,            # ids, toks, weights
+        num_scalar_prefetch=3,
         in_specs=[any_spec] * 5,
         out_specs=any_spec,
         grid=(1,),
         scratch_shapes=[
-            pltpu.VMEM((C_PAD, 1, K), lhs.dtype),                   # full_lhs_scratch
-            pltpu.VMEM((M_PAD, K), lhs.dtype),                      # lhs_scratch
-            pltpu.VMEM((NBUF_W1, K_TILE, N1), w1.dtype),            # w1_bufs
-            pltpu.VMEM((NBUF_W1, KB_TILE, 1, N1), w1_scale.dtype),  # w1_s_bufs
-            pltpu.VMEM((NBUF_W2, I_TILE, H), w2.dtype),             # w2_bufs
-            pltpu.VMEM((NBUF_W2, IB_TILE, 1, H), w2_scale.dtype),   # w2_s_bufs
-            pltpu.VMEM((n_tokens, 1, H), jnp.float32),              # acc_scratch
-            pltpu.VMEM((C_PAD, 1, H), jnp.bfloat16),                # full_out_scratch
+            pltpu.VMEM((C_PAD, 1, K), lhs.dtype),
+            pltpu.VMEM((M_PAD, K), lhs.dtype),
+            pltpu.VMEM((NBUF_W1, K_TILE, N1), w1.dtype),
+            pltpu.VMEM((NBUF_W1, KB_TILE, 1, N1), w1_scale.dtype),
+            pltpu.VMEM((NBUF_W2, I_TILE, H), w2.dtype),
+            pltpu.VMEM((NBUF_W2, IB_TILE, 1, H), w2_scale.dtype),
+            pltpu.VMEM((n_tokens, 1, H), jnp.float32),
+            pltpu.VMEM((C_PAD, 1, H), jnp.bfloat16),
             pltpu.SemaphoreType.DMA((2 * NBUF_W1 + 2 * NBUF_W2 + 2,)),
         ])
     compiler_params = None if interpret else pltpu.CompilerParams(
@@ -536,24 +517,19 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
         out_shape=jax.ShapeDtypeStruct((C_PAD, 1, H), jnp.bfloat16),
         grid_spec=grid_spec, compiler_params=compiler_params,
         interpret=interpret, name="cn_gemv_w1w2_fused_token_fp8",
-    )(sorted_ids, sorted_toks, sorted_weights,   # scalar prefetch (3)
-      lhs, w1, w1_scale, w2, w2_scale)           # inputs (5)
+    )(sorted_ids, sorted_toks, sorted_weights,
+      lhs, w1, w1_scale, w2, w2_scale)
 
 
 def cn_moe_full(hidden_state, w1, w1_scale, w2, w2_scale,
                 active_ids, topk_weights, *, use_ep=False, interpret=False):
     """hidden_state [C, K]; active_ids/topk_weights [C, TOP_K].
     Returns [C, K] -- token t's MoE output at row t.
-
-    Pre-sorts slots by expert_id to enable weight reuse for duplicate
-    experts across tokens (dedup via pl.when inside the kernel).
     """
     C = hidden_state.shape[0]
     K = hidden_state.shape[1]
+    lhs = hidden_state.reshape(C, 1, K)
 
-    lhs = hidden_state.reshape(C, 1, K)  # 3D for 1x128 tiling
-
-    # ---- Pre-sort by expert_id to group duplicates ----
     flat_ids = active_ids.reshape(C * TOP_K)
     flat_weights = topk_weights.reshape(C * TOP_K)
     sort_order = jnp.argsort(flat_ids, stable=True)
