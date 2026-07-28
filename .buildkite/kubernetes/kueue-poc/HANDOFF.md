@@ -8,6 +8,11 @@ for the architecture and tradeoffs, and the repository-level
 [`../../KUBERNETES_POC.md`](../../KUBERNETES_POC.md) for results and decision
 gates.
 
+One investigation is tracked separately because it is unresolved and has its
+own reproduction: cancelling a build leaves queued Kubernetes Jobs behind, and
+they later consume a TPU node before exiting. See
+[`CANCELLATION_HANDOFF.md`](CANCELLATION_HANDOFF.md).
+
 ## Current state
 
 - Controller: GKE Autopilot cluster `ci-test-controller`, region `us-central1`.

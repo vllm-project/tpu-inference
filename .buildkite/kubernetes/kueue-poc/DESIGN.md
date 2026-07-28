@@ -181,6 +181,11 @@ Options to investigate, in order:
 4. If none is viable, explicitly accept a long timeout and compensate with Job
    active deadlines, monitoring, and aggressive cancellation cleanup.
 
+Option 4 is the current position, but the cancellation cleanup it depends on
+does not work yet: a cancelled build leaves queued Jobs behind, which later
+take a quota slot and scale a TPU node before exiting. That gap is tracked in
+[`CANCELLATION_HANDOFF.md`](CANCELLATION_HANDOFF.md).
+
 The Job also has `activeDeadlineSeconds: 10800` and the Kueue maximum execution
 label. Those bound runtime; they are separate from readiness and admission wait.
 `pendingTimeout: 0` allows indefinite waiting for scarce TPU capacity.
