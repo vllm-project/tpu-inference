@@ -357,17 +357,21 @@ def _cn_w1w2_fused_token_kernel_fp8(
                 # Buffer 0: current expert
                 _start_all_dma(gj, jnp.int32(0), jnp.int32(0), **all_dma_kw)
 
-                # Buffers 1..NBUF-1: next unique experts (one forward scan)
-                last_gj = gj
+                # Buffers 1..NBUF-1: seed by counting transitions (group
+                # boundaries) from the start of the sorted array.
+                # d=1 → first transition (expert B), d=2 → second (expert C).
                 for d in range(1, NBUF):
-                    # Find the d-th unique expert after `last_gj`
-                    found_gj = gj       # fallback
+                    found_gj = gj        # fallback
                     found = jnp.bool_(False)
+                    transition_count = jnp.int32(0)
                     for ahead in range(1, N_SLOTS):
                         future_gj = ids_ref[ahead]
-                        is_hit = (future_gj != last_gj) & (~found)
-                        found_gj = jnp.where(is_hit, future_gj, found_gj)
-                        found = found | is_hit
+                        is_transition = (future_gj != ids_ref[ahead - 1])
+                        transition_count = transition_count + \
+                            is_transition.astype(jnp.int32)
+                        is_target = (transition_count == d) & (~found)
+                        found_gj = jnp.where(is_target, future_gj, found_gj)
+                        found = found | is_target
 
                     buf_d_w1 = jnp.int32(d % NBUF_W1_)
                     buf_d_w2 = jnp.int32(d % NBUF_W2_)
@@ -375,8 +379,6 @@ def _cn_w1w2_fused_token_kernel_fp8(
                     def _(fgj=found_gj, bw1=buf_d_w1, bw2=buf_d_w2):
                         _start_all_dma(
                             pl.multiple_of(fgj, 1), bw1, bw2, **all_dma_kw)
-
-                    last_gj = found_gj  # next depth starts past this one
 
             # ============================================================
             #  SLOT > 0 — STEADY STATE: rotate + one prefetch per transition
