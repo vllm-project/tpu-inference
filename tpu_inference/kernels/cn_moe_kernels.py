@@ -1,9 +1,12 @@
 # Copyright 2026 Google LLC
 """C=N fused MoE Pallas kernels — per-token expert loop with dedup.
 
-Cross-expert double buffering: while computing on buffer A, prefetch next
-expert's weights into buffer B.  Buffer index (`cur_w1_buf` / `cur_w2_buf`)
-is a traced JAX value that swaps only on genuine expert transitions.
+N-way cross-expert buffering: while computing on buffer `cur`, prefetch the
+next NBUF-1 unique experts into the remaining buffer slots.  Buffer index
+(`cur_w1_buf` / `cur_w2_buf`) is a traced JAX value that rotates only on
+genuine expert transitions via `(cur + 1) % NBUF`.
+
+Set MOE_CN_NBUF=2 for double, =3 for triple (default), etc.
 """
 
 import functools
@@ -22,15 +25,31 @@ _GEMV_NBUF = max(2, int(_os.getenv("MOE_GEMV_NBUF", "2")))
 _FUSE_NBUF = max(2, int(_os.getenv("MOE_FUSE_NBUF", str(_GEMV_NBUF))))
 _CN_K_TILE = int(_os.getenv("MOE_CN_K_TILE", "4096"))
 _CN_I_TILE = int(_os.getenv("MOE_CN_I_TILE", "2048"))
+_CN_NBUF = max(2, int(_os.getenv("MOE_CN_NBUF", "3")))
 
 # ── Semaphore layout ────────────────────────────────────────────────
-#   [0          .. NBUF_W1)           w1 weight DMAs
-#   [NBUF_W1   .. 2*NBUF_W1)         w1 scale  DMAs
-#   [2*NBUF_W1 .. 2*NBUF_W1+NBUF_W2) w2 weight DMAs
-#   [2*NBUF_W1+NBUF_W2 .. 2*NBUF_W1+2*NBUF_W2) w2 scale DMAs
-#   [2*NBUF_W1+2*NBUF_W2]            lhs DMA
-#   [2*NBUF_W1+2*NBUF_W2+1]          output DMA
+#   [0                            .. NBUF_W1)           w1 weight DMAs
+#   [NBUF_W1                     .. 2*NBUF_W1)         w1 scale  DMAs
+#   [2*NBUF_W1                   .. 2*NBUF_W1+NBUF_W2) w2 weight DMAs
+#   [2*NBUF_W1+NBUF_W2           .. 2*NBUF_W1+2*NBUF_W2) w2 scale DMAs
+#   [2*NBUF_W1+2*NBUF_W2]        lhs DMA
+#   [2*NBUF_W1+2*NBUF_W2+1]      output DMA
 # ────────────────────────────────────────────────────────────────────
+
+
+# =====================================================================
+#  Buffer selection helper — works with any NBUF
+# =====================================================================
+def _select_buf(ref, cur_buf, nbuf):
+    """Select buffer slot `cur_buf` from ref[nbuf, ...].
+
+    Uses a jnp.where chain so that every index is a static int
+    (avoids Mosaic PyTree issues with traced bracket indices).
+    """
+    result = ref[0]
+    for i in range(1, nbuf):
+        result = jnp.where(cur_buf == i, ref[i], result)
+    return result
 
 
 # =====================================================================
@@ -113,6 +132,57 @@ def _wait_w2_dma(gj, buf, m, w2_ref, w2_scale_ref,
 
 
 # =====================================================================
+#  Multi-depth prefetch — scan forward to find next N unique experts
+# =====================================================================
+def _prefetch_upcoming_experts(
+    slot, gj, cur_w1_buf, cur_w2_buf, ids_ref, *,
+    N_SLOTS, NUM_K, NUM_I, NBUF_W1_, NBUF_W2_,
+    dma_kw_w1, dma_kw_w2,
+):
+    """Scan forward from `slot` to find the next NBUF-1 unique experts
+    and start prefetching each into its designated buffer slot.
+
+    Since expert IDs are sorted, transitions are at group boundaries:
+      [A, A, A, B, B, C, C, C, D, ...]
+    Depth-1 finds B, depth-2 finds C, etc.
+    """
+    nbuf = max(NBUF_W1_, NBUF_W2_)  # same in practice
+    max_depth = nbuf - 1             # e.g. 2 for triple buffering
+
+    # last_gj tracks the expert at the previous depth so we can
+    # identify the *next* distinct one.  Starts as the current expert.
+    last_gj = gj
+
+    for depth in range(1, max_depth + 1):
+        target_buf_w1 = (cur_w1_buf + depth) % NBUF_W1_
+        target_buf_w2 = (cur_w2_buf + depth) % NBUF_W2_
+
+        # Scan forward to find the first slot whose expert differs
+        # from `last_gj`.  All state is traced.
+        found_gj = gj         # fallback (never used if found=False)
+        found = jnp.bool_(False)
+
+        remaining = N_SLOTS - slot - 1
+        for ahead in range(1, remaining + 1):
+            future_gj = ids_ref[slot + ahead]
+            is_hit = (future_gj != last_gj) & (~found)
+            found_gj = jnp.where(is_hit, future_gj, found_gj)
+            found = found | is_hit
+
+        # Fire prefetch only if we actually found a distinct expert
+        @pl.when(found)
+        def _():
+            fgj = pl.multiple_of(found_gj, 1)
+            for k in range(NUM_K):
+                _start_w1_dma(fgj, target_buf_w1, k, **dma_kw_w1)
+            for m in range(NUM_I):
+                _start_w2_dma(fgj, target_buf_w2, m, **dma_kw_w2)
+
+        # For the next depth, look for an expert beyond this one
+        last_gj = found_gj
+
+
+# =====================================================================
 #  Compute-only expert body — no DMA; caller handles all transfers
 # =====================================================================
 def _expert_body(
@@ -149,12 +219,9 @@ def _expert_body(
         def _():
             _wait_w1_dma(gj, cur_w1_buf, k, **dma_kw_w1)
 
-        # ---- UNCONDITIONAL compute (buffer valid either way) ----
-        # Select buffer via jnp.where (both static reads are cheap in VMEM).
-        w1_fp8 = jnp.where(cur_w1_buf == 0,
-                           w1_bufs_ref[0], w1_bufs_ref[1])
-        s1 = jnp.where(cur_w1_buf == 0,
-                       w1_s_bufs_ref[0], w1_s_bufs_ref[1])
+        # ---- UNCONDITIONAL compute ----
+        w1_fp8 = _select_buf(w1_bufs_ref, cur_w1_buf, NBUF_W1_)
+        s1 = _select_buf(w1_s_bufs_ref, cur_w1_buf, NBUF_W1_)
         lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD), pl.ds(k * K_TILE, K_TILE)]
 
         if DEQUANT_W1_AFTER_:
@@ -186,10 +253,8 @@ def _expert_body(
             _wait_w2_dma(gj, cur_w2_buf, m, **dma_kw_w2)
 
         # ---- UNCONDITIONAL w2 compute ----
-        w2_fp8 = jnp.where(cur_w2_buf == 0,
-                           w2_bufs_ref[0], w2_bufs_ref[1])
-        s2 = jnp.where(cur_w2_buf == 0,
-                       w2_s_bufs_ref[0], w2_s_bufs_ref[1])
+        w2_fp8 = _select_buf(w2_bufs_ref, cur_w2_buf, NBUF_W2_)
+        s2 = _select_buf(w2_s_bufs_ref, cur_w2_buf, NBUF_W2_)
         inter_tile = intermediate[:, m * I_TILE : (m + 1) * I_TILE]
 
         if DEQUANT_W2_AFTER_:
@@ -259,8 +324,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
                      sem_ref=sem_ref, I_TILE=I_TILE, IB_TILE=IB_TILE,
                      H=H, IB=IB, NBUF_W1_=NBUF_W1_, NBUF_W2_=NBUF_W2_)
 
-    # Compute-body kwargs (everything except DMA-related, buffer indices,
-    # and per-slot values that change each iteration)
+    # Compute-body kwargs
     body_kw = dict(
         lhs_scratch_ref=lhs_scratch_ref,
         w1_ref=w1_ref, w1_scale_ref=w1_scale_ref,
@@ -276,6 +340,12 @@ def _cn_w1w2_fused_token_kernel_fp8(
         DTYPE_LHS=DTYPE_LHS, DTYPE_OUT=DTYPE_OUT,
         DEQUANT_W1_AFTER_=DEQUANT_W1_AFTER_,
         DEQUANT_W2_AFTER_=DEQUANT_W2_AFTER_,
+    )
+
+    prefetch_kw = dict(
+        N_SLOTS=N_SLOTS, NUM_K=NUM_K, NUM_I=NUM_I,
+        NBUF_W1_=NBUF_W1_, NBUF_W2_=NBUF_W2_,
+        dma_kw_w1=dma_kw_w1, dma_kw_w2=dma_kw_w2,
     )
 
     # ---- DMA ALL tokens from HBM -> VMEM (once) ----
@@ -294,7 +364,6 @@ def _cn_w1w2_fused_token_kernel_fp8(
     # ---- Flat slot loop (Python-unrolled, sorted by expert) ----
     if SKIP_ZERO_WEIGHT_:
         # EP mode: no dedup, no cross-expert prefetch.
-        # Each slot bootstraps its own DMA independently.
         for slot in range(N_SLOTS):
             gj = ids_ref[slot]
             gj = pl.multiple_of(gj, 1)
@@ -307,7 +376,6 @@ def _cn_w1w2_fused_token_kernel_fp8(
 
             @pl.when(weight != 0.0)
             def _():
-                # Bootstrap: start DMA for this slot's expert into buf 0
                 for k in range(NUM_K):
                     _start_w1_dma(gj, jnp.int32(0), k, **dma_kw_w1)
                 for m in range(NUM_I):
@@ -319,8 +387,8 @@ def _cn_w1w2_fused_token_kernel_fp8(
                              cur_w2_buf=jnp.int32(0),
                              **body_kw)
     else:
-        # TP mode: dedup + cross-expert double buffering.
-        # Traced buffer indices — swap only on genuine expert transitions.
+        # TP mode: dedup + N-way cross-expert buffering.
+        # Traced buffer indices — rotate only on genuine expert transitions.
         cur_w1_buf = jnp.int32(0)
         cur_w2_buf = jnp.int32(0)
 
@@ -337,27 +405,21 @@ def _cn_w1w2_fused_token_kernel_fp8(
                 prev_gj = ids_ref[slot - 1]
                 is_new_expert = (gj != prev_gj)
 
-            # ---- On genuine transition, swap to the prefetched buffer ----
+            # ---- On genuine transition, rotate to next buffer ----
             if slot > 0:
                 cur_w1_buf = jnp.where(is_new_expert,
-                                       1 - cur_w1_buf, cur_w1_buf)
+                                       (cur_w1_buf + 1) % NBUF_W1_,
+                                       cur_w1_buf)
                 cur_w2_buf = jnp.where(is_new_expert,
-                                       1 - cur_w2_buf, cur_w2_buf)
+                                       (cur_w2_buf + 1) % NBUF_W2_,
+                                       cur_w2_buf)
 
-            # ---- EARLY PREFETCH: next expert into alternate buffer ----
-            # Fires at the TOP of each slot, giving the DMA the entire
-            # slot's phase-1 + SwiGLU + phase-2 time to complete.
-            if slot + 1 < N_SLOTS:
-                _next_gj = pl.multiple_of(ids_ref[slot + 1], 1)
-                _is_next_new = (_next_gj != gj)
-                nxt_w1_buf = 1 - cur_w1_buf
-                nxt_w2_buf = 1 - cur_w2_buf
-                @pl.when(_is_next_new)
-                def _():
-                    for k in range(NUM_K):
-                        _start_w1_dma(_next_gj, nxt_w1_buf, k, **dma_kw_w1)
-                    for m in range(NUM_I):
-                        _start_w2_dma(_next_gj, nxt_w2_buf, m, **dma_kw_w2)
+            # ---- MULTI-DEPTH PREFETCH at top of each slot ----
+            # Scans forward to find the next NBUF-1 unique experts
+            # and starts DMA into their designated buffer slots.
+            _prefetch_upcoming_experts(
+                slot, gj, cur_w1_buf, cur_w2_buf, ids_ref,
+                **prefetch_kw)
 
             # ---- Slot 0 bootstrap: start DMA for first expert ----
             if slot == 0:
@@ -435,9 +497,9 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
 
     NUM_K_setup = K // K_TILE
     NUM_I_setup = I // I_TILE
-    # Cross-expert double buffering: always ≥ 2 buffers.
-    NBUF_W1 = max(2, NUM_K_setup)
-    NBUF_W2 = max(2, NUM_I_setup)
+    # N-way cross-expert buffering: at least _CN_NBUF buffers.
+    NBUF_W1 = max(_CN_NBUF, NUM_K_setup)
+    NBUF_W2 = max(_CN_NBUF, NUM_I_setup)
 
     C_PAD = lhs.shape[0]
     grid_spec = pltpu.PrefetchScalarGridSpec(
