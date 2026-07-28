@@ -370,7 +370,8 @@ def expert_ffn_int8(act,
                     w1b=None):
     """One expert's FFN on eight-bit INTEGER weights with per-channel scales.
 
-    The served generation's matrix unit has no integer input type, so an
+    TPU v7's matrix unit has no integer input type (a generation with
+    integer input could add a native int8 body as another weight form), so an
     integer weight cannot be contracted as it is stored: w1_chunk(b) and
     w2_chunk(b) return contraction chunk b already widened to bf16, the way
     the four-bit body's callers widen a scale block to fp8. Widening a whole
@@ -702,7 +703,7 @@ def _build_fused_ep_moe_kernel(*,
             """(w1_chunk, w2_chunk) integer chunk readers at slot `slot`.
 
             Each widens one contraction chunk to bf16, which is what the
-            matrix unit takes: the served generation has no integer input
+            matrix unit takes: TPU v7 has no integer input
             type, so the widening is not an optimization but the only way
             an integer weight reaches a matmul at all.
             """

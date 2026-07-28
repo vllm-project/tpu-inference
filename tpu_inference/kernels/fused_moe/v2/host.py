@@ -34,8 +34,9 @@ QB4 = 512
 # word the same way.
 PACK4 = 8
 BF16 = jnp.bfloat16
-# Storage only, the same way four-bit weights are: the served generation's
-# matrix unit takes no integer input, so an integer weight is widened to
+# Storage only, the same way four-bit weights are: TPU v7, the generation
+# this kernel is validated on, takes no integer input on the matrix unit
+# (earlier generations do), so an integer weight is widened to
 # bf16 one contraction chunk at a time before it is contracted. The format
 # buys weight bytes and weight bandwidth, not matmul work.
 INT8 = jnp.int8
