@@ -14,9 +14,9 @@
 /.github/ @QiliangCui @yiw-wang @CienetStingLin @theminghuang
 
 # Documentation
-/docs/ @bvrockwell @vipannalla
-/README.md @bvrockwell @vipannalla
-/CONTRIBUTING.md @jrplatin @bvrockwell
+/docs/ @bvrockwell @vipannalla @QiliangCui
+/README.md @bvrockwell @vipannalla @QiliangCui
+/CONTRIBUTING.md @jrplatin @bvrockwell @QiliangCui
 
 # Distributed Computing
 /tpu_inference/distributed/ @mrjunwan-lang @sixiang-google
