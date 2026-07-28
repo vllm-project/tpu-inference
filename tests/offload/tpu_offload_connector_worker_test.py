@@ -26,6 +26,7 @@ import numpy as np
 from absl.testing import parameterized
 from jax._src import test_util as jtu
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from vllm.config.parallel import ParallelConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
 from tpu_inference.logger import init_logger
@@ -75,10 +76,11 @@ class MockVllmConfig:
         ip = "ip"
         port = 1234
 
-    class Parallel:
+    class Parallel(ParallelConfig):
 
-        def __init__(self, pipeline_parallel_size=1):
+        def __init__(self, pipeline_parallel_size=1, data_parallel_size=1):
             self.pipeline_parallel_size = pipeline_parallel_size
+            self.data_parallel_size = data_parallel_size
 
 
 class TestTPUOffloadConnectorWorker(jtu.JaxTestCase):

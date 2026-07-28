@@ -111,6 +111,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
+from vllm.config.parallel import ParallelConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import \
@@ -452,9 +453,11 @@ class TPUOffloadConnector(KVConnectorBase_V1):
         logger.info("TPUOffloadConnector: Entering __init__")
         # Check DP/PP support
         parallel_config = vllm_config.parallel_config
-        pipeline_parallel_size = getattr(parallel_config,
-                                         "pipeline_parallel_size", 1)
-        data_parallel_size = getattr(parallel_config, "data_parallel_size", 1)
+        assert isinstance(parallel_config, ParallelConfig), (
+            f"parallel_config must be an instance of ParallelConfig, "
+            f"got {type(parallel_config)}")
+        pipeline_parallel_size = parallel_config.pipeline_parallel_size
+        data_parallel_size = parallel_config.data_parallel_size
         if pipeline_parallel_size > 1:
             raise ValueError(
                 "Pipeline Parallelism (PP) is not supported with KV cache offloading yet. "
