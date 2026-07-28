@@ -23,11 +23,12 @@ from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 from tpu_inference.layers.common.process_weights.moe_weights import \
     UnfusedMoEWeights
+from tpu_inference.layers.jax.activation import (apply_gated_activation,
+                                                 situ_params)
 # yapf: disable
 from tpu_inference.layers.jax.moe.utils import (get_all_to_all_params_fn,
                                                 global_permute_fn, gmm_fn,
                                                 local_permute_fn,
-                                                modeling_flax_utils,
                                                 sort_activations_fn,
                                                 unpermute_fn)
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
@@ -153,8 +154,6 @@ def sparse_moe_distributed_fwd(
         if moe_instance.edf_sharding[1] is not None:
             gating_TEF = jax.lax.psum(gating_TEF,
                                       axis_name=moe_instance.edf_sharding[1])
-        activated_gating_TEF = modeling_flax_utils.ACT2FN[
-            moe_instance.hidden_act](gating_TEF)
 
     with jax.named_scope("up_projection"):
         up_proj_TEF = gmm_fn(compute_inputs, kernel_up_proj,
@@ -165,7 +164,9 @@ def sparse_moe_distributed_fwd(
             up_proj_TEF = jax.lax.psum(up_proj_TEF,
                                        axis_name=moe_instance.edf_sharding[1])
 
-    fuse_TEF = activated_gating_TEF * up_proj_TEF
+    situ_beta, situ_linear_beta = situ_params(moe_instance)
+    fuse_TEF = apply_gated_activation(moe_instance.hidden_act, gating_TEF,
+                                      up_proj_TEF, situ_beta, situ_linear_beta)
 
     with jax.named_scope("down_projection"):
         intermediate_output = gmm_fn(fuse_TEF, kernel_down_proj,

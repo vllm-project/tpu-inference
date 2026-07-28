@@ -180,6 +180,7 @@ def moe_apply(
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
+                from tpu_inference.layers.jax.activation import situ_params
                 from tpu_inference.layers.jax.moe.dense_moe import \
                     dense_moe_func
                 assert isinstance(
@@ -188,6 +189,7 @@ def moe_apply(
                 assert len(
                     gating_output
                 ) == 2, "Expected the gating output to be have 2 entries: weights and indices"
+                situ_beta, situ_linear_beta = situ_params(layer)
                 return dense_moe_func(
                     weights=weights,
                     x_TD=x,
@@ -199,7 +201,9 @@ def moe_apply(
                     activation_ffw_ted=layer.activation_ffw_ted,
                     activation_ffw_td=layer.activation_ffw_td,
                     hidden_act=layer.hidden_act,
-                    mesh=mesh)
+                    mesh=mesh,
+                    situ_beta=situ_beta,
+                    situ_linear_beta=situ_linear_beta)
 
             case MoEBackend.MEGABLX_GMM:
                 # NOTE: circular import avoidance

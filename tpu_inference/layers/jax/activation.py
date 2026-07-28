@@ -52,3 +52,38 @@ def situ_and_mul(gate: jax.Array,
     if linear_beta is not None:
         up_f32 = linear_beta * jnp.tanh(up_f32 / linear_beta)
     return (situ * up_f32).astype(out_dtype)
+
+
+def apply_gated_activation(
+        hidden_act: str,
+        gate: jax.Array,
+        up: jax.Array,
+        situ_beta: float = SITU_BETA,
+        situ_linear_beta: float | None = SITU_LINEAR_BETA) -> jax.Array:
+    """Apply a gated MLP activation to a (gate, up) pair.
+
+    ``situ`` transforms both branches (see :func:`situ_and_mul`); every other
+    activation is unary on the gate branch, i.e. ``act(gate) * up``.
+    """
+    if hidden_act == "situ":
+        return situ_and_mul(gate,
+                            up,
+                            beta=situ_beta,
+                            linear_beta=situ_linear_beta)
+    # Imported inside the function: `layers.jax.layers` imports the nnx layer
+    # stack, and several of those modules import this one for `situ_and_mul`.
+    from tpu_inference.layers.jax.layers import modeling_flax_utils
+    return modeling_flax_utils.ACT2FN[hidden_act](gate) * up
+
+
+def situ_params(layer) -> tuple[float, float | None]:
+    """Read a layer's SiTU betas, defaulting to the Kimi-K3 config values.
+
+    The MoE backends are shared across models, so the two SiTU constants ride
+    on the layer instead of widening every backend signature -- the same
+    pattern `layers/common/moe.py` uses for GPT-OSS's ``swiglu_limit``.
+    """
+    beta = getattr(layer, "situ_beta", None)
+    linear_beta = getattr(layer, "situ_linear_beta", None)
+    return (SITU_BETA if beta is None else beta,
+            SITU_LINEAR_BETA if linear_beta is None else linear_beta)
