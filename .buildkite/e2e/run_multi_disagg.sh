@@ -311,112 +311,102 @@ start_vllm_log_streaming() {
   DECODE_LOG_TAIL_PID=$!
 }
 
-cleanup_local_tpu_runtime() {
-  local grace_seconds="${TPU_CLEANUP_GRACE_SECONDS:-30}"
-  local settle_seconds="${TPU_RUNTIME_SETTLE_SECONDS:-30}"
-  local device
-  local runtime_changed=0
-  local -a fuser_cmd=(fuser)
-
-  [[ "$grace_seconds" =~ ^[0-9]+$ ]] || grace_seconds=30
-  [[ "$settle_seconds" =~ ^[0-9]+$ ]] || settle_seconds=30
-
-  if docker inspect node >/dev/null 2>&1; then
-    runtime_changed=1
-    echo "   -> Gracefully stopping vLLM and Ray in local node container..."
-    docker exec -i node bash -s -- "$grace_seconds" <<'EOF' >/dev/null 2>&1 || true
-grace_seconds=$1
-pkill -TERM -f '[v]llm serve|[A]PIServer' >/dev/null 2>&1 || true
-end_time=$((SECONDS + grace_seconds))
-while (( SECONDS < end_time )); do
-  pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || break
-  sleep 1
-done
-pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
-ray stop --force >/dev/null 2>&1 || true
-EOF
-    docker stop node >/dev/null 2>&1 || true
-    docker rm -f node >/dev/null 2>&1 || true
-  fi
-
-  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    fuser_cmd=(sudo -n fuser)
-  fi
-  for device in /dev/accel* /dev/vfio/[0-9]*; do
-    [[ -e "$device" ]] || continue
-    if "${fuser_cmd[@]}" "$device" >/dev/null 2>&1; then
-      runtime_changed=1
-      echo "   -> Force-releasing lingering TPU user on $device..."
-      "${fuser_cmd[@]}" -k -9 "$device" >/dev/null 2>&1 || true
-    fi
-  done
-
-  if [[ "${fuser_cmd[0]}" == "sudo" ]]; then
-    sudo -n rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
-  else
-    rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
-  fi
-  if (( runtime_changed == 1 )); then
-    echo "   -> Waiting ${settle_seconds}s for the local TPU runtime to settle..."
-    sleep "$settle_seconds"
-  fi
-}
-
-cleanup_remote_tpu_runtime() {
+cleanup_node_runtime() {
   local ip=$1
-  local grace_seconds="${TPU_CLEANUP_GRACE_SECONDS:-30}"
-  local settle_seconds="${TPU_RUNTIME_SETTLE_SECONDS:-30}"
+  local label=$2
+  local is_local=0
+  if [[ "$ip" == "localhost" || "$ip" == "127.0.0.1" || "$ip" == "$HEAD_INTERNAL_IP" ]]; then
+    is_local=1
+  fi
 
-  [[ "$grace_seconds" =~ ^[0-9]+$ ]] || grace_seconds=30
-  [[ "$settle_seconds" =~ ^[0-9]+$ ]] || settle_seconds=30
+  echo "🧹 Cleaning up node runtime on $label ($ip)..."
 
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" \
-    "bash -s -- '$grace_seconds' '$settle_seconds'" <<'EOF' || true
-grace_seconds=$1
-settle_seconds=$2
-runtime_changed=0
-
+  local cleanup_cmd
+  cleanup_cmd=$(cat <<'EOF'
+set -x
+grace_seconds=10
+# 1. Gracefully stop inside the container if it exists
 if docker inspect node >/dev/null 2>&1; then
-  runtime_changed=1
-  echo "   -> Gracefully stopping vLLM and Ray in node container..."
-  docker exec -i node bash -s -- "$grace_seconds" <<'INNER_EOF' >/dev/null 2>&1 || true
-grace_seconds=$1
-pkill -TERM -f '[v]llm serve|[A]PIServer' >/dev/null 2>&1 || true
-end_time=$((SECONDS + grace_seconds))
-while (( SECONDS < end_time )); do
-  pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || break
-  sleep 1
-done
-pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
-ray stop --force >/dev/null 2>&1 || true
-INNER_EOF
+  echo "   -> Gracefully stopping processes inside 'node' container..."
+  docker exec -i node bash -c "
+    pkill -TERM -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
+    end_time=\$((SECONDS + grace_seconds))
+    while (( SECONDS < end_time )); do
+      pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || break
+      sleep 1
+    done
+    pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
+    ray stop --force >/dev/null 2>&1 || true
+  " >/dev/null 2>&1 || true
+
+  # 2. Stop and remove container
+  echo "   -> Stopping and removing 'node' container..."
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
 fi
 
+# 3. Release TPU devices on the host
 fuser_cmd=(fuser)
 if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   fuser_cmd=(sudo -n fuser)
 fi
+
 for device in /dev/accel* /dev/vfio/[0-9]*; do
   [[ -e "$device" ]] || continue
   if "${fuser_cmd[@]}" "$device" >/dev/null 2>&1; then
-    runtime_changed=1
     echo "   -> Force-releasing lingering TPU user on $device..."
     "${fuser_cmd[@]}" -k -9 "$device" >/dev/null 2>&1 || true
   fi
 done
 
+# 4. Remove TPU lockfile
 if [[ "${fuser_cmd[0]}" == "sudo" ]]; then
   sudo -n rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
 else
   rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
 fi
-if (( runtime_changed == 1 )); then
-  echo "   -> Waiting ${settle_seconds}s for the TPU runtime to settle..."
-  sleep "$settle_seconds"
+
+# 5. Clean up any lingering Ray processes on host (outside docker)
+if pgrep -f ray >/dev/null 2>&1; then
+  echo "   -> Warning: Lingering Ray processes found on host. Force killing..."
+  pkill -9 -f ray >/dev/null 2>&1 || true
+fi
+
+# 6. Verification
+verification_passed=1
+if docker ps -a -q --filter name=^/node$ >/dev/null 2>&1 | grep -q .; then
+  echo "❌ Verification Failed: 'node' container still exists!"
+  verification_passed=0
+fi
+
+for device in /dev/accel* /dev/vfio/[0-9]*; do
+  [[ -e "$device" ]] || continue
+  if "${fuser_cmd[@]}" "$device" >/dev/null 2>&1; then
+    echo "❌ Verification Failed: TPU device $device is still held by processes!"
+    "${fuser_cmd[@]}" "$device" || true
+    verification_passed=0
+  fi
+done
+
+if pgrep -f ray >/dev/null 2>&1; then
+  echo "❌ Verification Failed: Ray processes are still running on host!"
+  pgrep -l -f ray || true
+  verification_passed=0
+fi
+
+if (( verification_passed == 1 )); then
+  echo "✅ Verification Passed: Node is fully cleaned!"
+else
+  echo "⚠️ Warning: Cleanup verification found unresolved issues on $ip"
 fi
 EOF
+)
+
+  if (( is_local == 1 )); then
+    bash -c "$cleanup_cmd"
+  else
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "bash -s" <<< "$cleanup_cmd" || true
+  fi
 }
 
 cleanup() {
@@ -435,25 +425,21 @@ cleanup() {
 
   # Cleanup Prefill workers
   for ip in "${PREFILL_WORKER_IPS[@]}"; do
-    echo "   -> Cleaning Prefill worker: $ip"
-    cleanup_remote_tpu_runtime "$ip"
+    cleanup_node_runtime "$ip" "prefill-worker"
   done
 
   # Cleanup Decode Head
   if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
-    echo "   -> Cleaning Decode Head: $DECODE_HEAD_IP"
-    cleanup_remote_tpu_runtime "$DECODE_HEAD_IP"
+    cleanup_node_runtime "$DECODE_HEAD_IP" "decode-head"
   fi
 
   # Cleanup Decode workers
   for ip in "${DECODE_WORKER_IPS[@]}"; do
-    echo "   -> Cleaning Decode worker: $ip"
-    cleanup_remote_tpu_runtime "$ip"
+    cleanup_node_runtime "$ip" "decode-worker"
   done
 
   # Cleanup Prefill Head (Local Node)
-  echo "   -> Cleaning Prefill Head (Local)..."
-  cleanup_local_tpu_runtime
+  cleanup_node_runtime "localhost" "prefill-head"
 
   # Cleanup Local proxy/benchmark container
   docker stop disagg-proxy-benchmark >/dev/null 2>&1 || true
@@ -594,7 +580,51 @@ dump_ray_resources() {
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec node python3 -c \"${ray_dump_cmd}\"" || true
   fi
 }
+wait_for_ray_cluster_members_remote() {
+  local host=$1
+  local expected_nodes=$2
+  local timeout=${3:-300}
+  
+  local ray_ready_cmd="import ray; ray.init(address='auto', ignore_reinit_error=True); alive=sum(node.get('Alive', False) for node in ray.nodes()); raise SystemExit(0 if alive >= ${expected_nodes} else 1)"
+  
+  echo "Waiting for Ray cluster on $host to register ${expected_nodes} alive node(s)..."
+  local end_time=$((SECONDS + timeout))
+  local last_status_time=0
+  while [[ $SECONDS -lt $end_time ]]; do
+    local is_ready=0
+    if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
+      if docker exec node python3 -c "$ray_ready_cmd" >/dev/null 2>&1; then
+        is_ready=1
+      fi
+    else
+      if ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec node python3 -c \"${ray_ready_cmd}\"" >/dev/null 2>&1; then
+        is_ready=1
+      fi
+    fi
+    
+    if (( is_ready == 1 )); then
+      echo "Ray cluster on $host has registered ${expected_nodes} alive node(s)."
+      return 0
+    fi
 
+    # Print status every 30 seconds
+    if (( SECONDS - last_status_time >= 30 )); then
+      echo "   -> [$(date +%T)] Current Ray nodes on $host:"
+      local ray_status_cmd="import ray; ray.init(address='auto', ignore_reinit_error=True); print('\n'.join(f'      - Host: {n.get(\"NodeName\")} | Alive: {n.get(\"Alive\")}' for n in ray.nodes()))"
+      if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
+        docker exec node python3 -c "$ray_status_cmd" || true
+      else
+        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "docker exec node python3 -c \"${ray_status_cmd}\"" || true
+      fi
+      last_status_time=$SECONDS
+    fi
+    
+    sleep 5
+  done
+
+  echo "Error: Ray cluster on $host did not register ${expected_nodes} alive node(s) within ${timeout}s." >&2
+  return 1
+}
 
 PROJECT="$(gcloud config get-value project)"
 GCR_REPO="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference"
@@ -729,8 +759,9 @@ EOF
     sleep 15
 done
 
-echo "--- Waiting for Ray Clusters to fully form..."
-sleep 120
+echo "--- Waiting for Prefill & Decode Ray Clusters to fully form..."
+wait_for_ray_cluster_members_remote "$PREFILL_HEAD_IP" "$PREFILL_HOSTS_COUNT" 300
+wait_for_ray_cluster_members_remote "$DECODE_HEAD_IP" "$DECODE_HOSTS_COUNT" 300
 
 dump_ray_resources "$PREFILL_HEAD_IP" "Prefill"
 dump_ray_resources "$DECODE_HEAD_IP" "Decode"

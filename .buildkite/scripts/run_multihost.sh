@@ -198,6 +198,104 @@ dump_container_logs() {
 }
 
 # Cleanup function that runs on exit to tear down the Ray cluster
+cleanup_node_runtime() {
+  local ip=$1
+  local label=$2
+  local is_local=0
+  if [[ "$ip" == "localhost" || "$ip" == "127.0.0.1" || "$ip" == "$HEAD_INTERNAL_IP" ]]; then
+    is_local=1
+  fi
+
+  echo "🧹 Cleaning up node runtime on $label ($ip)..."
+
+  local cleanup_cmd
+  cleanup_cmd=$(cat <<'EOF'
+set -x
+grace_seconds=10
+# 1. Gracefully stop inside the container if it exists
+if docker inspect node >/dev/null 2>&1; then
+  echo "   -> Gracefully stopping processes inside 'node' container..."
+  docker exec -i node bash -c "
+    pkill -TERM -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
+    end_time=\$((SECONDS + grace_seconds))
+    while (( SECONDS < end_time )); do
+      pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || break
+      sleep 1
+    done
+    pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 || true
+    ray stop --force >/dev/null 2>&1 || true
+  " >/dev/null 2>&1 || true
+
+  # 2. Stop and remove container
+  echo "   -> Stopping and removing 'node' container..."
+  docker stop node >/dev/null 2>&1 || true
+  docker rm -f node >/dev/null 2>&1 || true
+fi
+
+# 3. Release TPU devices on the host
+fuser_cmd=(fuser)
+if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+  fuser_cmd=(sudo -n fuser)
+fi
+
+for device in /dev/accel* /dev/vfio/[0-9]*; do
+  [[ -e "$device" ]] || continue
+  if "${fuser_cmd[@]}" "$device" >/dev/null 2>&1; then
+    echo "   -> Force-releasing lingering TPU user on $device..."
+    "${fuser_cmd[@]}" -k -9 "$device" >/dev/null 2>&1 || true
+  fi
+done
+
+# 4. Remove TPU lockfile
+if [[ "${fuser_cmd[0]}" == "sudo" ]]; then
+  sudo -n rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
+else
+  rm -f /tmp/libtpu_lockfile >/dev/null 2>&1 || true
+fi
+
+# 5. Clean up any lingering Ray processes on host (outside docker)
+if pgrep -f ray >/dev/null 2>&1; then
+  echo "   -> Warning: Lingering Ray processes found on host. Force killing..."
+  pkill -9 -f ray >/dev/null 2>&1 || true
+fi
+
+# 6. Verification
+verification_passed=1
+if docker ps -a -q --filter name=^/node$ >/dev/null 2>&1 | grep -q .; then
+  echo "❌ Verification Failed: 'node' container still exists!"
+  verification_passed=0
+fi
+
+for device in /dev/accel* /dev/vfio/[0-9]*; do
+  [[ -e "$device" ]] || continue
+  if "${fuser_cmd[@]}" "$device" >/dev/null 2>&1; then
+    echo "❌ Verification Failed: TPU device $device is still held by processes!"
+    "${fuser_cmd[@]}" "$device" || true
+    verification_passed=0
+  fi
+done
+
+if pgrep -f ray >/dev/null 2>&1; then
+  echo "❌ Verification Failed: Ray processes are still running on host!"
+  pgrep -l -f ray || true
+  verification_passed=0
+fi
+
+if (( verification_passed == 1 )); then
+  echo "✅ Verification Passed: Node is fully cleaned!"
+else
+  echo "⚠️ Warning: Cleanup verification found unresolved issues on $ip"
+fi
+EOF
+)
+
+  if (( is_local == 1 )); then
+    bash -c "$cleanup_cmd"
+  else
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ip}" "bash -s" <<< "$cleanup_cmd" || true
+  fi
+}
+
 cleanup() {
   local exit_code=${1:-0}
   echo "🧹 Cleaning up containers on head and workers..."
@@ -205,9 +303,7 @@ cleanup() {
 
   stop_vllm_log_streaming
 
-  # Print diagnostics before removing containers. The generic multi-host runner
-  # has one vLLM head and Ray workers, so dump the equivalent of the
-  # prefill/decode host logs from every participating host.
+  # Print diagnostics before removing containers.
   if (( exit_code != 0 )); then
     echo "--- 🚨 Script failed (exit code: ${exit_code}). Dumping host logs..."
     dump_container_logs "localhost" "head"
@@ -219,7 +315,7 @@ cleanup() {
   echo "   -> Cleaning workers..."
   if [[ ${#WORKER_IPS_ARRAY[@]} -gt 0 && -n "${WORKER_IPS_ARRAY[0]}" ]]; then
     for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker stop node >/dev/null 2>&1 || true; docker rm -f node >/dev/null 2>&1 || true" || true
+      cleanup_node_runtime "$worker_ip" "worker"
     done
   fi
 
@@ -230,8 +326,7 @@ cleanup() {
     cat /tmp/vllm_serve.log || true
     echo "==================== END OF VLLM SERVE LOG ===================="
   fi
-  docker stop node >/dev/null 2>&1 || true
-  docker rm -f node >/dev/null 2>&1 || true
+  cleanup_node_runtime "localhost" "head"
   rm -f /root/vllm_serve.log || true
 
   echo "✅ Cleanup complete."
@@ -283,12 +378,21 @@ wait_for_ray_cluster_members() {
 
   echo "Waiting for Ray cluster to register ${expected_nodes} alive node(s)..."
   local end_time=$((SECONDS + timeout))
+  local last_status_time=0
   while [[ $SECONDS -lt $end_time ]]; do
     check_worker_launchers
     if docker exec node python3 -c "$ray_ready_cmd" >/dev/null 2>&1; then
       echo "Ray cluster has registered ${expected_nodes} alive node(s)."
       return 0
     fi
+    
+    # Print status every 30 seconds
+    if (( SECONDS - last_status_time >= 30 )); then
+      echo "   -> [$(date +%T)] Current Ray nodes:"
+      docker exec node python3 -c "import ray; ray.init(address='auto', ignore_reinit_error=True); print('\n'.join(f'      - Host: {n.get(\"NodeName\")} | Alive: {n.get(\"Alive\")}' for n in ray.nodes()))" || true
+      last_status_time=$SECONDS
+    fi
+    
     sleep 5
   done
 
