@@ -151,6 +151,27 @@ def is_attn_dp(mesh: Mesh) -> bool:
     return (attn_dp_size // dp_size) > 1
 
 
+def rank_local_slot_indices(state_indices, num_local_blocks: int):
+    """Rebase global mamba slot ids onto one ``ATTN_DATA`` shard.
+
+    The mamba state pool is allocated with its leading (block) dimension
+    sharded over ``ShardingAxisName.ATTN_DATA``, and the slot allocator hands
+    DP rank ``k`` slots out of ``[k * L, (k + 1) * L)``, where
+    ``L = mamba_num_blocks // dp_size`` (see ``InputBatch._build_mamba_pools``
+    and the ``MambaSpec`` branch of ``KVCacheManager.initialize_kv_cache``).
+    The ids published in ``AttentionMetadata.mamba_state_indices`` are global,
+    so inside a ``shard_map`` — where rank ``k`` sees only its own ``L``
+    blocks, indexed from 0 — they have to be rebased or every rank but 0 reads
+    and writes another rank's slots.
+
+    ``num_local_blocks`` is the leading dimension of the *shard* (i.e.
+    ``conv_state.shape[0]`` as seen inside the ``shard_map``), which equals
+    ``L`` by construction. At ``dp_size == 1`` every id is already below ``L``,
+    so this is the identity.
+    """
+    return state_indices % num_local_blocks
+
+
 @dataclass
 class ShardingStrategy:
     """Defines the high-level parallelism strategy.

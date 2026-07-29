@@ -71,6 +71,7 @@ from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLmHead
 from tpu_inference.layers.jax.mlp import GatedMLP
 from tpu_inference.layers.jax.moe.moe import JaxMoE
+from tpu_inference.layers.jax.moe.utils import get_expert_parallelism
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
@@ -336,7 +337,10 @@ class KimiDeltaAttention(JaxModule):
 
     NOTE(sharding): the KDA parameters are replicated. The linear-attention
     math is head-parallel and will be sharded on ``ATTN_HEAD`` together with
-    the hybrid-KV-cache work; correctness comes first here.
+    the hybrid-KV-cache work; correctness comes first here. The state-carrying
+    math still runs under a ``shard_map`` over ``ATTN_DATA`` (see
+    ``kda_attention``): that is not an optimization but a correctness
+    requirement, because the ragged metadata is laid out per DP rank.
     """
     hidden_size: int
     num_heads: int
@@ -345,6 +349,7 @@ class KimiDeltaAttention(JaxModule):
     rms_norm_eps: float
     dtype: jnp.dtype
     use_full_rank_gate: bool
+    mesh: Mesh
     gate_lower_bound: Optional[float] = None
     random_init: bool = False
     quant_config: Optional[QuantizationConfig] = None
@@ -483,7 +488,8 @@ class KimiDeltaAttention(JaxModule):
                                        head_dim=self.head_dim,
                                        kernel_size=self.conv_kernel_size,
                                        gate_lower_bound=self.gate_lower_bound,
-                                       rms_norm_eps=self.rms_norm_eps)
+                                       rms_norm_eps=self.rms_norm_eps,
+                                       mesh=self.mesh)
         return tuple(new_state), out
 
 
@@ -779,12 +785,14 @@ class KimiLinearModel(JaxModule):
                  kv_cache_dtype: str = "auto",
                  quant_config: Optional[QuantizationConfig] = None,
                  moe_backend: MoEBackend = MoEBackend.DENSE_MAT,
+                 num_expert_parallelism: int = 1,
                  random_init: bool = False,
                  prefix: str = "model"):
         self.config = config
         self.mesh = mesh
         self.dtype = dtype
         self.moe_backend = moe_backend
+        self.num_expert_parallelism = num_expert_parallelism
 
         self.embed_tokens = JaxEmbed(
             num_embeddings=config.vocab_size,
@@ -860,6 +868,7 @@ class KimiLinearModel(JaxModule):
                 random_init=random_init,
                 quant_config=None,
                 rngs=rngs,
+                mesh=self.mesh,
                 prefix=f"{prefix}.self_attn")
         else:
             self_attn = MLAAttention(
@@ -898,14 +907,16 @@ class KimiLinearModel(JaxModule):
                 prefix=f"{prefix}.self_attn")
 
         if config.is_moe_layer(layer_idx):
-            mlp = KimiSparseMoeBlock(config=config,
-                                     mesh=self.mesh,
-                                     dtype=dtype,
-                                     quant_config=quant_config,
-                                     rngs=rngs,
-                                     moe_backend=self.moe_backend,
-                                     random_init=random_init,
-                                     prefix=f"{prefix}.block_sparse_moe")
+            mlp = KimiSparseMoeBlock(
+                config=config,
+                mesh=self.mesh,
+                dtype=dtype,
+                quant_config=quant_config,
+                rngs=rngs,
+                moe_backend=self.moe_backend,
+                num_expert_parallelism=self.num_expert_parallelism,
+                random_init=random_init,
+                prefix=f"{prefix}.block_sparse_moe")
         else:
             mlp = GatedMLP(dtype=dtype,
                            hidden_act=config.hidden_act,
@@ -985,7 +996,7 @@ class KimiLinearForCausalLM(JaxModule, LoadableWithIterator):
                  rng_key: jax.Array,
                  mesh: Mesh,
                  *,
-                 moe_backend: MoEBackend = MoEBackend.DENSE_MAT,
+                 moe_backend: MoEBackend | None = None,
                  random_init: bool = False) -> None:
         self.vllm_config = vllm_config
         self.mesh = mesh
@@ -996,6 +1007,17 @@ class KimiLinearForCausalLM(JaxModule, LoadableWithIterator):
         self.config = config
         dtype = model_config.dtype
 
+        # The routed experts are sharded on ATTN_DATA_EXPERT; how many ways
+        # decides which MoE backend can be used at all.
+        self.num_expert_parallelism = get_expert_parallelism(
+            ShardingAxisName.ATTN_DATA_EXPERT, mesh)
+        if moe_backend is None:
+            moe_backend = self._select_moe_backend()
+        logger.info(
+            "[kimi] MoE backend=%s, expert_parallelism=%d "
+            "(experts sharded on %s)", moe_backend.value,
+            self.num_expert_parallelism, ShardingAxisName.ATTN_DATA_EXPERT)
+
         self.model = KimiLinearModel(
             config=config,
             rngs=rngs,
@@ -1004,6 +1026,7 @@ class KimiLinearForCausalLM(JaxModule, LoadableWithIterator):
             kv_cache_dtype=vllm_config.cache_config.cache_dtype,
             quant_config=vllm_config.quant_config,
             moe_backend=moe_backend,
+            num_expert_parallelism=self.num_expert_parallelism,
             random_init=random_init,
             prefix="model")
         self.lm_head = JaxLmHead(
@@ -1017,6 +1040,27 @@ class KimiLinearForCausalLM(JaxModule, LoadableWithIterator):
             prefix="lm_head",
         )
         attach_default_weight_loaders(self)
+
+    def _select_moe_backend(self) -> MoEBackend:
+        """Pick a backend that can see the router's expert selection.
+
+        Kimi routes with noaux_tc: the router adds ``e_score_correction_bias``
+        to the scores it ranks by but not to the weights it returns, and K3
+        additionally uses the SiTU activation. The fused backends take raw
+        router logits and select experts themselves, so they would silently
+        drop the bias (changing which experts run) and have no SiTU branch —
+        hence one of the two unfused backends, which consume the
+        ``(weights, indices)`` the router already produced.
+
+        Between those two: DENSE_MAT evaluates every expert for every token,
+        so with expert-sharded weights each device needs all of them (~94 GiB
+        for Kimi-Linear-48B, ~1.4 TB for K3) and the all-gather alone exceeds
+        HBM. MEGABLX_GMM dispatches tokens to the experts that live on this
+        shard, so it is the only workable choice once the experts are split.
+        """
+        if self.num_expert_parallelism > 1:
+            return MoEBackend.MEGABLX_GMM
+        return MoEBackend.DENSE_MAT
 
     def __call__(
         self,

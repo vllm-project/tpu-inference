@@ -15,7 +15,6 @@
 Bridge the torch gdn_attention_core op for gated deltanet attention TPU impl
 
 """
-import functools
 from typing import Optional, Tuple
 
 import jax
@@ -23,7 +22,8 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference.kernels.gdn.v3 import wrapper
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import (ShardingAxisName,
+                                                  rank_local_slot_indices)
 from tpu_inference.utils import get_mesh_shape_product
 
 
@@ -125,17 +125,34 @@ def run_jax_gdn_attention(
 
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
 
-    p_run_jax_gdn_attention_local = functools.partial(
-        wrapper.fused_conv1d_gdn,
-        n_kq=n_kq // tp_size,
-        n_v=n_v // tp_size,
-        d_k=d_k,
-        d_v=d_v,
-        kernel_size=kernel_size,
-    )
+    def _local(qkv, b, a, conv_state, recurrent_state, conv_weight, conv_bias,
+               a_log, dt_bias, qsl, state_indices, dist, has_init):
+        # `state_indices` are global slot ids while `conv_state` /
+        # `recurrent_state` here are this rank's shard of the pool, so rebase
+        # before the kernel indexes them (identity at dp_size == 1).
+        return wrapper.fused_conv1d_gdn(
+            qkv,
+            b,
+            a,
+            conv_state,
+            recurrent_state,
+            conv_weight,
+            conv_bias,
+            a_log,
+            dt_bias,
+            qsl,
+            rank_local_slot_indices(state_indices, conv_state.shape[0]),
+            dist,
+            has_init,
+            n_kq=n_kq // tp_size,
+            n_v=n_v // tp_size,
+            d_k=d_k,
+            d_v=d_v,
+            kernel_size=kernel_size,
+        )
 
     mapped_fn = jax.shard_map(
-        p_run_jax_gdn_attention_local,
+        _local,
         mesh=mesh,
         in_specs=in_specs,
         out_specs=out_specs,

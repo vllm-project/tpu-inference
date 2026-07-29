@@ -428,6 +428,53 @@ def test_kda_layer_rejects_missing_has_initial_state(mesh):
             kda_layer(x, caches[1], md)
 
 
+def _expert_parallel_mesh(ep_size):
+    """A mesh whose only nontrivial axis is the expert axis."""
+    if len(jax.devices()) < ep_size:
+        pytest.skip(f"needs >= {ep_size} devices")
+    shape = tuple(ep_size if name == "attn_dp_expert" else 1
+                  for name in MESH_AXIS_NAMES)
+    devices = np.array(jax.devices()[:ep_size]).reshape(shape)
+    return Mesh(devices, axis_names=MESH_AXIS_NAMES)
+
+
+@pytest.mark.parametrize("ep_size,expected", [
+    (1, "dense_mat"),
+    (2, "megablox_gmm"),
+])
+def test_moe_backend_follows_expert_parallelism(ep_size, expected):
+    """DENSE_MAT evaluates every expert on every device, so it only works
+    while the experts are replicated; once they are sharded the model has to
+    pick the dispatching backend, or the all-gather of the expert weights
+    alone exceeds HBM (Kimi-Linear-48B: 722 GiB across 8 chips)."""
+    from tpu_inference.layers.jax.quantization.unquantized import \
+        UnquantizedConfig
+    ep_mesh = _expert_parallel_mesh(ep_size)
+    hf = types.SimpleNamespace(**{
+        **_config_from().hf_config.__dict__,
+        **_48B_SHAPED
+    })
+    vllm_config = types.SimpleNamespace(
+        model_config=types.SimpleNamespace(
+            hf_config=hf,
+            dtype=jnp.float32,
+            get_vocab_size=lambda: _48B_SHAPED["vocab_size"]),
+        quant_config=UnquantizedConfig({}),
+        cache_config=types.SimpleNamespace(cache_dtype="auto"))
+
+    with jax.set_mesh(ep_mesh):
+        model = KimiLinearForCausalLM(vllm_config,
+                                      jax.random.PRNGKey(0),
+                                      ep_mesh,
+                                      random_init=True)
+
+    assert model.num_expert_parallelism == ep_size
+    assert model.model.moe_backend.value == expected
+    experts = model.model.layers[1].block_sparse_moe.experts
+    assert experts.num_expert_parallelism == ep_size
+    assert experts.use_ep == (ep_size > 1)
+
+
 # --------------------------------------------------------------------------
 # Golden parity (needs a checkpoint + TPU)
 # --------------------------------------------------------------------------
