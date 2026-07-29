@@ -6,6 +6,10 @@ buffers `cur+1 .. cur+NBUF-2` hold pre-fetched upcoming experts.  On
 each genuine expert transition `cur` rotates by +1 and a SINGLE new
 prefetch fires into the freed slot `(cur+NBUF-1) % NBUF`.
 
+Lookahead is precomputed on the host via group_id/group_expert_table
+and passed as scalar-prefetch arrays — the kernel does O(1) SMEM reads
+instead of O(N_SLOTS) traced scans.
+
 Set MOE_CN_NBUF=2 for double, =3 for triple (default), etc.
 """
 
@@ -38,20 +42,18 @@ _CN_NBUF = max(2, int(_os.getenv("MOE_CN_NBUF", "3")))
 
 
 # =====================================================================
-#  Buffer selection — reads only the selected slot via lax.switch
+#  Buffer selection
 # =====================================================================
 def _select_buf(ref, cur_buf, nbuf):
     """Read buffer slot `cur_buf` from ref[nbuf, ...].
 
-    Uses lax.switch with static-int branches (same pattern as gmm_v2.py)
-    so Mosaic only evaluates the selected branch — avoids reading all
-    NBUF slots from VMEM.
+    Uses a jnp.where chain — each ref[i] is a static-int index that
+    Mosaic handles correctly.  Faster than lax.switch in practice.
     """
-    def _read_slot(slot_idx):
-        return ref[slot_idx]
-
-    branches = [functools.partial(_read_slot, i) for i in range(nbuf)]
-    return lax.switch(cur_buf, branches)
+    result = ref[0]
+    for i in range(1, nbuf):
+        result = jnp.where(cur_buf == i, ref[i], result)
+    return result
 
 
 # =====================================================================
@@ -139,7 +141,7 @@ def _start_all_dma(gj, buf_w1, buf_w2, *, NUM_K, NUM_I,
 
 
 # =====================================================================
-#  Compute-only expert body — no DMA; caller handles all transfers
+#  Compute-only expert body
 # =====================================================================
 def _expert_body(
     gj, weight, tok, lhs_scratch_ref,
@@ -152,11 +154,7 @@ def _expert_body(
     DTYPE_LHS, DTYPE_OUT, DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_,
     is_new_expert, cur_w1_buf, cur_w2_buf,
 ):
-    """Process one slot: wait→w1 matmul→SwiGLU→wait→w2 matmul→accumulate.
-
-    All prefetching is done by the caller (kernel loop).  This function
-    only waits for the current expert's buffers and computes.
-    """
+    """Process one slot: wait→w1 matmul→SwiGLU→wait→w2 matmul→accumulate."""
     dma_kw_w1 = dict(w1_ref=w1_ref, w1_scale_ref=w1_scale_ref,
                      w1_bufs_ref=w1_bufs_ref, w1_s_bufs_ref=w1_s_bufs_ref,
                      sem_ref=sem_ref, K_TILE=K_TILE, KB_TILE=KB_TILE,
@@ -235,6 +233,8 @@ def _expert_body(
 def _cn_w1w2_fused_token_kernel_fp8(
     # ---- Scalar prefetch (SMEM) ----
     ids_ref, toks_ref, topk_weights_ref,
+    seed_experts_ref,       # [NBUF]: expert id for seed buffers 0..NBUF-1
+    lookahead_ids_ref,      # [N_SLOTS]: expert MAX_DEPTH groups ahead (or -1)
     # ---- HBM inputs ----
     lhs_ref, w1_ref, w1_scale_ref, w2_ref, w2_scale_ref,
     # ---- HBM output ----
@@ -352,37 +352,26 @@ def _cn_w1w2_fused_token_kernel_fp8(
                 is_new_expert = (gj != prev_gj)
 
             # ============================================================
-            #  SLOT 0 — SEED PHASE: fill all NBUF buffers
+            #  SLOT 0 — SEED PHASE: fill all NBUF buffers from
+            #  precomputed seed_experts_ref (O(1) SMEM reads).
             # ============================================================
             if slot == 0:
                 # Buffer 0: current expert
                 _start_all_dma(gj, jnp.int32(0), jnp.int32(0), **all_dma_kw)
 
-                # Buffers 1..NBUF-1: seed by counting transitions (group
-                # boundaries) from the start of the sorted array.
-                # d=1 → first transition (expert B), d=2 → second (expert C).
+                # Buffers 1..NBUF-1: precomputed seed experts
                 for d in range(1, NBUF):
-                    found_gj = gj        # fallback
-                    found = jnp.bool_(False)
-                    transition_count = jnp.int32(0)
-                    for ahead in range(1, N_SLOTS):
-                        future_gj = ids_ref[ahead]
-                        is_transition = (future_gj != ids_ref[ahead - 1])
-                        transition_count = transition_count + \
-                            is_transition.astype(jnp.int32)
-                        is_target = (transition_count == d) & (~found)
-                        found_gj = jnp.where(is_target, future_gj, found_gj)
-                        found = found | is_target
-
+                    seed_gj = seed_experts_ref[d]
                     buf_d_w1 = jnp.int32(d % NBUF_W1_)
                     buf_d_w2 = jnp.int32(d % NBUF_W2_)
-                    @pl.when(found)
-                    def _(fgj=found_gj, bw1=buf_d_w1, bw2=buf_d_w2):
+                    @pl.when(seed_gj >= 0)
+                    def _(sgj=seed_gj, bw1=buf_d_w1, bw2=buf_d_w2):
                         _start_all_dma(
-                            pl.multiple_of(fgj, 1), bw1, bw2, **all_dma_kw)
+                            pl.multiple_of(sgj, 1), bw1, bw2, **all_dma_kw)
 
             # ============================================================
-            #  SLOT > 0 — STEADY STATE: rotate + one prefetch per transition
+            #  SLOT > 0 — STEADY STATE: rotate + one prefetch from
+            #  precomputed lookahead_ids_ref (O(1) SMEM read).
             # ============================================================
             if slot > 0:
                 # Rotate buffer index on genuine transition
@@ -394,26 +383,12 @@ def _cn_w1w2_fused_token_kernel_fp8(
                                        cur_w2_buf)
 
                 # ONE prefetch into the freed buffer.
-                # Scan is unconditional (cheap traced ops); DMA is gated
-                # by a single flat pl.when to avoid nested conditionals.
+                # lookahead_ids_ref[slot] holds the expert MAX_DEPTH
+                # transitions ahead, or -1 if none exists.
                 target_w1 = (cur_w1_buf + MAX_DEPTH) % NBUF_W1_
                 target_w2 = (cur_w2_buf + MAX_DEPTH) % NBUF_W2_
-
-                ahead_gj = gj
-                ahead_found = jnp.bool_(False)
-                transition_count = jnp.int32(0)
-                for ahead in range(1, N_SLOTS - slot):
-                    future_gj = ids_ref[slot + ahead]
-                    is_transition = (future_gj != ids_ref[slot + ahead - 1])
-                    transition_count = transition_count + \
-                        is_transition.astype(jnp.int32)
-                    is_target = (transition_count == MAX_DEPTH) & \
-                                (~ahead_found)
-                    ahead_gj = jnp.where(is_target, future_gj, ahead_gj)
-                    ahead_found = ahead_found | is_target
-
-                # Single flat gate: fire only on transition AND target found
-                should_prefetch = is_new_expert & ahead_found
+                ahead_gj = lookahead_ids_ref[slot]
+                should_prefetch = is_new_expert & (ahead_gj >= 0)
                 @pl.when(should_prefetch)
                 def _():
                     _start_all_dma(
@@ -446,6 +421,53 @@ def _cn_w1w2_fused_token_kernel_fp8(
     )
     out_copy.start()
     out_copy.wait()
+
+
+# =====================================================================
+#  Host-side lookahead precomputation
+# =====================================================================
+def _build_lookahead_tables(sorted_ids, n_slots, nbuf):
+    """Build seed_experts and lookahead_ids from sorted expert IDs.
+
+    sorted_ids [N_SLOTS]: expert indices, sorted so duplicates are adjacent.
+
+    Returns:
+        seed_experts [NBUF]:   expert id for seed buffers 0..NBUF-1.
+                               seed_experts[0] = sorted_ids[0] (current),
+                               seed_experts[d] = d-th unique expert (or -1).
+        lookahead_ids [N_SLOTS]: for each slot, the expert MAX_DEPTH groups
+                                 ahead (or -1 if none).
+    """
+    max_depth = nbuf - 1
+
+    # ---- Group structure ----
+    # is_transition[0] = True (first slot always starts a group)
+    is_transition = jnp.concatenate([
+        jnp.array([True]),
+        sorted_ids[1:] != sorted_ids[:-1]
+    ])
+    # group_id[s] = which group slot s belongs to (0-indexed)
+    group_id = jnp.cumsum(is_transition.astype(jnp.int32)) - 1
+    num_groups = group_id[-1] + 1  # traced; max possible = n_slots
+
+    # ---- Group → expert table ----
+    # group_expert[g] = expert id for group g.  Padded with -1.
+    table_size = n_slots + nbuf  # pad for safe indexing
+    group_expert = jnp.full(table_size, -1, dtype=jnp.int32)
+    group_expert = group_expert.at[group_id].set(sorted_ids)
+
+    # ---- Seed experts: groups 0..NBUF-1 ----
+    seed_experts = jnp.array(
+        [group_expert[d] for d in range(nbuf)], dtype=jnp.int32)
+
+    # ---- Lookahead: for each slot, expert MAX_DEPTH groups ahead ----
+    target_groups = group_id + max_depth
+    # Clamp to table_size-1 so the gather is always in bounds;
+    # out-of-range entries will read the -1 padding.
+    clamped = jnp.minimum(target_groups, table_size - 1)
+    lookahead_ids = group_expert[clamped]
+
+    return seed_experts, lookahead_ids
 
 
 # =====================================================================
@@ -484,10 +506,15 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
     NUM_I_setup = I // I_TILE
     NBUF_W1 = max(_CN_NBUF, NUM_K_setup)
     NBUF_W2 = max(_CN_NBUF, NUM_I_setup)
+    NBUF_EFF = max(NBUF_W1, NBUF_W2)
+
+    # ---- Precompute lookahead tables (host-side, O(N_SLOTS)) ----
+    seed_experts, lookahead_ids = _build_lookahead_tables(
+        sorted_ids, TOPK_TOTAL, NBUF_EFF)
 
     C_PAD = lhs.shape[0]
     grid_spec = pltpu.PrefetchScalarGridSpec(
-        num_scalar_prefetch=3,
+        num_scalar_prefetch=5,        # ids, toks, weights, seed, lookahead
         in_specs=[any_spec] * 5,
         out_specs=any_spec,
         grid=(1,),
@@ -520,8 +547,9 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
         out_shape=jax.ShapeDtypeStruct((C_PAD, 1, H), jnp.bfloat16),
         grid_spec=grid_spec, compiler_params=compiler_params,
         interpret=interpret, name="cn_gemv_w1w2_fused_token_fp8",
-    )(sorted_ids, sorted_toks, sorted_weights,
-      lhs, w1, w1_scale, w2, w2_scale)
+    )(sorted_ids, sorted_toks, sorted_weights,  # scalar prefetch (5)
+      seed_experts, lookahead_ids,
+      lhs, w1, w1_scale, w2, w2_scale)          # inputs (5)
 
 
 def cn_moe_full(hidden_state, w1, w1_scale, w2, w2_scale,
