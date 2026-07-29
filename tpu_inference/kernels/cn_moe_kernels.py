@@ -29,7 +29,7 @@ _GEMV_NBUF = max(2, int(_os.getenv("MOE_GEMV_NBUF", "2")))
 _FUSE_NBUF = max(2, int(_os.getenv("MOE_FUSE_NBUF", str(_GEMV_NBUF))))
 _CN_K_TILE = int(_os.getenv("MOE_CN_K_TILE", "4096"))
 _CN_I_TILE = int(_os.getenv("MOE_CN_I_TILE", "2048"))
-_CN_NBUF = max(2, int(_os.getenv("MOE_CN_NBUF", "3")))
+_CN_NBUF = max(2, int(_os.getenv("MOE_CN_NBUF", "4")))
 
 # ── Semaphore layout ────────────────────────────────────────────────
 #   [0                            .. NBUF_W1)           w1 weight DMAs
@@ -240,7 +240,8 @@ def _cn_w1w2_fused_token_kernel_fp8(
     # ---- HBM output ----
     o_ref,
     # ---- VMEM scratch ----
-    full_lhs_scratch_ref,  # [C_PAD, 1, K]
+    full_lhs_2d_ref,       # [C_PAD, K]         — 2D DMA landing pad
+    full_lhs_scratch_ref,  # [C_PAD, 1, K]      — 3D for dynamic indexing
     lhs_scratch_ref,       # [M_PAD, K]
     w1_bufs_ref,           # [NBUF_W1, K_TILE, 2I]
     w1_s_bufs_ref,         # [NBUF_W1, KB_TILE, 1, 2I] fp32
@@ -248,6 +249,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
     w2_s_bufs_ref,         # [NBUF_W2, IB_TILE, 1, H] fp32
     acc_scratch_ref,       # [N_TOKENS_, 1, H] fp32
     full_out_scratch_ref,  # [C_PAD, 1, H] bf16
+    out_2d_ref,            # [C_PAD, H]         — 2D DMA launch pad
     sem_ref,               # semaphores
     *,
     K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, TOP_K_,
@@ -255,7 +257,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
     N_TOKENS_, DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_,
     SKIP_ZERO_WEIGHT_, DTYPE_LHS, DTYPE_OUT,
 ):
-    C_PAD = full_lhs_scratch_ref.shape[0]
+    C_PAD = full_lhs_2d_ref.shape[0]
     N_SLOTS = N_TOKENS_ * TOP_K_
 
     K_TILE = w1_bufs_ref.shape[1]
@@ -299,14 +301,20 @@ def _cn_w1w2_fused_token_kernel_fp8(
     NBUF = max(NBUF_W1_, NBUF_W2_)  # same in practice
     MAX_DEPTH = NBUF - 1             # how far ahead we look
 
-    # ---- DMA ALL tokens from HBM -> VMEM (once) ----
+    # ---- DMA lhs from HBM -> 2D VMEM landing pad (shape-matched) ----
     full_lhs_copy = pltpu.make_async_copy(
-        lhs_ref.at[pl.ds(0, C_PAD), pl.ds(0, 1), pl.ds(0, K)],
-        full_lhs_scratch_ref,
+        lhs_ref.at[pl.ds(0, C_PAD), pl.ds(0, K)],
+        full_lhs_2d_ref,
         sem_ref.at[2 * NBUF_W1_ + 2 * NBUF_W2_]
     )
     full_lhs_copy.start()
     full_lhs_copy.wait()
+
+    # ---- On-chip copy: 2D [C_PAD, K] -> 3D [C_PAD, 1, K] ----
+    for t in range(C_PAD):
+        row = full_lhs_2d_ref[pl.ds(t, 1), pl.ds(0, K)]
+        full_lhs_scratch_ref[pl.ds(t, 1), pl.ds(0, 1), pl.ds(0, K)] = \
+            row.reshape(1, 1, K)
 
     # Initialize output scratch and per-token accumulator to zeros
     full_out_scratch_ref[...] = jnp.zeros((C_PAD, 1, H), dtype=DTYPE_OUT)
@@ -407,16 +415,21 @@ def _cn_w1w2_fused_token_kernel_fp8(
                          cur_w2_buf=cur_w2_buf,
                          **body_kw)
 
-    # ---- Final: copy each token's accumulated result to output ----
+    # ---- Final: copy 3D accumulator → 3D output scratch ----
     for t in range(N_TOKENS_):
         row = acc_scratch_ref[pl.ds(t, 1), pl.ds(0, 1), pl.ds(0, H)]
         full_out_scratch_ref[pl.ds(t, 1), pl.ds(0, 1), pl.ds(0, H)] = \
             row.astype(DTYPE_OUT)
 
-    # ---- DMA full output back to HBM ----
+    # ---- On-chip copy: 3D [C_PAD, 1, H] -> 2D [C_PAD, H] ----
+    for t in range(C_PAD):
+        row_3d = full_out_scratch_ref[pl.ds(t, 1), pl.ds(0, 1), pl.ds(0, H)]
+        out_2d_ref[pl.ds(t, 1), pl.ds(0, H)] = row_3d.reshape(1, H)
+
+    # ---- DMA 2D output from VMEM -> HBM (shape-matched) ----
     out_copy = pltpu.make_async_copy(
-        full_out_scratch_ref,
-        o_ref.at[pl.ds(0, C_PAD), pl.ds(0, 1), pl.ds(0, H)],
+        out_2d_ref,
+        o_ref.at[pl.ds(0, C_PAD), pl.ds(0, H)],
         sem_ref.at[2 * NBUF_W1_ + 2 * NBUF_W2_ + 1]
     )
     out_copy.start()
@@ -476,7 +489,11 @@ def _build_lookahead_tables(sorted_ids, n_slots, nbuf):
 def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
                               sorted_ids, sorted_toks, sorted_weights, *,
                               n_tokens, use_ep=False, interpret=False):
-    """Fused gate+up+SwiGLU+down for the C=N MoE block with expert dedup."""
+    """Fused gate+up+SwiGLU+down for the C=N MoE block with expert dedup.
+
+    lhs: [C_PAD, K] — native 2D input (no middle axis).
+    Returns: [C_PAD, H] — native 2D output.
+    """
     G, K, N1 = w1.shape
     assert N1 % 2 == 0, f"w1 last dim must be 2*I; got {N1}"
     I = N1 // 2
@@ -519,14 +536,16 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
         out_specs=any_spec,
         grid=(1,),
         scratch_shapes=[
-            pltpu.VMEM((C_PAD, 1, K), lhs.dtype),
-            pltpu.VMEM((M_PAD, K), lhs.dtype),
+            pltpu.VMEM((C_PAD, K), lhs.dtype),         # full_lhs_2d (DMA pad)
+            pltpu.VMEM((C_PAD, 1, K), lhs.dtype),      # full_lhs_scratch (3D)
+            pltpu.VMEM((M_PAD, K), lhs.dtype),          # lhs_scratch
             pltpu.VMEM((NBUF_W1, K_TILE, N1), w1.dtype),
             pltpu.VMEM((NBUF_W1, KB_TILE, 1, N1), w1_scale.dtype),
             pltpu.VMEM((NBUF_W2, I_TILE, H), w2.dtype),
             pltpu.VMEM((NBUF_W2, IB_TILE, 1, H), w2_scale.dtype),
-            pltpu.VMEM((n_tokens, 1, H), jnp.float32),
-            pltpu.VMEM((C_PAD, 1, H), jnp.bfloat16),
+            pltpu.VMEM((n_tokens, 1, H), jnp.float32), # acc_scratch
+            pltpu.VMEM((C_PAD, 1, H), jnp.bfloat16),   # full_out_scratch (3D)
+            pltpu.VMEM((C_PAD, H), jnp.bfloat16),       # out_2d (DMA pad)
             pltpu.SemaphoreType.DMA((2 * NBUF_W1 + 2 * NBUF_W2 + 2,)),
         ])
     compiler_params = None if interpret else pltpu.CompilerParams(
@@ -544,7 +563,7 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
                           DEQUANT_W2_AFTER_=(IB_TILE == 1),
                           SKIP_ZERO_WEIGHT_=use_ep,
                           DTYPE_LHS=lhs.dtype, DTYPE_OUT=jnp.bfloat16),
-        out_shape=jax.ShapeDtypeStruct((C_PAD, 1, H), jnp.bfloat16),
+        out_shape=jax.ShapeDtypeStruct((C_PAD, H), jnp.bfloat16),
         grid_spec=grid_spec, compiler_params=compiler_params,
         interpret=interpret, name="cn_gemv_w1w2_fused_token_fp8",
     )(sorted_ids, sorted_toks, sorted_weights,  # scalar prefetch (5)
@@ -555,11 +574,10 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
 def cn_moe_full(hidden_state, w1, w1_scale, w2, w2_scale,
                 active_ids, topk_weights, *, use_ep=False, interpret=False):
     """hidden_state [C, K]; active_ids/topk_weights [C, TOP_K].
-    Returns [C, K] -- token t's MoE output at row t.
+    Returns [C, H] -- token t's MoE output at row t.
     """
     C = hidden_state.shape[0]
     K = hidden_state.shape[1]
-    lhs = hidden_state.reshape(C, 1, K)
 
     flat_ids = active_ids.reshape(C * TOP_K)
     flat_weights = topk_weights.reshape(C * TOP_K)
@@ -569,8 +587,8 @@ def cn_moe_full(hidden_state, w1, w1_scale, w2, w2_scale,
     sorted_weights = flat_weights[sort_order]
 
     fused_out = cn_gemv_w1w2_fused_mb_fp8(
-        lhs, w1, w1_scale, w2, w2_scale,
+        hidden_state, w1, w1_scale, w2, w2_scale,
         sorted_ids, sorted_toks, sorted_weights,
         n_tokens=C, use_ep=use_ep, interpret=interpret)
 
-    return fused_out[:C, 0, :].astype(jnp.bfloat16)
+    return fused_out[:C, :].astype(jnp.bfloat16)
