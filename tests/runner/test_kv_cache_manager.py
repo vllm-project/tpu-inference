@@ -1454,33 +1454,44 @@ class TestKVCacheManager:
 
     def _ds_v4_groups(self):
         """DSv4-Flash-style cache groups: 2 CSA layers (0-1), each with a
-        main latent, an indexer k_cache and two compressor state caches,
-        plus 3 SWA-only layers (2-4); every layer has a swa_cache. Specs
-        mirror what the TPU DSv4 classes register (block_size 256,
-        fp8-packed-uint8 latents, f32 compressor state)."""
-        main_spec = MLAAttentionSpec(block_size=256,
+        main latent, an indexer k_cache and two compressor state caches, one
+        HCA layer (2) with its own latent and state cache, plus 2 SWA-only
+        layers (3-4); every layer has a swa_cache. Specs mirror what the TPU
+        DSv4 classes register (block_size 1024, byte-addressed uint8
+        latents, f32 compressor state)."""
+        main_spec = MLAAttentionSpec(block_size=1024,
                                      num_kv_heads=1,
                                      head_size=640,
                                      dtype=torch.uint8,
                                      compress_ratio=4)
-        idx_spec = MLAAttentionSpec(block_size=256,
+        idx_spec = MLAAttentionSpec(block_size=1024,
                                     num_kv_heads=1,
                                     head_size=256,
                                     dtype=torch.uint8,
                                     compress_ratio=4)
-        swa_spec = SlidingWindowMLASpec(block_size=64,
+        hca_spec = MLAAttentionSpec(block_size=1024,
+                                    num_kv_heads=1,
+                                    head_size=1024,
+                                    dtype=torch.uint8,
+                                    compress_ratio=128)
+        swa_spec = SlidingWindowMLASpec(block_size=128,
                                         num_kv_heads=1,
-                                        head_size=640,
+                                        head_size=1024,
                                         dtype=torch.uint8,
                                         sliding_window=4096)
-        main_state_spec = SlidingWindowMLASpec(block_size=4,
+        main_state_spec = SlidingWindowMLASpec(block_size=16,
                                                num_kv_heads=1,
                                                head_size=2048,
                                                dtype=torch.float32,
                                                sliding_window=8)
-        idx_state_spec = SlidingWindowMLASpec(block_size=4,
+        idx_state_spec = SlidingWindowMLASpec(block_size=16,
                                               num_kv_heads=1,
                                               head_size=512,
+                                              dtype=torch.float32,
+                                              sliding_window=8)
+        hca_state_spec = SlidingWindowMLASpec(block_size=1,
+                                              num_kv_heads=1,
+                                              head_size=1024,
                                               dtype=torch.float32,
                                               sliding_window=8)
 
@@ -1492,6 +1503,9 @@ class TestKVCacheManager:
                 f"model.layers.{i}.attn.compressor.state_cache"] = main_state_spec
             state_specs[f"model.layers.{i}.attn.indexer.compressor."
                         "state_cache"] = idx_state_spec
+        mla_specs["model.layers.2.attn"] = hca_spec
+        state_specs[
+            "model.layers.2.attn.compressor.state_cache"] = hca_state_spec
         swa_names = [f"model.layers.{i}.attn.swa_cache" for i in range(5)]
         # vLLM splits the swa layers into two cache groups (layers[i::2]),
         # like DSv4-Flash's 43 swa layers over 21 CSA layers.
@@ -1499,8 +1513,8 @@ class TestKVCacheManager:
         swa_specs_1 = {name: swa_spec for name in swa_names[1::2]}
 
         groups = []
-        for block_size, specs in ((256, mla_specs), (4, state_specs),
-                                  (64, swa_specs_0), (64, swa_specs_1)):
+        for block_size, specs in ((1024, mla_specs), (16, state_specs),
+                                  (128, swa_specs_0), (128, swa_specs_1)):
             groups.append(
                 KVCacheGroupSpec(layer_names=list(specs),
                                  kv_cache_spec=UniformTypeKVCacheSpecs(
@@ -1548,19 +1562,28 @@ class TestKVCacheManager:
         idx_map = self.runner.layer_name_to_kvcache_index
         caches = self.runner.kv_caches
 
-        # 4 MLA arrays + 1 standalone for the 3rd layer of the 3-layer swa
-        # group (only 2 CSA latent arrays can host it).
-        assert len(caches) == 5
+        # 5 MLA arrays + 2 CSA rope companions + 1 standalone for the 3rd
+        # layer of the 3-layer swa group (there are only 2 CSA NoPE arrays).
+        assert len(caches) == 8
         for cache in caches:
             assert cache.shape[0] == num_blocks
+            assert cache.dtype == jnp.uint8
 
-        # Every MLA layer owns its own array with its own spec's geometry.
+        # Every MLA layer owns its own array, shaped for the kernel that
+        # reads it: CSA NoPE 512B/token (one 4x128 row) with a companion
+        # rope array at 128B/token, the indexer 256B/token, HCA raw bf16 at
+        # 1024B/token (two rows).
         assert idx_map['model.layers.0.attn'] == 0
-        assert idx_map['model.layers.0.attn.indexer.k_cache'] == 1
-        assert idx_map['model.layers.1.attn'] == 2
-        assert idx_map['model.layers.1.attn.indexer.k_cache'] == 3
-        assert caches[0].shape == (num_blocks, 16, 4, 640)
-        assert caches[1].shape == (num_blocks, 16, 4, 256)
+        assert idx_map['model.layers.0.attn_rope'] == 1
+        assert idx_map['model.layers.0.attn.indexer.k_cache'] == 2
+        assert idx_map['model.layers.1.attn'] == 3
+        assert idx_map['model.layers.1.attn_rope'] == 4
+        assert idx_map['model.layers.1.attn.indexer.k_cache'] == 5
+        assert idx_map['model.layers.2.attn'] == 6
+        assert caches[0].shape == (num_blocks, 256, 4, 128)
+        assert caches[1].shape == (num_blocks, 64, 4, 128)
+        assert caches[2].shape == (num_blocks, 64, 4, 256)
+        assert caches[6].shape == (num_blocks, 16, 4, 128)
 
         # Compressor state caches share their compressed-KV layer's array
         # (the compressor kernel writes state + compressed KV through one
@@ -1571,20 +1594,26 @@ class TestKVCacheManager:
             assert (idx_map[f'model.layers.{i}.attn.indexer.compressor.'
                             'state_cache'] ==
                     idx_map[f'model.layers.{i}.attn.indexer.k_cache'])
+        assert (idx_map['model.layers.2.attn.compressor.state_cache'] ==
+                idx_map['model.layers.2.attn'])
 
-        # swa_caches overlay latent arrays: distinct arrays within one cache
-        # group (shared block table), and only arrays wide enough for the
-        # 640B SWA entries (never the 256B-wide indexer arrays).
+        # swa_caches overlay the CSA NoPE arrays (never the indexer or HCA
+        # arrays), distinct within one cache group (shared block table).
+        csa_nope_indices = {
+            idx_map['model.layers.0.attn'],
+            idx_map['model.layers.1.attn'],
+        }
         swa_groups = [[f'model.layers.{i}.attn.swa_cache' for i in (0, 2, 4)],
                       [f'model.layers.{i}.attn.swa_cache' for i in (1, 3)]]
         for group_layers in swa_groups:
             indices = [idx_map[name] for name in group_layers]
             assert len(set(indices)) == len(indices)
-            for index in indices:
-                assert caches[index].shape[-1] == 640
-        # The overflow swa layer got the standalone array.
-        assert idx_map['model.layers.4.attn.swa_cache'] == 4
-        assert caches[4].shape == (num_blocks, 16, 4, 640)
+            for index in indices[:len(csa_nope_indices)]:
+                assert index in csa_nope_indices
+        # The overflow swa layer got a standalone array with the CSA NoPE
+        # geometry (a swa page and a CSA NoPE page hold the same bytes).
+        assert idx_map['model.layers.4.attn.swa_cache'] == 7
+        assert caches[7].shape == caches[idx_map['model.layers.0.attn']].shape
 
     def test_initialize_kv_cache_ds_v4_packed_overlay(self):
         # New (post-#48993) packed layout: shared_by groups layers from
@@ -1594,15 +1623,17 @@ class TestKVCacheManager:
         tensors = self._ds_v4_packed_tensors(groups, num_blocks)
 
         # The layout must produce the mixed offset group shape that crashed
-        # the old slot-based logic (indexer k_cache + swa_cache +
-        # compressor state_cache in one shared_by).
+        # the old slot-based logic: one byte offset shared by layers from
+        # three or more different cache groups.
+        group_of = {
+            name: index
+            for index, group in enumerate(groups)
+            for name in group.layer_names
+        }
         mixed = [
             tensor for tensor in tensors
-            if any('indexer.k_cache' in name
-                   for name in tensor.shared_by) and any(
-                       'swa_cache' in name
-                       for name in tensor.shared_by) and any(
-                           'state_cache' in name for name in tensor.shared_by)
+            if len({group_of[name]
+                    for name in tensor.shared_by}) >= 3
         ]
         assert mixed, "test setup should produce a mixed offset group"
 

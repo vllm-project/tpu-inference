@@ -17,7 +17,7 @@ import jax
 import jax.numpy as jnp
 
 import tpu_inference.kernels.experimental.deepseek_v4.compress_and_store.kernel as compress_kernel
-import tpu_inference.kernels.experimental.deepseek_v4.proj_and_save_state as proj_kernel
+import tpu_inference.kernels.experimental.deepseek_v4.compress_and_store.proj_and_save_state as proj_kernel
 
 
 def derive_metadata(
