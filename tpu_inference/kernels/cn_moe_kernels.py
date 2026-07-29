@@ -437,8 +437,35 @@ def _cn_w1w2_fused_token_kernel_fp8(
 
 
 # =====================================================================
-#  Host-side lookahead precomputation
+#  Host-side forward fill + lookahead precomputation
 # =====================================================================
+def _forward_fill_ids(sorted_ids, sorted_weights):
+    """Forward-fill expert IDs: zero-weight slots inherit the last real ID.
+
+    Uses associative_scan so that masked EP slots don't create fake
+    expert transitions.  Leading zeros (no prior real expert) keep
+    their original ID — they form one harmless "ghost" group.
+
+    Args:
+        sorted_ids     [N]: expert indices, already sorted.
+        sorted_weights [N]: per-slot weights (0.0 = masked).
+    Returns:
+        effective_ids  [N]: forward-filled expert indices.
+    """
+    valid = (sorted_weights != 0.0)
+
+    def _fill_op(a, b):
+        a_id, a_v = a
+        b_id, b_v = b
+        out_id = jnp.where(b_v, b_id, a_id)
+        out_v = a_v | b_v
+        return (out_id, out_v)
+
+    effective_ids, _ = jax.lax.associative_scan(
+        _fill_op, (sorted_ids, valid))
+    return effective_ids
+
+
 def _build_lookahead_tables(sorted_ids, n_slots, nbuf):
     """Build seed_experts and lookahead_ids from sorted expert IDs.
 
@@ -525,9 +552,15 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
     NBUF_W2 = max(_CN_NBUF, NUM_I_setup)
     NBUF_EFF = max(NBUF_W1, NBUF_W2)
 
+    # ---- Forward-fill IDs for EP (zero-weight → last real expert) ----
+    if use_ep:
+        effective_ids = _forward_fill_ids(sorted_ids, sorted_weights)
+    else:
+        effective_ids = sorted_ids
+
     # ---- Precompute lookahead tables (host-side, O(N_SLOTS)) ----
     seed_experts, lookahead_ids = _build_lookahead_tables(
-        sorted_ids, TOPK_TOTAL, NBUF_EFF)
+        effective_ids, TOPK_TOTAL, NBUF_EFF)
 
     C_PAD = lhs.shape[0]
     grid_spec = pltpu.PrefetchScalarGridSpec(
@@ -566,9 +599,9 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
         out_shape=jax.ShapeDtypeStruct((C_PAD, H), jnp.bfloat16),
         grid_spec=grid_spec, compiler_params=compiler_params,
         interpret=interpret, name="cn_gemv_w1w2_fused_token_fp8",
-    )(sorted_ids, sorted_toks, sorted_weights,  # scalar prefetch (5)
+    )(effective_ids, sorted_toks, sorted_weights,  # scalar prefetch (5)
       seed_experts, lookahead_ids,
-      lhs, w1, w1_scale, w2, w2_scale)          # inputs (5)
+      lhs, w1, w1_scale, w2, w2_scale)             # inputs (5)
 
 
 def cn_moe_full(hidden_state, w1, w1_scale, w2, w2_scale,
