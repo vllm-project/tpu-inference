@@ -44,6 +44,15 @@ gcloud container clusters get-credentials "${CLUSTER}" \
   --project="${PROJECT}" \
   --zone="${ZONE}"
 
+echo "=== Step 1.5: Deleting old Raiden pods and waiting for cleanup ==="
+kubectl --context="${KUBE_CONTEXT}" delete lws vllm-prefill vllm-decode --ignore-not-found=true
+kubectl --context="${KUBE_CONTEXT}" delete deployment vllm-disagg-proxy --ignore-not-found=true
+kubectl --context="${KUBE_CONTEXT}" delete pod -l llm-d.ai/inferenceServing=true --ignore-not-found=true
+kubectl --context="${KUBE_CONTEXT}" delete pod -l app=vllm-proxy --ignore-not-found=true
+echo "Waiting for old pods to be completely deleted..."
+kubectl --context="${KUBE_CONTEXT}" wait --for=delete pod -l llm-d.ai/inferenceServing=true --timeout=300s 2>/dev/null || true
+kubectl --context="${KUBE_CONTEXT}" wait --for=delete pod -l app=vllm-proxy --timeout=300s 2>/dev/null || true
+
 echo "=== Step 2: Deploying Raiden Disaggregated Serving Manifest (${MANIFEST_FILE}) ==="
 kubectl --context="${KUBE_CONTEXT}" apply -f "${MANIFEST_FILE}"
 

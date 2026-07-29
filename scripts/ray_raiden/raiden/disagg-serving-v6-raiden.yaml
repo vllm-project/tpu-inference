@@ -125,7 +125,7 @@ spec:
               - |
                 chmod +x /workspace/vllm/examples/ray_serving/multi-node-serving.sh
                 bash /workspace/vllm/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE) --ray_init_timeout=1800
-                vllm serve --seed=42 --model=Qwen/Qwen3-8B --load-format=runai_streamer --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --tensor-parallel-size=8 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.70 --async-scheduling --block-size=128 --kv-transfer-config '{"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_raiden_connector","kv_role":"kv_producer"}'
+                vllm serve --seed=42 --model=Qwen/Qwen3-8B --load-format=runai_streamer --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --tensor-parallel-size=8 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.70 --async-scheduling --block-size=128 --kv-transfer-config '{"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_raiden_connector","kv_role":"kv_producer"}' || (echo "CONTAINER FAILED - SLEEPING FOR DEBUGGING" && sleep 86400)
             resources:
               limits:
                 google.com/tpu: "4"
@@ -352,7 +352,7 @@ spec:
               - |
                 chmod +x /workspace/vllm/examples/ray_serving/multi-node-serving.sh
                 bash /workspace/vllm/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE) --ray_init_timeout=1800
-                vllm serve --seed=42 --model=Qwen/Qwen3-8B --load-format=runai_streamer --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --tensor-parallel-size=8 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.80 --async-scheduling --block-size=128 --kv-transfer-config '{"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_raiden_connector","kv_role":"kv_consumer"}'
+                vllm serve --seed=42 --model=Qwen/Qwen3-8B --load-format=runai_streamer --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --tensor-parallel-size=8 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.80 --async-scheduling --block-size=128 --kv-transfer-config '{"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_raiden_connector","kv_role":"kv_consumer"}' || (echo "CONTAINER FAILED - SLEEPING FOR DEBUGGING" && sleep 86400)
             resources:
               limits:
                 google.com/tpu: "4"
