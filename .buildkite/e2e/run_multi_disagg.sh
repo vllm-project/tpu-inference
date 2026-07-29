@@ -119,6 +119,7 @@ fi
 readonly HOSTS_PER_ROLE=1
 readonly CHIPS_PER_HOST=4
 readonly CORES_PER_CHIP=2
+readonly DEVICES_PER_HOST=$(( CHIPS_PER_HOST * CORES_PER_CHIP ))
 ALL_SLICE_HOSTS=("${ORDERED_SLICE_HOSTS[@]}")
 PREFILL_HEAD_IP="$HEAD_INTERNAL_IP"
 DECODE_HEAD_IP="$REMOTE_HOST"
@@ -134,16 +135,32 @@ echo "Using TPU7x-16 hosts by TPU process ID: ${ORDERED_SLICE_HOSTS[*]}"
 echo "Prefill owns all chips on ${PREFILL_HEAD_IP}; Decode owns all chips on ${DECODE_HEAD_IP}."
 echo "Tensor parallel size per role: ${PREFILL_TENSOR_PARALLEL_SIZE}"
 
-# TPU7x-16 exposes a 2x2x1 four-chip topology on each physical host. A
-# cross-host JAX process cannot describe only half of that physical topology,
-# so each disaggregated role owns one complete host and runs as process 0 in
-# its own single-node JAX runtime.
+# TPU7x-16 is one indivisible 2x2x2 topology. Prefill and Decode keep separate
+# Ray control planes, but their TPU workers join one two-process PJRT runtime.
+# Each role is then restricted to the eight global devices on its physical VM.
 readonly TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE="2,2,1"
 readonly TPU_VISIBLE_CHIPS_VALUE="0,1,2,3"
-readonly ROLE_LOCAL_PROCESS_ID=0
+readonly TPU_PROCESS_PORT_VALUE=8476
+TPU_PROCESS_ADDRESSES="${ORDERED_SLICE_HOSTS[0]}:${TPU_PROCESS_PORT_VALUE},${ORDERED_SLICE_HOSTS[1]}:${TPU_PROCESS_PORT_VALUE}"
 
-# Populates PROCESS_IDENTITY_ENV_ARGS for a role-local JAX process while
-# preserving the physical TPU VM worker identity used for diagnostics.
+build_device_indexes() {
+  local process_id=$1
+  local first=$(( process_id * DEVICES_PER_HOST ))
+  local last=$(( first + DEVICES_PER_HOST - 1 ))
+  local result=""
+  local device_index
+  for ((device_index = first; device_index <= last; device_index++)); do
+    [[ -z "$result" ]] || result+=","
+    result+="$device_index"
+  done
+  echo "$result"
+}
+
+PREFILL_DEVICE_INDEXES="$(build_device_indexes "$LOCAL_PROCESS_ID")"
+DECODE_DEVICE_INDEXES="$(build_device_indexes "$REMOTE_PROCESS_ID")"
+
+# Populates PROCESS_IDENTITY_ENV_ARGS with the physical TPU process identity.
+# The two roles must use distinct IDs because they share one PJRT runtime.
 PROCESS_IDENTITY_ENV_ARGS=()
 build_process_identity_env_args() {
   local process_id=$1
@@ -158,23 +175,28 @@ build_process_identity_env_args() {
 COMMON_TPU_ENV_ARGS=(
   -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}"
   -e TPU_VISIBLE_CHIPS="${TPU_VISIBLE_CHIPS_VALUE}"
-  -e TPU_PROCESS_BOUNDS="1,1,1"
-  -e JAX_NUM_PROCESSES=1
+  -e TPU_PROCESS_BOUNDS="1,1,2"
+  -e TPU_PROCESS_ADDRESSES="${TPU_PROCESS_ADDRESSES}"
+  -e TPU_PROCESS_PORT="${TPU_PROCESS_PORT_VALUE}"
+  -e JAX_NUM_PROCESSES=2
   -e VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
   -e RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS=1
 )
 PREFILL_TPU_ENV_ARGS=("${COMMON_TPU_ENV_ARGS[@]}")
 DECODE_TPU_ENV_ARGS=("${COMMON_TPU_ENV_ARGS[@]}")
 
-build_process_identity_env_args "$ROLE_LOCAL_PROCESS_ID" "$LOCAL_PROCESS_ID"
+build_process_identity_env_args "$LOCAL_PROCESS_ID" "$LOCAL_PROCESS_ID"
 PREFILL_HEAD_PROCESS_ENV_ARGS=("${PROCESS_IDENTITY_ENV_ARGS[@]}")
-build_process_identity_env_args "$ROLE_LOCAL_PROCESS_ID" "$REMOTE_PROCESS_ID"
+build_process_identity_env_args "$REMOTE_PROCESS_ID" "$REMOTE_PROCESS_ID"
 DECODE_HEAD_PROCESS_ENV_ARGS=("${PROCESS_IDENTITY_ENV_ARGS[@]}")
 
 echo "Prefill Ray head: ${PREFILL_HEAD_IP}:${PREFILL_RAY_PORT}"
 echo "Decode Ray head: ${DECODE_HEAD_IP}:${DECODE_RAY_PORT}"
 echo "Prefill actor host: ${PREFILL_HEAD_IP}"
 echo "Decode actor host: ${DECODE_HEAD_IP}"
+echo "Shared PJRT process addresses: ${TPU_PROCESS_ADDRESSES}"
+echo "Prefill global devices: ${PREFILL_DEVICE_INDEXES}"
+echo "Decode global devices: ${DECODE_DEVICE_INDEXES}"
 
 run_host_script() {
   local host=$1
@@ -620,14 +642,14 @@ launch_cluster_node() {
   sleep 15
 }
 
-# Each role owns one complete physical host. Separate Ray control planes keep
-# Prefill and Decode independent without constructing a partial-host topology.
-launch_cluster_node prefill "$PREFILL_HEAD_IP" --head "$ROLE_LOCAL_PROCESS_ID"
+# The two single-node Ray clusters are independent control planes. Their TPU
+# actors use different physical process IDs and join the shared PJRT topology.
+launch_cluster_node prefill "$PREFILL_HEAD_IP" --head "$LOCAL_PROCESS_ID"
 wait_for_ray_head "$PREFILL_HEAD_IP" "$PREFILL_RAY_PORT"
 wait_for_ray_cluster_members "$PREFILL_HEAD_IP" "$PREFILL_CONTAINER_NAME" Prefill \
   "$HOSTS_PER_ROLE" "${RAY_CLUSTER_TIMEOUT:-900}"
 
-launch_cluster_node decode "$DECODE_HEAD_IP" --head "$ROLE_LOCAL_PROCESS_ID"
+launch_cluster_node decode "$DECODE_HEAD_IP" --head "$REMOTE_PROCESS_ID"
 wait_for_ray_head "$DECODE_HEAD_IP" "$DECODE_RAY_PORT"
 wait_for_ray_cluster_members "$DECODE_HEAD_IP" "$DECODE_CONTAINER_NAME" Decode \
   "$HOSTS_PER_ROLE" "${RAY_CLUSTER_TIMEOUT:-900}"
@@ -642,7 +664,7 @@ dump_tpu_process_env "$DECODE_HEAD_IP" decode "$DECODE_CONTAINER_NAME"
 # -----------------------------------------------------------------
 # 3. Start vLLM Prefill & Decode Servers
 # -----------------------------------------------------------------
-echo "--- Starting vLLM Prefill server on Head Node locally"
+echo "--- Preparing vLLM Prefill server on Head Node locally"
 PREFILL_VLLM_PORT="8400"
 PREFILL_DOCKER_EXEC_ENV_ARGS="${PREFILL_TPU_ENV_ARGS[*]}"
 
@@ -657,6 +679,7 @@ docker exec \
   ${PREFILL_CONTAINER_NAME} bash -c "vllm serve ${MODEL} \
     --port ${PREFILL_VLLM_PORT} \
     --tensor-parallel-size ${PREFILL_TENSOR_PARALLEL_SIZE} \
+    --additional-config '{\"sharding\": {\"sharding_strategy\": {\"device_indexes\": [${PREFILL_DEVICE_INDEXES}]}}}' \
     --trust-remote-code \
     --no-enable-prefix-caching \
     --kv-transfer-config '{\"kv_connector\": \"TPUConnector\", \"kv_connector_module_path\": \"tpu_inference.distributed.tpu_connector\", \"kv_role\": \"kv_producer\"}' \
@@ -665,9 +688,8 @@ set +x
 EOF
 
 chmod +x /tmp/start_prefill.sh
-bash /tmp/start_prefill.sh
 
-echo "--- Starting vLLM Decode server on remote Head Node (${DECODE_HEAD_IP})"
+echo "--- Preparing vLLM Decode server on remote Head Node (${DECODE_HEAD_IP})"
 DECODE_VLLM_PORT="9400"
 DECODE_DOCKER_EXEC_ENV_ARGS="${DECODE_TPU_ENV_ARGS[*]}"
 
@@ -682,6 +704,7 @@ docker exec \
   ${DECODE_CONTAINER_NAME} bash -c "vllm serve ${MODEL} \
     --port ${DECODE_VLLM_PORT} \
     --tensor-parallel-size ${DECODE_TENSOR_PARALLEL_SIZE} \
+    --additional-config '{\"sharding\": {\"sharding_strategy\": {\"device_indexes\": [${DECODE_DEVICE_INDEXES}]}}}' \
     --trust-remote-code \
     --no-enable-prefix-caching \
     --kv-transfer-config '{\"kv_connector\": \"TPUConnector\", \"kv_connector_module_path\": \"tpu_inference.distributed.tpu_connector\", \"kv_role\": \"kv_consumer\"}' \
@@ -691,9 +714,14 @@ EOF
 
 chmod +x /tmp/start_decode.sh
 
-echo "--- Executing start_decode.sh on Decode Head Node (${DECODE_HEAD_IP})..."
+echo "--- Starting Prefill and Decode together so both PJRT processes can rendezvous"
+bash /tmp/start_prefill.sh &
+prefill_submit_pid=$!
 base64 < /tmp/start_decode.sh | \
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "base64 -d | bash"
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "base64 -d | bash" &
+decode_submit_pid=$!
+wait "$prefill_submit_pid"
+wait "$decode_submit_pid"
 
 # -----------------------------------------------------------------
 # 4. Wait for healthiness
