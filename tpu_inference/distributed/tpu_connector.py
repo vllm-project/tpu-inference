@@ -795,7 +795,8 @@ class TPUConnectorWorker:
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
             assert len(req_meta.remote_host) == len(req_meta.remote_port)
-            remote_addr = f"{req_meta.remote_host[self.node_id]}:{req_meta.remote_port[self.node_id]}"
+            host_index = 0 if len(req_meta.remote_host) == 1 else self.node_id
+            remote_addr = f"{req_meta.remote_host[host_index]}:{req_meta.remote_port[host_index]}"
         else:
             remote_addr = f"{req_meta.remote_host}:{req_meta.remote_port}"
 
@@ -882,7 +883,8 @@ class TPUConnectorWorker:
     def _maybe_build_notif_socket(self, req_meta: LoadMeta) -> zmq.Socket:
         remote_host = req_meta.remote_host
         if isinstance(req_meta.remote_host, list):
-            remote_host = req_meta.remote_host[self.node_id]
+            host_index = 0 if len(req_meta.remote_host) == 1 else self.node_id
+            remote_host = req_meta.remote_host[host_index]
 
         sock_path = make_zmq_path("tcp", remote_host, self.side_channel_port)
         if sock_path in self.notif_sockets:
