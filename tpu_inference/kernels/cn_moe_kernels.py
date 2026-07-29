@@ -233,8 +233,10 @@ def _expert_body(
 def _cn_w1w2_fused_token_kernel_fp8(
     # ---- Scalar prefetch (SMEM) ----
     ids_ref, toks_ref, topk_weights_ref,
-    seed_experts_ref,       # [NBUF]: expert id for seed buffers 0..NBUF-1
-    lookahead_ids_ref,      # [N_SLOTS]: expert MAX_DEPTH groups ahead (or -1)
+    seed_experts_w1_ref,    # [NBUF_W1]: expert id for w1 seed buffers
+    lookahead_ids_w1_ref,   # [N_SLOTS]: expert NBUF_W1-1 groups ahead (or -1)
+    seed_experts_w2_ref,    # [NBUF_W2]: expert id for w2 seed buffers
+    lookahead_ids_w2_ref,   # [N_SLOTS]: expert NBUF_W2-1 groups ahead (or -1)
     # ---- HBM inputs ----
     lhs_ref, w1_ref, w1_scale_ref, w2_ref, w2_scale_ref,
     # ---- HBM output ----
@@ -268,6 +270,9 @@ def _cn_w1w2_fused_token_kernel_fp8(
     NUM_I = I // I_TILE
     IB_TILE = I_TILE // min(I_TILE, IB)
 
+    MAX_DEPTH_W1 = NBUF_W1_ - 1
+    MAX_DEPTH_W2 = NBUF_W2_ - 1
+
     # DMA helper kwargs
     dma_kw_w1 = dict(w1_ref=w1_ref, w1_scale_ref=w1_scale_ref,
                      w1_bufs_ref=w1_bufs_ref, w1_s_bufs_ref=w1_s_bufs_ref,
@@ -298,8 +303,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
         DEQUANT_W2_AFTER_=DEQUANT_W2_AFTER_,
     )
 
-    NBUF = max(NBUF_W1_, NBUF_W2_)  # same in practice
-    MAX_DEPTH = NBUF - 1             # how far ahead we look
+    NBUF = max(NBUF_W1_, NBUF_W2_)  # for EP fallback path
 
     # ---- DMA lhs from HBM -> 2D VMEM landing pad (shape-matched) ----
     full_lhs_copy = pltpu.make_async_copy(
@@ -360,29 +364,39 @@ def _cn_w1w2_fused_token_kernel_fp8(
                 is_new_expert = (gj != prev_gj)
 
             # ============================================================
-            #  SLOT 0 — SEED PHASE: fill all NBUF buffers from
-            #  precomputed seed_experts_ref (O(1) SMEM reads).
+            #  SLOT 0 — SEED PHASE: fill buffers from precomputed tables.
+            #  w1 and w2 seeded independently with their own depths.
             # ============================================================
             if slot == 0:
-                # Buffer 0: current expert
+                # Buffer 0: current expert (both w1 and w2)
                 _start_all_dma(gj, jnp.int32(0), jnp.int32(0), **all_dma_kw)
 
-                # Buffers 1..NBUF-1: precomputed seed experts
-                for d in range(1, NBUF):
-                    seed_gj = seed_experts_ref[d]
-                    buf_d_w1 = jnp.int32(d % NBUF_W1_)
-                    buf_d_w2 = jnp.int32(d % NBUF_W2_)
+                # w1 buffers 1..NBUF_W1-1
+                for d in range(1, NBUF_W1_):
+                    seed_gj = seed_experts_w1_ref[d]
+                    buf_d = jnp.int32(d % NBUF_W1_)
                     @pl.when(seed_gj >= 0)
-                    def _(sgj=seed_gj, bw1=buf_d_w1, bw2=buf_d_w2):
-                        _start_all_dma(
-                            pl.multiple_of(sgj, 1), bw1, bw2, **all_dma_kw)
+                    def _(sgj=seed_gj, bw1=buf_d):
+                        for k in range(NUM_K):
+                            _start_w1_dma(pl.multiple_of(sgj, 1), bw1, k,
+                                          **dma_kw_w1)
+
+                # w2 buffers 1..NBUF_W2-1
+                for d in range(1, NBUF_W2_):
+                    seed_gj = seed_experts_w2_ref[d]
+                    buf_d = jnp.int32(d % NBUF_W2_)
+                    @pl.when(seed_gj >= 0)
+                    def _(sgj=seed_gj, bw2=buf_d):
+                        for m in range(NUM_I):
+                            _start_w2_dma(pl.multiple_of(sgj, 1), bw2, m,
+                                          **dma_kw_w2)
 
             # ============================================================
-            #  SLOT > 0 — STEADY STATE: rotate + one prefetch from
-            #  precomputed lookahead_ids_ref (O(1) SMEM read).
+            #  SLOT > 0 — STEADY STATE: rotate + independent prefetch
+            #  per tensor from their own lookahead tables.
             # ============================================================
             if slot > 0:
-                # Rotate buffer index on genuine transition
+                # Rotate buffer indices on genuine transition
                 cur_w1_buf = jnp.where(is_new_expert,
                                        (cur_w1_buf + 1) % NBUF_W1_,
                                        cur_w1_buf)
@@ -390,18 +404,25 @@ def _cn_w1w2_fused_token_kernel_fp8(
                                        (cur_w2_buf + 1) % NBUF_W2_,
                                        cur_w2_buf)
 
-                # ONE prefetch into the freed buffer.
-                # lookahead_ids_ref[slot] holds the expert MAX_DEPTH
-                # transitions ahead, or -1 if none exists.
-                target_w1 = (cur_w1_buf + MAX_DEPTH) % NBUF_W1_
-                target_w2 = (cur_w2_buf + MAX_DEPTH) % NBUF_W2_
-                ahead_gj = lookahead_ids_ref[slot]
-                should_prefetch = is_new_expert & (ahead_gj >= 0)
-                @pl.when(should_prefetch)
+                # w1 prefetch
+                target_w1 = (cur_w1_buf + MAX_DEPTH_W1) % NBUF_W1_
+                ahead_gj_w1 = lookahead_ids_w1_ref[slot]
+                should_pf_w1 = is_new_expert & (ahead_gj_w1 >= 0)
+                @pl.when(should_pf_w1)
                 def _():
-                    _start_all_dma(
-                        pl.multiple_of(ahead_gj, 1),
-                        target_w1, target_w2, **all_dma_kw)
+                    for k in range(NUM_K):
+                        _start_w1_dma(pl.multiple_of(ahead_gj_w1, 1),
+                                      target_w1, k, **dma_kw_w1)
+
+                # w2 prefetch
+                target_w2 = (cur_w2_buf + MAX_DEPTH_W2) % NBUF_W2_
+                ahead_gj_w2 = lookahead_ids_w2_ref[slot]
+                should_pf_w2 = is_new_expert & (ahead_gj_w2 >= 0)
+                @pl.when(should_pf_w2)
+                def _():
+                    for m in range(NUM_I):
+                        _start_w2_dma(pl.multiple_of(ahead_gj_w2, 1),
+                                      target_w2, m, **dma_kw_w2)
 
             # ---- Load this token's lhs ----
             token_row = full_lhs_scratch_ref[pl.ds(tok, 1), pl.ds(0, 1),
@@ -558,13 +579,15 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
     else:
         effective_ids = sorted_ids
 
-    # ---- Precompute lookahead tables (host-side, O(N_SLOTS)) ----
-    seed_experts, lookahead_ids = _build_lookahead_tables(
-        effective_ids, TOPK_TOTAL, NBUF_EFF)
+    # ---- Precompute lookahead tables per tensor (independent depths) ----
+    seed_experts_w1, lookahead_ids_w1 = _build_lookahead_tables(
+        effective_ids, TOPK_TOTAL, NBUF_W1)
+    seed_experts_w2, lookahead_ids_w2 = _build_lookahead_tables(
+        effective_ids, TOPK_TOTAL, NBUF_W2)
 
     C_PAD = lhs.shape[0]
     grid_spec = pltpu.PrefetchScalarGridSpec(
-        num_scalar_prefetch=5,        # ids, toks, weights, seed, lookahead
+        num_scalar_prefetch=7,        # ids, toks, weights, seed_w1, la_w1, seed_w2, la_w2
         in_specs=[any_spec] * 5,
         out_specs=any_spec,
         grid=(1,),
@@ -582,7 +605,8 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
             pltpu.SemaphoreType.DMA((2 * NBUF_W1 + 2 * NBUF_W2 + 2,)),
         ])
     compiler_params = None if interpret else pltpu.CompilerParams(
-        vmem_limit_bytes=int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9))
+        vmem_limit_bytes=int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9),
+        disable_bounds_checks=True)
 
     return pl.pallas_call(
         functools.partial(_cn_w1w2_fused_token_kernel_fp8,
@@ -599,8 +623,9 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
         out_shape=jax.ShapeDtypeStruct((C_PAD, H), jnp.bfloat16),
         grid_spec=grid_spec, compiler_params=compiler_params,
         interpret=interpret, name="cn_gemv_w1w2_fused_token_fp8",
-    )(effective_ids, sorted_toks, sorted_weights,  # scalar prefetch (5)
-      seed_experts, lookahead_ids,
+    )(effective_ids, sorted_toks, sorted_weights,  # scalar prefetch (7)
+      seed_experts_w1, lookahead_ids_w1,
+      seed_experts_w2, lookahead_ids_w2,
       lhs, w1, w1_scale, w2, w2_scale)             # inputs (5)
 
 
