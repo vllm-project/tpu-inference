@@ -426,7 +426,12 @@ class MLAEinsum(JaxEinsum):
             self.loaded.add(name)
         if len(self.loaded) != len(named_params):
             return
-        if self.quant_config is None:
+        # Presence of the scale param -- not of a quant_config -- is what
+        # decides the path: an unquantized model still carries a
+        # QuantizationConfig (UnquantizedConfig), it just never creates
+        # `weight_scale_inv`. Kimi-Linear-48B is bf16 throughout and Kimi-K3
+        # keeps `self_attn.*` in bf16, so both land here.
+        if not hasattr(self, "weight_scale_inv"):
             self._split_unquantized()
             return
         # After loading, split the weights into k/v

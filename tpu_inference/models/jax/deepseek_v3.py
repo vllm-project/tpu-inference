@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import os
-from dataclasses import InitVar, dataclass
+from dataclasses import dataclass
 from itertools import islice
 from typing import Iterable, List, Optional, Tuple, Union
 
@@ -42,6 +42,7 @@ from tpu_inference.layers.jax.base import create_param, sharded_initializer
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLmHead
+from tpu_inference.layers.jax.mlp import GatedMLP
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.moe.utils import (get_expert_parallelism,
                                                 select_moe_backend)
@@ -270,81 +271,9 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
         return kv_cache, output_TNH
 
 
-@dataclass(kw_only=True)
-class DeepseekV3MLP(JaxModule):
-    """A Gated Feed-Forward Network (FFN) layer.
-
-    This module consists of two linear projections (gating and up-projection),
-    an element-wise multiplication of the activated gating projection and the
-    up-projection, followed by a final downward projection.
-
-    Attributes:
-        sharding_cfg: The configuration for tensor sharding.
-    """
-    dtype: jnp.dtype
-    hidden_act: str
-    hidden_size: int
-    intermediate_size: int
-    df_sharding: P = P()
-    fd_sharding: P = P()
-    activation_ffw_td: P = P()
-    random_init: bool = False
-    quant_config: Optional[QuantizationConfig] = None
-
-    rngs: InitVar[nnx.Rngs]
-
-    def __call__(self, x_TD):
-        """Performs the forward pass of the FFW layer.
-
-        Args:
-            x_TD: The input tensor of shape either `(sequence, d_model)`
-
-        Returns:
-            The output tensor of shape `(batch, sequence, d_model)`.
-        """
-        x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
-        with jax.named_scope("wi_0"):
-            gating_TF = self.gate_proj(x_TD)
-            activated_gating_TF = modeling_flax_utils.ACT2FN[self.hidden_act](
-                gating_TF)
-        with jax.named_scope("wi_1"):
-            up_proj_TF = self.up_proj(x_TD)
-        fuse_TF = activated_gating_TF * up_proj_TF
-        with jax.named_scope("wo"):
-            output_TD = self.down_proj(fuse_TF)
-
-        return output_TD
-
-    def __post_init__(self, rngs: nnx.Rngs):
-        D = self.hidden_size
-        F = self.intermediate_size
-        weight_init = _weight_init(self.random_init)
-
-        self.gate_proj = JaxEinsum(
-            einsum_str="TD,DF->TF",
-            kernel_shape=(D, F),
-            rngs=rngs,
-            quant_config=self.quant_config,
-            param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.df_sharding),
-        )
-        self.up_proj = JaxEinsum(
-            einsum_str="TD,DF->TF",
-            kernel_shape=(D, F),
-            rngs=rngs,
-            quant_config=self.quant_config,
-            param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.df_sharding),
-        )
-        self.down_proj = JaxEinsum(
-            einsum_str="TF,FD->TD",
-            kernel_shape=(F, D),
-            rngs=rngs,
-            quant_config=self.quant_config,
-            param_dtype=self.dtype,
-            kernel_init=nnx.with_partitioning(weight_init, self.fd_sharding),
-        )
+# The gated FFN lives in the shared layer module so other models can reuse
+# it; this keeps the DeepSeek-V3 name in place.
+DeepseekV3MLP = GatedMLP
 
 
 @dataclass(kw_only=True)
