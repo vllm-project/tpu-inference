@@ -116,11 +116,9 @@ if [[ "$accelerator_type" != *"v7x-16"* && "$accelerator_type" != *"tpu7x-16"* ]
   exit 1
 fi
 
-readonly TOTAL_HOSTS_USED=2
-readonly CHIPS_PER_ROLE_PER_HOST=2
+readonly HOSTS_PER_ROLE=1
+readonly CHIPS_PER_HOST=4
 readonly CORES_PER_CHIP=2
-PREFILL_HOSTS=("${ORDERED_SLICE_HOSTS[@]}")
-DECODE_HOSTS=("${ORDERED_SLICE_HOSTS[@]}")
 ALL_SLICE_HOSTS=("${ORDERED_SLICE_HOSTS[@]}")
 PREFILL_HEAD_IP="$HEAD_INTERNAL_IP"
 DECODE_HEAD_IP="$REMOTE_HOST"
@@ -130,91 +128,53 @@ readonly PROXY_CONTAINER_NAME="disagg-proxy-benchmark"
 readonly PREFILL_RAY_PORT=6379
 readonly DECODE_RAY_PORT=7379
 
-PREFILL_TENSOR_PARALLEL_SIZE=$(( TOTAL_HOSTS_USED * CHIPS_PER_ROLE_PER_HOST * CORES_PER_CHIP ))
+PREFILL_TENSOR_PARALLEL_SIZE=$(( HOSTS_PER_ROLE * CHIPS_PER_HOST * CORES_PER_CHIP ))
 DECODE_TENSOR_PARALLEL_SIZE=$PREFILL_TENSOR_PARALLEL_SIZE
 echo "Using TPU7x-16 hosts by TPU process ID: ${ORDERED_SLICE_HOSTS[*]}"
-echo "Prefill uses chips 0,1 on both hosts; Decode uses chips 2,3 on both hosts."
+echo "Prefill owns all chips on ${PREFILL_HEAD_IP}; Decode owns all chips on ${DECODE_HEAD_IP}."
 echo "Tensor parallel size per role: ${PREFILL_TENSOR_PARALLEL_SIZE}"
 
-# TPU7x-16 exposes four chips per physical host. Each disaggregated role uses
-# only two of them, so keep the physical host topology separate from the
-# per-process topology selected through TPU_VISIBLE_CHIPS.
-readonly TPU_CHIPS_PER_HOST_BOUNDS_VALUE="2,2,1"
-readonly TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE="1,2,1"
-readonly PREFILL_TPU_PROCESS_PORT=8476
-readonly DECODE_TPU_PROCESS_PORT=9476
+# TPU7x-16 exposes a 2x2x1 four-chip topology on each physical host. A
+# cross-host JAX process cannot describe only half of that physical topology,
+# so each disaggregated role owns one complete host and runs as process 0 in
+# its own single-node JAX runtime.
+readonly TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE="2,2,1"
+readonly TPU_VISIBLE_CHIPS_VALUE="0,1,2,3"
+readonly ROLE_LOCAL_PROCESS_ID=0
 
-# Populates PROCESS_IDENTITY_ENV_ARGS for a role-local JAX process. Keep the
-# three equivalent identity variables synchronized at every launch site.
+# Populates PROCESS_IDENTITY_ENV_ARGS for a role-local JAX process while
+# preserving the physical TPU VM worker identity used for diagnostics.
 PROCESS_IDENTITY_ENV_ARGS=()
 build_process_identity_env_args() {
-  local process_id="$1"
+  local process_id=$1
+  local physical_worker_id=$2
   PROCESS_IDENTITY_ENV_ARGS=(
     -e CLOUD_TPU_TASK_ID="${process_id}"
-    -e TPU_WORKER_ID="${process_id}"
+    -e TPU_WORKER_ID="${physical_worker_id}"
     -e JAX_PROCESS_ID="${process_id}"
   )
 }
 
-PREFILL_NODE_IPS="$(IFS=,; echo "${PREFILL_HOSTS[*]}")"
-DECODE_NODE_IPS="$(IFS=,; echo "${DECODE_HOSTS[*]}")"
-
-PREFILL_PROCESS_MAP=""
-PREFILL_PROCESS_ADDRESSES=""
-for host_index in "${!PREFILL_HOSTS[@]}"; do
-  [[ -z "$PREFILL_PROCESS_MAP" ]] || PREFILL_PROCESS_MAP+=","
-  [[ -z "$PREFILL_PROCESS_ADDRESSES" ]] || PREFILL_PROCESS_ADDRESSES+=","
-  PREFILL_PROCESS_MAP+="${PREFILL_HOSTS[$host_index]}=${host_index}"
-  PREFILL_PROCESS_ADDRESSES+="${PREFILL_HOSTS[$host_index]}:${PREFILL_TPU_PROCESS_PORT}"
-done
-
-DECODE_PROCESS_MAP=""
-DECODE_PROCESS_ADDRESSES=""
-for host_index in "${!DECODE_HOSTS[@]}"; do
-  [[ -z "$DECODE_PROCESS_MAP" ]] || DECODE_PROCESS_MAP+=","
-  [[ -z "$DECODE_PROCESS_ADDRESSES" ]] || DECODE_PROCESS_ADDRESSES+=","
-  DECODE_PROCESS_MAP+="${DECODE_HOSTS[$host_index]}=${host_index}"
-  DECODE_PROCESS_ADDRESSES+="${DECODE_HOSTS[$host_index]}:${DECODE_TPU_PROCESS_PORT}"
-done
-
-# Ray normally rewrites TPU_VISIBLE_CHIPS and forces TPU_HOST_BOUNDS=1,1,1
-# for a partial-chip actor. Preserve the role-specific chip IDs while reporting
-# the complete physical host topology required by TPU7x-16 VM metadata.
-PREFILL_TPU_ENV_ARGS=(
-  -e TPU_CHIPS_PER_HOST_BOUNDS="${TPU_CHIPS_PER_HOST_BOUNDS_VALUE}"
+COMMON_TPU_ENV_ARGS=(
   -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}"
-  -e TPU_VISIBLE_CHIPS="0,1"
-  -e TPU_PROCESS_PORT="${PREFILL_TPU_PROCESS_PORT}"
+  -e TPU_VISIBLE_CHIPS="${TPU_VISIBLE_CHIPS_VALUE}"
+  -e TPU_PROCESS_BOUNDS="1,1,1"
+  -e JAX_NUM_PROCESSES=1
   -e VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
   -e RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS=1
-  -e TPU_PROCESS_BOUNDS="1,1,2"
-  -e TPU_PROCESS_ADDRESSES="${PREFILL_PROCESS_ADDRESSES}"
-  -e JAX_NUM_PROCESSES=2
-  -e VLLM_TPU_RAY_NODE_IPS="${PREFILL_NODE_IPS}"
-  -e VLLM_TPU_RAY_PROCESS_MAP="${PREFILL_PROCESS_MAP}"
 )
-DECODE_TPU_ENV_ARGS=(
-  -e TPU_CHIPS_PER_HOST_BOUNDS="${TPU_CHIPS_PER_HOST_BOUNDS_VALUE}"
-  -e TPU_CHIPS_PER_PROCESS_BOUNDS="${TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE}"
-  -e TPU_VISIBLE_CHIPS="2,3"
-  -e TPU_PROCESS_PORT="${DECODE_TPU_PROCESS_PORT}"
-  -e VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
-  -e RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS=1
-  -e TPU_PROCESS_BOUNDS="1,1,2"
-  -e TPU_PROCESS_ADDRESSES="${DECODE_PROCESS_ADDRESSES}"
-  -e JAX_NUM_PROCESSES=2
-  -e VLLM_TPU_RAY_NODE_IPS="${DECODE_NODE_IPS}"
-  -e VLLM_TPU_RAY_PROCESS_MAP="${DECODE_PROCESS_MAP}"
-)
-build_process_identity_env_args "$LOCAL_PROCESS_ID"
+PREFILL_TPU_ENV_ARGS=("${COMMON_TPU_ENV_ARGS[@]}")
+DECODE_TPU_ENV_ARGS=("${COMMON_TPU_ENV_ARGS[@]}")
+
+build_process_identity_env_args "$ROLE_LOCAL_PROCESS_ID" "$LOCAL_PROCESS_ID"
 PREFILL_HEAD_PROCESS_ENV_ARGS=("${PROCESS_IDENTITY_ENV_ARGS[@]}")
-build_process_identity_env_args "$REMOTE_PROCESS_ID"
+build_process_identity_env_args "$ROLE_LOCAL_PROCESS_ID" "$REMOTE_PROCESS_ID"
 DECODE_HEAD_PROCESS_ENV_ARGS=("${PROCESS_IDENTITY_ENV_ARGS[@]}")
 
 echo "Prefill Ray head: ${PREFILL_HEAD_IP}:${PREFILL_RAY_PORT}"
 echo "Decode Ray head: ${DECODE_HEAD_IP}:${DECODE_RAY_PORT}"
-echo "Prefill actor hosts: ${PREFILL_NODE_IPS}; process map: ${PREFILL_PROCESS_MAP}"
-echo "Decode actor hosts: ${DECODE_NODE_IPS}; process map: ${DECODE_PROCESS_MAP}"
+echo "Prefill actor host: ${PREFILL_HEAD_IP}"
+echo "Decode actor host: ${DECODE_HEAD_IP}"
 
 run_host_script() {
   local host=$1
@@ -307,9 +267,12 @@ collect_remote_logs() {
 
 cleanup() {
   local status=0
+  local dump_logs="${1:-true}"
   echo "--- Cleaning up multi-host disaggregated serving"
 
-  collect_remote_logs
+  if [[ "$dump_logs" == "true" ]]; then
+    collect_remote_logs
+  fi
 
   for ip in "${ALL_SLICE_HOSTS[@]}"; do
     if ! cleanup_host "$ip"; then
@@ -322,7 +285,9 @@ cleanup() {
     status=1
   fi
 
-  print_logs
+  if [[ "$dump_logs" == "true" ]]; then
+    print_logs
+  fi
   return "$status"
 }
 
@@ -533,10 +498,10 @@ DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 
 # Clean up potential leftovers from previous runs
 echo "--- Cleaning up previous cluster state..."
-cleanup
+cleanup false
 
-# This test needs two Ray nodes on each physical host, so it owns the Docker
-# launch details instead of changing the shared run_cluster.sh behavior.
+# Each physical host runs one role-local Ray head and one complete TPU runtime.
+# Keep the launch details here instead of changing shared cluster behavior.
 run_host_script "$REMOTE_HOST" "$DOCKER_IMAGE" <<'PREPARE_REMOTE_HOST'
 set -euo pipefail
 image=$1
@@ -571,6 +536,7 @@ launch_cluster_node() {
   local host=$2
   local node_type=$3
   local process_id=$4
+  local physical_worker_id
   local head_ip container head_port dashboard_port client_port min_worker_port max_worker_port agent_port
   local ray_start_cmd remote_docker_cmd
   local -a tpu_env_args mount_args docker_args
@@ -583,7 +549,12 @@ launch_cluster_node() {
     -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}"
   )
 
-  build_process_identity_env_args "$process_id"
+  if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
+    physical_worker_id="$LOCAL_PROCESS_ID"
+  else
+    physical_worker_id="$REMOTE_PROCESS_ID"
+  fi
+  build_process_identity_env_args "$process_id" "$physical_worker_id"
   local -a identity_env_args=("${PROCESS_IDENTITY_ENV_ARGS[@]}")
   if [[ "$role" == "prefill" ]]; then
     head_ip="$PREFILL_HEAD_IP"
@@ -649,29 +620,24 @@ launch_cluster_node() {
   sleep 15
 }
 
-# Each role spans the complete physical 2-host topology. Separate Ray control
-# planes let the unchanged RayExecutor reserve all resources visible in its
-# role-specific cluster without blocking the other role.
-launch_cluster_node prefill "$PREFILL_HEAD_IP" --head "$LOCAL_PROCESS_ID"
-launch_cluster_node prefill "$REMOTE_HOST" --worker "$REMOTE_PROCESS_ID"
+# Each role owns one complete physical host. Separate Ray control planes keep
+# Prefill and Decode independent without constructing a partial-host topology.
+launch_cluster_node prefill "$PREFILL_HEAD_IP" --head "$ROLE_LOCAL_PROCESS_ID"
 wait_for_ray_head "$PREFILL_HEAD_IP" "$PREFILL_RAY_PORT"
 wait_for_ray_cluster_members "$PREFILL_HEAD_IP" "$PREFILL_CONTAINER_NAME" Prefill \
-  "$TOTAL_HOSTS_USED" "${RAY_CLUSTER_TIMEOUT:-900}"
+  "$HOSTS_PER_ROLE" "${RAY_CLUSTER_TIMEOUT:-900}"
 
-launch_cluster_node decode "$DECODE_HEAD_IP" --head "$REMOTE_PROCESS_ID"
-launch_cluster_node decode "$HEAD_INTERNAL_IP" --worker "$LOCAL_PROCESS_ID"
+launch_cluster_node decode "$DECODE_HEAD_IP" --head "$ROLE_LOCAL_PROCESS_ID"
 wait_for_ray_head "$DECODE_HEAD_IP" "$DECODE_RAY_PORT"
 wait_for_ray_cluster_members "$DECODE_HEAD_IP" "$DECODE_CONTAINER_NAME" Decode \
-  "$TOTAL_HOSTS_USED" "${RAY_CLUSTER_TIMEOUT:-900}"
+  "$HOSTS_PER_ROLE" "${RAY_CLUSTER_TIMEOUT:-900}"
 
 dump_ray_resources "$PREFILL_HEAD_IP" Prefill "$PREFILL_CONTAINER_NAME"
 dump_ray_resources "$DECODE_HEAD_IP" Decode "$DECODE_CONTAINER_NAME"
 
 echo "--- TPU process environment on Prefill and Decode nodes"
-for host in "${SLICE_HOSTS[@]}"; do
-  dump_tpu_process_env "$host" prefill "$PREFILL_CONTAINER_NAME"
-  dump_tpu_process_env "$host" decode "$DECODE_CONTAINER_NAME"
-done
+dump_tpu_process_env "$PREFILL_HEAD_IP" prefill "$PREFILL_CONTAINER_NAME"
+dump_tpu_process_env "$DECODE_HEAD_IP" decode "$DECODE_CONTAINER_NAME"
 
 # -----------------------------------------------------------------
 # 3. Start vLLM Prefill & Decode Servers
