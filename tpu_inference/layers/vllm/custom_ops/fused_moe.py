@@ -112,6 +112,7 @@ class VllmMoERunner(MoERunner):
     def _maybe_reduce_shared_expert_output(
         self,
         shared_output: torch.Tensor | None,
+        fused_output_is_reduced: bool | None = None,
     ) -> torch.Tensor | None:
         """Early all-reduce path: reduce the shared-expert output on its own.
 
@@ -126,7 +127,10 @@ class VllmMoERunner(MoERunner):
         if mesh is None:
             return shared_output
 
-        if (shared_output is not None and self._fused_output_is_reduced
+        if fused_output_is_reduced is None:
+            fused_output_is_reduced = self._fused_output_is_reduced
+
+        if (shared_output is not None and fused_output_is_reduced
                 and not self.moe_config.is_sequence_parallel
                 and not is_attn_dp(mesh)):
             shared_output = _all_reduce_over_tp(shared_output, mesh)
@@ -136,6 +140,7 @@ class VllmMoERunner(MoERunner):
         self,
         states: torch.Tensor,
         trunc_size: int,
+        output_is_reduced: bool | None = None,
     ) -> torch.Tensor:
         """Late all-reduce path: reduce the combined (shared + fused) output.
 
@@ -149,10 +154,12 @@ class VllmMoERunner(MoERunner):
         if mesh is None:
             return states[..., :trunc_size]
 
+        if output_is_reduced is None:
+            output_is_reduced = self._fused_output_is_reduced
+
         is_dp = is_attn_dp(mesh)
         is_sequence_parallel = self.moe_config.is_sequence_parallel
-        is_fused_output_reduced = self._fused_output_is_reduced
 
-        if not is_dp and not is_sequence_parallel and not is_fused_output_reduced:
+        if not is_dp and not is_sequence_parallel and not output_is_reduced:
             states = _all_reduce_over_tp(states, mesh)
         return states[..., :trunc_size]
