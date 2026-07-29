@@ -322,6 +322,65 @@ for model_name in $model_list; do
         current_serve_args+=("${extra_args_array[@]}")
     fi
 
+    # Merge multiple --additional_config / --additional-config JSON objects into a single flag
+    mapfile -d '' current_serve_args < <(python3 -c '
+import json, sys
+
+def deep_merge(dict1, dict2):
+    for key, value in dict2.items():
+        if key in dict1 and isinstance(dict1[key], dict) and isinstance(value, dict):
+            deep_merge(dict1[key], value)
+        else:
+            dict1[key] = value
+    return dict1
+
+args = sys.argv[1:]
+merged_config = {}
+new_args = []
+i = 0
+has_additional_config = False
+
+while i < len(args):
+    arg = args[i]
+    if arg in ("--additional_config", "--additional-config"):
+        if i + 1 < len(args):
+            val = args[i + 1]
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, dict):
+                    deep_merge(merged_config, parsed)
+                    has_additional_config = True
+                else:
+                    new_args.extend([arg, val])
+            except Exception:
+                new_args.extend([arg, val])
+            i += 2
+            continue
+    elif arg.startswith("--additional_config=") or arg.startswith("--additional-config="):
+        val = arg.split("=", 1)[1]
+        if (val.startswith("\x27") and val.endswith("\x27")) or (val.startswith("\"") and val.endswith("\"")):
+            val = val[1:-1]
+        try:
+            parsed = json.loads(val)
+            if isinstance(parsed, dict):
+                deep_merge(merged_config, parsed)
+                has_additional_config = True
+            else:
+                new_args.append(arg)
+        except Exception:
+            new_args.append(arg)
+        i += 1
+        continue
+    new_args.append(arg)
+    i += 1
+
+if has_additional_config:
+    new_args.extend(["--additional-config", json.dumps(merged_config)])
+
+for a in new_args:
+    sys.stdout.write(a + "\x00")
+' "${current_serve_args[@]}")
+
     # Spin up the vLLM server
     echo "Spinning up the vLLM server..."
     (vllm serve "$model_name" --no-enable-prefix-caching --gpu-memory-utilization=0.95 --max-model-len $max_model_len --max-num-seqs $max_num_seqs --max-num-batched-tokens "$max_batched_tokens" "${current_serve_args[@]}" 2>&1 | tee -a "$LOG_FILE") &
