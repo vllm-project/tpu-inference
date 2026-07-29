@@ -123,13 +123,16 @@ def _fresh_caches(config):
     for i in range(config.num_hidden_layers):
         if config.is_kda_layer(i):
             # Slot 0 is the null block; the tests use slot 1.
+            # Allocated as a plain tuple, the way the KV-cache manager
+            # hands a `MambaSpec` layer's slot to the model.
             caches.append(
-                KDAState(conv_q=jnp.zeros((4, w - 1, hp), jnp.float32),
-                         conv_k=jnp.zeros((4, w - 1, hp), jnp.float32),
-                         conv_v=jnp.zeros((4, w - 1, hp), jnp.float32),
-                         recurrent=jnp.zeros(
-                             (4, config.kda_num_heads, config.kda_head_dim,
-                              config.kda_head_dim), jnp.float32)))
+                tuple(
+                    KDAState(conv_q=jnp.zeros((4, w - 1, hp), jnp.float32),
+                             conv_k=jnp.zeros((4, w - 1, hp), jnp.float32),
+                             conv_v=jnp.zeros((4, w - 1, hp), jnp.float32),
+                             recurrent=jnp.zeros(
+                                 (4, config.kda_num_heads, config.kda_head_dim,
+                                  config.kda_head_dim), jnp.float32))))
         else:
             caches.append(
                 jnp.zeros(
@@ -501,7 +504,8 @@ def test_greedy_decode_reproduces_golden_tokens(variant, mesh):
             if not config.is_kda_layer(i):
                 continue
             ref_state = g[f"d32.layers.{i}.recurrent_state"][0]
-            got_state = np.asarray(caches[i].recurrent[1], np.float32)
+            got_state = np.asarray(
+                KDAState(*caches[i]).recurrent[1], np.float32)
             worst_state_err = max(worst_state_err,
                                   np.abs(got_state - ref_state).max())
             np.testing.assert_allclose(got_state, ref_state, atol=ACT_ATOL)

@@ -19,6 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from torchax.ops.mappings import t2j_dtype
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig, set_current_vllm_config)
 from vllm.model_executor.layers.attention import Attention
@@ -1672,3 +1673,295 @@ class TestKVCacheManager:
 
         with pytest.raises(ValueError, match=r"\[kv-cache\].*state_cache"):
             self._init_ds_v4(kv_cache_config)
+
+    # ---------------------------------------------------------------
+    # JAX-native hybrid models (linear attention + full attention)
+    # ---------------------------------------------------------------
+
+    _HYBRID_BLOCK_SIZE = 16
+    _HYBRID_ATTN_HEAD_SIZE = 64
+    _HYBRID_MAMBA_SHAPES = ((3, 32), (3, 32), (3, 32), (2, 8, 8))
+    _HYBRID_MAMBA_DTYPES = (torch.bfloat16, torch.bfloat16, torch.bfloat16,
+                            torch.float32)
+
+    @staticmethod
+    def _vllm_shared_by_layout(num_attn: int, num_mamba: int):
+        """vLLM's kv-cache grouping, as (groups, shared_by-lists).
+
+        Transcribes `_get_kv_cache_groups_uniform_page_size`: split each layer
+        type into groups of `group_size`, then build one `KVCacheTensor` per
+        slot, `shared_by` the layer occupying that slot in each group. The
+        last group of the larger type is short when the count doesn't divide
+        evenly, which is what makes `shared_by` non-uniform.
+        """
+        min_count, max_count = min(num_attn,
+                                   num_mamba), max(num_attn, num_mamba)
+        group_size = max_count if max_count < min_count * 1.5 else min_count
+        attn = [f"layer.attn{i}" for i in range(num_attn)]
+        mamba = [f"layer.mamba{i}" for i in range(num_mamba)]
+        groups = [
+            attn[i:i + group_size] for i in range(0, num_attn, group_size)
+        ]
+        groups += [
+            mamba[i:i + group_size] for i in range(0, num_mamba, group_size)
+        ]
+        shared_by = [[g[slot] for g in groups if slot < len(g)]
+                     for slot in range(group_size)]
+        return groups, shared_by
+
+    def _hybrid_kv_cache_config(self, num_attn: int, num_mamba: int,
+                                num_blocks: int):
+        """A KVCacheConfig shaped like vLLM produces for a hybrid model."""
+        mamba_spec = MambaSpec(shapes=self._HYBRID_MAMBA_SHAPES,
+                               dtypes=self._HYBRID_MAMBA_DTYPES,
+                               block_size=self._HYBRID_BLOCK_SIZE)
+        attn_spec = FullAttentionSpec(block_size=self._HYBRID_BLOCK_SIZE,
+                                      num_kv_heads=1,
+                                      head_size=self._HYBRID_ATTN_HEAD_SIZE,
+                                      dtype=torch.bfloat16)
+        attn_page = get_attention_page_size_bytes(self.runner.mesh,
+                                                  self._HYBRID_BLOCK_SIZE, 1,
+                                                  self._HYBRID_ATTN_HEAD_SIZE,
+                                                  torch.bfloat16, False)
+
+        groups, shared_by = self._vllm_shared_by_layout(num_attn, num_mamba)
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=names,
+                             kv_cache_spec=(mamba_spec if "mamba" in names[0]
+                                            else attn_spec))
+            for names in groups
+        ]
+        # vLLM gives every tensor the same byte budget, sized from the widest
+        # group. Short groups therefore have spare room -- that is exactly the
+        # case the leading-dimension clamp has to handle.
+        widest = max(
+            sum(mamba_spec.page_size_bytes if "mamba" in n else attn_page
+                for n in names) for names in shared_by)
+        tensors = [
+            KVCacheTensor(size=widest * num_blocks, shared_by=names)
+            for names in shared_by
+        ]
+        return KVCacheConfig(num_blocks=num_blocks,
+                             kv_cache_tensors=tensors,
+                             kv_cache_groups=kv_cache_groups)
+
+    def _init_hybrid(self, num_attn: int, num_mamba: int, num_blocks: int = 8):
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+        self.runner.kv_caches = []
+        self.runner.layer_name_to_kvcache_index = {}
+        config = self._hybrid_kv_cache_config(num_attn, num_mamba, num_blocks)
+        manager.initialize_kv_cache(config)
+        return manager, config
+
+    @pytest.mark.parametrize(
+        "num_attn,num_mamba,uniform_groups",
+        [
+            # Kimi-K3: 24 MLA + 69 KDA. group_size=24 => KDA splits 24/24/21,
+            # so 3 of the 24 tensors are shared_by 3 layers, not 4.
+            (24, 69, False),
+            # The K3-tiny proxy: 3 + 6 divides evenly (2 KDA groups of 3).
+            (3, 6, True),
+            # Qwen3.5-shaped control: 15 + 45, evenly divisible.
+            (15, 45, True),
+        ])
+    def test_hybrid_layer_indices_cover_every_layer(self, num_attn, num_mamba,
+                                                    uniform_groups):
+        """Every layer gets its own array and its own index, whether or not
+        the `shared_by` groups all have the same size."""
+        manager, config = self._init_hybrid(num_attn, num_mamba)
+
+        group_sizes = {len(t.shared_by) for t in config.kv_cache_tensors}
+        assert (len(group_sizes) == 1) is uniform_groups, (
+            f"expected uniform_groups={uniform_groups}, got sizes {group_sizes}"
+        )
+
+        num_layers = num_attn + num_mamba
+        index_map = self.runner.layer_name_to_kvcache_index
+        assert len(index_map) == num_layers
+        assert len(self.runner.kv_caches) == num_layers
+        # A bijection onto the array list: no layer aliases another's state.
+        assert sorted(index_map.values()) == list(range(num_layers))
+
+        # ...and each layer's index really points at an array of its own kind.
+        for name, idx in index_map.items():
+            entry = self.runner.kv_caches[idx]
+            is_mamba_entry = isinstance(entry, tuple)
+            assert is_mamba_entry == ("mamba" in name), (
+                f"{name} -> kv_caches[{idx}] of the wrong kind")
+
+    def test_hybrid_all_layers_share_one_leading_dimension(self):
+        """Short groups must not get more blocks than the full ones: block
+        IDs are handed out from a single pool, so a layer with a shorter
+        leading dimension would silently clip writes."""
+        num_attn, num_mamba = 24, 69
+        manager, _ = self._init_hybrid(num_attn, num_mamba)
+
+        attn_blocks = {
+            self.runner.kv_caches[idx].shape[0]
+            for name, idx in self.runner.layer_name_to_kvcache_index.items()
+            if "attn" in name
+        }
+        mamba_blocks = {
+            state.shape[0]
+            for name, idx in self.runner.layer_name_to_kvcache_index.items()
+            if "mamba" in name for state in self.runner.kv_caches[idx]
+        }
+        assert len(attn_blocks) == 1, f"ragged attention pool: {attn_blocks}"
+        assert len(mamba_blocks) == 1, f"ragged mamba pool: {mamba_blocks}"
+
+    def test_hybrid_mamba_state_shapes_and_dtypes_follow_the_spec(self):
+        """A 4-state KDA layer allocates all four arrays, with the conv
+        windows at the model dtype and the recurrent state in fp32."""
+        _, _ = self._init_hybrid(3, 6)
+        idx = self.runner.layer_name_to_kvcache_index["layer.mamba0"]
+        states = self.runner.kv_caches[idx]
+        assert len(states) == len(self._HYBRID_MAMBA_SHAPES)
+        for state, shape, dtype in zip(states, self._HYBRID_MAMBA_SHAPES,
+                                       self._HYBRID_MAMBA_DTYPES):
+            assert state.shape[1:] == shape
+            assert state.dtype == t2j_dtype(dtype)
+
+    # ---------------------------------------------------------------
+    # JAX-native hybrid: per-layer spec emission from the HF config
+    # ---------------------------------------------------------------
+
+    def _jax_hybrid_text_config(self, num_layers: int, kda_layers_1indexed):
+        """A Kimi-shaped text config: MLA everywhere except `kda_layers`."""
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            num_hidden_layers=num_layers,
+            linear_attn_config={
+                "kda_layers": list(kda_layers_1indexed),
+                "num_heads": 2,
+                "head_dim": 8,
+                "short_conv_kernel_size": 4,
+            },
+            # MLA geometry (read only when use_mla is on).
+            qk_rope_head_dim=64,
+            kv_lora_rank=512,
+            # Plain-attention geometry (read only when use_mla is off).
+            num_key_value_heads=1,
+            head_dim=64,
+            num_global_key_value_heads=None,
+            global_head_dim=None,
+            layer_types=None,
+            num_kv_shared_layers=0,
+        )
+
+    def _jax_hybrid_spec(self,
+                         num_layers,
+                         kda_layers_1indexed,
+                         *,
+                         use_mla=True,
+                         mamba_block_size=1024):
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        text_config = self._jax_hybrid_text_config(num_layers,
+                                                   kda_layers_1indexed)
+        model_config = MagicMock()
+        model_config.hf_text_config = text_config
+        model_config.hf_config = text_config
+        model_config.use_mla = use_mla
+        model_config.dtype = torch.bfloat16
+        model_config.get_num_layers.return_value = num_layers
+        model_config.get_total_num_kv_heads.return_value = 1
+        model_config.get_head_size.return_value = 64
+        self.runner.model_config = model_config
+        self.runner.cache_config.mamba_block_size = mamba_block_size
+        self.runner.speculative_config = None
+        self.runner.vllm_config.speculative_config = None
+        # The JAX branch is the one taken when no attention module registered
+        # itself in the forward context.
+        self.runner.vllm_config.compilation_config.static_forward_context.clear(
+        )
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = use_mla
+        return manager, manager.get_kv_cache_spec()
+
+    def test_jax_hybrid_spec_is_per_layer_not_model_wide(self):
+        """Kimi-K3's real split: 93 layers, 69 KDA + 24 MLA. The KDA layers
+        must get a MambaSpec even though `use_mla` is on model-wide."""
+        kda = sorted(
+            set(range(1, 94)) - {
+                70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85,
+                86, 87, 88, 89, 90, 91, 92, 93
+            })
+        manager, spec = self._jax_hybrid_spec(93, kda)
+
+        assert len(spec) == 93
+        mamba_layers = {
+            int(name.split(".")[1])
+            for name, s in spec.items() if isinstance(s, MambaSpec)
+        }
+        mla_layers = {
+            int(name.split(".")[1])
+            for name, s in spec.items() if isinstance(s, MLAAttentionSpec)
+        }
+        assert len(mamba_layers) == 69 and len(mla_layers) == 24
+        assert mamba_layers == {i - 1 for i in kda}, "kda_layers is 1-indexed"
+        assert mamba_layers.isdisjoint(mla_layers)
+
+        # Every layer reports the same page size, which is what lets vLLM
+        # group them: 1 attn group + 3 KDA groups (69 = 24+24+21).
+        page_sizes = {s.page_size_bytes for s in spec.values()}
+        assert len(page_sizes) == 1
+        assert page_sizes == {manager._hybrid_uniform_page_size_bytes}
+
+    def test_jax_hybrid_mamba_spec_matches_the_config_layout(self):
+        from tpu_inference.models.common.linear_attention import \
+            compute_linear_attention_layout
+        _, spec = self._jax_hybrid_spec(9, [1, 2, 3, 5, 6, 7])
+        layout = compute_linear_attention_layout(
+            self._jax_hybrid_text_config(9, [1, 2, 3, 5, 6, 7]),
+            torch.bfloat16)
+        mamba = spec["layer.0"]
+        assert isinstance(mamba, MambaSpec)
+        assert mamba.shapes == layout.shapes
+        assert mamba.dtypes == layout.dtypes
+        assert mamba.block_size == 1024
+        # Three conv windows at the model dtype, one fp32 recurrent state.
+        assert mamba.dtypes == (torch.bfloat16, torch.bfloat16, torch.bfloat16,
+                                torch.float32)
+
+    def test_jax_hybrid_spec_falls_back_when_vllm_left_block_size_unset(self):
+        """If vLLM didn't classify the model as hybrid it leaves
+        `mamba_block_size` unset; one block must then cover a whole
+        sequence rather than crashing or silently using the attention
+        block size."""
+        _, spec = self._jax_hybrid_spec(9, [1, 2, 3], mamba_block_size=None)
+        assert spec["layer.0"].block_size == self.runner.max_model_len
+
+    def test_jax_non_hybrid_spec_is_unchanged(self):
+        """A config with no `linear_attn_config` must produce exactly the
+        attention-only specs it did before, with no page-size padding."""
+        from types import SimpleNamespace
+
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        text_config = SimpleNamespace(num_hidden_layers=4,
+                                      num_key_value_heads=1,
+                                      head_dim=64,
+                                      num_global_key_value_heads=None,
+                                      global_head_dim=None,
+                                      layer_types=None,
+                                      num_kv_shared_layers=0)
+        model_config = MagicMock()
+        model_config.hf_text_config = text_config
+        model_config.hf_config = text_config
+        model_config.use_mla = False
+        model_config.dtype = torch.bfloat16
+        model_config.get_num_layers.return_value = 4
+        model_config.get_total_num_kv_heads.return_value = 1
+        model_config.get_head_size.return_value = 64
+        self.runner.model_config = model_config
+        self.runner.speculative_config = None
+        self.runner.vllm_config.compilation_config.static_forward_context.clear(
+        )
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+        spec = manager.get_kv_cache_spec()
+
+        assert len(spec) == 4
+        assert all(isinstance(s, FullAttentionSpec) for s in spec.values())
+        assert manager._hybrid_uniform_page_size_bytes is None
+        assert manager._mamba_num_blocks is None

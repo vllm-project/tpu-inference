@@ -63,7 +63,8 @@ from tpu_inference.layers.common.sharding import \
     ShardingAxisNameBase as ShardingAxisName
 from tpu_inference.layers.jax import JaxModule, JaxModuleList
 from tpu_inference.layers.jax.activation import SITU_BETA, SITU_LINEAR_BETA
-from tpu_inference.layers.jax.attention.mla import MLAAttention
+from tpu_inference.layers.jax.attention.mla import (
+    MLAAttention, derived_absorbed_mla_param_names)
 from tpu_inference.layers.jax.base import _init_fn as init_fn
 from tpu_inference.layers.jax.base import create_param, sharded_initializer
 from tpu_inference.layers.jax.embed import JaxEmbed
@@ -73,6 +74,8 @@ from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.linear_attention import (
+    compute_linear_attention_layers, linear_attn_config)
 from tpu_inference.models.jax.deepseek_v3 import DeepSeekV3Router
 from tpu_inference.models.jax.utils.weight_utils import (
     JaxAutoWeightsLoader, LoadableWithIterator,
@@ -177,14 +180,11 @@ class KimiConfig:
                                                  False)
 
         # --- KDA ---
-        linear_cfg = getattr(c, "linear_attn_config", None) or {}
-        if not isinstance(linear_cfg, dict):
-            linear_cfg = vars(linear_cfg)
-        # `kda_layers` is 1-indexed in the checkpoint config.
-        self.kda_layers: set = {
-            i - 1
-            for i in linear_cfg.get("kda_layers", ())
-        }
+        # Parsed through the shared helper so that the KV-cache manager (which
+        # must know which layers are recurrent before any module exists) and
+        # the model agree on the layer list by construction.
+        linear_cfg = linear_attn_config(c)
+        self.kda_layers: set = set(compute_linear_attention_layers(c))
         self.kda_num_heads: int = linear_cfg.get("num_heads",
                                                  self.num_attention_heads)
         self.kda_head_dim: int = linear_cfg.get("head_dim", self.v_head_dim)
@@ -449,22 +449,33 @@ class KimiDeltaAttention(JaxModule):
             o_proj=_t(self.o_proj),
             **gate_kwargs)
 
-    def __call__(self, x_TD: jax.Array, state: KDAState,
-                 md: AttentionMetadata) -> Tuple[KDAState, jax.Array]:
+    def __call__(
+            self, x_TD: jax.Array, state: Sequence[jax.Array],
+            md: AttentionMetadata) -> Tuple[Tuple[jax.Array, ...], jax.Array]:
+        """Runs the sublayer over one `kv_cache` slot.
+
+        The slot arrives as a plain tuple of the four state arrays -- that is
+        how the KV-cache manager allocates a `MambaSpec` layer, and how the
+        decoder loop threads it. Naming them via `KDAState` here (and handing
+        a plain tuple back) keeps the jitted model's input and output pytrees
+        the same shape, so `self.kv_caches = model_fn(...)` round-trips
+        without a retrace.
+        """
         query_lens = md.query_start_loc[1:] - md.query_start_loc[:-1]
         has_initial_state = (md.seq_lens - query_lens) > 0
-        return kda_attention(x_TD,
-                             self._params(),
-                             state,
-                             md.mamba_state_indices,
-                             md.query_start_loc,
-                             md.request_distribution,
-                             has_initial_state,
-                             num_heads=self.num_heads,
-                             head_dim=self.head_dim,
-                             kernel_size=self.conv_kernel_size,
-                             gate_lower_bound=self.gate_lower_bound,
-                             rms_norm_eps=self.rms_norm_eps)
+        new_state, out = kda_attention(x_TD,
+                                       self._params(),
+                                       KDAState(*state),
+                                       md.mamba_state_indices,
+                                       md.query_start_loc,
+                                       md.request_distribution,
+                                       has_initial_state,
+                                       num_heads=self.num_heads,
+                                       head_dim=self.head_dim,
+                                       kernel_size=self.conv_kernel_size,
+                                       gate_lower_bound=self.gate_lower_bound,
+                                       rms_norm_eps=self.rms_norm_eps)
+        return tuple(new_state), out
 
 
 class KimiRoutedExperts(JaxMoE):
@@ -918,18 +929,35 @@ class KimiLinearModel(JaxModule):
         self,
         kv_caches: List[Any],
         input_ids: Optional[jax.Array],
-        attention_metadata: AttentionMetadata,
+        attention_metadata: Any,
         inputs_embeds: Optional[jax.Array] = None,
+        layer_name_to_kv_cache: Optional[dict] = None,
     ) -> Tuple[List[Any], jax.Array]:
+        """Runs the stack.
+
+        Two things are per-layer rather than global on a hybrid model:
+
+        * ``attention_metadata`` is a ``{layer_name: metadata}`` dict whenever
+          the model spans more than one kv-cache group (the KDA layers and the
+          MLA layers land in different groups, each with its own block table).
+        * ``kv_caches`` is ordered by kv-cache tensor, not by layer, so the
+          slot for layer ``i`` has to be looked up rather than indexed.
+        """
         x = (inputs_embeds
              if inputs_embeds is not None else self.embed_tokens(input_ids))
 
         block_residual: List[jax.Array] = []
         for i, layer in enumerate(self.layers):
-            kv_caches[i], x, block_residual = layer(
+            layer_name = f"layer.{i}"
+            layer_md = (attention_metadata[layer_name] if isinstance(
+                attention_metadata, dict) else attention_metadata)
+            cache_idx = (layer_name_to_kv_cache[layer_name]
+                         if layer_name_to_kv_cache
+                         and layer_name in layer_name_to_kv_cache else i)
+            kv_caches[cache_idx], x, block_residual = layer(
                 x,
-                kv_cache=kv_caches[i],
-                attention_metadata=attention_metadata,
+                kv_cache=kv_caches[cache_idx],
+                attention_metadata=layer_md,
                 block_residual=block_residual)
 
         if self.config.use_attn_residuals:
@@ -985,13 +1013,20 @@ class KimiLinearForCausalLM(JaxModule, LoadableWithIterator):
         self,
         kv_caches: List[Any],
         input_ids: jax.Array,
-        attention_metadata: AttentionMetadata,
+        attention_metadata: Any,
         inputs_embeds: Optional[jax.Array] = None,
+        _input_positions=None,
+        layer_name_to_kv_cache: Optional[Sequence[Tuple[str, int]]] = None,
         *args,
         **kwargs,
     ) -> Tuple[List[Any], jax.Array, List[jax.Array], Optional[jax.Array]]:
-        kv_caches, x = self.model(kv_caches, input_ids, attention_metadata,
-                                  inputs_embeds)
+        kv_caches, x = self.model(
+            kv_caches,
+            input_ids,
+            attention_metadata,
+            inputs_embeds,
+            layer_name_to_kv_cache=dict(layer_name_to_kv_cache)
+            if layer_name_to_kv_cache else None)
         return kv_caches, x, [], None
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
@@ -1002,7 +1037,11 @@ class KimiLinearForCausalLM(JaxModule, LoadableWithIterator):
             return super().load_weights(weights)
         loader = JaxAutoWeightsLoader(self,
                                       skip_prefixes=list(VISION_SKIP_PREFIXES))
-        return loader.load_weights(weights)
+        loaded = loader.load_weights(weights)
+        # The absorbed-MLA up-projections are split out of `kv_b_proj` during
+        # that call rather than read from the checkpoint, so they carry no
+        # checkpoint name of their own.
+        return loaded | derived_absorbed_mla_param_names(self)
 
 
 class KimiK3ForConditionalGeneration(KimiLinearForCausalLM):

@@ -329,6 +329,30 @@ class MLABaseAttention(JaxModule):
             return new_kv_cache, o_TD
 
 
+# The absorbed-MLA forward runs on `k_up_proj`/`v_up_proj`, which `MLAEinsum`
+# splits out of the checkpoint's fused `kv_b_proj` at load time. No checkpoint
+# tensor carries their names, so they never show up as "loaded".
+_ABSORBED_MLA_DERIVED_MODULES = (".k_up_proj.", ".v_up_proj.")
+
+
+def derived_absorbed_mla_param_names(model) -> set:
+    """Parameter names an MLA model materializes instead of loading.
+
+    vLLM's model loader raises if any `named_parameters()` entry is missing
+    from the set a model's `load_weights` returns. Quantized MLA checkpoints
+    get a pass because their `quant_method` declares
+    `process_weights_after_loading`, which the loader whitelists wholesale; an
+    unquantized MLA checkpoint (Kimi-Linear-48B is bf16 throughout, Kimi-K3
+    keeps `self_attn.*` in bf16) has no such method, so the model has to
+    report these names itself.
+    """
+    return {
+        name
+        for name, _ in model.named_parameters()
+        if any(part in name for part in _ABSORBED_MLA_DERIVED_MODULES)
+    }
+
+
 class MLAEinsum(JaxEinsum):
     """Extending JaxEinsum to handle MLA.
 
