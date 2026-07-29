@@ -663,7 +663,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${PREFILL_TPU_ENV_ARGS[@]}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
-  -e JAX_PLATFORMS='' \
+  -e JAX_PLATFORMS='tpu' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE=vllm \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM="${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}" \
@@ -692,7 +692,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${PREFI
   ${PREFILL_TPU_ENV_ARGS[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
-  -e JAX_PLATFORMS='' \
+  -e JAX_PLATFORMS='tpu' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE=vllm \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
@@ -719,7 +719,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECOD
   ${DECODE_TPU_ENV_ARGS[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
-  -e JAX_PLATFORMS='' \
+  -e JAX_PLATFORMS='tpu' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE=vllm \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
@@ -749,7 +749,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${DECOD
   ${DECODE_TPU_ENV_ARGS[*]} \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
-  -e JAX_PLATFORMS='' \
+  -e JAX_PLATFORMS='tpu' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE=vllm \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
@@ -766,8 +766,17 @@ echo "--- Waiting for Prefill & Decode Ray Clusters to fully form..."
 wait_for_ray_cluster_members_remote "$PREFILL_HEAD_IP" "$PREFILL_HOSTS_COUNT" 300
 wait_for_ray_cluster_members_remote "$DECODE_HEAD_IP" "$DECODE_HOSTS_COUNT" 300
 
-dump_ray_resources "$PREFILL_HEAD_IP" "Prefill"
-dump_ray_resources "$DECODE_HEAD_IP" "Decode"
+echo "--- [DIAGNOSTIC] Prefill Node Container Environment ---"
+docker exec node env | grep -E "TPU|JAX|CLOUD" || true
+echo "--- [DIAGNOSTIC] Running JAX test on Prefill Node ---"
+docker exec node env JAX_PLATFORMS=tpu python3 -c "import jax; print('JAX devices:', jax.devices())" || true
+
+echo "--- [DIAGNOSTIC] Decode Node Container Environment ---"
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
+  "docker exec node env" | grep -E "TPU|JAX|CLOUD" || true
+echo "--- [DIAGNOSTIC] Running JAX test on Decode Node ---"
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
+  "docker exec node env JAX_PLATFORMS=tpu python3 -c \"import jax; print('JAX devices:', jax.devices())\"" || true
 
 # -----------------------------------------------------------------
 # 3. Start vLLM Prefill & Decode Servers
