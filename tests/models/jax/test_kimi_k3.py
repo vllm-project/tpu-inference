@@ -264,6 +264,146 @@ def test_apply_attn_res_is_a_convex_mix_of_its_candidates():
     assert np.abs(out - np.asarray(prefix_sum)).max() > 1e-3
 
 
+def test_moe_layer_split_respects_first_k_dense_replace():
+    c = _config_from(num_experts=8, first_k_dense_replace=2)
+    assert [i for i in range(4) if c.is_moe_layer(i)] == [2, 3]
+
+
+# --------------------------------------------------------------------------
+# Kimi-Linear-48B-shaped config: the paths K3-tiny cannot reach
+# --------------------------------------------------------------------------
+
+# Both tiny checkpoints have attention residuals, a latent MoE, situ, and
+# routed_scaling_factor 1.0, so the golden tests above never exercise the
+# plain residual stream, the full-width MoE, or the routed scaling. This is
+# the Kimi-Linear-48B shape (attn_res / routed_expert_hidden_size / situ /
+# q_lora_rank all absent) at tiny dimensions.
+_48B_SHAPED = dict(
+    hidden_size=32,
+    intermediate_size=64,
+    num_hidden_layers=2,
+    vocab_size=64,
+    hidden_act="silu",
+    num_attention_heads=2,
+    num_key_value_heads=2,
+    q_lora_rank=None,
+    kv_lora_rank=16,
+    qk_nope_head_dim=16,
+    qk_rope_head_dim=8,
+    v_head_dim=16,
+    mla_use_nope=True,
+    num_experts=8,
+    num_experts_per_token=2,
+    moe_intermediate_size=16,
+    num_shared_experts=1,
+    first_k_dense_replace=1,
+    routed_scaling_factor=2.446,
+    linear_attn_config={
+        # 1-indexed: layer 0 is MLA (+ dense MLP), layer 1 KDA.
+        "kda_layers": [2],
+        "num_heads": 2,
+        "head_dim": 16,
+        "short_conv_kernel_size": 4,
+    })
+
+
+def _build_48b_shaped(mesh, **overrides):
+    from tpu_inference.layers.jax.quantization.unquantized import \
+        UnquantizedConfig
+    from tpu_inference.models.jax.kimi_k3 import KimiLinearModel
+    config = _config_from(**{**_48B_SHAPED, **overrides})
+    with jax.set_mesh(mesh):
+        model = KimiLinearModel(config=config,
+                                rngs=nnx.Rngs(0),
+                                mesh=mesh,
+                                dtype=jnp.float32,
+                                quant_config=UnquantizedConfig({}),
+                                random_init=True)
+    return config, model
+
+
+def test_48b_shaped_model_omits_k3_only_parameters(mesh):
+    """No attention-residual or latent-MoE weights when the flags are absent."""
+    config, model = _build_48b_shaped(mesh)
+    names = {n for n, _ in model.named_parameters()}
+    assert not config.use_attn_residuals
+    assert not [n for n in names if "_res_proj" in n or "_res_norm" in n]
+    assert not [n for n in names if "routed_expert_" in n]
+    # q_lora_rank=None selects the single fused q_proj.
+    assert any(n.endswith("layers.0.self_attn.q_proj.weight") for n in names)
+    assert not [n for n in names if "q_a_proj" in n or "q_b_proj" in n]
+    # ...while the KDA layer keeps the low-rank output gate.
+    assert any("layers.1.self_attn.g_a_proj" in n for n in names)
+    assert not [n for n in names if "layers.1.self_attn.g_proj" in n]
+
+
+def test_48b_shaped_moe_runs_experts_at_full_hidden_width(mesh):
+    config, model = _build_48b_shaped(mesh)
+    moe = model.layers[1].block_sparse_moe
+    assert not moe.use_latent_moe
+    assert moe.experts.hidden_size == config.hidden_size
+
+
+@nnx.jit
+def _moe_block_fwd(model, x):
+    return model.layers[1].block_sparse_moe(x)
+
+
+def test_routed_scaling_factor_scales_the_routed_contribution(mesh):
+    """The reference applies it to the top-k weights inside the gate, so the
+    routed path -- and only the routed path -- scales with it."""
+    x = jax.random.normal(jax.random.PRNGKey(0),
+                          (4, _48B_SHAPED["hidden_size"]),
+                          dtype=jnp.float32)
+
+    def routed_only(factor):
+        _, model = _build_48b_shaped(mesh,
+                                     routed_scaling_factor=factor,
+                                     num_shared_experts=None)
+        with jax.set_mesh(mesh), jax.default_matmul_precision("highest"):
+            return np.asarray(_moe_block_fwd(model, x), np.float32)
+
+    one = routed_only(1.0)
+    scaled = routed_only(2.446)
+    err = np.abs(scaled - one * 2.446).max()
+    print(f"[observed] routed_scaling_factor linearity max_abs={err:.3e}")
+    np.testing.assert_allclose(scaled, one * 2.446, rtol=2e-5, atol=2e-5)
+    # Anti-vacuity: the scaling actually changed the output.
+    assert np.abs(scaled - one).max() > 1e-3
+
+
+@nnx.jit
+def _plain_residual_probe(model, caches, x, md):
+    """The layer's own output alongside an explicit x + attn + mlp."""
+    layer = model.layers[1]  # KDA layer: no MLA kernel needed
+    _, got, block_residual = layer(x,
+                                   kv_cache=caches[1],
+                                   attention_metadata=md,
+                                   block_residual=[])
+    _, attn_out = layer.self_attn(layer.input_layernorm(x), caches[1], md)
+    h = x + attn_out
+    expect = h + layer._mlp()(layer.post_attention_layernorm(h))
+    return got, expect, block_residual
+
+
+def test_48b_shaped_decoder_uses_the_plain_residual_stream(mesh):
+    """Without attention residuals the layer must be x + attn + mlp."""
+    config, model = _build_48b_shaped(mesh)
+    md = _metadata(4, np.arange(4), 4, decode=False)
+    x = jax.random.normal(jax.random.PRNGKey(1), (4, config.hidden_size),
+                          dtype=jnp.float32) * 0.1
+
+    with jax.set_mesh(mesh), jax.default_matmul_precision("highest"):
+        got, expect, block_residual = _plain_residual_probe(
+            model, _fresh_caches(config), x, md)
+
+    assert block_residual == []
+    err = np.abs(np.asarray(got, np.float32) -
+                 np.asarray(expect, np.float32)).max()
+    print(f"[observed] plain residual stream max_abs={err:.3e}")
+    np.testing.assert_allclose(np.asarray(got), np.asarray(expect), atol=1e-5)
+
+
 # --------------------------------------------------------------------------
 # Golden parity (needs a checkpoint + TPU)
 # --------------------------------------------------------------------------
