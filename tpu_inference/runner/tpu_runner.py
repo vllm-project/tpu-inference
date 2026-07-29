@@ -2941,7 +2941,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
-                is_spec_decode=is_spec_decode,
             )
 
             return attention_metadata_gid
@@ -2954,7 +2953,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
-                is_spec_decode=is_spec_decode,
             )
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]

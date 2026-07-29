@@ -28,7 +28,7 @@ import jax
         "request_distribution",
         "mamba_state_indices",
     ],
-    meta_fields=["padded_num_reqs", "is_spec_decode"],
+    meta_fields=["padded_num_reqs"],
 )
 @dataclass
 class AttentionMetadata(object):
@@ -58,7 +58,6 @@ class AttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
-    is_spec_decode: bool = False
 
 
 @functools.partial(
@@ -70,7 +69,7 @@ class AttentionMetadata(object):
         "request_distribution",
         "mamba_state_indices",
     ],
-    meta_fields=["padded_num_reqs", "is_spec_decode"],
+    meta_fields=["padded_num_reqs"],
 )
 @dataclass
 class SharedAttentionMetadata(object):
@@ -97,4 +96,3 @@ class SharedAttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
-    is_spec_decode: bool = False

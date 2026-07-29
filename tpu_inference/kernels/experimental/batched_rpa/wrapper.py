@@ -192,7 +192,6 @@ def get_kv_cache_shape(
         "update_kv_cache",
         "kv_layout",
         "decode_query_size",
-        "is_spec_decode",
     ),
     # Donation of transient inputs can fail for some runtime buffer layouts in
     # the experimental tuning path. Keep donation only for kv_cache, which is
@@ -229,7 +228,6 @@ def ragged_paged_attention(
     update_kv_cache: bool = True,
     kv_layout: configs.KVLayout | None = None,
     decode_query_size: int = 1,
-    is_spec_decode: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
 
@@ -316,6 +314,10 @@ def ragged_paged_attention(
         soft_cap=soft_cap,
         mask_value=mask_value,
     )
+    decode_bkv_p_new = (
+        1 if decode_query_size <= 1
+        else ((decode_query_size - 1) // page_size + 2)
+    )
     serve_cfgs = configs.ServingConfigs(
         num_seqs=max_num_seqs,
         num_page_indices=num_page_indices,
@@ -328,7 +330,7 @@ def ragged_paged_attention(
         scale_k=k_scale,
         scale_v=v_scale,
         kv_layout=kv_layout,
-        is_spec_decode=is_spec_decode,
+        decode_bkv_p_new=decode_bkv_p_new,
     )
 
     q_hbm, new_kv_hbm = prepare_inputs(

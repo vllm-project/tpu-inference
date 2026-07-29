@@ -406,7 +406,6 @@ class CompilationManager:
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
-                is_spec_decode=bool(self.runner.speculative_config),
             )
 
             return attention_metadata_gid
@@ -419,7 +418,6 @@ class CompilationManager:
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
-                is_spec_decode=bool(self.runner.speculative_config),
             )
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]

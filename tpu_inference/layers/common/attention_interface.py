@@ -388,7 +388,6 @@ def sharded_ragged_paged_attention(
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
     decode_query_size: int = 1,
-    is_spec_decode: bool = False,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
@@ -458,7 +457,6 @@ def sharded_ragged_paged_attention(
             kwargs["use_causal_mask"] = use_causal_mask
             if envs.USE_BATCHED_RPA_KERNEL:
                 kwargs["decode_query_size"] = decode_query_size
-                kwargs["is_spec_decode"] = is_spec_decode
         return func(*args, **kwargs)
 
     return jax.shard_map(
@@ -852,7 +850,6 @@ def attention(
         update_kv_cache=update_kv_cache,
         use_causal_mask=use_causal_mask,
         decode_query_size=decode_query_size,
-        is_spec_decode=getattr(shared_md, "is_spec_decode", False),
     )
 
     return kv_cache, output
