@@ -9,6 +9,7 @@ Model,Type,UnitTest,Accuracy/Correctness,Benchmark
 "google/gemma-4-31B-it",Multimodal,✅ Passing,✅ Passing,not enough HBM
 "google/gemma-4-E2B-it",Multimodal,✅ Passing,✅ Passing,✅ Passing
 "google/gemma-4-E4B-it",Multimodal,✅ Passing,✅ Passing,✅ Passing
+"meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal",Multimodal,❓ Untested,❓ Untested,❓ Untested
 "MiniMaxAI/MiniMax-M2.5",Text,❓ Untested,❓ Untested,❓ Untested
 "Qwen/Qwen3-30B-A3B",Text,✅ Passing,✅ Passing,✅ Passing
 "Qwen/Qwen3-32B",Text,✅ Passing,✅ Passing,✅ Passing

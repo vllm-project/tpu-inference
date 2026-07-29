@@ -8,7 +8,6 @@ Feature,CorrectnessTest,PerformanceTest
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
 "Speculative Decoding: Eagle3",✅ Passing,✅ Passing
-"Speculative Decoding: DFlash",✅ Passing,✅ Passing
 "Speculative Decoding: Ngram",✅ Passing,✅ Passing
 "Step Pooling (Embedding)",✅ Passing,❓ Untested
 "async scheduler",✅ Passing,✅ Passing
