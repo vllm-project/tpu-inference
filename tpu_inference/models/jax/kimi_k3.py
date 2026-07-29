@@ -461,8 +461,17 @@ class KimiDeltaAttention(JaxModule):
         the same shape, so `self.kv_caches = model_fn(...)` round-trips
         without a retrace.
         """
-        query_lens = md.query_start_loc[1:] - md.query_start_loc[:-1]
-        has_initial_state = (md.seq_lens - query_lens) > 0
+        if md.has_initial_state is None:
+            raise ValueError(
+                "[kda] AttentionMetadata.has_initial_state is None, so this "
+                "layer cannot tell which slots must resume recurrent/conv "
+                "state. The runner publishes the field for models that "
+                "register mamba kv-cache layers; a None here means this "
+                "model's KDA layers were not registered as such. Not "
+                "re-deriving it from query_start_loc on purpose -- that "
+                "derivation is wrong under attention DP (see the field docs "
+                "in layers/common/attention_metadata.py).")
+        has_initial_state = md.has_initial_state.astype(jnp.bool_)
         new_state, out = kda_attention(x_TD,
                                        self._params(),
                                        KDAState(*state),

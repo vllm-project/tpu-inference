@@ -116,6 +116,21 @@ class CompilationManager:
             return device_array(self.runner.mesh, tensor, sharding=sharding)
         return device_array(self.runner.mesh, tensor)
 
+    def _create_dummy_mamba_fields(self,
+                                   sharding: NamedSharding) -> Tuple[Any, Any]:
+        """Dummy `(mamba_state_indices, has_initial_state)` for precompilation.
+
+        Both are `None` for pure-attention models because `_prepare_inputs`
+        passes `None` at runtime, and the precompile primer must match that
+        pytree for the cached HLO to be reused (otherwise the ForbidCompile
+        guard fires on the first real step).
+        """
+        if not self.runner.kv_cache_config.has_mamba_layers:
+            return None, None
+        zeros = np.zeros(self.runner.max_num_reqs, dtype=np.int32)
+        return (device_array(self.runner.mesh, zeros, sharding=sharding),
+                device_array(self.runner.mesh, zeros, sharding=sharding))
+
     def _should_skip_padding_combination(self, outer_val: int, inner_val: int,
                                          only_equal: bool) -> bool:
         """Helper to determine if we should skip this padding combination."""
@@ -414,18 +429,9 @@ class CompilationManager:
                                              np.zeros((pcp_size, n_reqs),
                                                       dtype=np.int32),
                                              sharding=pcp_spec)
-        # Dummy mamba_state_indices for compile-cache pre-tracing. Only
-        # populate for hybrid attn+mamba models — for pure-attention models we
-        # pass None at runtime (see `_prepare_inputs`), and the precompile
-        # primer must match that shape so the cached HLO is reused.
-        if self.runner.kv_cache_config.has_mamba_layers:
-            mamba_state_indices = device_array(self.runner.mesh,
-                                               np.zeros(
-                                                   self.runner.max_num_reqs,
-                                                   dtype=np.int32),
-                                               sharding=metadata_attn_sharding)
-        else:
-            mamba_state_indices = None
+        # Dummy mamba fields for compile-cache pre-tracing.
+        (mamba_state_indices, has_initial_state) = (
+            self._create_dummy_mamba_fields(metadata_attn_sharding))
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
@@ -446,6 +452,7 @@ class CompilationManager:
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                has_initial_state=has_initial_state,
                 padded_num_reqs=num_reqs,
                 pcp_kv_cache_lens=pcp_kv_cache_lens,
                 pcp_q_pos_offsets=pcp_q_pos_offsets,
@@ -460,6 +467,7 @@ class CompilationManager:
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                has_initial_state=has_initial_state,
                 padded_num_reqs=num_reqs,
             )
 
@@ -1449,19 +1457,12 @@ class CompilationManager:
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution,
                                             sharding=dp_sharding)
-        # Dummy mamba_state_indices for spec-decode compile-cache pre-tracing.
-        # Must match the ATTN_DATA sharding `_prepare_inputs_*` produces at
+        # Dummy mamba fields for spec-decode compile-cache pre-tracing. Must
+        # match the ATTN_DATA sharding `_prepare_inputs_*` produces at
         # runtime — otherwise the draft model_fn cache misses and the
-        # ForbidCompile guard inside `Eagle3Proposer.propose` raises. None for
-        # pure-attention models (the common eagle3 case) so the field stays
-        # absent end-to-end.
-        if self.runner.kv_cache_config.has_mamba_layers:
-            eagle3_mamba_state_indices = device_array(
-                self.runner.mesh,
-                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
-                sharding=dp_sharding)
-        else:
-            eagle3_mamba_state_indices = None
+        # ForbidCompile guard inside `Eagle3Proposer.propose` raises.
+        (eagle3_mamba_state_indices, eagle3_has_initial_state
+         ) = self._create_dummy_mamba_fields(dp_sharding)
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1479,6 +1480,7 @@ class CompilationManager:
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
                     mamba_state_indices=eagle3_mamba_state_indices,
+                    has_initial_state=eagle3_has_initial_state,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1584,20 +1586,12 @@ class CompilationManager:
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution,
                                             sharding=dp_sharding)
-        # Dummy mamba_state_indices for spec-decode compile-cache pre-tracing.
-        # Must match the ATTN_DATA sharding `_prepare_inputs_*` produces at
+        # Dummy mamba fields for spec-decode compile-cache pre-tracing. Must
+        # match the ATTN_DATA sharding `_prepare_inputs_*` produces at
         # runtime — otherwise the draft model_fn cache misses and the
-        # ForbidCompile guard inside `Eagle3Proposer.propose` raises. None for
-        # pure-attention models (the common eagle3 case) so the field stays
-        # absent end-to-end.
-        if self.runner.kv_cache_config.has_mamba_layers:
-            mamba_state_indices = device_array(self.runner.mesh,
-                                               np.zeros(
-                                                   self.runner.max_num_reqs,
-                                                   dtype=np.int32),
-                                               sharding=dp_sharding)
-        else:
-            mamba_state_indices = None
+        # ForbidCompile guard inside `Eagle3Proposer.propose` raises.
+        (mamba_state_indices,
+         has_initial_state) = self._create_dummy_mamba_fields(dp_sharding)
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1623,6 +1617,7 @@ class CompilationManager:
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
                     mamba_state_indices=mamba_state_indices,
+                    has_initial_state=has_initial_state,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1714,13 +1709,8 @@ class CompilationManager:
                                             request_distribution,
                                             sharding=dp_sharding)
 
-        if self.runner.kv_cache_config.has_mamba_layers:
-            dflash_mamba_state_indices = device_array(
-                self.runner.mesh,
-                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
-                sharding=dp_sharding)
-        else:
-            dflash_mamba_state_indices = None
+        (dflash_mamba_state_indices, dflash_has_initial_state
+         ) = self._create_dummy_mamba_fields(dp_sharding)
 
         num_reqs_dp = self._create_dummy_tensor((dp_size, ),
                                                 jnp.int32,
@@ -1757,6 +1747,7 @@ class CompilationManager:
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
                     mamba_state_indices=dflash_mamba_state_indices,
+                    has_initial_state=dflash_has_initial_state,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1816,6 +1807,7 @@ class CompilationManager:
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
                     mamba_state_indices=dflash_mamba_state_indices,
+                    has_initial_state=dflash_has_initial_state,
                     padded_num_reqs=num_reqs,
                 )
 
@@ -1928,13 +1920,8 @@ class CompilationManager:
                                                 request_distribution,
                                                 sharding=dp_sharding)
 
-            if self.runner.kv_cache_config.has_mamba_layers:
-                mamba_state_indices = device_array(
-                    self.runner.mesh,
-                    np.zeros(self.runner.max_num_reqs, dtype=np.int32),
-                    sharding=dp_sharding)
-            else:
-                mamba_state_indices = None
+            (mamba_state_indices,
+             has_initial_state) = self._create_dummy_mamba_fields(dp_sharding)
 
             def build_block_table(kv_cache_gid: int) -> jax.Array:
                 block_table_obj = self.runner.input_batch.block_table[
@@ -1960,6 +1947,7 @@ class CompilationManager:
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
                     mamba_state_indices=mamba_state_indices,
+                    has_initial_state=has_initial_state,
                     padded_num_reqs=num_reqs,
                 )
             else:
@@ -1972,6 +1960,7 @@ class CompilationManager:
                         query_start_loc=query_start_loc,
                         request_distribution=request_distribution,
                         mamba_state_indices=mamba_state_indices,
+                        has_initial_state=has_initial_state,
                         padded_num_reqs=num_reqs,
                     )
                     for gid, kv_cache_group in enumerate(

@@ -137,6 +137,7 @@ def _decode_core(
     query_start_loc,
     request_distribution,
     mamba_state_indices,
+    has_initial_state,
     current_tokens,
     active_mask,
     input_positions,
@@ -172,6 +173,7 @@ def _decode_core(
             query_start_loc=query_start_loc,
             request_distribution=request_distribution,
             mamba_state_indices=mamba_state_indices,
+            has_initial_state=has_initial_state,
         )
         shared_attn_metadata = SharedAttentionMetadata(
             input_positions=pos,
@@ -179,6 +181,7 @@ def _decode_core(
             query_start_loc=query_start_loc,
             request_distribution=request_distribution,
             mamba_state_indices=mamba_state_indices,
+            has_initial_state=has_initial_state,
         )
         kvc, hidden_states, _, expert_indices_step = model_fn(
             state,
@@ -430,6 +433,7 @@ def continue_decode(
                 query_start_loc=attn.query_start_loc,
                 request_distribution=attn.request_distribution,
                 mamba_state_indices=attn.mamba_state_indices,
+                has_initial_state=attn.has_initial_state,
             )
             shared_am = SharedAttentionMetadata(
                 input_positions=input_positions,
@@ -437,6 +441,7 @@ def continue_decode(
                 query_start_loc=attn.query_start_loc,
                 request_distribution=attn.request_distribution,
                 mamba_state_indices=attn.mamba_state_indices,
+                has_initial_state=attn.has_initial_state,
             )
             _, _, _, experts = model_fn(state,
                                         kv_caches,
@@ -478,6 +483,7 @@ def continue_decode(
          query_start_loc=attn.query_start_loc,
          request_distribution=attn.request_distribution,
          mamba_state_indices=attn.mamba_state_indices,
+         has_initial_state=attn.has_initial_state,
          current_tokens=init_state.current_tokens,
          active_mask=init_state.active_mask,
          input_positions=attn.input_positions,
@@ -513,6 +519,7 @@ def continue_decode(
             query_start_loc=attn.query_start_loc,
             request_distribution=attn.request_distribution,
             mamba_state_indices=attn.mamba_state_indices,
+            has_initial_state=attn.has_initial_state,
         ),
         step_counter=step_counter.astype(jnp.int32),
     )

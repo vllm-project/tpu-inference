@@ -31,6 +31,7 @@ agreement in a 9-layer stack. These tests check the model's math, not the
 matmul default.
 """
 
+import dataclasses
 import json
 import os
 import types
@@ -153,6 +154,9 @@ def _metadata(num_tokens, positions, seq_len, *, decode):
         request_distribution=jnp.array([1, 1, 1] if decode else [0, 0, 1],
                                        jnp.int32),
         mamba_state_indices=jnp.array([1], jnp.int32),
+        # `seq_len > num_tokens` means the request already has state in its
+        # slot -- what the runner publishes as `has_initial_state`.
+        has_initial_state=jnp.array([int(seq_len > num_tokens)], jnp.int32),
         padded_num_reqs=1)
 
 
@@ -405,6 +409,23 @@ def test_48b_shaped_decoder_uses_the_plain_residual_stream(mesh):
                  np.asarray(expect, np.float32)).max()
     print(f"[observed] plain residual stream max_abs={err:.3e}")
     np.testing.assert_allclose(np.asarray(got), np.asarray(expect), atol=1e-5)
+
+
+def test_kda_layer_rejects_missing_has_initial_state(mesh):
+    """The state-resumption flag comes from the runner, not from a local
+    derivation off `query_start_loc` -- which would be wrong under attention
+    DP. If the field is absent the layer must say so rather than guess."""
+    config, model = _build_48b_shaped(mesh)
+    md = dataclasses.replace(_metadata(4, np.arange(4), 4, decode=False),
+                             has_initial_state=None)
+    x = jax.random.normal(jax.random.PRNGKey(1), (4, config.hidden_size),
+                          dtype=jnp.float32) * 0.1
+    kda_layer = model.layers[1].self_attn
+    caches = _fresh_caches(config)
+
+    with jax.set_mesh(mesh):
+        with pytest.raises(ValueError, match="has_initial_state is None"):
+            kda_layer(x, caches[1], md)
 
 
 # --------------------------------------------------------------------------

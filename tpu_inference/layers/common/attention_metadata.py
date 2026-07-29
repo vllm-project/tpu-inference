@@ -27,6 +27,7 @@ import jax
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "has_initial_state",
         "pcp_q_pos_offsets",
         "pcp_kv_cache_lens",
     ],
@@ -54,6 +55,33 @@ class AttentionMetadata(object):
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
 
+    # (max_num_seqs,) int32, 0/1 — 1 when the request occupying this
+    # persistent-batch position already has recurrent/conv state in its mamba
+    # slot from an earlier step, i.e. this step must resume from that state
+    # rather than zero-initialize it. Runner-computed and authoritative;
+    # linear-attention ops must consume it and must NOT re-derive it.
+    #
+    # Why published rather than derived: the natural derivation
+    # `(seq_lens - query_lens) > 0` needs `query_lens`, and
+    # `query_start_loc` is laid out as a per-DP-rank concatenation of
+    # `max_num_reqs_per_dp_rank + 1` entries — total `max_num_seqs +
+    # dp_size`, not `max_num_seqs + 1`. Differencing it globally yields
+    # `max_num_seqs + dp_size - 1` values (one bogus entry per rank seam)
+    # instead of `max_num_seqs`, so the derivation is only valid at
+    # dp_size == 1, or inside a `shard_map` whose in_spec slices both arrays
+    # per rank. Ops that run outside such a shard_map (the JAX-native model
+    # path) silently get the wrong shape/values under attention DP.
+    #
+    # int32 rather than bool because the runner packs it through the int32
+    # `DeviceBuffer` blob; consumers should treat any nonzero as True.
+    # A boolean flag rather than a `num_computed_tokens` count: with
+    # speculative decoding the host-side count is optimistic (it assumes every
+    # proposed token was accepted, corrected on device afterwards), while the
+    # "> 0" predicate is exact — a request cannot have had tokens rejected
+    # before it has been prefilled at all.
+    # None for models without mamba layers.
+    has_initial_state: jax.Array | None = None
+
     # (max_num_seqs, ) int32 — PCP only. For a single request, it is [rank*C, (2*pcp-1-rank)*C].
     pcp_q_pos_offsets: jax.Array | None = None
 
@@ -78,6 +106,7 @@ class AttentionMetadata(object):
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "has_initial_state",
     ],
     meta_fields=["padded_num_reqs"],
 )
@@ -99,6 +128,9 @@ class SharedAttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+
+    # (max_num_seqs,) int32, 0/1 — see `AttentionMetadata.has_initial_state`.
+    has_initial_state: jax.Array | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket
     # contains only max_reqs by default to reduce model precompilation time.
