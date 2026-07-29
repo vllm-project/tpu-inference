@@ -22,6 +22,11 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 DURATION_MS = int(os.getenv("VLLM_TPU_PROFILE_DURATION_MS", 3000))
 DELAY_MS = int(os.getenv("VLLM_TPU_PROFILE_DELAY_MS", 0))
+# Semicolon-separated profiler options forwarded to the TPU worker, e.g.
+# "tpu_trace_mode:TRACE_COMPUTE;host_tracer_level:3". Keys matching
+# jax.profiler.ProfileOptions attributes are set directly; the rest go into
+# ProfileOptions.advanced_configuration.
+PROFILE_OPTIONS = os.getenv("VLLM_TPU_PROFILE_OPTIONS", "")
 
 
 def main(args: argparse.Namespace):
@@ -70,7 +75,7 @@ def main(args: argparse.Namespace):
     print(f"Average warmup latency: {np.mean(warmup_latencies):.4f}s")
 
     # Enable tracing on server
-    llm.start_profile()
+    llm.start_profile(profile_prefix=PROFILE_OPTIONS or None)
     if DELAY_MS == 0:
         time.sleep(1.0)
     profile_latencies = []

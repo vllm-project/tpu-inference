@@ -460,6 +460,7 @@ class TestTPUWorker:
         assert mock_options.host_tracer_level == 3
         assert mock_options.advanced_configuration == {
             "check_experimental_options": True,
+            "tpu_trace_mode": "TRACE_COMPUTE",
             "tpu_power_trace_level": 2,
             "tpu_perf_counters": True,
             "enable_hlo_proto": False,
@@ -483,6 +484,7 @@ class TestTPUWorker:
         assert mock_options.host_tracer_level == 2
         assert mock_options.advanced_configuration == {
             "check_experimental_options": True,
+            "tpu_trace_mode": "TRACE_COMPUTE",
             "tpu_cpu_perf_counter_profile_events": "event1,event2",
             "tpu_cpu_perf_counter_configs": "101:3:cpu_event",
         }
@@ -536,8 +538,27 @@ class TestTPUWorker:
         assert mock_options.host_tracer_level == 3
         assert mock_options.advanced_configuration == {
             "check_experimental_options": True,
+            "tpu_trace_mode": "TRACE_COMPUTE",
             "tpu_power_trace_level": 2,
         }
+
+    @patch('tpu_inference.worker.tpu_worker.jax')
+    def test_profile_default_trace_mode(self, mock_jax, mock_vllm_config):
+        """Tests that TRACE_COMPUTE is the default and stays overridable."""
+        worker = self._create_worker(mock_vllm_config)
+
+        mock_options = MagicMock()
+        mock_options.advanced_configuration = {}
+        mock_jax.profiler.ProfileOptions.return_value = mock_options
+
+        worker.profile(is_start=True)
+        assert mock_options.advanced_configuration["tpu_trace_mode"] == \
+            "TRACE_COMPUTE"
+
+        worker.profile(is_start=True,
+                       profile_prefix="tpu_trace_mode:TRACE_COMPUTE_AND_DMA")
+        assert mock_options.advanced_configuration["tpu_trace_mode"] == \
+            "TRACE_COMPUTE_AND_DMA"
 
     @patch('tpu_inference.worker.tpu_worker.jax')
     def test_profile_stop(self, mock_jax, mock_vllm_config):

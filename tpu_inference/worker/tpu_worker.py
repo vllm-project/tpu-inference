@@ -634,8 +634,13 @@ class TPUWorker(WorkerBase):
             # unrecognized configuration is passed, JAX/libtpu will raise a
             # runtime initialization error instead of silently ignoring it.
             # Users can opt-out by passing 'check_experimental_options:false'.
+            # TRACE_COMPUTE keeps the TensorCore compute timeline and drops the
+            # DMA/sync streams, which is what almost every kernel- or model-level
+            # investigation needs. Pass e.g. 'tpu_trace_mode:TRACE_COMPUTE_AND_DMA'
+            # in profile_prefix when DMA or SparseCore streams are needed.
             advanced_config = {
                 "check_experimental_options": True,
+                "tpu_trace_mode": "TRACE_COMPUTE",
             }
             if envs.PROFILE_SINGLE_DEVICE:
                 advanced_config.update({
