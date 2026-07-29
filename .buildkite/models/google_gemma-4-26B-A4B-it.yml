@@ -91,6 +91,7 @@ steps:
       TEST_MODEL: google/gemma-4-26B-A4B-it
       TENSOR_PARALLEL_SIZE: 8
       MINIMUM_THROUGHPUT_THRESHOLD: 2
+      COMPILATION_CONFIG: '{"cudagraph_mm_encoder": true}'
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
