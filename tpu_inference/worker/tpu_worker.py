@@ -405,10 +405,14 @@ class TPUWorker(WorkerBase):
                     self.devices = jax.local_devices()[:sharding_config.
                                                        total_devices]
                 else:
-                    # In a multi-host distributed env, say: Ray, local_device count may smaller
-                    # than the total devices, we just choose the smaller set here.
-                    self.devices = jax.devices()[:sharding_config.
-                                                 total_devices]
+                    # In a multi-host distributed env, say: Ray, local_device count may be smaller
+                    # than the total devices. Offset the device selection by process index to ensure
+                    # each process maps to its own local host devices.
+                    process_index = jax.process_index()
+                    devices_per_host = jax.local_device_count()
+                    start_device = process_index * devices_per_host
+                    self.devices = jax.devices()[start_device:start_device +
+                                                 sharding_config.total_devices]
 
         # Initialize the vLLM distribution layer as a single chip environment,
         # we'll swap the model's parallel modules with TPU SPMD equivalents.
