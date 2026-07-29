@@ -316,7 +316,7 @@ def ragged_paged_attention(
     )
     decode_bkv_p_new = (
         1 if decode_query_size <= 1
-        else ((decode_query_size - 1) // page_size + 2)
+        else ((decode_query_size - 2) // page_size + 2)
     )
     serve_cfgs = configs.ServingConfigs(
         num_seqs=max_num_seqs,
